@@ -86,16 +86,17 @@ func (mr *MockStoreMockRecorder) SetSubscriptionMentions(ctx, roomID, accounts a
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSubscriptionMentions", reflect.TypeOf((*MockStore)(nil).SetSubscriptionMentions), ctx, roomID, accounts)
 }
 
-// UpdateRoomOnNewMessage mocks base method.
-func (m *MockStore) UpdateRoomOnNewMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
+// FetchAndUpdateRoom mocks base method.
+func (m *MockStore) FetchAndUpdateRoom(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) (*model.Room, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateRoomOnNewMessage", ctx, roomID, msgID, msgAt, mentionAll)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "FetchAndUpdateRoom", ctx, roomID, msgID, msgAt, mentionAll)
+	ret0, _ := ret[0].(*model.Room)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
-// UpdateRoomOnNewMessage indicates an expected call of UpdateRoomOnNewMessage.
-func (mr *MockStoreMockRecorder) UpdateRoomOnNewMessage(ctx, roomID, msgID, msgAt, mentionAll any) *gomock.Call {
+// FetchAndUpdateRoom indicates an expected call of FetchAndUpdateRoom.
+func (mr *MockStoreMockRecorder) FetchAndUpdateRoom(ctx, roomID, msgID, msgAt, mentionAll any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomOnNewMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomOnNewMessage), ctx, roomID, msgID, msgAt, mentionAll)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchAndUpdateRoom", reflect.TypeOf((*MockStore)(nil).FetchAndUpdateRoom), ctx, roomID, msgID, msgAt, mentionAll)
 }

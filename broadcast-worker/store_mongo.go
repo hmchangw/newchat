@@ -7,6 +7,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 )
@@ -43,7 +44,7 @@ func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]mo
 	return subs, nil
 }
 
-func (m *mongoStore) UpdateRoomOnNewMessage(ctx context.Context, roomID string, msgID string, msgAt time.Time, mentionAll bool) error {
+func (m *mongoStore) FetchAndUpdateRoom(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) (*model.Room, error) {
 	fields := bson.M{
 		"lastMsgAt": msgAt,
 		"lastMsgId": msgID,
@@ -54,11 +55,13 @@ func (m *mongoStore) UpdateRoomOnNewMessage(ctx context.Context, roomID string, 
 	}
 	filter := bson.M{"_id": roomID}
 	update := bson.M{"$set": fields}
-	_, err := m.roomCol.UpdateOne(ctx, filter, update)
-	if err != nil {
-		return fmt.Errorf("update room %s on new message: %w", roomID, err)
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+
+	var room model.Room
+	if err := m.roomCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&room); err != nil {
+		return nil, fmt.Errorf("fetch and update room %s: %w", roomID, err)
 	}
-	return nil
+	return &room, nil
 }
 
 func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string) error {

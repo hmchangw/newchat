@@ -52,18 +52,14 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 
 	msg := evt.Message
 
-	room, err := h.store.GetRoom(ctx, msg.RoomID)
-	if err != nil {
-		return fmt.Errorf("get room %s: %w", msg.RoomID, err)
-	}
-
 	resolved, err := mention.Resolve(ctx, msg.Content, h.userStore.FindUsersByAccounts)
 	if err != nil {
 		slog.Warn("mention resolve failed", "error", err)
 	}
 
-	if err := h.store.UpdateRoomOnNewMessage(ctx, room.ID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
-		return fmt.Errorf("update room on new message: %w", err)
+	room, err := h.store.FetchAndUpdateRoom(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll)
+	if err != nil {
+		return fmt.Errorf("fetch and update room %s: %w", msg.RoomID, err)
 	}
 
 	if len(resolved.Accounts) > 0 {

@@ -15,6 +15,6 @@ import (
 type Store interface {
 	GetRoom(ctx context.Context, roomID string) (*model.Room, error)
 	ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error)
-	UpdateRoomOnNewMessage(ctx context.Context, roomID string, msgID string, msgAt time.Time, mentionAll bool) error
+	FetchAndUpdateRoom(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) (*model.Room, error)
 	SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string) error
 }

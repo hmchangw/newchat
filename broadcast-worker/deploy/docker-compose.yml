@@ -18,6 +18,10 @@ services:
       - SITE_ID=site-local
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # In-process user cache. Defaults: 10000 entries, 5m TTL.
+      # Set USER_CACHE_SIZE=0 to disable caching.
+      - USER_CACHE_SIZE=10000
+      - USER_CACHE_TTL=5m
       - VALKEY_ADDR=valkey:6379
       - VALKEY_KEY_GRACE_PERIOD=24h
     volumes:
