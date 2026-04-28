@@ -23,19 +23,20 @@ import (
 )
 
 type config struct {
-	NatsURL           string `env:"NATS_URL,required"`
-	NatsCredsFile     string `env:"NATS_CREDS_FILE"    envDefault:""`
-	SiteID            string `env:"SITE_ID,required"`
-	CassandraHosts    string `env:"CASSANDRA_HOSTS"    envDefault:"localhost"`
-	CassandraKeyspace string `env:"CASSANDRA_KEYSPACE" envDefault:"chat"`
-	CassandraUsername string `env:"CASSANDRA_USERNAME" envDefault:""`
-	CassandraPassword string `env:"CASSANDRA_PASSWORD" envDefault:""`
-	MaxWorkers        int    `env:"MAX_WORKERS"        envDefault:"100"`
-	MaxRedeliver      int    `env:"MAX_REDELIVER"      envDefault:"5"`
-	MongoURI          string `env:"MONGO_URI,required"`
-	MongoDB           string `env:"MONGO_DB"           envDefault:"chat"`
-	MongoUsername     string `env:"MONGO_USERNAME"     envDefault:""`
-	MongoPassword     string `env:"MONGO_PASSWORD"     envDefault:""`
+	NatsURL           string          `env:"NATS_URL,required"`
+	NatsCredsFile     string          `env:"NATS_CREDS_FILE"    envDefault:""`
+	SiteID            string          `env:"SITE_ID,required"`
+	CassandraHosts    string          `env:"CASSANDRA_HOSTS"    envDefault:"localhost"`
+	CassandraKeyspace string          `env:"CASSANDRA_KEYSPACE" envDefault:"chat"`
+	CassandraUsername string          `env:"CASSANDRA_USERNAME" envDefault:""`
+	CassandraPassword string          `env:"CASSANDRA_PASSWORD" envDefault:""`
+	MaxWorkers        int             `env:"MAX_WORKERS"        envDefault:"100"`
+	MaxRedeliver      int             `env:"MAX_REDELIVER"      envDefault:"5"`
+	MongoURI          string          `env:"MONGO_URI,required"`
+	MongoDB           string          `env:"MONGO_DB"           envDefault:"chat"`
+	MongoUsername     string          `env:"MONGO_USERNAME"     envDefault:""`
+	MongoPassword     string          `env:"MONGO_PASSWORD"     envDefault:""`
+	Bootstrap         bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 }
 
 func main() {
@@ -93,14 +94,12 @@ func main() {
 	}
 	handler := NewHandler(store, us, threadStore)
 
-	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
-	if _, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     canonicalCfg.Name,
-		Subjects: canonicalCfg.Subjects,
-	}); err != nil {
-		slog.Error("create MESSAGES_CANONICAL stream failed", "error", err)
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
+
+	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, jetstream.ConsumerConfig{
 		Durable:    "message-worker",

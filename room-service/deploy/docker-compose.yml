@@ -27,6 +27,7 @@ services:
       - MAX_BATCH_SIZE=500
       - VALKEY_ADDR=valkey:6379
       - VALKEY_KEY_GRACE_PERIOD=24h
+      - BOOTSTRAP_STREAMS=true
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     depends_on:

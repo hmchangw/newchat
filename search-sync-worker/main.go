@@ -21,24 +21,22 @@ import (
 
 // bootstrapConfig groups every field that is ONLY meaningful when the worker
 // is being stood up in dev or integration tests without its normal upstream
-// services. In production none of these fields should be set — streams are
-// owned by their publisher services (message-gatekeeper for
-// MESSAGES_CANONICAL, inbox-worker for INBOX) and search-sync-worker only
-// manages its own durable consumers.
+// services. In production Enabled must remain false — streams are owned by
+// their publisher services (message-gatekeeper for MESSAGES_CANONICAL,
+// inbox-worker for INBOX) and search-sync-worker only manages its own
+// durable consumers.
+//
+// search-sync-worker NEVER bootstraps INBOX, even when Enabled=true; that
+// stream's schema is owned by inbox-worker and its federation by ops/IaC.
 //
 // Env vars in this group are all prefixed `BOOTSTRAP_` so they're easy to
 // spot in deployment manifests and obvious to grep.
 type bootstrapConfig struct {
 	// Enabled (BOOTSTRAP_STREAMS) toggles whether the worker calls
 	// CreateOrUpdateStream at startup for each collection's stream. Leave
-	// false in production.
+	// false in production. INBOX is intentionally excluded from this loop
+	// — inbox-worker owns INBOX schema bootstrap.
 	Enabled bool `env:"STREAMS" envDefault:"false"`
-	// RemoteSiteIDs (BOOTSTRAP_REMOTE_SITE_IDS) lists the other sites whose
-	// OUTBOX streams should be sourced into this site's INBOX when the
-	// worker is creating it itself. Used to build the cross-site Sources +
-	// SubjectTransforms config during bootstrap. Only consulted when
-	// Enabled is true; unused in production.
-	RemoteSiteIDs []string `env:"REMOTE_SITE_IDS" envSeparator:","`
 }
 
 type config struct {
@@ -165,29 +163,22 @@ func main() {
 	// we don't redundantly call CreateOrUpdateStream per collection.
 	createdStreams := make(map[string]struct{}, len(collections))
 
-	// Canonical INBOX stream name, used below to decide when to layer on
-	// cross-site Sources + SubjectTransforms during bootstrap.
+	// INBOX is owned by inbox-worker — see the skip in the loop below.
 	inboxName := stream.Inbox(cfg.SiteID).Name
 
 	for _, coll := range collections {
 		streamCfg := coll.StreamConfig(cfg.SiteID)
-		if cfg.Bootstrap.Enabled {
-			bootstrapCfg := streamCfg
-			// The INBOX stream is the only one that needs cross-site Sources
-			// + SubjectTransforms. Collections return a minimal baseline
-			// (name + local subjects from pkg/stream.Inbox) and the
-			// bootstrap path layers on the federation config here, keeping
-			// the cross-site topology out of the Collection type entirely.
-			if streamCfg.Name == inboxName {
-				bootstrapCfg = inboxBootstrapStreamConfig(cfg.SiteID, cfg.Bootstrap.RemoteSiteIDs)
-			}
-			if _, alreadyCreated := createdStreams[bootstrapCfg.Name]; !alreadyCreated {
-				if _, err := js.CreateOrUpdateStream(ctx, bootstrapCfg); err != nil {
-					slog.Error("create stream failed", "stream", bootstrapCfg.Name, "error", err)
+		// Skip INBOX bootstrap — inbox-worker owns its schema, ops/IaC
+		// owns its federation. Consumer creation still runs for
+		// INBOX-based collections (spotlight, user-room).
+		if cfg.Bootstrap.Enabled && streamCfg.Name != inboxName {
+			if _, alreadyCreated := createdStreams[streamCfg.Name]; !alreadyCreated {
+				if _, err := js.CreateOrUpdateStream(ctx, streamCfg); err != nil {
+					slog.Error("create stream failed", "stream", streamCfg.Name, "error", err)
 					os.Exit(1)
 				}
-				createdStreams[bootstrapCfg.Name] = struct{}{}
-				slog.Info("stream bootstrapped", "stream", bootstrapCfg.Name)
+				createdStreams[streamCfg.Name] = struct{}{}
+				slog.Info("stream bootstrapped", "stream", streamCfg.Name)
 			}
 		}
 

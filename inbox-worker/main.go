@@ -25,13 +25,14 @@ import (
 )
 
 type config struct {
-	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	NatsURL       string          `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string          `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string          `env:"SITE_ID"         envDefault:"default"`
+	MongoURI      string          `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string          `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string          `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string          `env:"MONGO_PASSWORD"  envDefault:""`
+	Bootstrap     bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 }
 
 // mongoInboxStore implements InboxStore using MongoDB.
@@ -147,13 +148,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	inboxCfg := stream.Inbox(cfg.SiteID)
-	if _, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name: inboxCfg.Name,
-	}); err != nil {
-		slog.Error("create inbox stream failed", "error", err)
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
+
+	inboxCfg := stream.Inbox(cfg.SiteID)
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, jetstream.ConsumerConfig{
 		Durable:   "inbox-worker",

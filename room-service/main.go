@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 
@@ -17,22 +16,22 @@ import (
 	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
-	"github.com/hmchangw/chat/pkg/stream"
 )
 
 type config struct {
-	NatsURL           string        `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
-	NatsCredsFile     string        `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID            string        `env:"SITE_ID"                   envDefault:"site-local"`
-	MongoURI          string        `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB           string        `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername     string        `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword     string        `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxRoomSize       int           `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize      int           `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	ValkeyAddr        string        `env:"VALKEY_ADDR,required"`
-	ValkeyPassword    string        `env:"VALKEY_PASSWORD"           envDefault:""`
-	ValkeyGracePeriod time.Duration `env:"VALKEY_KEY_GRACE_PERIOD,required"`
+	NatsURL           string          `env:"NATS_URL,required"`
+	NatsCredsFile     string          `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID            string          `env:"SITE_ID"                   envDefault:"site-local"`
+	MongoURI          string          `env:"MONGO_URI,required"`
+	MongoDB           string          `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername     string          `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword     string          `env:"MONGO_PASSWORD"            envDefault:""`
+	MaxRoomSize       int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize      int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	ValkeyAddr        string          `env:"VALKEY_ADDR,required"`
+	ValkeyPassword    string          `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD,required"`
+	Bootstrap         bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 }
 
 func main() {
@@ -80,11 +79,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	streamCfg := stream.Rooms(cfg.SiteID)
-	if _, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name: streamCfg.Name, Subjects: streamCfg.Subjects,
-	}); err != nil {
-		slog.Error("create stream failed", "error", err)
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 

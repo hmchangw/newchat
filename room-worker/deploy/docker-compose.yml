@@ -11,6 +11,7 @@ services:
       - SITE_ID=site-local
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      - BOOTSTRAP_STREAMS=true
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

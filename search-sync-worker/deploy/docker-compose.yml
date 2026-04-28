@@ -12,6 +12,7 @@ services:
       - SEARCH_URL=http://elasticsearch:9200
       - SEARCH_BACKEND=elasticsearch
       - MSG_INDEX_PREFIX=messages-site-local-v1
+      - BOOTSTRAP_STREAMS=true
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

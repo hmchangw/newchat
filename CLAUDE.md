@@ -194,7 +194,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Use `natsutil.ReplyJSON` for success responses, `natsutil.ReplyError` for errors
 - Define all stream configs in `pkg/stream/stream.go` with name pattern `<STREAM>_<siteID>`
 - Use durable consumers named after the service
-- Use `js.CreateOrUpdateStream` at startup — it's idempotent
+- Stream creation is gated by `BOOTSTRAP_STREAMS` (see below); when enabled, use `js.CreateOrUpdateStream` (it's idempotent) via the service's `bootstrapStreams` helper, never inline
 
 ### Event Timestamps
 - Every NATS event struct in `pkg/model` must include a `Timestamp int64 \`json:"timestamp" bson:"timestamp"\`` field
@@ -215,6 +215,8 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - `ROOMS_{siteID}` — Member invite requests
 - `OUTBOX_{siteID}` — Cross-site outbound events
 - `INBOX_{siteID}` — Cross-site inbound events (sourced from remote OUTBOX)
+- **Stream bootstrap is opt-in.** Services that consume from or publish to a stream MUST NOT create it in production — streams are owned by ops/IaC. Each such service's `config` includes `Bootstrap bootstrapConfig` (env prefix `BOOTSTRAP_`) with a single `Enabled` field tagged `env:"STREAMS" envDefault:"false"`. The service's `bootstrap.go` defines a `bootstrapStreams(ctx, js, siteID, enabled) error` helper that no-ops when `Enabled=false`. Local `deploy/docker-compose.yml` sets `BOOTSTRAP_STREAMS=true` so any service can stand up against a fresh NATS in dev. New services that interact with JetStream MUST follow this convention.
+- **Stream bootstrap ownership.** When a service does bootstrap a stream in dev, the helper sets ONLY the stream's schema — `Name + Subjects` from `pkg/stream.<Stream>(siteID)`. Federation config (`Sources` + `SubjectTransforms` for cross-site sourcing) is owned by ops/IaC and MUST NOT appear in any service's `bootstrap.go`. INBOX has a single owning service (`inbox-worker`); other services that consume from INBOX (e.g., `search-sync-worker`) skip it in their bootstrap loop and rely on `inbox-worker` to create the stream.
 
 ### MongoDB
 - Never use ORMs (no GORM, no ent) — use native drivers directly

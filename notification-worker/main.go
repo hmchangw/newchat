@@ -24,14 +24,15 @@ import (
 )
 
 type config struct {
-	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int    `env:"MAX_WORKERS"     envDefault:"100"`
+	NatsURL       string          `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string          `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string          `env:"SITE_ID"         envDefault:"default"`
+	MongoURI      string          `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string          `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string          `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string          `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers    int             `env:"MAX_WORKERS"     envDefault:"100"`
+	Bootstrap     bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 }
 
 // mongoMemberLookup implements MemberLookup using MongoDB.
@@ -91,14 +92,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
-	if _, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     canonicalCfg.Name,
-		Subjects: canonicalCfg.Subjects,
-	}); err != nil {
-		slog.Error("create MESSAGES_CANONICAL stream failed", "error", err)
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
+
+	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, jetstream.ConsumerConfig{
 		Durable:   "notification-worker",
