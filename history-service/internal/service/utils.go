@@ -83,3 +83,18 @@ func timeMax(a, b time.Time) time.Time {
 	}
 	return b
 }
+
+// canModify reports whether the given account is authorized to edit or
+// soft-delete the target message. Under sender-only authorization, the caller
+// must be the message's original sender; room-owner roles are not honored.
+// The helper treats an empty account on either side as unauthorized to avoid
+// matching messages with missing sender data.
+func canModify(msg *models.Message, account string) bool {
+	if account == "" {
+		return false
+	}
+	if msg.Sender.Account == "" {
+		return false
+	}
+	return msg.Sender.Account == account
+}

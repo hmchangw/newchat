@@ -62,3 +62,28 @@ type LoadSurroundingMessagesResponse struct {
 type GetMessageByIDRequest struct {
 	MessageID string `json:"messageId"`
 }
+
+// EditMessageRequest is the payload for editing a message.
+type EditMessageRequest struct {
+	MessageID string `json:"messageId"`
+	NewMsg    string `json:"newMsg"`
+}
+
+// EditMessageResponse is the reply returned by the edit handler.
+type EditMessageResponse struct {
+	MessageID string `json:"messageId"`
+	EditedAt  int64  `json:"editedAt"` // UTC millis
+}
+
+// DeleteMessageRequest is the payload for soft-deleting a message.
+type DeleteMessageRequest struct {
+	MessageID string `json:"messageId"`
+}
+
+// DeleteMessageResponse is the reply returned by the delete handler.
+// DeletedAt mirrors the updated_at value written to Cassandra (there is no
+// separate deleted_at column in the current schema).
+type DeleteMessageResponse struct {
+	MessageID string `json:"messageId"`
+	DeletedAt int64  `json:"deletedAt"` // UTC millis
+}

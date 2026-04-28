@@ -1,18 +1,22 @@
 package service
 
 import (
+	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 const (
 	defaultPageSize     = 20
 	surroundingPageSize = 50
 	maxPageSize         = 100
+	maxContentBytes     = 20 * 1024 // 20 KB; mirrors message-gatekeeper's content cap
 )
 
 func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHistoryRequest) (*models.LoadHistoryResponse, error) {
@@ -196,4 +200,160 @@ func (s *HistoryService) GetMessageByID(c *natsrouter.Context, req models.GetMes
 	}
 
 	return msg, nil
+}
+
+// EditMessage handles chat.user.{account}.request.room.{roomID}.{siteID}.msg.edit.
+// Sender-only auth. Writes to all applicable Cassandra tables via
+// UpdateMessageContent, then publishes a best-effort MessageEditedEvent to
+// chat.room.{roomID}.event for live fan-out.
+func (s *HistoryService) EditMessage(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
+	account := c.Param("account")
+	roomID := c.Param("roomID")
+
+	// 1. Subscription gate — non-subscribers cannot probe messageID -> roomID mappings.
+	if _, err := s.getAccessSince(c, account, roomID); err != nil {
+		return nil, err
+	}
+
+	// 2. Hydrate. findMessage returns ErrNotFound for missing IDs and for
+	// messages that belong to a different room (same error, no leak).
+	msg, err := s.findMessage(c, roomID, req.MessageID)
+	if err != nil {
+		return nil, err
+	}
+
+	// A soft-deleted message must not be editable — that would emit a
+	// message_edited event after message_deleted, which downstream consumers
+	// can't reconcile. Same ErrNotFound as wrong-room to keep the leak
+	// surface symmetric.
+	if msg.Deleted {
+		return nil, natsrouter.ErrNotFound("message not found")
+	}
+
+	// 3. Sender gate.
+	if !canModify(msg, account) {
+		return nil, natsrouter.ErrForbidden("only the sender can edit")
+	}
+
+	// 4. Content validation.
+	if strings.TrimSpace(req.NewMsg) == "" {
+		return nil, natsrouter.ErrBadRequest("newMsg must not be empty")
+	}
+	if len(req.NewMsg) > maxContentBytes {
+		return nil, natsrouter.ErrBadRequest("newMsg exceeds maximum size")
+	}
+
+	// 5. Persist.
+	editedAt := time.Now().UTC()
+	if err := s.messages.UpdateMessageContent(c, msg, req.NewMsg, editedAt); err != nil {
+		slog.Error("edit: update content", "error", err, "messageID", req.MessageID)
+		return nil, natsrouter.ErrInternal("failed to edit message")
+	}
+
+	// 6. Publish live event (best-effort — publish failure is logged, not returned).
+	editedAtMs := editedAt.UnixMilli()
+	evt := models.MessageEditedEvent{
+		Type:      "message_edited",
+		Timestamp: editedAtMs,
+		RoomID:    roomID,
+		MessageID: req.MessageID,
+		NewMsg:    req.NewMsg,
+		EditedBy:  account,
+		EditedAt:  editedAtMs,
+	}
+	if payload, err := json.Marshal(evt); err == nil {
+		if pubErr := s.publisher.Publish(c, subject.RoomEvent(roomID), payload); pubErr != nil {
+			slog.Warn("edit: publish event failed", "error", pubErr, "messageID", req.MessageID)
+		}
+	} else {
+		slog.Warn("edit: marshal event failed", "error", err, "messageID", req.MessageID)
+	}
+
+	return &models.EditMessageResponse{
+		MessageID: req.MessageID,
+		EditedAt:  editedAtMs,
+	}, nil
+}
+
+// DeleteMessage handles chat.user.{account}.request.room.{roomID}.{siteID}.msg.delete.
+// Sender-only auth. Soft-deletes (deleted = true, updated_at = ?) across all
+// applicable Cassandra tables via SoftDeleteMessage, including tcount
+// decrement on the parent for thread replies. On already-deleted messages the
+// handler short-circuits and returns success without repeating the UPDATEs or
+// publishing a duplicate event — this prevents tcount drift on caller retry.
+func (s *HistoryService) DeleteMessage(c *natsrouter.Context, req models.DeleteMessageRequest) (*models.DeleteMessageResponse, error) {
+	account := c.Param("account")
+	roomID := c.Param("roomID")
+
+	// 1. Subscription gate.
+	if _, err := s.getAccessSince(c, account, roomID); err != nil {
+		return nil, err
+	}
+
+	// 2. Hydrate. findMessage does the roomID-match check and ErrNotFound handling.
+	msg, err := s.findMessage(c, roomID, req.MessageID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Sender gate.
+	if !canModify(msg, account) {
+		return nil, natsrouter.ErrForbidden("only the sender can delete")
+	}
+
+	// 4. Already-deleted short-circuit. Echo the current updated_at as the
+	// DeletedAt. Prevents tcount double-decrement on caller retry and avoids
+	// duplicate message_deleted events.
+	if msg.Deleted {
+		var deletedAtMs int64
+		if msg.UpdatedAt != nil {
+			deletedAtMs = msg.UpdatedAt.UnixMilli()
+		}
+		return &models.DeleteMessageResponse{
+			MessageID: req.MessageID,
+			DeletedAt: deletedAtMs,
+		}, nil
+	}
+
+	// 5. Persist via LWT. The repo's CAS gates the mirror-table UPDATEs and
+	// parent-tcount decrement so two concurrent deletes can't double-decrement
+	// the parent.
+	deletedAt := time.Now().UTC()
+	actualDeletedAt, applied, err := s.messages.SoftDeleteMessage(c, msg, deletedAt)
+	if err != nil {
+		slog.Error("delete: soft-delete", "error", err, "messageID", req.MessageID)
+		return nil, natsrouter.ErrInternal("failed to delete message")
+	}
+	if !applied {
+		// A concurrent delete won the CAS. Skip the publish — the winning
+		// goroutine has emitted (or will emit) the message_deleted event —
+		// and return the timestamp actually persisted.
+		return &models.DeleteMessageResponse{
+			MessageID: req.MessageID,
+			DeletedAt: actualDeletedAt.UnixMilli(),
+		}, nil
+	}
+
+	// 6. Publish live event (best-effort).
+	deletedAtMs := actualDeletedAt.UnixMilli()
+	evt := models.MessageDeletedEvent{
+		Type:      "message_deleted",
+		Timestamp: deletedAtMs,
+		RoomID:    roomID,
+		MessageID: req.MessageID,
+		DeletedBy: account,
+		DeletedAt: deletedAtMs,
+	}
+	if payload, err := json.Marshal(evt); err == nil {
+		if pubErr := s.publisher.Publish(c, subject.RoomEvent(roomID), payload); pubErr != nil {
+			slog.Warn("delete: publish event failed", "error", pubErr, "messageID", req.MessageID)
+		}
+	} else {
+		slog.Warn("delete: marshal event failed", "error", err, "messageID", req.MessageID)
+	}
+
+	return &models.DeleteMessageResponse{
+		MessageID: req.MessageID,
+		DeletedAt: deletedAtMs,
+	}, nil
 }

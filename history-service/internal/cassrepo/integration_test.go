@@ -93,6 +93,50 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		PRIMARY KEY (message_id, created_at)
 	) WITH CLUSTERING ORDER BY (created_at DESC)`)).Exec())
 
+	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.thread_messages_by_room (
+		room_id TEXT,
+		thread_room_id TEXT,
+		created_at TIMESTAMP,
+		message_id TEXT,
+		sender FROZEN<"Participant">,
+		target_user FROZEN<"Participant">,
+		msg TEXT,
+		mentions SET<FROZEN<"Participant">>,
+		attachments LIST<BLOB>,
+		file FROZEN<"File">,
+		card FROZEN<"Card">,
+		card_action FROZEN<"CardAction">,
+		tshow BOOLEAN,
+		tcount INT,
+		thread_parent_id TEXT,
+		thread_parent_created_at TIMESTAMP,
+		quoted_parent_message FROZEN<"QuotedParentMessage">,
+		visible_to TEXT,
+		unread BOOLEAN,
+		reactions MAP<TEXT, FROZEN<SET<FROZEN<"Participant">>>>,
+		deleted BOOLEAN,
+		type TEXT,
+		sys_msg_data BLOB,
+		site_id TEXT,
+		edited_at TIMESTAMP,
+		updated_at TIMESTAMP,
+		PRIMARY KEY ((room_id), thread_room_id, created_at, message_id)
+	) WITH CLUSTERING ORDER BY (thread_room_id ASC, created_at DESC, message_id DESC)`)).Exec())
+
+	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.pinned_messages_by_room (
+		room_id TEXT,
+		created_at TIMESTAMP,
+		message_id TEXT,
+		sender FROZEN<"Participant">,
+		msg TEXT,
+		file FROZEN<"File">,
+		card FROZEN<"Card">,
+		deleted BOOLEAN,
+		edited_at TIMESTAMP,
+		updated_at TIMESTAMP,
+		PRIMARY KEY ((room_id), created_at, message_id)
+	) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`)).Exec())
+
 	cluster := gocql.NewCluster(host)
 	cluster.Consistency = gocql.One
 	cluster.Keyspace = keyspace
@@ -369,4 +413,583 @@ func TestRepository_FullRow_AllColumns(t *testing.T) {
 	require.NotNil(t, msg.PinnedBy)
 	assert.Equal(t, "u9", msg.PinnedBy.ID)
 	assert.Equal(t, "pinner", msg.PinnedBy.Account)
+}
+
+func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-top"
+	msgID := "m-top"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Seed a top-level message in both tables (ThreadParentID == "").
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "original", "",
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		roomID, createdAt, msgID, sender, "original", "",
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:      msgID,
+		RoomID:         roomID,
+		CreatedAt:      createdAt,
+		Sender:         sender,
+		ThreadParentID: "",
+	}
+	editedAt := createdAt.Add(time.Minute)
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+
+	// messages_by_id updated
+	var gotMsg string
+	var gotEditedAt time.Time
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		msgID, createdAt,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg)
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+
+	// messages_by_room updated
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, createdAt, msgID,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg)
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+
+	// thread_messages_by_room must NOT have a phantom row for this message
+	var threadCount int
+	require.NoError(t, session.Query(
+		`SELECT COUNT(*) FROM thread_messages_by_room WHERE room_id = ?`,
+		roomID,
+	).Scan(&threadCount))
+	assert.Equal(t, 0, threadCount, "top-level edit must not write to thread_messages_by_room")
+}
+
+func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-thread"
+	threadRoomID := "thread-1"
+	parentID := "m-parent"
+	msgID := "m-reply"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Seed a thread reply in messages_by_id and thread_messages_by_room.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_room_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "original", parentID, threadRoomID,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, threadRoomID, createdAt, msgID, sender, "original", parentID,
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:      msgID,
+		RoomID:         roomID,
+		CreatedAt:      createdAt,
+		Sender:         sender,
+		ThreadParentID: parentID,
+		ThreadRoomID:   threadRoomID,
+	}
+	editedAt := createdAt.Add(time.Minute)
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+
+	// messages_by_id updated
+	var gotMsg string
+	var gotEditedAt time.Time
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		msgID, createdAt,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg)
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+
+	// thread_messages_by_room updated (verify with the full PK including thread_room_id)
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM thread_messages_by_room WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, threadRoomID, createdAt, msgID,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg)
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+
+	// messages_by_room must NOT have a phantom row for this thread reply
+	var roomCount int
+	require.NoError(t, session.Query(
+		`SELECT COUNT(*) FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, createdAt, msgID,
+	).Scan(&roomCount))
+	assert.Equal(t, 0, roomCount, "thread-reply edit must not write to messages_by_room")
+}
+
+func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-pin"
+	msgID := "m-pin"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+	pinnedAt := createdAt.Add(10 * time.Second)
+
+	// Seed a top-level pinned message in all three tables.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "original", "", pinnedAt,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		roomID, createdAt, msgID, sender, "original", "",
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO pinned_messages_by_room (room_id, created_at, message_id, sender, msg) VALUES (?, ?, ?, ?, ?)`,
+		roomID, pinnedAt, msgID, sender, "original",
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:      msgID,
+		RoomID:         roomID,
+		CreatedAt:      createdAt,
+		Sender:         sender,
+		ThreadParentID: "",
+		PinnedAt:       &pinnedAt,
+	}
+	editedAt := createdAt.Add(time.Minute)
+	require.NoError(t, repo.UpdateMessageContent(ctx, msg, "edited", editedAt))
+
+	// All three affected tables updated
+	var gotMsg string
+	var gotEditedAt time.Time
+
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		msgID, createdAt,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg, "messages_by_id should reflect the edit")
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, createdAt, msgID,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg, "messages_by_room should reflect the edit")
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+
+	require.NoError(t, session.Query(
+		`SELECT msg, edited_at FROM pinned_messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, pinnedAt, msgID,
+	).Scan(&gotMsg, &gotEditedAt))
+	assert.Equal(t, "edited", gotMsg, "pinned_messages_by_room should reflect the edit")
+	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
+}
+
+func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-del-top"
+	msgID := "m-del-top"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Seed a top-level message in both tables.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "original", "", false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, createdAt, msgID, sender, "original", "", false,
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:      msgID,
+		RoomID:         roomID,
+		CreatedAt:      createdAt,
+		Sender:         sender,
+		ThreadParentID: "",
+	}
+	deletedAt := createdAt.Add(time.Minute)
+	_, applied, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	require.NoError(t, err)
+	require.True(t, applied, "first delete should apply")
+
+	// messages_by_id: deleted = true, msg retained, updated_at advanced
+	var gotDeleted bool
+	var gotMsg string
+	var gotUpdatedAt time.Time
+	require.NoError(t, session.Query(
+		`SELECT deleted, msg, updated_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		msgID, createdAt,
+	).Scan(&gotDeleted, &gotMsg, &gotUpdatedAt))
+	assert.True(t, gotDeleted, "messages_by_id.deleted should be true")
+	assert.Equal(t, "original", gotMsg, "msg content must be preserved")
+	assert.WithinDuration(t, deletedAt, gotUpdatedAt, time.Second)
+
+	// messages_by_room: same assertions
+	require.NoError(t, session.Query(
+		`SELECT deleted, msg, updated_at FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, createdAt, msgID,
+	).Scan(&gotDeleted, &gotMsg, &gotUpdatedAt))
+	assert.True(t, gotDeleted)
+	assert.Equal(t, "original", gotMsg, "msg content must be preserved")
+	assert.WithinDuration(t, deletedAt, gotUpdatedAt, time.Second)
+
+	// thread_messages_by_room must have no phantom row
+	var threadCount int
+	require.NoError(t, session.Query(
+		`SELECT COUNT(*) FROM thread_messages_by_room WHERE room_id = ?`,
+		roomID,
+	).Scan(&threadCount))
+	assert.Equal(t, 0, threadCount, "top-level soft-delete must not write to thread_messages_by_room")
+}
+
+func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-del-thread"
+	threadRoomID := "thread-del-1"
+	parentID := "m-del-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	replyID := "m-del-reply"
+	replyCreatedAt := parentCreatedAt.Add(10 * time.Second)
+
+	// Seed the parent (so the thread_parent_created_at reference is real and
+	// Task 7's tcount decrement has a target row to work with later).
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 1,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, parentCreatedAt, parentID, sender, "parent", "", false, 1,
+	).Exec())
+
+	// Seed the thread reply in messages_by_id and thread_messages_by_room.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, thread_parent_created_at, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, parentCreatedAt, false,
+	).Exec())
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             replyID,
+		RoomID:                roomID,
+		CreatedAt:             replyCreatedAt,
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+	}
+	deletedAt := replyCreatedAt.Add(time.Minute)
+	_, applied, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	require.NoError(t, err)
+	require.True(t, applied, "first delete should apply")
+
+	// messages_by_id: reply now deleted
+	var gotDeleted bool
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		replyID, replyCreatedAt,
+	).Scan(&gotDeleted))
+	assert.True(t, gotDeleted)
+
+	// thread_messages_by_room: reply now deleted (full PK including thread_room_id)
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM thread_messages_by_room WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, threadRoomID, replyCreatedAt, replyID,
+	).Scan(&gotDeleted))
+	assert.True(t, gotDeleted)
+
+	// messages_by_room must NOT have a phantom row for this thread reply
+	var roomCount int
+	require.NoError(t, session.Query(
+		`SELECT COUNT(*) FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, replyCreatedAt, replyID,
+	).Scan(&roomCount))
+	assert.Equal(t, 0, roomCount, "thread-reply soft-delete must not write to messages_by_room")
+
+	// Parent's tcount should have been decremented from 1 to 0 — see Task 7.
+	var gotTcount int
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, parentCreatedAt, parentID,
+	).Scan(&gotTcount))
+	assert.Equal(t, 0, gotTcount, "tcount should be decremented on thread-reply soft-delete")
+}
+
+func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-del-pin"
+	msgID := "m-del-pin"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+	pinnedAt := createdAt.Add(10 * time.Second)
+
+	// Seed a top-level pinned message in all three tables.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, pinned_at, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "content", "", pinnedAt, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, createdAt, msgID, sender, "content", "", false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO pinned_messages_by_room (room_id, created_at, message_id, sender, msg, deleted) VALUES (?, ?, ?, ?, ?, ?)`,
+		roomID, pinnedAt, msgID, sender, "content", false,
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:      msgID,
+		RoomID:         roomID,
+		CreatedAt:      createdAt,
+		Sender:         sender,
+		ThreadParentID: "",
+		PinnedAt:       &pinnedAt,
+	}
+	deletedAt := createdAt.Add(time.Minute)
+	_, applied, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	require.NoError(t, err)
+	require.True(t, applied, "first delete should apply")
+
+	// All three tables should reflect deleted = true
+	var gotDeleted bool
+
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		msgID, createdAt,
+	).Scan(&gotDeleted))
+	assert.True(t, gotDeleted, "messages_by_id should be deleted")
+
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, createdAt, msgID,
+	).Scan(&gotDeleted))
+	assert.True(t, gotDeleted, "messages_by_room should be deleted")
+
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM pinned_messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, pinnedAt, msgID,
+	).Scan(&gotDeleted))
+	assert.True(t, gotDeleted, "pinned_messages_by_room should be deleted")
+}
+
+func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-tcount"
+	threadRoomID := "thread-tcount"
+	parentID := "m-tcount-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	replyID := "m-tcount-reply"
+	replyCreatedAt := parentCreatedAt.Add(10 * time.Second)
+
+	// Parent has tcount = 3 (three replies, of which we're about to delete one).
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", 3, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, parentCreatedAt, parentID, sender, "parent", "", 3, false,
+	).Exec())
+
+	// Seed the reply we're deleting.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, thread_parent_created_at, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, parentCreatedAt, false,
+	).Exec())
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             replyID,
+		RoomID:                roomID,
+		CreatedAt:             replyCreatedAt,
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+	}
+	_, applied, err := repo.SoftDeleteMessage(ctx, msg, replyCreatedAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, applied, "first delete should apply")
+
+	// Both tables' tcount should now be 2.
+	var gotTcount int
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		parentID, parentCreatedAt,
+	).Scan(&gotTcount))
+	assert.Equal(t, 2, gotTcount, "messages_by_id.tcount should decrement 3 -> 2")
+
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, parentCreatedAt, parentID,
+	).Scan(&gotTcount))
+	assert.Equal(t, 2, gotTcount, "messages_by_room.tcount should decrement 3 -> 2")
+}
+
+func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-tcount-top"
+	msgID := "m-tcount-top"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Seed a top-level message with tcount=5 (pretend it has 5 thread replies).
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "top", "", 5, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, createdAt, msgID, sender, "top", "", 5, false,
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:      msgID,
+		RoomID:         roomID,
+		CreatedAt:      createdAt,
+		Sender:         sender,
+		ThreadParentID: "",
+	}
+	_, applied, err := repo.SoftDeleteMessage(ctx, msg, createdAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, applied, "first delete should apply")
+
+	// tcount stays at 5 — top-level delete does not cascade / decrement (spec §8.2).
+	var gotTcount int
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, createdAt, msgID,
+	).Scan(&gotTcount))
+	assert.Equal(t, 5, gotTcount, "top-level soft-delete must not touch tcount — replies are preserved (no cascade)")
+}
+
+// TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement covers the
+// concurrent-delete race: a thread reply that's already been soft-deleted
+// must not have its parent's tcount decremented again on a second delete.
+// This is the load-bearing test for the IF deleted != true CAS gate.
+func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-lwt"
+	threadRoomID := "thread-lwt-1"
+	parentID := "m-lwt-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	replyID := "m-lwt-reply"
+	replyCreatedAt := parentCreatedAt.Add(10 * time.Second)
+
+	// Seed parent with tcount = 1 (one reply).
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 1,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, parentCreatedAt, parentID, sender, "parent", "", false, 1,
+	).Exec())
+
+	// Seed the reply in both messages_by_id and thread_messages_by_room.
+	// Note: message-worker doesn't write `deleted` at INSERT time, so deleted
+	// will be NULL on a real reply row. We mirror that here by NOT setting
+	// `deleted` in the INSERT — this also exercises the IF deleted != true
+	// branch that must match NULL.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, thread_parent_created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, parentCreatedAt,
+	).Exec())
+
+	msg := &models.Message{
+		MessageID:             replyID,
+		RoomID:                roomID,
+		CreatedAt:             replyCreatedAt,
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAt,
+		ThreadRoomID:          threadRoomID,
+	}
+
+	// First delete: LWT applies (deleted was NULL → matches != true).
+	firstAt := replyCreatedAt.Add(time.Minute)
+	gotAt1, applied1, err := repo.SoftDeleteMessage(ctx, msg, firstAt)
+	require.NoError(t, err)
+	require.True(t, applied1, "first delete must apply (deleted was NULL)")
+	assert.Equal(t, firstAt.UnixMilli(), gotAt1.UnixMilli())
+
+	// Confirm tcount went 1 -> 0 on both parent rows.
+	var tcount int
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		parentID, parentCreatedAt,
+	).Scan(&tcount))
+	assert.Equal(t, 0, tcount, "first delete should have decremented messages_by_id.tcount")
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, parentCreatedAt, parentID,
+	).Scan(&tcount))
+	assert.Equal(t, 0, tcount, "first delete should have decremented messages_by_room.tcount")
+
+	// Second delete on the same reply: LWT must NOT apply (deleted is now
+	// true), and tcount must NOT be decremented a second time. Pass the same
+	// hydrated msg (Deleted=false) to simulate a stale read; the repo's CAS
+	// is authoritative.
+	secondAt := firstAt.Add(time.Second)
+	gotAt2, applied2, err := repo.SoftDeleteMessage(ctx, msg, secondAt)
+	require.NoError(t, err)
+	require.False(t, applied2, "second delete must NOT apply — deleted is already true")
+	assert.Equal(t, firstAt.UnixMilli(), gotAt2.UnixMilli(), "actualDeletedAt should reflect the winning goroutine's timestamp")
+
+	// tcount must still be 0 (not -1 / not double-decremented). casDecrement
+	// also clamps at zero, but the LWT gate is the proper defense.
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+		parentID, parentCreatedAt,
+	).Scan(&tcount))
+	assert.Equal(t, 0, tcount, "second delete must not double-decrement messages_by_id.tcount")
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, parentCreatedAt, parentID,
+	).Scan(&tcount))
+	assert.Equal(t, 0, tcount, "second delete must not double-decrement messages_by_room.tcount")
 }
