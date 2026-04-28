@@ -36,10 +36,11 @@ type RoomStore interface {
 	GetSubscriptionWithMembership(ctx context.Context, roomID, account string) (*SubscriptionWithMembership, error)
 	CountMembersAndOwners(ctx context.Context, roomID string) (*RoomCounts, error)
 	CountOwners(ctx context.Context, roomID string) (int, error)
-	CountSubscriptions(ctx context.Context, roomID string) (int, error)
-	GetRoomMembersByRooms(ctx context.Context, roomIDs []string) ([]model.RoomMember, error)
-	GetAccountsByRooms(ctx context.Context, roomIDs []string) ([]string, error)
-	ResolveAccounts(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]string, error)
+	// CountNewMembers returns the count of unique, non-bot, not-already-subscribed users
+	// that an add-members request would add to roomID for a given (orgIDs, directAccounts) tuple.
+	// Used by handleAddMembers for capacity validation. Delegates to
+	// pkg/pipelines.GetNewMembersPipeline + a $count terminal stage.
+	CountNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID string) (int, error)
 	// ListRoomMembers returns the members of roomID. When enrich=true, the
 	// returned RoomMember.Member entries carry display fields populated via
 	// $lookup stages against users and subscriptions. When enrich=false,

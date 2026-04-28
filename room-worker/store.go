@@ -58,4 +58,11 @@ type SubscriptionStore interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 	HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error)
 	GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error)
+	// ListNewMembers returns the unique, non-bot accounts that would be added
+	// to roomID for a given (orgIDs, directAccounts) tuple — i.e. the union
+	// minus already-subscribed accounts. Used by processAddMembers to expand
+	// the room-service-supplied (orgs, users) into the actual write list.
+	// Delegates to pkg/pipelines.GetNewMembersPipeline + a $group/$addToSet
+	// terminal stage.
+	ListNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]string, error)
 }

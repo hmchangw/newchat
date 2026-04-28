@@ -290,6 +290,21 @@ func (mr *MockSubscriptionStoreMockRecorder) ListByRoom(ctx, roomID any) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByRoom", reflect.TypeOf((*MockSubscriptionStore)(nil).ListByRoom), ctx, roomID)
 }
 
+// ListNewMembers mocks base method.
+func (m *MockSubscriptionStore) ListNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListNewMembers", ctx, orgIDs, directAccounts, roomID)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListNewMembers indicates an expected call of ListNewMembers.
+func (mr *MockSubscriptionStoreMockRecorder) ListNewMembers(ctx, orgIDs, directAccounts, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListNewMembers", reflect.TypeOf((*MockSubscriptionStore)(nil).ListNewMembers), ctx, orgIDs, directAccounts, roomID)
+}
+
 // ReconcileUserCount mocks base method.
 func (m *MockSubscriptionStore) ReconcileUserCount(ctx context.Context, roomID string) error {
 	m.ctrl.T.Helper()

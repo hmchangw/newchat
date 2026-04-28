@@ -861,7 +861,7 @@ func TestAddMembersRequestJSON(t *testing.T) {
 		RoomID:   "r1",
 		Users:    []string{"alice", "bob"},
 		Orgs:     []string{"engineering"},
-		Channels: []string{"general"},
+		Channels: []model.ChannelRef{{RoomID: "general", SiteID: "site-a"}},
 		History:  model.HistoryConfig{Mode: model.HistoryModeAll},
 	}
 	data, err := json.Marshal(req)
@@ -964,7 +964,7 @@ func TestMembersAddedJSON(t *testing.T) {
 	ma := model.MembersAdded{
 		Individuals:     []string{"alice", "bob"},
 		Orgs:            []string{"engineering"},
-		Channels:        []string{"general"},
+		Channels:        []model.ChannelRef{{RoomID: "general", SiteID: "site-a"}},
 		AddedUsersCount: 5,
 	}
 	data, err := json.Marshal(ma)
@@ -1407,6 +1407,28 @@ func TestSearchRoomsResponseJSON(t *testing.T) {
 	var dst model.SearchRoomsResponse
 	require.NoError(t, json.Unmarshal(data, &dst))
 	assert.True(t, reflect.DeepEqual(resp, dst))
+}
+
+func TestChannelRefJSONBSON(t *testing.T) {
+	src := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
+
+	t.Run("json", func(t *testing.T) {
+		data, err := json.Marshal(&src)
+		require.NoError(t, err)
+		// Tag spelling matters — the wire contract with frontends uses camelCase.
+		assert.Equal(t, `{"roomId":"room-eng","siteId":"site-us"}`, string(data))
+		var dst model.ChannelRef
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, src, dst)
+	})
+
+	t.Run("bson", func(t *testing.T) {
+		data, err := bson.Marshal(&src)
+		require.NoError(t, err)
+		var dst model.ChannelRef
+		require.NoError(t, bson.Unmarshal(data, &dst))
+		assert.Equal(t, src, dst)
+	})
 }
 
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.

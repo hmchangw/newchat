@@ -393,7 +393,15 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) error {
 		return fmt.Errorf("get room: %w", err)
 	}
 
-	accounts := req.Users
+	// Expand org IDs + direct accounts to actual account list, excluding already-subscribed
+	accounts, err := h.store.ListNewMembers(ctx, req.Orgs, req.Users, req.RoomID)
+	if err != nil {
+		return fmt.Errorf("list new members: %w", err)
+	}
+	if len(accounts) == 0 {
+		return nil
+	}
+
 	users, err := h.store.FindUsersByAccounts(ctx, accounts)
 	if err != nil {
 		return fmt.Errorf("find users by accounts: %w", err)

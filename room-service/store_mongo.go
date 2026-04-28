@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
 type MongoStore struct {
@@ -28,7 +29,8 @@ func NewMongoStore(db *mongo.Database) *MongoStore {
 	}
 }
 
-// EnsureIndexes creates the indexes that back the read paths in this service.
+// EnsureIndexes creates the indexes that back the read paths in this service
+// and the unique constraints required for retry-safe writes by room-worker.
 // Must be invoked once at startup. Mongo treats index creation as idempotent
 // when the key spec and options match.
 func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
@@ -37,10 +39,24 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure room_members (rid) index: %w", err)
 	}
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
+	// Unique logical key — retries from room-worker generate fresh _id values
+	// (see processAddMembers), so without this constraint a redelivered
+	// member.add would silently insert duplicate room_members. The bulk-insert
+	// path in room-worker already ignores mongo.IsDuplicateKeyError, so this
+	// makes redelivery idempotent.
+	if _, err := s.roomMembers.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "rid", Value: 1}, {Key: "member.type", Value: 1}, {Key: "member.id", Value: 1}},
+		Options: options.Index().SetUnique(true),
 	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,u.account) index: %w", err)
+		return fmt.Errorf("ensure room_members (rid,member.type,member.id) unique index: %w", err)
+	}
+	// Unique logical key for subscriptions. Same retry-idempotency rationale
+	// as room_members above.
+	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
 	}
 	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "account", Value: 1}},
@@ -244,105 +260,30 @@ func (s *MongoStore) CountOwners(ctx context.Context, roomID string) (int, error
 	return int(count), nil
 }
 
-func (s *MongoStore) CountSubscriptions(ctx context.Context, roomID string) (int, error) {
-	filter := bson.M{
-		"roomId":    roomID,
-		"u.account": bson.M{"$not": bson.Regex{Pattern: `(\.bot$|^p_)`, Options: ""}},
-	}
-	count, err := s.subscriptions.CountDocuments(ctx, filter)
-	if err != nil {
-		return 0, fmt.Errorf("count subscriptions for room %q: %w", roomID, err)
-	}
-	return int(count), nil
-}
-
-func (s *MongoStore) GetRoomMembersByRooms(ctx context.Context, roomIDs []string) ([]model.RoomMember, error) {
-	if len(roomIDs) == 0 {
-		return nil, nil
-	}
-	cursor, err := s.roomMembers.Find(ctx, bson.M{"rid": bson.M{"$in": roomIDs}})
-	if err != nil {
-		return nil, fmt.Errorf("find room members: %w", err)
-	}
-	var members []model.RoomMember
-	if err := cursor.All(ctx, &members); err != nil {
-		return nil, fmt.Errorf("decode room members: %w", err)
-	}
-	return members, nil
-}
-
-func (s *MongoStore) GetAccountsByRooms(ctx context.Context, roomIDs []string) ([]string, error) {
-	if len(roomIDs) == 0 {
-		return nil, nil
-	}
-	pipeline := bson.A{
-		bson.M{"$match": bson.M{"roomId": bson.M{"$in": roomIDs}}},
-		bson.M{"$group": bson.M{"_id": nil, "accounts": bson.M{"$addToSet": "$u.account"}}},
-	}
-	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
-	if err != nil {
-		return nil, fmt.Errorf("aggregate accounts by rooms: %w", err)
-	}
-	var results []struct {
-		Accounts []string `bson:"accounts"`
-	}
-	if err := cursor.All(ctx, &results); err != nil {
-		return nil, fmt.Errorf("decode accounts by rooms: %w", err)
-	}
-	if len(results) == 0 {
-		return nil, nil
-	}
-	return results[0].Accounts, nil
-}
-
-func (s *MongoStore) ResolveAccounts(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]string, error) {
+func (s *MongoStore) CountNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID string) (int, error) {
 	if len(orgIDs) == 0 && len(directAccounts) == 0 {
-		return nil, nil
+		return 0, nil
 	}
 
-	orFilter := bson.A{}
-	if len(orgIDs) > 0 {
-		orFilter = append(orFilter, bson.M{"sectId": bson.M{"$in": orgIDs}})
-	}
-	if len(directAccounts) > 0 {
-		orFilter = append(orFilter, bson.M{"account": bson.M{"$in": directAccounts}})
-	}
-
-	pipeline := bson.A{
-		bson.M{"$match": bson.M{
-			"$or":     orFilter,
-			"account": bson.M{"$not": bson.Regex{Pattern: `(\.bot$|^p_)`, Options: ""}},
-		}},
-		bson.M{"$lookup": bson.M{
-			"from": "subscriptions",
-			"let":  bson.M{"userAccount": "$account"},
-			"pipeline": bson.A{
-				bson.M{"$match": bson.M{"$expr": bson.M{"$and": bson.A{
-					bson.M{"$eq": bson.A{"$roomId", roomID}},
-					bson.M{"$eq": bson.A{"$u.account", "$$userAccount"}},
-				}}}},
-				bson.M{"$limit": 1},
-			},
-			"as": "existingSub",
-		}},
-		bson.M{"$match": bson.M{"existingSub": bson.M{"$eq": bson.A{}}}},
-		bson.M{"$group": bson.M{"_id": nil, "accounts": bson.M{"$addToSet": "$account"}}},
-	}
+	pipeline := pipelines.GetNewMembersPipeline(orgIDs, directAccounts, roomID)
+	pipeline = append(pipeline, bson.M{
+		"$count": "n",
+	})
 
 	cursor, err := s.users.Aggregate(ctx, pipeline)
 	if err != nil {
-		return nil, fmt.Errorf("resolve accounts: %w", err)
+		return 0, fmt.Errorf("count new members: %w", err)
 	}
 	var results []struct {
-		Accounts []string `bson:"accounts"`
+		Count int `bson:"n"`
 	}
 	if err := cursor.All(ctx, &results); err != nil {
-		return nil, fmt.Errorf("decode resolved accounts: %w", err)
+		return 0, fmt.Errorf("decode count new members: %w", err)
 	}
 	if len(results) == 0 {
-		return nil, nil
+		return 0, nil
 	}
-	return results[0].Accounts, nil
+	return results[0].Count, nil
 }
 
 // ListRoomMembers returns the members of a room. It prefers the room_members

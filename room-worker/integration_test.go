@@ -341,3 +341,50 @@ func TestMongoStore_DeleteRoomMember_Integration(t *testing.T) {
 		assert.Equal(t, int64(0), count)
 	})
 }
+
+func TestMongoStore_ListNewMembers_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	users := []interface{}{
+		model.User{ID: "u1", Account: "alice", SectID: "org1"},
+		model.User{ID: "u2", Account: "bob", SectID: "org1"},
+		model.User{ID: "u3", Account: "carol", SectID: "org2"},
+		model.User{ID: "u4", Account: "dave"},
+		model.User{ID: "u5", Account: "helper.bot", SectID: "org1"},
+	}
+	_, err := db.Collection("users").InsertMany(ctx, users)
+	require.NoError(t, err)
+
+	_, err = db.Collection("subscriptions").InsertOne(ctx, model.Subscription{
+		ID:     "s1",
+		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1",
+	})
+	require.NoError(t, err)
+
+	t.Run("merges org members and direct accounts, excludes already-subscribed and bots", func(t *testing.T) {
+		got, err := store.ListNewMembers(ctx, []string{"org1"}, []string{"carol", "dave"}, "r1")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"bob", "carol", "dave"}, got)
+	})
+
+	t.Run("empty inputs return nil", func(t *testing.T) {
+		got, err := store.ListNewMembers(ctx, nil, nil, "r1")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("orgIDs only", func(t *testing.T) {
+		got, err := store.ListNewMembers(ctx, []string{"org2"}, nil, "r1")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"carol"}, got)
+	})
+
+	t.Run("directAccounts only", func(t *testing.T) {
+		got, err := store.ListNewMembers(ctx, nil, []string{"dave"}, "r1")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"dave"}, got)
+	})
+}

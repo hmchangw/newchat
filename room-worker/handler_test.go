@@ -524,6 +524,8 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"bob", "charlie"}, "r1").
+		Return([]string{"bob", "charlie"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "charlie"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 		{ID: "u3", Account: "charlie", SiteID: "site-b"},
@@ -578,6 +580,8 @@ func TestHandler_ProcessAddMembers_HistoryAll(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"bob"}, "r1").
+		Return([]string{"bob"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 	}, nil)
@@ -634,6 +638,8 @@ func TestHandler_ProcessAddMembers_RestrictedPropagatesPointer(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"bob", "charlie"}, "r1").
+		Return([]string{"bob", "charlie"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "charlie"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 		{ID: "u3", Account: "charlie", SiteID: "site-b"},
@@ -691,6 +697,8 @@ func TestHandler_ProcessAddMembers_UnrestrictedOmitsFieldFromWire(t *testing.T) 
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"bob"}, "r1").
+		Return([]string{"bob"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 	}, nil)
@@ -722,6 +730,8 @@ func TestHandler_ProcessAddMembers_WithOrgs(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), []string{"eng"}, []string{"bob"}, "r1").
+		Return([]string{"bob"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 	}, nil)
@@ -758,6 +768,8 @@ func TestHandler_ProcessAddMembers_UserNotFound(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"bob", "ghost"}, "r1").
+		Return([]string{"bob", "ghost"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "ghost"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 	}, nil)
@@ -792,7 +804,9 @@ func TestHandler_ProcessAddMembers_MultipleSiteOutbox(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"alice", "bob", "charlie"}, "r1").
+		Return([]string{"alice", "bob", "charlie"}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice", "bob", "charlie"}).Return([]model.User{
 		{ID: "u1", Account: "alice", SiteID: "site-b"},
 		{ID: "u2", Account: "bob", SiteID: "site-b"},
 		{ID: "u3", Account: "charlie", SiteID: "site-c"},
@@ -1078,6 +1092,8 @@ func TestHandler_ProcessAddMembers_ExistingOrgsWritesIndividuals(t *testing.T) {
 	h := NewHandler(store, "site-a", publish)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-a"}, nil)
+	store.EXPECT().ListNewMembers(gomock.Any(), nil, []string{"bob"}, "r1").
+		Return([]string{"bob"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
 	}, nil)

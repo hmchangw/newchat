@@ -20,11 +20,19 @@ type HistoryConfig struct {
 	Mode HistoryMode `json:"mode" bson:"mode"`
 }
 
+// ChannelRef identifies a source channel by room + its home site. Used by add-member
+// to expand cross-site source channels via the remote site's member.list endpoint.
+type ChannelRef struct {
+	RoomID string `json:"roomId" bson:"roomId"`
+	SiteID string `json:"siteId" bson:"siteId"`
+}
+
+// AddMembersRequest is the event published by room-service when a user requests to add members to a room.
 type AddMembersRequest struct {
 	RoomID           string        `json:"roomId"           bson:"roomId"`
 	Users            []string      `json:"users"            bson:"users"`
 	Orgs             []string      `json:"orgs"             bson:"orgs"`
-	Channels         []string      `json:"channels"         bson:"channels"`
+	Channels         []ChannelRef  `json:"channels"         bson:"channels"`
 	History          HistoryConfig `json:"history"          bson:"history"`
 	RequesterID      string        `json:"requesterId"      bson:"requesterId"`
 	RequesterAccount string        `json:"requesterAccount" bson:"requesterAccount"`
@@ -78,11 +86,12 @@ type MemberRemoved struct {
 	RemovedUsersCount int         `json:"removedUsersCount"`
 }
 
+// MembersAdded describes the members that were added to a room, including individuals, organizations, and channel sources.
 type MembersAdded struct {
-	Individuals     []string `json:"individuals"`
-	Orgs            []string `json:"orgs"`
-	Channels        []string `json:"channels"`
-	AddedUsersCount int      `json:"addedUsersCount"`
+	Individuals     []string     `json:"individuals"`
+	Orgs            []string     `json:"orgs"`
+	Channels        []ChannelRef `json:"channels"`
+	AddedUsersCount int          `json:"addedUsersCount"`
 }
 
 type ListRoomMembersRequest struct {
