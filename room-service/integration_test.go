@@ -72,45 +72,34 @@ func TestMongoStore_Integration(t *testing.T) {
 
 	// Test CreateRoom and GetRoom
 	room := model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a", CreatedBy: "u1", UserCount: 1}
-	if err := store.CreateRoom(ctx, &room); err != nil {
-		t.Fatalf("CreateRoom: %v", err)
-	}
+	require.NoError(t, store.CreateRoom(ctx, &room))
 	got, err := store.GetRoom(ctx, "r1")
-	if err != nil {
-		t.Fatalf("GetRoom: %v", err)
-	}
-	if got.Name != "general" {
-		t.Errorf("Name = %q, want general", got.Name)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "general", got.Name)
 
 	// Test ListRooms
 	require.NoError(t, store.CreateRoom(ctx, &model.Room{ID: "r2", Name: "random", Type: model.RoomTypeChannel}))
 	rooms, err := store.ListRooms(ctx)
-	if err != nil {
-		t.Fatalf("ListRooms: %v", err)
-	}
-	if len(rooms) != 2 {
-		t.Errorf("got %d rooms, want 2", len(rooms))
-	}
+	require.NoError(t, err)
+	assert.Len(t, rooms, 2)
 
 	// Test CreateSubscription and GetSubscription
 	sub := model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", Roles: []model.Role{model.RoleOwner}}
-	if err := store.CreateSubscription(ctx, &sub); err != nil {
-		t.Fatalf("CreateSubscription: %v", err)
-	}
+	require.NoError(t, store.CreateSubscription(ctx, &sub))
 	gotSub, err := store.GetSubscription(ctx, "alice", "r1")
-	if err != nil {
-		t.Fatalf("GetSubscription: %v", err)
-	}
-	if len(gotSub.Roles) == 0 || gotSub.Roles[0] != model.RoleOwner {
-		t.Errorf("Roles = %v, want [owner]", gotSub.Roles)
-	}
+	require.NoError(t, err)
+	// Bound the slice access explicitly with require.Len before indexing —
+	// the prior `len(...) == 0 || s[0] != x` short-circuit guarded the read
+	// at runtime, but it sits on operator-evaluation order rather than a
+	// panic-exit, which static analyzers flag as a potential out-of-range
+	// read. require.Len calls t.FailNow on mismatch so the index is provably
+	// in-bounds on every path that reaches it.
+	require.Len(t, gotSub.Roles, 1)
+	assert.Equal(t, model.RoleOwner, gotSub.Roles[0])
 
 	// Test not found
 	_, err = store.GetSubscription(ctx, "u2", "r1")
-	if err == nil {
-		t.Error("expected error for missing subscription")
-	}
+	assert.Error(t, err, "expected error for missing subscription")
 }
 
 func TestMongoStore_GetSubscriptionWithMembership_Integration(t *testing.T) {

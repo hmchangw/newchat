@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -165,10 +166,24 @@ func loadTestEvents(t *testing.T) []model.MessageEvent {
 	return events
 }
 
+// esURLFor returns a URL rooted at the parsed ES base, with `segments`
+// appended via url.URL.JoinPath. Parsing locks the scheme + host before any
+// path data is appended, so test inputs (index names, doc IDs, query
+// patterns) cannot rewrite the request target — closes the
+// CodeQL go/request-forgery / gosec G107 sink that flagged the previous
+// fmt.Sprintf-built URLs.
+func esURLFor(t *testing.T, esURL string, segments ...string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(esURL)
+	require.NoError(t, err, "parse es base url")
+	return u.JoinPath(segments...)
+}
+
 // refreshIndex forces ES to make all indexed docs searchable.
 func refreshIndex(t *testing.T, esURL, pattern string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/%s/_refresh", esURL, pattern), nil)
+	u := esURLFor(t, esURL, pattern, "_refresh")
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -181,7 +196,8 @@ func refreshIndex(t *testing.T, esURL, pattern string) {
 // countDocs returns the number of documents matching the index pattern.
 func countDocs(t *testing.T, esURL, pattern string) int {
 	t.Helper()
-	resp, err := http.Get(fmt.Sprintf("%s/%s/_count", esURL, pattern))
+	u := esURLFor(t, esURL, pattern, "_count")
+	resp, err := http.Get(u.String())
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -204,9 +220,12 @@ func countDocs(t *testing.T, esURL, pattern string) int {
 // waitForClusterGreen polls ES cluster health until status is green or timeout.
 func waitForClusterGreen(t *testing.T, esURL string, timeout time.Duration) {
 	t.Helper()
+	u := esURLFor(t, esURL, "_cluster", "health")
+	u.RawQuery = "wait_for_status=green&timeout=5s"
+	healthURL := u.String()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(fmt.Sprintf("%s/_cluster/health?wait_for_status=green&timeout=5s", esURL))
+		resp, err := http.Get(healthURL)
 		if err == nil {
 			var health struct {
 				Status string `json:"status"`
@@ -226,7 +245,8 @@ func waitForClusterGreen(t *testing.T, esURL string, timeout time.Duration) {
 // preCreateIndex creates an ES index so shard allocation completes early.
 func preCreateIndex(t *testing.T, esURL, index string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/%s", esURL, index), nil)
+	u := esURLFor(t, esURL, index)
+	req, err := http.NewRequest(http.MethodPut, u.String(), nil)
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -257,7 +277,8 @@ func overrideIndexSettings(body json.RawMessage) json.RawMessage {
 // getDoc retrieves a single document from ES by ID. Returns nil if not found.
 func getDoc(t *testing.T, esURL, index, docID string) map[string]any {
 	t.Helper()
-	resp, err := http.Get(fmt.Sprintf("%s/%s/_doc/%s", esURL, index, docID))
+	u := esURLFor(t, esURL, index, "_doc", docID)
+	resp, err := http.Get(u.String())
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -407,7 +428,8 @@ func TestSearchSyncIntegration(t *testing.T) {
 func searchHits(t *testing.T, esURL, indexPattern, query string) int {
 	t.Helper()
 	body := fmt.Sprintf(`{"query":{"match":{"content":{"query":%q}}}}`, query)
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/%s/_search", esURL, indexPattern), bytes.NewBufferString(body))
+	u := esURLFor(t, esURL, indexPattern, "_search")
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewBufferString(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -436,7 +458,8 @@ func searchHits(t *testing.T, esURL, indexPattern, query string) int {
 func searchHitsWildcard(t *testing.T, esURL, indexPattern, pattern string) int {
 	t.Helper()
 	body := fmt.Sprintf(`{"query":{"wildcard":{"content":{"value":%q}}}}`, pattern)
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/%s/_search", esURL, indexPattern), bytes.NewBufferString(body))
+	u := esURLFor(t, esURL, indexPattern, "_search")
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewBufferString(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
