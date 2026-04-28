@@ -146,13 +146,11 @@ func (h *Handler) Flush(ctx context.Context) {
 	}
 }
 
-// ES error type strings we match against on 404 responses to distinguish
-// benign idempotent outcomes from fatal config errors. These come straight
-// from the Elasticsearch `_bulk` response `error.type` field.
-const (
-	esErrDocumentMissing = "document_missing_exception" // update on missing doc
-	esErrIndexNotFound   = "index_not_found_exception"  // index doesn't exist — config error
-)
+// esErrDocumentMissing is the Elasticsearch `_bulk` response `error.type`
+// for an update against a missing document — a benign idempotent outcome
+// we ack rather than retry. All other 404 error types (including
+// `index_not_found_exception`) are treated as real failures.
+const esErrDocumentMissing = "document_missing_exception"
 
 // isBulkItemSuccess maps an ES bulk item result to a logical success/failure
 // per action type.

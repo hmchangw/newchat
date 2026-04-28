@@ -12,7 +12,6 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
-// Collector names match the Observability → Metrics table in the spec.
 // All collectors register with the default Prometheus registry via
 // promauto so a plain promhttp.Handler() exposes them on /metrics.
 var (
@@ -27,48 +26,24 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"kind"})
 
-	metricCacheHits = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "search_service_cache_hits_total",
-		Help: "Restricted-rooms Valkey cache hits.",
-	}, []string{"kind"})
-
-	metricCacheMisses = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "search_service_cache_misses_total",
-		Help: "Restricted-rooms Valkey cache misses (including transport errors that fall through to ES).",
-	}, []string{"kind"})
-
-	metricESDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	metricESDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "search_service_es_duration_seconds",
-		Help:    "Elasticsearch call latency in seconds, partitioned by operation.",
+		Help:    "Elasticsearch _search call latency in seconds.",
 		Buckets: prometheus.DefBuckets,
-	}, []string{"op"})
+	})
 )
 
-// Metric label constants. Cardinality is fixed and bounded so every
-// permutation can be pre-resolved at init (see below) to avoid a
-// per-request map lookup inside `WithLabelValues`.
+// Per-kind handles for the request-path metrics. The `status` label on
+// requests_total is resolved lazily (5 values × 2 kinds = 10 perms would
+// clutter here); the duration handles are fully bound.
 const (
 	metricKindMessages = "messages"
 	metricKindRooms    = "rooms"
-
-	metricOpSearch      = "search"
-	metricOpUserRoomGet = "user_room_get"
 )
 
-// Pre-resolved per-kind handles for the request-path metrics. The
-// `status` label on requests_total is resolved lazily (5 values × 2
-// kinds = 10 perms would clutter here); the others are fully bound.
 var (
 	durMessages = metricRequestDuration.WithLabelValues(metricKindMessages)
 	durRooms    = metricRequestDuration.WithLabelValues(metricKindRooms)
-
-	cacheHitMessages  = metricCacheHits.WithLabelValues(metricKindMessages)
-	cacheHitRooms     = metricCacheHits.WithLabelValues(metricKindRooms)
-	cacheMissMessages = metricCacheMisses.WithLabelValues(metricKindMessages)
-	cacheMissRooms    = metricCacheMisses.WithLabelValues(metricKindRooms)
-
-	esDurSearch      = metricESDuration.WithLabelValues(metricOpSearch)
-	esDurUserRoomGet = metricESDuration.WithLabelValues(metricOpUserRoomGet)
 )
 
 // observeRequest captures a handler's total latency and terminal status.
@@ -89,42 +64,19 @@ func observeRequest(kind string, errPtr *error) func() {
 	}
 }
 
-func observeES(op string) func() {
+func observeES() func() {
 	start := time.Now()
-	h := esDurFor(op)
-	return func() { h.Observe(time.Since(start).Seconds()) }
+	return func() { metricESDuration.Observe(time.Since(start).Seconds()) }
 }
 
-// durFor / esDurFor / cacheHitFor / cacheMissFor return the pre-resolved
-// observer for the given label. All four fall back to the messages/search
-// variant on an unknown label so a caller typo surfaces as misattributed
-// metrics rather than a nil-observer panic at fire time.
+// durFor falls back to the messages variant on an unknown label so a
+// caller typo surfaces as misattributed metrics rather than a
+// nil-observer panic at fire time.
 func durFor(kind string) prometheus.Observer {
 	if kind == metricKindRooms {
 		return durRooms
 	}
 	return durMessages
-}
-
-func esDurFor(op string) prometheus.Observer {
-	if op == metricOpUserRoomGet {
-		return esDurUserRoomGet
-	}
-	return esDurSearch
-}
-
-func cacheHitFor(kind string) prometheus.Counter {
-	if kind == metricKindRooms {
-		return cacheHitRooms
-	}
-	return cacheHitMessages
-}
-
-func cacheMissFor(kind string) prometheus.Counter {
-	if kind == metricKindRooms {
-		return cacheMissRooms
-	}
-	return cacheMissMessages
 }
 
 // statusLabel maps a handler's returned error onto the requests_total

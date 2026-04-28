@@ -1298,7 +1298,7 @@ func TestSearchMessagesRequestJSON(t *testing.T) {
 	t.Run("full", func(t *testing.T) {
 		req := model.SearchMessagesRequest{
 			SearchText: "hello",
-			RoomIds:    []string{"r1", "r2"},
+			RoomIDs:    []string{"r1", "r2"},
 			Size:       50,
 			Offset:     25,
 		}

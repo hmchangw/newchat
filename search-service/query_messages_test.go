@@ -115,7 +115,7 @@ func inlineTermsAndLookup(t *testing.T, clause any) (roomIDs []any, account stri
 func TestBuildMessageQuery_ScopedInlineTerms(t *testing.T) {
 	req := model.SearchMessagesRequest{
 		SearchText: "hi",
-		RoomIds:    []string{"r1", "r2", "r3"},
+		RoomIDs:    []string{"r1", "r2", "r3"},
 	}
 	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "")
 	require.NoError(t, err)
@@ -130,7 +130,7 @@ func TestBuildMessageQuery_ScopedInlineTerms(t *testing.T) {
 func TestBuildMessageQuery_ScopedMixed(t *testing.T) {
 	req := model.SearchMessagesRequest{
 		SearchText: "hi",
-		RoomIds:    []string{"r1", "restricted-r2", "r3"},
+		RoomIDs:    []string{"r1", "restricted-r2", "r3"},
 	}
 	restricted := map[string]int64{"restricted-r2": 1_600_000_000_000}
 	raw, err := buildMessageQuery(req, "alice", restricted, time.Hour, "")
@@ -167,7 +167,7 @@ func TestBuildMessageQuery_UserRoomIndexOverride(t *testing.T) {
 func TestBuildMessageQuery_ScopedAllRestricted(t *testing.T) {
 	req := model.SearchMessagesRequest{
 		SearchText: "hi",
-		RoomIds:    []string{"ra"},
+		RoomIDs:    []string{"ra"},
 	}
 	restricted := map[string]int64{"ra": 1_700_000_000_000}
 	raw, err := buildMessageQuery(req, "alice", restricted, time.Hour, "")

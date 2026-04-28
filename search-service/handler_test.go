@@ -273,7 +273,7 @@ func TestHandler_SearchMessages_ScopedPartitioning(t *testing.T) {
 	h := newTestHandler(store, cache)
 	_, err := h.searchMessages(ctxWithAccount("alice"), model.SearchMessagesRequest{
 		SearchText: "x",
-		RoomIds:    []string{"r1", "rr", "r2"},
+		RoomIDs:    []string{"r1", "rr", "r2"},
 	})
 	require.NoError(t, err)
 

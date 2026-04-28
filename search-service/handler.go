@@ -74,7 +74,7 @@ func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessages
 	ctx, cancel := h.withRequestTimeout(c)
 	defer cancel()
 
-	restricted, err := h.loadRestricted(ctx, account, metricKindMessages)
+	restricted, err := h.loadRestricted(ctx, account)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessages
 		return nil, natsrouter.ErrInternal("unable to build search query")
 	}
 
-	observeESDone := observeES(metricOpSearch)
+	observeESDone := observeES()
 	raw, err := h.store.Search(ctx, MessageIndexPattern, body)
 	observeESDone()
 	if err != nil {
@@ -135,7 +135,7 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 		return nil, natsrouter.ErrInternal("unable to build search query")
 	}
 
-	observeESDone := observeES(metricOpSearch)
+	observeESDone := observeES()
 	raw, err := h.store.Search(ctx, []string{SpotlightIndex}, body)
 	observeESDone()
 	if err != nil {
@@ -154,28 +154,15 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 // loadRestricted implements the 2-tier Valkey → ES read. Cache errors
 // alone never fail the request — log-and-fall-through. Only when both
 // cache AND ES prefetch fail do we surface ErrInternal.
-//
-// `kind` is the endpoint that called in (`metricKindMessages` or
-// `metricKindRooms`) so cache-hit/miss counters carry the right label.
-// Plumbing it through here rather than hardcoding prevents silent
-// mislabeling when both endpoints traverse this path.
-func (h *handler) loadRestricted(ctx context.Context, account, kind string) (map[string]int64, error) {
+func (h *handler) loadRestricted(ctx context.Context, account string) (map[string]int64, error) {
 	cached, hit, cerr := h.cache.GetRestricted(ctx, account)
 	if cerr != nil {
 		slog.Warn("valkey read failed; falling through to ES", "account", account, "error", cerr)
 	}
 	if hit {
-		cacheHitFor(kind).Inc()
 		return cached, nil
 	}
-	// Counts both "key absent" and transport errors as a miss — both
-	// mean "we have no cached answer and must hit ES" from the caller's
-	// perspective.
-	cacheMissFor(kind).Inc()
-
-	observeESDone := observeES(metricOpUserRoomGet)
 	doc, _, err := h.store.GetUserRoomDoc(ctx, account)
-	observeESDone()
 	if err != nil {
 		// Always log the store error, even if the cache GET also failed
 		// — it's the actionable signal when both fail. Include cache_err

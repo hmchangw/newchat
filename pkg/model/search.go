@@ -4,12 +4,12 @@ import "time"
 
 // SearchMessagesRequest is the NATS payload for `chat.user.{account}.request.search.messages`.
 //
-// RoomIds, when empty, means global search across all rooms the user has
+// RoomIDs, when empty, means global search across all rooms the user has
 // access to. When set, the search is scoped to the listed rooms; the service
 // enforces access using the per-user restricted-rooms map.
 type SearchMessagesRequest struct {
 	SearchText string   `json:"searchText"`
-	RoomIds    []string `json:"roomIds,omitempty"`
+	RoomIDs    []string `json:"roomIds,omitempty"`
 	Size       int      `json:"size,omitempty"`
 	Offset     int      `json:"offset,omitempty"`
 }

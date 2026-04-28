@@ -22,15 +22,15 @@ var MessageIndexPattern = []string{"messages-*", "*:messages-*"}
 // map (rid → historySharedSince millis); pass nil or empty for
 // unrestricted-only users.
 //
-// For global search (req.RoomIds == nil), the unrestricted clause uses an
+// For global search (req.RoomIDs == nil), the unrestricted clause uses an
 // ES terms-lookup against the user-room doc so the service doesn't need
 // to send the full list over the wire. For scoped search
-// (req.RoomIds != nil), the inline terms clause is STILL gated by the
+// (req.RoomIDs != nil), the inline terms clause is STILL gated by the
 // terms-lookup so a caller can't reach rooms they don't belong to by
 // passing arbitrary roomIds.
 func buildMessageQuery(req model.SearchMessagesRequest, account string, restricted map[string]int64, recentWindow time.Duration, userRoomIndex string) (json.RawMessage, error) {
 	userRoomIndex = resolveUserRoomIndex(userRoomIndex)
-	clauses := roomAccessClauses(req.RoomIds, account, restricted, userRoomIndex)
+	clauses := roomAccessClauses(req.RoomIDs, account, restricted, userRoomIndex)
 
 	body := map[string]any{
 		"from":             req.Offset,
@@ -107,8 +107,6 @@ func scopedAccessClauses(roomIDs []string, account string, restricted map[string
 			unrestricted = append(unrestricted, rid)
 		}
 	}
-	sort.Strings(unrestricted)
-	sort.Strings(restrictedSubset)
 
 	clauses := make([]any, 0, 1+2*len(restrictedSubset))
 	if len(unrestricted) > 0 {
