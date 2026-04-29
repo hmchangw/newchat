@@ -47,9 +47,9 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	var page cassrepo.Page[models.Message]
 	if accessSince == nil {
-		page, err = s.messages.GetMessagesBefore(c, roomID, before, pageReq)
+		page, err = s.msgReader.GetMessagesBefore(c, roomID, before, pageReq)
 	} else {
-		page, err = s.messages.GetMessagesBetweenDesc(c, roomID, *accessSince, before, pageReq)
+		page, err = s.msgReader.GetMessagesBetweenDesc(c, roomID, *accessSince, before, pageReq)
 	}
 	if err != nil {
 		slog.Error("loading history", "error", err, "roomID", roomID)
@@ -88,9 +88,9 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 
 	var page cassrepo.Page[models.Message]
 	if lowerBound.IsZero() {
-		page, err = s.messages.GetAllMessagesAsc(c, roomID, pageReq)
+		page, err = s.msgReader.GetAllMessagesAsc(c, roomID, pageReq)
 	} else {
-		page, err = s.messages.GetMessagesAfter(c, roomID, lowerBound, pageReq)
+		page, err = s.msgReader.GetMessagesAfter(c, roomID, lowerBound, pageReq)
 	}
 	if err != nil {
 		slog.Error("loading next messages", "error", err, "roomID", roomID)
@@ -152,16 +152,16 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 
 	var beforePage cassrepo.Page[models.Message]
 	if accessSince == nil {
-		beforePage, err = s.messages.GetMessagesBefore(c, roomID, centralMsg.CreatedAt, beforePageReq)
+		beforePage, err = s.msgReader.GetMessagesBefore(c, roomID, centralMsg.CreatedAt, beforePageReq)
 	} else {
-		beforePage, err = s.messages.GetMessagesBetweenDesc(c, roomID, *accessSince, centralMsg.CreatedAt, beforePageReq)
+		beforePage, err = s.msgReader.GetMessagesBetweenDesc(c, roomID, *accessSince, centralMsg.CreatedAt, beforePageReq)
 	}
 	if err != nil {
 		slog.Error("loading surrounding messages", "error", err, "roomID", roomID, "direction", "before")
 		return nil, natsrouter.ErrInternal("failed to load surrounding messages")
 	}
 
-	afterPage, err := s.messages.GetMessagesAfter(c, roomID, centralMsg.CreatedAt, afterPageReq)
+	afterPage, err := s.msgReader.GetMessagesAfter(c, roomID, centralMsg.CreatedAt, afterPageReq)
 	if err != nil {
 		slog.Error("loading surrounding messages", "error", err, "roomID", roomID, "direction", "after")
 		return nil, natsrouter.ErrInternal("failed to load surrounding messages")
@@ -244,7 +244,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, req models.EditMessa
 	}
 
 	editedAt := time.Now().UTC()
-	if err := s.messages.UpdateMessageContent(c, msg, req.NewMsg, editedAt); err != nil {
+	if err := s.msgWriter.UpdateMessageContent(c, msg, req.NewMsg, editedAt); err != nil {
 		slog.Error("edit: update content", "error", err, "messageID", req.MessageID)
 		return nil, natsrouter.ErrInternal("failed to edit message")
 	}
@@ -311,7 +311,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, req models.DeleteM
 	}
 
 	deletedAt := time.Now().UTC()
-	actualDeletedAt, applied, err := s.messages.SoftDeleteMessage(c, msg, deletedAt)
+	actualDeletedAt, applied, err := s.msgWriter.SoftDeleteMessage(c, msg, deletedAt)
 	if err != nil {
 		slog.Error("delete: soft-delete", "error", err, "messageID", req.MessageID)
 		return nil, natsrouter.ErrInternal("failed to delete message")

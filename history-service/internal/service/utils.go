@@ -43,7 +43,7 @@ func (s *HistoryService) findMessage(ctx context.Context, roomID, messageID stri
 	if messageID == "" {
 		return nil, natsrouter.ErrBadRequest("messageId is required")
 	}
-	msg, err := s.messages.GetMessageByID(ctx, messageID)
+	msg, err := s.msgReader.GetMessageByID(ctx, messageID)
 	if err != nil {
 		slog.Error("finding message", "error", err, "messageID", messageID)
 		return nil, natsrouter.ErrInternal("failed to retrieve message")

@@ -24,10 +24,12 @@ func makeThreadRooms() []pkgmodel.ThreadRoom {
 	}
 }
 
+func intPtr(v int) *int { return &v }
+
 func makeCassMessages() []models.Message {
 	return []models.Message{
-		{MessageID: "p1", RoomID: "r1", Msg: "parent 1", TCount: 5},
-		{MessageID: "p2", RoomID: "r1", Msg: "parent 2", TCount: 3},
+		{MessageID: "p1", RoomID: "r1", Msg: "parent 1", TCount: intPtr(5)},
+		{MessageID: "p2", RoomID: "r1", Msg: "parent 2", TCount: intPtr(3)},
 	}
 }
 
@@ -239,68 +241,32 @@ func TestHistoryService_GetThreadMessages_Limits(t *testing.T) {
 	}
 }
 
-func TestHistoryService_GetThreadMessages_ReplyIDResolvesToParent(t *testing.T) {
+func TestHistoryService_GetThreadMessages_ReplyIDReturnsBadRequest(t *testing.T) {
 	svc, msgs, subs, _, _ := newService(t)
 	c := testContext()
 
-	replyCreatedAt := joinTime.Add(10 * time.Minute)
-	parentCreatedAt := joinTime.Add(5 * time.Minute)
-
-	// Client sends a reply ID instead of the parent ID.
-	reply := &models.Message{MessageID: "reply-1", RoomID: "r1", CreatedAt: replyCreatedAt, ThreadParentID: "m-parent"}
-	parent := &models.Message{MessageID: "m-parent", RoomID: "r1", CreatedAt: parentCreatedAt, ThreadRoomID: "tr-1"}
+	reply := &models.Message{MessageID: "reply-1", RoomID: "r1", CreatedAt: joinTime.Add(10 * time.Minute), ThreadParentID: "m-parent"}
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(reply, nil)
-	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-parent").Return(parent, nil)
-	msgs.EXPECT().GetThreadMessages(gomock.Any(), "r1", "tr-1", gomock.Any()).Return(makePage(nil, false), nil)
-
-	resp, err := svc.GetThreadMessages(c, models.GetThreadMessagesRequest{ThreadMessageID: "reply-1"})
-	require.NoError(t, err)
-	assert.NotNil(t, resp)
-}
-
-func TestHistoryService_GetThreadMessages_ReplyIDParentBeforeAccessSince(t *testing.T) {
-	svc, msgs, subs, _, _ := newService(t)
-	c := testContext()
-
-	// Reply is after accessSince, but the true parent is before — should be rejected.
-	replyCreatedAt := joinTime.Add(10 * time.Minute)
-	parentCreatedAt := joinTime.Add(-1 * time.Hour)
-
-	reply := &models.Message{MessageID: "reply-1", RoomID: "r1", CreatedAt: replyCreatedAt, ThreadParentID: "m-parent"}
-	parent := &models.Message{MessageID: "m-parent", RoomID: "r1", CreatedAt: parentCreatedAt, ThreadRoomID: "tr-1"}
-
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
-	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(reply, nil)
-	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-parent").Return(parent, nil)
 
 	_, err := svc.GetThreadMessages(c, models.GetThreadMessagesRequest{ThreadMessageID: "reply-1"})
+	require.Error(t, err)
+	assertBadRequestErr(t, err, "threadMessageId must be a top-level message, not a reply")
+}
+
+func TestHistoryService_GetThreadMessages_ParentBeforeAccessSinceReturnsForbidden(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	parent := &models.Message{MessageID: "m-parent", RoomID: "r1", CreatedAt: joinTime.Add(-1 * time.Hour), ThreadRoomID: "tr-1"}
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-parent").Return(parent, nil)
+
+	_, err := svc.GetThreadMessages(c, models.GetThreadMessagesRequest{ThreadMessageID: "m-parent"})
 	require.Error(t, err)
 	assertForbiddenErr(t, err, "thread is outside access window")
-}
-
-func TestHistoryService_GetThreadMessages_ReplyOfReplyReturnsError(t *testing.T) {
-	svc, msgs, subs, _, _ := newService(t)
-	c := testContext()
-
-	replyCreatedAt := joinTime.Add(10 * time.Minute)
-	parentCreatedAt := joinTime.Add(5 * time.Minute)
-
-	// reply-1 points to "m-parent", which itself is a reply (ThreadParentID set).
-	// This violates the data model invariant — parents must never be replies.
-	reply := &models.Message{MessageID: "reply-1", RoomID: "r1", CreatedAt: replyCreatedAt, ThreadParentID: "m-parent"}
-	parent := &models.Message{MessageID: "m-parent", RoomID: "r1", CreatedAt: parentCreatedAt, ThreadParentID: "m-grandparent", ThreadRoomID: "tr-nested"}
-
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
-	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(reply, nil)
-	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-parent").Return(parent, nil)
-
-	_, err := svc.GetThreadMessages(c, models.GetThreadMessagesRequest{ThreadMessageID: "reply-1"})
-	require.Error(t, err)
-	var routeErr *natsrouter.RouteError
-	require.ErrorAs(t, err, &routeErr)
-	assert.Equal(t, natsrouter.CodeInternal, routeErr.Code)
 }
 
 // ============================================================
@@ -320,7 +286,7 @@ func TestHistoryService_GetThreadParentMessages_All(t *testing.T) {
 	assert.Len(t, resp.ParentMessages, 2)
 	assert.Equal(t, int64(2), resp.Total)
 	assert.Equal(t, "p1", resp.ParentMessages[0].MessageID)
-	assert.Equal(t, 5, resp.ParentMessages[0].TCount)
+	assert.Equal(t, intPtr(5), resp.ParentMessages[0].TCount)
 }
 
 func TestHistoryService_GetThreadParentMessages_Total(t *testing.T) {

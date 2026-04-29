@@ -30,26 +30,16 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 		return nil, err
 	}
 
-	// Reply ID submitted: resolve to the true parent for the access-window check.
-	parent := msg
 	if msg.ThreadParentID != "" {
-		parent, err = s.findMessage(c, roomID, msg.ThreadParentID)
-		if err != nil {
-			return nil, err
-		}
-		if parent.ThreadParentID != "" {
-			slog.Error("data model violation: resolved parent is itself a reply",
-				"messageID", msg.ThreadParentID, "parentThreadParentID", parent.ThreadParentID)
-			return nil, natsrouter.ErrInternal("invalid thread structure")
-		}
+		return nil, natsrouter.ErrBadRequest("threadMessageId must be a top-level message, not a reply")
 	}
 
-	if accessSince != nil && parent.CreatedAt.Before(*accessSince) {
+	if accessSince != nil && msg.CreatedAt.Before(*accessSince) {
 		return nil, natsrouter.ErrForbidden("thread is outside access window")
 	}
 
 	// Empty ThreadRoomID: no replies yet, or stamp skipped due to missing event fields.
-	if parent.ThreadRoomID == "" {
+	if msg.ThreadRoomID == "" {
 		return &models.GetThreadMessagesResponse{Messages: []models.Message{}, HasNext: false}, nil
 	}
 
@@ -65,9 +55,9 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 		return nil, err
 	}
 
-	page, err := s.messages.GetThreadMessages(c, roomID, parent.ThreadRoomID, pageReq)
+	page, err := s.msgReader.GetThreadMessages(c, roomID, msg.ThreadRoomID, pageReq)
 	if err != nil {
-		slog.Error("loading thread messages", "error", err, "roomID", roomID, "threadRoomID", parent.ThreadRoomID)
+		slog.Error("loading thread messages", "error", err, "roomID", roomID, "threadRoomID", msg.ThreadRoomID)
 		return nil, natsrouter.ErrInternal("failed to load thread messages")
 	}
 
@@ -140,7 +130,7 @@ func (s *HistoryService) GetThreadParentMessages(c *natsrouter.Context, req mode
 		parentIDs = append(parentIDs, id)
 	}
 
-	cassMessages, err := s.messages.GetMessagesByIDs(c, parentIDs)
+	cassMessages, err := s.msgReader.GetMessagesByIDs(c, parentIDs)
 	if err != nil {
 		slog.Error("hydrating thread parent messages from Cassandra", "error", err, "roomID", roomID)
 		return nil, natsrouter.ErrInternal("failed to load thread parent messages")

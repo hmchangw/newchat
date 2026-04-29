@@ -65,7 +65,7 @@ type DeleteMessageResponse struct {
 }
 
 type GetThreadMessagesRequest struct {
-	ThreadMessageID string `json:"threadMessageId"` // parent or reply message ID
+	ThreadMessageID string `json:"threadMessageId"` // must be a top-level thread message ID, not a reply
 	Cursor          string `json:"cursor,omitempty"`
 	Limit           int    `json:"limit"`
 }

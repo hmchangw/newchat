@@ -46,8 +46,8 @@ type PageRequest struct {
 }
 
 const (
-	defaultPageSize = 50
-	maxPageSize     = 100
+	defaultCassPageSize = 50
+	maxPageSize         = 100
 )
 
 // ParsePageRequest validates and normalises cursor+pageSize. Default 50, max 100.
@@ -57,7 +57,7 @@ func ParsePageRequest(cursorStr string, pageSize int) (PageRequest, error) {
 		return PageRequest{}, fmt.Errorf("parse page request cursor: %w", err)
 	}
 	if pageSize <= 0 {
-		pageSize = defaultPageSize
+		pageSize = defaultCassPageSize
 	}
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
@@ -72,7 +72,7 @@ type QueryBuilder struct {
 }
 
 func NewQueryBuilder(q *gocql.Query) *QueryBuilder {
-	return &QueryBuilder{query: q, pageSize: defaultPageSize}
+	return &QueryBuilder{query: q, pageSize: defaultCassPageSize}
 }
 
 func (b *QueryBuilder) WithCursor(cursor *Cursor) *QueryBuilder {

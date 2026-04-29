@@ -17,5 +17,5 @@ type GetThreadParentMessagesRequest struct {
 
 type GetThreadParentMessagesResponse struct {
 	ParentMessages []Message `json:"parentMessages"` // ordered by most recent reply activity
-	Total          int64     `json:"total"`          // MongoDB match count; may exceed len(ParentMessages) after hydration
+	Total          int64     `json:"total"`          // raw MongoDB count before post-hydration access filtering; use for pagination math only, not slice length
 }

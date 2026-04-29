@@ -12,22 +12,31 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . MessageRepository,SubscriptionRepository,EventPublisher,ThreadRoomRepository
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . MessageReader,MessageWriter,SubscriptionRepository,EventPublisher,ThreadRoomRepository
 
-type MessageRepository interface {
+type MessageReader interface {
 	GetMessagesBefore(ctx context.Context, roomID string, before time.Time, q cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, q cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessagesAfter(ctx context.Context, roomID string, after time.Time, q cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetAllMessagesAsc(ctx context.Context, roomID string, q cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessageByID(ctx context.Context, messageID string) (*models.Message, error)
+	GetThreadMessages(ctx context.Context, roomID, threadRoomID string, q cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
+	GetMessagesByIDs(ctx context.Context, messageIDs []string) ([]models.Message, error)
+}
+
+type MessageWriter interface {
 	UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error
 	// SoftDeleteMessage performs a Cassandra LWT on messages_by_id and only
 	// runs the mirror-table and parent-tcount work when the LWT applies.
 	// Returns the updated_at value now persisted (the deletedAt argument when
 	// applied; the existing value when a concurrent delete won the race).
 	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, err error)
-	GetThreadMessages(ctx context.Context, roomID, threadRoomID string, q cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
-	GetMessagesByIDs(ctx context.Context, messageIDs []string) ([]models.Message, error)
+}
+
+// MessageRepository composes read and write access; satisfied by *cassrepo.Repository.
+type MessageRepository interface {
+	MessageReader
+	MessageWriter
 }
 
 type SubscriptionRepository interface {
@@ -48,7 +57,8 @@ type ThreadRoomRepository interface {
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
 type HistoryService struct {
-	messages      MessageRepository
+	msgReader     MessageReader
+	msgWriter     MessageWriter
 	subscriptions SubscriptionRepository
 	publisher     EventPublisher
 	threadRooms   ThreadRoomRepository
@@ -56,7 +66,7 @@ type HistoryService struct {
 
 // New creates a HistoryService with the given repositories and event publisher.
 func New(msgs MessageRepository, subs SubscriptionRepository, pub EventPublisher, threadRooms ThreadRoomRepository) *HistoryService {
-	return &HistoryService{messages: msgs, subscriptions: subs, publisher: pub, threadRooms: threadRooms}
+	return &HistoryService{msgReader: msgs, msgWriter: msgs, subscriptions: subs, publisher: pub, threadRooms: threadRooms}
 }
 
 // RegisterHandlers wires all NATS endpoints. Panics on subscription failure (fatal at startup).

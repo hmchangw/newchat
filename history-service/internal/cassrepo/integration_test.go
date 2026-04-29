@@ -26,7 +26,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		cql(`CREATE TYPE IF NOT EXISTS %s."File" (id TEXT, name TEXT, type TEXT)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."Card" (template TEXT, data BLOB)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."CardAction" (verb TEXT, text TEXT, card_id TEXT, display_text TEXT, hide_exec_log BOOLEAN, card_tmid TEXT, data BLOB)`),
-		cql(`CREATE TYPE IF NOT EXISTS %s."QuotedParentMessage" (message_id TEXT, room_id TEXT, sender FROZEN<"Participant">, created_at TIMESTAMP, msg TEXT, mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>, message_link TEXT)`),
+		cql(`CREATE TYPE IF NOT EXISTS %s."QuotedParentMessage" (message_id TEXT, room_id TEXT, sender FROZEN<"Participant">, created_at TIMESTAMP, msg TEXT, mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>, message_link TEXT, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP)`),
 	} {
 		require.NoError(t, adminSession.Query(stmt).Exec())
 	}
@@ -121,7 +121,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		edited_at TIMESTAMP,
 		updated_at TIMESTAMP,
 		PRIMARY KEY ((room_id), thread_room_id, created_at, message_id)
-	) WITH CLUSTERING ORDER BY (thread_room_id ASC, created_at DESC, message_id DESC)`)).Exec())
+	) WITH CLUSTERING ORDER BY (thread_room_id DESC, created_at DESC, message_id DESC)`)).Exec())
 
 	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.pinned_messages_by_room (
 		room_id TEXT,
