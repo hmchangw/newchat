@@ -37,10 +37,11 @@ type Handler struct {
 	userStore userstore.UserStore
 	pub       Publisher
 	keyStore  RoomKeyProvider
+	encrypt   bool
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider) *Handler {
-	return &Handler{store: store, userStore: userStore, pub: pub, keyStore: keyStore}
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, encrypt bool) *Handler {
+	return &Handler{store: store, userStore: userStore, pub: pub, keyStore: keyStore, encrypt: encrypt}
 }
 
 // HandleMessage processes a single MESSAGES_CANONICAL message payload.
@@ -98,31 +99,34 @@ func (h *Handler) publishChannelEvent(ctx context.Context, room *model.Room, cli
 		evt.Mentions = mentions
 	}
 
-	msgJSON, err := json.Marshal(clientMsg)
-	if err != nil {
-		return fmt.Errorf("marshal client message: %w", err)
-	}
+	if h.encrypt {
+		msgJSON, err := json.Marshal(clientMsg)
+		if err != nil {
+			return fmt.Errorf("marshal client message: %w", err)
+		}
 
-	key, err := h.keyStore.Get(ctx, room.ID)
-	if err != nil {
-		return fmt.Errorf("get room key for room %s: %w", room.ID, err)
-	}
-	if key == nil {
-		return fmt.Errorf("get room key for room %s: %w", room.ID, errNoCurrentKey)
-	}
+		key, err := h.keyStore.Get(ctx, room.ID)
+		if err != nil {
+			return fmt.Errorf("get room key for room %s: %w", room.ID, err)
+		}
+		if key == nil {
+			return fmt.Errorf("get room key for room %s: %w", room.ID, errNoCurrentKey)
+		}
 
-	encrypted, err := roomcrypto.Encode(string(msgJSON), key.KeyPair.PublicKey, key.Version)
-	if err != nil {
-		return fmt.Errorf("encrypt message for room %s: %w", room.ID, err)
-	}
+		encrypted, err := roomcrypto.Encode(string(msgJSON), key.KeyPair.PublicKey, key.Version)
+		if err != nil {
+			return fmt.Errorf("encrypt message for room %s: %w", room.ID, err)
+		}
 
-	encJSON, err := json.Marshal(encrypted)
-	if err != nil {
-		return fmt.Errorf("marshal encrypted message: %w", err)
-	}
+		encJSON, err := json.Marshal(encrypted)
+		if err != nil {
+			return fmt.Errorf("marshal encrypted message: %w", err)
+		}
 
-	evt.EncryptedMessage = json.RawMessage(encJSON)
-	evt.Message = nil
+		evt.EncryptedMessage = json.RawMessage(encJSON)
+		evt.Message = nil
+	}
+	// when h.encrypt is false, evt.Message is already set by buildRoomEvent
 
 	payload, err := json.Marshal(evt)
 	if err != nil {

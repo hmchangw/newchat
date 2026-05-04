@@ -23,21 +23,26 @@ import (
 	"github.com/hmchangw/chat/pkg/userstore"
 )
 
+type encryptionConfig struct {
+	Enabled bool `env:"ENABLED" envDefault:"false"`
+}
+
 type config struct {
-	NatsURL              string          `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
-	NatsCredsFile        string          `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID               string          `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI             string          `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB              string          `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername        string          `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword        string          `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
-	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	ValkeyAddr           string          `env:"VALKEY_ADDR,required"`
-	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
-	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD,required"`
-	Bootstrap            bootstrapConfig `envPrefix:"BOOTSTRAP_"`
+	NatsURL              string           `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
+	NatsCredsFile        string           `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID               string           `env:"SITE_ID"                   envDefault:"default"`
+	MongoURI             string           `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB              string           `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername        string           `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword        string           `env:"MONGO_PASSWORD"            envDefault:""`
+	MaxWorkers           int              `env:"MAX_WORKERS"               envDefault:"100"`
+	UserCacheSize        int              `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL         time.Duration    `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	ValkeyAddr           string           `env:"VALKEY_ADDR"`
+	ValkeyPassword       string           `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyKeyGracePeriod time.Duration    `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
+	Bootstrap            bootstrapConfig  `envPrefix:"BOOTSTRAP_"`
+	Encryption           encryptionConfig `envPrefix:"ENCRYPTION_"`
 }
 
 func main() {
@@ -72,14 +77,23 @@ func main() {
 		slog.Info("user-cache disabled")
 	}
 
-	keyStore, err := roomkeystore.NewValkeyStore(roomkeystore.Config{
-		Addr:        cfg.ValkeyAddr,
-		Password:    cfg.ValkeyPassword,
-		GracePeriod: cfg.ValkeyKeyGracePeriod,
-	})
-	if err != nil {
-		slog.Error("valkey connect failed", "error", err)
-		os.Exit(1)
+	var keyStore roomkeystore.RoomKeyStore
+	if cfg.Encryption.Enabled {
+		if cfg.ValkeyAddr == "" || cfg.ValkeyKeyGracePeriod <= 0 {
+			slog.Error("encryption enabled but VALKEY_ADDR is empty or VALKEY_KEY_GRACE_PERIOD is not a positive duration",
+				"valkey_addr_set", cfg.ValkeyAddr != "",
+				"valkey_key_grace_period", cfg.ValkeyKeyGracePeriod)
+			os.Exit(1)
+		}
+		keyStore, err = roomkeystore.NewValkeyStore(roomkeystore.Config{
+			Addr:        cfg.ValkeyAddr,
+			Password:    cfg.ValkeyPassword,
+			GracePeriod: cfg.ValkeyKeyGracePeriod,
+		})
+		if err != nil {
+			slog.Error("valkey connect failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
@@ -111,7 +125,7 @@ func main() {
 	}
 
 	publisher := &natsPublisher{nc: nc}
-	handler := NewHandler(store, us, publisher, keyStore)
+	handler := NewHandler(store, us, publisher, keyStore, cfg.Encryption.Enabled)
 
 	iter, err := cons.Messages(jetstream.PullMaxMessages(2 * cfg.MaxWorkers))
 	if err != nil {
@@ -150,9 +164,9 @@ func main() {
 		}
 	}()
 
-	slog.Info("broadcast-worker started", "site", cfg.SiteID)
+	slog.Info("broadcast-worker started", "site", cfg.SiteID, "encryption", cfg.Encryption.Enabled)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	hooks := []func(context.Context) error{
 		func(ctx context.Context) error {
 			iter.Stop()
 			return nil
@@ -169,9 +183,13 @@ func main() {
 		},
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error { return keyStore.Close() },
-		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
-	)
+	}
+	if keyStore != nil {
+		hooks = append(hooks, func(ctx context.Context) error { return keyStore.Close() })
+	}
+	hooks = append(hooks, func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil })
+
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
 // natsPublisher adapts *otelnats.Conn to the Publisher interface.

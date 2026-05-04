@@ -18,6 +18,7 @@ services:
       - VALKEY_ADDR=valkey:6379
       - VALKEY_KEY_GRACE_PERIOD=24h
       - BOOTSTRAP_STREAMS=true
+      - ENCRYPTION_ENABLED=false
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

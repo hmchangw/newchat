@@ -82,7 +82,7 @@ func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore)
+	handler := NewHandler(store, us, pub, keyStore, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -127,7 +127,7 @@ func TestBroadcastWorker_ChannelRoom_MentionAll_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore)
+	handler := NewHandler(store, us, pub, keyStore, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -166,7 +166,7 @@ func TestBroadcastWorker_ChannelRoom_IndividualMention_Integration(t *testing.T)
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore)
+	handler := NewHandler(store, us, pub, keyStore, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -215,7 +215,7 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	keyStore := &fakeRoomKeyProvider{pair: nil}
-	handler := NewHandler(store, us, pub, keyStore)
+	handler := NewHandler(store, us, pub, keyStore, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -252,6 +252,61 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	var room model.Room
 	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "dm-1"}).Decode(&room))
 	assert.Equal(t, "m4", room.LastMsgID)
+	require.NotNil(t, room.LastMsgAt)
+	assert.WithinDuration(t, msgTime, *room.LastMsgAt, time.Millisecond)
+}
+
+func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "rNoEnc", Name: "plain", Type: model.RoomTypeChannel, UserCount: 2, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("subscriptions").InsertMany(ctx, []interface{}{
+		model.Subscription{ID: "sN1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "rNoEnc"},
+		model.Subscription{ID: "sN2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "rNoEnc"},
+	})
+	require.NoError(t, err)
+	seedUsers(t, db)
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"))
+	us := userstore.NewMongoStore(db.Collection("users"))
+	pub := &recordingPublisher{}
+
+	// nil keyStore — encryption is disabled, handler must not consult it
+	handler := NewHandler(store, us, pub, nil, false)
+
+	msgTime := time.Now().UTC().Truncate(time.Millisecond)
+	evt := model.MessageEvent{
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "mNoEnc", RoomID: "rNoEnc", UserID: "u1", UserAccount: "alice", Content: "plaintext please", CreatedAt: msgTime,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	require.NoError(t, handler.HandleMessage(ctx, data))
+
+	records := pub.getRecords()
+	require.Len(t, records, 1)
+	assert.Equal(t, subject.RoomEvent("rNoEnc"), records[0].subject)
+
+	var roomEvt model.RoomEvent
+	require.NoError(t, json.Unmarshal(records[0].data, &roomEvt))
+	assert.Equal(t, "site-a", roomEvt.SiteID)
+	require.NotNil(t, roomEvt.Message, "plaintext channel event must carry Message")
+	assert.Empty(t, roomEvt.EncryptedMessage, "plaintext channel event must NOT carry EncryptedMessage")
+	assert.Equal(t, "mNoEnc", roomEvt.Message.ID)
+	assert.Equal(t, "plaintext please", roomEvt.Message.Content)
+	require.NotNil(t, roomEvt.Message.Sender)
+	assert.Equal(t, "u1", roomEvt.Message.Sender.UserID)
+	assert.Equal(t, "alice", roomEvt.Message.Sender.Account)
+
+	var room model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "rNoEnc"}).Decode(&room))
+	assert.Equal(t, "mNoEnc", room.LastMsgID)
 	require.NotNil(t, room.LastMsgAt)
 	assert.WithinDuration(t, msgTime, *room.LastMsgAt, time.Millisecond)
 }
