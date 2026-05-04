@@ -1,0 +1,45 @@
+{{- if eq .Values.enableApps.elasticsearch true }}
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: '{{ .Values.cluster.name }}-{{ .Values.properties.division }}'
+  namespace: {{ .Values.cluster.namespace }}
+spec:
+  version: {{ required "An Elasticsearch version is required" .Values.cluster.version }}
+  {{- with .Values.auth }}
+  auth:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.monitoring }}
+  monitoring:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  secureSettings:
+  - secretName: '{{ .Values.cluster.name }}-{{ .Values.properties.division }}-es-minio'
+    entries: 
+    - key: MINIO_BUCKET_ACCESS_KEY
+      path: s3.client.default.access_key
+    - key: MINIO_BUCKET_SECRET_KEY
+      path: s3.client.default.secret_key     
+
+  {{- $masters := .Values.cluster.nodeSets.masters }}
+  {{- $datas := .Values.cluster.nodeSets.datas }}
+  {{- $coords := .Values.cluster.nodeSets.coordinators }}
+  {{- $additionals := .Values.cluster.nodeSets.additionalNodes }}
+
+  nodeSets:
+    {{- range $idx, $nodeSet := $masters }}
+    - name: {{ $nodeSet.name }}
+    {{- include "config-per-node" (dict "Count" $nodeSet.count "NodeZone" $nodeSet.nodeZone "NodeRoles" $nodeSet.roles ) | nindent 4 }}
+    podTemplate:
+      metadata:
+        annotations:
+        {{- if $.Values.cluster.istioConfig }}
+        {{- toYaml $.Values.cluster.istioConfig | nindent 10 }}
+        {{- end}}      
+      {{- include "node-resource-config" (dict "ESJavaOpts" $.Values.cluster.masterNodeResources.esJavaOpts "RequestsMemory" $.Values.cluster.masterNodeResources.requests "RequestsCpu" $.Values.cluster.masterNodeResources.requests.cpu "LimitsMemory" $.Values.cluster.masterNodeResources.limits.memory "LimitsCpu" $.Values.cluster.masterNodeResources.limits.cpu.memory  "ClusterImage" (printf "%s/%s" $.Values.imageRegistry $.Values.images.elasticSearch) ) | nindent 8}}
+            {{- include "pvc-config" (dict "StorageSize" $nodeSet.storageSize "StorageClassName" $nodeSet.storageClassName ) | nindent 4 }}
+ {{- end }}
+
+// simiarly for data coords addtional, this is just the basic es clsuter setup sample
