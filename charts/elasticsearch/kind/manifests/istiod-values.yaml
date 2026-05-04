@@ -1,0 +1,13 @@
+# Values for the upstream istio/istiod Helm chart (control plane).
+# Sized down for kind — istiod's defaults reserve 500m CPU which is wasteful
+# for a single-node MacBook setup.
+pilot:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  autoscaleEnabled: false
+  replicaCount: 1

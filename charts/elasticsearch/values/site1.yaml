@@ -1,4 +1,4 @@
-# Phase 1 same-namespace test — site1.
+# Phase 2 prod — site1. Cert-based CCS over Istio passthrough on port 443.
 # Deploy with:
 #   helm upgrade --install es-chat-site1 ./charts/elasticsearch -f charts/elasticsearch/values/site1.yaml
 properties:
@@ -9,10 +9,20 @@ properties:
 
 ccs:
   enabled: true
-  remoteClusters:
-  - name: es-chat-site2
-    elasticsearchRef:
-      name: es-chat-site2
-      namespace: chat
+  transport:
+    enabled: true
+    caSecretName: chat-transport-ca
+    manageCASecret: true       # site1 owns the shared CA VaultStaticSecret in this ns; site2..site12 set false
   publicEndpoint:
-    enabled: false             # Phase 1 — no public endpoint needed
+    enabled: true              # render es-remote-site1.chat.com Gateway+VS (443 → transport 9300)
+
+# Cluster registration (the 11 peer entries via PUT /_cluster/settings) is
+# performed by the register-remotes Job — not part of the chart values yet.
+# See design doc §6.3.
+
+# Sidecar exclusions for ES transport — see design doc §4.3.
+cluster:
+  istioConfig:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "9300"

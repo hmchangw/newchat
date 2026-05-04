@@ -1,6 +1,4 @@
-# Phase 1 same-namespace test — site2.
-# Deploy with:
-#   helm upgrade --install es-chat-site2 ./charts/elasticsearch -f charts/elasticsearch/values/site2.yaml
+# Phase 2 prod — site2 (mirror of site1.yaml; manageCASecret=false).
 properties:
   site: site2
   stage: PROD
@@ -9,10 +7,15 @@ properties:
 
 ccs:
   enabled: true
-  remoteClusters:
-  - name: es-chat-site1
-    elasticsearchRef:
-      name: es-chat-site1
-      namespace: chat
+  transport:
+    enabled: true
+    caSecretName: chat-transport-ca
+    manageCASecret: false      # site1 owns the shared CA Secret in this ns
   publicEndpoint:
-    enabled: false             # Phase 1 — no public endpoint needed
+    enabled: true
+
+cluster:
+  istioConfig:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "9300"

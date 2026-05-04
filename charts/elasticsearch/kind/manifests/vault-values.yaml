@@ -1,0 +1,25 @@
+# Values for the upstream hashicorp/vault Helm chart, dev mode.
+# - server.dev.enabled=true → in-memory storage, root token = devRootToken
+# - injector disabled (we use VSO, not the agent injector)
+# - resources sized for kind
+server:
+  dev:
+    enabled: true
+    devRootToken: "root"
+  standalone:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  readinessProbe:
+    enabled: true
+  service:
+    enabled: true
+injector:
+  enabled: false
+ui:
+  enabled: false

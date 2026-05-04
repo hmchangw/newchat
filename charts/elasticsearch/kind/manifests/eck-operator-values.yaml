@@ -1,0 +1,14 @@
+# Values for the upstream elastic/eck-operator Helm chart (version 2.16.1).
+# 2.x is the line that supports Elasticsearch 8.x and provides the
+# `spec.remoteClusters[].apiKey` field used by the Phase 1 same-namespace CCS.
+installCRDs: true
+replicaCount: 1
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+# Watch all namespaces (cluster-scoped). Empty list = all.
+managedNamespaces: []

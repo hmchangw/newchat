@@ -1,0 +1,81 @@
+# Phase 1 same-namespace kind test — site1 (cert-based CCS, Basic tier).
+# Deploy with:
+#   helm upgrade --install es-chat-site1 ./charts/elasticsearch \
+#     -f charts/elasticsearch/kind/values/site1-kind.yaml -n chat
+#
+# The chart's default values.yaml is already sized for kind (3 master + 1 data
+# + 3 coord per cluster, 256Mi/512Mi per pod, `standard` storage class). This
+# file only carries the per-site identifiers and the cert-based CCS toggles.
+properties:
+  site: site1
+  stage: PROD
+  division: site1              # → ES cluster name: es-chat-site1
+  publicDomain: chat.com
+
+# Sidecar exclusions:
+#   9200: Gateway TLS PASSTHROUGH lands directly on ES's own TLS (no double-wrap)
+#   9300: ES transport TLS (and where cert-based CCS is received) — bypass sidecar
+cluster:
+  istioConfig:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "9300"
+
+  # Kind override: chart default is 3 master + 1 data + 3 coord = 7 pods per
+  # cluster (14 across both). With sidecars + Istio + Vault + ECK + control
+  # plane, that needs ~12Gi Docker Desktop memory. On a default 8Gi MacBook
+  # allocation, the apiserver thrashes. We collapse to 1+1+1 here for kind
+  # only — prod values keep the full 3+1+3 layout for HA.
+  nodeSets:
+    masters:
+    - name: master-a
+      count: 1
+      nodeZone: zone1
+      roles: [master, remote_cluster_client]
+      storageSize: 128Mi
+      storageClassName: standard
+    datas:
+    - name: data-a
+      count: 1
+      nodeZone: zone1
+      roles: [data, remote_cluster_client]
+      storageSize: 512Mi
+      storageClassName: standard
+    coordinators:
+    - name: coords-a
+      count: 1
+      nodeZone: zone1
+      roles: [remote_cluster_client]
+      storageSize: 128Mi
+      storageClassName: standard
+    additionalNodes: []
+
+# CCS — cert-based, Basic tier.
+ccs:
+  enabled: true
+  transport:
+    enabled: true
+    caSecretName: chat-transport-ca
+    manageCASecret: true         # site1 owns the shared CA VaultStaticSecret in this ns
+  publicEndpoint:
+    enabled: false               # same-namespace, no public hostname needed
+
+authorizationPolicy:
+  sourceCidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  ports: ["9200", "9300"]
+
+vault:
+  vaultAuthRef: chat-vault-auth
+  vaultConnectionRef: ""         # modern VSO binds connection via VaultAuth, not on VaultStaticSecret
+  mount: secret
+  type: kv-v2
+  refreshAfter: 30s
+  paths:
+    # Shared elastic password — cert-based CCS forwards the calling user's
+    # credentials, so site1 and site2 must agree on the elastic password.
+    elasticUser: elasticsearch/elastic-user
+    minio: elasticsearch/site1/minio
+    transportCA: elasticsearch/transport-ca

@@ -154,3 +154,15 @@ Vault paths. Auto-derived from properties.site when not explicitly set.
 {{- printf "elasticsearch/%s/minio" .Values.properties.site -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Vault path holding the SHARED transport CA cert+key. Same path across every
+site so all clusters reference one CA and mutually trust.
+*/}}
+{{- define "chat.vault.path.transportCA" -}}
+{{- if .Values.vault.paths.transportCA -}}
+{{- .Values.vault.paths.transportCA -}}
+{{- else -}}
+{{- "elasticsearch/transport-ca" -}}
+{{- end -}}
+{{- end -}}

@@ -70,8 +70,8 @@ spec:
       - {{ $remoteHost }}
     route:
     - destination:
-        host: {{ $esName }}-es-remote-cluster.{{ $ns }}.svc.cluster.local
+        host: {{ $esName }}-es-transport.{{ $ns }}.svc.cluster.local
         port:
-          number: 9443
+          number: 9300
 {{- end }}
 {{- end }}

@@ -1,0 +1,9 @@
+# The chat namespace hosts both ES clusters, Kibana, the per-namespace Istio
+# ingressgateway, and Vault auth resources. istio-injection=enabled mirrors
+# the prod design where the chat ns has default sidecar injection.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chat
+  labels:
+    istio-injection: enabled

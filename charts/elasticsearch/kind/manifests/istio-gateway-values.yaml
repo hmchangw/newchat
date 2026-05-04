@@ -1,0 +1,33 @@
+# Values for the per-namespace Istio ingressgateway deployed via the
+# `istio/gateway` Helm chart into the `chat` namespace.
+#
+# This pod is what the chart's Gateway resources attach to via
+# `selector: { istio: chat-ingressgateway }` (see values.yaml `istio.gatewaySelector`).
+# Specific-SNI Gateway resources from the elasticsearch chart attach here to
+# expose es-<site>.chat.com / kibana-<site>.chat.com / es-remote-<site>.chat.com.
+name: chat-ingressgateway
+labels:
+  istio: chat-ingressgateway
+
+service:
+  # NodePort with fixed ports that line up with kind extraPortMappings.
+  type: NodePort
+  ports:
+  - name: status-port
+    port: 15021
+    targetPort: 15021
+  - name: http2
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+  - name: https
+    port: 443
+    targetPort: 443
+    nodePort: 30443
+
+resources:
+  requests: { cpu: 50m,  memory: 128Mi }
+  limits:   { cpu: 500m, memory: 256Mi }
+
+autoscaling:
+  enabled: false

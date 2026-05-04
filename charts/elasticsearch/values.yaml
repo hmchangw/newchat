@@ -21,41 +21,51 @@ enableApps:
 # ──────────────────────────────────────────────────────────────────────────────
 # Cross-Cluster Search.
 #
-#   ccs.enabled              master toggle. Enables remote_cluster_server on
-#                            coord nodeSets, adds 9443 to the AuthorizationPolicy,
-#                            and renders spec.remoteClusters from ccs.remoteClusters.
+# Uses the TLS-CERT-based CCS model (Basic-tier, all ECK 2.x versions). The
+# API-key model + remote_cluster_server listener (port 9443) is intentionally
+# NOT used because both are paid-tier features — see the design doc license
+# audit (`docs/superpowers/specs/2026-05-04-elasticsearch-ccs-mesh-design.md`
+# §10) for empirical evidence.
 #
-#   ccs.remoteClusters       Phase 1 / same-K8s. Each entry becomes a
-#                            spec.remoteClusters[] with apiKey: {}, letting ECK
-#                            auto-mint cross-cluster API keys between operator-
-#                            managed clusters in the same namespace.
+#   ccs.enabled              master toggle. Cosmetic in cert-based mode (the
+#                            wire-level CCS settings are written via a
+#                            post-install Job / register-remotes script);
+#                            kept for forward compatibility with future Helm
+#                            templates that may render a registration Job
+#                            from values.peers.
 #
-#   ccs.publicEndpoint       Phase 2 / cross-K8s. Renders:
-#                              - spec.transport.tls.certificate (LE cert with
-#                                public hostname in SAN)
+#   ccs.transport            Shared transport CA wiring. When enabled, every
+#                            cluster references caSecretName so ECK signs
+#                            node transport certs from a common root and
+#                            clusters mutually trust each other automatically.
+#
+#   ccs.publicEndpoint       Phase 2 / cross-K8s only. Renders:
+#                              - subjectAltNames on spec.transport.tls so
+#                                cross-K8s peers can validate against the
+#                                public hostname
 #                              - chat-es-remote-<site>-gateway (Istio passthrough)
-#                              - chat-es-remote-<site>-vs (SNI route to 9443)
-#                            Leave disabled for Phase 1 — it's only needed when
-#                            peers live in different K8s clusters and reach this
-#                            cluster over the public internet.
+#                              - chat-es-remote-<site>-vs (SNI route to 9300)
+#                            Leave disabled for Phase 1 — peers live in the
+#                            same K8s and use the in-cluster transport Service.
 # ──────────────────────────────────────────────────────────────────────────────
 ccs:
   enabled: false
 
-  remoteClusters: []
-  # Example (Phase 1):
-  # remoteClusters:
-  # - name: site2
-  #   elasticsearchRef:
-  #     name: es-chat-site2
-  #     namespace: chat
+  transport:
+    enabled: false
+    # Name of the K8s Secret containing the shared transport CA cert+key
+    # (kind: tls). Every site references the same Secret name so node certs
+    # all chain to one root.
+    caSecretName: chat-transport-ca
+    # Whether THIS chart release manages the VaultStaticSecret that produces
+    # the shared CA. The Secret itself is shared across every release in the
+    # namespace, so exactly ONE release should own it (else Helm refuses the
+    # second install). Convention: site1's release sets this true, all others
+    # set false.
+    manageCASecret: false
 
   publicEndpoint:
     enabled: false
-    certificate:
-      secretName: ""           # auto-derived from cluster name when empty
-      issuerName: letsencrypt-prod
-      issuerKind: ClusterIssuer
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Container images. Final image string is composed as
@@ -63,7 +73,7 @@ ccs:
 # so cluster.version drives both the ECK resource spec.version field and the
 # image tag — single source of truth, no risk of drift between the two.
 # ──────────────────────────────────────────────────────────────────────────────
-imageRegistry: docker.elastic.co
+imageRegistry: docker.io/library
 images:
   elasticSearch: elasticsearch
   kibana: kibana
@@ -87,9 +97,13 @@ cluster:
   #   traffic.sidecar.istio.io/excludeInboundPorts: "9300"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # NodeSets — three masters, three datas, three coordinators (DC-aware).
+  # NodeSets — defaults sized to fit a MacBook kind cluster (3 master + 1 data
+  # + 3 coord = 7 pods per cluster, 14 across two clusters). Override
+  # per-environment via values files (storageClassName, count, storageSize)
+  # for prod-grade deployments.
+  #
   # remote_cluster_client is on every node so any node can coordinate a CCS query.
-  # remote_cluster_server is only enabled on coord-only nodes (set via ccs.enabled).
+  # In cert-based CCS we don't enable remote_cluster_server (paid feature).
   # ────────────────────────────────────────────────────────────────────────────
   nodeSets:
     masters:
@@ -97,60 +111,48 @@ cluster:
       count: 1
       nodeZone: zone1
       roles: [master, remote_cluster_client]
-      storageSize: 50Gi
-      storageClassName: ssd
+      storageSize: 128Mi         # masters only hold cluster metadata
+      storageClassName: standard
     - name: master-b
       count: 1
       nodeZone: zone2
       roles: [master, remote_cluster_client]
-      storageSize: 50Gi
-      storageClassName: ssd
+      storageSize: 128Mi
+      storageClassName: standard
     - name: master-c
       count: 1
       nodeZone: zone3
       roles: [master, remote_cluster_client]
-      storageSize: 50Gi
-      storageClassName: ssd
+      storageSize: 128Mi
+      storageClassName: standard
 
     datas:
     - name: data-a
       count: 1
       nodeZone: zone1
       roles: [data, remote_cluster_client]
-      storageSize: 500Gi
-      storageClassName: ssd
-    - name: data-b
-      count: 1
-      nodeZone: zone2
-      roles: [data, remote_cluster_client]
-      storageSize: 500Gi
-      storageClassName: ssd
-    - name: data-c
-      count: 1
-      nodeZone: zone3
-      roles: [data, remote_cluster_client]
-      storageSize: 500Gi
-      storageClassName: ssd
+      storageSize: 512Mi         # only data nodes hold actual indices
+      storageClassName: standard
 
     coordinators:
     - name: coords-a
       count: 1
       nodeZone: zone1
       roles: [remote_cluster_client]
-      storageSize: 50Gi
-      storageClassName: ssd
+      storageSize: 128Mi         # coords are stateless aside from local config
+      storageClassName: standard
     - name: coords-b
       count: 1
       nodeZone: zone2
       roles: [remote_cluster_client]
-      storageSize: 50Gi
-      storageClassName: ssd
+      storageSize: 128Mi
+      storageClassName: standard
     - name: coords-c
       count: 1
       nodeZone: zone3
       roles: [remote_cluster_client]
-      storageSize: 50Gi
-      storageClassName: ssd
+      storageSize: 128Mi
+      storageClassName: standard
 
     # Free-form extra nodeSets (e.g. ml, ingest). Each entry mirrors the
     # masters/datas shape and uses additionalNodeResources.
@@ -158,39 +160,48 @@ cluster:
 
   # ────────────────────────────────────────────────────────────────────────────
   # Per-role pod resources.
+  #
+  # Sizing convention used here (kind-friendly defaults):
+  #   - JVM heap = requests.memory (set via -Xms / -Xmx, both equal)
+  #   - container limit = 2× heap, leaving headroom for off-heap (Lucene mmap,
+  #     direct buffers, thread stacks). With 256Mi heap + 512Mi limit the pod
+  #     can serve test traffic without OOMKill.
+  #   - CPU: 200m request / 500m limit — burst-friendly without reserving
+  #     much capacity from kubelet.
+  # Override per-role in prod values files for serious workloads.
   # ────────────────────────────────────────────────────────────────────────────
   masterNodeResources:
-    esJavaOpts: "-Xms2g -Xmx2g"
+    esJavaOpts: "-Xms256m -Xmx256m"
     requests:
-      memory: 4Gi
-      cpu: "1"
+      memory: 256Mi
+      cpu: 200m
     limits:
-      memory: 4Gi
-      cpu: "2"
+      memory: 1Gi               # ES off-heap (Lucene mmap + JVM overhead) needs ~2x heap; 512Mi limit OOMs under load
+      cpu: 500m
   dataNodeResources:
-    esJavaOpts: "-Xms8g -Xmx8g"
+    esJavaOpts: "-Xms256m -Xmx256m"
     requests:
-      memory: 16Gi
-      cpu: "2"
+      memory: 256Mi
+      cpu: 200m
     limits:
-      memory: 16Gi
-      cpu: "4"
+      memory: 1Gi               # ES off-heap (Lucene mmap + JVM overhead) needs ~2x heap; 512Mi limit OOMs under load
+      cpu: 500m
   coordNodeResources:
-    esJavaOpts: "-Xms4g -Xmx4g"
+    esJavaOpts: "-Xms256m -Xmx256m"
     requests:
-      memory: 8Gi
-      cpu: "1"
+      memory: 256Mi
+      cpu: 200m
     limits:
-      memory: 8Gi
-      cpu: "2"
+      memory: 1Gi               # ES off-heap (Lucene mmap + JVM overhead) needs ~2x heap; 512Mi limit OOMs under load
+      cpu: 500m
   additionalNodeResources:
-    esJavaOpts: "-Xms4g -Xmx4g"
+    esJavaOpts: "-Xms256m -Xmx256m"
     requests:
-      memory: 8Gi
-      cpu: "1"
+      memory: 256Mi
+      cpu: 200m
     limits:
-      memory: 8Gi
-      cpu: "2"
+      memory: 1Gi               # ES off-heap (Lucene mmap + JVM overhead) needs ~2x heap; 512Mi limit OOMs under load
+      cpu: 500m
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Kibana — single-instance per site, fronted by the same Istio passthrough pattern.
@@ -201,11 +212,11 @@ kibana:
   count: 1
   resources:
     requests:
-      memory: 1Gi
-      cpu: 500m
+      memory: 256Mi
+      cpu: 200m
     limits:
-      memory: 2Gi
-      cpu: "1"
+      memory: 1Gi               # ES off-heap (Lucene mmap + JVM overhead) needs ~2x heap; 512Mi limit OOMs under load
+      cpu: 500m
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Public hostnames. Leave blank to auto-derive from properties.site / publicDomain:
@@ -228,7 +239,9 @@ istio:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AuthorizationPolicy — restricts inbound by source CIDR + dst port.
-# 9443 is appended automatically when ccs.enabled=true.
+# Scoped to ES + Kibana pods via workloadSelector so it does NOT apply to the
+# per-namespace Istio ingressgateway pod (which listens on 443 and would
+# otherwise be blocked by an unmatched port).
 # ──────────────────────────────────────────────────────────────────────────────
 authorizationPolicy:
   name: ""                     # auto-derived when blank
@@ -237,6 +250,7 @@ authorizationPolicy:
   ports:
   - "9200"
   - "5601"
+  - "9300"                     # transport (CCS uses this in cert-based mode)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HashiCorp Vault Secrets Operator — pulls credentials from Vault into K8s Secrets
@@ -248,7 +262,9 @@ vault:
   mount: secret                # KV mount in Vault
   type: kv-v2                  # kv-v1 | kv-v2
   refreshAfter: 30s
-  # Vault paths. Leave blank to default to elasticsearch/<site>/<purpose>.
+  # Vault paths. Leave blank to default to elasticsearch/<site>/<purpose>
+  # (or elasticsearch/<purpose> for shared paths like the transport CA).
   paths:
     elasticUser: ""            # → elasticsearch/<site>/elastic-user
     minio: ""                  # → elasticsearch/<site>/minio
+    transportCA: ""            # → elasticsearch/transport-ca (shared across all sites)

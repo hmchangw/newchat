@@ -23,27 +23,22 @@ spec:
     - key: MINIO_BUCKET_SECRET_KEY
       path: s3.client.default.secret_key
 
-  {{- if and .Values.ccs.enabled .Values.ccs.remoteClusters }}
-  remoteClusters:
-    {{- range .Values.ccs.remoteClusters }}
-  - name: {{ .name }}
-    elasticsearchRef:
-      name: {{ .elasticsearchRef.name }}
-      {{- with .elasticsearchRef.namespace }}
-      namespace: {{ . }}
-      {{- end }}
-    apiKey: {}
-    {{- end }}
-  {{- end }}
-
-  {{- if .Values.ccs.publicEndpoint.enabled }}
+  {{- /*
+     Cert-based CCS: every cluster references the SAME shared transport CA
+     Secret, so node transport certs across all clusters chain to one root and
+     mutually trust. In Phase 2, subjectAltNames also include the public host
+     so cross-K8s peers can validate against `cluster.remote.<peer>.server_name`.
+  */}}
+  {{- if .Values.ccs.transport.enabled }}
   transport:
     tls:
       certificate:
-        secretName: {{ default (printf "%s-transport-cert" (include "chat.es.fullname" .)) .Values.ccs.publicEndpoint.certificate.secretName }}
+        secretName: {{ required "ccs.transport.caSecretName must be set when ccs.transport.enabled" .Values.ccs.transport.caSecretName }}
+      {{- if .Values.ccs.publicEndpoint.enabled }}
       subjectAltNames:
       - dns: {{ include "chat.hosts.esRemote" . }}
-      - dns: {{ include "chat.es.fullname" . }}-es-coordinating.{{ .Values.cluster.namespace }}.svc.cluster.local
+      - dns: {{ include "chat.es.fullname" . }}-es-transport.{{ .Values.cluster.namespace }}.svc.cluster.local
+      {{- end }}
   {{- end }}
 
   {{- $ctx := . }}
@@ -102,11 +97,12 @@ spec:
     */}}
     {{- range $coords }}
     - name: {{ .name }}
-      {{- $extra := "" }}
-      {{- if $ctx.Values.ccs.enabled }}
-      {{- $extra = "remote_cluster_server.enabled: true" }}
-      {{- end }}
-      {{- include "config-per-node" (dict "Count" .count "NodeZone" .nodeZone "NodeRoles" .roles "ExtraConfig" $extra) | nindent 6 }}
+      {{- /*
+         Cert-based CCS uses the standard transport listener (9300), so no
+         `remote_cluster_server.enabled` or 9443 SSL injection is needed —
+         that path is API-key/Enterprise-gated. See design doc Section 4.1.
+      */}}
+      {{- include "config-per-node" (dict "Count" .count "NodeZone" .nodeZone "NodeRoles" .roles) | nindent 6 }}
       podTemplate:
         metadata:
           {{- with $ctx.Values.cluster.istioConfig }}

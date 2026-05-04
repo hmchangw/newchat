@@ -1,0 +1,3 @@
+# Values for the upstream istio/base Helm chart (CRDs + cluster-wide RBAC).
+# No overrides needed for kind — defaults are fine.
+defaultRevision: default

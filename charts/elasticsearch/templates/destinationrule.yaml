@@ -1,0 +1,23 @@
+{{- if and .Values.enableApps.virtualService .Values.ccs.transport.manageCASecret }}
+{{- /* Gated on manageCASecret because both this DestinationRule and the
+       shared CA Secret are namespace-level singletons — only one release
+       should own them. By convention site1 manages both. */}}
+{{- /*
+   Disables Istio sidecar mTLS origination for traffic the ingressgateway
+   sends to ES + Kibana backend Services. Without this, the gateway tries to
+   wrap the connection in mTLS but the ES pods have port 9200/5601 excluded
+   from the sidecar (so they speak plain HTTPS, not mTLS). Result: TLS
+   handshake aborts with TCP RST. With tls.mode=DISABLE the gateway forwards
+   the original PASSTHROUGH bytes straight to the pod's HTTPS listener.
+*/}}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: chat-es-passthrough
+  namespace: {{ .Values.cluster.namespace }}
+spec:
+  host: "*.{{ .Values.cluster.namespace }}.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+{{- end }}

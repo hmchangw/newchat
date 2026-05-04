@@ -1,21 +1,21 @@
 {{- if .Values.enableApps.authorizationPolicy }}
 {{- /*
    Restricts inbound traffic to allowed source CIDRs (typically the K8s pod
-   network) and allowed destination ports. The Istio ingressgateway pod sits
-   inside the pod CIDR, so external traffic via the gateway also matches.
-   Authentication is handled at the ES layer (native realm + cross-cluster
-   API keys), not here.
+   network) and allowed destination ports. Scoped via workloadSelector to ES
+   + Kibana pods only — the per-namespace Istio ingressgateway pod listens on
+   443, which is intentionally NOT in the allowed list. Without the selector
+   this policy would block the gateway pod and break ingress entirely.
+   Authentication is handled at the ES layer (native realm), not here.
 */}}
-{{- $ports := .Values.authorizationPolicy.ports }}
-{{- if .Values.ccs.enabled }}
-{{- $ports = append $ports "9443" }}
-{{- end }}
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
   name: {{ default (printf "chat-es-%s-authz" .Values.properties.site) .Values.authorizationPolicy.name }}
   namespace: {{ .Values.cluster.namespace }}
 spec:
+  selector:
+    matchLabels:
+      common.k8s.elastic.co/type: elasticsearch
   action: ALLOW
   rules:
   - from:
@@ -25,5 +25,24 @@ spec:
     to:
     - operation:
         ports:
-          {{- toYaml $ports | nindent 8 }}
+          {{- toYaml .Values.authorizationPolicy.ports | nindent 8 }}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ default (printf "chat-kibana-%s-authz" .Values.properties.site) "" }}
+  namespace: {{ .Values.cluster.namespace }}
+spec:
+  selector:
+    matchLabels:
+      common.k8s.elastic.co/type: kibana
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        ipBlocks:
+          {{- toYaml .Values.authorizationPolicy.sourceCidrs | nindent 8 }}
+    to:
+    - operation:
+        ports: ["5601"]
 {{- end }}
