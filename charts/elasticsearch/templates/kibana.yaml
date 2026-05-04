@@ -1,0 +1,29 @@
+{{- if .Values.enableApps.kibana }}
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: {{ include "chat.kibana.fullname" . }}
+  namespace: {{ .Values.cluster.namespace }}
+spec:
+  version: {{ .Values.cluster.version }}
+  count: {{ .Values.kibana.count }}
+  elasticsearchRef:
+    name: {{ include "chat.es.fullname" . }}
+  podTemplate:
+    metadata:
+      {{- with .Values.cluster.istioConfig }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      containers:
+      - name: kibana
+        image: {{ .Values.imageRegistry }}/{{ .Values.images.kibana }}:{{ .Values.cluster.version }}
+        resources:
+          requests:
+            memory: {{ .Values.kibana.resources.requests.memory }}
+            cpu: {{ .Values.kibana.resources.requests.cpu }}
+          limits:
+            memory: {{ .Values.kibana.resources.limits.memory }}
+            cpu: {{ .Values.kibana.resources.limits.cpu }}
+{{- end }}

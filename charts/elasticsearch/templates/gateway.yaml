@@ -1,0 +1,95 @@
+{{- if .Values.enableApps.gateway }}
+{{- $esHost := include "chat.hosts.esHttp" . }}
+{{- $kbHost := include "chat.hosts.kibana" . }}
+{{- $remoteHost := include "chat.hosts.esRemote" . }}
+{{- $selector := .Values.istio.gatewaySelector }}
+{{- $ns := .Values.cluster.namespace }}
+{{- /*
+   Three separate Gateway resources, one per public hostname. Each attaches to
+   the shared chat-ingressgateway pod and uses TLS PASSTHROUGH on 443 — specific
+   SNI hosts override the namespace default `*.chat.com` SIMPLE-mode gateway.
+*/}}
+{{- if .Values.enableApps.elasticsearch }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: chat-es-{{ .Values.properties.site }}-gateway
+  namespace: {{ $ns }}
+spec:
+  selector:
+    {{- toYaml $selector | nindent 4 }}
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - {{ $esHost }}
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https-es
+      protocol: HTTPS
+    hosts:
+    - {{ $esHost }}
+    tls:
+      mode: PASSTHROUGH
+---
+{{- end }}
+{{- if .Values.enableApps.kibana }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: chat-kibana-{{ .Values.properties.site }}-gateway
+  namespace: {{ $ns }}
+spec:
+  selector:
+    {{- toYaml $selector | nindent 4 }}
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - {{ $kbHost }}
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https-kibana
+      protocol: HTTPS
+    hosts:
+    - {{ $kbHost }}
+    tls:
+      mode: PASSTHROUGH
+---
+{{- end }}
+{{- if .Values.ccs.publicEndpoint.enabled }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: chat-es-remote-{{ .Values.properties.site }}-gateway
+  namespace: {{ $ns }}
+spec:
+  selector:
+    {{- toYaml $selector | nindent 4 }}
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - {{ $remoteHost }}
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https-es-remote
+      protocol: HTTPS
+    hosts:
+    - {{ $remoteHost }}
+    tls:
+      mode: PASSTHROUGH
+{{- end }}
+{{- end }}

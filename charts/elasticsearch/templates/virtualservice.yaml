@@ -1,0 +1,77 @@
+{{- if .Values.enableApps.virtualService }}
+{{- $esHost := include "chat.hosts.esHttp" . }}
+{{- $kbHost := include "chat.hosts.kibana" . }}
+{{- $remoteHost := include "chat.hosts.esRemote" . }}
+{{- $esName := include "chat.es.fullname" . }}
+{{- $kbName := include "chat.kibana.fullname" . }}
+{{- $ns := .Values.cluster.namespace }}
+{{- $site := .Values.properties.site }}
+{{- if .Values.enableApps.elasticsearch }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: chat-es-{{ $site }}-vs
+  namespace: {{ $ns }}
+spec:
+  hosts:
+  - {{ $esHost }}
+  gateways:
+  - chat-es-{{ $site }}-gateway
+  tls:
+  - match:
+    - port: 443
+      sniHosts:
+      - {{ $esHost }}
+    route:
+    - destination:
+        host: {{ $esName }}-es-http.{{ $ns }}.svc.cluster.local
+        port:
+          number: 9200
+---
+{{- end }}
+{{- if .Values.enableApps.kibana }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: chat-kibana-{{ $site }}-vs
+  namespace: {{ $ns }}
+spec:
+  hosts:
+  - {{ $kbHost }}
+  gateways:
+  - chat-kibana-{{ $site }}-gateway
+  tls:
+  - match:
+    - port: 443
+      sniHosts:
+      - {{ $kbHost }}
+    route:
+    - destination:
+        host: {{ $kbName }}-kb-http.{{ $ns }}.svc.cluster.local
+        port:
+          number: 5601
+---
+{{- end }}
+{{- if .Values.ccs.publicEndpoint.enabled }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: chat-es-remote-{{ $site }}-vs
+  namespace: {{ $ns }}
+spec:
+  hosts:
+  - {{ $remoteHost }}
+  gateways:
+  - chat-es-remote-{{ $site }}-gateway
+  tls:
+  - match:
+    - port: 443
+      sniHosts:
+      - {{ $remoteHost }}
+    route:
+    - destination:
+        host: {{ $esName }}-es-remote-cluster.{{ $ns }}.svc.cluster.local
+        port:
+          number: 9443
+{{- end }}
+{{- end }}

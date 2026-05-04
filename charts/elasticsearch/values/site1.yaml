@@ -1,0 +1,18 @@
+# Phase 1 same-namespace test — site1.
+# Deploy with:
+#   helm upgrade --install es-chat-site1 ./charts/elasticsearch -f charts/elasticsearch/values/site1.yaml
+properties:
+  site: site1
+  stage: PROD
+  division: site1              # → ES cluster name: es-chat-site1
+  publicDomain: chat.com
+
+ccs:
+  enabled: true
+  remoteClusters:
+  - name: es-chat-site2
+    elasticsearchRef:
+      name: es-chat-site2
+      namespace: chat
+  publicEndpoint:
+    enabled: false             # Phase 1 — no public endpoint needed

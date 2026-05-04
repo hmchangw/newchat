@@ -1,8 +1,8 @@
-{{- if eq .Values.enableApps.elasticsearch true }}
+{{- if .Values.enableApps.elasticsearch }}
 apiVersion: elasticsearch.k8s.elastic.co/v1
 kind: Elasticsearch
 metadata:
-  name: '{{ .Values.cluster.name }}-{{ .Values.properties.division }}'
+  name: {{ include "chat.es.fullname" . }}
   namespace: {{ .Values.cluster.namespace }}
 spec:
   version: {{ required "An Elasticsearch version is required" .Values.cluster.version }}
@@ -16,30 +16,132 @@ spec:
   {{- end }}
 
   secureSettings:
-  - secretName: '{{ .Values.cluster.name }}-{{ .Values.properties.division }}-es-minio'
-    entries: 
+  - secretName: {{ include "chat.es.fullname" . }}-es-minio
+    entries:
     - key: MINIO_BUCKET_ACCESS_KEY
       path: s3.client.default.access_key
     - key: MINIO_BUCKET_SECRET_KEY
-      path: s3.client.default.secret_key     
+      path: s3.client.default.secret_key
 
+  {{- if and .Values.ccs.enabled .Values.ccs.remoteClusters }}
+  remoteClusters:
+    {{- range .Values.ccs.remoteClusters }}
+  - name: {{ .name }}
+    elasticsearchRef:
+      name: {{ .elasticsearchRef.name }}
+      {{- with .elasticsearchRef.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+    apiKey: {}
+    {{- end }}
+  {{- end }}
+
+  {{- if .Values.ccs.publicEndpoint.enabled }}
+  transport:
+    tls:
+      certificate:
+        secretName: {{ default (printf "%s-transport-cert" (include "chat.es.fullname" .)) .Values.ccs.publicEndpoint.certificate.secretName }}
+      subjectAltNames:
+      - dns: {{ include "chat.hosts.esRemote" . }}
+      - dns: {{ include "chat.es.fullname" . }}-es-coordinating.{{ .Values.cluster.namespace }}.svc.cluster.local
+  {{- end }}
+
+  {{- $ctx := . }}
+  {{- $img := printf "%s/%s:%s" .Values.imageRegistry .Values.images.elasticSearch .Values.cluster.version }}
   {{- $masters := .Values.cluster.nodeSets.masters }}
   {{- $datas := .Values.cluster.nodeSets.datas }}
   {{- $coords := .Values.cluster.nodeSets.coordinators }}
   {{- $additionals := .Values.cluster.nodeSets.additionalNodes }}
 
   nodeSets:
-    {{- range $idx, $nodeSet := $masters }}
-    - name: {{ $nodeSet.name }}
-    {{- include "config-per-node" (dict "Count" $nodeSet.count "NodeZone" $nodeSet.nodeZone "NodeRoles" $nodeSet.roles ) | nindent 4 }}
-    podTemplate:
-      metadata:
-        annotations:
-        {{- if $.Values.cluster.istioConfig }}
-        {{- toYaml $.Values.cluster.istioConfig | nindent 10 }}
-        {{- end}}      
-      {{- include "node-resource-config" (dict "ESJavaOpts" $.Values.cluster.masterNodeResources.esJavaOpts "RequestsMemory" $.Values.cluster.masterNodeResources.requests "RequestsCpu" $.Values.cluster.masterNodeResources.requests.cpu "LimitsMemory" $.Values.cluster.masterNodeResources.limits.memory "LimitsCpu" $.Values.cluster.masterNodeResources.limits.cpu.memory  "ClusterImage" (printf "%s/%s" $.Values.imageRegistry $.Values.images.elasticSearch) ) | nindent 8}}
-            {{- include "pvc-config" (dict "StorageSize" $nodeSet.storageSize "StorageClassName" $nodeSet.storageClassName ) | nindent 4 }}
- {{- end }}
+    {{- /* ───────────────────────── masters ───────────────────────── */}}
+    {{- range $masters }}
+    - name: {{ .name }}
+      {{- include "config-per-node" (dict "Count" .count "NodeZone" .nodeZone "NodeRoles" .roles) | nindent 6 }}
+      podTemplate:
+        metadata:
+          {{- with $ctx.Values.cluster.istioConfig }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "node-resource-config" (dict
+              "ESJavaOpts" $ctx.Values.cluster.masterNodeResources.esJavaOpts
+              "RequestsMemory" $ctx.Values.cluster.masterNodeResources.requests.memory
+              "RequestsCpu" $ctx.Values.cluster.masterNodeResources.requests.cpu
+              "LimitsMemory" $ctx.Values.cluster.masterNodeResources.limits.memory
+              "LimitsCpu" $ctx.Values.cluster.masterNodeResources.limits.cpu
+              "ClusterImage" $img) | nindent 10 }}
+      {{- include "pvc-config" (dict "StorageSize" .storageSize "StorageClassName" .storageClassName) | nindent 6 }}
+    {{- end }}
 
-// simiarly for data coords addtional, this is just the basic es clsuter setup sample
+    {{- /* ───────────────────────── datas ───────────────────────── */}}
+    {{- range $datas }}
+    - name: {{ .name }}
+      {{- include "config-per-node" (dict "Count" .count "NodeZone" .nodeZone "NodeRoles" .roles) | nindent 6 }}
+      podTemplate:
+        metadata:
+          {{- with $ctx.Values.cluster.istioConfig }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "node-resource-config" (dict
+              "ESJavaOpts" $ctx.Values.cluster.dataNodeResources.esJavaOpts
+              "RequestsMemory" $ctx.Values.cluster.dataNodeResources.requests.memory
+              "RequestsCpu" $ctx.Values.cluster.dataNodeResources.requests.cpu
+              "LimitsMemory" $ctx.Values.cluster.dataNodeResources.limits.memory
+              "LimitsCpu" $ctx.Values.cluster.dataNodeResources.limits.cpu
+              "ClusterImage" $img) | nindent 10 }}
+      {{- include "pvc-config" (dict "StorageSize" .storageSize "StorageClassName" .storageClassName) | nindent 6 }}
+    {{- end }}
+
+    {{- /* ───────────────────────── coordinators ─────────────────────────
+         Coord-only nodes get remote_cluster_server.enabled when ccs.enabled.
+         This is the only nodeSet group whose config diverges from the others.
+    */}}
+    {{- range $coords }}
+    - name: {{ .name }}
+      {{- $extra := "" }}
+      {{- if $ctx.Values.ccs.enabled }}
+      {{- $extra = "remote_cluster_server.enabled: true" }}
+      {{- end }}
+      {{- include "config-per-node" (dict "Count" .count "NodeZone" .nodeZone "NodeRoles" .roles "ExtraConfig" $extra) | nindent 6 }}
+      podTemplate:
+        metadata:
+          {{- with $ctx.Values.cluster.istioConfig }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "node-resource-config" (dict
+              "ESJavaOpts" $ctx.Values.cluster.coordNodeResources.esJavaOpts
+              "RequestsMemory" $ctx.Values.cluster.coordNodeResources.requests.memory
+              "RequestsCpu" $ctx.Values.cluster.coordNodeResources.requests.cpu
+              "LimitsMemory" $ctx.Values.cluster.coordNodeResources.limits.memory
+              "LimitsCpu" $ctx.Values.cluster.coordNodeResources.limits.cpu
+              "ClusterImage" $img) | nindent 10 }}
+      {{- include "pvc-config" (dict "StorageSize" .storageSize "StorageClassName" .storageClassName) | nindent 6 }}
+    {{- end }}
+
+    {{- /* ───────────────────────── additionalNodes ───────────────────────── */}}
+    {{- range $additionals }}
+    - name: {{ .name }}
+      {{- include "config-per-node" (dict "Count" .count "NodeZone" .nodeZone "NodeRoles" .roles) | nindent 6 }}
+      podTemplate:
+        metadata:
+          {{- with $ctx.Values.cluster.istioConfig }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "node-resource-config" (dict
+              "ESJavaOpts" $ctx.Values.cluster.additionalNodeResources.esJavaOpts
+              "RequestsMemory" $ctx.Values.cluster.additionalNodeResources.requests.memory
+              "RequestsCpu" $ctx.Values.cluster.additionalNodeResources.requests.cpu
+              "LimitsMemory" $ctx.Values.cluster.additionalNodeResources.limits.memory
+              "LimitsCpu" $ctx.Values.cluster.additionalNodeResources.limits.cpu
+              "ClusterImage" $img) | nindent 10 }}
+      {{- include "pvc-config" (dict "StorageSize" .storageSize "StorageClassName" .storageClassName) | nindent 6 }}
+    {{- end }}
+{{- end }}

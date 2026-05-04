@@ -1,0 +1,13 @@
+apiVersion: v2
+name: chat-elasticsearch
+description: Per-site Elasticsearch + Kibana stack for the chat platform (ECK-based, Istio-fronted, Vault-backed secrets, Basic-tier CCS-ready)
+type: application
+version: 0.1.0
+appVersion: 8.19.8
+keywords:
+- elasticsearch
+- kibana
+- eck
+- chat
+maintainers:
+- name: chat-platform

@@ -1,0 +1,254 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-site properties — typically the only block you override per environment.
+# ──────────────────────────────────────────────────────────────────────────────
+properties:
+  site: site1                  # logical site identifier (site1..site12)
+  stage: PROD                  # PROD | STAGING | DEV (used by chat.gateway helper)
+  division: chat               # appended to cluster.name → e.g. es-chat-chat
+  publicDomain: chat.com       # used to build external hostnames
+
+# ──────────────────────────────────────────────────────────────────────────────
+# App toggles — disable parts of the chart per environment.
+# ──────────────────────────────────────────────────────────────────────────────
+enableApps:
+  elasticsearch: true
+  kibana: true
+  gateway: true                # Istio Gateway resources
+  virtualService: true         # Istio VirtualService resources
+  authorizationPolicy: true    # Istio AuthorizationPolicy
+  vaultSecrets: true           # VaultStaticSecret resources for elastic + MinIO
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cross-Cluster Search.
+#
+#   ccs.enabled              master toggle. Enables remote_cluster_server on
+#                            coord nodeSets, adds 9443 to the AuthorizationPolicy,
+#                            and renders spec.remoteClusters from ccs.remoteClusters.
+#
+#   ccs.remoteClusters       Phase 1 / same-K8s. Each entry becomes a
+#                            spec.remoteClusters[] with apiKey: {}, letting ECK
+#                            auto-mint cross-cluster API keys between operator-
+#                            managed clusters in the same namespace.
+#
+#   ccs.publicEndpoint       Phase 2 / cross-K8s. Renders:
+#                              - spec.transport.tls.certificate (LE cert with
+#                                public hostname in SAN)
+#                              - chat-es-remote-<site>-gateway (Istio passthrough)
+#                              - chat-es-remote-<site>-vs (SNI route to 9443)
+#                            Leave disabled for Phase 1 — it's only needed when
+#                            peers live in different K8s clusters and reach this
+#                            cluster over the public internet.
+# ──────────────────────────────────────────────────────────────────────────────
+ccs:
+  enabled: false
+
+  remoteClusters: []
+  # Example (Phase 1):
+  # remoteClusters:
+  # - name: site2
+  #   elasticsearchRef:
+  #     name: es-chat-site2
+  #     namespace: chat
+
+  publicEndpoint:
+    enabled: false
+    certificate:
+      secretName: ""           # auto-derived from cluster name when empty
+      issuerName: letsencrypt-prod
+      issuerKind: ClusterIssuer
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Container images. Final image string is composed as
+#   "<imageRegistry>/<image>:<cluster.version>"
+# so cluster.version drives both the ECK resource spec.version field and the
+# image tag — single source of truth, no risk of drift between the two.
+# ──────────────────────────────────────────────────────────────────────────────
+imageRegistry: docker.elastic.co
+images:
+  elasticSearch: elasticsearch
+  kibana: kibana
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Elasticsearch cluster.
+# ──────────────────────────────────────────────────────────────────────────────
+cluster:
+  name: es-chat
+  namespace: chat
+  version: 8.19.8
+
+  # Optional pass-throughs to the Elasticsearch CRD.
+  auth: {}
+  monitoring: {}
+
+  # Annotations merged into every nodeSet's podTemplate.metadata.annotations.
+  istioConfig: {}
+  # Example:
+  #   sidecar.istio.io/inject: "true"
+  #   traffic.sidecar.istio.io/excludeInboundPorts: "9300"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # NodeSets — three masters, three datas, three coordinators (DC-aware).
+  # remote_cluster_client is on every node so any node can coordinate a CCS query.
+  # remote_cluster_server is only enabled on coord-only nodes (set via ccs.enabled).
+  # ────────────────────────────────────────────────────────────────────────────
+  nodeSets:
+    masters:
+    - name: master-a
+      count: 1
+      nodeZone: zone1
+      roles: [master, remote_cluster_client]
+      storageSize: 50Gi
+      storageClassName: ssd
+    - name: master-b
+      count: 1
+      nodeZone: zone2
+      roles: [master, remote_cluster_client]
+      storageSize: 50Gi
+      storageClassName: ssd
+    - name: master-c
+      count: 1
+      nodeZone: zone3
+      roles: [master, remote_cluster_client]
+      storageSize: 50Gi
+      storageClassName: ssd
+
+    datas:
+    - name: data-a
+      count: 1
+      nodeZone: zone1
+      roles: [data, remote_cluster_client]
+      storageSize: 500Gi
+      storageClassName: ssd
+    - name: data-b
+      count: 1
+      nodeZone: zone2
+      roles: [data, remote_cluster_client]
+      storageSize: 500Gi
+      storageClassName: ssd
+    - name: data-c
+      count: 1
+      nodeZone: zone3
+      roles: [data, remote_cluster_client]
+      storageSize: 500Gi
+      storageClassName: ssd
+
+    coordinators:
+    - name: coords-a
+      count: 1
+      nodeZone: zone1
+      roles: [remote_cluster_client]
+      storageSize: 50Gi
+      storageClassName: ssd
+    - name: coords-b
+      count: 1
+      nodeZone: zone2
+      roles: [remote_cluster_client]
+      storageSize: 50Gi
+      storageClassName: ssd
+    - name: coords-c
+      count: 1
+      nodeZone: zone3
+      roles: [remote_cluster_client]
+      storageSize: 50Gi
+      storageClassName: ssd
+
+    # Free-form extra nodeSets (e.g. ml, ingest). Each entry mirrors the
+    # masters/datas shape and uses additionalNodeResources.
+    additionalNodes: []
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Per-role pod resources.
+  # ────────────────────────────────────────────────────────────────────────────
+  masterNodeResources:
+    esJavaOpts: "-Xms2g -Xmx2g"
+    requests:
+      memory: 4Gi
+      cpu: "1"
+    limits:
+      memory: 4Gi
+      cpu: "2"
+  dataNodeResources:
+    esJavaOpts: "-Xms8g -Xmx8g"
+    requests:
+      memory: 16Gi
+      cpu: "2"
+    limits:
+      memory: 16Gi
+      cpu: "4"
+  coordNodeResources:
+    esJavaOpts: "-Xms4g -Xmx4g"
+    requests:
+      memory: 8Gi
+      cpu: "1"
+    limits:
+      memory: 8Gi
+      cpu: "2"
+  additionalNodeResources:
+    esJavaOpts: "-Xms4g -Xmx4g"
+    requests:
+      memory: 8Gi
+      cpu: "1"
+    limits:
+      memory: 8Gi
+      cpu: "2"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Kibana — single-instance per site, fronted by the same Istio passthrough pattern.
+# Version always tracks cluster.version (no separate Kibana version override).
+# ──────────────────────────────────────────────────────────────────────────────
+kibana:
+  name: kibana-chat
+  count: 1
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: "1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public hostnames. Leave blank to auto-derive from properties.site / publicDomain:
+#   esHttp:    es-<site>.<publicDomain>
+#   kibana:    kibana-<site>.<publicDomain>
+#   esRemote:  es-remote-<site>.<publicDomain>
+# ──────────────────────────────────────────────────────────────────────────────
+hosts:
+  esHttp: ""
+  kibana: ""
+  esRemote: ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Istio.
+# ──────────────────────────────────────────────────────────────────────────────
+istio:
+  # Selector for the shared ingressgateway pod that the per-app gateways attach to.
+  gatewaySelector:
+    istio: chat-ingressgateway
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AuthorizationPolicy — restricts inbound by source CIDR + dst port.
+# 9443 is appended automatically when ccs.enabled=true.
+# ──────────────────────────────────────────────────────────────────────────────
+authorizationPolicy:
+  name: ""                     # auto-derived when blank
+  sourceCidrs:
+  - 172.0.0.0/8
+  ports:
+  - "9200"
+  - "5601"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HashiCorp Vault Secrets Operator — pulls credentials from Vault into K8s Secrets
+# that ECK then consumes (elastic-user override, MinIO snapshot credentials).
+# ──────────────────────────────────────────────────────────────────────────────
+vault:
+  vaultAuthRef: default        # name of the VaultAuth resource
+  vaultConnectionRef: ""       # optional VaultConnection ref
+  mount: secret                # KV mount in Vault
+  type: kv-v2                  # kv-v1 | kv-v2
+  refreshAfter: 30s
+  # Vault paths. Leave blank to default to elasticsearch/<site>/<purpose>.
+  paths:
+    elasticUser: ""            # → elasticsearch/<site>/elastic-user
+    minio: ""                  # → elasticsearch/<site>/minio
