@@ -176,8 +176,9 @@ done
 #    See register-remotes.sh for the full rationale on why we don't use ECK's
 #    spec.remoteClusters auto-keying.
 # ─────────────────────────────────────────────────────────────────────────────
-log "Wiring CCS via cross-cluster API keys (Basic tier)"
-"${KIND_DIR}/register-remotes.sh"
+log "Wiring cert-based CCS (Basic tier) — internal mode (same K8s, same ns)"
+MODE=internal LOCAL_SITE=site1 PEERS=site2 "${KIND_DIR}/register-remotes.sh"
+MODE=internal LOCAL_SITE=site2 PEERS=site1 "${KIND_DIR}/register-remotes.sh"
 
 cat <<EOF
 

@@ -1,56 +1,117 @@
 #!/usr/bin/env bash
-# Cert-based CCS bootstrap for the two same-namespace kind clusters (Basic tier).
+# Cert-based CCS registration script — works in two modes:
 #
-# Both clusters are signed by the SAME shared transport CA (synced from Vault
-# by the chart's vault-secret-transport-ca template) so they mutually trust
-# at the transport layer. They share the same `elastic` password so CCS can
-# forward the calling user's credentials. All this script does is:
+#   MODE=internal  (default, used by kind/setup.sh)
+#     For peers in the SAME K8s cluster + namespace. proxy_address points
+#     at the peer's in-cluster transport Service:
+#       <peer-cluster-name>-es-transport.<ns>.svc.cluster.local:9300
 #
-#   PUT /_cluster/settings on each cluster, registering the peer with
-#   cluster.remote.<peer>.proxy_address pointing at <peer>-es-transport:9300.
+#   MODE=public
+#     For peers in OTHER K8s clusters. proxy_address points at the peer's
+#     public Istio passthrough endpoint (resolved via DNS to that K8s
+#     cluster's Istio LB IP):
+#       es-remote-<peer-site>.<public-domain>:443
+#     Also sets server_name so Istio's SNI route on 443 hits the right VS.
 #
-# Re-runnable: PUT /_cluster/settings is idempotent.
+# Both modes share the same trust + auth substrate:
+#   - shared transport CA (Secret name in .Values.ccs.transport.caSecretName,
+#     same content in every cluster's chat namespace, synced from Vault)
+#   - shared elastic password (Vault path elasticsearch/elastic-user)
+#
+# Run once per cluster, with kubectl context pointing at THAT cluster.
+# Re-runnable — PUT /_cluster/settings is idempotent.
+#
+# Usage examples:
+#   # Phase 1 (kind, same namespace):
+#   MODE=internal LOCAL_SITE=site1 PEERS=site2 ./register-remotes.sh
+#   MODE=internal LOCAL_SITE=site2 PEERS=site1 ./register-remotes.sh
+#
+#   # Phase 2 (12 K8s clusters, run on each):
+#   MODE=public LOCAL_SITE=site1 PEERS=site2,site3,...,site12 \
+#     PUBLIC_DOMAIN=chat.com ./register-remotes.sh
+#
+# Required:
+#   LOCAL_SITE    site identifier of THIS cluster (e.g. site1)
+#   PEERS         comma-separated peer site identifiers (e.g. site2,site3)
+#
+# Optional:
+#   MODE          internal | public                    (default: internal)
+#   PUBLIC_DOMAIN public domain for es-remote-<site>.X (default: chat.com)
+#   NAMESPACE     K8s namespace                         (default: chat)
+#   ES_PREFIX     ES cluster name prefix (matches chart's cluster.name +
+#                 properties.division convention)       (default: es-chat)
+#   ELASTIC_PW    shared elastic password               (default: chat-elastic-pw)
+#   GATEWAY       deploy/<name> we exec curl from       (default: deploy/chat-ingressgateway)
+
 set -euo pipefail
 
-NS="chat"
-SITE1="es-chat-site1"
-SITE2="es-chat-site2"
-PW="chat-elastic-pw"           # shared elastic password (kind/setup.sh seeded this in Vault)
+MODE="${MODE:-internal}"
+LOCAL_SITE="${LOCAL_SITE:?LOCAL_SITE is required (e.g. site1)}"
+PEERS="${PEERS:?PEERS is required (comma-separated, e.g. site2,site3)}"
+PUBLIC_DOMAIN="${PUBLIC_DOMAIN:-chat.com}"
+NAMESPACE="${NAMESPACE:-chat}"
+ES_PREFIX="${ES_PREFIX:-es-chat}"
+ELASTIC_PW="${ELASTIC_PW:-chat-elastic-pw}"
+GATEWAY="${GATEWAY:-deploy/chat-ingressgateway}"
+
+case "${MODE}" in
+  internal|public) ;;
+  *) echo "ERROR: MODE must be 'internal' or 'public', got '${MODE}'" >&2; exit 2 ;;
+esac
+
+LOCAL_ES="${ES_PREFIX}-${LOCAL_SITE}"
 
 log() { printf "\n\033[1;36m▶ %s\033[0m\n" "$*"; }
 
-# curl from inside the gateway pod (no sidecar, can reach both ES Services).
+# curl from inside the local cluster's ingressgateway pod (no sidecar in front
+# of the Envoy gateway, can reach the local ES HTTP Service).
 ec() {
-  local site="$1" method="$2" path="$3" body="${4:-}"
-  local args=(-k -sS -u "elastic:${PW}" -X "${method}"
-              "https://${site}-es-http.${NS}.svc.cluster.local:9200${path}"
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-k -sS -u "elastic:${ELASTIC_PW}" -X "${method}"
+              "https://${LOCAL_ES}-es-http.${NAMESPACE}.svc.cluster.local:9200${path}"
               -H 'content-type: application/json')
   [[ -n "${body}" ]] && args+=(-d "${body}")
-  kubectl -n "${NS}" exec deploy/chat-ingressgateway -- curl "${args[@]}"
+  kubectl -n "${NAMESPACE}" exec "${GATEWAY}" -- curl "${args[@]}"
 }
 
-register() {
-  local local_site="$1" peer="$2"
-  log "Registering remote ${peer} on ${local_site}"
-  ec "${local_site}" PUT /_cluster/settings "$(cat <<EOF
+# Build cluster.remote.<peer>.* settings for one peer, in the appropriate mode.
+build_remote_settings() {
+  local peer_site="$1"
+  local peer_es="${ES_PREFIX}-${peer_site}"
+  local proxy_address server_name_line
+
+  if [[ "${MODE}" == "internal" ]]; then
+    proxy_address="${peer_es}-es-transport.${NAMESPACE}.svc.cluster.local:9300"
+    server_name_line=""
+  else
+    proxy_address="es-remote-${peer_site}.${PUBLIC_DOMAIN}:443"
+    # In public mode, server_name MUST match the SNI host the Istio Gateway
+    # is configured for, otherwise the VirtualService SNI route doesn't fire
+    # and Istio drops the connection.
+    server_name_line=$',\n    "cluster.remote.'"${peer_es}"'.server_name": "es-remote-'"${peer_site}.${PUBLIC_DOMAIN}"'"'
+  fi
+
+  cat <<EOF
 {
   "persistent": {
-    "cluster.remote.${peer}.mode": "proxy",
-    "cluster.remote.${peer}.proxy_address": "${peer}-es-transport.${NS}.svc.cluster.local:9300",
-    "cluster.remote.${peer}.skip_unavailable": true
+    "cluster.remote.${peer_es}.mode": "proxy",
+    "cluster.remote.${peer_es}.proxy_address": "${proxy_address}"${server_name_line},
+    "cluster.remote.${peer_es}.skip_unavailable": true
   }
 }
 EOF
-)"
-  echo
 }
-register "${SITE1}" "${SITE2}"
-register "${SITE2}" "${SITE1}"
 
-log "Verifying _remote/info on both sides"
-echo "${SITE1} → ${SITE2}:"
-ec "${SITE1}" GET /_remote/info
-echo
-echo "${SITE2} → ${SITE1}:"
-ec "${SITE2}" GET /_remote/info
+log "Registering peers on ${LOCAL_ES} (mode=${MODE})"
+IFS=',' read -ra peer_list <<< "${PEERS}"
+for peer in "${peer_list[@]}"; do
+  peer="${peer// /}"   # trim spaces
+  [[ -z "${peer}" ]] && continue
+  printf "  → %s\n" "${peer}"
+  ec PUT /_cluster/settings "$(build_remote_settings "${peer}")"
+  echo
+done
+
+log "Verifying _remote/info on ${LOCAL_ES}"
+ec GET /_remote/info
 echo
