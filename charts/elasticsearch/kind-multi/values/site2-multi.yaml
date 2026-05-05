@@ -1,0 +1,60 @@
+# Multi-kind site2 — runs in its OWN kind cluster (chat-eck-site2).
+# Mirror of site1-multi.yaml.
+properties:
+  site: site2
+  stage: PROD
+  division: site2
+  publicDomain: chat.com
+
+enableApps:
+  elasticsearch: true
+  kibana: false
+  gateway: true
+  virtualService: true
+  authorizationPolicy: true
+  vaultSecrets: true
+
+vault:
+  vaultAuthRef: chat-vault-auth
+  vaultConnectionRef: ""
+  mount: secret
+  type: kv-v2
+  refreshAfter: 30s
+  paths:
+    elasticUser: elasticsearch/elastic-user
+    minio: elasticsearch/site2/minio
+    transportCA: elasticsearch/transport-ca
+
+cluster:
+  istioConfig:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "9300"
+
+  nodeSets:
+    masters: []
+    datas: []
+    coordinators:
+    - name: all-a
+      count: 1
+      nodeZone: zone1
+      roles: [master, data, remote_cluster_client]
+      storageSize: 512Mi
+      storageClassName: standard
+    additionalNodes: []
+
+ccs:
+  enabled: true
+  transport:
+    enabled: true
+    caSecretName: chat-transport-ca
+    manageCASecret: true
+  publicEndpoint:
+    enabled: true
+
+authorizationPolicy:
+  sourceCidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  ports: ["9200", "9300"]

@@ -1,0 +1,11 @@
+# Kind config for the multi-cluster harness. We don't bind any host ports —
+# each cluster's Istio NodePort 30443 is reached via its container IP on the
+# Docker `kind` network, which is how the two kind clusters talk to each
+# other (mimicking cross-K8s public ingress in real prod).
+#
+# Reused for both site1 and site2; the cluster name is supplied via `kind
+# create cluster --name <name>` in setup-multi.sh.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane

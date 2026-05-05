@@ -1,0 +1,66 @@
+# Multi-kind site1 — runs in its OWN kind cluster (chat-eck-site1).
+# vaultSecrets: false because the multi-kind harness doesn't run Vault inside
+# each cluster; setup-multi.sh creates the K8s Secrets directly to mimic the
+# "manually placed in Vault, synced by VSO" model in a slimmer test footprint.
+properties:
+  site: site1
+  stage: PROD
+  division: site1
+  publicDomain: chat.com
+
+enableApps:
+  elasticsearch: true
+  kibana: false                  # skip Kibana to free memory — verify via curl
+  gateway: true
+  virtualService: true
+  authorizationPolicy: true
+  vaultSecrets: true             # each kind cluster runs its own Vault, mirroring per-cluster-Vault prod reality
+
+vault:
+  vaultAuthRef: chat-vault-auth
+  vaultConnectionRef: ""
+  mount: secret
+  type: kv-v2
+  refreshAfter: 30s
+  paths:
+    elasticUser: elasticsearch/elastic-user      # SAME content across both clusters' Vaults
+    minio: elasticsearch/site1/minio
+    transportCA: elasticsearch/transport-ca      # SAME content across both clusters' Vaults
+
+cluster:
+  istioConfig:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "9300"
+
+  # Single all-roles node — multi-kind doubles the infra footprint, so each
+  # cluster runs the absolute minimum.
+  nodeSets:
+    masters: []
+    datas: []
+    coordinators:
+    - name: all-a
+      count: 1
+      nodeZone: zone1
+      roles: [master, data, remote_cluster_client]
+      storageSize: 512Mi
+      storageClassName: standard
+    additionalNodes: []
+
+# Cert-based CCS, with the public endpoint enabled — this is the wire
+# pattern that Phase 2 prod uses across real K8s clusters.
+ccs:
+  enabled: true
+  transport:
+    enabled: true
+    caSecretName: chat-transport-ca
+    manageCASecret: true         # each cluster owns its own copy in its own ns
+  publicEndpoint:
+    enabled: true                # render Gateway+VS for es-remote-site1.chat.com → transport 9300
+
+authorizationPolicy:
+  sourceCidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  ports: ["9200", "9300"]

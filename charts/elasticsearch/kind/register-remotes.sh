@@ -37,6 +37,9 @@
 # Optional:
 #   MODE          internal | public                    (default: internal)
 #   PUBLIC_DOMAIN public domain for es-remote-<site>.X (default: chat.com)
+#   PUBLIC_PORT   port on the peer's public endpoint     (default: 443)
+#                 Use 30443 when multi-kind testing where both clusters'
+#                 NodePorts can't both bind host port 443.
 #   NAMESPACE     K8s namespace                         (default: chat)
 #   ES_PREFIX     ES cluster name prefix (matches chart's cluster.name +
 #                 properties.division convention)       (default: es-chat)
@@ -49,6 +52,7 @@ MODE="${MODE:-internal}"
 LOCAL_SITE="${LOCAL_SITE:?LOCAL_SITE is required (e.g. site1)}"
 PEERS="${PEERS:?PEERS is required (comma-separated, e.g. site2,site3)}"
 PUBLIC_DOMAIN="${PUBLIC_DOMAIN:-chat.com}"
+PUBLIC_PORT="${PUBLIC_PORT:-443}"
 NAMESPACE="${NAMESPACE:-chat}"
 ES_PREFIX="${ES_PREFIX:-es-chat}"
 ELASTIC_PW="${ELASTIC_PW:-chat-elastic-pw}"
@@ -84,7 +88,7 @@ build_remote_settings() {
     proxy_address="${peer_es}-es-transport.${NAMESPACE}.svc.cluster.local:9300"
     server_name_line=""
   else
-    proxy_address="es-remote-${peer_site}.${PUBLIC_DOMAIN}:443"
+    proxy_address="es-remote-${peer_site}.${PUBLIC_DOMAIN}:${PUBLIC_PORT}"
     # In public mode, server_name MUST match the SNI host the Istio Gateway
     # is configured for, otherwise the VirtualService SNI route doesn't fire
     # and Istio drops the connection.
