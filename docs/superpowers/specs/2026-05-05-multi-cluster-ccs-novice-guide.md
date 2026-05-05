@@ -455,7 +455,254 @@ curl -k -u elastic:"${ELASTIC_PW}" \
 
 ---
 
-## 8. Common questions and traps
+## 8. Scaling — adding new clusters to an existing mesh
+
+The cert-based CCS substrate is **additive** — once your shared CA + shared
+elastic password are in Vault on every cluster, new clusters integrate
+without touching the existing ones' trust setup. You only add new peer
+registrations; existing settings stay untouched.
+
+This section covers two concrete cases: growing 3 → 6 clusters, and
+bringing up the full 12 from scratch (or any subset). The pattern is
+identical at any scale.
+
+### 8.1 Mental model for scaling
+
+| Existing infra | Action when adding new clusters |
+|---|---|
+| Shared CA + shared elastic password (already in existing Vaults) | **Don't touch.** Use the SAME CA + password for new clusters' Vaults. |
+| Existing clusters' `Elasticsearch` CRs, certs, keystores | **Don't touch.** No rolling restart needed. |
+| Existing clusters' `cluster.remote.<peer>.*` settings | **Add new peer entries.** Existing entries are unaffected — `PUT /_cluster/settings` is per-key. |
+
+**Net work to add N new clusters to a mesh of M existing clusters**:
+
+- ~3 commands per new cluster × N new clusters (Vault seed)
+- 1 `helm install` per new cluster
+- N new DNS A records per hostname (×3 hostnames per cluster)
+- 1 `register-remotes.sh` run per cluster (M+N total) — existing clusters
+  pick up new peers, new clusters register their full peer list
+
+**Zero downtime on the existing mesh.** Existing CCS queries continue working
+throughout.
+
+### 8.2 Concrete walkthrough — 3 → 6 clusters
+
+Existing: `site1, site2, site3` (already in a working mesh).
+Adding: `site4, site5, site6`.
+
+#### Phase A — Bring up the 3 NEW clusters (parallelizable)
+
+For each new cluster (`site4`, `site5`, `site6` — independent of each other):
+
+**A1. Seed the new cluster's Vault** (use the same CA/password files you
+generated when you first built site1):
+
+```bash
+# Switch vault CLI to the new cluster's Vault
+export VAULT_ADDR=https://vault.cluster<N>.internal
+export VAULT_TOKEN=<your-admin-token>
+
+vault kv put secret/elasticsearch/transport-ca \
+  "tls.crt=$(cat shared-transport-ca.crt)" \
+  "tls.key=$(cat shared-transport-ca.key)"
+
+vault kv put secret/elasticsearch/elastic-user \
+  elastic="${ELASTIC_PW}"           # SAME password as sites 1-3
+
+vault kv put secret/elasticsearch/site<N>/minio \
+  MINIO_BUCKET_ACCESS_KEY=<key> MINIO_BUCKET_SECRET_KEY=<secret>
+```
+
+**A2. Confirm VSO + `chat-vault-auth` exist** in the new cluster (your
+platform team installs these — same setup as sites 1-3).
+
+**A3. Helm install the chart** (kubectl context pointing at the new cluster):
+
+```bash
+helm upgrade --install es-chat-site<N> ./charts/elasticsearch \
+  -n chat --force-conflicts \
+  -f charts/elasticsearch/values/site<N>.yaml
+# values: ccs.enabled=true, ccs.transport.enabled=true,
+#         ccs.transport.manageCASecret=true (each cluster owns its own ns Secret),
+#         ccs.publicEndpoint.enabled=true (renders es-remote-site<N>.chat.com Gateway+VS)
+```
+
+**A4. Add DNS A records** for the new cluster:
+
+```
+A   es-remote-site<N>.chat.com   <new cluster's Istio LB IP>
+A   es-site<N>.chat.com          <same IP>
+A   kibana-site<N>.chat.com      <same IP>
+```
+
+```bash
+# Get the LB IP:
+kubectl --context <new-cluster> -n chat get svc chat-ingressgateway \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+**A5. Wait for ES green**:
+
+```bash
+kubectl --context <new-cluster> -n chat wait \
+  --for=jsonpath='{.status.health}'=green \
+  elasticsearch/es-chat-site<N> --timeout=600s
+```
+
+**After Phase A, all 6 clusters are running with shared-CA trust ready.
+No CCS settings have been changed on any cluster yet.**
+
+#### Phase B — Update peer registrations on ALL 6 clusters
+
+For **each of the 6 clusters** (existing AND new), with kubectl context
+pointing at it:
+
+```bash
+# Existing site1 — was registering site2,site3; now registers site2..site6
+MODE=public LOCAL_SITE=site1 PEERS=site2,site3,site4,site5,site6 \
+  PUBLIC_DOMAIN=chat.com ELASTIC_PW="${ELASTIC_PW}" \
+  ./charts/elasticsearch/kind/register-remotes.sh
+
+# Existing site2
+MODE=public LOCAL_SITE=site2 PEERS=site1,site3,site4,site5,site6 \
+  PUBLIC_DOMAIN=chat.com ELASTIC_PW="${ELASTIC_PW}" \
+  ./charts/elasticsearch/kind/register-remotes.sh
+
+# ... site3 with PEERS=site1,site2,site4,site5,site6
+# ... site4 with PEERS=site1,site2,site3,site5,site6
+# ... site5 with PEERS=site1,site2,site3,site4,site6
+# ... site6 with PEERS=site1,site2,site3,site4,site5
+```
+
+The script is **idempotent**. On the existing 3 clusters, the previously-
+registered 2 peers get re-applied (no-op); 3 new peer entries get added.
+**No restart needed** — `cluster.remote.*` are dynamic settings.
+
+#### Phase C — Verify
+
+```bash
+# Each cluster should see 5 peers, all connected: true
+for n in 1 2 3 4 5 6; do
+  echo "=== site${n} ==="
+  curl -ks -u elastic:"${ELASTIC_PW}" \
+    https://es-site${n}.chat.com/_remote/info \
+    | jq 'to_entries | map({key, connected:.value.connected})'
+done
+
+# End-to-end CCS query — all 6 clusters in _clusters.details
+curl -ks -u elastic:"${ELASTIC_PW}" \
+  'https://es-site1.chat.com/messages-*,*:messages-*/_search' \
+  | jq '._clusters.details | keys'
+# → ["(local)","es-chat-site2","es-chat-site3","es-chat-site4","es-chat-site5","es-chat-site6"]
+```
+
+### 8.3 Same shape for 12 clusters
+
+Identical pattern, bigger lists. Useful loop for the registration phase:
+
+```bash
+# After all 12 are at green, run this from your laptop with all 12 contexts available:
+PUBLIC_DOMAIN=chat.com
+for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  peers=$(seq 1 12 | grep -vw "$n" | sed 's/^/site/' | paste -sd, -)
+  echo ">>> site${n} → peers=${peers}"
+  kubectl config use-context cluster-${n}    # adjust to your context naming
+  MODE=public LOCAL_SITE=site${n} PEERS=${peers} \
+    PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" ELASTIC_PW="${ELASTIC_PW}" \
+    ./charts/elasticsearch/kind/register-remotes.sh
+done
+```
+
+The `seq | grep -vw | paste` produces e.g.
+`site1,site2,site3,site4,site5,site6,site7,site8,site9,site10,site11` for the
+loop iteration `n=12` — every site EXCEPT the one being registered.
+
+### 8.4 Growing 6 → 12 clusters
+
+Same as 3 → 6, scaled up:
+1. **Phase A on 6 new clusters** — Vault seed + helm install + DNS + green
+2. **Phase B on all 12 clusters** — `PEERS=<11 others>` per cluster
+
+The 6 existing clusters' previously-registered 5 peers stay; 6 new entries
+get added per cluster.
+
+### 8.5 Operational notes & gotchas
+
+#### Order within Phase A doesn't matter
+Each new cluster's Vault seed + helm install is independent. Spin them up
+in parallel.
+
+#### Order within Phase B doesn't matter strictly
+`cluster.remote.<peer>.*` settings are local to each cluster — cluster A
+"registering site5" just writes settings on A; site5 doesn't need to be
+informed.
+
+- You CAN start Phase B on existing clusters even before new clusters are green
+- `_remote/info` will show `connected: false` for not-yet-up peers
+- Once new clusters reach green, ES auto-retries proxy connections — no
+  human intervention needed
+
+#### `skip_unavailable: true` makes additions zero-risk
+Existing CCS queries won't fail because you added a peer that's still
+booting. ES skips unhealthy peers and returns partial results.
+
+#### What forces a rolling restart
+- Changing the shared CA Secret content (rare — only on rotation, which
+  the design avoids by using a 100-year CA — see design doc §5.3)
+- Changing the elastic password Secret (rare)
+
+**Adding a peer does NOT.** Settings updates are dynamic.
+
+#### Removing a cluster from the mesh
+
+Inverse of adding:
+
+```bash
+# Run on EVERY OTHER cluster — deregisters the leaving site:
+curl -k -u elastic:"${ELASTIC_PW}" -XPUT \
+  https://es-site1.chat.com/_cluster/settings \
+  -H 'content-type: application/json' \
+  -d '{"persistent":{"cluster.remote.es-chat-site<N>": null}}'
+```
+
+Then decommission cluster `<N>` (helm uninstall, delete the cluster, remove
+DNS records).
+
+#### AuthorizationPolicy / firewall rules
+
+The chart's `AuthorizationPolicy` is workload-selector-scoped to ES + Kibana
+pods and allows pod CIDRs. Cross-cluster traffic arrives at the receiver
+pod from the LOCAL gateway pod's IP (because of L4 PASSTHROUGH — see §6).
+**No policy update needed** when adding peers.
+
+### 8.6 Post-scale validation checklist
+
+```bash
+# 1. Every cluster's _remote/info has the right number of entries
+TOTAL=12
+for n in $(seq 1 ${TOTAL}); do
+  count=$(curl -ks -u elastic:"${ELASTIC_PW}" \
+    https://es-site${n}.chat.com/_remote/info | jq 'length')
+  echo "site${n}: ${count} peers (expect $((TOTAL-1)))"
+done
+
+# 2. Every entry on every cluster is connected: true
+for n in $(seq 1 ${TOTAL}); do
+  echo "=== site${n} ==="
+  curl -ks -u elastic:"${ELASTIC_PW}" https://es-site${n}.chat.com/_remote/info \
+    | jq 'to_entries | map({key, connected:.value.connected})'
+done
+
+# 3. End-to-end mesh query lists all clusters
+curl -ks -u elastic:"${ELASTIC_PW}" \
+  'https://es-site1.chat.com/messages-*,*:messages-*/_search' \
+  | jq '._clusters.details | keys'
+# → all sites listed, all status=successful in the full output
+```
+
+---
+
+## 9. Common questions and traps
 
 ### "Do all 12 clusters need to be brought up at the same time?"
 
@@ -524,7 +771,7 @@ in the chart.
 
 ---
 
-## 9. Reference summary
+## 10. Reference summary
 
 | Question | Answer |
 |---|---|
@@ -538,7 +785,7 @@ in the chart.
 
 ---
 
-## 10. References
+## 11. References
 
 - `docs/superpowers/specs/2026-05-04-elasticsearch-ccs-mesh-design.md` —
   the full architectural design with licensing audit
