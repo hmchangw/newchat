@@ -1,5 +1,7 @@
 # NATS Subject Naming Design
 
+> Looking for the **client integrator reference**? See [`client-api.md`](./client-api.md). This document is the authoritative subject-naming spec used by backend developers.
+
 ## Overview
 
 This document defines the complete NATS subject naming scheme for the chat system. Each site runs its own independent NATS server — subjects are scoped per-site at the infrastructure level, not by embedding `siteID` at a fixed position. Where a subject must indicate a room's home site (e.g., message sends, invite requests), `{siteID}` appears after `{roomID}`. Clients (web & mobile) connect to NATS core subjects only — no JetStream consumers on the client side. On reconnect, clients use request/reply to catch up on missed data (message history, subscription lists, etc.).

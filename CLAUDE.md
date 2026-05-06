@@ -165,6 +165,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Lint and tests are enforced by a pre-commit hook — fix failures before retrying
 - Never commit `.env` files
 - Never merge code directly into `master` or `main` — always create a PR for review first
+- If your changes touch a client-facing handler (any handler registered with `nc.QueueSubscribe` or `natsrouter.Register` whose subject begins with `chat.user.{account}.request.…` or `chat.user.{account}.room.{roomID}.{siteID}.msg.send`, or any HTTP route in `auth-service`), update `docs/client-api.md` in the same PR to reflect the new request/response schema, error cases, and triggered events.
 
 ### Before Editing
 - Always read a file before modifying it — understand existing code before suggesting changes
