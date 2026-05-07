@@ -51,6 +51,11 @@ cluster:
 # pattern that Phase 2 prod uses across real K8s clusters.
 ccs:
   enabled: true
+  peers: [site2]
+  mode: public                   # public Istio passthrough endpoint (NodePort 30443)
+  registrationJob:
+    enabled: true                # post-install Job auto-registers site2
+    publicPort: "30443"          # multi-kind exposes Istio LB on NodePort 30443
   transport:
     enabled: true
     caSecretName: chat-transport-ca

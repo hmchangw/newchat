@@ -176,33 +176,25 @@ kubectl -n chat wait --for=jsonpath='{.status.health}'=green elasticsearch/es-ch
 kubectl -n chat wait --for=jsonpath='{.status.health}'=green elasticsearch/es-chat-site2 --timeout=600s
 ```
 
-### Step D — Register peers
+### Step D — Register peers (automatic — done by the chart)
 
-Two equivalent options. Both call `PUT /_cluster/settings` on each cluster
-and produce identical state in Elasticsearch — pick by ergonomic profile.
-
-#### Option D1 — Helm post-install Job (default for prod, declarative)
-
-Set `ccs.peers` and `ccs.mode` in each cluster's values file. The chart
-renders a `Job` (template: `templates/job-register-remotes.yaml`) gated on
-`helm.sh/hook: post-install,post-upgrade`, so registration runs
-automatically as part of `helm install` / `helm upgrade`. Re-runnable;
-adding/removing peers is purely a values-file change.
+The chart renders a `Job` (`templates/job-register-remotes.yaml`) as a
+`helm.sh/hook: post-install,post-upgrade`, so registration runs automatically
+as part of `helm install` / `helm upgrade`. Each cluster's values file declares
+its peers and mode:
 
 ```yaml
-# site1 values
+# Phase 1, same K8s
 ccs:
   enabled: true
-  peers: [site2]                      # Phase 1: just the one peer
+  peers: [site2]                      # peers visible from this cluster
   mode: internal                      # in-cluster transport Service
   registrationJob:
-    enabled: true                     # default — set false to suppress
-
-# site2 values mirror it: peers: [site1]
+    enabled: true                     # default
 ```
 
-For Phase 2 cross-K8s, use `mode: public` and list all 11 peers:
 ```yaml
+# Phase 2, cross K8s — site1's view (mirror across all 12 sites)
 ccs:
   enabled: true
   peers: [site2, site3, site4, site5, site6, site7, site8, site9, site10, site11, site12]
@@ -214,34 +206,23 @@ ccs:
 What the Job does: waits for local ES `/_cluster/health` to be yellow/green,
 builds the `cluster.remote.<peer>.{mode,proxy_address,server_name,skip_unavailable}`
 JSON for every peer, PUTs it, then verifies via `_remote/info`. Idempotent —
-re-runs on every `helm upgrade`. Logs visible via:
+re-runs on every `helm upgrade`, so adding or removing peers is just a values
+change. Logs visible via:
 
 ```bash
 kubectl -n chat logs job/register-remotes-site1
 ```
 
-#### Option D2 — `register-remotes.sh` script (ad-hoc / emergency / kind harness)
+#### Fallback: `register-remotes.sh` (only if you need ad-hoc surgery)
 
-```bash
-./charts/elasticsearch/kind/register-remotes.sh
-```
+The same logic is also available as a script under `kind/register-remotes.sh`
+for cases where you don't want to `helm upgrade`:
+- Re-registering one cluster without bumping the release
+- Interactive iteration while debugging connectivity
+- Recovering from a Job failure mid-rollout
 
-Same logic, run from your laptop. Useful when:
-- The Job's container image isn't available in your registry
-- You need to re-register one cluster without `helm upgrade`-ing
-- You're debugging connectivity and want interactive iteration
-
-The default kind harnesses (`kind/setup.sh`, `kind-multi/setup-multi.sh`)
-use this path because the values files there leave `ccs.peers` empty.
-
-#### Pick one (you don't need both at the same time)
-
-| Use case | Pick |
-|---|---|
-| Production rollout (12 K8s clusters), where ops wants `helm install` to be the entire workflow | **D1 (Job)** |
-| Local kind harness, fast iteration, debugging | **D2 (script)** — or set `ccs.registrationJob.enabled: false` if you want the chart to leave it alone |
-| Emergency surgery on a single cluster | **D2 (script)** |
-| Rolling out a 13th site later | **D1 (Job)** — bump `ccs.peers` everywhere, `helm upgrade`, done |
+Set `ccs.registrationJob.enabled: false` in a release's values to suppress
+the Job and use the script exclusively.
 
 ---
 

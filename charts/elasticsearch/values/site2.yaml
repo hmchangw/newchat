@@ -7,6 +7,11 @@ properties:
 
 ccs:
   enabled: true
+  # Bidirectional mesh — site2 registers all 11 other sites.
+  peers: [site1, site3, site4, site5, site6, site7, site8, site9, site10, site11, site12]
+  mode: public                 # cross-K8s via es-remote-<peer>.chat.com:443
+  registrationJob:
+    enabled: true              # post-install Job runs PUT /_cluster/settings for every peer
   transport:
     enabled: true
     caSecretName: chat-transport-ca

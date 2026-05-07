@@ -239,19 +239,18 @@ patch_coredns site1 site2 "${IP_site2}"
 patch_coredns site2 site1 "${IP_site1}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Register peers via MODE=public — proxy_address points at the peer's
-#    es-remote-<peer>.chat.com:30443 (NodePort, since we're not on host:443)
+# 6. CCS is wired automatically by the chart's post-install Job
+#    (templates/job-register-remotes.yaml). Each site's values file declares
+#    ccs.peers + ccs.mode=public + registrationJob.publicPort=30443, so the
+#    Job runs as part of `helm install` and PUTs cluster.remote.* settings
+#    pointing at the peer's es-remote-<peer>.chat.com:30443 NodePort endpoint.
+#
+#    The Job's PUT succeeds even if the peer isn't reachable yet (just persists
+#    config); the actual transport connection establishes once both clusters
+#    have CoreDNS hosts entries set up + are healthy.
+#
+#    For ad-hoc surgery, register-remotes.sh stays in kind/ — same logic.
 # ─────────────────────────────────────────────────────────────────────────────
-for site in "${SITES[@]}"; do
-  ctx="$(ctx_name "${site}")"
-  peer=$([[ "${site}" == "site1" ]] && echo site2 || echo site1)
-  log "[${site}] register-remotes MODE=public PEERS=${peer}"
-  kubectl config use-context "${ctx}" >/dev/null
-  MODE=public LOCAL_SITE="${site}" PEERS="${peer}" \
-    PUBLIC_DOMAIN=chat.com PUBLIC_PORT=30443 \
-    ELASTIC_PW="${SHARED_ELASTIC_PW}" \
-    "${KIND_VENDOR}/register-remotes.sh"
-done
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Done

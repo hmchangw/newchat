@@ -173,13 +173,13 @@ for site in es-chat-site1 es-chat-site2; do
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Wire up CCS the Basic-tier way (mint + register manually).
-#    See register-remotes.sh for the full rationale on why we don't use ECK's
-#    spec.remoteClusters auto-keying.
+# 7. CCS is wired automatically by the chart's post-install Job
+#    (templates/job-register-remotes.yaml). The Job runs PUT /_cluster/settings
+#    using ccs.peers / ccs.mode from each site's values file.
+#
+#    For ad-hoc surgery (e.g. re-registering one peer without a helm upgrade),
+#    register-remotes.sh stays available — same logic, callable from a shell.
 # ─────────────────────────────────────────────────────────────────────────────
-log "Wiring cert-based CCS (Basic tier) — internal mode (same K8s, same ns)"
-MODE=internal LOCAL_SITE=site1 PEERS=site2 "${KIND_DIR}/register-remotes.sh"
-MODE=internal LOCAL_SITE=site2 PEERS=site1 "${KIND_DIR}/register-remotes.sh"
 
 cat <<EOF
 
@@ -192,8 +192,11 @@ Add to /etc/hosts (kind exposes the chat-ingressgateway on host 80/443):
 Watch ES clusters come up:
   kubectl -n ${APP_NS} get elasticsearch,kibana,pods -w
 
-Phase 1 CCS is wired automatically by register-remotes.sh. To verify via the
-Istio VirtualService → Gateway → ES (no port-forward needed):
+Phase 1 CCS is wired automatically by the chart's post-install Job. Logs:
+  kubectl -n ${APP_NS} logs job/register-remotes-site1
+  kubectl -n ${APP_NS} logs job/register-remotes-site2
+
+To verify via the Istio VirtualService → Gateway → ES (no port-forward needed):
 
   curl -k -u elastic:chat-elastic-pw https://es-site1.chat.com/_remote/info | jq .
   # Expect: { "es-chat-site2": { "connected": true, "mode": "proxy", ... } }
