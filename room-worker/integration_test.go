@@ -752,9 +752,9 @@ func TestProcessAddMembers_OutboxPerRemoteSite(t *testing.T) {
 	})
 	// Owner sub.
 	mustInsertSub(t, db, &model.Subscription{
-		ID:       idgen.GenerateUUIDv7(),
-		User:     model.SubscriptionUser{ID: "u_alice", Account: "alice"},
-		RoomID:   roomID, SiteID: "site-A", Name: roomName, RoomType: model.RoomTypeChannel,
+		ID:     idgen.GenerateUUIDv7(),
+		User:   model.SubscriptionUser{ID: "u_alice", Account: "alice"},
+		RoomID: roomID, SiteID: "site-A", Name: roomName, RoomType: model.RoomTypeChannel,
 		Roles:    []model.Role{model.RoleOwner},
 		JoinedAt: time.Now().UTC(),
 	})

@@ -262,6 +262,30 @@ func TestParseOrgMembersSubject(t *testing.T) {
 	}
 }
 
+func TestMessageRead(t *testing.T) {
+	got := subject.MessageRead("alice", "r1", "site-a")
+	want := "chat.user.alice.request.room.r1.site-a.message.read"
+	if got != want {
+		t.Errorf("MessageRead: got %q, want %q", got, want)
+	}
+}
+
+func TestMessageReadWildcard(t *testing.T) {
+	got := subject.MessageReadWildcard("site-a")
+	want := "chat.user.*.request.room.*.site-a.message.read"
+	if got != want {
+		t.Errorf("MessageReadWildcard: got %q, want %q", got, want)
+	}
+}
+
+func TestMessageRead_ParseUserRoomSubject(t *testing.T) {
+	subj := subject.MessageRead("alice", "r1", "site-a")
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok || account != "alice" || roomID != "r1" {
+		t.Errorf("parse: got (%q,%q,%v), want (alice,r1,true)", account, roomID, ok)
+	}
+}
+
 func TestParseRoomCreateSubject(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -78,6 +78,9 @@ func (h *Handler) RegisterCRUD(nc *otelnats.Conn) error {
 	if _, err := nc.QueueSubscribe(subject.MemberAddWildcard(h.siteID), queue, h.natsAddMembers); err != nil {
 		return fmt.Errorf("subscribe member add: %w", err)
 	}
+	if _, err := nc.QueueSubscribe(subject.MessageReadWildcard(h.siteID), queue, h.natsMessageRead); err != nil {
+		return fmt.Errorf("subscribe message read: %w", err)
+	}
 	if _, err := nc.QueueSubscribe(subject.MemberListWildcard(h.siteID), queue, h.natsListMembers); err != nil {
 		return fmt.Errorf("subscribe member list: %w", err)
 	}
@@ -908,4 +911,115 @@ func chunkedGetKeys(ctx context.Context, ks RoomKeyStore, ids []string) (map[str
 		}
 	}
 	return merged, nil
+}
+
+func (h *Handler) natsMessageRead(m otelnats.Msg) {
+	ctx := wrappedCtx(m)
+	resp, err := h.handleMessageRead(ctx, m.Msg.Subject, m.Msg.Data)
+	if err != nil {
+		slog.Error("message read failed", "error", err)
+		natsutil.ReplyError(m.Msg, sanitizeError(err))
+		return
+	}
+	if err := m.Msg.Respond(resp); err != nil {
+		slog.Error("failed to respond to message read", "error", err)
+	}
+}
+
+func (h *Handler) handleMessageRead(ctx context.Context, subj string, _ []byte) ([]byte, error) {
+
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok {
+		return nil, fmt.Errorf("invalid message-read subject: %s", subj)
+	}
+
+	sub, err := h.store.GetSubscription(ctx, account, roomID)
+	switch {
+	case errors.Is(err, model.ErrSubscriptionNotFound):
+		return nil, errNotRoomMember
+	case err != nil:
+		return nil, fmt.Errorf("get subscription: %w", err)
+	}
+
+	newAlert := sub.Alert && len(sub.ThreadUnread) > 0
+	now := time.Now().UTC()
+
+	if err := h.store.UpdateSubscriptionRead(ctx, roomID, account, now, newAlert); err != nil {
+		return nil, fmt.Errorf("update subscription read: %w", err)
+	}
+
+	var (
+		userSiteID string
+		room       *model.Room
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		s, err := h.store.GetUserSiteID(gctx, account)
+		if err != nil {
+			return fmt.Errorf("get user siteId: %w", err)
+		}
+		userSiteID = s
+		return nil
+	})
+	g.Go(func() error {
+		r, err := h.store.GetRoom(gctx, roomID)
+		if err != nil {
+			return fmt.Errorf("get room: %w", err)
+		}
+		room = r
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	switch {
+	case userSiteID == "":
+		slog.Warn("user not found locally; skipping cross-site outbox", "account", account)
+	case userSiteID != h.siteID:
+		payload := model.SubscriptionReadEvent{
+			Account:    account,
+			RoomID:     roomID,
+			LastSeenAt: now.UnixMilli(),
+			Alert:      newAlert,
+			Timestamp:  now.UnixMilli(),
+		}
+		payloadData, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal subscription_read payload: %w", err)
+		}
+		outbox := model.OutboxEvent{
+			Type:       model.OutboxSubscriptionRead,
+			SiteID:     h.siteID,
+			DestSiteID: userSiteID,
+			Payload:    payloadData,
+			Timestamp:  now.UnixMilli(),
+		}
+		outboxData, err := json.Marshal(outbox)
+		if err != nil {
+			return nil, fmt.Errorf("marshal outbox event: %w", err)
+		}
+		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, model.OutboxSubscriptionRead), outboxData); err != nil {
+			return nil, fmt.Errorf("publish subscription_read outbox: %w", err)
+		}
+	}
+
+	// Skip the room-floor recompute when the room has no content, or when
+	// this user already had a recorded read past the latest message
+	if room.LastMsgAt == nil {
+		return json.Marshal(map[string]string{"status": "accepted"})
+	}
+	if sub.LastSeenAt != nil && sub.LastSeenAt.After(*room.LastMsgAt) {
+		return json.Marshal(map[string]string{"status": "accepted"})
+	}
+
+	minTime, err := h.store.MinSubscriptionLastSeenByRoomID(ctx, roomID)
+	if err != nil {
+		return nil, fmt.Errorf("min subscription lastSeenAt: %w", err)
+	}
+	if err := h.store.UpdateRoomMinUserLastSeenAt(ctx, roomID, minTime); err != nil {
+		return nil, fmt.Errorf("update room minUserLastSeenAt: %w", err)
+	}
+
+	return json.Marshal(map[string]string{"status": "accepted"})
 }

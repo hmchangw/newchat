@@ -12,6 +12,7 @@ package main
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
 	roomkeystore "github.com/hmchangw/chat/pkg/roomkeystore"
@@ -205,6 +206,21 @@ func (mr *MockRoomStoreMockRecorder) GetUser(ctx, account any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUser", reflect.TypeOf((*MockRoomStore)(nil).GetUser), ctx, account)
 }
 
+// GetUserSiteID mocks base method.
+func (m *MockRoomStore) GetUserSiteID(ctx context.Context, account string) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserSiteID", ctx, account)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserSiteID indicates an expected call of GetUserSiteID.
+func (mr *MockRoomStoreMockRecorder) GetUserSiteID(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserSiteID", reflect.TypeOf((*MockRoomStore)(nil).GetUserSiteID), ctx, account)
+}
+
 // ListOrgMembers mocks base method.
 func (m *MockRoomStore) ListOrgMembers(ctx context.Context, orgID string) ([]model.OrgMember, error) {
 	m.ctrl.T.Helper()
@@ -263,6 +279,49 @@ func (m *MockRoomStore) ListRoomsByIDs(ctx context.Context, ids []string) ([]mod
 func (mr *MockRoomStoreMockRecorder) ListRoomsByIDs(ctx, ids any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRoomsByIDs", reflect.TypeOf((*MockRoomStore)(nil).ListRoomsByIDs), ctx, ids)
+}
+
+// MinSubscriptionLastSeenByRoomID mocks base method.
+func (m *MockRoomStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID string) (*time.Time, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MinSubscriptionLastSeenByRoomID", ctx, roomID)
+	ret0, _ := ret[0].(*time.Time)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// MinSubscriptionLastSeenByRoomID indicates an expected call of MinSubscriptionLastSeenByRoomID.
+func (mr *MockRoomStoreMockRecorder) MinSubscriptionLastSeenByRoomID(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MinSubscriptionLastSeenByRoomID", reflect.TypeOf((*MockRoomStore)(nil).MinSubscriptionLastSeenByRoomID), ctx, roomID)
+}
+
+// UpdateRoomMinUserLastSeenAt mocks base method.
+func (m *MockRoomStore) UpdateRoomMinUserLastSeenAt(ctx context.Context, roomID string, t *time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateRoomMinUserLastSeenAt", ctx, roomID, t)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateRoomMinUserLastSeenAt indicates an expected call of UpdateRoomMinUserLastSeenAt.
+func (mr *MockRoomStoreMockRecorder) UpdateRoomMinUserLastSeenAt(ctx, roomID, t any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomMinUserLastSeenAt", reflect.TypeOf((*MockRoomStore)(nil).UpdateRoomMinUserLastSeenAt), ctx, roomID, t)
+}
+
+// UpdateSubscriptionRead mocks base method.
+func (m *MockRoomStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateSubscriptionRead", ctx, roomID, account, lastSeenAt, alert)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateSubscriptionRead indicates an expected call of UpdateSubscriptionRead.
+func (mr *MockRoomStoreMockRecorder) UpdateSubscriptionRead(ctx, roomID, account, lastSeenAt, alert any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRead", reflect.TypeOf((*MockRoomStore)(nil).UpdateSubscriptionRead), ctx, roomID, account, lastSeenAt, alert)
 }
 
 // MockRoomKeyStore is a mock of RoomKeyStore interface.

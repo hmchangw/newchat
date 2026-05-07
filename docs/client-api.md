@@ -727,6 +727,56 @@ See [Error envelope](#5-error-envelope-reference). Common errors: `"not a member
 
 ---
 
+#### Mark Messages Read
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.read`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+This is a **synchronous RPC** — `room-service` performs all writes inline before replying. The handler validates room membership, recomputes the per-subscription `alert` flag, persists the new `lastSeenAt` and `alert` on the user's `Subscription`, optionally recomputes `Room.MinUserLastSeenAt`, and (for cross-site users) publishes a `subscription_read` event to the user's home-site outbox so the destination `inbox-worker` can update its local subscription cache.
+
+##### Request body
+
+The subject already carries `account` and `roomID`, so no body fields are required. Clients may send `{}` or omit the body entirely; any body content is ignored by the handler.
+
+##### Success response
+
+| Field    | Type   | Notes |
+|----------|--------|-------|
+| `status` | string | Always `"accepted"`. Confirms the read receipt was applied. |
+
+```json
+{ "status": "accepted" }
+```
+
+##### Error response
+
+See [Error envelope](#5-error-envelope-reference). Common errors:
+
+- `"only room members can list members"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"invalid message-read subject: …"` — the subject is malformed.
+
+```json
+{ "error": "only room members can list members" }
+```
+
+##### Behaviour notes
+
+- **Alert recomputation:** new `alert = oldSub.alert && len(oldSub.threadUnread) > 0`. Reading the room clears the alert when there are no unread thread mentions; it stays set when thread-level unreads remain.
+- **No `JoinedAt` fallback for the early-return:** if `subscription.lastSeenAt` is null (the user was invited but has never opened the room), the handler does **not** treat `joinedAt` as a synthetic read position — being invited isn't reading. The room-floor recompute runs in this case so that a newly-invited member's joinedAt cannot keep `room.minUserLastSeenAt` pinned to a stale value.
+- **Room-floor recompute (`Room.MinUserLastSeenAt`):** skipped when `room.lastMsgAt` is `null` or when `subscription.lastSeenAt` is non-null and already strictly greater than `room.lastMsgAt` (the user had a recorded read past all content — the floor cannot have moved). Otherwise the handler computes the new floor as `MIN(lastSeenAt)` across only those subscriptions whose `lastSeenAt` is set; subscriptions that have never been read are excluded entirely. If no subscription has a usable `lastSeenAt`, `rooms.minUserLastSeenAt` is `$unset`.
+- **Cross-site federation:** if the user's home site (`users.siteId`) differs from the handler's site, a `subscription_read` event is published to `outbox.{handlerSite}.to.{userSite}.subscription_read` with payload `{account, roomId, lastSeenAt, alert, timestamp}` (timestamps as `int64` UnixMilli). The destination `inbox-worker` applies the write with an `$lt` order-safety guard so out-of-order delivery cannot regress `lastSeenAt`. The outbox publish happens **before** the room-floor recompute so the user's home site receives every read receipt — even ones that don't move the room floor.
+- **No system message, no fan-out events:** read receipts are silent; only the requester receives the `accepted` reply.
+
+##### Triggered events — success path
+
+`None — reply only.` (Cross-site users may observe a delayed `subscription.update` on their home site driven by the outbox/inbox flow above; this is treated as cache convergence rather than a client-visible event for this RPC.)
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 #### List Org Members
 
 **Subject:** `chat.user.{account}.request.orgs.{orgID}.members`

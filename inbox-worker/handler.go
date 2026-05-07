@@ -24,6 +24,12 @@ type InboxStore interface {
 	UpdateSubscriptionRoles(ctx context.Context, account, roomID string, roles []model.Role) error
 	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) error
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
+	// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
+	// keyed by (roomID, account). Idempotent and order-safe: the write
+	// only applies when the stored lastSeenAt is missing or strictly
+	// earlier than the supplied value. Older or duplicate events are
+	// silent no-ops. Missing-subscription is also a silent no-op.
+	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 }
 
@@ -53,6 +59,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleRoomSync(ctx, &evt)
 	case "role_updated":
 		return h.handleRoleUpdated(ctx, &evt)
+	case "subscription_read":
+		return h.handleSubscriptionRead(ctx, &evt)
 	case "thread_subscription_upserted":
 		return h.handleThreadSubscriptionUpserted(ctx, &evt)
 	case model.MessageTypeRoomCreated:
@@ -171,6 +179,21 @@ func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.OutboxEvent)
 	}
 	if err := h.store.UpdateSubscriptionRoles(ctx, account, roomID, roles); err != nil {
 		return fmt.Errorf("update subscription roles: %w", err)
+	}
+	return nil
+}
+
+// handleSubscriptionRead is idempotent and order-safe — the store's $lt
+// guard rejects writes whose lastSeenAt is not strictly later than the
+// stored one, so out-of-order federated delivery cannot regress read state.
+func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.OutboxEvent) error {
+	var e model.SubscriptionReadEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal subscription_read payload: %w", err)
+	}
+	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
+	if err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert); err != nil {
+		return fmt.Errorf("update subscription read for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
 	return nil
 }

@@ -107,6 +107,22 @@ func (s *mongoInboxStore) BulkCreateSubscriptions(ctx context.Context, subs []*m
 	return nil
 }
 
+func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+	filter := bson.M{
+		"roomId":    roomID,
+		"u.account": account,
+		"$or": bson.A{
+			bson.M{"lastSeenAt": bson.M{"$exists": false}},
+			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
+		},
+	}
+	update := bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert}}
+	if _, err := s.subCol.UpdateOne(ctx, filter, update); err != nil {
+		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
+	}
+	return nil
+}
+
 // ensureIndexes creates the unique index on (threadRoomId, userId) used by
 // UpsertThreadSubscription. The index name and shape match what message-worker
 // creates in its own threadStoreMongo so both services agree on the natural
