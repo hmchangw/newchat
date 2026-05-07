@@ -176,14 +176,72 @@ kubectl -n chat wait --for=jsonpath='{.status.health}'=green elasticsearch/es-ch
 kubectl -n chat wait --for=jsonpath='{.status.health}'=green elasticsearch/es-chat-site2 --timeout=600s
 ```
 
-### Step D — Register peers (the only non-Helm step)
+### Step D — Register peers
+
+Two equivalent options. Both call `PUT /_cluster/settings` on each cluster
+and produce identical state in Elasticsearch — pick by ergonomic profile.
+
+#### Option D1 — Helm post-install Job (default for prod, declarative)
+
+Set `ccs.peers` and `ccs.mode` in each cluster's values file. The chart
+renders a `Job` (template: `templates/job-register-remotes.yaml`) gated on
+`helm.sh/hook: post-install,post-upgrade`, so registration runs
+automatically as part of `helm install` / `helm upgrade`. Re-runnable;
+adding/removing peers is purely a values-file change.
+
+```yaml
+# site1 values
+ccs:
+  enabled: true
+  peers: [site2]                      # Phase 1: just the one peer
+  mode: internal                      # in-cluster transport Service
+  registrationJob:
+    enabled: true                     # default — set false to suppress
+
+# site2 values mirror it: peers: [site1]
+```
+
+For Phase 2 cross-K8s, use `mode: public` and list all 11 peers:
+```yaml
+ccs:
+  enabled: true
+  peers: [site2, site3, site4, site5, site6, site7, site8, site9, site10, site11, site12]
+  mode: public
+  registrationJob:
+    enabled: true
+```
+
+What the Job does: waits for local ES `/_cluster/health` to be yellow/green,
+builds the `cluster.remote.<peer>.{mode,proxy_address,server_name,skip_unavailable}`
+JSON for every peer, PUTs it, then verifies via `_remote/info`. Idempotent —
+re-runs on every `helm upgrade`. Logs visible via:
+
+```bash
+kubectl -n chat logs job/register-remotes-site1
+```
+
+#### Option D2 — `register-remotes.sh` script (ad-hoc / emergency / kind harness)
 
 ```bash
 ./charts/elasticsearch/kind/register-remotes.sh
 ```
 
-This runs two idempotent `PUT /_cluster/settings` calls — one on each
-cluster — pointing at `<peer>-es-transport:9300`.
+Same logic, run from your laptop. Useful when:
+- The Job's container image isn't available in your registry
+- You need to re-register one cluster without `helm upgrade`-ing
+- You're debugging connectivity and want interactive iteration
+
+The default kind harnesses (`kind/setup.sh`, `kind-multi/setup-multi.sh`)
+use this path because the values files there leave `ccs.peers` empty.
+
+#### Pick one (you don't need both at the same time)
+
+| Use case | Pick |
+|---|---|
+| Production rollout (12 K8s clusters), where ops wants `helm install` to be the entire workflow | **D1 (Job)** |
+| Local kind harness, fast iteration, debugging | **D2 (script)** — or set `ccs.registrationJob.enabled: false` if you want the chart to leave it alone |
+| Emergency surgery on a single cluster | **D2 (script)** |
+| Rolling out a 13th site later | **D1 (Job)** — bump `ccs.peers` everywhere, `helm upgrade`, done |
 
 ---
 
@@ -232,10 +290,13 @@ GET messages-*,es-chat-site2:messages-*/_search
 
 ### Outside Helm
 1. **Vault path seeding** (Step A) — bootstrap-time, once per environment
-2. **Cross-cluster registration** (Step D) — script-based today; can be
-   converted to a post-install Helm hook Job if you wrap both clusters in a
-   parent chart (Helm has no cross-release dependency mechanism, which is
-   why it's a script and not a per-release Job)
+2. **Cross-cluster registration** (Step D) — both options live inside the
+   chart now. The Helm post-install Job (`templates/job-register-remotes.yaml`)
+   handles it declaratively when `ccs.peers` is set; `register-remotes.sh`
+   remains under `kind/` for ad-hoc invocations. Helm has no cross-release
+   ordering primitive, but `cluster.remote.*.skip_unavailable: true` makes
+   the order independent — each cluster registers its peers when it's ready,
+   and the actual transport connections establish whenever both ends come up.
 
 ---
 
@@ -250,6 +311,8 @@ GET messages-*,es-chat-site2:messages-*/_search
 | `https://es-site1.chat.com` returns RST after TLS handshake | Gateway is mTLS-originating to ES whose 9200 is sidecar-excluded | Verify the `chat-es-passthrough` DestinationRule exists (created when at least one release has `manageCASecret: true`) |
 | `https://es-site1.chat.com` returns immediate connection close | AuthorizationPolicy missing the workload selector and blocking the gateway pod (port 443) | Verify `kubectl -n chat get authorizationpolicy chat-es-site1-authz -o yaml` has `spec.selector.matchLabels.common.k8s.elastic.co/type: elasticsearch` (default) |
 | ES pods crash-loop with `xpack.security.remote_cluster_server.ssl - server ssl configuration requires a key and certificate` | Stale state — the chart used to inject this; latest chart removed it | `helm upgrade --force-conflicts` to re-render with the current template |
+| `helm install` fails with `Job register-remotes-<site> failed` | Job timed out waiting for ES health, or PUT failed with non-200 | `kubectl -n chat logs job/register-remotes-<site>` to see why; common causes: ES not green within `ccs.registrationJob.healthTimeoutSeconds` (bump it), wrong elastic password (check Vault), peer hostname unresolvable when `mode: public` (verify DNS) |
+| Job succeeds but `_remote/info` shows `connected: false` for some peers | Peer cluster not up yet, or peer's transport listener unreachable | Expected during initial mesh bring-up — `skip_unavailable: true` keeps queries working with partial mesh. Re-check `_remote/info` after all peers are healthy. |
 
 ---
 
@@ -268,6 +331,7 @@ charts/elasticsearch/
 │   ├── virtualservice.yaml              # SNI-routed VirtualServices (443 → 9200 / 5601 / 9300)
 │   ├── authorization-policy.yaml        # Workload-selector-scoped to ES + Kibana
 │   ├── destinationrule.yaml             # chat-es-passthrough — gated on manageCASecret
+│   ├── job-register-remotes.yaml       # Post-install Job — registers ccs.peers via PUT /_cluster/settings
 │   ├── vault-secret-elastic-user.yaml   # Per-site VaultStaticSecret for elastic password
 │   ├── vault-secret-transport-ca.yaml   # Shared CA VaultStaticSecret — gated on manageCASecret
 │   └── vault-secret-es-minio.yaml       # MinIO snapshot creds VaultStaticSecret

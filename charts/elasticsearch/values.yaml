@@ -34,6 +34,25 @@ enableApps:
 #                            templates that may render a registration Job
 #                            from values.peers.
 #
+#   ccs.peers                List of peer site identifiers (e.g. [site2, site3]).
+#                            When non-empty AND ccs.registrationJob.enabled,
+#                            renders a post-install/upgrade Job that calls
+#                            PUT /_cluster/settings to register every peer.
+#                            Idempotent — safe to re-run on every helm upgrade.
+#                            Leave empty if you prefer running register-remotes.sh
+#                            manually instead.
+#
+#   ccs.mode                 internal | public — drives how the Job builds
+#                            cluster.remote.<peer>.proxy_address:
+#                              internal → <peer>-es-transport.<ns>.svc:9300
+#                                         (same-K8s, Phase 1)
+#                              public   → es-remote-<peer>.<publicDomain>:443
+#                                         (cross-K8s, Phase 2)
+#
+#   ccs.registrationJob      Tunables for the Job. Set enabled=false to skip
+#                            rendering it (e.g. if you prefer the script-based
+#                            workflow for ad-hoc ops).
+#
 #   ccs.transport            Shared transport CA wiring. When enabled, every
 #                            cluster references caSecretName so ECK signs
 #                            node transport certs from a common root and
@@ -50,6 +69,20 @@ enableApps:
 # ──────────────────────────────────────────────────────────────────────────────
 ccs:
   enabled: false
+
+  peers: []
+  # Phase 1 example (same K8s):  peers: [site2]
+  # Phase 2 example (cross K8s): peers: [site2, site3, site4, site5, site6,
+  #                                       site7, site8, site9, site10, site11, site12]
+
+  mode: internal
+
+  registrationJob:
+    enabled: true
+    image: curlimages/curl:8.10.0
+    backoffLimit: 6
+    healthTimeoutSeconds: 600
+    publicPort: "443"          # override to "30443" for multi-kind harness
 
   transport:
     enabled: false

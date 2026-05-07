@@ -1,0 +1,140 @@
+{{- /*
+   Post-install/upgrade Job that registers every peer in .Values.ccs.peers as
+   a remote cluster on THIS local cluster, via PUT /_cluster/settings.
+
+   Idempotent — re-runs on every helm upgrade. PUT /_cluster/settings is a
+   no-op when values are unchanged, so adding/removing peers via values just
+   works.
+
+   Gated on ccs.peers being non-empty AND ccs.registrationJob.enabled, so the
+   default is "render nothing" until you opt in by declaring peers. The
+   external register-remotes.sh script remains a valid alternative for ad-hoc
+   ops; both call the same API and produce identical state in ES.
+
+   See docs/superpowers/specs/2026-05-04-elasticsearch-ccs-mesh-design.md §6
+   and CCS-SETUP-README.md §3 Step D for context.
+*/ -}}
+{{- if and .Values.ccs.enabled .Values.ccs.peers .Values.ccs.registrationJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: register-remotes-{{ .Values.properties.site }}
+  namespace: {{ .Values.cluster.namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.ccs.registrationJob.backoffLimit }}
+  template:
+    metadata:
+      annotations:
+        # Skip sidecar injection — short-lived Pod doesn't need mTLS, and
+        # avoids the "sidecar starts after main container" race.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: register
+        image: {{ .Values.ccs.registrationJob.image }}
+        env:
+        - name: LOCAL_SITE
+          value: {{ .Values.properties.site | quote }}
+        - name: PEERS
+          value: {{ join "," .Values.ccs.peers | quote }}
+        - name: MODE
+          value: {{ .Values.ccs.mode | quote }}
+        - name: PUBLIC_DOMAIN
+          value: {{ .Values.properties.publicDomain | quote }}
+        - name: PUBLIC_PORT
+          value: {{ .Values.ccs.registrationJob.publicPort | quote }}
+        - name: NS
+          value: {{ .Values.cluster.namespace | quote }}
+        - name: ES_PREFIX
+          value: {{ .Values.cluster.name | quote }}
+        - name: HEALTH_TIMEOUT_SECONDS
+          value: {{ .Values.ccs.registrationJob.healthTimeoutSeconds | quote }}
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "chat.es.fullname" . }}-es-elastic-user
+              key: elastic
+        command: ["/bin/sh", "-eu", "-c"]
+        args:
+        - |
+          LOCAL_ES="${ES_PREFIX}-${LOCAL_SITE}"
+          ES_URL="https://${LOCAL_ES}-es-http.${NS}.svc.cluster.local:9200"
+
+          echo "Local cluster:  ${LOCAL_ES}"
+          echo "ES URL:         ${ES_URL}"
+          echo "Mode:           ${MODE}"
+          echo "Peers:          ${PEERS}"
+          echo
+
+          # 1. Wait for local ES /_cluster/health to be green or yellow.
+          echo "Waiting up to ${HEALTH_TIMEOUT_SECONDS}s for ES health..."
+          deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
+          while :; do
+            if curl -sk -u "elastic:${ELASTIC_PASSWORD}" "${ES_URL}/_cluster/health" \
+                | grep -qE '"status":"(green|yellow)"'; then
+              echo "ES is healthy."
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "ERROR: ES not healthy within ${HEALTH_TIMEOUT_SECONDS}s" >&2
+              curl -sk -u "elastic:${ELASTIC_PASSWORD}" "${ES_URL}/_cluster/health" >&2 || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # 2. Build PUT /_cluster/settings JSON body covering all peers.
+          SETTINGS='{"persistent":{'
+          FIRST=1
+          for peer in $(echo "${PEERS}" | tr ',' ' '); do
+            [ -z "${peer}" ] && continue
+            PEER_ES="${ES_PREFIX}-${peer}"
+            case "${MODE}" in
+              internal)
+                PROXY="${PEER_ES}-es-transport.${NS}.svc.cluster.local:9300"
+                SNI=""
+                ;;
+              public)
+                PROXY="es-remote-${peer}.${PUBLIC_DOMAIN}:${PUBLIC_PORT}"
+                SNI="es-remote-${peer}.${PUBLIC_DOMAIN}"
+                ;;
+              *)
+                echo "ERROR: invalid MODE='${MODE}', expected 'internal' or 'public'" >&2
+                exit 2
+                ;;
+            esac
+            if [ "${FIRST}" = "0" ]; then
+              SETTINGS="${SETTINGS},"
+            fi
+            FIRST=0
+            SETTINGS="${SETTINGS}\"cluster.remote.${PEER_ES}.mode\":\"proxy\""
+            SETTINGS="${SETTINGS},\"cluster.remote.${PEER_ES}.proxy_address\":\"${PROXY}\""
+            if [ -n "${SNI}" ]; then
+              SETTINGS="${SETTINGS},\"cluster.remote.${PEER_ES}.server_name\":\"${SNI}\""
+            fi
+            SETTINGS="${SETTINGS},\"cluster.remote.${PEER_ES}.skip_unavailable\":true"
+            echo "  → ${peer}: ${PROXY}"
+          done
+          SETTINGS="${SETTINGS}}}"
+
+          # 3. Apply settings.
+          echo
+          echo "PUT ${ES_URL}/_cluster/settings"
+          curl -sk -u "elastic:${ELASTIC_PASSWORD}" \
+            -X PUT "${ES_URL}/_cluster/settings" \
+            -H 'content-type: application/json' \
+            -d "${SETTINGS}" \
+            --fail-with-body
+          echo
+
+          # 4. Verify.
+          echo
+          echo "GET ${ES_URL}/_remote/info"
+          curl -sk -u "elastic:${ELASTIC_PASSWORD}" "${ES_URL}/_remote/info"
+          echo
+{{- end }}
