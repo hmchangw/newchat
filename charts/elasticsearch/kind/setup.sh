@@ -5,7 +5,8 @@
 #   * ECK operator 2.16 (supports ES up to 8.x)
 #   * HashiCorp Vault (dev mode, root token = "root") + Vault Secrets Operator
 #   * Two minimal ECK Elasticsearch clusters (es-chat-site1 / es-chat-site2)
-#     in the same namespace, with Phase 1 same-namespace CCS via apiKey: {}
+#     in the same namespace, with Phase 1 same-namespace CCS via the shared
+#     transport CA (Basic-tier; API-key + remote_cluster_server are paid)
 #
 # Every component is installed from a vendored chart .tgz checked into ./charts/
 # (no `helm repo add`, no internet required for chart pulls). Chart values are
