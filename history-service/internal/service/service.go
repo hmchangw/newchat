@@ -13,7 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . MessageReader,MessageWriter,MessageRepository,SubscriptionRepository,EventPublisher,ThreadRoomRepository,RoomKeyProvider
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . MessageReader,MessageWriter,MessageRepository,SubscriptionRepository,RoomRepository,EventPublisher,ThreadRoomRepository,RoomKeyProvider
 
 type MessageReader interface {
 	GetMessagesBefore(ctx context.Context, roomID string, before time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
@@ -44,6 +44,10 @@ type SubscriptionRepository interface {
 	GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error)
 }
 
+type RoomRepository interface {
+	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
+}
+
 // EventPublisher publishes live events to a NATS subject. Implemented by a
 // thin wrapper around *otelnats.Conn in main.go.
 type EventPublisher interface {
@@ -68,6 +72,7 @@ type HistoryService struct {
 	msgReader     MessageReader
 	msgWriter     MessageWriter
 	subscriptions SubscriptionRepository
+	rooms         RoomRepository
 	publisher     EventPublisher
 	threadRooms   ThreadRoomRepository
 	keyProvider   RoomKeyProvider
@@ -75,11 +80,12 @@ type HistoryService struct {
 }
 
 // New creates a HistoryService with the given repositories and event publisher.
-func New(msgs MessageRepository, subs SubscriptionRepository, pub EventPublisher, threadRooms ThreadRoomRepository, keyProvider RoomKeyProvider, encrypt bool) *HistoryService {
+func New(msgs MessageRepository, subs SubscriptionRepository, rooms RoomRepository, pub EventPublisher, threadRooms ThreadRoomRepository, keyProvider RoomKeyProvider, encrypt bool) *HistoryService {
 	return &HistoryService{
 		msgReader:     msgs,
 		msgWriter:     msgs,
 		subscriptions: subs,
+		rooms:         rooms,
 		publisher:     pub,
 		threadRooms:   threadRooms,
 		keyProvider:   keyProvider,
@@ -99,5 +105,6 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), s.GetThreadParentMessages)
 }
 
-// Compile-time check: *cassrepo.Repository must satisfy MessageRepository.
+// Compile-time checks.
 var _ MessageRepository = (*cassrepo.Repository)(nil)
+var _ RoomRepository = (*mongorepo.RoomRepo)(nil)

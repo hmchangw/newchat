@@ -118,11 +118,17 @@ func (alwaysSubscribedRepo) GetHistorySharedSince(_ context.Context, _, _ string
 	return nil, true, nil
 }
 
+type nilRoomRepo struct{}
+
+func (nilRoomRepo) GetMinUserLastSeenAt(_ context.Context, _ string) (*time.Time, error) {
+	return nil, nil
+}
+
 func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session)
 	pub := &recordingPublisher{}
-	svc := service.New(repo, alwaysSubscribedRepo{}, pub, nil, nil, false)
+	svc := service.New(repo, alwaysSubscribedRepo{}, nilRoomRepo{}, pub, nil, nil, false)
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-integ"
@@ -184,7 +190,7 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session)
 	pub := &recordingPublisher{}
-	svc := service.New(repo, alwaysSubscribedRepo{}, pub, nil, nil, false)
+	svc := service.New(repo, alwaysSubscribedRepo{}, nilRoomRepo{}, pub, nil, nil, false)
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-del-integ"
@@ -244,7 +250,7 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session)
 	pub := &recordingPublisher{}
-	svc := service.New(repo, alwaysSubscribedRepo{}, pub, nil, nil, false)
+	svc := service.New(repo, alwaysSubscribedRepo{}, nilRoomRepo{}, pub, nil, nil, false)
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-parent-cascade"

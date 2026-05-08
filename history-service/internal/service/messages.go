@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -47,19 +49,46 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 		return nil, err
 	}
 
-	var page cassrepo.Page[models.Message]
-	if accessSince == nil {
-		page, err = s.msgReader.GetMessagesBefore(c, roomID, before, pageReq)
-	} else {
-		page, err = s.msgReader.GetMessagesBetweenDesc(c, roomID, *accessSince, before, pageReq)
-	}
-	if err != nil {
+	var (
+		page  cassrepo.Page[models.Message]
+		floor *time.Time
+	)
+	g, gctx := errgroup.WithContext(c)
+	g.Go(func() error {
+		var pErr error
+		if accessSince == nil {
+			page, pErr = s.msgReader.GetMessagesBefore(gctx, roomID, before, pageReq)
+		} else {
+			page, pErr = s.msgReader.GetMessagesBetweenDesc(gctx, roomID, *accessSince, before, pageReq)
+		}
+		return pErr
+	})
+	g.Go(func() error {
+		// Non-fatal: client treats absence as "no floor".
+		t, rErr := s.rooms.GetMinUserLastSeenAt(gctx, roomID)
+		if rErr != nil {
+			slog.Warn("loading minUserLastSeenAt", "error", rErr, "roomID", roomID)
+			return nil
+		}
+		floor = t
+		return nil
+	})
+	if err := g.Wait(); err != nil {
 		slog.Error("loading history", "error", err, "roomID", roomID)
 		return nil, natsrouter.ErrInternal("failed to load message history")
 	}
 
+	var minMs *int64
+	if floor != nil {
+		ms := floor.UTC().UnixMilli()
+		minMs = &ms
+	}
+
 	redactUnavailableQuotes(page.Data, accessSince)
-	return &models.LoadHistoryResponse{Messages: page.Data}, nil
+	return &models.LoadHistoryResponse{
+		Messages:          page.Data,
+		MinUserLastSeenAt: minMs,
+	}, nil
 }
 
 func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.LoadNextMessagesRequest) (*models.LoadNextMessagesResponse, error) {

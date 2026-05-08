@@ -80,6 +80,7 @@ func main() {
 	cassRepo := cassrepo.NewRepository(cassSession)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
+	roomRepo := mongorepo.NewRoomRepo(db)
 	threadRoomRepo := mongorepo.NewThreadRoomRepo(db)
 
 	if err := threadRoomRepo.EnsureIndexes(ctx); err != nil {
@@ -88,7 +89,7 @@ func main() {
 	}
 
 	pub := publisher.New(nc)
-	svc := service.New(cassRepo, subRepo, pub, threadRoomRepo, keyStore, cfg.Encryption.Enabled)
+	svc := service.New(cassRepo, subRepo, roomRepo, pub, threadRoomRepo, keyStore, cfg.Encryption.Enabled)
 	router := natsrouter.New(nc, "history-service")
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

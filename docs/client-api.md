@@ -927,6 +927,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | Field | Type | Notes |
 |-------|------|-------|
 | `messages` | array<Message> | Most-recent first. See [Message schema](#message-schema). |
+| `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's read floor — `MIN(lastSeenAt)` across all subscribers whose `lastSeenAt` is set. Absent when no member has read yet, when the latest read is past `room.lastMsgAt`, or when the value cannot be retrieved (treated as best-effort; messages still load). See the Message Read RPC for the semantics of how this floor is recomputed. |
 
 ```json
 {
@@ -942,7 +943,8 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
       },
       "msg": "morning team"
     }
-  ]
+  ],
+  "minUserLastSeenAt": 1746518100000
 }
 ```
 

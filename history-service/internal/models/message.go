@@ -15,7 +15,8 @@ type LoadHistoryRequest struct {
 }
 
 type LoadHistoryResponse struct {
-	Messages []Message `json:"messages"`
+	Messages          []Message `json:"messages"`
+	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
 }
 
 type LoadNextMessagesRequest struct {
