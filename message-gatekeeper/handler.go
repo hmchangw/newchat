@@ -42,16 +42,24 @@ type publishFunc func(ctx context.Context, msg *nats.Msg, opts ...jetstream.Publ
 // Handler processes messages from the MESSAGES stream and validates them
 // before publishing to MESSAGES_CANONICAL.
 type Handler struct {
-	store         Store
-	publish       publishFunc
-	reply         replyFunc
-	siteID        string
-	parentFetcher ParentMessageFetcher
+	store              Store
+	publish            publishFunc
+	reply              replyFunc
+	siteID             string
+	parentFetcher      ParentMessageFetcher
+	largeRoomThreshold int
 }
 
 // NewHandler constructs a new Handler with the given dependencies.
-func NewHandler(store Store, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher) *Handler {
-	return &Handler{store: store, publish: publish, reply: reply, siteID: siteID, parentFetcher: parentFetcher}
+func NewHandler(store Store, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold int) *Handler {
+	return &Handler{
+		store:              store,
+		publish:            publish,
+		reply:              reply,
+		siteID:             siteID,
+		parentFetcher:      parentFetcher,
+		largeRoomThreshold: largeRoomThreshold,
+	}
 }
 
 // HandleJetStreamMsg processes a JetStream message from the MESSAGES stream.
@@ -75,7 +83,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			}
 		} else {
 			// Validation error: reply with error and ack.
-			h.sendReply(ctx, account, msg.Data(), natsutil.MarshalError(err.Error()))
+			h.sendReply(ctx, account, msg.Data(), h.marshalErrorReply(err))
 			if err := msg.Ack(); err != nil {
 				slog.Error("failed to ack message", "error", err)
 			}
@@ -156,6 +164,30 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, &infraError{cause: fmt.Errorf("get subscription for user %s in room %s: %w", account, roomID, err)}
 	}
 
+	// Large-room post restriction: in rooms with more than the configured
+	// threshold of members, only owners, admins, and bots may send top-level
+	// messages. Thread replies are exempt regardless of room size; bypass-eligible
+	// senders (owner/admin role, or bot account name) are exempt regardless of
+	// room size. Both bypasses skip the Room fetch entirely (approach B —
+	// owner fast-path generalized).
+	isThreadReply := req.ThreadParentMessageID != ""
+	if !isThreadReply && !canBypassLargeRoomCap(sub) {
+		userCount, err := h.store.GetRoomUserCount(ctx, roomID)
+		if err != nil {
+			return nil, &infraError{cause: fmt.Errorf("get user count for room %s: %w", roomID, err)}
+		}
+		if userCount > h.largeRoomThreshold {
+			slog.Info("send blocked",
+				"reason", codeLargeRoomPostRestricted,
+				"account", account,
+				"roomID", roomID,
+				"userCount", userCount,
+				"threshold", h.largeRoomThreshold,
+			)
+			return nil, errLargeRoomPostRestricted
+		}
+	}
+
 	// Build Message
 	now := time.Now().UTC()
 
@@ -220,4 +252,30 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 	default:
 		return snap, nil
 	}
+}
+
+// canBypassLargeRoomCap reports whether the subscriber is exempt from the
+// large-room post restriction. Owners, admins, and bots bypass.
+//
+// "Bot" is detected by account-name pattern (\.bot$|^p_) — see helper.go.
+// This single function is the edit point if/when the bypass policy changes
+// (e.g. promoting isBot to a shared package, adding new roles, etc.).
+func canBypassLargeRoomCap(sub *model.Subscription) bool {
+	for _, r := range sub.Roles {
+		if r == model.RoleOwner || r == model.RoleAdmin {
+			return true
+		}
+	}
+	return isBot(sub.User.Account)
+}
+
+// marshalErrorReply produces the JSON reply payload for a validation error.
+// If the error is (or wraps) a *codedError, the reply carries the code;
+// otherwise the reply is the legacy uncoded shape.
+func (h *Handler) marshalErrorReply(err error) []byte {
+	var ce *codedError
+	if errors.As(err, &ce) {
+		return natsutil.MarshalErrorWithCode(ce.Message, ce.Code)
+	}
+	return natsutil.MarshalError(err.Error())
 }

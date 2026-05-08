@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -74,4 +77,13 @@ func TestTryParseError(t *testing.T) {
 			t.Fatal("expected ok=false for empty error string")
 		}
 	})
+}
+
+func TestMarshalErrorWithCode(t *testing.T) {
+	data := natsutil.MarshalErrorWithCode("only owners can post in this room", "large_room_post_restricted")
+
+	var got model.ErrorResponse
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, "only owners can post in this room", got.Error)
+	assert.Equal(t, "large_room_post_restricted", got.Code)
 }

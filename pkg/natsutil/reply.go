@@ -20,6 +20,14 @@ func MarshalError(errMsg string) []byte {
 	return data
 }
 
+// MarshalErrorWithCode encodes an error message and machine-readable code
+// as a JSON ErrorResponse. The code is omitted from the wire payload when
+// empty (omitempty on the Code field).
+func MarshalErrorWithCode(errMsg, code string) []byte {
+	data, _ := json.Marshal(model.ErrorResponse{Error: errMsg, Code: code})
+	return data
+}
+
 // ReplyJSON sends a JSON-encoded response to a NATS message.
 func ReplyJSON(msg *nats.Msg, v any) {
 	data, err := MarshalResponse(v)

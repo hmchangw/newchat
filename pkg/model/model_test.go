@@ -499,6 +499,9 @@ func TestRoleValues(t *testing.T) {
 	if model.RoleOwner != "owner" {
 		t.Errorf("RoleOwner = %q", model.RoleOwner)
 	}
+	if model.RoleAdmin != "admin" {
+		t.Errorf("RoleAdmin = %q", model.RoleAdmin)
+	}
 	if model.RoleMember != "member" {
 		t.Errorf("RoleMember = %q", model.RoleMember)
 	}
@@ -1849,6 +1852,24 @@ func TestAddMembersRequestNoRequestIDField(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "requestId")
+}
+
+func TestErrorResponseJSON(t *testing.T) {
+	t.Run("without code, omitempty hides the field", func(t *testing.T) {
+		src := model.ErrorResponse{Error: "boom"}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"error":"boom"}`, string(data))
+		roundTrip(t, &src, &model.ErrorResponse{})
+	})
+
+	t.Run("with code, both fields present", func(t *testing.T) {
+		src := model.ErrorResponse{Error: "blocked", Code: "large_room_post_restricted"}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"error":"blocked","code":"large_room_post_restricted"}`, string(data))
+		roundTrip(t, &src, &model.ErrorResponse{})
+	})
 }
 
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.

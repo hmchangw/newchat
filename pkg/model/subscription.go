@@ -11,7 +11,11 @@ var ErrSubscriptionNotFound = errors.New("subscription not found")
 type Role string
 
 const (
-	RoleOwner  Role = "owner"
+	RoleOwner Role = "owner"
+	// RoleAdmin is recognized by message-gatekeeper's large-room post bypass,
+	// but is not yet assignable: room-service's role-update RPC still rejects
+	// "admin" via errInvalidRole. Wiring assignment is owned separately.
+	RoleAdmin  Role = "admin"
 	RoleMember Role = "member"
 )
 
