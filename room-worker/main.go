@@ -22,15 +22,16 @@ import (
 )
 
 type config struct {
-	NatsURL       string          `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string          `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string          `env:"SITE_ID"         envDefault:"site-local"`
-	MongoURI      string          `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string          `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string          `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string          `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int             `env:"MAX_WORKERS"     envDefault:"100"`
-	Bootstrap     bootstrapConfig `envPrefix:"BOOTSTRAP_"`
+	NatsURL       string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string                  `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string                  `env:"SITE_ID"         envDefault:"site-local"`
+	MongoURI      string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
+	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 }
 
 func main() {
@@ -96,9 +97,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, jetstream.ConsumerConfig{
-		Durable: "room-worker", AckPolicy: jetstream.AckExplicitPolicy,
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -153,4 +152,12 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 	)
+}
+
+// buildConsumerConfig returns the durable consumer config for
+// room-worker. Centralized so it is unit-testable without NATS.
+func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "room-worker"
+	return cc
 }

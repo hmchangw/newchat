@@ -28,21 +28,22 @@ type encryptionConfig struct {
 }
 
 type config struct {
-	NatsURL              string           `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
-	NatsCredsFile        string           `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID               string           `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI             string           `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB              string           `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername        string           `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword        string           `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxWorkers           int              `env:"MAX_WORKERS"               envDefault:"100"`
-	UserCacheSize        int              `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL         time.Duration    `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	ValkeyAddr           string           `env:"VALKEY_ADDR"`
-	ValkeyPassword       string           `env:"VALKEY_PASSWORD"           envDefault:""`
-	ValkeyKeyGracePeriod time.Duration    `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
-	Bootstrap            bootstrapConfig  `envPrefix:"BOOTSTRAP_"`
-	Encryption           encryptionConfig `envPrefix:"ENCRYPTION_"`
+	NatsURL              string                  `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
+	NatsCredsFile        string                  `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID               string                  `env:"SITE_ID"                   envDefault:"default"`
+	MongoURI             string                  `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB              string                  `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername        string                  `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword        string                  `env:"MONGO_PASSWORD"            envDefault:""`
+	MaxWorkers           int                     `env:"MAX_WORKERS"               envDefault:"100"`
+	UserCacheSize        int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL         time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	ValkeyAddr           string                  `env:"VALKEY_ADDR"`
+	ValkeyPassword       string                  `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyKeyGracePeriod time.Duration           `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
+	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
 }
 
 func main() {
@@ -115,10 +116,7 @@ func main() {
 
 	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, jetstream.ConsumerConfig{
-		Durable:   "broadcast-worker",
-		AckPolicy: jetstream.AckExplicitPolicy,
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildConsumerConfig(cfg.Consumer))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -202,4 +200,12 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
 	return nil
+}
+
+// buildConsumerConfig returns the durable consumer config for
+// broadcast-worker. Centralized so it is unit-testable without NATS.
+func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "broadcast-worker"
+	return cc
 }

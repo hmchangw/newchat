@@ -24,15 +24,16 @@ import (
 )
 
 type config struct {
-	NatsURL       string          `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string          `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string          `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string          `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string          `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string          `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string          `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int             `env:"MAX_WORKERS"     envDefault:"100"`
-	Bootstrap     bootstrapConfig `envPrefix:"BOOTSTRAP_"`
+	NatsURL       string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string                  `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string                  `env:"SITE_ID"         envDefault:"default"`
+	MongoURI      string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
+	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 }
 
 // mongoMemberLookup implements MemberLookup using MongoDB.
@@ -99,10 +100,7 @@ func main() {
 
 	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, jetstream.ConsumerConfig{
-		Durable:   "notification-worker",
-		AckPolicy: jetstream.AckExplicitPolicy,
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildConsumerConfig(cfg.Consumer))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -181,4 +179,12 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
 	return nil
+}
+
+// buildConsumerConfig returns the durable consumer config for
+// notification-worker. Centralized so it is unit-testable without NATS.
+func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "notification-worker"
+	return cc
 }

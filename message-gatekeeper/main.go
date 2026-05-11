@@ -22,17 +22,18 @@ import (
 )
 
 type config struct {
-	NatsURL            string          `env:"NATS_URL,required"`
-	NatsCredsFile      string          `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID             string          `env:"SITE_ID,required"`
-	MongoURI           string          `env:"MONGO_URI,required"`
-	MongoDB            string          `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername      string          `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword      string          `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers         int             `env:"MAX_WORKERS"     envDefault:"100"`
-	LargeRoomThreshold int             `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
-	ChatBaseURL        string          `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
-	Bootstrap          bootstrapConfig `envPrefix:"BOOTSTRAP_"`
+	NatsURL            string                  `env:"NATS_URL,required"`
+	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID             string                  `env:"SITE_ID,required"`
+	MongoURI           string                  `env:"MONGO_URI,required"`
+	MongoDB            string                  `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername      string                  `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword      string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers         int                     `env:"MAX_WORKERS"     envDefault:"100"`
+	LargeRoomThreshold int                     `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
+	ChatBaseURL        string                  `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
+	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 }
 
 func main() {
@@ -93,10 +94,7 @@ func main() {
 	}
 
 	messagesCfg := stream.Messages(cfg.SiteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, jetstream.ConsumerConfig{
-		Durable:   "message-gatekeeper",
-		AckPolicy: jetstream.AckExplicitPolicy,
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, buildConsumerConfig(cfg.Consumer))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -151,4 +149,12 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 	)
+}
+
+// buildConsumerConfig returns the durable consumer config for
+// message-gatekeeper. Centralized so it is unit-testable without NATS.
+func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "message-gatekeeper"
+	return cc
 }
