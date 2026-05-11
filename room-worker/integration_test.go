@@ -642,17 +642,17 @@ func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
 		assert.Equal(t, "site-A", s.SiteID, "sub %s siteID", s.User.Account)
 	}
 
-	// Filter outbox publishes per destination site.
-	pubsB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", ""))
-	pubsC := cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", ""))
-	pubsA := cap.outboxOnPrefix(subject.Outbox("site-A", "site-A", ""))
-	require.Len(t, pubsB, 1, "exactly one outbox to site-B")
-	require.Len(t, pubsC, 1, "exactly one outbox to site-C")
-	assert.Empty(t, pubsA, "no outbox to home site-A")
+	assert.Empty(t, cap.outboxOnPrefix(subject.Outbox("site-A", "site-A", "")),
+		"no outbox to home site-A")
 
-	// Site-B payload assertions.
+	// room_created outboxes — one per remote site.
+	createdB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", model.OutboxTypeRoomCreated))
+	createdC := cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", model.OutboxTypeRoomCreated))
+	require.Len(t, createdB, 1, "exactly one room_created outbox to site-B")
+	require.Len(t, createdC, 1, "exactly one room_created outbox to site-C")
+
 	var envB model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubsB[0].data, &envB))
+	require.NoError(t, json.Unmarshal(createdB[0].data, &envB))
 	var payloadB model.RoomCreatedOutbox
 	require.NoError(t, json.Unmarshal(envB.Payload, &payloadB))
 	assert.ElementsMatch(t, []string{"bob", "carol"}, payloadB.Accounts)
@@ -660,19 +660,37 @@ func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
 	assert.Equal(t, "deal team", payloadB.RoomName)
 	assert.Equal(t, "site-A", payloadB.HomeSiteID)
 	assert.Equal(t, "alice", payloadB.RequesterAccount)
-	assert.Equal(t, reqID+":site-B", pubsB[0].msgID)
+	assert.Equal(t, reqID+":site-B", createdB[0].msgID)
 
-	// Site-C payload assertions.
 	var envC model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubsC[0].data, &envC))
+	require.NoError(t, json.Unmarshal(createdC[0].data, &envC))
 	var payloadC model.RoomCreatedOutbox
 	require.NoError(t, json.Unmarshal(envC.Payload, &payloadC))
 	assert.ElementsMatch(t, []string{"ian"}, payloadC.Accounts)
-	assert.Equal(t, model.RoomTypeChannel, payloadC.RoomType)
-	assert.Equal(t, "deal team", payloadC.RoomName)
-	assert.Equal(t, "site-A", payloadC.HomeSiteID)
-	assert.Equal(t, "alice", payloadC.RequesterAccount)
-	assert.Equal(t, reqID+":site-C", pubsC[0].msgID)
+	assert.Equal(t, reqID+":site-C", createdC[0].msgID)
+
+	// member_added outboxes — one per remote site (search-sync-worker federation).
+	memberB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", model.OutboxMemberAdded))
+	memberC := cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", model.OutboxMemberAdded))
+	require.Len(t, memberB, 1, "exactly one member_added outbox to site-B")
+	require.Len(t, memberC, 1, "exactly one member_added outbox to site-C")
+
+	var memberEnvB model.OutboxEvent
+	require.NoError(t, json.Unmarshal(memberB[0].data, &memberEnvB))
+	var memberPayloadB model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(memberEnvB.Payload, &memberPayloadB))
+	assert.ElementsMatch(t, []string{"bob", "carol"}, memberPayloadB.Accounts)
+	assert.Equal(t, "deal team", memberPayloadB.RoomName)
+	assert.Equal(t, "site-A", memberPayloadB.SiteID)
+	assert.Nil(t, memberPayloadB.HistorySharedSince)
+	assert.Equal(t, reqID+":site-B", memberB[0].msgID)
+
+	var memberEnvC model.OutboxEvent
+	require.NoError(t, json.Unmarshal(memberC[0].data, &memberEnvC))
+	var memberPayloadC model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(memberEnvC.Payload, &memberPayloadC))
+	assert.ElementsMatch(t, []string{"ian"}, memberPayloadC.Accounts)
+	assert.Equal(t, reqID+":site-C", memberC[0].msgID)
 }
 
 func TestProcessCreateRoomDM_OutboxToCounterpartSite(t *testing.T) {
@@ -712,14 +730,14 @@ func TestProcessCreateRoomDM_OutboxToCounterpartSite(t *testing.T) {
 		assert.Equal(t, "site-A", s.SiteID, "sub %s siteID", s.User.Account)
 	}
 
-	// Only one outbox publish, to site-B.
-	pubsB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", ""))
-	require.Len(t, pubsB, 1)
 	assert.Empty(t, cap.outboxOnPrefix(subject.Outbox("site-A", "site-A", "")))
 	assert.Empty(t, cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", "")))
 
+	// room_created outbox to the recipient's site.
+	createdB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", model.OutboxTypeRoomCreated))
+	require.Len(t, createdB, 1)
 	var env model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubsB[0].data, &env))
+	require.NoError(t, json.Unmarshal(createdB[0].data, &env))
 	var payload model.RoomCreatedOutbox
 	require.NoError(t, json.Unmarshal(env.Payload, &payload))
 	assert.Equal(t, model.RoomTypeDM, payload.RoomType)
@@ -727,7 +745,18 @@ func TestProcessCreateRoomDM_OutboxToCounterpartSite(t *testing.T) {
 	assert.ElementsMatch(t, []string{"bob"}, payload.Accounts)
 	assert.Equal(t, "alice", payload.RequesterAccount)
 	assert.Equal(t, "site-A", payload.HomeSiteID)
-	assert.Equal(t, reqID+":site-B", pubsB[0].msgID)
+	assert.Equal(t, reqID+":site-B", createdB[0].msgID)
+
+	// member_added outbox (search-sync-worker federation).
+	memberB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", model.OutboxMemberAdded))
+	require.Len(t, memberB, 1)
+	var memberEnv model.OutboxEvent
+	require.NoError(t, json.Unmarshal(memberB[0].data, &memberEnv))
+	var memberPayload model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(memberEnv.Payload, &memberPayload))
+	assert.ElementsMatch(t, []string{"bob"}, memberPayload.Accounts)
+	assert.Equal(t, "site-A", memberPayload.SiteID)
+	assert.Equal(t, reqID+":site-B", memberB[0].msgID)
 }
 
 func TestProcessAddMembers_OutboxPerRemoteSite(t *testing.T) {
@@ -913,7 +942,7 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 	assert.ElementsMatch(t, []string{"charlie", "bob"}, inner.Accounts,
 		"local INBOX must carry full add set — same-site (charlie) + remote (bob)")
 	assert.Equal(t, reqID+":site-A", pubs[0].msgID,
-		"Nats-Msg-Id must be outboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
+		"Nats-Msg-Id must be natsutil.OutboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
 }
 
 func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {

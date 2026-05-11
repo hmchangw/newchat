@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2895,4 +2896,181 @@ func TestHandleSyncCreateDM_IdempotentRecreate_UsesExistingCreatedAt(t *testing.
 		assert.Equal(t, originalCreatedAt, s.JoinedAt,
 			"sub.JoinedAt must reflect existing.CreatedAt on idempotent re-delivery, not retry wall-clock")
 	}
+}
+
+type inboxCapturedPublish struct {
+	subj  string
+	data  []byte
+	msgID string
+}
+
+func captureInboxPublishes() (PublishFunc, func() []inboxCapturedPublish) {
+	var captured []inboxCapturedPublish
+	fn := PublishFunc(func(_ context.Context, subj string, data []byte, msgID string) error {
+		captured = append(captured, inboxCapturedPublish{subj: subj, data: append([]byte(nil), data...), msgID: msgID})
+		return nil
+	})
+	return fn, func() []inboxCapturedPublish { return captured }
+}
+
+func findInboxMemberAdded(t *testing.T, captured []inboxCapturedPublish, siteID string) inboxCapturedPublish {
+	t.Helper()
+	want := subject.InboxMemberAdded(siteID)
+	var matches []inboxCapturedPublish
+	for _, p := range captured {
+		if p.subj == want {
+			matches = append(matches, p)
+		}
+	}
+	require.Lenf(t, matches, 1, "expected exactly 1 publish to %s, got %d", want, len(matches))
+	return matches[0]
+}
+
+func TestProcessCreateRoom_DM_PublishesLocalInbox(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockStore := NewMockSubscriptionStore(ctrl)
+	publish, getCaptured := captureInboxPublishes()
+	h := &Handler{store: mockStore, publish: publish, siteID: "site-A"}
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	requester := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice", ChineseName: "艾", SiteID: "site-A"}
+	// bob lives on site-B → cross-site DM
+	other := &model.User{ID: "u_bob", Account: "bob", EngName: "Bob", ChineseName: "鮑", SiteID: "site-B"}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(requester, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().GetUser(gomock.Any(), "bob").Return(other, nil)
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-dm-inbox").Return(nil)
+
+	ts := time.Now().UnixMilli()
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID:           "room-dm-inbox",
+		RequesterAccount: "alice",
+		Users:            []string{"bob"},
+		Timestamp:        ts,
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	got := findInboxMemberAdded(t, getCaptured(), "site-A")
+
+	var outbox model.OutboxEvent
+	require.NoError(t, json.Unmarshal(got.data, &outbox))
+	assert.Equal(t, "member_added", outbox.Type)
+	assert.Equal(t, "site-A", outbox.SiteID)
+	assert.Equal(t, "site-A", outbox.DestSiteID, "self-loop publish: dest must equal origin")
+	assert.Greater(t, outbox.Timestamp, int64(0))
+
+	var inner model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(outbox.Payload, &inner))
+	assert.Equal(t, "member_added", inner.Type)
+	assert.Equal(t, "room-dm-inbox", inner.RoomID)
+	assert.Empty(t, inner.RoomName, "DM rooms have no name")
+	assert.ElementsMatch(t, []string{"alice", "bob"}, inner.Accounts,
+		"DM INBOX publish must carry both creator and recipient")
+	assert.Equal(t, "site-A", inner.SiteID)
+	assert.Nil(t, inner.HistorySharedSince, "HistorySharedSince must be nil at create-time")
+
+	wantMsgID := natsutil.OutboxDedupID(ctx, "site-A", "room-dm-inbox:alice:"+strconv.FormatInt(ts, 10))
+	assert.Equal(t, wantMsgID, got.msgID, "Nats-Msg-Id must be natsutil.OutboxDedupID(ctx, originSite, payloadSeed)")
+}
+
+func TestProcessCreateRoom_Channel_PublishesLocalInbox(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockStore := NewMockSubscriptionStore(ctrl)
+	publish, getCaptured := captureInboxPublishes()
+	h := &Handler{store: mockStore, publish: publish, siteID: "site-A"}
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	requester := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice", ChineseName: "艾", SiteID: "site-A"}
+	invited := []model.User{
+		{ID: "u_bob", Account: "bob", EngName: "Bob", ChineseName: "鮑", SiteID: "site-A"},
+		{ID: "u_dave", Account: "dave", EngName: "Dave", ChineseName: "戴", SiteID: "site-B"},
+	}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(requester, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ListNewMembersForNewRoom(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]string{"bob", "dave"}, nil)
+	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(invited, nil)
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-ch-inbox").Return(nil)
+
+	ts := time.Now().UnixMilli()
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID: "room-ch-inbox", Name: "Mixed", RequesterAccount: "alice",
+		Users: []string{"bob", "dave"}, Orgs: []string{"org1"},
+		ResolvedUsers: []string{"bob", "dave"}, ResolvedOrgs: []string{"org1"},
+		Timestamp: ts,
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	got := findInboxMemberAdded(t, getCaptured(), "site-A")
+
+	var outbox model.OutboxEvent
+	require.NoError(t, json.Unmarshal(got.data, &outbox))
+	assert.Equal(t, "member_added", outbox.Type)
+	assert.Equal(t, "site-A", outbox.SiteID)
+	assert.Equal(t, "site-A", outbox.DestSiteID)
+
+	var inner model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(outbox.Payload, &inner))
+	assert.Equal(t, "room-ch-inbox", inner.RoomID)
+	assert.Equal(t, "Mixed", inner.RoomName)
+	assert.ElementsMatch(t, []string{"alice", "bob", "dave"}, inner.Accounts,
+		"channel INBOX publish must carry creator + every auto-enrolled member (same-site + cross-site)")
+	assert.Equal(t, "site-A", inner.SiteID)
+	assert.Nil(t, inner.HistorySharedSince, "create-time event must be unrestricted regardless of req.History")
+
+	wantMsgID := natsutil.OutboxDedupID(ctx, "site-A", "room-ch-inbox:alice:"+strconv.FormatInt(ts, 10))
+	assert.Equal(t, wantMsgID, got.msgID)
+}
+
+func TestProcessCreateRoom_Channel_PublishesCrossSiteMemberAdded(t *testing.T) {
+	h, mockStore, getPublished := newCreateRoomTestHandler(t)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	requester := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice", ChineseName: "艾", SiteID: "site-A"}
+	invited := []model.User{
+		{ID: "u_bob", Account: "bob", EngName: "Bob", ChineseName: "鮑", SiteID: "site-B"},
+	}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(requester, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ListNewMembersForNewRoom(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"bob"}, nil)
+	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(invited, nil)
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-ch-xsite").Return(nil)
+
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID: "room-ch-xsite", Name: "Cross", RequesterAccount: "alice",
+		Users: []string{"bob"}, Orgs: []string{"org1"},
+		ResolvedUsers: []string{"bob"}, ResolvedOrgs: []string{"org1"},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	memberAddedOutbox := outboxFor(getPublished(), "site-B", model.OutboxMemberAdded)
+	require.Len(t, memberAddedOutbox, 1,
+		"finishCreateRoom must emit outbox.{origin}.to.{remote}.member_added alongside room_created so the remote site's search-sync-worker updates its MV")
+
+	var envelope model.OutboxEvent
+	require.NoError(t, json.Unmarshal(memberAddedOutbox[0].data, &envelope))
+	assert.Equal(t, model.OutboxMemberAdded, envelope.Type)
+	assert.Equal(t, "site-A", envelope.SiteID)
+	assert.Equal(t, "site-B", envelope.DestSiteID)
+
+	var inner model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(envelope.Payload, &inner))
+	assert.Equal(t, "room-ch-xsite", inner.RoomID)
+	assert.Equal(t, "Cross", inner.RoomName)
+	assert.Equal(t, []string{"bob"}, inner.Accounts, "carries only the remote-site accounts, mirroring processAddMembers")
+	assert.Equal(t, "site-A", inner.SiteID, "inner SiteID is the origin (room's home)")
+	assert.Nil(t, inner.HistorySharedSince, "create-time event must be unrestricted")
+
+	// Sanity: the existing room_created outbox is still emitted on the same loop.
+	roomCreatedOutbox := outboxFor(getPublished(), "site-B", model.OutboxTypeRoomCreated)
+	require.Len(t, roomCreatedOutbox, 1, "room_created outbox path unchanged")
 }

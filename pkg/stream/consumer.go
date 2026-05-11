@@ -21,10 +21,16 @@ type ConsumerSettings struct {
 
 // DurableConsumerDefaults returns a ConsumerConfig populated from the
 // supplied ConsumerSettings plus the project-wide architectural
-// invariants (AckPolicy=Explicit, DeliverPolicy=New).
+// invariants (AckPolicy=Explicit, DeliverPolicy=All).
 //
 // Callers MUST set Durable. Callers MAY set FilterSubjects to scope the
 // consumer to a subset of the stream's subjects.
+//
+// DeliverPolicy=All so a freshly-created durable (new deploy, new site,
+// or a deleted-and-recreated durable) replays the stream from the start.
+// search-sync-worker's MV rebuild and inbox-worker's federated catch-up
+// both depend on this; for streams with no historical data (steady-state
+// new sites) All and New are equivalent.
 //
 // DeliverPolicy is honored only at consumer creation. Updating an
 // existing durable via js.CreateOrUpdateConsumer does not reset its
@@ -32,7 +38,7 @@ type ConsumerSettings struct {
 func DurableConsumerDefaults(s ConsumerSettings) jetstream.ConsumerConfig {
 	return jetstream.ConsumerConfig{
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		DeliverPolicy: jetstream.DeliverNewPolicy,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckWait:       s.AckWait,
 		MaxDeliver:    s.MaxDeliver,
 		MaxWaiting:    s.MaxWaiting,

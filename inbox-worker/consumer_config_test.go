@@ -29,7 +29,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 30*time.Second, cc.AckWait)
 		assert.Equal(t, 5, cc.MaxDeliver)
 		assert.Equal(t, 512, cc.MaxWaiting)
-		assert.Equal(t, jetstream.DeliverNewPolicy, cc.DeliverPolicy)
+		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 	})
 
 	t.Run("overrides flow through", func(t *testing.T) {

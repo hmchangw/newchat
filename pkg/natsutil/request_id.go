@@ -3,6 +3,7 @@ package natsutil
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/nats-io/nats.go"
 )
@@ -56,4 +57,16 @@ func NewMsg(ctx context.Context, subj string, data []byte) *nats.Msg {
 		Data:    data,
 		Header:  HeaderForContext(ctx),
 	}
+}
+
+// OutboxDedupID composes a JetStream Nats-Msg-Id as base+":"+destSiteID. base
+// is the X-Request-ID from ctx; falls back to payloadSeed when ctx carries no
+// request ID, with a warn log so partial-deployment cases are observable.
+func OutboxDedupID(ctx context.Context, destSiteID, payloadSeed string) string {
+	base := RequestIDFromContext(ctx)
+	if base == "" {
+		slog.Warn("missing X-Request-ID; falling back to payload-derived outbox dedup base", "destSiteID", destSiteID)
+		base = payloadSeed
+	}
+	return base + ":" + destSiteID
 }

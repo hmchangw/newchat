@@ -36,16 +36,6 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc) *Ha
 	return &Handler{store: store, siteID: siteID, publish: publish}
 }
 
-// outboxDedupID composes Nats-Msg-Id as base+":"+destSiteID; base is X-Request-ID from ctx, falling back to payloadSeed when absent (partial-deployment safety).
-func outboxDedupID(ctx context.Context, destSiteID, payloadSeed string) string {
-	base := natsutil.RequestIDFromContext(ctx)
-	if base == "" {
-		slog.Warn("missing X-Request-ID; falling back to payload-derived outbox dedup base", "destSiteID", destSiteID)
-		base = payloadSeed
-	}
-	return base + ":" + destSiteID
-}
-
 // messageDedupSeed returns the X-Request-ID from ctx, or payloadSeed when absent (partial-deployment safety, with a warn log).
 func messageDedupSeed(ctx context.Context, handler, roomID, payloadSeed string) string {
 	if seed := natsutil.RequestIDFromContext(ctx); seed != "" {
@@ -236,7 +226,7 @@ func (h *Handler) processRoleUpdate(ctx context.Context, data []byte) error {
 		}
 		outboxSubj := subject.Outbox(h.siteID, user.SiteID, "role_updated")
 		payloadSeed := fmt.Sprintf("%s:%s:%s:%d", req.RoomID, req.Account, req.NewRole, req.Timestamp)
-		dedupID := outboxDedupID(ctx, user.SiteID, payloadSeed)
+		dedupID := natsutil.OutboxDedupID(ctx, user.SiteID, payloadSeed)
 		if err := h.publish(ctx, outboxSubj, outboxData, dedupID); err != nil {
 			return fmt.Errorf("publish outbox: %w", err)
 		}
@@ -342,7 +332,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	inboxData, _ := json.Marshal(inboxOutbox)
 	inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
-	if err := h.publish(ctx, subject.InboxMemberRemoved(h.siteID), inboxData, outboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
+	if err := h.publish(ctx, subject.InboxMemberRemoved(h.siteID), inboxData, natsutil.OutboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
 		slog.Error("local inbox member_removed publish failed", "error", err, "roomID", req.RoomID)
 	}
 
@@ -388,7 +378,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		}
 		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
-		dedupID := outboxDedupID(ctx, user.SiteID, payloadSeed)
+		dedupID := natsutil.OutboxDedupID(ctx, user.SiteID, payloadSeed)
 		if err := h.publish(ctx, subject.Outbox(h.siteID, user.SiteID, "member_removed"), outboxData, dedupID); err != nil {
 			return fmt.Errorf("outbox publish to %s: %w", user.SiteID, err)
 		}
@@ -484,7 +474,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		}
 		inboxData, _ := json.Marshal(inboxOutbox)
 		inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
-		if err := h.publish(ctx, subject.InboxMemberRemoved(h.siteID), inboxData, outboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
+		if err := h.publish(ctx, subject.InboxMemberRemoved(h.siteID), inboxData, natsutil.OutboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
 			slog.Error("local inbox member_removed publish failed", "error", err, "roomID", req.RoomID)
 		}
 	}
@@ -539,7 +529,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		}
 		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
-		dedupID := outboxDedupID(ctx, destSiteID, payloadSeed)
+		dedupID := natsutil.OutboxDedupID(ctx, destSiteID, payloadSeed)
 		if err := h.publish(ctx, subject.Outbox(h.siteID, destSiteID, "member_removed"), outboxData, dedupID); err != nil {
 			return fmt.Errorf("outbox publish to %s: %w", destSiteID, err)
 		}
@@ -769,7 +759,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 		inboxData, _ := json.Marshal(inboxOutbox)
 		inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp)
-		if err := h.publish(ctx, subject.InboxMemberAdded(room.SiteID), inboxData, outboxDedupID(ctx, room.SiteID, inboxSeed)); err != nil {
+		if err := h.publish(ctx, subject.InboxMemberAdded(room.SiteID), inboxData, natsutil.OutboxDedupID(ctx, room.SiteID, inboxSeed)); err != nil {
 			slog.Error("local inbox member_added publish failed", "error", err, "roomID", req.RoomID)
 		}
 	}
@@ -830,7 +820,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp)
-		dedupID := outboxDedupID(ctx, destSiteID, payloadSeed)
+		dedupID := natsutil.OutboxDedupID(ctx, destSiteID, payloadSeed)
 		if err := h.publish(ctx, subject.Outbox(room.SiteID, destSiteID, "member_added"), outboxData, dedupID); err != nil {
 			return fmt.Errorf("outbox publish to %s failed: %w", destSiteID, err)
 		}
@@ -1121,6 +1111,34 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		}
 	}
 
+	accounts := make([]string, 0, len(subs))
+	for _, sub := range subs {
+		accounts = append(accounts, sub.User.Account)
+	}
+	inner := model.MemberAddEvent{
+		Type:               model.OutboxMemberAdded,
+		RoomID:             room.ID,
+		RoomName:           room.Name,
+		Accounts:           accounts,
+		SiteID:             room.SiteID,
+		JoinedAt:           req.Timestamp,
+		HistorySharedSince: nil,
+		Timestamp:          now.UnixMilli(),
+	}
+	innerData, _ := json.Marshal(inner)
+	outbox := model.OutboxEvent{
+		Type:       model.OutboxMemberAdded,
+		SiteID:     room.SiteID,
+		DestSiteID: room.SiteID,
+		Payload:    innerData,
+		Timestamp:  now.UnixMilli(),
+	}
+	outboxData, _ := json.Marshal(outbox)
+	payloadSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
+	if err := h.publish(ctx, subject.InboxMemberAdded(room.SiteID), outboxData, natsutil.OutboxDedupID(ctx, room.SiteID, payloadSeed)); err != nil {
+		slog.Error("local inbox member_added publish failed", "error", err, "roomID", room.ID, "requestID", requestID)
+	}
+
 	// Task 37: outbox per remote site
 	remoteSiteAccounts := map[string][]string{}
 	for _, u := range allUsers {
@@ -1156,6 +1174,35 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		}
 		if err := h.publish(ctx, subject.Outbox(room.SiteID, destSiteID, model.OutboxTypeRoomCreated), eData, requestID+":"+destSiteID); err != nil {
 			return fmt.Errorf("publish room_created outbox to %s: %w", destSiteID, err)
+		}
+
+		// Cross-site member_added so the remote site's search-sync-worker
+		// updates its user-room/spotlight MV — mirrors processAddMembers'
+		// federation. inbox-worker still consumes the room_created above to
+		// build correctly-typed Subscription rows; this event only feeds the
+		// search index.
+		memberEvt := model.MemberAddEvent{
+			Type:               model.OutboxMemberAdded,
+			RoomID:             room.ID,
+			RoomName:           room.Name,
+			Accounts:           accounts,
+			SiteID:             room.SiteID,
+			JoinedAt:           req.Timestamp,
+			HistorySharedSince: nil,
+			Timestamp:          now.UnixMilli(),
+		}
+		memberData, _ := json.Marshal(memberEvt)
+		memberEnvelope := model.OutboxEvent{
+			Type:       model.OutboxMemberAdded,
+			SiteID:     room.SiteID,
+			DestSiteID: destSiteID,
+			Payload:    memberData,
+			Timestamp:  now.UnixMilli(),
+		}
+		memberOutboxData, _ := json.Marshal(memberEnvelope)
+		memberSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
+		if err := h.publish(ctx, subject.Outbox(room.SiteID, destSiteID, model.OutboxMemberAdded), memberOutboxData, natsutil.OutboxDedupID(ctx, destSiteID, memberSeed)); err != nil {
+			return fmt.Errorf("publish member_added outbox to %s: %w", destSiteID, err)
 		}
 	}
 
@@ -1439,7 +1486,7 @@ func (h *Handler) publishSyncDMOutbox(ctx context.Context, room *model.Room, req
 	return h.publish(ctx,
 		subject.Outbox(room.SiteID, other.SiteID, model.OutboxTypeRoomCreated),
 		eData,
-		outboxDedupID(ctx, other.SiteID, payloadSeed),
+		natsutil.OutboxDedupID(ctx, other.SiteID, payloadSeed),
 	)
 }
 

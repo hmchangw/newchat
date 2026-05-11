@@ -23,7 +23,7 @@ func TestDurableConsumerDefaults(t *testing.T) {
 		cc := stream.DurableConsumerDefaults(s)
 
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy, "AckPolicy invariant")
-		assert.Equal(t, jetstream.DeliverNewPolicy, cc.DeliverPolicy, "DeliverPolicy invariant")
+		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy, "DeliverPolicy invariant")
 		assert.Equal(t, 45*time.Second, cc.AckWait)
 		assert.Equal(t, 3, cc.MaxDeliver)
 		assert.Equal(t, 256, cc.MaxWaiting)
@@ -37,7 +37,7 @@ func TestDurableConsumerDefaults(t *testing.T) {
 		cc := stream.DurableConsumerDefaults(stream.ConsumerSettings{})
 
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
-		assert.Equal(t, jetstream.DeliverNewPolicy, cc.DeliverPolicy)
+		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 		assert.Zero(t, cc.AckWait)
 		assert.Zero(t, cc.MaxDeliver)
 		assert.Zero(t, cc.MaxWaiting)
