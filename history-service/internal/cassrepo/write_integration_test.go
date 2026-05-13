@@ -11,11 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 
 func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -29,8 +30,8 @@ func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 		msgID, roomID, createdAt, sender, "original", "",
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "original", "",
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "original", "",
 	).Exec())
 
 	msg := &models.Message{
@@ -55,8 +56,8 @@ func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 
 	// messages_by_room updated
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT msg, edited_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg)
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
@@ -64,15 +65,15 @@ func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 	// thread_messages_by_room must NOT have a phantom row for this message
 	var threadCount int
 	require.NoError(t, session.Query(
-		`SELECT COUNT(*) FROM thread_messages_by_room WHERE room_id = ?`,
-		roomID,
+		`SELECT COUNT(*) FROM thread_messages_by_room WHERE room_id = ? AND bucket = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt),
 	).Scan(&threadCount))
 	assert.Equal(t, 0, threadCount, "top-level edit must not write to thread_messages_by_room")
 }
 
 func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -88,8 +89,8 @@ func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 		msgID, roomID, createdAt, sender, "original", parentID, threadRoomID,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, threadRoomID, createdAt, msgID, sender, "original", parentID,
+		`INSERT INTO thread_messages_by_room (room_id, bucket, thread_room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), threadRoomID, createdAt, msgID, sender, "original", parentID,
 	).Exec())
 
 	msg := &models.Message{
@@ -113,10 +114,10 @@ func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 	assert.Equal(t, "edited", gotMsg)
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
 
-	// thread_messages_by_room updated (verify with the full PK including thread_room_id)
+	// thread_messages_by_room updated (verify with the full PK including bucket and thread_room_id)
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM thread_messages_by_room WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, threadRoomID, createdAt, msgID,
+		`SELECT msg, edited_at FROM thread_messages_by_room WHERE room_id = ? AND bucket = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), threadRoomID, createdAt, msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg)
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
@@ -124,15 +125,15 @@ func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 	// messages_by_room must NOT have a phantom row for this thread reply
 	var roomCount int
 	require.NoError(t, session.Query(
-		`SELECT COUNT(*) FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT COUNT(*) FROM messages_by_room WHERE room_id = ? AND bucket = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt),
 	).Scan(&roomCount))
 	assert.Equal(t, 0, roomCount, "thread-reply edit must not write to messages_by_room")
 }
 
 func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -147,8 +148,8 @@ func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 		msgID, roomID, createdAt, sender, "original", "", pinnedAt,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "original", "",
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "original", "",
 	).Exec())
 	require.NoError(t, session.Query(
 		`INSERT INTO pinned_messages_by_room (room_id, created_at, message_id, sender, msg) VALUES (?, ?, ?, ?, ?)`,
@@ -178,8 +179,8 @@ func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
 
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT msg, edited_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg, "messages_by_room should reflect the edit")
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
@@ -194,7 +195,7 @@ func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -208,8 +209,8 @@ func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 		msgID, roomID, createdAt, sender, "original", "", false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "original", "", false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "original", "", false,
 	).Exec())
 
 	msg := &models.Message{
@@ -238,8 +239,8 @@ func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 
 	// messages_by_room: same assertions
 	require.NoError(t, session.Query(
-		`SELECT deleted, msg, updated_at FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT deleted, msg, updated_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID,
 	).Scan(&gotDeleted, &gotMsg, &gotUpdatedAt))
 	assert.True(t, gotDeleted)
 	assert.Equal(t, "original", gotMsg, "msg content must be preserved")
@@ -248,15 +249,15 @@ func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 	// thread_messages_by_room must have no phantom row
 	var threadCount int
 	require.NoError(t, session.Query(
-		`SELECT COUNT(*) FROM thread_messages_by_room WHERE room_id = ?`,
-		roomID,
+		`SELECT COUNT(*) FROM thread_messages_by_room WHERE room_id = ? AND bucket = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt),
 	).Scan(&threadCount))
 	assert.Equal(t, 0, threadCount, "top-level soft-delete must not write to thread_messages_by_room")
 }
 
 func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -274,8 +275,8 @@ func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 1,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, parentCreatedAt, parentID, sender, "parent", "", false, 1,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", false, 1,
 	).Exec())
 
 	// Seed the thread reply in messages_by_id and thread_messages_by_room.
@@ -284,8 +285,8 @@ func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID, false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, false,
+		`INSERT INTO thread_messages_by_room (room_id, bucket, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(replyCreatedAt), threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, false,
 	).Exec())
 
 	parentCreatedAtPtr := parentCreatedAt
@@ -311,33 +312,35 @@ func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted)
 
-	// thread_messages_by_room: reply now deleted (full PK including thread_room_id)
+	// thread_messages_by_room: reply now deleted (full PK including bucket and thread_room_id)
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM thread_messages_by_room WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, threadRoomID, replyCreatedAt, replyID,
+		`SELECT deleted FROM thread_messages_by_room WHERE room_id = ? AND bucket = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(replyCreatedAt), threadRoomID, replyCreatedAt, replyID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted)
 
-	// messages_by_room must NOT have a phantom row for this thread reply
-	var roomCount int
+	// messages_by_room must NOT have a phantom row for this thread reply. Scoped
+	// to the reply's exact PK because the parent (a top-level message) legitimately
+	// shares the same daily bucket and would otherwise be counted.
+	var replyInRoom int
 	require.NoError(t, session.Query(
-		`SELECT COUNT(*) FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, replyCreatedAt, replyID,
-	).Scan(&roomCount))
-	assert.Equal(t, 0, roomCount, "thread-reply soft-delete must not write to messages_by_room")
+		`SELECT COUNT(*) FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(replyCreatedAt), replyCreatedAt, replyID,
+	).Scan(&replyInRoom))
+	assert.Equal(t, 0, replyInRoom, "thread-reply soft-delete must not write to messages_by_room")
 
 	// Parent's tcount should have been decremented from 1 to 0 — see Task 7.
 	var gotTcount int
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, parentCreatedAt, parentID,
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
 	).Scan(&gotTcount))
 	assert.Equal(t, 0, gotTcount, "tcount should be decremented on thread-reply soft-delete")
 }
 
 func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -352,8 +355,8 @@ func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 		msgID, roomID, createdAt, sender, "content", "", pinnedAt, false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "content", "", false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "content", "", false,
 	).Exec())
 	require.NoError(t, session.Query(
 		`INSERT INTO pinned_messages_by_room (room_id, created_at, message_id, sender, msg, deleted) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -383,8 +386,8 @@ func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 	assert.True(t, gotDeleted, "messages_by_id should be deleted")
 
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT deleted FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted, "messages_by_room should be deleted")
 
@@ -397,7 +400,7 @@ func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -414,8 +417,8 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 		parentID, roomID, parentCreatedAt, sender, "parent", "", 3, false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, parentCreatedAt, parentID, sender, "parent", "", 3, false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", 3, false,
 	).Exec())
 
 	// Seed the reply we're deleting.
@@ -424,8 +427,8 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID, false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, false,
+		`INSERT INTO thread_messages_by_room (room_id, bucket, thread_room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(replyCreatedAt), threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID, false,
 	).Exec())
 
 	parentCreatedAtPtr := parentCreatedAt
@@ -451,15 +454,15 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 	assert.Equal(t, 2, gotTcount, "messages_by_id.tcount should decrement 3 -> 2")
 
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, parentCreatedAt, parentID,
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
 	).Scan(&gotTcount))
 	assert.Equal(t, 2, gotTcount, "messages_by_room.tcount should decrement 3 -> 2")
 }
 
 func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -473,8 +476,8 @@ func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
 		msgID, roomID, createdAt, sender, "top", "", 5, false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "top", "", 5, false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "top", "", 5, false,
 	).Exec())
 
 	msg := &models.Message{
@@ -491,15 +494,15 @@ func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
 	// tcount stays at 5 — top-level delete does not cascade / decrement (spec §8.2).
 	var gotTcount int
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID,
 	).Scan(&gotTcount))
 	assert.Equal(t, 5, gotTcount, "top-level soft-delete must not touch tcount — replies are preserved (no cascade)")
 }
 
 func TestRepository_UpdateMessageContent_MissingThreadRoomID_ReturnsError(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -533,7 +536,7 @@ func TestRepository_UpdateMessageContent_MissingThreadRoomID_ReturnsError(t *tes
 
 func TestRepository_SoftDeleteMessage_MissingThreadRoomID_ReturnsError(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -571,7 +574,7 @@ func TestRepository_SoftDeleteMessage_MissingThreadRoomID_ReturnsError(t *testin
 // This is the load-bearing test for the IF deleted != true CAS gate.
 func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -588,8 +591,8 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 1,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, parentCreatedAt, parentID, sender, "parent", "", false, 1,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", false, 1,
 	).Exec())
 
 	// Seed the reply in both messages_by_id and thread_messages_by_room.
@@ -602,8 +605,8 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID,
+		`INSERT INTO thread_messages_by_room (room_id, bucket, thread_room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(replyCreatedAt), threadRoomID, replyCreatedAt, replyID, sender, "reply", parentID,
 	).Exec())
 
 	msg := &models.Message{
@@ -631,8 +634,8 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	).Scan(&tcount))
 	assert.Equal(t, 0, tcount, "first delete should have decremented messages_by_id.tcount")
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, parentCreatedAt, parentID,
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
 	).Scan(&tcount))
 	assert.Equal(t, 0, tcount, "first delete should have decremented messages_by_room.tcount")
 
@@ -654,8 +657,8 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	).Scan(&tcount))
 	assert.Equal(t, 0, tcount, "second delete must not double-decrement messages_by_id.tcount")
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, parentCreatedAt, parentID,
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
 	).Scan(&tcount))
 	assert.Equal(t, 0, tcount, "second delete must not double-decrement messages_by_room.tcount")
 }
@@ -665,7 +668,7 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 // via the struct-scan read path (Tasks 1–2).
 func TestRepository_UpdateMessageContent_RoundTrip(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -678,8 +681,8 @@ func TestRepository_UpdateMessageContent_RoundTrip(t *testing.T) {
 		msgID, roomID, createdAt, sender, "original", "",
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "original", "",
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "original", "",
 	).Exec())
 
 	msg := &models.Message{
@@ -705,7 +708,7 @@ func TestRepository_UpdateMessageContent_RoundTrip(t *testing.T) {
 // a top-level message, GetMessageByID returns deleted=true via struct scan.
 func TestRepository_SoftDeleteMessage_RoundTrip(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -718,8 +721,8 @@ func TestRepository_SoftDeleteMessage_RoundTrip(t *testing.T) {
 		msgID, roomID, createdAt, sender, "content", "", false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "content", "", false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "content", "", false,
 	).Exec())
 
 	msg := &models.Message{
@@ -748,7 +751,7 @@ func TestRepository_SoftDeleteMessage_RoundTrip(t *testing.T) {
 // a partial phantom row; the method must handle this gracefully.
 func TestRepository_SoftDeleteMessage_RowCreatedByLWT(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	msg := &models.Message{
@@ -768,7 +771,7 @@ func TestRepository_SoftDeleteMessage_RowCreatedByLWT(t *testing.T) {
 // atomically in messages_by_id and messages_by_room.
 func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -785,8 +788,8 @@ func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T)
 
 	// Seed messages_by_room (top-level message: no thread_parent_id).
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "parent msg", tcount, false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, tcount, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "parent msg", tcount, false,
 	).Exec())
 
 	msg := &models.Message{
@@ -814,8 +817,8 @@ func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T)
 
 	// Verify messages_by_room: deleted = true AND type = 'message_removed'.
 	require.NoError(t, session.Query(
-		`SELECT deleted, type FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, createdAt, msgID,
+		`SELECT deleted, type FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID,
 	).Scan(&gotDeleted, &gotType))
 	assert.True(t, gotDeleted)
 	assert.Equal(t, MessageTypeRemoved, gotType, "messages_by_room must have type='message_removed' for thread parent")
@@ -825,7 +828,7 @@ func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T)
 // deleting a regular message (TCount nil) does NOT set type = 'message_removed'.
 func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -839,8 +842,8 @@ func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T)
 		msgID, roomID, createdAt, sender, "regular msg", false,
 	).Exec())
 	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, created_at, message_id, sender, msg, deleted) VALUES (?, ?, ?, ?, ?, ?)`,
-		roomID, createdAt, msgID, sender, "regular msg", false,
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "regular msg", false,
 	).Exec())
 
 	msg := &models.Message{
@@ -870,7 +873,7 @@ func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T)
 // sets type = 'message_removed' in messages_by_id and thread_messages_by_room.
 func TestRepository_SoftDeleteMessage_ReplyThreadParent_SetsTypeRemoved(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -891,8 +894,8 @@ func TestRepository_SoftDeleteMessage_ReplyThreadParent_SetsTypeRemoved(t *testi
 	// Seed thread_messages_by_room (message is a reply in the parent's thread).
 	// Note: thread_messages_by_room has no tcount column — tcount only lives in messages_by_id.
 	require.NoError(t, session.Query(
-		`INSERT INTO thread_messages_by_room (room_id, thread_room_id, created_at, message_id, sender, msg, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		roomID, threadRoomID, createdAt, msgID, sender, "nested thread parent", false,
+		`INSERT INTO thread_messages_by_room (room_id, bucket, thread_room_id, created_at, message_id, sender, msg, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), threadRoomID, createdAt, msgID, sender, "nested thread parent", false,
 	).Exec())
 
 	msg := &models.Message{
@@ -920,8 +923,8 @@ func TestRepository_SoftDeleteMessage_ReplyThreadParent_SetsTypeRemoved(t *testi
 
 	// Verify thread_messages_by_room: type = 'message_removed'.
 	require.NoError(t, session.Query(
-		`SELECT type FROM thread_messages_by_room WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
-		roomID, threadRoomID, createdAt, msgID,
+		`SELECT type FROM thread_messages_by_room WHERE room_id = ? AND bucket = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), threadRoomID, createdAt, msgID,
 	).Scan(&gotType))
 	assert.Equal(t, MessageTypeRemoved, gotType, "thread_messages_by_room must have type='message_removed'")
 }

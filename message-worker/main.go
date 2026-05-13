@@ -15,6 +15,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -23,20 +24,21 @@ import (
 )
 
 type config struct {
-	NatsURL           string                  `env:"NATS_URL,required"`
-	NatsCredsFile     string                  `env:"NATS_CREDS_FILE"    envDefault:""`
-	SiteID            string                  `env:"SITE_ID,required"`
-	CassandraHosts    string                  `env:"CASSANDRA_HOSTS"    envDefault:"localhost"`
-	CassandraKeyspace string                  `env:"CASSANDRA_KEYSPACE" envDefault:"chat"`
-	CassandraUsername string                  `env:"CASSANDRA_USERNAME" envDefault:""`
-	CassandraPassword string                  `env:"CASSANDRA_PASSWORD" envDefault:""`
-	MaxWorkers        int                     `env:"MAX_WORKERS"        envDefault:"100"`
-	MongoURI          string                  `env:"MONGO_URI,required"`
-	MongoDB           string                  `env:"MONGO_DB"           envDefault:"chat"`
-	MongoUsername     string                  `env:"MONGO_USERNAME"     envDefault:""`
-	MongoPassword     string                  `env:"MONGO_PASSWORD"     envDefault:""`
-	Consumer          stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap         bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	NatsURL            string                  `env:"NATS_URL,required"`
+	NatsCredsFile      string                  `env:"NATS_CREDS_FILE"      envDefault:""`
+	SiteID             string                  `env:"SITE_ID,required"`
+	CassandraHosts     string                  `env:"CASSANDRA_HOSTS"      envDefault:"localhost"`
+	CassandraKeyspace  string                  `env:"CASSANDRA_KEYSPACE"   envDefault:"chat"`
+	CassandraUsername  string                  `env:"CASSANDRA_USERNAME"   envDefault:""`
+	CassandraPassword  string                  `env:"CASSANDRA_PASSWORD"   envDefault:""`
+	MaxWorkers         int                     `env:"MAX_WORKERS"          envDefault:"100"`
+	MessageBucketHours int                     `env:"MESSAGE_BUCKET_HOURS" envDefault:"24"`
+	MongoURI           string                  `env:"MONGO_URI,required"`
+	MongoDB            string                  `env:"MONGO_DB"             envDefault:"chat"`
+	MongoUsername      string                  `env:"MONGO_USERNAME"       envDefault:""`
+	MongoPassword      string                  `env:"MONGO_PASSWORD"       envDefault:""`
+	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 }
 
 func main() {
@@ -47,6 +49,14 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
+
+	if cfg.MessageBucketHours < 1 {
+		slog.Error("invalid config", "MESSAGE_BUCKET_HOURS", cfg.MessageBucketHours)
+		os.Exit(1)
+	}
+	slog.Info("message bucket configured", "hours", cfg.MessageBucketHours)
+
+	bucketSizer := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
 
 	ctx := context.Background()
 
@@ -86,7 +96,7 @@ func main() {
 	db := mongoClient.Database(cfg.MongoDB)
 	us := userstore.NewMongoStore(db.Collection("users"))
 
-	store := NewCassandraStore(cassSession)
+	store := NewCassandraStore(cassSession, bucketSizer)
 	threadStore := newThreadStoreMongo(db)
 	if err := threadStore.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure thread store indexes failed", "error", err)

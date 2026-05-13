@@ -16,13 +16,13 @@ const casMaxRetries = 16
 
 const (
 	editMsgByID   = `UPDATE messages_by_id SET msg = ?, edited_at = ?, updated_at = ? WHERE message_id = ? AND created_at = ?`
-	editMsgByRoom = `UPDATE messages_by_room SET msg = ?, edited_at = ?, updated_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`
-	editThreadMsg = `UPDATE thread_messages_by_room SET msg = ?, edited_at = ?, updated_at = ? WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`
+	editMsgByRoom = `UPDATE messages_by_room SET msg = ?, edited_at = ?, updated_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
+	editThreadMsg = `UPDATE thread_messages_by_room SET msg = ?, edited_at = ?, updated_at = ? WHERE room_id = ? AND bucket = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`
 	editPinnedMsg = `UPDATE pinned_messages_by_room SET msg = ?, edited_at = ?, updated_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`
 
 	deleteMsgByIDCAS = `UPDATE messages_by_id SET deleted = true, updated_at = ? WHERE message_id = ? AND created_at = ? IF deleted != true`
-	deleteMsgByRoom  = `UPDATE messages_by_room SET deleted = true, updated_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`
-	deleteThreadMsg  = `UPDATE thread_messages_by_room SET deleted = true, updated_at = ? WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`
+	deleteMsgByRoom  = `UPDATE messages_by_room SET deleted = true, updated_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
+	deleteThreadMsg  = `UPDATE thread_messages_by_room SET deleted = true, updated_at = ? WHERE room_id = ? AND bucket = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?`
 	deletePinnedMsg  = `UPDATE pinned_messages_by_room SET deleted = true, updated_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`
 )
 
@@ -35,8 +35,8 @@ const MessageTypeRemoved = "message_removed"
 // set type = MessageTypeRemoved. Used when msg.TCount != nil && *msg.TCount > 0.
 const (
 	deleteThreadParentMsgByIDCAS = "UPDATE messages_by_id SET deleted = true, type = '" + MessageTypeRemoved + "', updated_at = ? WHERE message_id = ? AND created_at = ? IF deleted != true"
-	deleteThreadParentMsgByRoom  = "UPDATE messages_by_room SET deleted = true, type = '" + MessageTypeRemoved + "', updated_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?"
-	deleteThreadParentThreadMsg  = "UPDATE thread_messages_by_room SET deleted = true, type = '" + MessageTypeRemoved + "', updated_at = ? WHERE room_id = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?"
+	deleteThreadParentMsgByRoom  = "UPDATE messages_by_room SET deleted = true, type = '" + MessageTypeRemoved + "', updated_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?"
+	deleteThreadParentThreadMsg  = "UPDATE thread_messages_by_room SET deleted = true, type = '" + MessageTypeRemoved + "', updated_at = ? WHERE room_id = ? AND bucket = ? AND thread_room_id = ? AND created_at = ? AND message_id = ?"
 	deleteThreadParentPinnedMsg  = "UPDATE pinned_messages_by_room SET deleted = true, type = '" + MessageTypeRemoved + "', updated_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?"
 )
 
@@ -70,11 +70,13 @@ func (r *Repository) editInMessagesByID(ctx context.Context, msg *models.Message
 }
 
 func (r *Repository) editInMessagesByRoom(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error {
-	return r.session.Query(editMsgByRoom, newMsg, editedAt, editedAt, msg.RoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
+	b := r.bucket.Of(msg.CreatedAt)
+	return r.session.Query(editMsgByRoom, newMsg, editedAt, editedAt, msg.RoomID, b, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
 }
 
 func (r *Repository) editInThreadMessagesByRoom(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error {
-	return r.session.Query(editThreadMsg, newMsg, editedAt, editedAt, msg.RoomID, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
+	b := r.bucket.Of(msg.CreatedAt)
+	return r.session.Query(editThreadMsg, newMsg, editedAt, editedAt, msg.RoomID, b, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
 }
 
 func (r *Repository) editInPinnedMessagesByRoom(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error {
@@ -82,11 +84,13 @@ func (r *Repository) editInPinnedMessagesByRoom(ctx context.Context, msg *models
 }
 
 func (r *Repository) deleteInMessagesByRoom(ctx context.Context, q string, msg *models.Message, deletedAt time.Time) error {
-	return r.session.Query(q, deletedAt, msg.RoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
+	b := r.bucket.Of(msg.CreatedAt)
+	return r.session.Query(q, deletedAt, msg.RoomID, b, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
 }
 
 func (r *Repository) deleteInThreadMessagesByRoom(ctx context.Context, q string, msg *models.Message, deletedAt time.Time) error {
-	return r.session.Query(q, deletedAt, msg.RoomID, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
+	b := r.bucket.Of(msg.CreatedAt)
+	return r.session.Query(q, deletedAt, msg.RoomID, b, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec()
 }
 
 func (r *Repository) deleteInPinnedMessagesByRoom(ctx context.Context, q string, msg *models.Message, deletedAt time.Time) error {
@@ -226,9 +230,10 @@ func (r *Repository) decrementParentTcount(ctx context.Context, msg *models.Mess
 	}
 
 	// CAS decrement on messages_by_room.
+	parentBucket := r.bucket.Of(parentCreatedAt)
 	if err := r.session.Query(
-		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND created_at = ? AND message_id = ?`,
-		msg.RoomID, parentCreatedAt, parentID,
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		msg.RoomID, parentBucket, parentCreatedAt, parentID,
 	).WithContext(ctx).Scan(&tcount); err != nil {
 		if errors.Is(err, gocql.ErrNotFound) {
 			return nil
@@ -238,8 +243,8 @@ func (r *Repository) decrementParentTcount(ctx context.Context, msg *models.Mess
 	if err := casDecrement(casMaxRetries, tcount, func(newVal int, expected *int) (bool, *int, error) {
 		var current *int
 		applied, err := r.session.Query(
-			`UPDATE messages_by_room SET tcount = ? WHERE room_id = ? AND created_at = ? AND message_id = ? IF tcount = ?`,
-			newVal, msg.RoomID, parentCreatedAt, parentID, expected,
+			`UPDATE messages_by_room SET tcount = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ? IF tcount = ?`,
+			newVal, msg.RoomID, parentBucket, parentCreatedAt, parentID, expected,
 		).WithContext(ctx).ScanCAS(&current)
 		return applied, current, err
 	}); err != nil {

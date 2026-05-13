@@ -44,12 +44,15 @@ type EncryptionConfig struct {
 
 // Config is the top-level configuration for history-service.
 type Config struct {
-	SiteID     string           `env:"SITE_ID" envDefault:"site-local"`
-	Cassandra  CassandraConfig  `envPrefix:"CASSANDRA_"`
-	Mongo      MongoConfig      `envPrefix:"MONGO_"`
-	NATS       NATSConfig       `envPrefix:"NATS_"`
-	Valkey     ValkeyConfig     `envPrefix:"VALKEY_"`
-	Encryption EncryptionConfig `envPrefix:"ENCRYPTION_"`
+	SiteID                  string           `env:"SITE_ID"                    envDefault:"site-local"`
+	Cassandra               CassandraConfig  `envPrefix:"CASSANDRA_"`
+	Mongo                   MongoConfig      `envPrefix:"MONGO_"`
+	NATS                    NATSConfig       `envPrefix:"NATS_"`
+	Valkey                  ValkeyConfig     `envPrefix:"VALKEY_"`
+	Encryption              EncryptionConfig `envPrefix:"ENCRYPTION_"`
+	MessageBucketHours      int              `env:"MESSAGE_BUCKET_HOURS"       envDefault:"24"`
+	MessageReadMaxBuckets   int              `env:"MESSAGE_READ_MAX_BUCKETS"   envDefault:"365"`
+	MessageHistoryFloorDays int              `env:"MESSAGE_HISTORY_FLOOR_DAYS" envDefault:"730"`
 }
 
 // Load parses environment variables into Config. Returns error if required vars are missing.

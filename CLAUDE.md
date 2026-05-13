@@ -241,6 +241,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - `docs/cassandra_message_model.md` is the single source of truth for the message schema. Any PR that touches it MUST, in the same PR, update both downstream mirrors:
   1. The Go UDT/row structs in `pkg/model/cassandra/` (keep `cql:"…"` tags aligned with the columns).
   2. The init DDL under `docker-local/cassandra/init/*.cql` that creates the types and tables.
+- **Bucketed message tables.** `messages_by_room` and `thread_messages_by_room` use a composite partition key `(room_id, bucket)`. The bucket is `floor(created_at_unix_ms / windowMs) * windowMs`. The window is configured per service via `MESSAGE_BUCKET_HOURS` (default 24). All services that read or write these tables MUST be configured with the same `MESSAGE_BUCKET_HOURS`; mismatches will cause writes and reads to target different partitions and silently lose data. Bucket math lives in `pkg/msgbucket`.
 
 ### HTTP (Gin + Resty)
 - Use Gin for all HTTP servers — never `net/http` mux directly

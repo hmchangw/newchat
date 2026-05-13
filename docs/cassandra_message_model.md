@@ -58,10 +58,20 @@ CREATE TYPE IF NOT EXISTS "QuotedParentMessage"(
 );
 ```
 ### Table
+
+### Partition Bucketing
+
+`messages_by_room` and `thread_messages_by_room` use a composite partition key
+`(room_id, bucket)`. `bucket` is the start-of-window in unix milliseconds derived
+deterministically from `created_at` via `pkg/msgbucket.Sizer`. The window size
+is configured per service via `MESSAGE_BUCKET_HOURS` (default 24); all services
+that read or write these tables MUST be configured with the same window.
+
 #### messages_by_room
 ```cql
 CREATE TABLE IF NOT EXISTS messages_by_room(
   room_id TEXT,
+  bucket BIGINT,
   created_at TIMESTAMP,
   message_id TEXT,
   thread_room_id TEXT,
@@ -86,13 +96,14 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
   site_id TEXT,
   edited_at TIMESTAMP,
   updated_at TIMESTAMP,
-  PRIMARY KEY((room_id),created_at,message_id)
+  PRIMARY KEY((room_id, bucket),created_at,message_id)
 )WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC);
 ```
 #### thread_messages_by_room
 ```cql
 CREATE TABLE IF NOT EXISTS thread_messages_by_room(
   room_id TEXT,
+  bucket BIGINT,
   thread_room_id TEXT,
   created_at TIMESTAMP,
   message_id TEXT,
@@ -114,7 +125,7 @@ CREATE TABLE IF NOT EXISTS thread_messages_by_room(
   site_id TEXT,
   edited_at TIMESTAMP,
   updated_at TIMESTAMP,
-  PRIMARY KEY((room_id),thread_room_id,created_at,message_id)
+  PRIMARY KEY((room_id, bucket),thread_room_id,created_at,message_id)
 )WITH CLUSTERING ORDER BY (thread_room_id DESC,created_at DESC, message_id DESC);
 ```
 #### pinned_messages_by_room

@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS chat.messages_by_room (
   room_id                  TEXT,
+  bucket                   BIGINT,
   created_at               TIMESTAMP,
   message_id               TEXT,
   thread_room_id           TEXT,
@@ -24,5 +25,5 @@ CREATE TABLE IF NOT EXISTS chat.messages_by_room (
   site_id                  TEXT,
   edited_at                TIMESTAMP,
   updated_at               TIMESTAMP,
-  PRIMARY KEY ((room_id), created_at, message_id)
+  PRIMARY KEY ((room_id, bucket), created_at, message_id)
 ) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC);
