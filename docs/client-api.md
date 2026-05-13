@@ -25,6 +25,7 @@ paths.
    - [3.1 room-service](#31-room-service)
    - [3.2 history-service](#32-history-service)
    - [3.3 search-service](#33-search-service)
+   - [3.4 user-service (mock)](#34-user-service-mock)
 4. [Message Send](#4-message-send)
 5. [Error envelope reference](#5-error-envelope-reference)
 
@@ -1617,6 +1618,42 @@ See [Error envelope](#5-error-envelope-reference). Returns an error when `scope=
 
 ---
 
+### 3.4 user-service (mock)
+
+> **Dev-only.** Implemented by `mock-user-service` with hardcoded
+> responses. Subjects and shapes are stable; switch to a real
+> implementation later by swapping the handler bodies.
+
+All subjects share the prefix `chat.user.{account}.request.user.{siteID}.`
+unless noted. siteID must match the deployed mock's `SITE_ID`; otherwise
+the reply is `{"error":"unknown site","code":"not_found"}`.
+
+| # | Suffix | Builder | Request | Response |
+|---|---|---|---|---|
+| 1 | `status.getByName` | `subject.UserStatusGetByName(account, siteID)` | `{"name": "<string>"}` | `{"name": "<echoed>", "statusText": "available", "statusIsShow": true}` |
+| 2 | `status.set` | `subject.UserStatusSet(account, siteID)` | `{"statusText": "<string>", "statusIsShow": <bool>}` | `{"success": true}` |
+| 3 | `profile.getByName` | `subject.UserProfileGetByName(account, siteID)` | `{"name": "<string>"}` | `{"name": "<echoed>", "displayName": "Mock User", "email": "mock@example.test"}` |
+| 4 | `subscription.getCurrent` | `subject.UserSubscriptionGetCurrent(account, siteID)` | `{"favorite": <bool?>, "membersContain": <string[]?>, "accountNames": <string[]?>}` | `{"subscriptions": [<Subscription>, <Subscription>], "total": 2}` |
+| 5 | `subscription.getRooms` | `subject.UserSubscriptionGetRooms(account, siteID)` | same as #4 | same as #4 |
+| 6 | `subscription.getChannels` | `subject.UserSubscriptionGetChannels(account, siteID)` | same as #4 | same as #4 |
+| 7 | `subscription.getDM` | `subject.UserSubscriptionGetDM(account, siteID)` | `{"targetAccount": "<string>"}` | `{"subscription": <Subscription with User.Account == targetAccount>}` |
+| 8 | `subscription.getApps` | `subject.UserSubscriptionGetApps(account, siteID)` | `{"favorite": <bool?>}` | `{"subscriptions": [<Subscription>, <Subscription>], "total": 2}` |
+| 9 | `subscription.subscribeApp` | `subject.UserSubscriptionSubscribeApp(account, siteID)` | `{"appId": "<string>"}` | `{"success": true}` |
+| 10 | `subscription.unsubscribeApp` | `subject.UserSubscriptionUnsubscribeApp(account, siteID)` | `{"appId": "<string>"}` | `{"success": true}` |
+| 11 | `room.{roomID}.subscription.get` | `subject.UserRoomSubscriptionGet(account, siteID, roomID)` | _no body_ | `{"subscription": <Subscription with RoomID == roomID>}` |
+| 12 | `apps.list` | `subject.UserAppsList(account, siteID)` | _no body_ | `{"apps": [<App>, <App>], "total": 2}` |
+
+`<Subscription>` and `<App>` are the standard `pkg/model.Subscription`
+and `pkg/model.App` JSON shapes. Filter fields on request bodies (`favorite`,
+`membersContain`, `accountNames`) are accepted and ignored by the mock —
+every list endpoint returns the same two mock entries regardless of input.
+
+**Error envelope:** all routes return the standard `{"error": "...", "code": "..."}`
+shape on failure. The only error returned by the mock is `unknown site`
+(`code: not_found`).
+
+---
+
 ## 4. Message Send
 
 ### Send Message
@@ -1829,15 +1866,16 @@ When validation fails, the gatekeeper publishes the error envelope to `chat.user
 Every error response — over NATS reply subjects and HTTP — uses the same envelope:
 
 ```json
-{ "error": "<human-readable reason>" }
+{ "error": "<human-readable reason>", "code": "<optional machine-readable code>" }
 ```
 
 | Field   | Type   | Notes |
 |---------|--------|-------|
 | `error` | string | Human-readable, sanitized at the service boundary. Do not parse or pattern-match against the text. |
+| `code`  | string | Optional. Machine-readable category emitted by services using `natsrouter`'s typed `RouteError` (e.g. `bad_request`, `not_found`, `forbidden`, `conflict`, `internal`, `unavailable`). Absent for plain `natsutil.ReplyError` responses. |
 
-**NATS errors** are sent on the standard reply subject (`_INBOX.>` for §3 methods, `chat.user.{account}.response.{requestID}` for §4) via `natsutil.ReplyError`. The reply body is the JSON object above.
+**NATS errors** are sent on the standard reply subject (`_INBOX.>` for §3 methods, `chat.user.{account}.response.{requestID}` for §4) via `natsutil.ReplyError` (no `code`) or `natsrouter`'s typed error replies (with `code`).
 
 **HTTP errors** (auth-service §2.2) use the same shape with an HTTP status code in the response line.
 
-Clients should rely on the presence/absence of the `error` field — and on context (HTTP status, or whether a reply parses as a success-shape) — rather than on the error text.
+Clients should rely on the presence/absence of the `error` field — and on context (HTTP status, or whether a reply parses as a success-shape) — rather than on the error text. When `code` is present, prefer matching against the documented constant rather than the human-readable message.
