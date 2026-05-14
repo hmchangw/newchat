@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 //go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main
@@ -28,4 +30,32 @@ type UserRoomDoc struct {
 	UserAccount     string           `json:"userAccount"`
 	Rooms           []string         `json:"rooms"`
 	RestrictedRooms map[string]int64 `json:"restrictedRooms"`
+}
+
+// MongoStore is the Mongo-backed store interface for search-service.
+type MongoStore interface {
+	SearchAppsByName(
+		ctx context.Context,
+		query, account string,
+		assistantEnabled *bool,
+		offset, limit int,
+	) ([]model.App, error)
+
+	// HydrateRooms fetches the caller's Subscription documents for
+	// the given room IDs and returns them as SearchRoom projections.
+	// The returned slice preserves the ordering of roomIDs. Room IDs for
+	// which no subscription exists in Mongo are silently omitted (the user
+	// may have left the room between the ES query and the Mongo fetch).
+	HydrateRooms(
+		ctx context.Context,
+		account string,
+		roomIDs []string,
+	) ([]model.SearchRoom, error)
+}
+
+// SearchUsersClient is the outbound HTTP interface for user search.
+// It wraps the third-party HR endpoint; the handler tests inject a fake
+// implementation so no real HTTP call is needed in unit tests.
+type SearchUsersClient interface {
+	SearchUsers(ctx context.Context, query string) ([]model.SearchUser, error)
 }

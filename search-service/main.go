@@ -12,9 +12,11 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -41,6 +43,22 @@ type NATSConfig struct {
 	CredsFile string `env:"CREDS_FILE" envDefault:""`
 }
 
+type MongoConfig struct {
+	URI      string `env:"URI,required"`
+	DB       string `env:"DB"       envDefault:"chat"`
+	Username string `env:"USERNAME" envDefault:""`
+	Password string `env:"PASSWORD" envDefault:""`
+}
+
+// UsersAPIConfig carries the third-party HR endpoint settings.
+// URL is required; Token is optional (TBD when the third-party auth scheme
+// is known — see TODO(searchUsers-thirdparty) in users_client.go).
+type UsersAPIConfig struct {
+	URL     string        `env:"URL,required"`
+	Timeout time.Duration `env:"TIMEOUT" envDefault:"5s"`
+	Token   string        `env:"TOKEN"   envDefault:""`
+}
+
 // SearchConfig groups the request-shape knobs — size caps, cache TTL, and
 // the recent-window filter bound. All optional with sane defaults so a
 // minimal environment only needs URL + NATS_URL + VALKEY_ADDR.
@@ -62,11 +80,13 @@ type SearchConfig struct {
 // against the other or moved to a distinct prefix to avoid silent env
 // shadowing.
 type Config struct {
-	SiteID string       `env:"SITE_ID" envDefault:"site-local"`
-	ES     ESConfig     `envPrefix:"SEARCH_"`
-	Valkey ValkeyConfig `envPrefix:"VALKEY_"`
-	NATS   NATSConfig   `envPrefix:"NATS_"`
-	Search SearchConfig `envPrefix:"SEARCH_"`
+	SiteID   string         `env:"SITE_ID" envDefault:"site-local"`
+	ES       ESConfig       `envPrefix:"SEARCH_"`
+	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
+	NATS     NATSConfig     `envPrefix:"NATS_"`
+	Search   SearchConfig   `envPrefix:"SEARCH_"`
+	Mongo    MongoConfig    `envPrefix:"MONGO_"`
+	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
 }
 
 func main() {
@@ -117,9 +137,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password)
+	if err != nil {
+		slog.Error("mongo connect failed", "error", err)
+		os.Exit(1)
+	}
+	mongoDB := mongoClient.Database(cfg.Mongo.DB)
+
+	usersRC := restyutil.New(
+		cfg.UsersAPI.URL,
+		restyutil.WithTimeout(cfg.UsersAPI.Timeout),
+	)
+	usersClient := newHTTPUsersClient(usersRC, cfg.UsersAPI.Token)
+
 	store := newESStore(engine, cfg.Search.UserRoomIndex)
 	cache := newValkeyCache(valkey)
-	handler := newHandler(store, cache, handlerConfig{
+	mongoStore := newMongoStore(mongoDB)
+	handler := newHandler(store, mongoStore, usersClient, cache, handlerConfig{
 		DocCounts:               cfg.Search.DocCounts,
 		MaxDocCounts:            cfg.Search.MaxDocCounts,
 		RestrictedRoomsCacheTTL: cfg.Search.RestrictedRoomsCacheTTL,
@@ -177,6 +211,7 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkey); return nil },
+		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		// /metrics last so Prometheus can scrape the final drain-window observations.
 		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 	)

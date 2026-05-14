@@ -1471,70 +1471,85 @@ See [Error envelope](#5-error-envelope-reference).
 
 ### 3.3 search-service
 
-#### Search Messages
+#### `search.messages` — full-text message search
+
+> **Breaking change (v2):** The response shape has changed from `{total, results}` to `{messages, total}`. The `results` field no longer exists. The per-hit type is now `SearchMessage` (an enriched projection) instead of the former `MessageSearchHit`. Update all clients before deploying this version.
 
 **Subject:** `chat.user.{account}.request.search.messages`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Full-text search across messages the requester has access to. When `roomIds` is omitted (or empty), the search runs across all rooms the user can see; when set, it scopes to those rooms (the service still enforces per-user access).
+**Auth:** the `{account}` in the subject is the authenticated identity. The search is automatically scoped to rooms the user is a member of — results never include messages from rooms the user cannot access.
 
 ##### Request body
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `searchText` | string   | yes | The query. |
-| `roomIds`    | string[] | no  | Optional scope. Empty means "search every room the user has access to". |
-| `size`       | number   | no  | Page size. |
-| `offset`     | number   | no  | Pagination offset. |
-
 ```json
 {
-  "searchText": "rollout plan",
-  "size": 20
+  "query": "hello world",
+  "roomIds": ["r1", "r2"],
+  "size": 25,
+  "offset": 0
 }
 ```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `query` | string | **yes** | Full-text query. Empty string is rejected. |
+| `roomIds` | string[] | no | Scope the search to these rooms. Omit for global search across all accessible rooms. Unknown room IDs and rooms the user cannot access are silently excluded (enforced by the ES terms-lookup + restricted-rooms floor). |
+| `size` | integer | no | Page size. Default `25`, capped at `100`. |
+| `offset` | integer | no | Page offset. Default `0`. |
 
 ##### Success response
 
-| Field   | Type                    | Notes |
-|---------|-------------------------|-------|
-| `total` | number                  | Total hits matching the query. |
-| `results` | array<MessageSearchHit> | Page of message hits. |
-
-`MessageSearchHit`:
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `messageId` | string |       |
-| `roomId` | string |       |
-| `siteId` | string |       |
-| `userId` | string | Sender's internal user ID. |
-| `userAccount` | string | Sender's account. |
-| `content` | string | The message body. |
-| `createdAt` | string | RFC 3339. |
-| `threadParentMessageId` | string | Optional. |
-| `threadParentMessageCreatedAt` | string | Optional. RFC 3339. |
-
 ```json
 {
-  "total": 42,
-  "results": [
+  "messages": [
     {
-      "messageId": "01970a4f8c2d7c9aQRST",
-      "roomId": "01970a4f8c2d7c9aQ",
-      "siteId": "siteA",
-      "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+      "messageId": "m1",
+      "roomId": "r1",
+      "siteId": "site-a",
       "userAccount": "alice",
-      "content": "let's discuss the rollout plan tomorrow",
-      "createdAt": "2026-05-06T07:55:00Z"
+      "content": "hello world",
+      "createdAt": "2026-04-01T12:00:00Z",
+      "threadParentMessageId": "p0",
+      "threadParentMessageCreatedAt": "2026-04-01T11:58:00Z"
     }
-  ]
+  ],
+  "total": 42
 }
 ```
+
+| Field | Type | Notes |
+|---|---|---|
+| `messages` | SearchMessage[] | Per-hit projection. Always an array (empty `[]` when no results). |
+| `total` | integer | Total matching hits (may exceed `messages.length` when paginating). |
+
+**`SearchMessage` fields** (all sourced directly from the ES message index — no Mongo round-trip):
+
+| Field | Type | Omitted when |
+|---|---|---|
+| `messageId` | string | — |
+| `roomId` | string | — |
+| `siteId` | string | — |
+| `userAccount` | string | — |
+| `content` | string | — |
+| `createdAt` | RFC3339 timestamp | — |
+| `threadParentMessageId` | string | omitted when not a thread reply |
+| `threadParentMessageCreatedAt` | RFC3339 timestamp (nullable) | omitted when not a thread reply |
+
+Display fields (user name, room name) are intentionally NOT carried in the response. Clients resolve them via the `user-service` lookups (`user.{siteID}.profile.getByName`) or their own subscription cache.
 
 ##### Error response
 
 See [Error envelope](#5-error-envelope-reference).
+
+| Code | Reason |
+|---|---|
+| `bad_request` | `query` is empty; or `size`/`offset` is negative. |
+| `internal` | ES backend failure or cache failure with no ES fallback. Raw errors are never leaked to the client. |
+
+**Access control for `roomIds`:**
+- Rooms in neither the user's subscription set nor the restricted-rooms map are silently excluded.
+- Restricted rooms (those with an HSS floor) are included only for messages posted after the user's `historySharedSince` boundary.
 
 ##### Triggered events — success path
 
@@ -1551,54 +1566,46 @@ See [Error envelope](#5-error-envelope-reference).
 **Subject:** `chat.user.{account}.request.search.rooms`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Full-text search across rooms the requester is a member of (spotlight search).
+Full-text search across rooms the requester is subscribed to. Results are returned as `SearchRoom` projections hydrated from MongoDB (the caller's per-room subscription documents), not raw ES index fields.
 
 ##### Request body
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `searchText` | string | yes | The query. |
-| `scope`      | string | no  | `"all"` (default), `"channel"`, or `"dm"`. The value `"app"` is reserved and currently rejected. |
-| `size`       | number | no  | Page size. |
-| `offset`     | number | no  | Pagination offset. |
+| `query`    | string | **yes** | Case-insensitive prefix/substring match on room name. Whitespace-only is rejected. |
+| `roomType` | string | no      | `"all"` (default), `"channel"`, or `"dm"`. The value `"app"` and any other value are rejected with `bad_request`. |
+| `size`     | number | no      | Page size. Default `25`, capped at `100`. |
+| `offset`   | number | no      | Pagination offset. Default `0`. |
 
 ```json
 {
-  "searchText": "engineering",
-  "scope": "channel",
+  "query": "engineering",
+  "roomType": "channel",
   "size": 20
 }
 ```
 
 ##### Success response
 
-| Field   | Type                  | Notes |
-|---------|-----------------------|-------|
-| `total` | number                | Total hits. |
-| `results` | array<RoomSearchHit> | Page of room hits. |
+| Field   | Type              | Notes |
+|---------|-------------------|-------|
+| `rooms` | array<SearchRoom> | Page of room results. Empty slice when no matches, never null. |
 
-`RoomSearchHit`:
+`SearchRoom` (field list mirrors the legacy HTTP shape — see implementation):
 
-| Field | Type | Notes |
-|-------|------|-------|
-| `roomId` | string |       |
-| `roomName` | string |       |
-| `roomType` | string | The internal letter code: `p` (channel), `d` (DM), etc. — different from the request `scope` values. |
-| `userAccount` | string | The requester's account (echoed). |
-| `siteId` | string |       |
-| `joinedAt` | string | RFC 3339. When the requester joined this room. |
+| Field      | Type   | Notes |
+|------------|--------|-------|
+| `roomId`   | string | The room's ID. |
+| `name`     | string | The room's display name. |
+| `roomType` | string | `"channel"`, `"dm"`, or omitted for other types. |
 
 ```json
 {
-  "total": 3,
-  "results": [
+  "rooms": [
     {
       "roomId": "01970a4f8c2d7c9aQ",
-      "roomName": "engineering-announcements",
-      "roomType": "p",
-      "userAccount": "alice",
-      "siteId": "siteA",
-      "joinedAt": "2026-05-01T10:00:00Z"
+      "name": "engineering-announcements",
+      "roomType": "channel"
     }
   ]
 }
@@ -1606,7 +1613,12 @@ Full-text search across rooms the requester is a member of (spotlight search).
 
 ##### Error response
 
-See [Error envelope](#5-error-envelope-reference). Returns an error when `scope=app` is used.
+See [Error envelope](#5-error-envelope-reference).
+
+| Code          | Reason |
+|---------------|--------|
+| `bad_request` | `query` is missing, empty, or whitespace-only; or `roomType` is `"app"` or an unrecognized value; or `size`/`offset` is negative. |
+| `internal`    | ES or MongoDB backend failure (transient or permanent). The raw error is never leaked to the client. |
 
 ##### Triggered events — success path
 
@@ -1615,6 +1627,101 @@ See [Error envelope](#5-error-envelope-reference). Returns an error when `scope=
 ##### Triggered events — error path
 
 `None — error returned only via the reply subject.`
+
+---
+
+#### Search Apps
+
+**Subject:** `chat.user.{account}.request.search.apps`
+
+**Auth:** the `{account}` in the subject is the authenticated identity (enforced by the NATS auth callout).
+
+**Current behavior (prototype):** results are matched by `query` (and optional `assistantEnabled`) only. The response is **not** yet subscription-scoped — every app whose name matches the query is returned.
+
+**Planned behavior:** the response will be scoped to apps the caller has subscribed to once the pipeline's `$lookup` access guard against the `subscriptions` collection is enabled. See `TODO(searchApps-pipeline)` in `search-service/query_apps.go`.
+
+**Request body:**
+```json
+{
+  "query": "weather",
+  "assistantEnabled": true,
+  "size": 25,
+  "offset": 0
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `query` | string | **yes** | Case-insensitive substring match on `app.name`. Whitespace-only is rejected. |
+| `assistantEnabled` | boolean (nullable) | no | When set, strict equality on `app.assistant.enabled`. Omit for no filter. |
+| `size` | integer | no | Page size. Default `25`, capped at `100`. |
+| `offset` | integer | no | Page offset. Default `0`. |
+
+**Response body:**
+```json
+{
+  "apps": [
+    {
+      "id": "a1",
+      "name": "Weather",
+      "description": "...",
+      "assistant": { "enabled": true, "name": "weather.bot", "settingsUrl": "..." },
+      "sponsors": [{ "name": "...", "phone": "..." }]
+    }
+  ]
+}
+```
+
+**Errors:**
+
+| Category | Reason |
+|---|---|
+| `bad_request` | Validation failures (`query` missing/blank, negative `size`/`offset`). |
+| `internal` | Backend failure (transient or permanent). The raw error is never leaked to the client. |
+
+These are documentation categories. The wire error envelope is `{ "error": "<human-readable reason>", "code": "<category>" }` per `pkg/model.ErrorResponse` (see §5).
+
+---
+
+#### Search Users
+
+**Subject:** `chat.user.{account}.request.search.users`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Proxy search for users via the third-party HR endpoint. The `{account}` in the subject is the authenticated identity (enforced by the NATS auth callout) and is used for logging/metrics only — company-scoping is enforced by the third-party endpoint.
+
+No pagination parameters — the third-party endpoint hardcodes offset=0, limit=25.
+
+**Request body:**
+```json
+{
+  "query": "alice"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `query` | string | **yes** | Search term forwarded to the third-party HR endpoint. Whitespace-only is rejected. |
+
+**Response body — raw JSON array (no envelope):**
+```json
+[
+  {
+    "account": "alice",
+    "engName": "Alice Wang",
+    "chineseName": "愛麗絲王"
+  }
+]
+```
+
+The response is a top-level JSON array of `SearchUser` objects (no wrapping object). The full field set mirrors the legacy `GET /api/v3/users` response shape — see `pkg/model.SearchUser` for the authoritative list.
+
+**Errors:**
+
+| Code | Reason |
+|---|---|
+| `bad_request` | `query` is missing, empty, or whitespace-only. |
+| `internal` | Third-party HR endpoint unavailable or returned a non-2xx status. The raw third-party error is never forwarded to the caller. |
 
 ---
 

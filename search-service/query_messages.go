@@ -40,7 +40,7 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 				"must": []any{
 					map[string]any{
 						"multi_match": map[string]any{
-							"query":    req.SearchText,
+							"query":    req.Query,
 							"type":     "bool_prefix",
 							"operator": "AND",
 							"fields":   []string{"content"},

@@ -383,7 +383,7 @@ func SearchMessages(account string) string {
 	return fmt.Sprintf("chat.user.%s.request.search.messages", account)
 }
 
-// SearchRooms builds the concrete subject for a room search request.
+// SearchRooms builds the concrete subject for a subscription search request.
 func SearchRooms(account string) string {
 	return fmt.Sprintf("chat.user.%s.request.search.rooms", account)
 }
@@ -394,9 +394,29 @@ func SearchMessagesPattern() string {
 	return "chat.user.{account}.request.search.messages"
 }
 
-// SearchRoomsPattern is the natsrouter pattern for room search.
+// SearchRoomsPattern is the natsrouter pattern for subscription search.
 func SearchRoomsPattern() string {
 	return "chat.user.{account}.request.search.rooms"
+}
+
+// SearchApps builds the concrete subject for an app search request.
+func SearchApps(account string) string {
+	return fmt.Sprintf("chat.user.%s.request.search.apps", account)
+}
+
+// SearchAppsPattern is the natsrouter pattern for app search.
+func SearchAppsPattern() string {
+	return "chat.user.{account}.request.search.apps"
+}
+
+// SearchUsers builds the concrete subject for a user search request.
+func SearchUsers(account string) string {
+	return fmt.Sprintf("chat.user.%s.request.search.users", account)
+}
+
+// SearchUsersPattern is the natsrouter pattern for user search.
+func SearchUsersPattern() string {
+	return "chat.user.{account}.request.search.users"
 }
 
 // isValidAccountToken rejects empty tokens and tokens containing NATS wildcard
