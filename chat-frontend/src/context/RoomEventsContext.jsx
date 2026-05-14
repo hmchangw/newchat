@@ -10,6 +10,9 @@ import {
   subscriptionUpdate,
   roomMetadataUpdate,
   userRoomEvent,
+  userSubscriptionGetCurrent,
+  userSubscriptionGetApps,
+  userSubscriptionGetRooms,
 } from '../lib/subjects'
 
 const RoomEventsContext = createContext(null)
@@ -108,6 +111,39 @@ export function RoomEventsProvider({ children }) {
       })
       .catch((err) => {
         if (!cancelledRef.current) safeDispatch({ type: 'ROOMS_FAILED', error: err.message })
+      })
+
+    Promise.all([
+      request(userSubscriptionGetCurrent(user.account, user.siteId), { favorite: true }),
+      request(userSubscriptionGetApps(user.account, user.siteId), {}),
+      request(userSubscriptionGetRooms(user.account, user.siteId), {}),
+    ])
+      .then(([favResp, appResp, roomResp]) => {
+        if (cancelledRef.current) return
+        const subscriptionData = {}
+        const collect = (resp) => {
+          for (const s of resp?.subscriptions ?? []) {
+            if (!s?.roomId) continue
+            // Later sources overwrite earlier ones, but the three responses
+            // describe the same Subscription record so collisions are benign.
+            subscriptionData[s.roomId] = { name: s.name, hrInfo: s.hrInfo }
+          }
+        }
+        collect(favResp)
+        collect(appResp)
+        collect(roomResp)
+        safeDispatch({
+          type: 'BUCKETS_LOADED',
+          favoriteIds: (favResp?.subscriptions ?? []).map((s) => s.roomId),
+          appIds: (appResp?.subscriptions ?? []).map((s) => s.roomId),
+          channelDmIds: (roomResp?.subscriptions ?? []).map((s) => s.roomId),
+          subscriptionData,
+        })
+      })
+      .catch((err) => {
+        // Bucket RPC failure is non-fatal — sidebar grouping degrades but rooms
+        // still render via the existing roomsList path.
+        console.warn('sidebar bucket bootstrap failed:', err.message)
       })
 
     return () => {
@@ -229,4 +265,36 @@ export function useRoomSummaries() {
     jumpToMessage,
     error: state.roomsError,
   }
+}
+
+export function useSidebarSections() {
+  const { state } = useRoomEventsInternal()
+  const { summaries, favoriteIds, appIds, channelDmIds, subscriptionData } = state
+  return useMemo(() => {
+    // Merge per-room subscription metadata (name + hrInfo) from the
+    // user-service RPCs onto each summary so roomDisplayName can render
+    // subscription.Name for channels/botDM/discussion and HRInfo for DMs.
+    const enrich = (room) => {
+      const data = subscriptionData[room.id]
+      if (!data) return room
+      return {
+        ...room,
+        subscriptionName: data.name ?? room.subscriptionName,
+        hrInfo: data.hrInfo ?? room.hrInfo,
+      }
+    }
+    const favorite = []
+    const apps = []
+    const channelDm = []
+    for (const room of summaries) {
+      if (favoriteIds.has(room.id)) favorite.push(enrich(room))
+      else if (appIds.has(room.id)) apps.push(enrich(room))
+      else if (channelDmIds.has(room.id)) channelDm.push(enrich(room))
+    }
+    return [
+      { key: 'favorite',  title: 'Favorite',          rooms: favorite },
+      { key: 'apps',      title: 'Apps',              rooms: apps },
+      { key: 'channelDm', title: 'Channels and DMs',  rooms: channelDm },
+    ]
+  }, [summaries, favoriteIds, appIds, channelDmIds, subscriptionData])
 }

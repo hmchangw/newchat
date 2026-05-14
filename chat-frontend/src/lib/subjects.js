@@ -86,3 +86,23 @@ export function searchMessages(account) {
 export function orgMembers(account, orgId) {
   return `chat.user.${account}.request.orgs.${orgId}.members`
 }
+
+// userSubscriptionGetCurrent fetches the caller's current subscriptions, optionally
+// filtered server-side. The sidebar passes `{ favorite: true }` to drive the
+// Favorite section. Mirrors pkg/subject/subject.go::UserSubscriptionGetCurrent.
+export function userSubscriptionGetCurrent(account, siteId) {
+  return `chat.user.${account}.request.user.${siteId}.subscription.getCurrent`
+}
+
+// userSubscriptionGetApps fetches the caller's app subscriptions. Drives the
+// Apps section of the sidebar. Mirrors pkg/subject/subject.go::UserSubscriptionGetApps.
+export function userSubscriptionGetApps(account, siteId) {
+  return `chat.user.${account}.request.user.${siteId}.subscription.getApps`
+}
+
+// userSubscriptionGetRooms fetches the caller's non-app room subscriptions
+// (channels, DMs, discussions). Drives the Channels and DMs section of the
+// sidebar. Mirrors pkg/subject/subject.go::UserSubscriptionGetRooms.
+export function userSubscriptionGetRooms(account, siteId) {
+  return `chat.user.${account}.request.user.${siteId}.subscription.getRooms`
+}

@@ -474,3 +474,223 @@ describe('roomEventsReducer: buffer mode (jump-to-message)', () => {
     expect(next.roomState.missing?.bufferMode ?? BUFFER_MODE.LIVE).toBe(BUFFER_MODE.LIVE)
   })
 })
+
+describe('roomEventsReducer: bucket Sets', () => {
+  it('initialState has empty favoriteIds, appIds, channelDmIds Sets', () => {
+    expect(initialState.favoriteIds).toBeInstanceOf(Set)
+    expect(initialState.appIds).toBeInstanceOf(Set)
+    expect(initialState.channelDmIds).toBeInstanceOf(Set)
+    expect(initialState.favoriteIds.size).toBe(0)
+    expect(initialState.appIds.size).toBe(0)
+    expect(initialState.channelDmIds.size).toBe(0)
+  })
+
+  it('BUCKETS_LOADED populates all three Sets from input arrays', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1', 'f2'],
+      appIds: ['a1'],
+      channelDmIds: ['c1', 'c2', 'c3'],
+    })
+    expect([...next.favoriteIds].sort()).toEqual(['f1', 'f2'])
+    expect([...next.appIds].sort()).toEqual(['a1'])
+    expect([...next.channelDmIds].sort()).toEqual(['c1', 'c2', 'c3'])
+  })
+
+  it('BUCKETS_LOADED replaces previous Set contents', () => {
+    const first = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: ['a1'],
+      channelDmIds: ['c1'],
+    })
+    const second = roomEventsReducer(first, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f2'],
+      appIds: [],
+      channelDmIds: ['c2'],
+    })
+    expect([...second.favoriteIds]).toEqual(['f2'])
+    expect(second.appIds.size).toBe(0)
+    expect([...second.channelDmIds]).toEqual(['c2'])
+  })
+
+  it('ROOM_ADDED with botDM type adds to appIds, leaves channelDmIds unchanged', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'ROOM_ADDED',
+      room: room('bot1', { type: 'botDM' }),
+    })
+    expect(next.appIds.has('bot1')).toBe(true)
+    expect(next.channelDmIds.has('bot1')).toBe(false)
+    expect(next.favoriteIds.has('bot1')).toBe(false)
+  })
+
+  it('ROOM_ADDED with channel type adds to channelDmIds, leaves appIds unchanged', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'ROOM_ADDED',
+      room: room('ch1', { type: 'channel' }),
+    })
+    expect(next.channelDmIds.has('ch1')).toBe(true)
+    expect(next.appIds.has('ch1')).toBe(false)
+    expect(next.favoriteIds.has('ch1')).toBe(false)
+  })
+
+  it('ROOM_ADDED with dm type adds to channelDmIds', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'ROOM_ADDED',
+      room: room('dm1', { type: 'dm' }),
+    })
+    expect(next.channelDmIds.has('dm1')).toBe(true)
+    expect(next.appIds.has('dm1')).toBe(false)
+  })
+
+  it('ROOM_ADDED with discussion type adds to channelDmIds', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'ROOM_ADDED',
+      room: room('d1', { type: 'discussion' }),
+    })
+    expect(next.channelDmIds.has('d1')).toBe(true)
+    expect(next.appIds.has('d1')).toBe(false)
+  })
+
+  it('ROOM_ADDED never modifies favoriteIds', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: [],
+      channelDmIds: [],
+    })
+    const next = roomEventsReducer(seeded, {
+      type: 'ROOM_ADDED',
+      room: room('newRoom', { type: 'botDM' }),
+    })
+    expect([...next.favoriteIds]).toEqual(['f1'])
+  })
+
+  it('ROOM_ADDED for a roomId already in appIds is a no-op for the bucket', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [],
+      appIds: ['bot1'],
+      channelDmIds: [],
+    })
+    const next = roomEventsReducer(seeded, {
+      type: 'ROOM_ADDED',
+      room: room('bot1', { type: 'botDM' }),
+    })
+    expect(next.appIds.size).toBe(1)
+    expect(next.appIds.has('bot1')).toBe(true)
+  })
+
+  it('ROOM_REMOVED removes the roomId from favoriteIds if present', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1', 'f2'],
+      appIds: [],
+      channelDmIds: [],
+    })
+    const next = roomEventsReducer(seeded, { type: 'ROOM_REMOVED', roomId: 'f1' })
+    expect([...next.favoriteIds]).toEqual(['f2'])
+  })
+
+  it('ROOM_REMOVED removes the roomId from appIds if present', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [],
+      appIds: ['a1', 'a2'],
+      channelDmIds: [],
+    })
+    const next = roomEventsReducer(seeded, { type: 'ROOM_REMOVED', roomId: 'a1' })
+    expect([...next.appIds]).toEqual(['a2'])
+  })
+
+  it('ROOM_REMOVED removes the roomId from channelDmIds if present', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [],
+      appIds: [],
+      channelDmIds: ['c1', 'c2'],
+    })
+    const next = roomEventsReducer(seeded, { type: 'ROOM_REMOVED', roomId: 'c1' })
+    expect([...next.channelDmIds]).toEqual(['c2'])
+  })
+
+  it('ROOM_REMOVED for a roomId in none of the Sets leaves them unchanged', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: ['a1'],
+      channelDmIds: ['c1'],
+    })
+    const next = roomEventsReducer(seeded, { type: 'ROOM_REMOVED', roomId: 'unknown' })
+    expect([...next.favoriteIds]).toEqual(['f1'])
+    expect([...next.appIds]).toEqual(['a1'])
+    expect([...next.channelDmIds]).toEqual(['c1'])
+  })
+
+  it('RESET empties all three bucket Sets', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: ['a1'],
+      channelDmIds: ['c1'],
+    })
+    const next = roomEventsReducer(seeded, { type: 'RESET' })
+    expect(next.favoriteIds.size).toBe(0)
+    expect(next.appIds.size).toBe(0)
+    expect(next.channelDmIds.size).toBe(0)
+  })
+
+  it('initialState has an empty subscriptionData map', () => {
+    expect(initialState.subscriptionData).toEqual({})
+  })
+
+  it('BUCKETS_LOADED stores subscriptionData when provided', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: ['a1'],
+      channelDmIds: ['c1'],
+      subscriptionData: {
+        f1: { name: 'general', hrInfo: undefined },
+        c1: { name: 'one-on-one', hrInfo: { engName: 'bob', name: '鮑勃' } },
+      },
+    })
+    expect(next.subscriptionData.f1.name).toBe('general')
+    expect(next.subscriptionData.c1.hrInfo.engName).toBe('bob')
+  })
+
+  it('BUCKETS_LOADED with no subscriptionData payload keeps the map empty', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: [],
+      channelDmIds: [],
+    })
+    expect(next.subscriptionData).toEqual({})
+  })
+
+  it('ROOM_REMOVED also drops the room from subscriptionData', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [],
+      appIds: [],
+      channelDmIds: ['c1'],
+      subscriptionData: { c1: { name: 'one-on-one' } },
+    })
+    const next = roomEventsReducer(seeded, { type: 'ROOM_REMOVED', roomId: 'c1' })
+    expect(next.subscriptionData.c1).toBeUndefined()
+  })
+
+  it('RESET also clears subscriptionData', () => {
+    const seeded = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: ['f1'],
+      appIds: [],
+      channelDmIds: [],
+      subscriptionData: { f1: { name: 'general' } },
+    })
+    const next = roomEventsReducer(seeded, { type: 'RESET' })
+    expect(next.subscriptionData).toEqual({})
+  })
+})

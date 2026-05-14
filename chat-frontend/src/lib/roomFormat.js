@@ -2,18 +2,29 @@ export function roomPrefix(type) {
   return type === 'dm' || type === 'botDM' ? '@ ' : '# '
 }
 
-// Resolves the text label for a room in the sidebar / chat header. DM rooms
-// have no canonical Room.Name on the server (the server only stores
-// subscription-side names for them — each user has their own friendly name
-// per DM, typically the counterpart account). When the user-scoped
-// subscription event flowed into the reducer it brought that subscription
-// name with it; otherwise we fall back to "(DM)" rather than rendering an
-// empty string that the user can't act on.
+// Resolves the text label for a room in the sidebar / chat header.
+//
+// For channel / botDM / discussion: prefer the user's subscription Name
+// (server stores it per-subscription so each user can rename a room without
+// affecting others); fall back to the canonical Room.Name, then to the
+// room id as a last-resort identifier.
+//
+// For dm: compose from the counterpart's HRInfo — engName + " " + name,
+// collapsed to just `name` when the two are identical. HRInfo lives on the
+// Subscription for dm rooms and is sourced from the user-service
+// subscription RPCs. When no hrInfo is available yet, render a "(DM)"
+// placeholder so the sidebar row stays identifiable.
 export function roomDisplayName(room) {
   if (!room) return ''
-  if (room.name) return room.name
+  if (room.type === 'dm') {
+    const eng = room.hrInfo?.engName
+    const name = room.hrInfo?.name
+    if (eng && name) return eng === name ? name : `${eng} ${name}`
+    return '(DM)'
+  }
   if (room.subscriptionName) return room.subscriptionName
-  if (room.type === 'dm' || room.type === 'botDM') return '(DM)'
+  if (room.name) return room.name
+  if (room.type === 'botDM') return '(DM)'
   return room.id ?? ''
 }
 

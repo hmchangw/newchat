@@ -166,6 +166,29 @@ body {
   color: var(--status-error);
 }
 
+.room-list-section {
+  margin-bottom: 0.5rem;
+}
+
+.room-list-section-header {
+  padding: 0.5rem 1rem;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.room-list-section-header:hover {
+  color: var(--text-secondary);
+}
+
+.room-list-section-collapsed .room-list-section-header {
+  opacity: 0.7;
+}
+
 /* Message Area */
 .message-area {
   display: flex;

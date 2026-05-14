@@ -34,10 +34,14 @@ describe('MessageInput', () => {
   })
 
   it('uses "@ {name}" placeholder for DM rooms via roomDisplayName', () => {
-    // DMs use the @ prefix and route through roomDisplayName, which
-    // prefers room.name, then subscriptionName, then a "(DM)" placeholder.
+    // DMs use the @ prefix and route through roomDisplayName, which composes
+    // the counterpart's HRInfo (engName + name, collapsed when equal).
     setupNats()
-    render(<MessageInput room={{ id: 'r-dm', name: 'bob', type: 'dm' }} />)
+    render(
+      <MessageInput
+        room={{ id: 'r-dm', type: 'dm', hrInfo: { engName: 'bob', name: 'bob' } }}
+      />
+    )
     expect(screen.getByPlaceholderText('Message @ bob')).toBeInTheDocument()
   })
 

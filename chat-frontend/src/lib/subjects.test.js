@@ -13,6 +13,9 @@ import {
   roomCreate,
   userResponse,
   orgMembers,
+  userSubscriptionGetCurrent,
+  userSubscriptionGetApps,
+  userSubscriptionGetRooms,
 } from './subjects'
 
 describe('subjects', () => {
@@ -78,5 +81,23 @@ describe('subjects', () => {
 
   it('orgMembers builds the list-org-members request subject', () => {
     expect(orgMembers('alice', 'sect-eng')).toBe('chat.user.alice.request.orgs.sect-eng.members')
+  })
+
+  it('userSubscriptionGetCurrent builds the user-service getCurrent subject', () => {
+    expect(userSubscriptionGetCurrent('alice', 'site-A')).toBe(
+      'chat.user.alice.request.user.site-A.subscription.getCurrent'
+    )
+  })
+
+  it('userSubscriptionGetApps builds the user-service getApps subject', () => {
+    expect(userSubscriptionGetApps('alice', 'site-A')).toBe(
+      'chat.user.alice.request.user.site-A.subscription.getApps'
+    )
+  })
+
+  it('userSubscriptionGetRooms builds the user-service getRooms subject', () => {
+    expect(userSubscriptionGetRooms('alice', 'site-A')).toBe(
+      'chat.user.alice.request.user.site-A.subscription.getRooms'
+    )
   })
 })

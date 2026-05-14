@@ -23,27 +23,50 @@ describe('roomDisplayName', () => {
     expect(roomDisplayName(undefined)).toBe('')
   })
 
-  it('prefers room.name when set (channels)', () => {
+  it('prefers room.subscriptionName for channel rooms', () => {
+    expect(
+      roomDisplayName({ name: 'fallback', subscriptionName: 'frontend', type: 'channel', id: 'r1' })
+    ).toBe('frontend')
+  })
+
+  it('prefers room.subscriptionName for botDM rooms', () => {
+    expect(
+      roomDisplayName({ subscriptionName: 'weather-bot', type: 'botDM', id: 'r1' })
+    ).toBe('weather-bot')
+  })
+
+  it('prefers room.subscriptionName for discussion rooms', () => {
+    expect(
+      roomDisplayName({ name: 'fallback', subscriptionName: 'design-thread', type: 'discussion', id: 'r1' })
+    ).toBe('design-thread')
+  })
+
+  it('falls back to room.name for channel rooms when subscriptionName is missing', () => {
     expect(roomDisplayName({ name: 'frontend', type: 'channel', id: 'r1' })).toBe('frontend')
   })
 
-  it('falls back to room.subscriptionName when room.name is empty (DM with subscription event)', () => {
+  it('falls back to room.id for channel rooms with no subscriptionName and no name', () => {
+    expect(roomDisplayName({ type: 'channel', id: 'r-orphan' })).toBe('r-orphan')
+  })
+
+  it('renders dm rooms using HRInfo.engName + " " + HRInfo.name', () => {
     expect(
-      roomDisplayName({ name: '', subscriptionName: 'bob', type: 'dm', id: 'r-dm' })
-    ).toBe('bob')
+      roomDisplayName({ type: 'dm', id: 'r-dm', hrInfo: { engName: 'John Smith', name: '約翰史密斯' } })
+    ).toBe('John Smith 約翰史密斯')
   })
 
-  it('renders a "(DM)" placeholder for dm / botDM rooms with no name and no subscription name', () => {
-    // The initial roomsList payload returns Room not Subscription, so DMs
-    // arrive with empty name and no subscriptionName until a subscription.update
-    // event lands. Show a placeholder rather than the empty string so the
-    // sidebar row remains clickable + identifiable.
-    expect(roomDisplayName({ name: '', type: 'dm', id: 'r-dm' })).toBe('(DM)')
-    expect(roomDisplayName({ name: '', type: 'botDM', id: 'r-bot' })).toBe('(DM)')
+  it('collapses dm display to a single HRInfo.name when engName equals name', () => {
+    expect(
+      roomDisplayName({ type: 'dm', id: 'r-dm', hrInfo: { engName: 'John Smith', name: 'John Smith' } })
+    ).toBe('John Smith')
   })
 
-  it('falls back to room.id for an unnamed non-DM room (defensive)', () => {
-    expect(roomDisplayName({ name: '', type: 'channel', id: 'r-orphan' })).toBe('r-orphan')
+  it('falls back to "(DM)" for dm rooms with no hrInfo', () => {
+    expect(roomDisplayName({ type: 'dm', id: 'r-dm' })).toBe('(DM)')
+  })
+
+  it('falls back to "(DM)" for dm rooms with an empty hrInfo object', () => {
+    expect(roomDisplayName({ type: 'dm', id: 'r-dm', hrInfo: {} })).toBe('(DM)')
   })
 })
 
