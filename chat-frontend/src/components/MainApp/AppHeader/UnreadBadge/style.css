@@ -1,0 +1,17 @@
+.unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--space-lg);
+  height: var(--space-lg);
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.unread-badge--mention {
+  background: var(--mention);
+}

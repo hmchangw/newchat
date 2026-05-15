@@ -1,6 +1,7 @@
 import { useNats } from '@/context/NatsContext'
 import SearchBar from './SearchBar/SearchBar'
 import ThemeToggle from './ThemeToggle/ThemeToggle'
+import UnreadBadge from './UnreadBadge'
 import './style.css'
 
 export default function AppHeader({ onSelectRoom, onEnterSearch }) {
@@ -11,6 +12,7 @@ export default function AppHeader({ onSelectRoom, onEnterSearch }) {
       <div className="app-header-search">
         <SearchBar onSelectRoom={onSelectRoom} onEnterSearch={onEnterSearch} />
       </div>
+      <UnreadBadge />
       <span className="app-header-user">
         {user?.account} · {user?.siteId}
       </span>

@@ -31,6 +31,24 @@ export const initialState = {
   subscriptions: {},
 }
 
+/**
+ * Aggregate the per-room unread state into a single header badge value.
+ *
+ * Pure derivation over `state.summaries` — the reducer already keeps
+ * `unreadCount` / `hasMention` per room current (incremented by
+ * `MESSAGE_RECEIVED` for non-active rooms, zeroed by `SET_ACTIVE_ROOM`),
+ * so the badge stays live without any extra fetch or subscription.
+ */
+export function selectUnreadTotal(summaries) {
+  let total = 0
+  let hasMention = false
+  for (const s of summaries) {
+    total += s.unreadCount ?? 0
+    if (s.hasMention) hasMention = true
+  }
+  return { total, hasMention }
+}
+
 function sortByLastMsgDesc(summaries) {
   return [...summaries].sort((a, b) => {
     const at = a.lastMsgAt ? new Date(a.lastMsgAt).getTime() : 0

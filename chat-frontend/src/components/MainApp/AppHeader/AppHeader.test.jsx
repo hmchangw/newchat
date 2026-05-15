@@ -14,12 +14,14 @@ vi.mock('./SearchBar/SearchBar', () => ({
   ),
 }))
 vi.mock('./ThemeToggle/ThemeToggle', () => ({ default: () => <span>fake-theme</span> }))
+vi.mock('./UnreadBadge', () => ({ default: () => <span>fake-unread</span> }))
 
 describe('AppHeader', () => {
   it('renders user chip, theme toggle, logout', () => {
     render(<AppHeader onSelectRoom={() => {}} onEnterSearch={() => {}} />)
     expect(screen.getByText('alice · site-1')).toBeInTheDocument()
     expect(screen.getByText('fake-theme')).toBeInTheDocument()
+    expect(screen.getByText('fake-unread')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /logout/i })).toBeInTheDocument()
   })
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { BUFFER_MODE, initialState, roomEventsReducer } from './reducer'
+import { BUFFER_MODE, initialState, roomEventsReducer, selectUnreadTotal } from './reducer'
 
 function room(id, overrides = {}) {
   return {
@@ -1096,5 +1096,60 @@ describe('roomEventsReducer: bucket Sets', () => {
     })
     // hasMention must survive — the event didn't carry the field.
     expect(next.summaries.find((s) => s.id === 'c1').hasMention).toBe(true)
+  })
+})
+
+describe('selectUnreadTotal', () => {
+  it('returns zero/false for empty summaries', () => {
+    expect(selectUnreadTotal([])).toEqual({ total: 0, hasMention: false })
+  })
+
+  it('sums unreadCount across rooms', () => {
+    const summaries = [
+      { id: 'a', unreadCount: 3, hasMention: false },
+      { id: 'b', unreadCount: 2, hasMention: false },
+      { id: 'c', unreadCount: 0, hasMention: false },
+    ]
+    expect(selectUnreadTotal(summaries)).toEqual({ total: 5, hasMention: false })
+  })
+
+  it('ORs hasMention across rooms', () => {
+    const summaries = [
+      { id: 'a', unreadCount: 1, hasMention: false },
+      { id: 'b', unreadCount: 4, hasMention: true },
+    ]
+    expect(selectUnreadTotal(summaries)).toEqual({ total: 5, hasMention: true })
+  })
+
+  it('tolerates missing/undefined unreadCount fields', () => {
+    const summaries = [{ id: 'a' }, { id: 'b', unreadCount: 2 }]
+    expect(selectUnreadTotal(summaries)).toEqual({ total: 2, hasMention: false })
+  })
+
+  it('recomputes after a MESSAGE_RECEIVED in a non-active room (count up)', () => {
+    const loaded = roomEventsReducer(initialState, {
+      type: 'ROOMS_LOADED',
+      rooms: [{ id: 'a', name: 'a', type: 'channel', siteId: 's', userCount: 1 }],
+    })
+    expect(selectUnreadTotal(loaded.summaries)).toEqual({ total: 0, hasMention: false })
+    const next = roomEventsReducer(loaded, {
+      type: 'MESSAGE_RECEIVED',
+      event: { roomId: 'a', message: { id: 'm1', roomId: 'a', content: 'hi' }, hasMention: true },
+    })
+    expect(selectUnreadTotal(next.summaries)).toEqual({ total: 1, hasMention: true })
+  })
+
+  it('recomputes after SET_ACTIVE_ROOM clears that room (count down)', () => {
+    let state = roomEventsReducer(initialState, {
+      type: 'ROOMS_LOADED',
+      rooms: [{ id: 'a', name: 'a', type: 'channel', siteId: 's', userCount: 1 }],
+    })
+    state = roomEventsReducer(state, {
+      type: 'MESSAGE_RECEIVED',
+      event: { roomId: 'a', message: { id: 'm1', roomId: 'a', content: 'hi' } },
+    })
+    expect(selectUnreadTotal(state.summaries).total).toBe(1)
+    state = roomEventsReducer(state, { type: 'SET_ACTIVE_ROOM', roomId: 'a' })
+    expect(selectUnreadTotal(state.summaries)).toEqual({ total: 0, hasMention: false })
   })
 })
