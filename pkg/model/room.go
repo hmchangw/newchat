@@ -26,6 +26,8 @@ type Room struct {
 	CreatedAt         time.Time  `json:"createdAt" bson:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt" bson:"updatedAt"`
 	Restricted        bool       `json:"restricted,omitempty" bson:"restricted,omitempty"`
+	UIDs              []string   `json:"uids,omitempty"     bson:"uids,omitempty"`
+	Accounts          []string   `json:"accounts,omitempty" bson:"accounts,omitempty"`
 }
 
 type ListRoomsResponse struct {
@@ -53,4 +55,16 @@ type RoomInfo struct {
 // RoomsInfoBatchResponse contains one entry per requested roomID, in input order.
 type RoomsInfoBatchResponse struct {
 	Rooms []RoomInfo `json:"rooms"`
+}
+
+// BuildDMParticipants returns sorted-by-UID, paired-by-index participant
+// lists for a dm or botDM room. UIDs[i] and Accounts[i] always describe
+// the same user. Callers must pass exactly two distinct *User values;
+// upstream (room-service capacity check + room-worker counterpart fetch)
+// already enforces this invariant.
+func BuildDMParticipants(a, b *User) (uids, accounts []string) {
+	if a.ID < b.ID {
+		return []string{a.ID, b.ID}, []string{a.Account, b.Account}
+	}
+	return []string{b.ID, a.ID}, []string{b.Account, a.Account}
 }

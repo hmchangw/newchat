@@ -75,6 +75,43 @@ func TestRoomJSON_NilTimestampsOmitted(t *testing.T) {
 	assert.Nil(t, dst.MinUserLastSeenAt, "absent JSON field must unmarshal to nil pointer")
 }
 
+func TestRoomJSON_WithDMParticipants(t *testing.T) {
+	r := model.Room{
+		ID: "r1", Name: "dm", Type: model.RoomTypeDM,
+		CreatedBy: "u1", SiteID: "site-a", UserCount: 2,
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		UIDs:      []string{"u1", "u2"},
+		Accounts:  []string{"alice", "bob"},
+	}
+	roundTrip(t, &r, &model.Room{})
+}
+
+func TestRoomJSON_NilDMParticipantsOmitted(t *testing.T) {
+	r := model.Room{
+		ID: "r1", Name: "general", Type: model.RoomTypeChannel,
+		CreatedBy: "u1", SiteID: "site-a", UserCount: 1,
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, err := json.Marshal(&r)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	_, hasUIDs := raw["uids"]
+	assert.False(t, hasUIDs, "nil UIDs must be omitted from JSON")
+
+	_, hasAccounts := raw["accounts"]
+	assert.False(t, hasAccounts, "nil Accounts must be omitted from JSON")
+
+	var dst model.Room
+	require.NoError(t, json.Unmarshal(data, &dst))
+	assert.Nil(t, dst.UIDs, "absent JSON field must unmarshal to nil slice")
+	assert.Nil(t, dst.Accounts, "absent JSON field must unmarshal to nil slice")
+}
+
 func TestThreadRoomJSON(t *testing.T) {
 	tr := model.ThreadRoom{
 		ID:                    "tr-1",

@@ -888,13 +888,13 @@ func TestHandleUpdated_DMRoom_FansOutToBothMembers(t *testing.T) {
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
 	roomID := "dm-alice-bob"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeDM, SiteID: "site-a"}
-	subs := []model.Subscription{
-		{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomID: roomID},
-		{User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}, RoomID: roomID},
+	room := &model.Room{
+		ID:       roomID,
+		Type:     model.RoomTypeDM,
+		SiteID:   "site-a",
+		Accounts: []string{"alice", "bob"},
 	}
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-	store.EXPECT().ListSubscriptions(gomock.Any(), roomID).Return(subs, nil)
 
 	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
 	evt := model.MessageEvent{
@@ -946,13 +946,13 @@ func TestHandleDeleted_DMRoom_FansOutToBothMembers(t *testing.T) {
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
 	roomID := "dm-alice-bob"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeDM, SiteID: "site-a"}
-	subs := []model.Subscription{
-		{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomID: roomID},
-		{User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}, RoomID: roomID},
+	room := &model.Room{
+		ID:       roomID,
+		Type:     model.RoomTypeDM,
+		SiteID:   "site-a",
+		Accounts: []string{"alice", "bob"},
 	}
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-	store.EXPECT().ListSubscriptions(gomock.Any(), roomID).Return(subs, nil)
 
 	deletedAt := time.Date(2026, 5, 14, 12, 10, 0, 0, time.UTC)
 	evt := model.MessageEvent{
@@ -991,6 +991,48 @@ func TestHandleDeleted_DMRoom_FansOutToBothMembers(t *testing.T) {
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+}
+
+func TestHandleUpdated_BotDMRoom_SkipsBotAccount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "botdm-alice-helper.bot"
+	room := &model.Room{
+		ID:       roomID,
+		Type:     model.RoomTypeBotDM,
+		SiteID:   "site-a",
+		Accounts: []string{"alice", "helper.bot"},
+	}
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
+
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Event:     model.EventUpdated,
+		SiteID:    "site-a",
+		Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID:          "msg-1",
+			RoomID:      roomID,
+			UserID:      "u-alice",
+			UserAccount: "alice",
+			Content:     "updated content",
+			CreatedAt:   time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+			EditedAt:    &edited,
+			UpdatedAt:   &edited,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, true)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1, "botDM: only the human recipient gets the live event")
+	assert.Equal(t, subject.UserRoomEvent("alice"), pub.records[0].subject)
 }
 
 func TestHandler_HandleMessage_ChannelEncryptionDisabled(t *testing.T) {

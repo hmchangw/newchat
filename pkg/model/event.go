@@ -229,6 +229,10 @@ const (
 	MessageTypeRoomCreated = "room_created"
 	// MessageTypeMembersAdded is the system-message type emitted when members are added.
 	MessageTypeMembersAdded = "members_added"
+	// MessageTypeMemberRemoved is the system-message type emitted when a member is removed.
+	MessageTypeMemberRemoved = "member_removed"
+	// MessageTypeMemberLeft is the system-message type emitted when a member self-leaves.
+	MessageTypeMemberLeft = "member_left"
 )
 
 const (

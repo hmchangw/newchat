@@ -605,6 +605,8 @@ func TestProcessCreateRoomDMPersistsTwoSubsAndZeroMembers(t *testing.T) {
 	// CreatedBy is the requester's User.ID for every room type, including
 	// DM/botDM (post-v2 cleanup; previously empty for DM/botDM).
 	assert.Equal(t, "u_alice", room.CreatedBy)
+	assert.Equal(t, []string{"u_alice", "u_bob"}, room.UIDs, "DM participant uids persisted, sorted")
+	assert.Equal(t, []string{"alice", "bob"}, room.Accounts, "DM participant accounts persisted, paired by index with uids")
 }
 
 func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
@@ -925,6 +927,16 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 		"local INBOX must carry full add set — same-site (charlie) + remote (bob)")
 	assert.Equal(t, reqID+":site-A", pubs[0].msgID,
 		"Nats-Msg-Id must be natsutil.OutboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
+
+	// members_added sys-message: requester is the sender, Content is server-rendered.
+	sysPubs := cap.outboxOnPrefix(subject.MsgCanonicalCreated("site-A"))
+	require.Len(t, sysPubs, 1, "exactly one members_added sys-message per add-members call")
+	var sysEvt model.MessageEvent
+	require.NoError(t, json.Unmarshal(sysPubs[0].data, &sysEvt))
+	assert.Equal(t, model.MessageTypeMembersAdded, sysEvt.Message.Type)
+	assert.Equal(t, "alice", sysEvt.Message.UserAccount, "sender is the requester")
+	assert.Equal(t, `"Alice 爱丽丝" added members to the channel`, sysEvt.Message.Content,
+		"multi-add Content uses formatAddedMulti(requester)")
 }
 
 func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {
@@ -981,6 +993,16 @@ func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {
 	assert.Equal(t, roomID, inner.RoomID)
 	assert.Equal(t, []string{"bob"}, inner.Accounts)
 	assert.Equal(t, reqID+":site-A", pubs[0].msgID)
+
+	// member_removed sys-message: requester is the sender, Content is server-rendered.
+	sysPubs := cap.outboxOnPrefix(subject.MsgCanonicalCreated("site-A"))
+	require.Len(t, sysPubs, 1, "exactly one member_removed sys-message per remove-member call")
+	var sysEvt model.MessageEvent
+	require.NoError(t, json.Unmarshal(sysPubs[0].data, &sysEvt))
+	assert.Equal(t, model.MessageTypeMemberRemoved, sysEvt.Message.Type)
+	assert.Equal(t, "alice", sysEvt.Message.UserAccount, "sender is the requester, not the removed user")
+	assert.Equal(t, `"Bob 鲍勃" has been removed from the channel`, sysEvt.Message.Content,
+		"forced-remove Content uses formatRemovedUser(user)")
 }
 
 // --- Sync DM endpoint integration tests ---
@@ -1018,6 +1040,8 @@ func TestSyncCreateDM_DM_PersistsRoomAndSubs(t *testing.T) {
 	assert.Equal(t, siteID, room.SiteID)
 	assert.Equal(t, 2, room.UserCount, "DM room.UserCount set at creation; no Reconcile pass")
 	assert.Equal(t, 0, room.AppCount)
+	assert.Equal(t, []string{"u-alice", "u-bob"}, room.UIDs, "DM participant uids persisted, sorted")
+	assert.Equal(t, []string{"alice", "bob"}, room.Accounts, "DM participant accounts persisted, paired by index with uids")
 
 	subCount, err := db.Collection("subscriptions").CountDocuments(ctx, bson.M{"roomId": roomID})
 	require.NoError(t, err)

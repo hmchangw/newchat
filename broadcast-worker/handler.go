@@ -171,17 +171,15 @@ func (h *Handler) fanOutMutationEvent(
 		}
 		return h.pub.Publish(ctx, subject.RoomEvent(room.ID), payload)
 
-	case model.RoomTypeDM:
-		subs, err := h.store.ListSubscriptions(ctx, room.ID)
-		if err != nil {
-			return fmt.Errorf("list subscriptions for DM room %s: %w", room.ID, err)
-		}
+	case model.RoomTypeDM, model.RoomTypeBotDM:
 		payload, err := json.Marshal(&roomEvt)
 		if err != nil {
 			return fmt.Errorf("marshal %s DM event: %w", roomEvtType, err)
 		}
-		for i := range subs {
-			account := subs[i].User.Account
+		for _, account := range room.Accounts {
+			if isBot(account) {
+				continue
+			}
 			if err := h.pub.Publish(ctx, subject.UserRoomEvent(account), payload); err != nil {
 				slog.Error("publish DM mutation event failed",
 					"error", err,

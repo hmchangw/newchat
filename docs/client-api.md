@@ -231,6 +231,8 @@ The created `Room` object.
 | `createdAt`         | string  | RFC 3339 timestamp. |
 | `updatedAt`         | string  | RFC 3339 timestamp. |
 | `restricted`        | boolean | Optional. |
+| `uids`              | string[] | Optional. `dm`/`botDM` only. Sorted ascending; paired by index with `accounts` so `uids[i]` and `accounts[i]` describe the same user. Absent on channels and on legacy DMs created before this field was introduced. |
+| `accounts`          | string[] | Optional. `dm`/`botDM` only. Permuted to mirror `uids` order. Absent on channels and legacy DMs. |
 
 ```json
 {
@@ -948,7 +950,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `visibleTo` | string | Optional. Visibility scope. |
 | `reactions` | object | Optional. Map of `emoji → Participant[]`. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
-| `type` | string | Optional. System-message type when set (e.g. `"member_added"`); regular messages omit it. |
+| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`. For all four, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other and room-creates, the leaving user for self-leave). |
 | `sysMsgData` | string | Optional. Base64-encoded raw JSON payload for system messages. |
 | `siteId` | string | Optional. The site that owns the message. |
 | `editedAt` | string | Optional. RFC 3339. Set after an edit. |

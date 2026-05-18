@@ -389,9 +389,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 
 	// Member change event
-	evtType := "member_left"
+	evtType := model.MessageTypeMemberLeft
 	if !isSelfLeave {
-		evtType = "member_removed"
+		evtType = model.MessageTypeMemberRemoved
 	}
 	memberEvt := model.MemberRemoveEvent{
 		Type:      evtType,
@@ -408,7 +408,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	// Wrapper Type collapses to member_removed even for self-leave so
 	// search-sync-worker dispatches on one MV op; inner Type is preserved.
 	inboxOutbox := model.OutboxEvent{
-		Type:       "member_removed",
+		Type:       model.OutboxMemberRemoved,
 		SiteID:     h.siteID,
 		DestSiteID: h.siteID,
 		Payload:    memberEvtData,
@@ -420,7 +420,17 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		slog.Error("local inbox member_removed publish failed", "error", err, "roomID", req.RoomID)
 	}
 
-	// System message
+	// Sys-msg sender: leaving user for self-leave, requester for forced removal.
+	requester := &user.User
+	if !isSelfLeave {
+		requester, err = h.store.GetUser(ctx, req.Requester)
+		if err != nil {
+			if errors.Is(err, ErrUserNotFound) {
+				return newPermanent("requester %s not found (room %s)", req.Requester, req.RoomID)
+			}
+			return fmt.Errorf("get requester: %w", err)
+		}
+	}
 	sysMsgUser := model.SysMsgUser{
 		Account:     user.Account,
 		EngName:     user.EngName,
@@ -434,12 +444,21 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	seed := messageDedupSeed(ctx, "processRemoveIndividual", req.RoomID,
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp))
+	var content string
+	if isSelfLeave {
+		content = formatLeft(&user.User)
+	} else {
+		content = formatRemovedUser(&user.User)
+	}
 	sysMsg := model.Message{
-		ID:         idgen.MessageIDFromRequestID(seed, "rmindiv"),
-		RoomID:     req.RoomID,
-		Type:       evtType,
-		SysMsgData: sysMsgData,
-		CreatedAt:  now,
+		ID:          idgen.MessageIDFromRequestID(seed, "rmindiv"),
+		RoomID:      req.RoomID,
+		UserID:      requester.ID,
+		UserAccount: requester.Account,
+		Type:        evtType,
+		Content:     content,
+		SysMsgData:  sysMsgData,
+		CreatedAt:   now,
 	}
 	msgEvt := model.MessageEvent{
 		Event:     model.EventCreated,
@@ -455,7 +474,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	// Cross-site outbox for federated users
 	if user.SiteID != h.siteID {
 		outbox := model.OutboxEvent{
-			Type:       "member_removed",
+			Type:       model.OutboxMemberRemoved,
 			SiteID:     h.siteID,
 			DestSiteID: user.SiteID,
 			Payload:    memberEvtData,
@@ -464,7 +483,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
 		dedupID := natsutil.OutboxDedupID(ctx, user.SiteID, payloadSeed)
-		if err := h.publish(ctx, subject.Outbox(h.siteID, user.SiteID, "member_removed"), outboxData, dedupID); err != nil {
+		if err := h.publish(ctx, subject.Outbox(h.siteID, user.SiteID, model.OutboxMemberRemoved), outboxData, dedupID); err != nil {
 			return fmt.Errorf("outbox publish to %s: %w", user.SiteID, err)
 		}
 	}
@@ -484,6 +503,23 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	members, err := h.store.GetOrgMembersWithIndividualStatus(ctx, req.RoomID, req.OrgID)
 	if err != nil {
 		return fmt.Errorf("get org members with individual status: %w", err)
+	}
+
+	// SectName is harvested from the UNFILTERED members slice (not toRemove) so
+	// it remains correct when every org member also has an individual sub and
+	// toRemove ends up empty. Pick the first non-empty SectName; an all-empty
+	// result is a data inconsistency upstream and must short-circuit before any
+	// mutating store call so the org-doc deletion is not lost to a malformed
+	// sys-message.
+	sectName := ""
+	for _, m := range members {
+		if m.SectName != "" {
+			sectName = m.SectName
+			break
+		}
+	}
+	if sectName == "" {
+		return newPermanent("org %s missing SectName on all members (room %s)", req.OrgID, req.RoomID)
 	}
 
 	var toRemove []OrgMemberStatus
@@ -526,11 +562,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	now := time.Now().UTC()
 
 	// Publish per-account subscription update and collect cross-site accounts
-	sectName := ""
 	for _, m := range toRemove {
-		if m.SectName != "" {
-			sectName = m.SectName
-		}
 		subEvt := model.SubscriptionUpdateEvent{
 			Subscription: model.Subscription{
 				RoomID:   req.RoomID,
@@ -549,7 +581,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	// Member change event with all removed accounts
 	if len(accounts) > 0 {
 		memberEvt := model.MemberRemoveEvent{
-			Type:      "member_removed",
+			Type:      model.OutboxMemberRemoved,
 			RoomID:    req.RoomID,
 			Accounts:  accounts,
 			SiteID:    h.siteID,
@@ -562,7 +594,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		}
 
 		inboxOutbox := model.OutboxEvent{
-			Type:       "member_removed",
+			Type:       model.OutboxMemberRemoved,
 			SiteID:     h.siteID,
 			DestSiteID: h.siteID,
 			Payload:    memberEvtData,
@@ -575,7 +607,14 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		}
 	}
 
-	// System message
+	// Sys-msg sender is the requester.
+	requester, err := h.store.GetUser(ctx, req.Requester)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return newPermanent("requester %s not found (room %s)", req.Requester, req.RoomID)
+		}
+		return fmt.Errorf("get requester: %w", err)
+	}
 	sysMsgPayload, _ := json.Marshal(model.MemberRemoved{
 		OrgID:             req.OrgID,
 		SectName:          sectName,
@@ -584,11 +623,14 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	seed := messageDedupSeed(ctx, "processRemoveOrg", req.RoomID,
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp))
 	sysMsg := model.Message{
-		ID:         idgen.MessageIDFromRequestID(seed, "rmorg"),
-		RoomID:     req.RoomID,
-		Type:       "member_removed",
-		SysMsgData: sysMsgPayload,
-		CreatedAt:  now,
+		ID:          idgen.MessageIDFromRequestID(seed, "rmorg"),
+		RoomID:      req.RoomID,
+		UserID:      requester.ID,
+		UserAccount: requester.Account,
+		Type:        model.MessageTypeMemberRemoved,
+		Content:     formatRemovedOrg(sectName),
+		SysMsgData:  sysMsgPayload,
+		CreatedAt:   now,
 	}
 	msgEvt := model.MessageEvent{
 		Event:     model.EventCreated,
@@ -610,7 +652,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	}
 	for destSiteID, accounts := range siteAccounts {
 		evt := model.MemberRemoveEvent{
-			Type:      "member_removed",
+			Type:      model.OutboxMemberRemoved,
 			RoomID:    req.RoomID,
 			Accounts:  accounts,
 			SiteID:    h.siteID,
@@ -618,7 +660,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 			Timestamp: now.UnixMilli(),
 		}
 		outbox := model.OutboxEvent{
-			Type:       "member_removed",
+			Type:       model.OutboxMemberRemoved,
 			SiteID:     h.siteID,
 			DestSiteID: destSiteID,
 			Payload:    mustMarshal(evt),
@@ -627,7 +669,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
 		dedupID := natsutil.OutboxDedupID(ctx, destSiteID, payloadSeed)
-		if err := h.publish(ctx, subject.Outbox(h.siteID, destSiteID, "member_removed"), outboxData, dedupID); err != nil {
+		if err := h.publish(ctx, subject.Outbox(h.siteID, destSiteID, model.OutboxMemberRemoved), outboxData, dedupID); err != nil {
 			return fmt.Errorf("outbox publish to %s: %w", destSiteID, err)
 		}
 	}
@@ -642,7 +684,10 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	requestID := natsutil.RequestIDFromContext(ctx)
 	if requestID == "" {
-		return fmt.Errorf("missing X-Request-ID: %w", errPermanent)
+		return newPermanent("missing X-Request-ID")
+	}
+	if !idgen.IsValidUUID(requestID) {
+		return newPermanent("invalid X-Request-ID: must be a hyphenated UUID")
 	}
 	if req.Timestamp <= 0 {
 		req.Timestamp = time.Now().UTC().UnixMilli()
@@ -687,6 +732,14 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		if _, ok := userMap[account]; !ok {
 			return newPermanent("user %s not found in room.member.add (room %s)", account, req.RoomID)
 		}
+	}
+
+	requester, err := h.store.GetUser(ctx, req.RequesterAccount)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return newPermanent("requester %s not found (room %s)", req.RequesterAccount, req.RoomID)
+		}
+		return fmt.Errorf("get requester: %w", err)
 	}
 
 	// acceptedAt is the stable request-acceptance time (set by room-service).
@@ -735,20 +788,25 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		return fmt.Errorf("bulk create subscriptions: %w", err)
 	}
 
-	writeIndividuals := len(req.Orgs) > 0
-	if !writeIndividuals {
-		hasOrgs, err := h.store.HasOrgRoomMembers(ctx, req.RoomID)
-		if err != nil {
-			slog.Warn("check existing org room members failed", "error", err, "roomID", req.RoomID)
-		}
-		writeIndividuals = hasOrgs
+	// Fail closed: defaulting hadOrgsBefore=false on error would trigger spurious first-org backfill.
+	hadOrgsBefore, err := h.store.HasOrgRoomMembers(ctx, req.RoomID)
+	if err != nil {
+		return fmt.Errorf("check existing org room members: %w", err)
 	}
+	writeIndividuals := len(req.Orgs) > 0 || hadOrgsBefore
 
 	// Collect all room_member docs to write in a single bulk insert:
 	// new individuals + new orgs + (optional) backfill of existing subscribers.
 	roomMembers := make([]*model.RoomMember, 0, len(subs)+len(req.Orgs))
+	allowedIndividual := make(map[string]struct{}, len(req.Users))
+	for _, acc := range req.Users {
+		allowedIndividual[acc] = struct{}{}
+	}
 	if writeIndividuals {
 		for _, sub := range subs {
+			if _, ok := allowedIndividual[sub.User.Account]; !ok {
+				continue
+			}
 			roomMembers = append(roomMembers, &model.RoomMember{
 				ID:     idgen.GenerateUUIDv7(),
 				RoomID: req.RoomID,
@@ -775,7 +833,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 
 	// Backfill existing subscribers into room_members only when orgs are
 	// joining for the first time and we're starting to track individuals.
-	if writeIndividuals && len(req.Orgs) > 0 {
+	if len(req.Orgs) > 0 && !hadOrgsBefore {
 		existingAccounts, err := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 		if err != nil {
 			slog.Warn("get subscription accounts for backfill failed", "error", err)
@@ -882,12 +940,19 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	sysMsgData, _ := json.Marshal(membersAdded)
 	seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
+	// Single form only for direct 1-user adds; org-bearing adds always use multi.
+	content := formatAddedMulti(requester)
+	if len(subs) == 1 && len(req.Orgs) == 0 {
+		onlyUser := userMap[subs[0].User.Account]
+		content = formatAddedSingle(requester, &onlyUser)
+	}
 	sysMsg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
 		RoomID:      req.RoomID,
-		UserID:      req.RequesterID,
-		UserAccount: req.RequesterAccount,
-		Type:        "members_added",
+		UserID:      requester.ID,
+		UserAccount: requester.Account,
+		Type:        model.MessageTypeMembersAdded,
+		Content:     content,
 		SysMsgData:  sysMsgData,
 		CreatedAt:   acceptedAt,
 	}
@@ -1001,6 +1066,9 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 	if requestID == "" {
 		return newPermanent("missing X-Request-ID")
 	}
+	if !idgen.IsValidUUID(requestID) {
+		return newPermanent("invalid X-Request-ID: must be a hyphenated UUID")
+	}
 
 	var req model.CreateRoomRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -1041,6 +1109,24 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 		CreatedAt: acceptedAt,
 		UpdatedAt: acceptedAt,
 	}
+
+	// Fetch the DM/botDM counterpart upfront so the room can be inserted in a
+	// single write with UIDs/Accounts populated, matching the sync DM path.
+	var counterpart *model.User
+	if roomType == model.RoomTypeDM || roomType == model.RoomTypeBotDM {
+		counterpart, err = h.store.GetUser(ctx, req.Users[0])
+		if err != nil {
+			if errors.Is(err, ErrUserNotFound) {
+				if roomType == model.RoomTypeBotDM {
+					return newPermanent("bot user not found")
+				}
+				return newPermanent("counterpart not found")
+			}
+			return fmt.Errorf("get counterpart: %w", err)
+		}
+		room.UIDs, room.Accounts = model.BuildDMParticipants(requester, counterpart)
+	}
+
 	if err := h.store.CreateRoom(ctx, room); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
 			existing, fetchErr := h.store.GetRoom(ctx, room.ID)
@@ -1067,10 +1153,17 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 	}
 
 	switch roomType {
-	case model.RoomTypeDM:
-		return h.processCreateRoomDM(ctx, &req, room, requester, requestID, acceptedAt, now)
-	case model.RoomTypeBotDM:
-		return h.processCreateRoomBotDM(ctx, &req, room, requester, requestID, acceptedAt, now)
+	case model.RoomTypeDM, model.RoomTypeBotDM:
+		var subs []*model.Subscription
+		if roomType == model.RoomTypeBotDM {
+			subs = buildBotDMSubs(requester, counterpart, room, acceptedAt)
+		} else {
+			subs = buildDMSubs(requester, counterpart, room, acceptedAt)
+		}
+		if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
+			return fmt.Errorf("bulk create subs: %w", err)
+		}
+		return h.finishCreateRoom(ctx, &req, room, requester, []model.User{*requester, *counterpart}, subs, requestID, now)
 	case model.RoomTypeChannel:
 		return h.processCreateRoomChannel(ctx, &req, room, requester, requestID, acceptedAt, now)
 	default:
@@ -1090,38 +1183,6 @@ func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
 		return model.RoomTypeDM
 	}
 	return model.RoomTypeChannel
-}
-
-func (h *Handler) processCreateRoomDM(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, requestID string, acceptedAt, now time.Time) error {
-	other, err := h.store.GetUser(ctx, req.Users[0])
-	if err != nil {
-		if errors.Is(err, ErrUserNotFound) {
-			return newPermanent("counterpart not found")
-		}
-		return fmt.Errorf("get counterpart: %w", err)
-	}
-
-	subs := buildDMSubs(requester, other, room, acceptedAt)
-	if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
-		return fmt.Errorf("bulk create subs: %w", err)
-	}
-	return h.finishCreateRoom(ctx, req, room, requester, []model.User{*requester, *other}, subs, requestID, now)
-}
-
-func (h *Handler) processCreateRoomBotDM(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, requestID string, acceptedAt, now time.Time) error {
-	bot, err := h.store.GetUser(ctx, req.Users[0])
-	if err != nil {
-		if errors.Is(err, ErrUserNotFound) {
-			return newPermanent("bot user not found")
-		}
-		return fmt.Errorf("get bot user: %w", err)
-	}
-
-	subs := buildBotDMSubs(requester, bot, room, acceptedAt)
-	if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
-		return fmt.Errorf("bulk create subs: %w", err)
-	}
-	return h.finishCreateRoom(ctx, req, room, requester, []model.User{*requester, *bot}, subs, requestID, now)
 }
 
 func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, requestID string, acceptedAt, now time.Time) error {
@@ -1144,9 +1205,6 @@ func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.Creat
 	userSet := make(map[string]struct{}, len(users))
 	for i := range users {
 		userSet[users[i].Account] = struct{}{}
-		if users[i].EngName == "" || users[i].ChineseName == "" {
-			return newPermanent("user %s missing required name fields", users[i].Account)
-		}
 	}
 	for _, account := range accounts {
 		if _, ok := userSet[account]; !ok {
@@ -1173,8 +1231,16 @@ func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.Creat
 	}
 
 	if len(req.ResolvedOrgs) > 0 {
+		allowedIndividual := make(map[string]struct{}, len(req.ResolvedUsers)+1)
+		allowedIndividual[requester.Account] = struct{}{}
+		for _, acc := range req.ResolvedUsers {
+			allowedIndividual[acc] = struct{}{}
+		}
 		members := make([]*model.RoomMember, 0, len(subs)+len(req.ResolvedOrgs))
 		for _, sub := range subs {
+			if _, ok := allowedIndividual[sub.User.Account]; !ok {
+				continue
+			}
 			members = append(members, &model.RoomMember{
 				ID:     idgen.GenerateUUIDv7(),
 				RoomID: room.ID,
@@ -1329,7 +1395,7 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeRoomCreated,
-		Content:     "a new room has been created",
+		Content:     "A new room has been created",
 		SysMsgData:  sysData1,
 		CreatedAt:   acceptedAt,
 	}
@@ -1352,6 +1418,7 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeMembersAdded,
+		Content:     formatAddedMulti(requester),
 		SysMsgData:  sysData2,
 		CreatedAt:   acceptedAt.Add(time.Millisecond),
 	}
@@ -1444,6 +1511,8 @@ func (h *Handler) handleSyncCreateDM(ctx context.Context, data []byte) (*model.S
 	acceptedAt := time.Now().UTC()
 	roomID := idgen.BuildDMRoomID(requester.ID, other.ID)
 
+	uids, accounts := model.BuildDMParticipants(requester, other)
+
 	// DMs/botDMs have a fixed 2-member roster — set counts at creation; no Reconcile needed.
 	userCount, appCount := 2, 0
 	if req.RoomType == model.RoomTypeBotDM {
@@ -1458,6 +1527,8 @@ func (h *Handler) handleSyncCreateDM(ctx context.Context, data []byte) (*model.S
 		SiteID:    h.siteID,
 		UserCount: userCount,
 		AppCount:  appCount,
+		UIDs:      uids,
+		Accounts:  accounts,
 		CreatedAt: acceptedAt,
 		UpdatedAt: acceptedAt,
 	}
@@ -1481,6 +1552,7 @@ func (h *Handler) handleSyncCreateDM(ctx context.Context, data []byte) (*model.S
 				"requestID", requestID)
 			return nil, errRoomIDCollision
 		}
+		// Sync-path duplicate-key: forward-only — no UIDs/Accounts backfill on the existing room.
 		room = existing
 		acceptedAt = existing.CreatedAt
 	}
