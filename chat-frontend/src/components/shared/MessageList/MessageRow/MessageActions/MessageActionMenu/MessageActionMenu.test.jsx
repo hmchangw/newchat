@@ -6,6 +6,7 @@ import MessageActionMenu from './MessageActionMenu'
 // the format ever changes both the production code and this string
 // need to flip together.
 const READ_RECEIPT_SUBJECT = 'chat.user.alice.request.room.r1.siteA.message.read-receipt'
+const MEMBER_LIST_SUBJECT = 'chat.user.alice.request.room.r1.siteA.member.list'
 
 vi.mock('@/context/NatsContext', () => ({
   useNats: vi.fn(),
@@ -189,9 +190,26 @@ describe('MessageActionMenu read-receipt RPC', () => {
   })
 
   it('refetches the RPC every time the menu is reopened', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce({ readers: [] })
-      .mockResolvedValueOnce({ readers: [{ userId: 'u1', account: 'bob', engName: 'Bob', chineseName: '' }] })
+    // The kebab fires two RPCs per open (read-receipt + member.list); route
+    // by subject so a sequence-of-once mock isn't fragile to call order.
+    let receiptCalls = 0
+    const request = vi.fn((subj) => {
+      if (subj.includes('read-receipt')) {
+        receiptCalls++
+        return receiptCalls === 1
+          ? Promise.resolve({ readers: [] })
+          : Promise.resolve({ readers: [{ userId: 'u1', account: 'bob', engName: 'Bob', chineseName: '' }] })
+      }
+      if (subj.includes('member.list')) {
+        return Promise.resolve({ members: [
+          { id: 'a', rid: 'r1', ts: '', member: { type: 'individual', id: 'u0', account: 'alice' } },
+          { id: 'b', rid: 'r1', ts: '', member: { type: 'individual', id: 'u1', account: 'bob' } },
+          { id: 'c', rid: 'r1', ts: '', member: { type: 'individual', id: 'u2', account: 'carol' } },
+          { id: 'd', rid: 'r1', ts: '', member: { type: 'individual', id: 'u3', account: 'dave' } },
+        ] })
+      }
+      return Promise.reject(new Error('unexpected subject: ' + subj))
+    })
     useNats.mockReturnValue({
       user: { account: 'alice', siteId: 'siteA' },
       request,
@@ -204,7 +222,7 @@ describe('MessageActionMenu read-receipt RPC', () => {
     fireEvent.click(kebab) // close
     fireEvent.click(kebab) // reopen
     await waitFor(() => expect(screen.getByText('Read by 1 of 3')).toBeInTheDocument())
-    expect(request).toHaveBeenCalledTimes(2)
+    expect(receiptCalls).toBe(2)
   })
 
   it('uses message.messageId when message.id is absent (history-loaded shape)', () => {
@@ -241,6 +259,79 @@ describe('MessageActionMenu read-receipt RPC', () => {
       READ_RECEIPT_SUBJECT,
       { messageId: 'm1' }
     )
+  })
+})
+
+describe('MessageActionMenu recipient count (Y) sourcing', () => {
+  const msg = { id: 'm1', sender: { account: 'alice' } }
+
+  function mkRequest({ readers, members, memberListError }) {
+    return vi.fn((subj) => {
+      if (subj.includes('read-receipt')) return Promise.resolve({ readers })
+      if (subj.includes('member.list')) {
+        if (memberListError) return Promise.reject(memberListError)
+        return Promise.resolve({ members })
+      }
+      return Promise.reject(new Error('unexpected subject: ' + subj))
+    })
+  }
+
+  it('derives Y from member.list (members - 1) even when room.userCount is stale', async () => {
+    // Regression: after Alice logs out and back in, the room summary's
+    // userCount is hydrated from a Subscription record that doesn't carry
+    // the field, so it collapses to 0. The kebab must still show the right
+    // denominator by fetching member.list itself.
+    const members = ['alice', 'bob', 'carol', 'dave', 'eve'].map((account, i) => ({
+      id: `m${i}`, rid: 'r1', ts: '', member: { type: 'individual', id: `u${i}`, account },
+    }))
+    const request = mkRequest({
+      readers: [
+        { userId: 'u1', account: 'bob', engName: 'Bob' },
+        { userId: 'u2', account: 'carol', engName: 'Carol' },
+      ],
+      members,
+    })
+    useNats.mockReturnValue({ user: { account: 'alice', siteId: 'siteA' }, request })
+    render(
+      <MessageActionMenu
+        message={msg}
+        room={{ id: 'r1', siteId: 'siteA', userCount: 0 }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Message actions/i }))
+    expect(await screen.findByText('Read by 2 of 4')).toBeInTheDocument()
+  })
+
+  it('calls member.list on the same room/site as the read-receipt RPC', async () => {
+    const request = mkRequest({ readers: [], members: [] })
+    useNats.mockReturnValue({ user: { account: 'alice', siteId: 'siteA' }, request })
+    render(
+      <MessageActionMenu
+        message={msg}
+        room={{ id: 'r1', siteId: 'siteA', userCount: 4 }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Message actions/i }))
+    expect(request).toHaveBeenCalledWith(MEMBER_LIST_SUBJECT, {})
+  })
+
+  it('falls back to room.userCount - 1 when member.list rejects', async () => {
+    // listRoomMembers failure is non-blocking: Y degrades to the prior
+    // behavior so users with a valid in-session userCount still see a
+    // sensible denominator, and the X side of the menu still renders.
+    const request = mkRequest({
+      readers: [{ userId: 'u1', account: 'bob', engName: 'Bob' }],
+      memberListError: new Error('member.list down'),
+    })
+    useNats.mockReturnValue({ user: { account: 'alice', siteId: 'siteA' }, request })
+    render(
+      <MessageActionMenu
+        message={msg}
+        room={{ id: 'r1', siteId: 'siteA', userCount: 4 }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Message actions/i }))
+    expect(await screen.findByText('Read by 1 of 3')).toBeInTheDocument()
   })
 })
 
