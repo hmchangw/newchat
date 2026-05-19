@@ -31,11 +31,12 @@ export default function SearchResultsPane({
     setRoomsError(null)
     setMsgsError(null)
 
-    searchRooms(nats, { searchText: query, scope: 'all', size: 50 })
+    searchRooms(nats, { searchText: query, roomType: 'all', size: 50 })
       .then((resp) => {
         if (cancelled) return
-        setRoomResults(resp.results ?? [])
-        setRoomTotal(resp.total ?? 0)
+        const rooms = resp.rooms ?? []
+        setRoomResults(rooms)
+        setRoomTotal(rooms.length)
       })
       .catch((err) => {
         if (!cancelled) setRoomsError(err?.message || 'Search failed')
@@ -47,7 +48,7 @@ export default function SearchResultsPane({
     searchMessages(nats, { searchText: query, size: 50 })
       .then((resp) => {
         if (cancelled) return
-        setMsgResults(resp.results ?? [])
+        setMsgResults(resp.messages ?? [])
         setMsgTotal(resp.total ?? 0)
       })
       .catch((err) => {
@@ -120,7 +121,7 @@ export default function SearchResultsPane({
                 <span className="result-type">
                   {searchRoomPrefix(hit.roomType)}
                 </span>
-                <span className="result-name">{hit.roomName}</span>
+                <span className="result-name">{hit.name}</span>
               </button>
             ))}
           </div>

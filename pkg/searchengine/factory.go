@@ -41,7 +41,7 @@ func New(ctx context.Context, cfg Config) (SearchEngine, error) {
 			httpTransport := dt.Clone()
 			httpTransport.TLSClientConfig = &tls.Config{
 				// #nosec G402 -- InsecureSkipVerify is opt-in via TLSSkipVerify config for self-signed ES certs
-				InsecureSkipVerify: true, //nolint:gosec // intentional: opt-in via config for self-signed ES certs
+				InsecureSkipVerify: true, //nolint:gosec
 				MinVersion:         tls.VersionTLS12,
 			}
 			esCfg.Transport = httpTransport

@@ -152,21 +152,6 @@ func (m *MockMongoStore) EXPECT() *MockMongoStoreMockRecorder {
 	return m.recorder
 }
 
-// HydrateRooms mocks base method.
-func (m *MockMongoStore) HydrateRooms(ctx context.Context, account string, roomIDs []string) ([]model.SearchRoom, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "HydrateRooms", ctx, account, roomIDs)
-	ret0, _ := ret[0].([]model.SearchRoom)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// HydrateRooms indicates an expected call of HydrateRooms.
-func (mr *MockMongoStoreMockRecorder) HydrateRooms(ctx, account, roomIDs any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HydrateRooms", reflect.TypeOf((*MockMongoStore)(nil).HydrateRooms), ctx, account, roomIDs)
-}
-
 // SearchAppsByName mocks base method.
 func (m *MockMongoStore) SearchAppsByName(ctx context.Context, query, account string, assistantEnabled *bool, offset, limit int) ([]model.App, error) {
 	m.ctrl.T.Helper()

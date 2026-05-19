@@ -61,14 +61,15 @@ type SearchRoomsResponse struct {
 	Rooms []SearchRoom `json:"rooms"`
 }
 
-// SearchRoom is the per-user-room projection returned by
-// search.rooms. Field list mirrors the legacy HTTP shape for
-// the /rooms endpoint — fill in additional fields per the legacy
-// response during implementation.
+// SearchRoom is the per-user-room projection returned by search.rooms,
+// built directly from the spotlight ES index hit (one doc per
+// (account, room)). SiteID is the room's home site, carried on the
+// spotlight doc by search-sync-worker.
 type SearchRoom struct {
-	RoomID   string `json:"roomId"             bson:"roomId"`
-	Name     string `json:"name"               bson:"name"`
-	RoomType string `json:"roomType,omitempty" bson:"roomType,omitempty"`
+	RoomID   string `json:"roomId"`
+	Name     string `json:"name"`
+	RoomType string `json:"roomType,omitempty"`
+	SiteID   string `json:"siteId"`
 }
 
 // SearchAppsRequest is the NATS payload for `chat.user.{account}.request.search.apps`.

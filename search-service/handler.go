@@ -159,26 +159,12 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 		return nil, natsrouter.ErrInternal("search backend unavailable")
 	}
 
-	roomIDs, err := parseRoomIDs(raw)
+	rooms, err := parseRooms(raw)
 	if err != nil {
-		slog.Error("parse subscription room IDs failed", "account", account, "error", err)
+		slog.Error("parse spotlight rooms failed", "account", account, "error", err)
 		return nil, natsrouter.ErrInternal("unexpected search response")
 	}
-
-	if len(roomIDs) == 0 {
-		return &model.SearchRoomsResponse{Rooms: []model.SearchRoom{}}, nil
-	}
-
-	subs, err := h.mongo.HydrateRooms(ctx, account, roomIDs)
-	if err != nil {
-		slog.Error("subscription hydration failed", "account", account, "error", err)
-		return nil, natsrouter.ErrInternal("subscription hydration unavailable")
-	}
-
-	if subs == nil {
-		subs = []model.SearchRoom{}
-	}
-	return &model.SearchRoomsResponse{Rooms: subs}, nil
+	return &model.SearchRoomsResponse{Rooms: rooms}, nil
 }
 
 // loadRestricted implements the 2-tier Valkey → ES read. Cache errors

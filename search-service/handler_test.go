@@ -228,10 +228,6 @@ type fakeMongo struct {
 	searchAppsCalls   []searchAppsCall
 	searchAppsResults []model.App
 	searchAppsErr     error
-
-	hydrateRoomsCalls   []hydrateRoomsCall
-	hydrateRoomsResults []model.SearchRoom
-	hydrateRoomsErr     error
 }
 
 type searchAppsCall struct {
@@ -240,11 +236,6 @@ type searchAppsCall struct {
 	assistantEnabled *bool
 	offset           int
 	limit            int
-}
-
-type hydrateRoomsCall struct {
-	account string
-	roomIDs []string
 }
 
 func (f *fakeMongo) SearchAppsByName(
@@ -262,46 +253,24 @@ func (f *fakeMongo) SearchAppsByName(
 	return f.searchAppsResults, nil
 }
 
-func (f *fakeMongo) HydrateRooms(
-	_ context.Context,
-	account string,
-	roomIDs []string,
-) ([]model.SearchRoom, error) {
-	f.hydrateRoomsCalls = append(f.hydrateRoomsCalls, hydrateRoomsCall{
-		account: account, roomIDs: roomIDs,
-	})
-	if f.hydrateRoomsErr != nil {
-		return nil, f.hydrateRoomsErr
-	}
-	return f.hydrateRoomsResults, nil
-}
-
 func TestHandler_SearchRooms_HappyPath(t *testing.T) {
 	store := &fakeStore{
-		searchBody: json.RawMessage(`{"hits":{"total":{"value":2},"hits":[{"_source":{"roomId":"r1"}},{"_source":{"roomId":"r2"}}]}}`),
+		searchBody: json.RawMessage(`{"hits":{"total":{"value":2},"hits":[` +
+			`{"_source":{"roomId":"r1","roomName":"general","roomType":"channel","siteId":"site-a"}},` +
+			`{"_source":{"roomId":"r2","roomName":"alice-bob","roomType":"dm","siteId":"site-b"}}]}}`),
 	}
-	mongo := &fakeMongo{
-		hydrateRoomsResults: []model.SearchRoom{
-			{RoomID: "r1", Name: "general", RoomType: "channel"},
-			{RoomID: "r2", Name: "alice-bob", RoomType: "dm"},
-		},
-	}
-	h := newTestHandler(store, mongo, nil, newFakeCache())
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
 
 	resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Query: "general"})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	require.Len(t, resp.Rooms, 2)
-	assert.Equal(t, "r1", resp.Rooms[0].RoomID)
-	assert.Equal(t, "general", resp.Rooms[0].Name)
+	assert.Equal(t, model.SearchRoom{RoomID: "r1", Name: "general", RoomType: "channel", SiteID: "site-a"}, resp.Rooms[0])
+	assert.Equal(t, "r2", resp.Rooms[1].RoomID)
+	assert.Equal(t, "site-b", resp.Rooms[1].SiteID)
 
 	require.Len(t, store.searchCalls, 1)
 	assert.Equal(t, []string{testSpotlightIndex}, store.searchCalls[0].indices)
-
-	require.Len(t, mongo.hydrateRoomsCalls, 1)
-	call := mongo.hydrateRoomsCalls[0]
-	assert.Equal(t, "alice", call.account)
-	assert.Equal(t, []string{"r1", "r2"}, call.roomIDs)
 }
 
 func TestHandler_SearchRooms_EmptyQueryRejected(t *testing.T) {
@@ -352,33 +321,17 @@ func TestHandler_SearchRooms_ESErrorSanitized(t *testing.T) {
 	assert.NotContains(t, rerr.Message, "es failed")
 }
 
-func TestHandler_SearchRooms_MongoErrorSanitized(t *testing.T) {
-	store := &fakeStore{
-		searchBody: json.RawMessage(`{"hits":{"total":{"value":1},"hits":[{"_source":{"roomId":"r1"}}]}}`),
-	}
-	mongo := &fakeMongo{hydrateRoomsErr: errors.New("mongo down")}
-	h := newTestHandler(store, mongo, nil, newFakeCache())
-	_, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Query: "general"})
-	require.Error(t, err)
-	var rerr *natsrouter.RouteError
-	require.True(t, errors.As(err, &rerr))
-	assert.Equal(t, natsrouter.CodeInternal, rerr.Code)
-	assert.NotContains(t, rerr.Message, "mongo down")
-}
-
-func TestHandler_SearchRooms_EmptyESResultSkipsMongo(t *testing.T) {
+func TestHandler_SearchRooms_EmptyESResult(t *testing.T) {
 	store := &fakeStore{
 		searchBody: json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`),
 	}
-	mongo := &fakeMongo{}
-	h := newTestHandler(store, mongo, nil, newFakeCache())
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
 
 	resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Query: "nope"})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotNil(t, resp.Rooms, "must be empty slice, not nil")
 	assert.Empty(t, resp.Rooms)
-	assert.Len(t, mongo.hydrateRoomsCalls, 0, "no Mongo call when ES returns no hits")
 }
 
 func TestHandler_SearchRooms_SizeClamped(t *testing.T) {

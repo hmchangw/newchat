@@ -40,11 +40,23 @@ type messageSearchHit struct {
 	ThreadParentCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty"`
 }
 
-// roomSearchHit is the ES `_source` shape for a spotlight hit used
-// during the subscription search flow. Only `roomId` is extracted; the other
-// fields are present in the index but unused after the Mongo hydration step.
+// roomSearchHit is the spotlight ES `_source` shape for a room
+// typeahead hit. search.rooms is served directly from this index
+// (one doc per (account, room)); the fields map onto model.SearchRoom.
 type roomSearchHit struct {
-	RoomID string `json:"roomId"`
+	RoomID   string `json:"roomId"`
+	RoomName string `json:"roomName"`
+	RoomType string `json:"roomType"`
+	SiteID   string `json:"siteId"`
+}
+
+func toSearchRoom(h roomSearchHit) model.SearchRoom {
+	return model.SearchRoom{
+		RoomID:   h.RoomID,
+		Name:     h.RoomName,
+		RoomType: h.RoomType,
+		SiteID:   h.SiteID,
+	}
 }
 
 func parseMessagesResponse(raw json.RawMessage) ([]messageSearchHit, int64, error) {
@@ -79,18 +91,17 @@ func toSearchMessage(hit *messageSearchHit) model.SearchMessage {
 	}
 }
 
-// parseRoomIDs extracts the ordered list of room IDs from a
-// spotlight ES response. The caller passes these IDs to HydrateRooms
-// for Mongo enrichment.
-func parseRoomIDs(raw json.RawMessage) ([]string, error) {
+// parseRooms extracts the ordered list of rooms from a spotlight ES
+// response, preserving ES relevance order.
+func parseRooms(raw json.RawMessage) ([]model.SearchRoom, error) {
 	var rr rawResponse[roomSearchHit]
 	if err := json.Unmarshal(raw, &rr); err != nil {
-		return nil, fmt.Errorf("parse subscription room IDs: %w", err)
+		return nil, fmt.Errorf("parse spotlight rooms response: %w", err)
 	}
 
-	ids := make([]string, 0, len(rr.Hits.Hits))
+	rooms := make([]model.SearchRoom, 0, len(rr.Hits.Hits))
 	for i := range rr.Hits.Hits {
-		ids = append(ids, rr.Hits.Hits[i].Source.RoomID)
+		rooms = append(rooms, toSearchRoom(rr.Hits.Hits[i].Source))
 	}
-	return ids, nil
+	return rooms, nil
 }

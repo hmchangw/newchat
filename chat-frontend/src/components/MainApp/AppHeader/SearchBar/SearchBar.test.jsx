@@ -34,8 +34,8 @@ describe('SearchBar', () => {
 
   it('fetches rooms after 250ms debounce when query >= 2 chars', async () => {
     const request = vi.fn().mockResolvedValue({
-      results: [
-        { roomId: 'r1', roomName: 'general', roomType: 'c', siteId: 'site-A' },
+      rooms: [
+        { roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' },
       ],
       total: 1,
     })
@@ -53,16 +53,16 @@ describe('SearchBar', () => {
     await waitFor(() => {
       expect(request).toHaveBeenCalledWith(
         'chat.user.alice.request.search.rooms',
-        { searchText: 'fro', scope: 'all', size: 8 }
+        { query: 'fro', roomType: 'all', size: 8 }
       )
     })
   })
 
   it('shows results in dropdown', async () => {
     const request = vi.fn().mockResolvedValue({
-      results: [
-        { roomId: 'r1', roomName: 'frontend-team', roomType: 'c', siteId: 'site-A' },
-        { roomId: 'r2', roomName: 'frontend-perf', roomType: 'c', siteId: 'site-A' },
+      rooms: [
+        { roomId: 'r1', name: 'frontend-team', roomType: 'c', siteId: 'site-A' },
+        { roomId: 'r2', name: 'frontend-perf', roomType: 'c', siteId: 'site-A' },
       ],
       total: 2,
     })
@@ -84,8 +84,8 @@ describe('SearchBar', () => {
   it('clicking result calls onSelectRoom and clears input', async () => {
     const onSelectRoom = vi.fn()
     const request = vi.fn().mockResolvedValue({
-      results: [
-        { roomId: 'r1', roomName: 'general', roomType: 'c', siteId: 'site-A' },
+      rooms: [
+        { roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' },
       ],
       total: 1,
     })
@@ -115,7 +115,7 @@ describe('SearchBar', () => {
     const onEnterSearch = vi.fn()
     useNats.mockReturnValue({
       user: { account: 'alice' },
-      request: vi.fn().mockResolvedValue({ results: [], total: 0 }),
+      request: vi.fn().mockResolvedValue({ rooms: [], total: 0 }),
     })
 
     render(<SearchBar onSelectRoom={vi.fn()} onEnterSearch={onEnterSearch} />)
@@ -131,7 +131,7 @@ describe('SearchBar', () => {
     useNats.mockReturnValue({
       user: { account: 'alice' },
       request: vi.fn().mockResolvedValue({
-        results: [{ roomId: 'r1', roomName: 'general', roomType: 'c', siteId: 'site-A' }],
+        rooms: [{ roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' }],
         total: 1,
       }),
     })

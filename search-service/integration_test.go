@@ -889,17 +889,16 @@ func TestIntegration_SearchUsers_ThirdPartyErrorReturnsInternal(t *testing.T) {
 
 // --- search.rooms integration ----------------------------------------
 
-// roomsFixture wires a real Mongo container alongside a real ES container
-// (for the spotlight index) and NATS. ES is needed to seed spotlight docs;
-// Mongo is needed to seed subscription docs for hydration.
+// roomsFixture wires a real ES container (for the spotlight index) and
+// NATS. search.rooms is served directly from the spotlight index, so no
+// Mongo is involved.
 type roomsFixture struct {
 	clientNATS *nats.Conn
-	mongoDB    *mongo.Database
 	esURL      string
 }
 
-// setupRoomsFixture stands up ES (spotlight index), Mongo (subscriptions), and
-// NATS. It registers t.Cleanup for all containers and returns a ready fixture.
+// setupRoomsFixture stands up ES (spotlight index) and NATS. It registers
+// t.Cleanup for all containers and returns a ready fixture.
 func setupRoomsFixture(t *testing.T) *roomsFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -936,8 +935,6 @@ func setupRoomsFixture(t *testing.T) *roomsFixture {
 	spotlightIndex := "spotlight-subs-test"
 	putTestSpotlightIndex(t, esURL, spotlightIndex)
 
-	mongoDB := testutil.MongoDB(t, "search_service_test")
-
 	natsURL := startNATS(t)
 	serverNC, err := natsutil.Connect(natsURL, "")
 	require.NoError(t, err, "connect nats (server side)")
@@ -951,9 +948,8 @@ func setupRoomsFixture(t *testing.T) *roomsFixture {
 	require.NoError(t, err, "build searchengine for subs fixture")
 
 	esStore := newESStore(engine, testUserRoomIndex)
-	mStore := newMongoStore(mongoDB)
 	cache := newValkeyCache(newSubsValkeyClient(t))
-	h := newHandler(esStore, mStore, nil, cache, handlerConfig{
+	h := newHandler(esStore, nil, nil, cache, handlerConfig{
 		DocCounts:               25,
 		MaxDocCounts:            100,
 		RestrictedRoomsCacheTTL: 5 * time.Minute,
@@ -969,7 +965,7 @@ func setupRoomsFixture(t *testing.T) *roomsFixture {
 	require.NoError(t, serverNC.NatsConn().Flush())
 	t.Cleanup(func() { _ = router.Shutdown(context.Background()) })
 
-	return &roomsFixture{clientNATS: clientNC, mongoDB: mongoDB, esURL: esURL}
+	return &roomsFixture{clientNATS: clientNC, esURL: esURL}
 }
 
 // newSubsValkeyClient starts a Valkey testcontainer and returns a connected
@@ -1021,7 +1017,6 @@ func putTestSpotlightIndex(t *testing.T, esURL, index string) {
 
 func TestIntegration_SearchRooms_HappyPath(t *testing.T) {
 	f := setupRoomsFixture(t)
-	ctx := context.Background()
 
 	const account = "alice"
 	now := time.Now().UTC()
@@ -1043,25 +1038,17 @@ func TestIntegration_SearchRooms_HappyPath(t *testing.T) {
 		"siteId":      "site-local",
 		"joinedAt":    now.Add(-24 * time.Hour).Format(time.RFC3339),
 	})
-
-	// Seed subscription docs for those rooms.
-	_, err := f.mongoDB.Collection("subscriptions").InsertMany(ctx, []any{
-		map[string]any{
-			"_id":      "sub-r1",
-			"roomId":   "r1",
-			"name":     "engineering-announcements",
-			"roomType": "channel",
-			"u":        map[string]any{"account": account},
-		},
-		map[string]any{
-			"_id":      "sub-r2",
-			"roomId":   "r2",
-			"name":     "engineering-random",
-			"roomType": "channel",
-			"u":        map[string]any{"account": account},
-		},
+	// A matching room owned by a different account. With the Mongo
+	// hydration removed, the spotlight userAccount term filter is the
+	// sole access boundary — this must not leak into alice's results.
+	seedDoc(t, f.esURL, "spotlight-subs-test", "spot-r3", map[string]any{
+		"roomId":      "r3",
+		"roomName":    "engineering-secret",
+		"roomType":    "channel",
+		"userAccount": "mallory",
+		"siteId":      "site-local",
+		"joinedAt":    now.Add(-12 * time.Hour).Format(time.RFC3339),
 	})
-	require.NoError(t, err)
 
 	reqBytes, err := json.Marshal(model.SearchRoomsRequest{Query: "engineering"})
 	require.NoError(t, err)
@@ -1072,15 +1059,19 @@ func TestIntegration_SearchRooms_HappyPath(t *testing.T) {
 	var resp model.SearchRoomsResponse
 	require.NoError(t, json.Unmarshal(msg.Data, &resp))
 
-	assert.Len(t, resp.Rooms, 2, "both rooms matching 'engineering' must be returned")
-	roomIDs := []string{resp.Rooms[0].RoomID, resp.Rooms[1].RoomID}
-	assert.Contains(t, roomIDs, "r1")
-	assert.Contains(t, roomIDs, "r2")
+	require.Len(t, resp.Rooms, 2, "both rooms matching 'engineering' must be returned")
+	byID := map[string]model.SearchRoom{}
+	for _, r := range resp.Rooms {
+		byID[r.RoomID] = r
+	}
+	assert.Equal(t, model.SearchRoom{RoomID: "r1", Name: "engineering-announcements", RoomType: "channel", SiteID: "site-local"}, byID["r1"])
+	assert.Equal(t, model.SearchRoom{RoomID: "r2", Name: "engineering-random", RoomType: "channel", SiteID: "site-local"}, byID["r2"])
+	_, leaked := byID["r3"]
+	assert.False(t, leaked, "rooms owned by another account must not leak")
 }
 
 func TestIntegration_SearchRooms_RoomTypeChannelFilter(t *testing.T) {
 	f := setupRoomsFixture(t)
-	ctx := context.Background()
 
 	const account = "bob"
 	now := time.Now().UTC()
@@ -1102,12 +1093,6 @@ func TestIntegration_SearchRooms_RoomTypeChannelFilter(t *testing.T) {
 		"joinedAt":    now.Add(-2 * time.Hour).Format(time.RFC3339),
 	})
 
-	_, err := f.mongoDB.Collection("subscriptions").InsertMany(ctx, []any{
-		map[string]any{"_id": "sub-b-r1", "roomId": "b-r1", "name": "bob-alice", "roomType": "dm", "u": map[string]any{"account": account}},
-		map[string]any{"_id": "sub-b-r2", "roomId": "b-r2", "name": "bob-channel", "roomType": "channel", "u": map[string]any{"account": account}},
-	})
-	require.NoError(t, err)
-
 	reqBytes, err := json.Marshal(model.SearchRoomsRequest{Query: "bob", RoomType: "channel"})
 	require.NoError(t, err)
 
@@ -1118,7 +1103,8 @@ func TestIntegration_SearchRooms_RoomTypeChannelFilter(t *testing.T) {
 	require.NoError(t, json.Unmarshal(msg.Data, &resp))
 
 	require.Len(t, resp.Rooms, 1)
-	assert.Equal(t, "b-r2", resp.Rooms[0].RoomID, "only the channel room must match roomType=channel filter")
+	assert.Equal(t, model.SearchRoom{RoomID: "b-r2", Name: "bob-channel", RoomType: "channel", SiteID: "site-local"}, resp.Rooms[0],
+		"only the channel room must match roomType=channel filter")
 }
 
 func TestIntegration_SearchRooms_EmptyQueryReturnsBadRequest(t *testing.T) {

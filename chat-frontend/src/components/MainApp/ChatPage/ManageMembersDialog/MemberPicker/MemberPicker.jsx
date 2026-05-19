@@ -23,7 +23,7 @@ const identity = (e) => e
 
 const renderChannelResult = (r) => (
   <div className="picker-result-line">
-    <strong>{r.roomName}</strong>
+    <strong>{r.name}</strong>
     <span className="picker-result-sub"> — {r.siteId}</span>
   </div>
 )
@@ -78,8 +78,8 @@ const MemberPicker = forwardRef(function MemberPicker(
 
   const channelFetcher = useCallback(
     async (q) => {
-      const resp = await searchRooms(nats, { searchText: q, scope: 'all', size: 8 })
-      return resp.results ?? []
+      const resp = await searchRooms(nats, { searchText: q, roomType: 'all', size: 8 })
+      return resp.rooms ?? []
     },
     [nats]
   )

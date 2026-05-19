@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 func TestParseMessagesResponse_HappyPath(t *testing.T) {
@@ -126,56 +128,58 @@ func TestToSearchMessage_ThreadParentBothFieldsCopied(t *testing.T) {
 	assert.True(t, got.ThreadParentMessageCreatedAt.Equal(tp))
 }
 
-func TestParseSubscriptionRoomIDs_HappyPath(t *testing.T) {
+func TestParseRooms_HappyPath(t *testing.T) {
 	body := json.RawMessage(`{
 		"hits": {
 			"total": {"value": 2},
 			"hits": [
 				{"_source": {
-					"roomId": "r1", "roomName": "general", "roomType": "p",
+					"roomId": "r1", "roomName": "general", "roomType": "channel",
 					"userAccount": "alice", "siteId": "site-a",
 					"joinedAt": "2026-04-01T12:00:00Z"
 				}},
 				{"_source": {
-					"roomId": "r2", "roomName": "alice-bob", "roomType": "d",
-					"userAccount": "alice", "siteId": "site-a",
+					"roomId": "r2", "roomName": "alice-bob", "roomType": "dm",
+					"userAccount": "alice", "siteId": "site-b",
 					"joinedAt": "2026-04-02T12:00:00Z"
 				}}
 			]
 		}
 	}`)
 
-	ids, err := parseRoomIDs(body)
+	rooms, err := parseRooms(body)
 	require.NoError(t, err)
-	require.Len(t, ids, 2)
-	assert.Equal(t, "r1", ids[0])
-	assert.Equal(t, "r2", ids[1])
+	require.Len(t, rooms, 2)
+	assert.Equal(t, model.SearchRoom{RoomID: "r1", Name: "general", RoomType: "channel", SiteID: "site-a"}, rooms[0])
+	assert.Equal(t, model.SearchRoom{RoomID: "r2", Name: "alice-bob", RoomType: "dm", SiteID: "site-b"}, rooms[1])
 }
 
-func TestParseSubscriptionRoomIDs_Empty(t *testing.T) {
+func TestParseRooms_Empty(t *testing.T) {
 	body := json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`)
-	ids, err := parseRoomIDs(body)
+	rooms, err := parseRooms(body)
 	require.NoError(t, err)
-	assert.Empty(t, ids)
+	assert.Empty(t, rooms)
+	assert.NotNil(t, rooms, "must be empty slice, not nil")
 }
 
-func TestParseSubscriptionRoomIDs_Malformed(t *testing.T) {
-	_, err := parseRoomIDs(json.RawMessage(`{`))
+func TestParseRooms_Malformed(t *testing.T) {
+	_, err := parseRooms(json.RawMessage(`{`))
 	assert.Error(t, err)
 }
 
-func TestParseSubscriptionRoomIDs_PreservesOrder(t *testing.T) {
+func TestParseRooms_PreservesOrder(t *testing.T) {
 	body := json.RawMessage(`{
 		"hits": {
 			"total": {"value": 3},
 			"hits": [
-				{"_source": {"roomId": "r3"}},
-				{"_source": {"roomId": "r1"}},
-				{"_source": {"roomId": "r2"}}
+				{"_source": {"roomId": "r3", "roomName": "c"}},
+				{"_source": {"roomId": "r1", "roomName": "a"}},
+				{"_source": {"roomId": "r2", "roomName": "b"}}
 			]
 		}
 	}`)
-	ids, err := parseRoomIDs(body)
+	rooms, err := parseRooms(body)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"r3", "r1", "r2"}, ids, "ES hit order must be preserved for Mongo hydration")
+	got := []string{rooms[0].RoomID, rooms[1].RoomID, rooms[2].RoomID}
+	assert.Equal(t, []string{"r3", "r1", "r2"}, got, "ES relevance order must be preserved")
 }

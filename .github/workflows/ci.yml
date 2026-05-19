@@ -143,7 +143,10 @@ jobs:
             full_scope=true
             files=""
           else
-            git fetch --quiet --depth=1 origin "$GITHUB_BASE_REF"
+            # Full base history (no --depth) so the three-dot
+            # origin/<base>...HEAD diff can resolve a merge base;
+            # a shallow depth-1 base fetch fails with "no merge base".
+            git fetch --quiet origin "$GITHUB_BASE_REF"
             files="$(git diff --name-only "origin/$GITHUB_BASE_REF"...HEAD)"
             echo "---changed files---"
             echo "$files"

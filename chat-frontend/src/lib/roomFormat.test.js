@@ -78,7 +78,7 @@ describe('roomDisplayName', () => {
 
 describe('roomFromSearchHit', () => {
   it('maps search-hit field names onto the room shape', () => {
-    const hit = { roomId: 'r1', roomName: 'frontend', roomType: 'channel', siteId: 'site-A' }
+    const hit = { roomId: 'r1', name: 'frontend', roomType: 'channel', siteId: 'site-A' }
     expect(roomFromSearchHit(hit)).toEqual({
       id: 'r1',
       name: 'frontend',

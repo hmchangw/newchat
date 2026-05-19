@@ -31,7 +31,7 @@ export function roomDisplayName(room) {
 export function roomFromSearchHit(hit) {
   return {
     id: hit.roomId,
-    name: hit.roomName,
+    name: hit.name,
     type: hit.roomType,
     siteId: hit.siteId,
   }

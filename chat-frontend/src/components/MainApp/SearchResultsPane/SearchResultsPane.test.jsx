@@ -15,10 +15,9 @@ describe('SearchResultsPane', () => {
 
   it('fetches and displays room results immediately', async () => {
     const request = vi.fn().mockResolvedValue({
-      results: [
-        { roomId: 'r1', roomName: 'general', roomType: 'c', siteId: 'site-A' },
+      rooms: [
+        { roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' },
       ],
-      total: 1,
     })
     useNats.mockReturnValue({
       user: { account: 'alice' },
@@ -40,7 +39,7 @@ describe('SearchResultsPane', () => {
 
     expect(request).toHaveBeenCalledWith(
       'chat.user.alice.request.search.rooms',
-      expect.objectContaining({ searchText: 'gen' })
+      { query: 'gen', roomType: 'all', size: 50 }
     )
   })
 
@@ -48,13 +47,12 @@ describe('SearchResultsPane', () => {
     const request = vi.fn().mockImplementation((subject) => {
       if (subject.includes('.search.rooms')) {
         return Promise.resolve({
-          results: [{ roomId: 'r1', roomName: 'general', roomType: 'c', siteId: 'site-A' }],
-          total: 1,
+          rooms: [{ roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' }],
         })
       }
       if (subject.includes('.search.messages')) {
         return Promise.resolve({
-          results: [
+          messages: [
             { messageId: 'm1', roomId: 'r1', content: 'hello', createdAt: '2026-04-17T10:00:00Z', userAccount: 'bob' },
           ],
           total: 1,
@@ -93,10 +91,9 @@ describe('SearchResultsPane', () => {
     const onSelectRoom = vi.fn()
     const onClose = vi.fn()
     const request = vi.fn().mockResolvedValue({
-      results: [
-        { roomId: 'r1', roomName: 'general', roomType: 'c', siteId: 'site-A' },
+      rooms: [
+        { roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' },
       ],
-      total: 1,
     })
     useNats.mockReturnValue({
       user: { account: 'alice' },
@@ -130,11 +127,11 @@ describe('SearchResultsPane', () => {
     const onClose = vi.fn()
     const request = vi.fn().mockImplementation((subject) => {
       if (subject.includes('.search.rooms')) {
-        return Promise.resolve({ results: [], total: 0 })
+        return Promise.resolve({ rooms: [] })
       }
       if (subject.includes('.search.messages')) {
         return Promise.resolve({
-          results: [
+          messages: [
             { messageId: 'm1', roomId: 'r1', content: 'hello world', createdAt: '2026-04-17T10:00:00Z', userAccount: 'bob' },
           ],
           total: 1,

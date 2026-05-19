@@ -12,9 +12,9 @@ export default function SearchBar({ onSelectRoom, onEnterSearch }) {
 
   const fetcher = useCallback(
     async (q) => {
-      const resp = await searchRooms(nats, { searchText: q, scope: 'all', size: 8 })
+      const resp = await searchRooms(nats, { searchText: q, roomType: 'all', size: 8 })
       setActiveIdx(0)
-      return resp.results ?? []
+      return resp.rooms ?? []
     },
     [nats]
   )
@@ -87,7 +87,7 @@ export default function SearchBar({ onSelectRoom, onEnterSearch }) {
               <div className="result-type">
                 {searchRoomPrefix(hit.roomType)}
               </div>
-              <div className="result-name">{hit.roomName}</div>
+              <div className="result-name">{hit.name}</div>
             </div>
           ))}
           <div className="search-footer">

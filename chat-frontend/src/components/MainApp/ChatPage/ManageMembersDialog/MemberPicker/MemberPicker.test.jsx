@@ -10,7 +10,7 @@ vi.mock('@/context/NatsContext', () => ({
 import { useNats } from '@/context/NatsContext'
 
 function setup(overrides = {}) {
-  const request = vi.fn().mockResolvedValue({ results: [] })
+  const request = vi.fn().mockResolvedValue({ rooms: [] })
   useNats.mockReturnValue({
     user: { account: 'alice', siteId: 'site-A' },
     request,
@@ -206,7 +206,7 @@ describe('MemberPicker', () => {
 
   it('debounces search.rooms (channels) and adds a ChannelRef when a result is clicked', async () => {
     const request = vi.fn().mockResolvedValue({
-      results: [{ roomId: 'r-x', roomName: 'project-x', siteId: 'site-B', roomType: 'c' }],
+      rooms: [{ roomId: 'r-x', name: 'project-x', siteId: 'site-B', roomType: 'c' }],
     })
     const onChannelsChange = vi.fn()
     useNats.mockReturnValue({ user: { account: 'alice', siteId: 'site-A' }, request })
@@ -225,7 +225,7 @@ describe('MemberPicker', () => {
     await waitFor(() => {
       expect(request).toHaveBeenCalledWith(
         'chat.user.alice.request.search.rooms',
-        expect.objectContaining({ searchText: 'pro' })
+        expect.objectContaining({ query: 'pro' })
       )
     })
     await waitFor(() => expect(screen.getByText('project-x')).toBeInTheDocument())

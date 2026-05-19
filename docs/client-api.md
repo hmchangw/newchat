@@ -1575,7 +1575,7 @@ See [Error envelope](#6-error-envelope-reference).
 **Subject:** `chat.user.{account}.request.search.rooms`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Full-text search across rooms the requester is subscribed to. Results are returned as `SearchRoom` projections hydrated from MongoDB (the caller's per-room subscription documents), not raw ES index fields.
+Full-text search across rooms the requester is subscribed to. Results are served directly from the spotlight ES index (one document per `(account, room)` pair), in ES relevance order.
 
 ##### Request body
 
@@ -1600,13 +1600,14 @@ Full-text search across rooms the requester is subscribed to. Results are return
 |---------|-------------------|-------|
 | `rooms` | array<SearchRoom> | Page of room results. Empty slice when no matches, never null. |
 
-`SearchRoom` (field list mirrors the legacy HTTP shape — see implementation):
+`SearchRoom` (projection of the spotlight ES document):
 
 | Field      | Type   | Notes |
 |------------|--------|-------|
 | `roomId`   | string | The room's ID. |
 | `name`     | string | The room's display name. |
 | `roomType` | string | `"channel"`, `"dm"`, or omitted for other types. |
+| `siteId`   | string | The room's home site. |
 
 ```json
 {
@@ -1614,7 +1615,8 @@ Full-text search across rooms the requester is subscribed to. Results are return
     {
       "roomId": "01970a4f8c2d7c9aQ",
       "name": "engineering-announcements",
-      "roomType": "channel"
+      "roomType": "channel",
+      "siteId": "site-a"
     }
   ]
 }
@@ -1622,12 +1624,12 @@ Full-text search across rooms the requester is subscribed to. Results are return
 
 ##### Error response
 
-See [Error envelope](#5-error-envelope-reference).
+See [Error envelope](#6-error-envelope-reference).
 
 | Code          | Reason |
 |---------------|--------|
 | `bad_request` | `query` is missing, empty, or whitespace-only; or `roomType` is `"app"` or an unrecognized value; or `size`/`offset` is negative. |
-| `internal`    | ES or MongoDB backend failure (transient or permanent). The raw error is never leaked to the client. |
+| `internal`    | Elasticsearch backend failure (transient or permanent). The raw error is never leaked to the client. |
 
 ##### Triggered events — success path
 

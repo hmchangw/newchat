@@ -29,7 +29,7 @@ export default function InRoomSearch({ roomId, onClose, onJumpToMessage }) {
     setSubmitted(true)
     try {
       const resp = await searchMessages(nats, { searchText: q, roomIds: [roomId], size: 50 })
-      setResults(resp.results ?? [])
+      setResults(resp.messages ?? [])
     } catch {
       setResults([])
     } finally {

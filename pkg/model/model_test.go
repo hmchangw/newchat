@@ -1769,14 +1769,14 @@ func TestSearchRoomsRequestJSON(t *testing.T) {
 func TestSearchRoomsResponseJSON(t *testing.T) {
 	resp := model.SearchRoomsResponse{
 		Rooms: []model.SearchRoom{
-			{RoomID: "r1", Name: "engineering-announcements", RoomType: "channel"},
-			{RoomID: "r2", Name: "alice-bob", RoomType: "dm"},
+			{RoomID: "r1", Name: "engineering-announcements", RoomType: "channel", SiteID: "site-a"},
+			{RoomID: "r2", Name: "alice-bob", RoomType: "dm", SiteID: "site-b"},
 		},
 	}
 	roundTrip(t, &resp, &model.SearchRoomsResponse{})
 }
 
-func TestSearchRoomsResponseJSON_EmptySubscriptions(t *testing.T) {
+func TestSearchRoomsResponseJSON_EmptyRooms(t *testing.T) {
 	resp := model.SearchRoomsResponse{Rooms: []model.SearchRoom{}}
 	data, err := json.Marshal(&resp)
 	require.NoError(t, err)

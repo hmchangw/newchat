@@ -8,27 +8,34 @@ export interface SearchMessagesArgs {
   size: number
 }
 
+/** Mirrors pkg/model.SearchMessage (the search.messages reply projection). */
 export interface SearchMessageHit {
   messageId: string
   roomId: string
   siteId: string
-  userId: string
   userAccount: string
   content: string
   createdAt: string
+  editedAt?: string
+  updatedAt?: string
   threadParentMessageId?: string
   threadParentMessageCreatedAt?: string
 }
 
 export interface SearchMessagesResponse {
+  messages: SearchMessageHit[]
   total: number
-  results: SearchMessageHit[]
 }
 
 /** Full-text search across messages. Optionally scope to a room subset. */
 export async function searchMessages(
   { user, request }: Nats,
-  args: SearchMessagesArgs,
+  { searchText, roomIds, size }: SearchMessagesArgs,
 ): Promise<SearchMessagesResponse> {
-  return request<SearchMessagesResponse>(searchMessagesSubject(user.account), args)
+  const payload: { query: string; roomIds?: string[]; size: number } = {
+    query: searchText,
+    size,
+  }
+  if (roomIds) payload.roomIds = roomIds
+  return request<SearchMessagesResponse>(searchMessagesSubject(user.account), payload)
 }
