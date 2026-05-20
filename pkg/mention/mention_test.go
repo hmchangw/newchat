@@ -154,3 +154,74 @@ func TestResolve(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveFromParsed(t *testing.T) {
+	aliceUser := model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice Wang", ChineseName: "愛麗絲"}
+	bobUser := model.User{ID: "u-bob", Account: "bob", SiteID: "site-a", EngName: "Bob Chen", ChineseName: "鮑勃"}
+
+	tests := []struct {
+		name           string
+		parsed         ParseResult
+		users          map[string]model.User
+		wantParts      []model.Participant
+		wantAccounts   []string
+		wantMentionAll bool
+	}{
+		{
+			name:   "all mentions resolved",
+			parsed: ParseResult{Accounts: []string{"alice", "bob"}},
+			users:  map[string]model.User{"alice": aliceUser, "bob": bobUser},
+			wantParts: []model.Participant{
+				{UserID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice Wang", ChineseName: "愛麗絲"},
+				{UserID: "u-bob", Account: "bob", SiteID: "site-a", EngName: "Bob Chen", ChineseName: "鮑勃"},
+			},
+			wantAccounts: []string{"alice", "bob"},
+		},
+		{
+			name:           "mention all appends synthetic participant",
+			parsed:         ParseResult{Accounts: []string{"alice"}, MentionAll: true},
+			users:          map[string]model.User{"alice": aliceUser},
+			wantMentionAll: true,
+			wantAccounts:   []string{"alice"},
+			wantParts: []model.Participant{
+				{UserID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice Wang", ChineseName: "愛麗絲"},
+				{Account: "all", EngName: "all"},
+			},
+		},
+		{
+			name:         "unknown account silently omitted",
+			parsed:       ParseResult{Accounts: []string{"alice", "ghost"}},
+			users:        map[string]model.User{"alice": aliceUser},
+			wantAccounts: []string{"alice", "ghost"},
+			wantParts: []model.Participant{
+				{UserID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice Wang", ChineseName: "愛麗絲"},
+			},
+		},
+		{
+			name:   "no mentions, no MentionAll",
+			parsed: ParseResult{},
+		},
+		{
+			name:           "MentionAll only",
+			parsed:         ParseResult{MentionAll: true},
+			wantMentionAll: true,
+			wantParts:      []model.Participant{{Account: "all", EngName: "all"}},
+		},
+		{
+			name:         "nil users map is treated like empty",
+			parsed:       ParseResult{Accounts: []string{"alice"}},
+			users:        nil,
+			wantAccounts: []string{"alice"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveFromParsed(tt.parsed, tt.users)
+			require.NotNil(t, got)
+			assert.Equal(t, tt.wantAccounts, got.Accounts)
+			assert.Equal(t, tt.wantMentionAll, got.MentionAll)
+			assert.Equal(t, tt.wantParts, got.Participants)
+		})
+	}
+}

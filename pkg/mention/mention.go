@@ -61,36 +61,54 @@ type ResolveResult struct {
 // (MentionAll and Accounts populated, Participants empty) with the error.
 func Resolve(ctx context.Context, content string, lookupFn LookupFunc) (*ResolveResult, error) {
 	parsed := Parse(content)
+	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
+		return &ResolveResult{Accounts: parsed.Accounts, MentionAll: parsed.MentionAll}, nil
+	}
+
+	users := map[string]model.User{}
+	if len(parsed.Accounts) > 0 {
+		fetched, err := lookupFn(ctx, parsed.Accounts)
+		if err != nil {
+			return &ResolveResult{Accounts: parsed.Accounts, MentionAll: parsed.MentionAll},
+				fmt.Errorf("find mentioned users: %w", err)
+		}
+		users = make(map[string]model.User, len(fetched))
+		for i := range fetched {
+			users[fetched[i].Account] = fetched[i]
+		}
+	}
+	return ResolveFromParsed(parsed, users), nil
+}
+
+// ResolveFromParsed builds the ResolveResult from a pre-parsed input and a
+// caller-supplied account→user map. Use this when the caller has already
+// done the user lookup (e.g. broadcast-worker fetches sender + mentions in a
+// single round-trip, then resolves without re-parsing or re-querying).
+// Missing accounts in users are silently omitted from Participants — same
+// semantics as Resolve, which omits unknown accounts returned by lookupFn.
+func ResolveFromParsed(parsed ParseResult, users map[string]model.User) *ResolveResult {
 	result := &ResolveResult{
 		MentionAll: parsed.MentionAll,
 		Accounts:   parsed.Accounts,
 	}
-	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
-		return result, nil
-	}
-
-	if len(parsed.Accounts) > 0 {
-		users, err := lookupFn(ctx, parsed.Accounts)
-		if err != nil {
-			return result, fmt.Errorf("find mentioned users: %w", err)
+	for _, account := range parsed.Accounts {
+		u, ok := users[account]
+		if !ok {
+			continue
 		}
-		for i := range users {
-			result.Participants = append(result.Participants, model.Participant{
-				UserID:      users[i].ID,
-				Account:     users[i].Account,
-				SiteID:      users[i].SiteID,
-				ChineseName: users[i].ChineseName,
-				EngName:     users[i].EngName,
-			})
-		}
+		result.Participants = append(result.Participants, model.Participant{
+			UserID:      u.ID,
+			Account:     u.Account,
+			SiteID:      u.SiteID,
+			ChineseName: u.ChineseName,
+			EngName:     u.EngName,
+		})
 	}
-
 	if parsed.MentionAll {
 		result.Participants = append(result.Participants, model.Participant{
 			Account: "all",
 			EngName: "all",
 		})
 	}
-
-	return result, nil
+	return result
 }
