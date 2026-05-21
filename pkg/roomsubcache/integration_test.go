@@ -1,6 +1,6 @@
 //go:build integration
 
-package roomsubcache_test
+package roomsubcache
 
 import (
 	"context"
@@ -10,22 +10,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 func setupValkey(t *testing.T) valkeyutil.Client {
 	t.Helper()
-	return valkeyutil.WrapClusterClient(testutil.StartValkeyCluster(t))
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	return valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
 }
 
 func TestValkeyCache_Integration_SetGetInvalidate(t *testing.T) {
 	client := setupValkey(t)
-	cache := roomsubcache.NewValkeyCache(client)
+	cache := NewValkeyCache(client)
 	ctx := context.Background()
 
-	members := []roomsubcache.Member{
+	members := []Member{
 		{ID: "u1", Account: "alice"},
 		{ID: "u2", Account: "bob"},
 	}
@@ -43,7 +43,7 @@ func TestValkeyCache_Integration_SetGetInvalidate(t *testing.T) {
 
 func TestValkeyCache_Integration_MissOnUnsetRoom(t *testing.T) {
 	client := setupValkey(t)
-	cache := roomsubcache.NewValkeyCache(client)
+	cache := NewValkeyCache(client)
 	ctx := context.Background()
 
 	_, err := cache.Get(ctx, "never-set")
@@ -52,10 +52,10 @@ func TestValkeyCache_Integration_MissOnUnsetRoom(t *testing.T) {
 
 func TestValkeyCache_Integration_TTLExpires(t *testing.T) {
 	client := setupValkey(t)
-	cache := roomsubcache.NewValkeyCache(client)
+	cache := NewValkeyCache(client)
 	ctx := context.Background()
 
-	require.NoError(t, cache.Set(ctx, "room-ttl", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Second))
+	require.NoError(t, cache.Set(ctx, "room-ttl", []Member{{ID: "u1", Account: "a"}}, time.Second))
 
 	// Poll for expiry — Valkey honors TTL with sub-second granularity but
 	// asserting on a precise deadline is flaky. Allow up to 5s.
@@ -73,10 +73,10 @@ func TestValkeyCache_Integration_TTLExpires(t *testing.T) {
 
 func TestValkeyCache_Integration_EmptyListIsCacheHit(t *testing.T) {
 	client := setupValkey(t)
-	cache := roomsubcache.NewValkeyCache(client)
+	cache := NewValkeyCache(client)
 	ctx := context.Background()
 
-	require.NoError(t, cache.Set(ctx, "empty-room", []roomsubcache.Member{}, time.Minute))
+	require.NoError(t, cache.Set(ctx, "empty-room", []Member{}, time.Minute))
 
 	got, err := cache.Get(ctx, "empty-room")
 	require.NoError(t, err)

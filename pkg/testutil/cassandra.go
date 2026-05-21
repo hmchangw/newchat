@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -18,10 +19,11 @@ import (
 const cassandraImage = "cassandra:5"
 
 var (
-	cassOnce    sync.Once
-	cassHost    string
-	cassSession *gocql.Session
-	cassInitErr error
+	cassOnce      sync.Once
+	cassContainer testcontainers.Container
+	cassHost      string
+	cassSession   *gocql.Session
+	cassInitErr   error
 )
 
 func ensureCassandraSession() (string, *gocql.Session, error) {
@@ -70,9 +72,31 @@ func ensureCassandraSession() (string, *gocql.Session, error) {
 		}
 		cassHost = addr
 		cassSession = s
+		cassContainer = container
 	})
 	return cassHost, cassSession, cassInitErr
 }
+
+// TerminateCassandra closes the shared session and stops the shared
+// container. Best-effort, idempotent.
+func TerminateCassandra() {
+	if cassSession != nil {
+		cassSession.Close()
+		cassSession = nil
+	}
+	if cassContainer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := cassContainer.Terminate(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "terminate shared cassandra: %v\n", err)
+		}
+		cassContainer = nil
+	}
+}
+
+// EnsureCassandra starts the shared Cassandra container if not already
+// started. No-t variant intended for TestMain pre-warming.
+func EnsureCassandra() error { _, _, err := ensureCassandraSession(); return err }
 
 // CassandraKeyspace creates an isolated keyspace for the test (SimpleStrategy, RF=1).
 // Returns the keyspace name, an admin session for DDL, and the container host.

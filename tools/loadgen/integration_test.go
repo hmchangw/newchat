@@ -5,56 +5,19 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/mongodb"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
-	"github.com/hmchangw/chat/pkg/testutil/testimages"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
-
-// setupNATS starts a JetStream-enabled NATS container via the generic
-// testcontainers interface (no dedicated NATS module is required).
-func setupNATS(t *testing.T) (string, func()) {
-	t.Helper()
-	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        testimages.NATS,
-			Cmd:          []string{"-js"},
-			ExposedPorts: []string{"4222/tcp"},
-			WaitingFor:   wait.ForLog("Server is ready").WithStartupTimeout(30 * time.Second),
-		},
-		Started: true,
-	})
-	require.NoError(t, err)
-	host, err := c.Host(ctx)
-	require.NoError(t, err)
-	port, err := c.MappedPort(ctx, "4222")
-	require.NoError(t, err)
-	return fmt.Sprintf("nats://%s:%s", host, port.Port()), func() { _ = c.Terminate(ctx) }
-}
-
-func setupMongo(t *testing.T) (string, func()) {
-	t.Helper()
-	ctx := context.Background()
-	c, err := mongodb.Run(ctx, testimages.Mongo)
-	require.NoError(t, err)
-	uri, err := c.ConnectionString(ctx)
-	require.NoError(t, err)
-	return uri, func() { _ = c.Terminate(ctx) }
-}
 
 // TestLoadgenSmallPreset_EndToEnd verifies the generator publishes messages,
 // a fake gatekeeper forwards them to MESSAGES_CANONICAL, two JetStream
@@ -62,12 +25,7 @@ func setupMongo(t *testing.T) (string, func()) {
 // and MongoDB shows the seeded room data.
 func TestLoadgenSmallPreset_EndToEnd(t *testing.T) {
 	ctx := context.Background()
-	natsURI, stopNATS := setupNATS(t)
-	defer stopNATS()
-	mongoURI, stopMongo := setupMongo(t)
-	defer stopMongo()
-
-	nc, err := nats.Connect(natsURI)
+	nc, err := nats.Connect(testutil.NATS(t))
 	require.NoError(t, err)
 	defer nc.Drain()
 
@@ -95,11 +53,7 @@ func TestLoadgenSmallPreset_EndToEnd(t *testing.T) {
 		defer cc.Stop()
 	}
 
-	// Connect Mongo and seed fixtures.
-	client, err := mongoutil.Connect(ctx, mongoURI, "", "")
-	require.NoError(t, err)
-	defer mongoutil.Disconnect(ctx, client)
-	db := client.Database("chat")
+	db := testutil.MongoDB(t, "loadgen")
 
 	preset, _ := BuiltinPreset("small")
 	fixtures := BuildFixtures(&preset, 42, siteID)
@@ -168,10 +122,8 @@ func TestLoadgenSmallPreset_EndToEnd(t *testing.T) {
 	defer cancel()
 	require.NoError(t, gen.Run(runCtx))
 
-	// Allow trailing events to flow.
 	time.Sleep(2 * time.Second)
 
-	// Assert the canonical stream drained.
 	for _, durable := range []string{"message-worker", "broadcast-worker"} {
 		cons, err := js.Consumer(ctx, canonical.Name, durable)
 		require.NoError(t, err)
@@ -180,9 +132,10 @@ func TestLoadgenSmallPreset_EndToEnd(t *testing.T) {
 		require.Equal(t, uint64(0), info.NumPending, "durable %s still has pending", durable)
 	}
 
-	// Assert seed data is visible in Mongo.
 	var room model.Room
 	err = db.Collection("rooms").FindOne(ctx, bson.M{"_id": fixtures.Rooms[0].ID}).Decode(&room)
 	require.NoError(t, err)
 	require.Equal(t, fixtures.Rooms[0].ID, room.ID)
 }
+
+func TestMain(m *testing.M) { testutil.RunTests(m) }

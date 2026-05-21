@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,139 +19,69 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
-	"github.com/hmchangw/chat/pkg/testutil/testimages"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-// Package-level singletons — one Elasticsearch + one NATS JetStream container
-// shared across all tests in this package. Tests isolate themselves via unique
-// index / stream names (already the case in this suite). On VFS storage,
-// spawning ES per-test is prohibitive — a 120s startup * 7 tests = 14min.
+// Package-level NATS connection + JetStream client. Connected once in
+// TestMain and shared by every test. The underlying NATS and ES
+// containers come from pkg/testutil.
 var (
-	testESURL   string
-	testJS      jetstream.JetStream
-	testNATSCon *nats.Conn
+	testJS         jetstream.JetStream
+	testNATSCon    *nats.Conn
+	testNATSConErr error
+	testNATSOnce   sync.Once
 )
 
+// TestMain pre-warms shared containers in parallel; fails fast on error.
+// Custom wrap (not testutil.RunTestsWithPrewarm) so we can close the
+// lazy-init JetStream conn between m.Run and TerminateAll.
 func TestMain(m *testing.M) {
-	// Wrap the setup logic in an inner function so `defer` runs for every
-	// successfully-created resource before TestMain returns, regardless of
-	// which error branch we take. Keeps cleanup in one place instead of
-	// reinvented cascades at each error site.
-	os.Exit(runTestMain(m))
-}
-
-func runTestMain(m *testing.M) int {
-	ctx := context.Background()
-
-	esContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        testimages.Elasticsearch,
-			ExposedPorts: []string{"9200/tcp"},
-			Env: map[string]string{
-				"discovery.type":         "single-node",
-				"xpack.security.enabled": "false",
-				"cluster.routing.allocation.disk.threshold_enabled": "false",
-				"ES_JAVA_OPTS": "-Xms512m -Xmx512m",
-			},
-			WaitingFor: wait.ForAll(
-				wait.ForHTTP("/").WithPort("9200/tcp").WithStartupTimeout(120*time.Second),
-				wait.ForHTTP("/_cluster/health?wait_for_status=yellow&timeout=60s").
-					WithPort("9200/tcp").
-					WithStartupTimeout(120*time.Second),
-			),
-		},
-		Started: true,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "start elasticsearch: %v\n", err)
-		return 1
+	if err := testutil.PrewarmFailFast(testutil.EnsureElasticsearch, testutil.EnsureNATS); err != nil {
+		fmt.Fprintf(os.Stderr, "prewarm shared containers: %v\n", err)
+		testutil.TerminateAll()
+		os.Exit(1)
 	}
-	defer func() {
-		if err := esContainer.Terminate(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate elasticsearch: %v\n", err)
-		}
-	}()
-	esHost, err := esContainer.Host(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "get es host: %v\n", err)
-		return 1
+	code := m.Run()
+	if testNATSCon != nil {
+		testNATSCon.Close()
 	}
-	esPort, err := esContainer.MappedPort(ctx, "9200")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "get es port: %v\n", err)
-		return 1
-	}
-	testESURL = fmt.Sprintf("http://%s:%s", esHost, esPort.Port())
-
-	natsContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        testimages.NATS,
-			ExposedPorts: []string{"4222/tcp"},
-			Cmd:          []string{"--jetstream"},
-			WaitingFor:   wait.ForLog("Server is ready").WithStartupTimeout(30 * time.Second),
-		},
-		Started: true,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "start nats: %v\n", err)
-		return 1
-	}
-	defer func() {
-		if err := natsContainer.Terminate(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate nats: %v\n", err)
-		}
-	}()
-	natsHost, err := natsContainer.Host(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "get nats host: %v\n", err)
-		return 1
-	}
-	natsPort, err := natsContainer.MappedPort(ctx, "4222")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "get nats port: %v\n", err)
-		return 1
-	}
-	natsURL := fmt.Sprintf("nats://%s:%s", natsHost, natsPort.Port())
-	nc, err := nats.Connect(natsURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "connect nats: %v\n", err)
-		return 1
-	}
-	defer nc.Close()
-	js, err := jetstream.New(nc)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init jetstream: %v\n", err)
-		return 1
-	}
-	testJS = js
-	testNATSCon = nc
-
-	return m.Run()
+	testutil.TerminateAll()
+	os.Exit(code)
 }
 
 // setupElasticsearch returns the shared ES URL. Tests must use unique index
 // names to stay isolated — the existing suite does.
 func setupElasticsearch(t *testing.T) string {
 	t.Helper()
-	if testESURL == "" {
-		t.Fatal("testESURL is empty — TestMain did not run")
-	}
-	return testESURL
+	return testutil.Elasticsearch(t)
 }
 
 // setupNATSJetStream returns the shared (JetStream, Conn). Tests must use
 // unique stream names to stay isolated — the existing suite does.
 func setupNATSJetStream(t *testing.T) (jetstream.JetStream, *nats.Conn) {
 	t.Helper()
-	if testJS == nil || testNATSCon == nil {
-		t.Fatal("testJS/testNATSCon is nil — TestMain did not run")
+	testNATSOnce.Do(func() {
+		nc, err := nats.Connect(testutil.NATS(t))
+		if err != nil {
+			testNATSConErr = fmt.Errorf("connect nats: %w", err)
+			return
+		}
+		js, err := jetstream.New(nc)
+		if err != nil {
+			nc.Close()
+			testNATSConErr = fmt.Errorf("init jetstream: %w", err)
+			return
+		}
+		testNATSCon = nc
+		testJS = js
+	})
+	if testNATSConErr != nil {
+		t.Fatalf("nats jetstream setup: %v", testNATSConErr)
 	}
 	return testJS, testNATSCon
 }

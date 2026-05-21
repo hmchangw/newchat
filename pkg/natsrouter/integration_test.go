@@ -1,6 +1,6 @@
 //go:build integration
 
-package natsrouter_test
+package natsrouter
 
 import (
 	"context"
@@ -13,37 +13,20 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
 
-	"github.com/hmchangw/chat/pkg/natsrouter"
-	"github.com/hmchangw/chat/pkg/testutil/testimages"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-// setupNATS starts a real NATS container and returns a connected otelnats
-// client. Required to surface timing races that in-process NATS cannot
+// setupNATS returns an otelnats client connected to the process-shared
+// NATS. Required to surface timing races that in-process NATS cannot
 // reproduce (real TCP, real server dispatch goroutines, real latency).
 func setupNATS(t *testing.T) *otelnats.Conn {
 	t.Helper()
-	ctx := context.Background()
-
-	container, err := tcnats.Run(ctx, testimages.NATS)
-	require.NoError(t, err, "start NATS container")
-	t.Cleanup(func() {
-		// Best-effort container teardown; failures here don't affect outcome.
-		if err := container.Terminate(ctx); err != nil {
-			t.Logf("terminate nats container: %v", err)
-		}
-	})
-
-	url, err := container.ConnectionString(ctx)
-	require.NoError(t, err, "nats connection string")
-
-	nc, err := otelnats.Connect(url)
+	nc, err := otelnats.Connect(testutil.NATS(t))
 	require.NoError(t, err, "connect to NATS")
 	t.Cleanup(nc.Close)
-
 	return nc
 }
 
@@ -66,17 +49,17 @@ type echoResp struct {
 // override is needed.
 func TestIntegration_ConcurrentRequestsWithCopy(t *testing.T) {
 	nc := setupNATS(t)
-	r := natsrouter.New(nc, "integration-concurrent")
-	r.Use(natsrouter.RequestID())
-	r.Use(natsrouter.Recovery())
-	r.Use(natsrouter.Logging())
+	r := New(nc, "integration-concurrent")
+	r.Use(RequestID())
+	r.Use(Recovery())
+	r.Use(Logging())
 
 	// Async goroutines use Copy() — we count them to prove they all ran.
 	var asyncCompleted atomic.Int64
 	var asyncStarted sync.WaitGroup
 
-	natsrouter.Register(r, "chat.user.{account}.echo.{room}",
-		func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+	Register(r, "chat.user.{account}.echo.{room}",
+		func(c *Context, req echoReq) (*echoResp, error) {
 			c.Set("account", c.Param("account"))
 			c.Set("room", c.Param("room"))
 
@@ -154,13 +137,13 @@ func TestIntegration_ShutdownUnderLoad(t *testing.T) {
 	for cycle := 0; cycle < cycles; cycle++ {
 		t.Run(fmt.Sprintf("cycle-%d", cycle), func(t *testing.T) {
 			nc := setupNATS(t)
-			r := natsrouter.New(nc, "integration-shutdown")
+			r := New(nc, "integration-shutdown")
 
 			var completed atomic.Int64
 			started := make(chan struct{})
 			var startOnce sync.Once
-			natsrouter.Register(r, "load.{id}",
-				func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+			Register(r, "load.{id}",
+				func(c *Context, req echoReq) (*echoResp, error) {
 					startOnce.Do(func() { close(started) })
 					time.Sleep(time.Duration(1+req.Seq%7) * time.Millisecond)
 					completed.Add(1)
@@ -201,7 +184,7 @@ func TestIntegration_ShutdownUnderLoad(t *testing.T) {
 // reply rather than blocking.
 func TestIntegration_BusyReplyOnSaturation(t *testing.T) {
 	nc := setupNATS(t)
-	r := natsrouter.New(nc, "integration-busy", natsrouter.WithMaxConcurrency(1))
+	r := New(nc, "integration-busy", WithMaxConcurrency(1))
 
 	gate := make(chan struct{})
 	// Safety net: if any assertion below fails before we close the gate,
@@ -220,8 +203,8 @@ func TestIntegration_BusyReplyOnSaturation(t *testing.T) {
 	// signals `entered` before blocking on `gate`, so the busy-reply poll
 	// only starts once the slot is genuinely held.
 	entered := make(chan struct{}, 1)
-	natsrouter.Register(r, "busy.{id}",
-		func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+	Register(r, "busy.{id}",
+		func(c *Context, req echoReq) (*echoResp, error) {
 			select {
 			case entered <- struct{}{}:
 			default:
@@ -259,9 +242,9 @@ func TestIntegration_BusyReplyOnSaturation(t *testing.T) {
 	data, _ := json.Marshal(echoReq{Seq: 2})
 	resp, err := nc.Request(context.Background(), "busy.2", data, 2*time.Second)
 	require.NoError(t, err)
-	var re natsrouter.RouteError
+	var re RouteError
 	require.NoError(t, json.Unmarshal(resp.Data, &re))
-	assert.Equal(t, natsrouter.CodeUnavailable, re.Code, "expected busy reply once slot is held")
+	assert.Equal(t, CodeUnavailable, re.Code, "expected busy reply once slot is held")
 
 	// Release the gate; first request must complete normally.
 	close(gate)
@@ -287,10 +270,10 @@ func TestIntegration_SpawnSitePanicBackstop(t *testing.T) {
 	// the follow-up "ok" request acquire a slot even if cleanup were
 	// broken, masking the regression. cap=1 forces the test to actually
 	// observe slot release.
-	r := natsrouter.New(nc, "integration-panic-backstop", natsrouter.WithMaxConcurrency(1))
+	r := New(nc, "integration-panic-backstop", WithMaxConcurrency(1))
 
-	natsrouter.Register(r, "boom.{id}",
-		func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+	Register(r, "boom.{id}",
+		func(c *Context, req echoReq) (*echoResp, error) {
 			panic("intentional handler panic")
 		})
 
@@ -307,8 +290,8 @@ func TestIntegration_SpawnSitePanicBackstop(t *testing.T) {
 	assert.Equal(t, "internal error", payload.Error, "expected internal error reply from backstop")
 
 	// Process survived: a follow-up normal request must succeed.
-	natsrouter.Register(r, "ok.{id}",
-		func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+	Register(r, "ok.{id}",
+		func(c *Context, req echoReq) (*echoResp, error) {
 			return &echoResp{Seq: req.Seq}, nil
 		})
 	data, _ = json.Marshal(echoReq{Seq: 2})
@@ -324,7 +307,7 @@ func TestIntegration_SpawnSitePanicBackstop(t *testing.T) {
 // model) have returned, not merely until the dispatcher has stopped.
 func TestIntegration_ShutdownWaitsForSpawnedHandlers(t *testing.T) {
 	nc := setupNATS(t)
-	r := natsrouter.New(nc, "integration-shutdown-wg", natsrouter.WithMaxConcurrency(8))
+	r := New(nc, "integration-shutdown-wg", WithMaxConcurrency(8))
 
 	gate := make(chan struct{})
 	// Safety net: any test failure before close(gate) below would pin
@@ -341,8 +324,8 @@ func TestIntegration_ShutdownWaitsForSpawnedHandlers(t *testing.T) {
 	}()
 	var entered atomic.Int64
 	var completed atomic.Int64
-	natsrouter.Register(r, "wg.{id}",
-		func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+	Register(r, "wg.{id}",
+		func(c *Context, req echoReq) (*echoResp, error) {
 			entered.Add(1)
 			<-gate
 			completed.Add(1)
@@ -416,13 +399,13 @@ func TestIntegration_MultipleRouterInstances(t *testing.T) {
 	const queue = "integration-queue-group"
 	const instances = 3
 
-	routers := make([]*natsrouter.Router, instances)
+	routers := make([]*Router, instances)
 	hits := make([]atomic.Int64, instances)
 	for idx := 0; idx < instances; idx++ {
 		idx := idx
-		r := natsrouter.New(nc, queue)
-		natsrouter.Register(r, "qg.work.{id}",
-			func(c *natsrouter.Context, req echoReq) (*echoResp, error) {
+		r := New(nc, queue)
+		Register(r, "qg.work.{id}",
+			func(c *Context, req echoReq) (*echoResp, error) {
 				hits[idx].Add(1)
 				return &echoResp{Seq: req.Seq}, nil
 			})
@@ -449,7 +432,7 @@ func TestIntegration_MultipleRouterInstances(t *testing.T) {
 	// Each Shutdown call gets its own deadline. Reusing one ticking context
 	// would mean the cleanup loop could see an already-expired ctx after
 	// the warmup-shutdown + 100 sequential RPCs above.
-	shutdown := func(r *natsrouter.Router) {
+	shutdown := func(r *Router) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		require.NoError(t, r.Shutdown(ctx))

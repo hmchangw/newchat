@@ -13,7 +13,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	natsmod "github.com/testcontainers/testcontainers-go/modules/nats"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
-	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
 func setupMongo(t *testing.T) *mongo.Database {
@@ -577,20 +575,13 @@ func TestHandleMemberAdded_DM_PersistsRemoteCounterpartSub(t *testing.T) {
 	assert.False(t, bobSub.IsSubscribed, "DM does not set IsSubscribed=true")
 }
 
-// setupNATS starts a NATS container with JetStream enabled and returns a
-// JetStream client tied to the test's lifetime.
+// setupNATS connects to the process-shared NATS (JetStream enabled in
+// testutil) and returns a JetStream client tied to the test's lifetime.
 func setupNATS(t *testing.T) (context.Context, jetstream.JetStream) {
 	t.Helper()
 	ctx := context.Background()
 
-	c, err := natsmod.Run(ctx, testimages.NATS)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Terminate(ctx) })
-
-	url, err := c.ConnectionString(ctx)
-	require.NoError(t, err)
-
-	nc, err := nats.Connect(url)
+	nc, err := nats.Connect(testutil.NATS(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { nc.Close() })
 

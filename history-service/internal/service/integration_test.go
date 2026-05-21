@@ -1,6 +1,6 @@
 //go:build integration
 
-package service_test
+package service
 
 import (
 	"context"
@@ -16,7 +16,6 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
-	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -139,7 +138,7 @@ func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	pub := &recordingPublisher{}
-	svc := service.New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, 730*24*time.Hour)
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, 730*24*time.Hour)
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-integ"
@@ -202,7 +201,7 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	pub := &recordingPublisher{}
-	svc := service.New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, 730*24*time.Hour)
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, 730*24*time.Hour)
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-del-integ"
@@ -262,7 +261,7 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365)
 	pub := &recordingPublisher{}
-	svc := service.New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, 730*24*time.Hour)
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, 730*24*time.Hour)
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-parent-cascade"

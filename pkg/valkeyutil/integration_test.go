@@ -22,7 +22,8 @@ import (
 // ConnectCluster's error-wrapping path is covered by TestConnectCluster_ErrorPath.
 func setupClusterClient(t *testing.T) Client {
 	t.Helper()
-	return &clusterClient{c: testutil.StartValkeyCluster(t)}
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	return &clusterClient{c: testutil.SharedValkeyCluster(t)}
 }
 
 func TestClusterRedisClient_Integration_GetSetDel(t *testing.T) {

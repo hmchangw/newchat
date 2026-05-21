@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
 // TestMembersSustained_EndToEnd verifies the full members-sustained pipeline
@@ -25,9 +26,7 @@ import (
 // non-zero traffic.
 func TestMembersSustained_EndToEnd(t *testing.T) {
 	ctx := context.Background()
-	natsURL, stopNATS := setupNATS(t)
-	defer stopNATS()
-
+	natsURL := testutil.NATS(t)
 	nc, err := nats.Connect(natsURL)
 	require.NoError(t, err)
 	defer nc.Drain() //nolint:errcheck

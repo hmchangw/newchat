@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -13,15 +14,17 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/testcontainers/testcontainers-go"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
 var (
-	minioOnce    sync.Once
-	minioClient  *minio.Client
-	minioInitErr error
+	minioOnce      sync.Once
+	minioClient    *minio.Client
+	minioContainer testcontainers.Container
+	minioInitErr   error
 )
 
 func ensureMinIOClient() (*minio.Client, error) {
@@ -54,9 +57,27 @@ func ensureMinIOClient() (*minio.Client, error) {
 			return
 		}
 		minioClient = c
+		minioContainer = container
 	})
 	return minioClient, minioInitErr
 }
+
+// TerminateMinIO stops the shared MinIO container. Best-effort, idempotent.
+func TerminateMinIO() {
+	if minioContainer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := minioContainer.Terminate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "terminate shared minio: %v\n", err)
+	}
+	minioContainer = nil
+}
+
+// EnsureMinIO starts the shared MinIO container if not already started.
+// No-t variant intended for TestMain pre-warming.
+func EnsureMinIO() error { _, err := ensureMinIOClient(); return err }
 
 // MinIO returns a shared client + per-test bucket (fnv-hashed from t.Name(); cleaned up via t.Cleanup).
 // Prefix must be S3-valid (3-46 lowercase chars/digits/hyphens, no leading/trailing hyphen); not validated.

@@ -17,7 +17,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	natsmod "github.com/testcontainers/testcontainers-go/modules/nats"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
@@ -27,7 +26,6 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
-	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
 func setupMongo(t *testing.T) *mongo.Database {
@@ -90,13 +88,7 @@ func TestCassMessageReader_GetMessageRoomAndCreatedAt_Integration(t *testing.T) 
 
 func setupNATS(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
-	container, err := natsmod.Run(ctx, testimages.NATS)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
-	url, err := container.ConnectionString(ctx)
-	require.NoError(t, err)
-	return url
+	return testutil.NATS(t)
 }
 
 func TestMongoStore_Integration(t *testing.T) {

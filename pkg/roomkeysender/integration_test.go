@@ -1,6 +1,6 @@
 //go:build integration
 
-package roomkeysender_test
+package roomkeysender
 
 import (
 	"bytes"
@@ -27,7 +27,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
-	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
@@ -289,7 +288,7 @@ func TestRoomKeySender_TypeScriptClient(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// 6. Publish room key via roomkeysender.
-	sender := roomkeysender.NewSender(nc)
+	sender := NewSender(nc)
 	evt := &model.RoomKeyEvent{
 		RoomID:     roomID,
 		Version:    version,
