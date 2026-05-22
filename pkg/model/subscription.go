@@ -22,6 +22,7 @@ const (
 type SubscriptionUser struct {
 	ID      string `json:"id" bson:"_id"`
 	Account string `json:"account" bson:"account"`
+	IsBot   bool   `json:"isBot" bson:"isBot"`
 }
 
 type Subscription struct {
