@@ -29,6 +29,8 @@ type InboxStore interface {
 	// silent no-ops. Missing-subscription is also a silent no-op.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
+	// ApplyThreadRead writes ThreadSubscription under a $lt lastSeenAt guard, then the Subscription only if the guard accepted.
+	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error
 	// UpdateSubscriptionMute sets muted by (roomID, account); missing-sub is a silent no-op for federation races.
 	UpdateSubscriptionMute(ctx context.Context, roomID, account string, muted bool) error
 }
@@ -65,6 +67,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleSubscriptionMuteToggled(ctx, &evt)
 	case "thread_subscription_upserted":
 		return h.handleThreadSubscriptionUpserted(ctx, &evt)
+	case "thread_read":
+		return h.handleThreadRead(ctx, &evt)
 	default:
 		slog.Warn("unknown event type, skipping", "type", evt.Type)
 		return nil
@@ -227,6 +231,19 @@ func (h *Handler) handleThreadSubscriptionUpserted(ctx context.Context, evt *mod
 	if err := h.store.UpsertThreadSubscription(ctx, &sub); err != nil {
 		return fmt.Errorf("upsert thread subscription (threadRoomID %q, userID %q): %w",
 			sub.ThreadRoomID, sub.UserID, err)
+	}
+	return nil
+}
+
+func (h *Handler) handleThreadRead(ctx context.Context, evt *model.OutboxEvent) error {
+	var e model.ThreadReadEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal thread_read payload: %w", err)
+	}
+	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
+	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.NewThreadUnread, e.Alert, lastSeenAt); err != nil {
+		return fmt.Errorf("apply thread read (room %q, parent %q, account %q): %w",
+			e.RoomID, e.ParentMessageID, e.Account, err)
 	}
 	return nil
 }

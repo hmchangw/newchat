@@ -31,16 +31,27 @@ type subRead struct {
 	alert      bool
 }
 
+type threadRead struct {
+	roomID          string
+	threadRoomID    string
+	account         string
+	newThreadUnread []string
+	alert           bool
+	lastSeenAt      time.Time
+}
+
 type stubInboxStore struct {
-	mu                sync.Mutex
-	subscriptions     []model.Subscription
-	bulkSubscriptions []*model.Subscription
-	bulkCreateErr     error
-	rooms             []model.Room
-	roleUpdates       []roleUpdate
-	users             []model.User
-	subReads          []subRead
-	threadSubs        []model.ThreadSubscription
+	mu                 sync.Mutex
+	subscriptions      []model.Subscription
+	bulkSubscriptions  []*model.Subscription
+	bulkCreateErr      error
+	rooms              []model.Room
+	roleUpdates        []roleUpdate
+	users              []model.User
+	subReads           []subRead
+	threadSubs         []model.ThreadSubscription
+	threadReads        []threadRead
+	applyThreadReadErr error
 }
 
 func (s *stubInboxStore) CreateSubscription(ctx context.Context, sub *model.Subscription) error {
@@ -180,6 +191,19 @@ func (s *stubInboxStore) getSubReads() []subRead {
 	cp := make([]subRead, len(s.subReads))
 	copy(cp, s.subReads)
 	return cp
+}
+
+func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applyThreadReadErr != nil {
+		return s.applyThreadReadErr
+	}
+	s.threadReads = append(s.threadReads, threadRead{
+		roomID: roomID, threadRoomID: threadRoomID, account: account,
+		newThreadUnread: newThreadUnread, alert: alert, lastSeenAt: lastSeenAt,
+	})
+	return nil
 }
 
 func (s *stubInboxStore) UpsertThreadSubscription(_ context.Context, sub *model.ThreadSubscription) error {
@@ -1202,6 +1226,64 @@ func TestHandleMemberAdded_BulkCreate_NonDuplicateError_ReturnsError(t *testing.
 	assert.Contains(t, err.Error(), "bulk create subscriptions")
 }
 
+func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	payload := model.ThreadReadEvent{
+		Account:         "alice",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		ParentMessageID: "p1",
+		NewThreadUnread: []string{"p2"},
+		Alert:           true,
+		LastSeenAt:      1735689600000,
+		Timestamp:       1735689600001,
+	}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.OutboxEvent{
+		Type:       model.OutboxThreadRead,
+		SiteID:     "site-a",
+		DestSiteID: "site-b",
+		Payload:    inner,
+		Timestamp:  1735689600002,
+	}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+	require.Len(t, store.threadReads, 1)
+	tr := store.threadReads[0]
+	assert.Equal(t, "r1", tr.roomID)
+	assert.Equal(t, "tr1", tr.threadRoomID)
+	assert.Equal(t, "alice", tr.account)
+	assert.Equal(t, []string{"p2"}, tr.newThreadUnread)
+	assert.True(t, tr.alert)
+	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), tr.lastSeenAt)
+}
+
+func TestHandler_HandleEvent_ThreadRead_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	outer := model.OutboxEvent{Type: model.OutboxThreadRead, Payload: []byte("{")}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+	err = h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+	assert.Len(t, store.threadReads, 0)
+}
+
+func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
+	store := &stubInboxStore{applyThreadReadErr: fmt.Errorf("boom")}
+	h := NewHandler(store)
+	payload := model.ThreadReadEvent{Account: "a", RoomID: "r", ThreadRoomID: "tr", ParentMessageID: "p"}
+	inner, _ := json.Marshal(&payload)
+	outer := model.OutboxEvent{Type: model.OutboxThreadRead, Payload: inner}
+	data, _ := json.Marshal(&outer)
+	err := h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+}
+
 func TestHandler_SubscriptionMuteToggled(t *testing.T) {
 	store := &stubInboxStore{
 		subscriptions: []model.Subscription{
@@ -1245,7 +1327,6 @@ func TestHandler_SubscriptionMuteToggled_MissingSubscriptionNoOp(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// missing subscription must be a silent no-op, not an error
 	require.NoError(t, h.HandleEvent(context.Background(), evt))
 }
 

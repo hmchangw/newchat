@@ -2410,3 +2410,52 @@ func TestRoomEventMessageDeletedJSON(t *testing.T) {
 	}
 	roundTrip(t, &evt, &model.RoomEvent{})
 }
+
+func TestMessageThreadReadRequestJSON(t *testing.T) {
+	src := model.MessageThreadReadRequest{ThreadID: "01970a4f8c2d7c9aQRST"}
+	roundTrip(t, &src, &model.MessageThreadReadRequest{})
+}
+
+func TestThreadReadEventJSON(t *testing.T) {
+	src := model.ThreadReadEvent{
+		Account:         "alice",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		ParentMessageID: "01970a4f8c2d7c9aQRST",
+		NewThreadUnread: []string{"t2", "t3"},
+		Alert:           true,
+		LastSeenAt:      1735689600000,
+		Timestamp:       1735689600001,
+	}
+	roundTrip(t, &src, &model.ThreadReadEvent{})
+}
+
+func TestOutboxEventJSON_ThreadRead(t *testing.T) {
+	payload := model.ThreadReadEvent{
+		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
+		ParentMessageID: "p1", NewThreadUnread: []string{"t2"},
+		Alert: false, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+	}
+	data, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	src := model.OutboxEvent{
+		Type:       model.OutboxThreadRead,
+		SiteID:     "site-a",
+		DestSiteID: "site-b",
+		Payload:    data,
+		Timestamp:  1735689600002,
+	}
+	out, err := json.Marshal(&src)
+	require.NoError(t, err)
+	var dst model.OutboxEvent
+	require.NoError(t, json.Unmarshal(out, &dst))
+	if !reflect.DeepEqual(src, dst) {
+		t.Errorf("round-trip mismatch:\n  got  %+v\n  want %+v", dst, src)
+	}
+	if dst.Type != "thread_read" {
+		t.Errorf("Type = %q, want thread_read", dst.Type)
+	}
+	var gotPayload model.ThreadReadEvent
+	require.NoError(t, json.Unmarshal(dst.Payload, &gotPayload))
+	assert.Equal(t, payload, gotPayload)
+}

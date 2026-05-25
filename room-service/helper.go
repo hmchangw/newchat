@@ -22,8 +22,10 @@ var (
 	// Used by both list-members (requester subscription check) and add-member
 	// channel-source expansion. Both contexts mean "the requester is not a
 	// member of the room they are asking about".
-	errNotRoomMember = errors.New("only room members can list members")
-	errInvalidOrg    = errors.New("invalid org")
+	errNotRoomMember     = errors.New("only room members can list members")
+	errInvalidOrg        = errors.New("invalid org")
+	errInvalidThreadID   = errors.New("threadId is required")
+	errThreadSubNotFound = errors.New("thread subscription not found")
 	// Only subscribers with an individual membership source can hold the owner
 	// role. Remove-member's dual-membership path relies on this invariant:
 	// stripping the owner role during an individual-leave is only sound when
@@ -195,6 +197,8 @@ func sanitizeError(err error) string {
 		errors.Is(err, errMessageNotFound),
 		errors.Is(err, errMessageRoomMismatch),
 		errors.Is(err, errNotMessageSender),
+		errors.Is(err, errInvalidThreadID),
+		errors.Is(err, errThreadSubNotFound),
 		errors.Is(err, &dmExistsError{}),
 		errors.Is(err, &channelExpandTimeoutError{}):
 		return err.Error()

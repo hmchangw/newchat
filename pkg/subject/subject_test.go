@@ -322,6 +322,31 @@ func TestMessageReadReceipt_ParseUserRoomSubject(t *testing.T) {
 	}
 }
 
+func TestMessageThreadRead(t *testing.T) {
+	got := subject.MessageThreadRead("alice", "r1", "site-a")
+	want := "chat.user.alice.request.room.r1.site-a.message.thread.read"
+	if got != want {
+		t.Errorf("MessageThreadRead: got %q, want %q", got, want)
+	}
+}
+
+func TestMessageThreadReadWildcard(t *testing.T) {
+	got := subject.MessageThreadReadWildcard("site-a")
+	want := "chat.user.*.request.room.*.site-a.message.thread.read"
+	if got != want {
+		t.Errorf("MessageThreadReadWildcard: got %q, want %q", got, want)
+	}
+}
+
+func TestMessageThreadRead_ParseUserRoomSubject(t *testing.T) {
+	subj := subject.MessageThreadRead("alice", "r1", "site-a")
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok || account != "alice" || roomID != "r1" {
+		t.Errorf("ParseUserRoomSubject(%q) = (%q, %q, %v); want (\"alice\", \"r1\", true)",
+			subj, account, roomID, ok)
+	}
+}
+
 func TestMuteToggle(t *testing.T) {
 	got := subject.MuteToggle("alice", "r1", "site-a")
 	want := "chat.user.alice.request.room.r1.site-a.mute.toggle"

@@ -110,6 +110,15 @@ type RoomStore interface {
 	GetApp(ctx context.Context, botAccount string) (*model.App, error)
 	// FindDMSubscription returns the requester's existing dm/botDM sub with Name == targetName, filtered by RoomType.
 	FindDMSubscription(ctx context.Context, account, targetName string) (*model.Subscription, error)
+
+	// GetThreadSubscriptionByParent enforces (parentMessageID, account, roomID); the roomID
+	// filter rejects a threadId that belongs to a different room than the request subject.
+	GetThreadSubscriptionByParent(ctx context.Context, account, parentMessageID, roomID string) (*model.ThreadSubscription, error)
+
+	// UpdateSubscriptionThreadRead overwrites threadUnread + alert; empty threadUnread is $unset.
+	UpdateSubscriptionThreadRead(ctx context.Context, roomID, account string, threadUnread []string, alert bool) error
+
+	UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
 }
 
 // RoomKeyStore is the consumer-side interface for room encryption key lookups.

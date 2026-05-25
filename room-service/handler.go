@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -90,6 +91,9 @@ func (h *Handler) RegisterCRUD(nc *otelnats.Conn) error {
 	}
 	if _, err := nc.QueueSubscribe(subject.MessageReadReceiptWildcard(h.siteID), queue, h.natsMessageReadReceipt); err != nil {
 		return fmt.Errorf("subscribe message read-receipt: %w", err)
+	}
+	if _, err := nc.QueueSubscribe(subject.MessageThreadReadWildcard(h.siteID), queue, h.natsMessageThreadRead); err != nil {
+		return fmt.Errorf("subscribe message thread read: %w", err)
 	}
 	if _, err := nc.QueueSubscribe(subject.MemberListWildcard(h.siteID), queue, h.natsListMembers); err != nil {
 		return fmt.Errorf("subscribe member list: %w", err)
@@ -1230,6 +1234,132 @@ func (h *Handler) handleMessageReadReceipt(ctx context.Context, subj string, dat
 	}
 
 	return json.Marshal(model.ReadReceiptResponse{Readers: entries})
+}
+
+func (h *Handler) natsMessageThreadRead(m otelnats.Msg) {
+	ctx := wrappedCtx(m)
+	resp, err := h.handleMessageThreadRead(ctx, m.Msg.Subject, m.Msg.Data)
+	if err != nil {
+		slog.Error("message thread-read failed", "error", err)
+		natsutil.ReplyError(m.Msg, sanitizeError(err))
+		return
+	}
+	if err := m.Msg.Respond(resp); err != nil {
+		slog.Error("failed to respond to message thread-read", "error", err)
+	}
+}
+
+func (h *Handler) handleMessageThreadRead(ctx context.Context, subj string, data []byte) ([]byte, error) {
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok {
+		return nil, fmt.Errorf("invalid message-thread-read subject: %s", subj)
+	}
+
+	var req model.MessageThreadReadRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("unmarshal thread-read request: %w", err)
+	}
+	if strings.TrimSpace(req.ThreadID) == "" {
+		return nil, errInvalidThreadID
+	}
+
+	// Manual priority after Wait(): errNotRoomMember > errThreadSubNotFound > internal errors.
+	// Plain errgroup.Group (not WithContext) so a NotFound from one goroutine does NOT cancel
+	// the siblings — otherwise context.Canceled in subErr/userSiteErr would outrank tsubErr.
+	var (
+		sub                          *model.Subscription
+		tsub                         *model.ThreadSubscription
+		userSiteID                   string
+		subErr, tsubErr, userSiteErr error
+	)
+	var g errgroup.Group
+	g.Go(func() error {
+		s, err := h.store.GetSubscription(ctx, account, roomID)
+		sub, subErr = s, err
+		return err
+	})
+	g.Go(func() error {
+		t, err := h.store.GetThreadSubscriptionByParent(ctx, account, req.ThreadID, roomID)
+		tsub, tsubErr = t, err
+		return err
+	})
+	g.Go(func() error {
+		s, err := h.store.GetUserSiteID(ctx, account)
+		userSiteID, userSiteErr = s, err
+		return err
+	})
+	_ = g.Wait()
+	// Specific NotFound sentinels first so they always outrank any sibling
+	// goroutine's generic error (defends against accidental ctx cancellation).
+	switch {
+	case errors.Is(subErr, model.ErrSubscriptionNotFound):
+		return nil, errNotRoomMember
+	case errors.Is(tsubErr, model.ErrThreadSubscriptionNotFound):
+		return nil, errThreadSubNotFound
+	case subErr != nil:
+		return nil, fmt.Errorf("get subscription: %w", subErr)
+	case tsubErr != nil:
+		return nil, fmt.Errorf("get thread subscription: %w", tsubErr)
+	case userSiteErr != nil:
+		return nil, fmt.Errorf("get user siteId: %w", userSiteErr)
+	}
+
+	newThreadUnread := slices.DeleteFunc(slices.Clone(sub.ThreadUnread), func(s string) bool { return s == req.ThreadID })
+	newAlert := sub.Alert && len(newThreadUnread) > 0
+	now := time.Now().UTC()
+
+	wg, wctx := errgroup.WithContext(ctx)
+	wg.Go(func() error {
+		if err := h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, newThreadUnread, newAlert); err != nil {
+			return fmt.Errorf("update subscription thread-read: %w", err)
+		}
+		return nil
+	})
+	wg.Go(func() error {
+		if err := h.store.UpdateThreadSubscriptionRead(wctx, tsub.ThreadRoomID, account, now); err != nil {
+			return fmt.Errorf("update thread subscription read: %w", err)
+		}
+		return nil
+	})
+	if err := wg.Wait(); err != nil {
+		return nil, err
+	}
+
+	switch {
+	case userSiteID == "":
+		slog.Warn("user not found locally; skipping cross-site outbox", "account", account)
+	case userSiteID != h.siteID:
+		payload := model.ThreadReadEvent{
+			Account:         account,
+			RoomID:          roomID,
+			ThreadRoomID:    tsub.ThreadRoomID,
+			ParentMessageID: req.ThreadID,
+			NewThreadUnread: newThreadUnread,
+			Alert:           newAlert,
+			LastSeenAt:      now.UnixMilli(),
+			Timestamp:       now.UnixMilli(),
+		}
+		payloadData, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal thread_read payload: %w", err)
+		}
+		outbox := model.OutboxEvent{
+			Type:       model.OutboxThreadRead,
+			SiteID:     h.siteID,
+			DestSiteID: userSiteID,
+			Payload:    payloadData,
+			Timestamp:  now.UnixMilli(),
+		}
+		outboxData, err := json.Marshal(outbox)
+		if err != nil {
+			return nil, fmt.Errorf("marshal outbox event: %w", err)
+		}
+		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, model.OutboxThreadRead), outboxData); err != nil {
+			return nil, fmt.Errorf("publish thread_read outbox: %w", err)
+		}
+	}
+
+	return json.Marshal(map[string]string{"status": "accepted"})
 }
 
 // NatsHandleEnsureRoomKey handles server-to-server requests to ensure a room

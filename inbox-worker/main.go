@@ -193,6 +193,46 @@ func (s *mongoInboxStore) UpsertThreadSubscription(ctx context.Context, sub *mod
 	return nil
 }
 
+func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
+	// Guarded thread-sub update first; same gate then protects the Subscription overwrite.
+	tsFilter := bson.M{
+		"threadRoomId": threadRoomID,
+		"userAccount":  account,
+		"$or": bson.A{
+			bson.M{"lastSeenAt": nil},
+			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
+		},
+	}
+	tsUpdate := bson.M{"$set": bson.M{
+		"lastSeenAt": lastSeenAt,
+		"updatedAt":  lastSeenAt,
+		"hasMention": false,
+	}}
+	tsRes, err := s.threadSubCol.UpdateOne(ctx, tsFilter, tsUpdate)
+	if err != nil {
+		return fmt.Errorf("apply thread read on thread subscription for %q in thread room %q: %w",
+			account, threadRoomID, err)
+	}
+	if tsRes.MatchedCount == 0 {
+		return nil
+	}
+
+	subFilter := bson.M{"roomId": roomID, "u.account": account}
+	var subUpdate bson.M
+	if len(newThreadUnread) == 0 {
+		subUpdate = bson.M{
+			"$set":   bson.M{"alert": alert},
+			"$unset": bson.M{"threadUnread": ""},
+		}
+	} else {
+		subUpdate = bson.M{"$set": bson.M{"threadUnread": newThreadUnread, "alert": alert}}
+	}
+	if _, err := s.subCol.UpdateOne(ctx, subFilter, subUpdate); err != nil {
+		return fmt.Errorf("apply thread read on subscription for %q in room %q: %w", account, roomID, err)
+	}
+	return nil
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 

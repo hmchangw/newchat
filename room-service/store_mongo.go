@@ -16,20 +16,22 @@ import (
 )
 
 type MongoStore struct {
-	rooms         *mongo.Collection
-	subscriptions *mongo.Collection
-	roomMembers   *mongo.Collection
-	users         *mongo.Collection
-	apps          *mongo.Collection
+	rooms               *mongo.Collection
+	subscriptions       *mongo.Collection
+	threadSubscriptions *mongo.Collection
+	roomMembers         *mongo.Collection
+	users               *mongo.Collection
+	apps                *mongo.Collection
 }
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
 	return &MongoStore{
-		rooms:         db.Collection("rooms"),
-		subscriptions: db.Collection("subscriptions"),
-		roomMembers:   db.Collection("room_members"),
-		users:         db.Collection("users"),
-		apps:          db.Collection("apps"),
+		rooms:               db.Collection("rooms"),
+		subscriptions:       db.Collection("subscriptions"),
+		threadSubscriptions: db.Collection("thread_subscriptions"),
+		roomMembers:         db.Collection("room_members"),
+		users:               db.Collection("users"),
+		apps:                db.Collection("apps"),
 	}
 }
 
@@ -95,6 +97,18 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 		Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "name", Value: 1}},
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (u.account,name) index: %w", err)
+	}
+	// Mirrors the unique index created by message-worker / history-service so per-service test DBs also enforce it.
+	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) unique index: %w", err)
+	}
+	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "parentMessageId", Value: 1}, {Key: "userAccount", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure thread_subscriptions (parentMessageId,userAccount) index: %w", err)
 	}
 	return nil
 }
@@ -948,4 +962,65 @@ func (s *MongoStore) ListReadReceipts(
 		return nil, fmt.Errorf("iterate read receipts for room %q: %w", roomID, err)
 	}
 	return rows, nil
+}
+
+func (s *MongoStore) GetThreadSubscriptionByParent(ctx context.Context, account, parentMessageID, roomID string) (*model.ThreadSubscription, error) {
+	var ts model.ThreadSubscription
+	err := s.threadSubscriptions.FindOne(ctx, bson.M{
+		"parentMessageId": parentMessageID,
+		"userAccount":     account,
+		"roomId":          roomID,
+	}).Decode(&ts)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("find thread subscription for %q parent %q in room %q: %w",
+				account, parentMessageID, roomID, model.ErrThreadSubscriptionNotFound)
+		}
+		return nil, fmt.Errorf("find thread subscription for %q parent %q in room %q: %w",
+			account, parentMessageID, roomID, err)
+	}
+	return &ts, nil
+}
+
+// Empty threadUnread is $unset so it round-trips through JSON as nil (omitempty contract).
+func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account string, threadUnread []string, alert bool) error {
+	filter := bson.M{"roomId": roomID, "u.account": account}
+	var update bson.M
+	if len(threadUnread) == 0 {
+		update = bson.M{
+			"$set":   bson.M{"alert": alert},
+			"$unset": bson.M{"threadUnread": ""},
+		}
+	} else {
+		update = bson.M{"$set": bson.M{"threadUnread": threadUnread, "alert": alert}}
+	}
+	res, err := s.subscriptions.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("update subscription thread-read for %q in room %q: %w",
+			account, roomID, model.ErrSubscriptionNotFound)
+	}
+	return nil
+}
+
+// No order-safety guard on the source-site write; the $lt guard lives on the inbox-worker side.
+func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
+	filter := bson.M{"threadRoomId": threadRoomID, "userAccount": account}
+	update := bson.M{"$set": bson.M{
+		"lastSeenAt": lastSeenAt,
+		"updatedAt":  lastSeenAt,
+		"hasMention": false,
+	}}
+	res, err := s.threadSubscriptions.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("update thread subscription read for %q in thread room %q: %w",
+			account, threadRoomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("update thread subscription read for %q in thread room %q: %w",
+			account, threadRoomID, model.ErrThreadSubscriptionNotFound)
+	}
+	return nil
 }

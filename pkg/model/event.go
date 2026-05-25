@@ -84,6 +84,7 @@ const (
 	OutboxSubscriptionRead           OutboxEventType = "subscription_read"
 	OutboxSubscriptionMuteToggled    OutboxEventType = "subscription_mute_toggled"
 	OutboxThreadSubscriptionUpserted OutboxEventType = "thread_subscription_upserted"
+	OutboxThreadRead                 OutboxEventType = "thread_read"
 )
 
 // SubscriptionReadEvent is the OutboxEvent.Payload for type
@@ -97,6 +98,19 @@ type SubscriptionReadEvent struct {
 	LastSeenAt int64  `json:"lastSeenAt" bson:"lastSeenAt"`
 	Alert      bool   `json:"alert"      bson:"alert"`
 	Timestamp  int64  `json:"timestamp"  bson:"timestamp"`
+}
+
+// ThreadReadEvent is the OutboxEvent.Payload for type "thread_read". The source site
+// ships the authoritative NewThreadUnread+Alert; the destination applies them as-is.
+type ThreadReadEvent struct {
+	Account         string   `json:"account"`
+	RoomID          string   `json:"roomId"`
+	ThreadRoomID    string   `json:"threadRoomId"`
+	ParentMessageID string   `json:"parentMessageId"`
+	NewThreadUnread []string `json:"newThreadUnread"`
+	Alert           bool     `json:"alert"`
+	LastSeenAt      int64    `json:"lastSeenAt"`
+	Timestamp       int64    `json:"timestamp"`
 }
 
 type OutboxEvent struct {

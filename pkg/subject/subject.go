@@ -361,6 +361,16 @@ func MessageReadReceiptWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.message.read-receipt", siteID)
 }
 
+// MessageThreadRead returns the concrete subject for the per-user mark-thread-as-read RPC.
+func MessageThreadRead(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.message.thread.read", account, roomID, siteID)
+}
+
+// MessageThreadReadWildcard is the per-site subscription pattern for the mark-thread-as-read RPC.
+func MessageThreadReadWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.message.thread.read", siteID)
+}
+
 // MuteToggle returns the concrete subject for the per-user mute.toggle RPC.
 func MuteToggle(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.mute.toggle", account, roomID, siteID)

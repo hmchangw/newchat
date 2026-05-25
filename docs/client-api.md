@@ -782,6 +782,60 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 ---
 
+#### Mark Thread as Read
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+A **synchronous RPC** that clears a single thread's unread state for the caller. `room-service` validates room membership and thread-subscription existence, removes the threadId from the user's `Subscription.ThreadUnread`, recomputes the per-subscription `alert` flag, refreshes the `ThreadSubscription` (`lastSeenAt`, `updatedAt`, `hasMention=false`), and — for cross-site users — publishes a `thread_read` event to the user's home-site outbox so the destination `inbox-worker` can mirror both updates.
+
+##### Request body
+
+| Field      | Type   | Notes |
+|------------|--------|-------|
+| `threadId` | string | Required. The thread's parent message ID. Empty / missing → `threadId is required`. |
+
+```json
+{ "threadId": "01970a4f8c2d7c9aQRST" }
+```
+
+##### Success response
+
+| Field    | Type   | Notes |
+|----------|--------|-------|
+| `status` | string | Always `"accepted"`. |
+
+```json
+{ "status": "accepted" }
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- `"only room members can list members"` — the caller has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"thread subscription not found"` — the caller has no `ThreadSubscription` for the supplied `threadId` in the supplied room. Also returned when the thread exists but belongs to a different room than the one in the subject.
+- `"threadId is required"` — body is missing `threadId` or sends an empty string.
+- `"invalid message-thread-read subject: …"` — the subject is malformed.
+
+##### Behaviour notes
+
+- **Alert recomputation:** new `alert = oldSub.alert && len(newThreadUnread) > 0`. A thread-read can only clear an alert, never set one. When the post-removal `threadUnread` is empty, `alert` becomes false.
+- **Concurrent local writes:** the room-`Subscription` update and the `ThreadSubscription` update run in parallel inside an `errgroup`. Both must succeed before the handler proceeds.
+- **Cross-site federation:** if the user's home site differs from the handler's site, a `thread_read` event is published to `outbox.{handlerSite}.to.{userSite}.thread_read` with payload `{account, roomId, threadRoomId, parentMessageId, newThreadUnread, alert, lastSeenAt, timestamp}` (timestamps as `int64` UnixMilli). The destination `inbox-worker` applies the supplied `newThreadUnread`+`alert` to the local Subscription cache and applies `lastSeenAt`+`updatedAt`+`hasMention=false` to the local ThreadSubscription with an `$lt` order-safety guard so out-of-order delivery cannot regress the thread's read position.
+- **Defensive `roomId` filter:** the thread-subscription lookup additionally enforces that the supplied `threadId` belongs to the room named in the subject. Mismatches return `thread subscription not found` (rather than silently clearing an unrelated thread).
+- **No system message, no fan-out events:** thread reads are silent; only the requester receives the `accepted` reply.
+
+##### Triggered events — success path
+
+`None — reply only.` (Cross-site users may observe a delayed cache update on their home site via the outbox/inbox flow above; this is treated as cache convergence rather than a client-visible event for this RPC.)
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 #### Toggle Mute
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle`

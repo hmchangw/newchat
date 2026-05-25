@@ -1773,6 +1773,126 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 	require.Empty(t, rows)
 }
 
+func TestMongoStore_GetThreadSubscriptionByParent(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	ts := model.ThreadSubscription{
+		ID:              "tsub-1",
+		ParentMessageID: "p1",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		UserID:          "u1",
+		UserAccount:     "alice",
+		SiteID:          "site-a",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	_, err := db.Collection("thread_subscriptions").InsertOne(ctx, &ts)
+	require.NoError(t, err)
+
+	t.Run("hit", func(t *testing.T) {
+		got, err := store.GetThreadSubscriptionByParent(ctx, "alice", "p1", "r1")
+		require.NoError(t, err)
+		assert.Equal(t, "tsub-1", got.ID)
+		assert.Equal(t, "tr1", got.ThreadRoomID)
+	})
+
+	t.Run("miss on wrong account", func(t *testing.T) {
+		_, err := store.GetThreadSubscriptionByParent(ctx, "bob", "p1", "r1")
+		require.ErrorIs(t, err, model.ErrThreadSubscriptionNotFound)
+	})
+
+	t.Run("miss on wrong parent", func(t *testing.T) {
+		_, err := store.GetThreadSubscriptionByParent(ctx, "alice", "p999", "r1")
+		require.ErrorIs(t, err, model.ErrThreadSubscriptionNotFound)
+	})
+
+	t.Run("miss on wrong room (defensive filter)", func(t *testing.T) {
+		_, err := store.GetThreadSubscriptionByParent(ctx, "alice", "p1", "r-other")
+		require.ErrorIs(t, err, model.ErrThreadSubscriptionNotFound)
+	})
+}
+
+func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	sub := model.Subscription{
+		ID: "sub-1", RoomID: "r1", SiteID: "site-a",
+		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
+		JoinedAt:     time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
+		ThreadUnread: []string{"t1", "t2"},
+		Alert:        true,
+	}
+	_, err := db.Collection("subscriptions").InsertOne(ctx, &sub)
+	require.NoError(t, err)
+
+	t.Run("non-empty array path", func(t *testing.T) {
+		require.NoError(t, store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", []string{"t2"}, true))
+		var got model.Subscription
+		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&got))
+		assert.Equal(t, []string{"t2"}, got.ThreadUnread)
+		assert.True(t, got.Alert)
+	})
+
+	t.Run("empty array path unsets threadUnread", func(t *testing.T) {
+		require.NoError(t, store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", nil, false))
+		var raw bson.M
+		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
+		_, present := raw["threadUnread"]
+		assert.False(t, present, "threadUnread must be $unset, not stored as empty array")
+		assert.Equal(t, false, raw["alert"])
+	})
+
+	t.Run("missing subscription returns sentinel", func(t *testing.T) {
+		err := store.UpdateSubscriptionThreadRead(ctx, "r-missing", "alice", nil, false)
+		require.ErrorIs(t, err, model.ErrSubscriptionNotFound)
+	})
+}
+
+func TestMongoStore_UpdateThreadSubscriptionRead(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	ts := model.ThreadSubscription{
+		ID:              "tsub-1",
+		ParentMessageID: "p1",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		UserAccount:     "alice",
+		HasMention:      true,
+		CreatedAt:       created,
+		UpdatedAt:       created,
+	}
+	_, err := db.Collection("thread_subscriptions").InsertOne(ctx, &ts)
+	require.NoError(t, err)
+
+	t.Run("happy path", func(t *testing.T) {
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		require.NoError(t, store.UpdateThreadSubscriptionRead(ctx, "tr1", "alice", now))
+		var got model.ThreadSubscription
+		require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&got))
+		require.NotNil(t, got.LastSeenAt)
+		assert.Equal(t, now, got.LastSeenAt.UTC().Truncate(time.Millisecond))
+		assert.Equal(t, now, got.UpdatedAt.UTC().Truncate(time.Millisecond))
+		assert.False(t, got.HasMention)
+	})
+
+	t.Run("missing thread subscription returns sentinel", func(t *testing.T) {
+		err := store.UpdateThreadSubscriptionRead(ctx, "tr-missing", "alice", time.Now().UTC())
+		require.ErrorIs(t, err, model.ErrThreadSubscriptionNotFound)
+	})
+}
+
 func TestMongoStore_ToggleSubscriptionMute(t *testing.T) {
 	db := testutil.MongoDB(t, "room-svc-mute")
 	store := NewMongoStore(db)
