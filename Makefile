@@ -189,3 +189,19 @@ sast-vuln:
 sast-semgrep:
 	@command -v semgrep >/dev/null 2>&1 || { echo "semgrep not installed — run 'make tools' (needs pipx), or: pipx install semgrep==$(SEMGREP_VERSION)"; exit 1; }
 	semgrep scan $(SEMGREP_FLAGS) .
+
+# --- Sample data seeder -----------------------------------------------------
+# Populate MongoDB and Valkey with a small idempotent dataset for local dev.
+# Run after `make deps-up`. Safe to re-run; `seed-reset` wipes the seed
+# records first via stable IDs (never DROP DATABASE) so any hand-added
+# dev data survives. `seed-dry-run` prints the plan without writing.
+.PHONY: seed seed-reset seed-dry-run
+
+seed:
+	go run ./tools/seed-sample-data
+
+seed-reset:
+	go run ./tools/seed-sample-data --reset
+
+seed-dry-run:
+	go run ./tools/seed-sample-data --dry-run

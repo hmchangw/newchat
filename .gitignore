@@ -4,6 +4,7 @@
 # Binaries for programs and plugins
 bin/
 demo
+/seed-sample-data
 *.exe
 *.exe~
 *.dll
