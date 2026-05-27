@@ -47,7 +47,7 @@ func makeStubMsg(t *testing.T, evt *model.MessageEvent) *stubMsg {
 func TestHandler_Add(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 
 	evt := model.MessageEvent{
 		Event: model.EventCreated,
@@ -66,7 +66,7 @@ func TestHandler_Add(t *testing.T) {
 func TestHandler_Add_MalformedJSON(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 
 	msg := &stubMsg{data: []byte("{invalid")}
 	h.Add(msg)
@@ -92,7 +92,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(1)).
 			Return([]searchengine.BulkResult{{Status: 201}}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 		msg := makeStubMsg(t, &baseEvt)
 		h.Add(msg)
 		h.Flush(context.Background())
@@ -109,7 +109,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(1)).
 			Return([]searchengine.BulkResult{{Status: 409, Error: "version conflict"}}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 		msg := makeStubMsg(t, &baseEvt)
 		h.Add(msg)
 		h.Flush(context.Background())
@@ -125,7 +125,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(1)).
 			Return([]searchengine.BulkResult{{Status: 500, Error: "internal"}}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 		msg := makeStubMsg(t, &baseEvt)
 		h.Add(msg)
 		h.Flush(context.Background())
@@ -141,7 +141,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(2)).
 			Return(nil, fmt.Errorf("connection refused"))
 
-		h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 		msg1 := makeStubMsg(t, &baseEvt)
 		evt2 := baseEvt
 		evt2.Message.ID = "m2"
@@ -159,7 +159,7 @@ func TestHandler_Flush(t *testing.T) {
 	t.Run("empty flush is no-op", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
-		h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 		h.Flush(context.Background())
 		assert.Equal(t, 0, h.MessageCount())
 	})
@@ -175,7 +175,7 @@ func TestHandler_Flush(t *testing.T) {
 				{Status: 500, Error: "shard failure"},
 			}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1"), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
 		msgs := make([]*stubMsg, 3)
 		for i := range msgs {
 			evt := baseEvt

@@ -15,17 +15,17 @@ import (
 )
 
 func TestMessageCollection_TemplateName_StripsVersion(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1")
+	coll := newMessageCollection("messages-site1-v1", time.Time{})
 	assert.Equal(t, "messages-site1_template", coll.TemplateName())
 }
 
 func TestMessageCollection_TemplateName_BareBaseFallback(t *testing.T) {
-	coll := newMessageCollection("messages-site1")
+	coll := newMessageCollection("messages-site1", time.Time{})
 	assert.Equal(t, "messages-site1_template", coll.TemplateName())
 }
 
 func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1")
+	coll := newMessageCollection("messages-site1-v1", time.Time{})
 	body := coll.TemplateBody()
 	require.NotNil(t, body)
 
@@ -58,13 +58,13 @@ func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 }
 
 func TestMessageCollection_StreamConfig(t *testing.T) {
-	coll := newMessageCollection("msgs-v1")
+	coll := newMessageCollection("msgs-v1", time.Time{})
 	cfg := coll.StreamConfig("site-a")
 	assert.Equal(t, "MESSAGES_CANONICAL_site-a", cfg.Name)
 }
 
 func TestMessageCollection_ConsumerName(t *testing.T) {
-	coll := newMessageCollection("msgs-v1")
+	coll := newMessageCollection("msgs-v1", time.Time{})
 	assert.Equal(t, "message-sync", coll.ConsumerName())
 }
 
@@ -273,7 +273,7 @@ func TestNewMessageSearchIndex_TShowOmittedWhenFalse(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction(t *testing.T) {
-	coll := newMessageCollection("msgs-v1")
+	coll := newMessageCollection("msgs-v1", time.Time{})
 	evt := model.MessageEvent{
 		Event: model.EventCreated,
 		Message: model.Message{
@@ -294,5 +294,48 @@ func TestMessageCollection_BuildAction(t *testing.T) {
 	t.Run("malformed JSON returns error", func(t *testing.T) {
 		_, err := coll.BuildAction([]byte("{invalid"))
 		assert.Error(t, err)
+	})
+}
+
+func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	coll := newMessageCollection("msgs-v1", cutoff)
+
+	mkEvent := func(createdAt time.Time) []byte {
+		evt := model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Content: "hi", CreatedAt: createdAt,
+			},
+			SiteID: "site-a", Timestamp: createdAt.UnixMilli(),
+		}
+		data, _ := json.Marshal(evt)
+		return data
+	}
+
+	t.Run("CreatedAt before cutoff is filtered (no actions, no error)", func(t *testing.T) {
+		actions, err := coll.BuildAction(mkEvent(time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC)))
+		require.NoError(t, err)
+		assert.Empty(t, actions)
+	})
+
+	t.Run("CreatedAt exactly at cutoff is kept", func(t *testing.T) {
+		actions, err := coll.BuildAction(mkEvent(cutoff))
+		require.NoError(t, err)
+		assert.Len(t, actions, 1)
+	})
+
+	t.Run("CreatedAt after cutoff is kept", func(t *testing.T) {
+		actions, err := coll.BuildAction(mkEvent(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)))
+		require.NoError(t, err)
+		assert.Len(t, actions, 1)
+	})
+
+	t.Run("zero cutoff disables filter — old data still indexed", func(t *testing.T) {
+		uncapped := newMessageCollection("msgs-v1", time.Time{})
+		actions, err := uncapped.BuildAction(mkEvent(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
+		require.NoError(t, err)
+		assert.Len(t, actions, 1)
 	})
 }

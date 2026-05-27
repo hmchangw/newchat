@@ -14,12 +14,22 @@ import (
 )
 
 // messageCollection implements Collection for message search sync.
+//
+// syncFrom is the SYNC_MESSAGES_FROM cutoff (UTC); a zero value disables
+// it. When set, BuildAction skips any event whose Message.CreatedAt
+// predates the cutoff. This is the legacy-migration filter: a migrator
+// replaying historical data into JetStream stamps evt.Timestamp at
+// publish-time, so we compare against the message's own CreatedAt to
+// reflect original data age. Only the messages collection has a cutoff —
+// spotlight and user-room remain unfiltered so a user can still discover
+// and search rooms they joined before the date.
 type messageCollection struct {
 	indexPrefix string
+	syncFrom    time.Time
 }
 
-func newMessageCollection(indexPrefix string) *messageCollection {
-	return &messageCollection{indexPrefix: indexPrefix}
+func newMessageCollection(indexPrefix string, syncFrom time.Time) *messageCollection {
+	return &messageCollection{indexPrefix: indexPrefix, syncFrom: syncFrom}
 }
 
 func (c *messageCollection) StreamConfig(siteID string) jetstream.StreamConfig {
@@ -60,6 +70,9 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	}
 	if evt.Timestamp <= 0 {
 		return nil, fmt.Errorf("build message action: missing timestamp")
+	}
+	if !c.syncFrom.IsZero() && evt.Message.CreatedAt.Before(c.syncFrom) {
+		return nil, nil
 	}
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
 }

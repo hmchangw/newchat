@@ -53,6 +53,15 @@ type config struct {
 	SpotlightIndex      string `env:"SPOTLIGHT_INDEX,required"`
 	UserRoomIndex       string `env:"USER_ROOM_INDEX,required"`
 
+	// SyncMessagesFrom is an optional YYYY-MM-DD cutoff (UTC) that the
+	// messages collection compares against Message.CreatedAt. Events
+	// before the date are skipped — used to keep legacy-migration replays
+	// of old chat messages out of the message index. Empty string
+	// disables the filter. Spotlight and user-room are NOT filtered: a
+	// user must still be able to discover and search rooms they joined
+	// before the cutoff.
+	SyncMessagesFrom string `env:"SYNC_MESSAGES_FROM" envDefault:""`
+
 	// FetchBatchSize is the maximum number of JetStream messages to pull
 	// per Fetch() round-trip. Smaller values give lower latency per message
 	// but more round-trips; larger values amortize the per-Fetch overhead.
@@ -115,6 +124,11 @@ func main() {
 		slog.Error("invalid config", "name", "SPOTLIGHT_INDEX", "value", cfg.SpotlightIndex, "reason", "must end with -v<N>, e.g. spotlight-site-a-v1")
 		os.Exit(1)
 	}
+	syncMessagesFrom, err := parseSyncMessagesFrom(cfg.SyncMessagesFrom)
+	if err != nil {
+		slog.Error("invalid config", "name", "SYNC_MESSAGES_FROM", "value", cfg.SyncMessagesFrom, "error", err)
+		os.Exit(1)
+	}
 
 	ctx := context.Background()
 
@@ -137,7 +151,7 @@ func main() {
 	}
 
 	collections := []Collection{
-		newMessageCollection(cfg.MsgIndexPrefix),
+		newMessageCollection(cfg.MsgIndexPrefix, syncMessagesFrom),
 		newSpotlightCollection(cfg.SpotlightIndex),
 		newUserRoomCollection(cfg.UserRoomIndex),
 	}
@@ -218,11 +232,16 @@ func main() {
 		go runConsumer(ctx, cons, handler, cfg.FetchBatchSize, cfg.BulkBatchSize, bulkFlushInterval, stopCh, doneCh)
 	}
 
+	syncMessagesFromLog := "disabled"
+	if !syncMessagesFrom.IsZero() {
+		syncMessagesFromLog = syncMessagesFrom.Format(time.RFC3339)
+	}
 	slog.Info("search-sync-worker running",
 		"site", cfg.SiteID,
 		"msgPrefix", cfg.MsgIndexPrefix,
 		"spotlightIndex", cfg.SpotlightIndex,
 		"userRoomIndex", cfg.UserRoomIndex,
+		"syncMessagesFrom", syncMessagesFromLog,
 		"collections", len(collections),
 	)
 
