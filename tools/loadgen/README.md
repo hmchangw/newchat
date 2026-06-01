@@ -212,3 +212,71 @@ most reads.
 - Errors broken out by class (`timeout`, `reply`, `bad`); the
   `no-thread-parents` counter is informational (thread requests that
   landed on a room with no seeded parents and fell back to history).
+
+## max-rps — auto-find Max RPS under SLO
+
+Automatically finds the maximum RPS each workload can sustain while all
+SLO signals hold. The subcommand ramps the target rate through an ordered
+list of steps, holds at each step for a measurement window, evaluates SLO
+signals, and reports the largest step at which every signal passed.
+
+```bash
+loadgen max-rps --workload=messages|history --preset=<name> [flags]
+```
+
+### Quick start
+
+```bash
+# messages: ramp 500..10k rps, stop at first SLO breach
+loadgen max-rps --workload=messages --preset=medium --steps=500,1k,2k,5k,10k
+
+# history: per-endpoint SLO, custom p95
+loadgen max-rps --workload=history --preset=history-medium --steps=200,500,1k,2k --slo-p95=80ms
+```
+
+Via the deploy Makefile:
+
+```bash
+make -C tools/loadgen/deploy run-max-rps PRESET=medium
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium STEPS=200,500,1k,2k
+```
+
+### Flags
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--workload` | `messages` | `messages` or `history` |
+| `--preset` | (required) | an existing preset for the chosen workload |
+| `--steps` | messages `500,1k,2k,5k,10k` / history `200,500,1k,2k,5k` | explicit ordered RPS list; `k` suffix = ×1000 |
+| `--warmup` | `10s` | per-step warmup (samples discarded) |
+| `--hold` | `30s` | per-step measurement window |
+| `--cooldown` | `5s` | per-step settle gap before next step |
+| `--slo-p95` | `100ms` | applied to **every** gated latency series |
+| `--slo-p99` | `250ms` | applied to **every** gated latency series |
+| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%) |
+| `--slo-pending-growth` | `1000` | **messages only**: per-durable end−start `NumPending` delta |
+| `--rate-tolerance` | `0.05` | achieved-vs-target shortfall band for the INCONCLUSIVE guard |
+| `--stop-on-trip` | `true` | stop the ramp at the first TRIP (does **not** stop on INCONCLUSIVE) |
+| `--seed` | `42` | RNG seed (parity with existing subcommands) |
+| `--csv` | `""` | optional CSV output path |
+
+### Reading the output
+
+At the end of the run the tool prints a per-step table and a final
+verdict line:
+
+```
+ANSWER: max RPS = 2000 (workload=messages, preset=medium)
+        Next limit: E2 p95=143ms > 100ms
+```
+
+This is the largest step at which **all** SLO signals passed; the
+`Next limit:` line names why the first failing step tripped. If no step
+passed, the output is `ANSWER: no step passed (workload=…, preset=…)`.
+
+**INCONCLUSIVE rows** appear when the achieved throughput fell more than
+`--rate-tolerance` below the target while the SLO signals still looked
+healthy — i.e. the load generator itself, not the service under test, was
+the limiting factor, so the step's result can't be trusted. An
+INCONCLUSIVE step does **not** count as a pass and does **not** stop the
+ramp, even with `--stop-on-trip`; only a hard TRIP stops the ramp.

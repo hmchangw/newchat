@@ -3,13 +3,15 @@ DEPS_COMPOSE     := $(ROOT)/docker-local/compose.deps.yaml
 SERVICES_COMPOSE := $(ROOT)/docker-local/compose.services.yaml
 OVERLAY          := docker-compose.yml
 COMPOSE          := docker compose -f $(OVERLAY)
+WORKLOAD         ?= messages
+STEPS            ?=
 
 # Encryption is the default for broadcast-worker; the broadcast-worker compose
 # reads ENCRYPTION_ENABLED via env interpolation (defaulting to true). Flip to
 # `ENCRYPTION_ENABLED=false make up` for a plaintext comparison run.
 export ENCRYPTION_ENABLED ?= true
 
-.PHONY: up stack-up overlay-up seed teardown run run-dashboards down logs seed-members teardown-members reset-members run-sustained run-capacity
+.PHONY: up stack-up overlay-up seed teardown run run-dashboards run-max-rps down logs seed-members teardown-members reset-members run-sustained run-capacity
 
 up: stack-up overlay-up
 
@@ -72,6 +74,13 @@ run:
 run-dashboards:
 	$(COMPOSE) --profile dashboards up -d
 	$(MAKE) run PRESET=$(PRESET) RATE=$(RATE) DURATION=$(DURATION)
+
+run-max-rps: ## Ramp RPS to find the max under SLO (WORKLOAD=messages|history PRESET=.. STEPS=..)
+	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
+	$(COMPOSE) exec -T loadgen /loadgen max-rps \
+	    --workload=$(WORKLOAD) \
+	    --preset=$(PRESET) \
+	    $(if $(STEPS),--steps=$(STEPS),)
 
 down:
 	$(COMPOSE) --profile dashboards down -v

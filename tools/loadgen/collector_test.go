@@ -168,3 +168,25 @@ func TestCollector_RecordPublishBroadcastOnly_FinalizeNoMissingReplies(t *testin
 	assert.Equal(t, 0, missingReplies, "canonical mode should never produce missing replies")
 	assert.Equal(t, 1, missingBroadcasts)
 }
+
+func TestCollector_Reset(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	now := time.Now()
+	c.RecordPublish("req-1", "msg-1", now)
+	c.RecordReply("req-1", now.Add(10*time.Millisecond))
+	c.RecordBroadcast("msg-1", now.Add(20*time.Millisecond))
+	require.Equal(t, 1, c.E1Count())
+	require.Equal(t, 1, c.E2Count())
+
+	c.Reset()
+
+	assert.Equal(t, 0, c.E1Count())
+	assert.Equal(t, 0, c.E2Count())
+	mr, mb := c.Finalize()
+	assert.Equal(t, 0, mr)
+	assert.Equal(t, 0, mb)
+	// After reset, a fresh publish+reply correlates normally.
+	c.RecordPublish("req-2", "msg-2", now)
+	c.RecordReply("req-2", now.Add(5*time.Millisecond))
+	assert.Equal(t, 1, c.E1Count())
+}

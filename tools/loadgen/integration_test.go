@@ -138,4 +138,74 @@ func TestLoadgenSmallPreset_EndToEnd(t *testing.T) {
 	require.Equal(t, fixtures.Rooms[0].ID, room.ID)
 }
 
+func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
+	ctx := context.Background()
+	siteID := "site-maxrps"
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	defer nc.Drain()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	canonical := stream.MessagesCanonical(siteID)
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     canonical.Name,
+		Subjects: canonical.Subjects,
+	})
+	require.NoError(t, err)
+
+	// Ack-only durables so the canonical stream drains to zero (pending stays low).
+	for _, durable := range []string{"message-worker", "broadcast-worker"} {
+		cons, err := js.CreateOrUpdateConsumer(ctx, canonical.Name, jetstream.ConsumerConfig{
+			Durable:   durable,
+			AckPolicy: jetstream.AckExplicitPolicy,
+		})
+		require.NoError(t, err)
+		cc, err := cons.Consume(func(msg jetstream.Msg) { _ = msg.Ack() })
+		require.NoError(t, err)
+		defer cc.Stop()
+	}
+
+	// Fake gatekeeper: frontdoor send -> canonical event.
+	gkSub, err := nc.Subscribe(subject.MsgSendWildcard(siteID), func(m *nats.Msg) {
+		var req model.SendMessageRequest
+		if err := json.Unmarshal(m.Data, &req); err != nil {
+			return
+		}
+		evt := model.MessageEvent{
+			Message:   model.Message{ID: req.ID, Content: req.Content, CreatedAt: time.Now().UTC()},
+			SiteID:    siteID,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		data, _ := json.Marshal(evt)
+		_, _ = js.Publish(ctx, subject.MsgCanonicalCreated(siteID), data)
+	})
+	require.NoError(t, err)
+	defer gkSub.Unsubscribe()
+
+	cfg := &config{NatsURL: testutil.NATS(t), SiteID: siteID, MetricsAddr: ":0", MaxInFlight: 100}
+	preset, _ := BuiltinPreset("small")
+
+	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42)
+	require.NoError(t, err)
+	defer cleanup()
+
+	results := runRamp(ctx, w, &rampConfig{
+		Steps: []int{50, 100}, Warmup: time.Second, Hold: 2 * time.Second, Cooldown: 0,
+		Thresholds: rpsThresholds{
+			P95: time.Second, P99: 2 * time.Second, ErrorRate: 0.9,
+			PendingGrowth: 1_000_000, RateTolerance: 0.9,
+		},
+		StopOnTrip: true,
+	})
+
+	require.Len(t, results, 2)
+	for _, r := range results {
+		require.NotEqual(t, verdictTrip, r.Kind, "reasons=%v", r.Reasons)
+		require.Greater(t, r.AttemptedOps, 0)
+		require.Greater(t, r.AchievedRPS, 0.0)
+	}
+}
+
 func TestMain(m *testing.M) { testutil.RunTests(m) }

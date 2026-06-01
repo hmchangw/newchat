@@ -56,7 +56,7 @@ type config struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|members-sustained|members-capacity|history-sustained|max-rps> [flags]")
 		os.Exit(2)
 	}
 	cfg, err := env.ParseAs[config]()
@@ -93,6 +93,8 @@ func dispatch(ctx context.Context, cfg *config) int {
 		return runMembersCapacity(ctx, cfg, os.Args[2:])
 	case "history-sustained":
 		return runHistorySustained(ctx, cfg, os.Args[2:])
+	case "max-rps":
+		return runMaxRPS(ctx, cfg, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		return 2
