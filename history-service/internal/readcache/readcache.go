@@ -17,6 +17,8 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"golang.org/x/sync/singleflight"
+
+	pkgmodel "github.com/hmchangw/chat/pkg/model"
 )
 
 // Stats is a snapshot of a cache's counters.
@@ -82,6 +84,7 @@ func (c *ttlCache[V]) stats() Stats {
 // SubscriptionSource is the subscription read the cache fronts.
 type SubscriptionSource interface {
 	GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error)
+	GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error)
 }
 
 type subEntry struct {
@@ -125,10 +128,18 @@ func (c *SubscriptionCache) GetHistorySharedSince(ctx context.Context, account, 
 // Stats returns the subscription cache counters.
 func (c *SubscriptionCache) Stats() Stats { return c.cache.stats() }
 
+// GetSubscription bypasses the access-window cache and delegates to the
+// underlying source. Pin/unpin paths need the full subscription doc (roles,
+// account) which we don't cache.
+func (c *SubscriptionCache) GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error) {
+	return c.inner.GetSubscription(ctx, account, roomID)
+}
+
 // RoomSource is the room metadata reads the cache fronts.
 type RoomSource interface {
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
+	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
 }
 
 type roomTimes struct {
@@ -189,4 +200,10 @@ func (c *RoomCache) GetMinUserLastSeenAt(ctx context.Context, roomID string) (*t
 // Stats returns the room-times and min-last-seen cache counters.
 func (c *RoomCache) Stats() (times, minSeen Stats) {
 	return c.times.stats(), c.minSeen.stats()
+}
+
+// GetRoomUserCount bypasses the cache and delegates to the source. The
+// large-room pin check needs the live member count, not a cached one.
+func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
+	return c.inner.GetRoomUserCount(ctx, roomID)
 }

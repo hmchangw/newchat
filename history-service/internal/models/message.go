@@ -8,6 +8,9 @@ type File = cassandra.File
 type Card = cassandra.Card
 type CardAction = cassandra.CardAction
 type QuotedParentMessage = cassandra.QuotedParentMessage
+type Reactions = cassandra.Reactions
+type ReactionKey = cassandra.ReactionKey
+type ReactorInfo = cassandra.ReactorInfo
 
 // RoomMeta carries client-cached room metadata so the server can skip a Mongo
 // lookup. Both fields are optional and individually validated server-side
@@ -74,6 +77,34 @@ type DeleteMessageRequest struct {
 type DeleteMessageResponse struct {
 	MessageID string `json:"messageId"`
 	DeletedAt int64  `json:"deletedAt"` // UTC millis; mirrors updated_at (no separate deleted_at column)
+}
+
+type PinMessageRequest struct {
+	MessageID string `json:"messageId"`
+}
+
+type PinMessageResponse struct {
+	MessageID string `json:"messageId"`
+	PinnedAt  int64  `json:"pinnedAt"` // UTC millis
+}
+
+type UnpinMessageRequest struct {
+	MessageID string `json:"messageId"`
+}
+
+type UnpinMessageResponse struct {
+	MessageID string `json:"messageId"`
+}
+
+type ListPinnedMessagesRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit"`
+}
+
+type ListPinnedMessagesResponse struct {
+	Messages   []Message `json:"messages"`
+	NextCursor string    `json:"nextCursor,omitempty"`
+	HasNext    bool      `json:"hasNext"`
 }
 
 type GetThreadMessagesRequest struct {

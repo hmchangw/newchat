@@ -67,6 +67,10 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return h.handleUpdated(ctx, &evt)
 	case model.EventDeleted:
 		return h.handleDeleted(ctx, &evt)
+	case model.EventPinned:
+		return h.handlePinned(ctx, &evt)
+	case model.EventUnpinned:
+		return h.handleUnpinned(ctx, &evt)
 	default:
 		slog.Warn("unknown message event type, skipping", "event", evt.Event, "messageID", evt.Message.ID)
 		return nil
@@ -172,6 +176,52 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 		UpdatedAt: *msg.UpdatedAt,
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageDeleted, msg.ID, &del)
+}
+
+func (h *Handler) handlePinned(ctx context.Context, evt *model.MessageEvent) error {
+	msg := evt.Message
+	if msg.PinnedAt == nil {
+		return fmt.Errorf("pinned event missing PinnedAt: %s", msg.ID)
+	}
+
+	room, err := h.store.GetRoom(ctx, msg.RoomID)
+	if err != nil {
+		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
+	}
+
+	pin := model.PinRoomEvent{
+		Type:      model.RoomEventMessagePinned,
+		RoomID:    room.ID,
+		SiteID:    room.SiteID,
+		Timestamp: time.Now().UTC().UnixMilli(),
+		MessageID: msg.ID,
+		PinnedBy:  msg.PinnedBy,
+		PinnedAt:  *msg.PinnedAt,
+	}
+	return h.publishMutation(ctx, room, model.RoomEventMessagePinned, msg.ID, &pin)
+}
+
+func (h *Handler) handleUnpinned(ctx context.Context, evt *model.MessageEvent) error {
+	msg := evt.Message
+	// UnpinnedAt comes from evt.Timestamp (set at publish): the canonical unpin
+	// payload from history-service clears PinnedAt, so the message itself
+	// carries no unpin timestamp.
+
+	room, err := h.store.GetRoom(ctx, msg.RoomID)
+	if err != nil {
+		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
+	}
+
+	unpin := model.UnpinRoomEvent{
+		Type:       model.RoomEventMessageUnpinned,
+		RoomID:     room.ID,
+		SiteID:     room.SiteID,
+		Timestamp:  time.Now().UTC().UnixMilli(),
+		MessageID:  msg.ID,
+		UnpinnedBy: msg.PinnedBy,
+		UnpinnedAt: time.UnixMilli(evt.Timestamp).UTC(),
+	}
+	return h.publishMutation(ctx, room, model.RoomEventMessageUnpinned, msg.ID, &unpin)
 }
 
 // publishMutation marshals a flattened edit/delete event and routes it by room

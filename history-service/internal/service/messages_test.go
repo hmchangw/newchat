@@ -14,6 +14,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
+	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
@@ -44,14 +45,7 @@ var defaultRoomCreatedAt = joinTime.Add(-30 * 24 * time.Hour)
 
 func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository) {
 	svc, msgs, subs, rooms, pub, threadRooms := newServiceWithRoomMock(t)
-	// Permissive defaults: existing tests don't care about the room reads.
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	// MinTimes(0) — tests asserting resolver invocation should override with a
-	// stricter Times(N). See room_times_test.go for examples.
-	rooms.EXPECT().
-		GetRoomTimes(gomock.Any(), gomock.Any()).
-		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
-		MinTimes(0)
 	return svc, msgs, subs, pub, threadRooms
 }
 
@@ -71,9 +65,22 @@ func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockM
 		GetRoomTimes(gomock.Any(), gomock.Any()).
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
 		MinTimes(0)
-	// historyFloor: 90 days — long enough that the floor never clips test fixtures.
-	const historyFloor = 90 * 24 * time.Hour
-	return service.New(msgs, subs, rooms, pub, threadRooms, historyFloor), msgs, subs, rooms, pub, threadRooms
+	// Permissive default: only the large-room override path reads userCount.
+	rooms.EXPECT().GetRoomUserCount(gomock.Any(), gomock.Any()).Return(0, nil).AnyTimes()
+	// Note: no AnyTimes default for GetPinnedMessages — pin tests that reach the
+	// pin-limit check (PinMessage success paths) set their own expectation. An
+	// AnyTimes default here would shadow the explicit expectations set by
+	// TestListPinnedMessages_* and break them.
+	// MessageHistoryFloorDays=90: long enough that the floor never clips test fixtures.
+	// PinEnabled=true: kill-switch on by default; TestPinMessage_KillSwitchDisabled
+	// builds its own service with false.
+	cfg := &config.Config{
+		MessageHistoryFloorDays: 90,
+		LargeRoomThreshold:      500,
+		MaxPinnedPerRoom:        10,
+		PinEnabled:              true,
+	}
+	return service.New(msgs, subs, rooms, pub, threadRooms, cfg), msgs, subs, rooms, pub, threadRooms
 }
 
 func assertInternalErr(t *testing.T, err error, wantMsg string) {

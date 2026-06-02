@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	pkgmodel "github.com/hmchangw/chat/pkg/model"
 )
 
 type fakeSubSource struct {
@@ -30,6 +32,10 @@ func (f *fakeSubSource) GetHistorySharedSince(_ context.Context, _, _ string) (*
 	}
 	f.calls.Add(1)
 	return f.sharedSince, f.subscribed, f.err
+}
+
+func (f *fakeSubSource) GetSubscription(_ context.Context, _, _ string) (*pkgmodel.Subscription, error) {
+	return nil, nil
 }
 
 func TestSubscriptionCache_CachesPositive(t *testing.T) {
@@ -171,6 +177,10 @@ func (f *fakeRoomSource) GetRoomTimes(_ context.Context, _ string) (time.Time, t
 func (f *fakeRoomSource) GetMinUserLastSeenAt(_ context.Context, _ string) (*time.Time, error) {
 	f.minSeenCalls.Add(1)
 	return f.minSeen, f.minSeenErr
+}
+
+func (f *fakeRoomSource) GetRoomUserCount(_ context.Context, _ string) (int, error) {
+	return 0, nil
 }
 
 func TestRoomCache_CachesRoomTimes(t *testing.T) {

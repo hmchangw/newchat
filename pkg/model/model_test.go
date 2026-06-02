@@ -1172,6 +1172,23 @@ func TestRoomTypeChannel(t *testing.T) {
 	assert.Equal(t, model.RoomType("channel"), model.RoomTypeChannel)
 }
 
+func TestEventPinnedConstants(t *testing.T) {
+	assert.Equal(t, model.EventType("pinned"), model.EventPinned)
+	assert.Equal(t, model.EventType("unpinned"), model.EventUnpinned)
+}
+
+func TestMessagePinnedFieldsRoundTrip(t *testing.T) {
+	at := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	src := model.Message{
+		ID:       "m1",
+		RoomID:   "r1",
+		PinnedAt: &at,
+		PinnedBy: &model.Participant{UserID: "u-123", Account: "alice"},
+	}
+	dst := model.Message{}
+	roundTrip(t, &src, &dst)
+}
+
 func TestRoom_RestrictedJSON(t *testing.T) {
 	room := model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel, Restricted: true, SiteID: "site-a"}
 	data, err := json.Marshal(room)
@@ -2553,4 +2570,32 @@ func TestSubscriptionRemovedEventOmitsZeroValueFields(t *testing.T) {
 		_, present := subRaw[leaked]
 		assert.False(t, present, "removed event subscription must not carry %q", leaked)
 	}
+}
+
+func TestPinRoomEventJSON(t *testing.T) {
+	pinnedAt := time.Date(2026, 5, 14, 12, 15, 0, 0, time.UTC)
+	evt := model.PinRoomEvent{
+		Type:      model.RoomEventMessagePinned,
+		RoomID:    "r1",
+		SiteID:    "site-a",
+		Timestamp: pinnedAt.UnixMilli(),
+		MessageID: "msg-uuid",
+		PinnedBy:  &model.Participant{UserID: "u1", Account: "alice"},
+		PinnedAt:  pinnedAt,
+	}
+	roundTrip(t, &evt, &model.PinRoomEvent{})
+}
+
+func TestUnpinRoomEventJSON(t *testing.T) {
+	unpinnedAt := time.Date(2026, 5, 14, 12, 20, 0, 0, time.UTC)
+	evt := model.UnpinRoomEvent{
+		Type:       model.RoomEventMessageUnpinned,
+		RoomID:     "r1",
+		SiteID:     "site-a",
+		Timestamp:  unpinnedAt.UnixMilli(),
+		MessageID:  "msg-uuid",
+		UnpinnedBy: &model.Participant{UserID: "u1", Account: "alice"},
+		UnpinnedAt: unpinnedAt,
+	}
+	roundTrip(t, &evt, &model.UnpinRoomEvent{})
 }

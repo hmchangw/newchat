@@ -56,3 +56,18 @@ func (r *RoomRepo) GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, 
 	}
 	return lastMsgAt, room.CreatedAt, nil
 }
+
+// GetRoomUserCount returns the room's userCount via a projected findOne.
+// Returns mongo.ErrNoDocuments wrapped when the room does not exist —
+// callers treat that as an infrastructure error (reaching this call already
+// implies the caller is subscribed to the room).
+func (r *RoomRepo) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
+	room, err := r.rooms.FindByID(ctx, roomID, mongoutil.WithProjection(bson.M{"userCount": 1, "_id": 0}))
+	if err != nil {
+		return 0, fmt.Errorf("get room %s userCount: %w", roomID, err)
+	}
+	if room == nil {
+		return 0, fmt.Errorf("get room %s userCount: %w", roomID, mongo.ErrNoDocuments)
+	}
+	return room.UserCount, nil
+}

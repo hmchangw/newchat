@@ -1420,6 +1420,301 @@ The payload is flat:
 
 ---
 
+#### Pin Message
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.pin`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Pins a message in the room. Idempotent — pinning an already-pinned message succeeds and echoes the existing `pinnedAt` without re-publishing the canonical event.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `messageId` | string | yes | The message to pin. |
+
+```json
+{ "messageId": "01970a4f8c2d7c9aQRST" }
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `messageId` | string | Echoes the input. |
+| `pinnedAt`  | number | Milliseconds since Unix epoch (UTC). For an already-pinned message, this is the original pin time. |
+
+```json
+{
+  "messageId": "01970a4f8c2d7c9aQRST",
+  "pinnedAt": 1746518900000
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+| Code | Message | Cause |
+|------|---------|-------|
+| `forbidden` | `"pinning is disabled"` | Global kill-switch (`PIN_ENABLED=false`) is off. |
+| `forbidden` | `"not subscribed to room"` | Caller has no subscription to the room. |
+| `forbidden` | `"room is too large to pin"` | Room member count exceeds the configured `LARGE_ROOM_THRESHOLD`. Owners, admins, and bot accounts are exempt. |
+| `forbidden` | `"room pin limit reached"` | Room already has `MAX_PINNED_PER_ROOM` pinned messages (default 10). Hard cap — no role-based bypass. Unpin an existing message to free a slot. |
+| `not_found` | `"message not found"` | Message does not exist, belongs to a different room, or has been deleted. |
+| `internal` | `"failed to retrieve message"` | Cassandra read failed while looking up the target message. |
+| `internal` | `"unable to verify room access"` | Failed to look up the caller's subscription. |
+| `internal` | `"unable to verify room size"` | Failed to read the room member count. |
+| `internal` | `"unable to verify pin count"` | Failed to read the current pinned-messages count for the room. |
+| `internal` | `"failed to pin message"` | Write to the message store failed. |
+
+##### Triggered events — success path
+
+**Channel rooms:** `chat.room.{roomID}.event` — `MessagePinnedEvent`. Recipients: every client subscribed to the room.
+**DM / BotDM rooms:** `chat.user.{account}.room.event` — `MessagePinnedEvent`. Recipients: each non-bot DM participant.
+
+Not published when the request hits an already-pinned message (idempotent short-circuit).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `type` | string | Always `"message_pinned"`. |
+| `timestamp` | number | Milliseconds since Unix epoch (UTC). Event publish time. |
+| `roomId` | string |       |
+| `siteId` | string | Originating site. |
+| `messagePinned.messageId` | string | The pinned message's ID. |
+| `messagePinned.pinnedBy` | object | `Participant` (`userId`, `account`) of the actor who pinned. |
+| `messagePinned.pinnedAt` | string | RFC 3339. Domain time of the pin. |
+
+```json
+{
+  "type": "message_pinned",
+  "timestamp": 1746518900123,
+  "roomId": "01970a4f8c2d7c9aQ",
+  "siteId": "site1",
+  "messagePinned": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "pinnedBy": { "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+    "pinnedAt": "2026-05-06T08:01:40Z"
+  }
+}
+```
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+##### Backend side effects (internal — not client-subscribable)
+
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `event` | string | Always `"pinned"`. |
+| `siteId` | string | The originating site. |
+| `timestamp` | number | Milliseconds since Unix epoch (UTC). Event publish time. |
+| `message` | object | `Message` with `id`, `roomId`, `userId`, `userAccount`, `createdAt`, `pinnedAt`, `pinnedBy` populated. See [Message schema](#message-schema). |
+
+```json
+{
+  "event": "pinned",
+  "siteId": "site1",
+  "timestamp": 1746518900123,
+  "message": {
+    "id": "01970a4f8c2d7c9aQRST",
+    "roomId": "01970a4f8c2d7c9aQ",
+    "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+    "userAccount": "alice",
+    "createdAt": "2026-05-01T10:00:00Z",
+    "pinnedAt": "2026-05-06T08:01:40Z",
+    "pinnedBy": { "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" }
+  }
+}
+```
+
+---
+
+#### Unpin Message
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.unpin`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Unpins a message in the room. Idempotent — unpinning a message that is not pinned succeeds as a no-op without publishing the canonical event.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `messageId` | string | yes | The message to unpin. |
+
+```json
+{ "messageId": "01970a4f8c2d7c9aQRST" }
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `messageId` | string | Echoes the input. |
+
+```json
+{ "messageId": "01970a4f8c2d7c9aQRST" }
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+| Code | Message | Cause |
+|------|---------|-------|
+| `forbidden` | `"pinning is disabled"` | Global kill-switch (`PIN_ENABLED=false`) is off. |
+| `forbidden` | `"not subscribed to room"` | Caller has no subscription to the room. |
+| `forbidden` | `"room is too large to pin"` | Room member count exceeds the configured `LARGE_ROOM_THRESHOLD`. Owners, admins, and bot accounts are exempt. |
+| `not_found` | `"message not found"` | Message does not exist or belongs to a different room. Unlike pin, **soft-deleted messages are still unpinnable** — a pinned message that was later deleted retains its slot in `pinned_messages_by_room`, and unpin is the only way to free it. |
+| `internal` | `"failed to retrieve message"` | Cassandra read failed while looking up the target message. |
+| `internal` | `"unable to verify room access"` | Failed to look up the caller's subscription. |
+| `internal` | `"unable to verify room size"` | Failed to read the room member count. |
+| `internal` | `"failed to unpin message"` | Write to the message store failed. |
+
+##### Triggered events — success path
+
+**Channel rooms:** `chat.room.{roomID}.event` — `MessageUnpinnedEvent`. Recipients: every client subscribed to the room.
+**DM / BotDM rooms:** `chat.user.{account}.room.event` — `MessageUnpinnedEvent`. Recipients: each non-bot DM participant.
+
+Not published when the request hits an already-unpinned message (idempotent short-circuit).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `type` | string | Always `"message_unpinned"`. |
+| `timestamp` | number | Milliseconds since Unix epoch (UTC). Event publish time. |
+| `roomId` | string |       |
+| `siteId` | string | Originating site. |
+| `messageUnpinned.messageId` | string | The unpinned message's ID. |
+| `messageUnpinned.unpinnedBy` | object | `Participant` (`userId`, `account`) of the actor who unpinned. |
+| `messageUnpinned.unpinnedAt` | string | RFC 3339. Stamped by history-service when it processes the unpin RPC (the canonical unpin event clears the pin timestamp, so this is the only unpin time on the wire). |
+
+```json
+{
+  "type": "message_unpinned",
+  "timestamp": 1746518950123,
+  "roomId": "01970a4f8c2d7c9aQ",
+  "siteId": "site1",
+  "messageUnpinned": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "unpinnedBy": { "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+    "unpinnedAt": "2026-05-06T08:02:30Z"
+  }
+}
+```
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+##### Backend side effects (internal — not client-subscribable)
+
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `event` | string | Always `"unpinned"`. |
+| `siteId` | string | The originating site. |
+| `timestamp` | number | Milliseconds since Unix epoch (UTC). Event publish time. |
+| `message` | object | `Message` with `id`, `roomId`, `userId`, `userAccount`, `createdAt`, `pinnedBy` populated (no `pinnedAt` — the message is now unpinned). See [Message schema](#message-schema). |
+
+```json
+{
+  "event": "unpinned",
+  "siteId": "site1",
+  "timestamp": 1746518950123,
+  "message": {
+    "id": "01970a4f8c2d7c9aQRST",
+    "roomId": "01970a4f8c2d7c9aQ",
+    "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+    "userAccount": "alice",
+    "createdAt": "2026-05-01T10:00:00Z",
+    "pinnedBy": { "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" }
+  }
+}
+```
+
+---
+
+#### List Pinned Messages
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.pinned.list`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns pinned messages in a room, ordered most-recently-pinned first. Only subscription access is required — the global pin kill-switch and the large-room override do **not** apply to listing (existing pins remain listable even when new pinning is disabled).
+
+The response is cursor-paginated (`cursor`/`limit` in the request, `nextCursor`/`hasNext` in the response). Because pins are capped at `MAX_PINNED_PER_ROOM` (default 10), most callers will see `hasNext=false` on the first page.
+
+**Access window — redacted stubs:** If the caller's subscription has a `historySharedSince` lower bound (partial history access), pins whose underlying message was created before that timestamp are returned as **redacted stubs**. The following fields are cleared: `msg` (replaced with `"This message is unavailable"`), `mentions`, `attachments`, `file`, `card`, `cardAction`, `quotedParentMessage`, `reactions`, `type`, `sysMsgData`. **All other Message fields remain populated** — identifiers, `sender`, `createdAt`, `pinnedAt`, `pinnedBy`, plus any thread/edit metadata — so the frontend can render a placeholder in place. **The row count is the same for every caller.** A quoted parent inside a still-visible pin is redacted by the same mechanism as elsewhere (see Load History).
+
+**Timestamps:** Each returned message carries both `createdAt` (the underlying message's true creation time) and `pinnedAt` (when it was pinned). No second round-trip is needed to obtain the original creation timestamp.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `cursor` | string | no | Pagination cursor returned by a previous response. Omit (or empty string) for the first page. |
+| `limit`  | number | yes | Maximum number of pinned messages to return in this page. Server clamps to a sane range. |
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `messages` | array<Message> | Pinned messages in the page, most-recently-pinned first. See [Message schema](#message-schema). Pre-access pins appear as redacted stubs (see "Access window" above). |
+| `nextCursor` | string | Opaque token to fetch the next page. Empty when there are no more pages. |
+| `hasNext` | boolean | `true` while more pages exist; `false` on the final page. |
+
+```json
+{
+  "messages": [
+    {
+      "roomId": "01970a4f8c2d7c9aQ",
+      "messageId": "01970a4f8c2d7c9aQRST",
+      "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+      "msg": "morning team",
+      "createdAt": "2026-05-06T07:55:12Z",
+      "pinnedAt": "2026-05-06T08:01:40Z",
+      "pinnedBy": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" }
+    },
+    {
+      "roomId": "01970a4f8c2d7c9aQ",
+      "messageId": "01970a4f8c2d7c9aQOLD",
+      "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "bob" },
+      "msg": "This message is unavailable",
+      "createdAt": "2025-12-01T10:00:00Z",
+      "pinnedAt": "2025-12-02T09:00:00Z",
+      "pinnedBy": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" }
+    }
+  ],
+  "nextCursor": "",
+  "hasNext": false
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+| Code | Message | Cause |
+|------|---------|-------|
+| `forbidden` | `"not subscribed to room"` | Caller has no subscription to the room. |
+| `bad_request` | `"invalid pagination cursor"` | The `cursor` value is not a valid base64 page-state token. |
+| `internal` | `"unable to verify room access"` | Failed to look up the caller's subscription. |
+| `internal` | `"failed to list pinned messages"` | Read from the message store failed. |
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 #### Get Thread Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.thread`

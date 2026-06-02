@@ -8,9 +8,11 @@ import (
 type EventType string
 
 const (
-	EventCreated EventType = "created"
-	EventUpdated EventType = "updated"
-	EventDeleted EventType = "deleted"
+	EventCreated  EventType = "created"
+	EventUpdated  EventType = "updated"
+	EventDeleted  EventType = "deleted"
+	EventPinned   EventType = "pinned"
+	EventUnpinned EventType = "unpinned"
 )
 
 type MessageEvent struct {
@@ -152,14 +154,17 @@ type ClientMessage struct {
 type RoomEventType string
 
 const (
-	RoomEventNewMessage     RoomEventType = "new_message"
-	RoomEventMessageEdited  RoomEventType = "message_edited"
-	RoomEventMessageDeleted RoomEventType = "message_deleted"
+	RoomEventNewMessage      RoomEventType = "new_message"
+	RoomEventMessageEdited   RoomEventType = "message_edited"
+	RoomEventMessageDeleted  RoomEventType = "message_deleted"
+	RoomEventMessagePinned   RoomEventType = "message_pinned"
+	RoomEventMessageUnpinned RoomEventType = "message_unpinned"
 )
 
 // RoomEvent is the live fan-out event for a newly created message
-// (RoomEventNewMessage). Edits and deletes use the flattened EditRoomEvent /
-// DeleteRoomEvent so clients are not handed zero-valued base fields.
+// (RoomEventNewMessage). Edits, deletes, pins, and unpins use the flattened
+// EditRoomEvent / DeleteRoomEvent / PinRoomEvent / UnpinRoomEvent so clients
+// are not handed zero-valued base fields.
 type RoomEvent struct {
 	Type      RoomEventType `json:"type"`
 	RoomID    string        `json:"roomId"`
@@ -209,6 +214,30 @@ type DeleteRoomEvent struct {
 	DeletedBy string        `json:"deletedBy" bson:"deletedBy"`
 	DeletedAt time.Time     `json:"deletedAt" bson:"deletedAt"`
 	UpdatedAt time.Time     `json:"updatedAt" bson:"updatedAt"`
+}
+
+// PinRoomEvent is the live event published when a message is pinned. Fields
+// are flat (no zero-valued RoomEvent base fields). Mirrors the
+// EditRoomEvent / DeleteRoomEvent pattern.
+type PinRoomEvent struct {
+	Type      RoomEventType `json:"type" bson:"type"`
+	RoomID    string        `json:"roomId" bson:"roomId"`
+	SiteID    string        `json:"siteId" bson:"siteId"`
+	Timestamp int64         `json:"timestamp" bson:"timestamp"`
+	MessageID string        `json:"messageId" bson:"messageId"`
+	PinnedBy  *Participant  `json:"pinnedBy,omitempty" bson:"pinnedBy,omitempty"`
+	PinnedAt  time.Time     `json:"pinnedAt" bson:"pinnedAt"`
+}
+
+// UnpinRoomEvent is the live event published when a message is unpinned.
+type UnpinRoomEvent struct {
+	Type       RoomEventType `json:"type" bson:"type"`
+	RoomID     string        `json:"roomId" bson:"roomId"`
+	SiteID     string        `json:"siteId" bson:"siteId"`
+	Timestamp  int64         `json:"timestamp" bson:"timestamp"`
+	MessageID  string        `json:"messageId" bson:"messageId"`
+	UnpinnedBy *Participant  `json:"unpinnedBy,omitempty" bson:"unpinnedBy,omitempty"`
+	UnpinnedAt time.Time     `json:"unpinnedAt" bson:"unpinnedAt"`
 }
 
 // RemovedSubscriptionRef is the minimal subscription identity carried on a

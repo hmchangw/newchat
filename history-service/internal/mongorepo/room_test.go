@@ -116,3 +116,25 @@ func TestRoomRepo_GetMinUserLastSeenAt_MissingDocument(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
+
+func TestRoomRepo_GetRoomUserCount(t *testing.T) {
+	db := setupMongo(t)
+	_, err := db.Collection("rooms").InsertOne(context.Background(),
+		bson.M{"_id": "room-uc-1", "userCount": 42})
+	require.NoError(t, err)
+
+	repo := NewRoomRepo(db)
+	count, err := repo.GetRoomUserCount(context.Background(), "room-uc-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, 42, count)
+}
+
+func TestRoomRepo_GetRoomUserCount_RoomMissing(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db)
+
+	_, err := repo.GetRoomUserCount(context.Background(), "missing")
+
+	require.ErrorIs(t, err, mongo.ErrNoDocuments)
+}

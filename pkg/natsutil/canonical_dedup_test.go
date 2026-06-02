@@ -13,6 +13,8 @@ import (
 
 func TestCanonicalDedupID(t *testing.T) {
 	editedAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	pinnedAt := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	unpinnedAtMs := time.Date(2026, 5, 14, 12, 10, 0, 0, time.UTC).UnixMilli()
 
 	tests := []struct {
 		name string
@@ -42,6 +44,23 @@ func TestCanonicalDedupID(t *testing.T) {
 				Message: model.Message{ID: "msg-1"},
 			},
 			want: "msg-1:deleted",
+		},
+		{
+			name: "pinned includes op suffix and pinnedAtMs",
+			evt: &model.MessageEvent{
+				Event:   model.EventPinned,
+				Message: model.Message{ID: "msg-1", PinnedAt: &pinnedAt},
+			},
+			want: fmt.Sprintf("msg-1:pinned:%d", pinnedAt.UnixMilli()),
+		},
+		{
+			name: "unpinned includes op suffix and event timestamp",
+			evt: &model.MessageEvent{
+				Event:     model.EventUnpinned,
+				Message:   model.Message{ID: "msg-1"},
+				Timestamp: unpinnedAtMs,
+			},
+			want: fmt.Sprintf("msg-1:unpinned:%d", unpinnedAtMs),
 		},
 	}
 

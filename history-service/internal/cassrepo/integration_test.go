@@ -115,18 +115,31 @@ func setupCassandra(t testing.TB) *gocql.Session {
 
 	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.pinned_messages_by_room (
 		room_id TEXT,
-		created_at TIMESTAMP,
+		pinned_at TIMESTAMP,
 		message_id TEXT,
 		sender FROZEN<"Participant">,
 		msg TEXT,
+		mentions SET<FROZEN<"Participant">>,
+		attachments LIST<BLOB>,
 		file FROZEN<"File">,
 		card FROZEN<"Card">,
+		card_action FROZEN<"CardAction">,
+		quoted_parent_message FROZEN<"QuotedParentMessage">,
+		visible_to TEXT,
 		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
 		deleted BOOLEAN,
+		type TEXT,
+		sys_msg_data BLOB,
+		site_id TEXT,
 		edited_at TIMESTAMP,
 		updated_at TIMESTAMP,
-		PRIMARY KEY ((room_id), created_at, message_id)
-	) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`)).Exec())
+		pinned_by FROZEN<"Participant">,
+		created_at TIMESTAMP,
+		tshow BOOLEAN,
+		thread_parent_id TEXT,
+		thread_parent_created_at TIMESTAMP,
+		PRIMARY KEY ((room_id), pinned_at, message_id)
+	) WITH CLUSTERING ORDER BY (pinned_at DESC, message_id DESC)`)).Exec())
 
 	cluster := gocql.NewCluster(host)
 	cluster.Consistency = gocql.One

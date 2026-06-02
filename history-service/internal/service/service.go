@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
+	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
@@ -23,6 +24,8 @@ type MessageReader interface {
 	GetMessageByID(ctx context.Context, messageID string) (*models.Message, error)
 	GetThreadMessages(ctx context.Context, threadRoomID string, before, floor time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessagesByIDs(ctx context.Context, messageIDs []string) ([]models.Message, error)
+	GetPinnedMessages(ctx context.Context, roomID string, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
+	GetAllPinnedMessages(ctx context.Context, roomID string) ([]models.Message, error)
 }
 
 type MessageWriter interface {
@@ -32,6 +35,8 @@ type MessageWriter interface {
 	// Returns the updated_at value now persisted (the deletedAt argument when
 	// applied; the existing value when a concurrent delete won the race).
 	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, err error)
+	PinMessage(ctx context.Context, msg *models.Message, pinnedAt time.Time, pinnedBy models.Participant) error
+	UnpinMessage(ctx context.Context, msg *models.Message) error
 }
 
 // MessageRepository composes read and write access; satisfied by *cassrepo.Repository.
@@ -42,6 +47,7 @@ type MessageRepository interface {
 
 type SubscriptionRepository interface {
 	GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error)
+	GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error)
 }
 
 // RoomRepository reads room metadata required by history handlers:
@@ -50,6 +56,7 @@ type SubscriptionRepository interface {
 type RoomRepository interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
+	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
 }
 
 // EventPublisher publishes canonical events to a JetStream-backed NATS
@@ -67,13 +74,16 @@ type ThreadRoomRepository interface {
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
 type HistoryService struct {
-	msgReader     MessageReader
-	msgWriter     MessageWriter
-	subscriptions SubscriptionRepository
-	rooms         RoomRepository
-	publisher     EventPublisher
-	threadRooms   ThreadRoomRepository
-	historyFloor  time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
+	msgReader          MessageReader
+	msgWriter          MessageWriter
+	subscriptions      SubscriptionRepository
+	rooms              RoomRepository
+	publisher          EventPublisher
+	threadRooms        ThreadRoomRepository
+	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
+	largeRoomThreshold int
+	maxPinnedPerRoom   int
+	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 }
 
 func New(
@@ -82,16 +92,19 @@ func New(
 	rooms RoomRepository,
 	pub EventPublisher,
 	threadRooms ThreadRoomRepository,
-	historyFloor time.Duration,
+	cfg *config.Config,
 ) *HistoryService {
 	return &HistoryService{
-		msgReader:     msgs,
-		msgWriter:     msgs,
-		subscriptions: subs,
-		rooms:         rooms,
-		publisher:     pub,
-		threadRooms:   threadRooms,
-		historyFloor:  historyFloor,
+		msgReader:          msgs,
+		msgWriter:          msgs,
+		subscriptions:      subs,
+		rooms:              rooms,
+		publisher:          pub,
+		threadRooms:        threadRooms,
+		historyFloor:       time.Duration(cfg.MessageHistoryFloorDays) * 24 * time.Hour,
+		largeRoomThreshold: cfg.LargeRoomThreshold,
+		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
+		pinEnabled:         cfg.PinEnabled,
 	}
 }
 
@@ -107,10 +120,18 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	natsrouter.Register(r, subject.MsgDeletePattern(siteID), func(c *natsrouter.Context, req models.DeleteMessageRequest) (*models.DeleteMessageResponse, error) {
 		return s.DeleteMessage(c, siteID, req)
 	})
+	natsrouter.Register(r, subject.MsgPinPattern(siteID), func(c *natsrouter.Context, req models.PinMessageRequest) (*models.PinMessageResponse, error) {
+		return s.PinMessage(c, siteID, req)
+	})
+	natsrouter.Register(r, subject.MsgUnpinPattern(siteID), func(c *natsrouter.Context, req models.UnpinMessageRequest) (*models.UnpinMessageResponse, error) {
+		return s.UnpinMessage(c, siteID, req)
+	})
+	natsrouter.Register(r, subject.MsgPinnedListPattern(siteID), s.ListPinnedMessages)
 	natsrouter.Register(r, subject.MsgThreadPattern(siteID), s.GetThreadMessages)
 	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), s.GetThreadParentMessages)
 }
 
 // Compile-time checks.
 var _ MessageRepository = (*cassrepo.Repository)(nil)
+var _ SubscriptionRepository = (*mongorepo.SubscriptionRepo)(nil)
 var _ RoomRepository = (*mongorepo.RoomRepo)(nil)

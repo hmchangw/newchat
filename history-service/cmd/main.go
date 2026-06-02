@@ -23,6 +23,28 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
+// checkConfig validates positive-integer config knobs and exits the process on
+// the first violation. Kept centralized so future int-bounded settings have one
+// place to land.
+func checkConfig(cfg *config.Config) {
+	checks := []struct {
+		name  string
+		value int
+	}{
+		{"MESSAGE_BUCKET_HOURS", cfg.MessageBucketHours},
+		{"MESSAGE_READ_MAX_BUCKETS", cfg.MessageReadMaxBuckets},
+		{"MESSAGE_HISTORY_FLOOR_DAYS", cfg.MessageHistoryFloorDays},
+		{"LARGE_ROOM_THRESHOLD", cfg.LargeRoomThreshold},
+		{"MAX_PINNED_PER_ROOM", cfg.MaxPinnedPerRoom},
+	}
+	for _, c := range checks {
+		if c.value < 1 {
+			slog.Error("invalid config", c.name, c.value)
+			os.Exit(1)
+		}
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -32,26 +54,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.MessageBucketHours < 1 {
-		slog.Error("invalid config", "MESSAGE_BUCKET_HOURS", cfg.MessageBucketHours)
-		os.Exit(1)
-	}
-	if cfg.MessageReadMaxBuckets < 1 {
-		slog.Error("invalid config", "MESSAGE_READ_MAX_BUCKETS", cfg.MessageReadMaxBuckets)
-		os.Exit(1)
-	}
-	if cfg.MessageHistoryFloorDays < 1 {
-		slog.Error("invalid config", "MESSAGE_HISTORY_FLOOR_DAYS", cfg.MessageHistoryFloorDays)
-		os.Exit(1)
-	}
+	checkConfig(&cfg)
 	slog.Info("message bucket configured",
 		"hours", cfg.MessageBucketHours,
 		"maxBuckets", cfg.MessageReadMaxBuckets,
 		"historyFloorDays", cfg.MessageHistoryFloorDays,
+		"largeRoomThreshold", cfg.LargeRoomThreshold,
+		"maxPinnedPerRoom", cfg.MaxPinnedPerRoom,
+		"pinEnabled", cfg.PinEnabled,
 	)
 
 	bucketSizer := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
-	historyFloor := time.Duration(cfg.MessageHistoryFloorDays) * 24 * time.Hour
 
 	ctx := context.Background()
 
@@ -126,7 +139,7 @@ func main() {
 	}
 
 	pub := publisher.New(js)
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, historyFloor)
+	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, &cfg)
 	router := natsrouter.New(nc, "history-service")
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())
