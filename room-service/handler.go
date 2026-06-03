@@ -1874,6 +1874,21 @@ func (h *Handler) handleMuteToggle(ctx context.Context, subj string, _ []byte) (
 		// Non-fatal — the DB write is the source of truth; clients will reconcile on next refetch.
 	}
 
+	// Canonical room-stream event consumed by notification-worker for cache invalidation.
+	// One event per mutation, room-scoped (not per-user). Non-fatal: TTL reconciles on miss.
+	canonEvt := model.CanonicalMemberEvent{
+		Type:      model.CanonicalMemberEventMuted,
+		RoomID:    sub.RoomID,
+		Account:   account,
+		Muted:     sub.Muted,
+		Timestamp: now.UnixMilli(),
+	}
+	if canonData, err := json.Marshal(canonEvt); err == nil {
+		if err := h.publishToStream(ctx, subject.RoomCanonicalMemberEvent(h.siteID, model.CanonicalMemberEventMuted), canonData, ""); err != nil {
+			slog.Error("canonical member event publish failed", "error", err, "type", "muted", "roomID", sub.RoomID, "account", account)
+		}
+	}
+
 	userSiteID, err := h.store.GetUserSiteID(ctx, account)
 	if err != nil {
 		return nil, fmt.Errorf("get user siteId: %w", err)

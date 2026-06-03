@@ -1131,7 +1131,7 @@ func TestSyncCreateDM_SelfDM_PersistsSingleFavoritedSub(t *testing.T) {
 	}
 	cap.mu.Unlock()
 	assert.Equal(t, 1, subjects[subject.SubscriptionUpdate("alice")])
-	assert.Equal(t, 1, total, "only the subscription.update; no outbox")
+	assert.Equal(t, 1, total, "subscription.update only; no outbox (same-site) and no canonical member event (Option C)")
 }
 
 func TestSyncCreateDM_BotDM_CrossSiteOutbox(t *testing.T) {

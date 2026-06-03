@@ -11,35 +11,19 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// bootstrapConfig groups every field that is ONLY meaningful when the
-// service is being stood up in dev or integration tests against a NATS
-// instance where the streams it consumes do not yet exist. In production
-// streams are pre-provisioned by ops/IaC and Bootstrap.Enabled must remain
-// false; the service only creates its own durable consumer.
+// bootstrapConfig gates stream creation to dev/integration; leave Enabled false in production.
 type bootstrapConfig struct {
-	// Enabled (BOOTSTRAP_STREAMS) toggles whether the service calls
-	// CreateOrUpdateStream at startup for the streams it consumes.
-	// Leave false in production.
 	Enabled bool `env:"STREAMS" envDefault:"false"`
 }
 
-// streamManager is the minimal JetStream surface bootstrapStreams depends on.
-// Kept service-local so we don't pollute pkg/ with a multi-method type and so
-// tests can inject a fake without mockgen.
+// streamManager is the narrow JetStream surface bootstrapStreams uses, injected by tests.
 type streamManager interface {
 	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error)
 	Stream(ctx context.Context, name string) (oteljetstream.Stream, error)
 }
 
-// bootstrapStreams handles the JetStream MESSAGES_CANONICAL stream this
-// service uses. When enabled (dev/integration), it creates the stream via
-// CreateOrUpdateStream. When disabled (production), it verifies the stream
-// exists via Stream() and returns an error if it doesn't — fail-fast so a
-// misprovisioned deploy surfaces at startup rather than at first publish.
-//
-// Ownership rule: this helper sets only the stream schema (Name + Subjects)
-// from pkg/stream.MessagesCanonical. Federation config belongs to ops/IaC and
-// is layered on in production. App code never sets it.
+// bootstrapStreams creates MESSAGES_CANONICAL + PUSH_NOTIFICATIONS when enabled (dev/integration).
+// When disabled it verifies MESSAGES_CANONICAL exists so a misconfigured deploy fails at startup.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	canonicalCfg := stream.MessagesCanonical(siteID)
 	if enabled {
@@ -49,11 +33,20 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 		}); err != nil {
 			return fmt.Errorf("create MESSAGES_CANONICAL stream: %w", err)
 		}
+		pushCfg := stream.PushNotifications(siteID)
+		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+			Name:     pushCfg.Name,
+			Subjects: pushCfg.Subjects,
+			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON
+			// at near-zero CPU. Belt-and-braces alongside the publisher's gzip: gzip shrinks
+			// inter-replica wire bytes, S2 shrinks on-disk bytes after gzip overhead.
+			Compression: jetstream.S2Compression,
+		}); err != nil {
+			return fmt.Errorf("create PUSH_NOTIFICATIONS stream: %w", err)
+		}
 		return nil
 	}
-	// Production path: verify the stream exists. Fail fast if it doesn't —
-	// ops/IaC owns provisioning, and a missing stream means the deploy is
-	// broken before the first publish or consume.
+	// PUSH_NOTIFICATIONS absence is non-fatal: async publish surfaces errors per-publish.
 	if _, err := js.Stream(ctx, canonicalCfg.Name); err != nil {
 		return fmt.Errorf("verify MESSAGES_CANONICAL stream: %w", err)
 	}

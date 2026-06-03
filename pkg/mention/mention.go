@@ -20,8 +20,7 @@ type ParseResult struct {
 	MentionAll bool     // true if @all was mentioned (case-insensitive)
 }
 
-// Parse extracts @mention tokens from content and returns the unique
-// mentioned accounts along with whether @all was present.
+// Parse extracts @mention tokens from content, returning unique accounts and whether @all appears.
 func Parse(content string) ParseResult {
 	matches := mentionRe.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
@@ -52,7 +51,7 @@ type LookupFunc func(ctx context.Context, accounts []string) ([]model.User, erro
 // ResolveResult holds mention resolution output.
 type ResolveResult struct {
 	Participants []model.Participant // enriched mentioned users + @all entry if present
-	MentionAll   bool                // true if @all or @here was mentioned
+	MentionAll   bool                // true if @all was mentioned (case-insensitive)
 	Accounts     []string            // raw parsed accounts (for caller use outside resolution)
 }
 
@@ -62,15 +61,20 @@ type ResolveResult struct {
 func Resolve(ctx context.Context, content string, lookupFn LookupFunc) (*ResolveResult, error) {
 	parsed := Parse(content)
 	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
-		return &ResolveResult{Accounts: parsed.Accounts, MentionAll: parsed.MentionAll}, nil
+		return &ResolveResult{
+			Accounts:   parsed.Accounts,
+			MentionAll: parsed.MentionAll,
+		}, nil
 	}
 
 	users := map[string]model.User{}
 	if len(parsed.Accounts) > 0 {
 		fetched, err := lookupFn(ctx, parsed.Accounts)
 		if err != nil {
-			return &ResolveResult{Accounts: parsed.Accounts, MentionAll: parsed.MentionAll},
-				fmt.Errorf("find mentioned users: %w", err)
+			return &ResolveResult{
+				Accounts:   parsed.Accounts,
+				MentionAll: parsed.MentionAll,
+			}, fmt.Errorf("find mentioned users: %w", err)
 		}
 		users = make(map[string]model.User, len(fetched))
 		for i := range fetched {
@@ -80,12 +84,8 @@ func Resolve(ctx context.Context, content string, lookupFn LookupFunc) (*Resolve
 	return ResolveFromParsed(parsed, users), nil
 }
 
-// ResolveFromParsed builds the ResolveResult from a pre-parsed input and a
-// caller-supplied account→user map. Use this when the caller has already
-// done the user lookup (e.g. broadcast-worker fetches sender + mentions in a
-// single round-trip, then resolves without re-parsing or re-querying).
-// Missing accounts in users are silently omitted from Participants — same
-// semantics as Resolve, which omits unknown accounts returned by lookupFn.
+// ResolveFromParsed builds a ResolveResult from pre-parsed input and a caller-supplied user map.
+// Use when the caller has already done the lookup. Unknown accounts are silently omitted.
 func ResolveFromParsed(parsed ParseResult, users map[string]model.User) *ResolveResult {
 	result := &ResolveResult{
 		MentionAll: parsed.MentionAll,

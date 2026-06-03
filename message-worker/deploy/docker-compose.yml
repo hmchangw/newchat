@@ -50,6 +50,10 @@ services:
       - CASSANDRA_KEYSPACE=chat
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
+      # and broadcast-worker). Defaults: 10000 entries, 5m TTL.
+      - USER_CACHE_SIZE=10000
+      - USER_CACHE_TTL=5m
       - BOOTSTRAP_STREAMS=true
       - ATREST_ENABLED=true
       - VAULT_ADDR=http://vault:8200

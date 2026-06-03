@@ -2,6 +2,7 @@ package roomsubcache_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -238,4 +240,48 @@ func keysOf(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestMember_JSONRoundTrip_NewFields(t *testing.T) {
+	hss := int64(1700000000000)
+	in := roomsubcache.Member{
+		ID:                 "u1",
+		Account:            "alice",
+		RoomType:           model.RoomTypeChannel,
+		IsBot:              true,
+		Muted:              true,
+		HistorySharedSince: &hss,
+	}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+
+	var out roomsubcache.Member
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, in, out)
+}
+
+func TestMember_RoomType_RoundTrip(t *testing.T) {
+	for _, rt := range []model.RoomType{
+		model.RoomTypeChannel,
+		model.RoomTypeDM,
+		model.RoomTypeBotDM,
+		model.RoomTypeDiscussion,
+	} {
+		m := roomsubcache.Member{ID: "u1", Account: "alice", RoomType: rt}
+		data, err := json.Marshal(m)
+		require.NoError(t, err)
+		var out roomsubcache.Member
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, rt, out.RoomType, "RoomType %q should round-trip", rt)
+	}
+}
+
+func TestMember_OmitemptyOnZeroValues(t *testing.T) {
+	in := roomsubcache.Member{ID: "u1", Account: "alice"}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+	got := string(data)
+
+	// Only id + account on the wire; no zero-valued booleans / strings / pointers.
+	assert.JSONEq(t, `{"id":"u1","account":"alice"}`, got)
 }

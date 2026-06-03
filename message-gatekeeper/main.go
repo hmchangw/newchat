@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/userstore"
 )
 
 type config struct {
@@ -36,6 +37,8 @@ type config struct {
 	SubCacheTTL        time.Duration           `env:"GATEKEEPER_SUB_CACHE_TTL"   envDefault:"2m"`
 	RoomMetaCacheSize  int                     `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
 	RoomMetaCacheTTL   time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
+	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
+	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 }
@@ -86,9 +89,16 @@ func main() {
 		slog.Error("init subscription cache failed", "error", err)
 		os.Exit(1)
 	}
+	users, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+		cfg.UserCacheSize, cfg.UserCacheTTL)
+	if err != nil {
+		slog.Error("init user meta cache failed", "error", err)
+		os.Exit(1)
+	}
 	slog.Info("gatekeeper caches enabled",
 		"sub_cache_size", cfg.SubCacheSize, "sub_cache_ttl", cfg.SubCacheTTL,
 		"room_meta_cache_size", cfg.RoomMetaCacheSize, "room_meta_cache_ttl", cfg.RoomMetaCacheTTL,
+		"user_cache_size", cfg.UserCacheSize, "user_cache_ttl", cfg.UserCacheTTL,
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)
@@ -104,7 +114,7 @@ func main() {
 		return nil
 	}
 	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL)
-	handler := NewHandler(store, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold)
+	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold)
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)

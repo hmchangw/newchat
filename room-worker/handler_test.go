@@ -1196,7 +1196,7 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 	err := h.processRemoveMember(context.Background(), data)
 	require.NoError(t, err)
 
-	// Expect: 2 sub updates (carol, dave) + 1 member event + 1 local INBOX + 1 sys msg = 5 publishes
+	// Expect: 2 sub updates + 1 member event + 1 local INBOX + 1 sys msg = 5 publishes
 	assert.Len(t, published, 5, "expected 5 publishes: 2 sub updates, member event, local INBOX, sys msg")
 
 	subjSet := make(map[string]bool)
@@ -2863,7 +2863,7 @@ func TestHandleSyncCreateDM_SelfDM(t *testing.T) {
 	// Reply returns the in-memory sub directly (no read-back round-trip).
 	assert.Equal(t, *captured[0], reply.Subscription)
 
-	// One subscription.update; no outbox (same-site by definition).
+	// subscription.update only — same-site self-DM; no outbox and no canonical event (Option C).
 	require.Len(t, capture.captured, 1)
 	assert.Equal(t, subject.SubscriptionUpdate("alice"), capture.captured[0].subject)
 }

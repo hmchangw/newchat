@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -30,10 +31,17 @@ type replyFunc func(ctx context.Context, msg *nats.Msg) error
 // publishFunc is the function signature for publishing to JetStream.
 type publishFunc func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 
+// UserGetter is the narrow user-record surface gatekeeper needs for sender
+// display-name resolution. *userstore.Cache satisfies this; tests stub it.
+type UserGetter interface {
+	FindUserByID(ctx context.Context, id string) (*model.User, error)
+}
+
 // Handler processes messages from the MESSAGES stream and validates them
 // before publishing to MESSAGES_CANONICAL.
 type Handler struct {
 	store              Store
+	users              UserGetter
 	publish            publishFunc
 	reply              replyFunc
 	siteID             string
@@ -42,9 +50,12 @@ type Handler struct {
 }
 
 // NewHandler constructs a new Handler with the given dependencies.
-func NewHandler(store Store, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold int) *Handler {
+// users may be nil; when nil, sender display-name resolution is skipped and
+// downstream consumers fall back to UserAccount.
+func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold int) *Handler {
 	return &Handler{
 		store:              store,
+		users:              users,
 		publish:            publish,
 		reply:              reply,
 		siteID:             siteID,
@@ -168,6 +179,10 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid requestId %q: must be a hyphenated UUID", req.RequestID))
 	}
 
+	// Payload requestId is the canonical source for X-Request-ID — upstream publishers may
+	// or may not set the NATS header, so overwrite ctx unconditionally before any downstream publish.
+	ctx = natsutil.WithRequestID(ctx, req.RequestID)
+
 	// Validate ID is a valid 20-char base62 message ID
 	if !idgen.IsValidMessageID(req.ID) {
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid message ID %q: must be a 20-char base62 string", req.ID))
@@ -244,11 +259,29 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, err
 	}
 
+	// Compose the sender's render-ready display name once at write time so every
+	// downstream consumer (notification-worker, future search-sync-worker) reads
+	// from the canonical message instead of doing its own user lookup. The lookup
+	// is best-effort — on miss/error we fall back to UserAccount via
+	// model.DisplayName's empty-fields branch; message validation already passed
+	// the sender check so missing display data does not warrant blocking the post.
+	displayName := sub.User.Account
+	if h.users != nil {
+		u, uerr := h.users.FindUserByID(ctx, sub.User.ID)
+		if uerr == nil && u != nil {
+			displayName = displayfmt.CombineWithFallback(u.EngName, u.ChineseName, sub.User.Account)
+		} else if uerr != nil {
+			slog.Warn("sender user-meta lookup failed, display name falls back to account",
+				"error", uerr, "userId", sub.User.ID, "account", sub.User.Account, "messageId", req.ID)
+		}
+	}
+
 	msg := model.Message{
 		ID:                           req.ID,
 		RoomID:                       roomID,
 		UserID:                       sub.User.ID,
 		UserAccount:                  sub.User.Account,
+		UserDisplayName:              displayName,
 		Content:                      req.Content,
 		CreatedAt:                    now,
 		ThreadParentMessageID:        req.ThreadParentMessageID,

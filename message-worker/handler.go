@@ -171,6 +171,12 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	if err := h.threadStore.InsertThreadSubscription(ctx, parentSub); err != nil {
 		return fmt.Errorf("insert parent author thread subscription: %w", err)
 	}
+	// Parent author joins the thread's replyAccounts set so they appear as a
+	// follower in notification-worker and history-service's "following" feed,
+	// even before they reply themselves. $addToSet dedups against the replier seed.
+	if err := h.threadStore.AddReplyAccounts(ctx, threadRoomID, []string{parentSender.Account}); err != nil {
+		return fmt.Errorf("add parent author to thread room replyAccounts: %w", err)
+	}
 	// Outbox publish is gated on parentOwnerSite — if the parent user is missing
 	// from userStore, we can't route the cross-site copy, but the local Insert
 	// above is independent of that and still happens.
@@ -265,7 +271,15 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		return "", fmt.Errorf("get parent message sender: %w", err)
 	}
 
-	if err := h.threadStore.UpdateThreadRoomLastMessage(ctx, existingRoom.ID, msg.ID, msg.UserAccount, now); err != nil {
+	// Update lastMsg pointer AND merge replier + parent author into replyAccounts in one write.
+	// Folding the parent-author $addToSet here (vs a separate AddReplyAccounts call) halves the
+	// per-reply Mongo round-trips and also covers the migration for thread_rooms created before
+	// the parent author was seeded.
+	replyAccounts := []string{msg.UserAccount}
+	if parentFound {
+		replyAccounts = append(replyAccounts, parentSender.Account)
+	}
+	if err := h.threadStore.UpdateThreadRoomLastMessage(ctx, existingRoom.ID, msg.ID, replyAccounts, now); err != nil {
 		return "", fmt.Errorf("update thread room last message: %w", err)
 	}
 
@@ -337,11 +351,14 @@ func (h *Handler) buildThreadSubscription(msg *model.Message, threadRoomID, user
 }
 
 // markThreadMentions flips hasMention=true on the thread subscription of every
-// @account mentionee in msg (auto-creating the subscription if absent). The
-// sender is excluded, and @all is ignored at the thread level. Subscription.SiteID
-// is the room's site (eventSiteID); the mentionee's home site (Participant.SiteID)
-// is used only for the cross-site outbox routing.
+// @account mentionee in msg (auto-creating the subscription if absent), and
+// also adds them to thread_rooms.replyAccounts so they appear as thread followers
+// for notification fan-out and the "following threads" feed. The sender is
+// excluded and @all is ignored at the thread level. Subscription.SiteID is the
+// room's site (eventSiteID); the mentionee's home site (Participant.SiteID) is
+// used only for the cross-site outbox routing.
 func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, threadRoomID, eventSiteID string) error {
+	var mentionedAccounts []string
 	for i := range msg.Mentions {
 		p := &msg.Mentions[i]
 		if p.Account == "all" {
@@ -357,6 +374,12 @@ func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, th
 		}
 		if err := h.publishThreadSubOutboxIfRemote(ctx, sub, p.SiteID, msg.ID); err != nil {
 			return fmt.Errorf("publish thread mention outbox for user %s: %w", p.UserID, err)
+		}
+		mentionedAccounts = append(mentionedAccounts, p.Account)
+	}
+	if len(mentionedAccounts) > 0 {
+		if err := h.threadStore.AddReplyAccounts(ctx, threadRoomID, mentionedAccounts); err != nil {
+			return fmt.Errorf("add mentioned accounts to thread room replyAccounts: %w", err)
 		}
 	}
 	return nil

@@ -73,6 +73,13 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, key
 	}
 }
 
+// publishSubscriptionUpdate fans out the per-user subscription.update event for the FE; best-effort.
+func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account string, subEvtData []byte) {
+	if err := h.publish(ctx, subject.SubscriptionUpdate(account), subEvtData, ""); err != nil {
+		slog.Error("subscription update publish failed", "error", err, "account", account)
+	}
+}
+
 // SetKeyFanoutWorkers overrides the bounded-worker pool size used by
 // fanOutKey. Values <= 0 are ignored so partial-deployment misconfig can't
 // disable the cap. main wires this from KEY_FANOUT_WORKERS at startup.
@@ -438,9 +445,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		Timestamp: now.UnixMilli(),
 	}
 	subEvtData, _ := json.Marshal(subEvt)
-	if err := h.publish(ctx, subject.SubscriptionUpdate(req.Account), subEvtData, ""); err != nil {
-		slog.ErrorContext(ctx, "subscription update publish failed", "error", err, "account", req.Account)
-	}
+	h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
 
 	// Member change event
 	evtType := model.MessageTypeMemberLeft
@@ -649,9 +654,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 			Timestamp: now.UnixMilli(),
 		}
 		subEvtData, _ := json.Marshal(subEvt)
-		if err := h.publish(ctx, subject.SubscriptionUpdate(m.Account), subEvtData, ""); err != nil {
-			slog.ErrorContext(ctx, "subscription update publish failed", "error", err, "account", m.Account)
-		}
+		h.publishSubscriptionUpdate(ctx, m.Account, subEvtData)
 	}
 
 	// Member change event with all removed accounts
@@ -1011,9 +1014,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			Timestamp:    now.UnixMilli(),
 		}
 		subEvtData, _ := json.Marshal(subEvt)
-		if err := h.publish(ctx, subject.SubscriptionUpdate(sub.User.Account), subEvtData, ""); err != nil {
-			slog.ErrorContext(ctx, "subscription update publish failed", "error", err, "account", sub.User.Account)
-		}
+		h.publishSubscriptionUpdate(ctx, sub.User.Account, subEvtData)
 	}
 
 	// Fan out the room key only to newly-subscribed accounts. Accounts in
@@ -1445,9 +1446,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 			slog.ErrorContext(ctx, "marshal subscription.update failed", "error", err, "account", sub.User.Account)
 			continue
 		}
-		if err := h.publish(ctx, subject.SubscriptionUpdate(sub.User.Account), data, ""); err != nil {
-			slog.ErrorContext(ctx, "publish subscription.update failed", "error", err, "account", sub.User.Account)
-		}
+		h.publishSubscriptionUpdate(ctx, sub.User.Account, data)
 	}
 
 	// Task 36: channel-only sys-messages
@@ -1817,10 +1816,7 @@ func (h *Handler) publishSubscriptionUpdates(ctx context.Context, subs []*model.
 				"error", err, "account", sub.User.Account, "request_id", requestID)
 			continue
 		}
-		if err := h.publish(ctx, subject.SubscriptionUpdate(sub.User.Account), data, ""); err != nil {
-			slog.ErrorContext(ctx, "sync DM: publish subscription.update failed",
-				"error", err, "account", sub.User.Account, "request_id", requestID)
-		}
+		h.publishSubscriptionUpdate(ctx, sub.User.Account, data)
 	}
 }
 

@@ -940,23 +940,6 @@ func TestRoomKeyGetResponseJSON(t *testing.T) {
 	roundTrip(t, &src, &dst)
 }
 
-func TestNotificationEventJSON(t *testing.T) {
-	src := model.NotificationEvent{
-		Type:   "new_message",
-		RoomID: "room-1",
-		Message: model.Message{
-			ID: "m1", RoomID: "room-1", UserID: "u1", UserAccount: "alice",
-			Content: "hello", CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
-		},
-		Timestamp: 1735689600000,
-	}
-	data, err := json.Marshal(&src)
-	require.NoError(t, err)
-	var dst model.NotificationEvent
-	require.NoError(t, json.Unmarshal(data, &dst))
-	assert.Equal(t, src, dst)
-}
-
 func TestUpdateRoleRequestJSON(t *testing.T) {
 	src := model.UpdateRoleRequest{RoomID: "r1", Account: "bob", NewRole: model.RoleOwner, Timestamp: 1735689600000}
 	roundTrip(t, &src, &model.UpdateRoleRequest{})
@@ -2748,4 +2731,65 @@ func TestMessageAndOutboxAndAsyncOpConstants(t *testing.T) {
 	assert.Equal(t, "room.rename", model.AsyncJobOpRoomRename)
 	assert.Equal(t, model.RoomEventType("room_renamed"), model.RoomEventRoomRenamed)
 	assert.Equal(t, model.RoomEventType("room_restricted"), model.RoomEventRoomRestricted)
+}
+
+func TestPushNotificationEvent_RoundTrip(t *testing.T) {
+	in := model.PushNotificationEvent{
+		ID:       "m1-b0",
+		Accounts: []string{"alice", "bob"},
+		Title:    "general",
+		Body:     "hello",
+		RoomID:   "r1",
+		Data: model.PushNotificationData{
+			RoomID:    "r1",
+			MessageID: "m1",
+			Type:      "c",
+			Sender:    &model.Participant{Account: "bob", ChineseName: "張三", EngName: "Bob"},
+			PushTime:  "2026-05-27T00:00:00Z",
+		},
+		Timestamp: 1700000000000,
+	}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+	var out model.PushNotificationEvent
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, in, out)
+}
+
+func TestMessage_SenderDisplayName(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  model.Message
+		want string
+	}{
+		{
+			name: "uses UserDisplayName when populated",
+			msg:  model.Message{UserAccount: "alice", UserDisplayName: "Alice Wang 愛麗絲"},
+			want: "Alice Wang 愛麗絲",
+		},
+		{
+			name: "falls back to UserAccount on legacy in-flight message",
+			msg:  model.Message{UserAccount: "alice", UserDisplayName: ""},
+			want: "alice",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.msg.SenderDisplayName())
+		})
+	}
+}
+
+func TestPresenceSnapshotReply_RoundTrip(t *testing.T) {
+	in := model.PresenceSnapshotReply{
+		Presences: map[string]model.Presence{
+			"alice": {AggregatedStatus: "online"},
+			"bob":   {AggregatedStatus: "busy"},
+		},
+	}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+	var out model.PresenceSnapshotReply
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, in, out)
 }

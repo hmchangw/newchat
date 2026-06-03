@@ -147,6 +147,12 @@ func TestSubjectBuilders(t *testing.T) {
 		}
 	})
 
+	t.Run("PushNotificationFilter", func(t *testing.T) {
+		assert.Equal(t,
+			"chat.server.notification.push.site-a.>",
+			subject.PushNotificationFilter("site-a"))
+	})
+
 	t.Run("InboxMemberEventSubjects", func(t *testing.T) {
 		got := subject.InboxMemberEventSubjects("site-a")
 		want := []string{
@@ -697,4 +703,34 @@ func TestUserServicePatternBuilders(t *testing.T) {
 			assert.Equal(t, tt.want, tt.got)
 		})
 	}
+}
+
+func TestPushNotification(t *testing.T) {
+	assert.Equal(t,
+		"chat.server.notification.push.site-a.send",
+		subject.PushNotification("site-a"))
+}
+
+func TestPresenceSnapshot(t *testing.T) {
+	assert.Equal(t,
+		"chat.presence.site-a.request.snapshot",
+		subject.PresenceSnapshot("site-a"))
+}
+
+func TestSubscriptionUpdateWildcard(t *testing.T) {
+	assert.Equal(t,
+		"chat.user.*.event.subscription.update",
+		subject.SubscriptionUpdateWildcard())
+}
+
+func TestParseSubscriptionUpdateAccount(t *testing.T) {
+	acct, ok := subject.ParseSubscriptionUpdateAccount("chat.user.alice.event.subscription.update")
+	assert.True(t, ok)
+	assert.Equal(t, "alice", acct)
+
+	_, ok = subject.ParseSubscriptionUpdateAccount("chat.user.alice.event.room.update")
+	assert.False(t, ok)
+
+	_, ok = subject.ParseSubscriptionUpdateAccount("chat.user.*.event.subscription.update")
+	assert.False(t, ok) // wildcard token rejected
 }

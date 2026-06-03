@@ -12,6 +12,12 @@ services:
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - CHAT_BASE_URL=http://localhost:3000
+      # User cache fronts users-collection lookups so the per-message sender
+      # display-name composition stays off the hot Mongo path. In-process LRU
+      # (the pkg/userstore.Cache shared with broadcast-worker + message-worker);
+      # entries are tiny so per-pod memory stays in the low MB.
+      - USER_CACHE_SIZE=10000
+      - USER_CACHE_TTL=5m
       - BOOTSTRAP_STREAMS=true
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro

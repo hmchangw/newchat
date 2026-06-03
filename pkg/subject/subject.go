@@ -101,6 +101,11 @@ func RoomCanonical(siteID, operation string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.%s", siteID, operation)
 }
 
+// RoomCanonicalMemberEvent returns the post-mutation member-event subject (mute-only today).
+func RoomCanonicalMemberEvent(siteID, eventType string) string {
+	return fmt.Sprintf("chat.room.canonical.%s.event.member.%s", siteID, eventType)
+}
+
 func SubscriptionUpdate(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.subscription.update", account)
 }
@@ -801,4 +806,41 @@ func UserRoomWildCard(siteID string) string {
 
 func UserAppsWildCard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.user.%s.apps.>", siteID)
+}
+
+// PushNotification is the per-recipient mobile-push subject. Lives under chat.server.* so
+// client JWTs cannot subscribe. The stream filter covers the .send leaf and future siblings.
+func PushNotification(siteID string) string {
+	return fmt.Sprintf("chat.server.notification.push.%s.send", siteID)
+}
+
+// PushNotificationFilter is the stream-binding wildcard covering .send and any future siblings.
+func PushNotificationFilter(siteID string) string {
+	return fmt.Sprintf("chat.server.notification.push.%s.>", siteID)
+}
+
+// PresenceSnapshot is the bulk presence RPC subject (request/reply).
+func PresenceSnapshot(siteID string) string {
+	return fmt.Sprintf("chat.presence.%s.request.snapshot", siteID)
+}
+
+// SubscriptionUpdateWildcard matches every subscription.update fanout event.
+func SubscriptionUpdateWildcard() string {
+	return "chat.user.*.event.subscription.update"
+}
+
+// ParseSubscriptionUpdateAccount extracts the account from a subscription.update subject; ok=false on malformed input.
+func ParseSubscriptionUpdateAccount(s string) (account string, ok bool) {
+	parts := strings.Split(s, ".")
+	if len(parts) != 6 {
+		return "", false
+	}
+	if parts[0] != "chat" || parts[1] != "user" || parts[3] != "event" ||
+		parts[4] != "subscription" || parts[5] != "update" {
+		return "", false
+	}
+	if !isValidAccountToken(parts[2]) {
+		return "", false
+	}
+	return parts[2], true
 }

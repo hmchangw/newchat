@@ -25,5 +25,12 @@ type ThreadStore interface {
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	MarkThreadSubscriptionMention(ctx context.Context, sub *model.ThreadSubscription) error
-	UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID, replierAccount string, lastMsgAt time.Time) error
+	// UpdateThreadRoomLastMessage bumps the last-message pointer and $addToSet-merges
+	// the supplied accounts (replier + parent author on the subsequent-reply path) into
+	// replyAccounts in one write.
+	UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID string, replyAccounts []string, lastMsgAt time.Time) error
+	// AddReplyAccounts $addToSet-merges accounts into thread_rooms.replyAccounts.
+	// Used by paths that don't already update lastMsg (first-reply parent author,
+	// mention-only subscribers) so the field mirrors thread_subscriptions membership.
+	AddReplyAccounts(ctx context.Context, threadRoomID string, accounts []string) error
 }

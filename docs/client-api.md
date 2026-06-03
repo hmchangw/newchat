@@ -928,7 +928,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 ##### Behaviour notes
 
-- **Notification delivery:** `notification-worker` does **not** yet consult `muted` before sending. End-to-end mute behaviour is wired only as far as the persisted flag; honouring it in fan-out is a follow-up.
+- **Notification delivery:** `notification-worker` respects `muted` flags when deciding whether to send mobile push notifications (see [Notification fan-out](#notification-fan-out-mobile-push-only) below).
 
 ---
 
@@ -2517,6 +2517,28 @@ When validation fails, the gatekeeper publishes the error envelope to `chat.user
 ```json
 { "code": "bad_request", "error": "content must not be empty" }
 ```
+
+#### Notification fan-out (mobile push only)
+
+`notification-worker` no longer publishes `chat.user.{account}.notification`
+on core NATS. Mobile pushes are emitted on the server-only JetStream subject
+`chat.server.notification.push.{siteID}.send` and forwarded by the internal
+push-notification service. Desktop banners are computed client-side from the
+broadcast-worker room-event stream — no server-side desktop publish exists.
+
+The worker filters recipients per message:
+
+- Skips the sender.
+- Skips members with `muted: true` on their subscription.
+- Skips members whose `historySharedSince` postdates the message (for a
+  thread-only reply the parent's `createdAt` is used instead).
+- For a thread reply with `tshow: false`, skips non-followers who are not
+  mentioned.
+- In rooms with more than `LARGE_ROOM_THRESHOLD` members (default 500),
+  pushes only to mentioned recipients (`@user`, `@all`, `@here`).
+- Bots never receive a mobile push.
+- Presence-busy / in-call recipients are not pushed; everyone else
+  (online, offline, away, missing) receives one.
 
 ---
 

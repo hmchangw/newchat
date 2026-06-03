@@ -11,10 +11,11 @@ services:
       - SITE_ID=site-local
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
-      # In-process user cache. Defaults: 10000 entries, 5m TTL.
-      # Set USER_CACHE_SIZE=0 to disable caching.
+      # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
+      # and message-worker). Defaults: 10000 entries, 5m TTL.
       - USER_CACHE_SIZE=10000
       - USER_CACHE_TTL=5m
+      # Valkey is used for room encryption keys only (when ENCRYPTION_ENABLED=true).
       - VALKEY_ADDRS=valkey:6379
       - VALKEY_KEY_GRACE_PERIOD=24h
       - BOOTSTRAP_STREAMS=true

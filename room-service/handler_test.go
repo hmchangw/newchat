@@ -3861,11 +3861,14 @@ func TestHandler_MuteToggle_Success(t *testing.T) {
 
 	var coreSubjects []string
 	var coreBodies [][]byte
+	var streamSubjects []string
+	var streamBodies [][]byte
 	h := &Handler{
 		store:  store,
 		siteID: "site-a",
-		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
-			t.Fatal("publishToStream must not be called for same-site mute toggle")
+		publishToStream: func(_ context.Context, subj string, data []byte, _ string) error {
+			streamSubjects = append(streamSubjects, subj)
+			streamBodies = append(streamBodies, data)
 			return nil
 		},
 		publishCore: func(_ context.Context, subj string, data []byte) error {
@@ -3892,6 +3895,16 @@ func TestHandler_MuteToggle_Success(t *testing.T) {
 	assert.Equal(t, "mute_toggled", evt.Action)
 	assert.True(t, evt.Subscription.Muted)
 	assert.Equal(t, "alice", evt.Subscription.User.Account)
+
+	// Canonical room-stream event for notification-worker cache invalidation.
+	require.Len(t, streamSubjects, 1)
+	assert.Equal(t, subject.RoomCanonicalMemberEvent("site-a", model.CanonicalMemberEventMuted), streamSubjects[0])
+	var canon model.CanonicalMemberEvent
+	require.NoError(t, json.Unmarshal(streamBodies[0], &canon))
+	assert.Equal(t, model.CanonicalMemberEventMuted, canon.Type)
+	assert.Equal(t, "r1", canon.RoomID)
+	assert.Equal(t, "alice", canon.Account)
+	assert.True(t, canon.Muted)
 }
 
 func TestHandler_MuteToggle_CrossSitePublishesOutbox(t *testing.T) {
@@ -4006,11 +4019,10 @@ func TestHandler_MuteToggle_GetUserSiteIDError(t *testing.T) {
 
 	h := &Handler{
 		store: store, siteID: "site-a",
-		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
-			t.Fatal("publishToStream must not be called when GetUserSiteID fails")
-			return nil
-		},
-		publishCore: func(_ context.Context, _ string, _ []byte) error { return nil },
+		// Canonical member event publish happens before GetUserSiteID and is
+		// independent of the outbox path — it represents the successful DB mutation.
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		publishCore:     func(_ context.Context, _ string, _ []byte) error { return nil },
 	}
 
 	subj := subject.MuteToggle("alice", "r1", "site-a")
@@ -4492,10 +4504,7 @@ func TestHandler_MuteToggle_CorePublishFailureIsNonFatal(t *testing.T) {
 		publishCore: func(_ context.Context, _ string, _ []byte) error {
 			return fmt.Errorf("core nats down")
 		},
-		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
-			t.Fatal("publishToStream must not be called for same-site mute toggle")
-			return nil
-		},
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
 	}
 
 	subj := subject.MuteToggle("alice", "r1", "site-a")

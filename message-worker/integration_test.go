@@ -668,6 +668,17 @@ func TestHandler_Integration_ThreadReplyWithMention(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(3), count)
 	})
+
+	t.Run("thread_rooms.replyAccounts contains replier + parent author + mentioned user", func(t *testing.T) {
+		var got model.ThreadRoom
+		err := db.Collection("thread_rooms").FindOne(ctx, bson.M{
+			"parentMessageId": "msg-parent-mention",
+		}).Decode(&got)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"replier", "parent-user", "bob"}, got.ReplyAccounts,
+			"replyAccounts should match thread_subscriptions members so notification-worker "+
+				"can use this single field as the follower set")
+	})
 }
 
 func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
@@ -901,7 +912,7 @@ func TestThreadStoreMongo_UpdateThreadRoomLastMessage(t *testing.T) {
 	require.NoError(t, store.CreateThreadRoom(ctx, room))
 
 	later := now.Add(10 * time.Minute)
-	err := store.UpdateThreadRoomLastMessage(ctx, "tr-update", "msg-5", "bob", later)
+	err := store.UpdateThreadRoomLastMessage(ctx, "tr-update", "msg-5", []string{"bob"}, later)
 	require.NoError(t, err)
 
 	got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-update")

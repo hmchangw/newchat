@@ -40,6 +40,15 @@ func Outbox(siteID string) Config {
 	}
 }
 
+// PushNotifications returns the PUSH_NOTIFICATIONS_{siteID} stream config.
+// Owned by ops in production; notification-worker bootstraps it in dev only.
+func PushNotifications(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("PUSH_NOTIFICATIONS_%s", siteID),
+		Subjects: []string{subject.PushNotificationFilter(siteID)},
+	}
+}
+
 // Inbox returns the canonical config for the `INBOX_{siteID}` stream that
 // carries subscription lifecycle events (member_added, member_removed)
 // plus any other aggregated events federated in from other sites.

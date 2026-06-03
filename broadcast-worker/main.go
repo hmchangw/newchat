@@ -79,13 +79,13 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
-	us := userstore.NewMongoStore(db.Collection("users"))
-	if cfg.UserCacheSize > 0 && cfg.UserCacheTTL > 0 {
-		us = NewCachedUserStore(us, cfg.UserCacheSize, cfg.UserCacheTTL)
-		slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
-	} else {
-		slog.Info("user-cache disabled")
+	us, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+		cfg.UserCacheSize, cfg.UserCacheTTL)
+	if err != nil {
+		slog.Error("init user cache failed", "error", err)
+		os.Exit(1)
 	}
+	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
 	var keyStore roomkeystore.RoomKeyStore
 	if cfg.Encryption.Enabled {

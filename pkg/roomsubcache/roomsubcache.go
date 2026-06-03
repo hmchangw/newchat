@@ -2,12 +2,9 @@
 // fan-out workers (e.g. notification-worker) can avoid a Mongo round-trip
 // for every published message.
 //
-// The cache stores only the fields a fan-out path actually needs —
-// {ID, Account} per member — not the full model.Subscription document.
-// Entries are written with a caller-supplied TTL and are not actively
-// invalidated; staleness is bounded by the TTL. An Invalidate method is
-// provided so a future room-membership event listener can evict eagerly
-// without changing this package.
+// The cache stores the fan-out path's per-member input set — see Member.
+// Entries are written with a caller-supplied TTL and may be eagerly
+// invalidated via Invalidate; staleness is otherwise bounded by the TTL.
 package roomsubcache
 
 import (
@@ -17,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -26,11 +24,15 @@ import (
 // the reader. Configurable per-instance via WithMaxValueBytes.
 const DefaultMaxValueBytes = 16 * 1024 * 1024
 
-// Member is the projection of model.Subscription that fan-out callers need:
-// the user's stable ID (for sender-skip checks) and account (for routing).
+// Member is the model.Subscription projection needed by the fan-out path.
+// Extra fields use omitempty so a plain member's JSON stays {id, account}.
 type Member struct {
-	ID      string `json:"id"`
-	Account string `json:"account"`
+	ID                 string         `json:"id"`
+	Account            string         `json:"account"`
+	RoomType           model.RoomType `json:"roomType,omitempty"`
+	IsBot              bool           `json:"isBot,omitempty"`
+	Muted              bool           `json:"muted,omitempty"`
+	HistorySharedSince *int64         `json:"historySharedSince,omitempty"`
 }
 
 // Cache stores and retrieves a room's member list.

@@ -181,17 +181,31 @@ func (mr *MockThreadStoreMockRecorder) MarkThreadSubscriptionMention(ctx, sub an
 }
 
 // UpdateThreadRoomLastMessage mocks base method.
-func (m *MockThreadStore) UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID, replierAccount string, lastMsgAt time.Time) error {
+func (m *MockThreadStore) UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID string, replyAccounts []string, lastMsgAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateThreadRoomLastMessage", ctx, threadRoomID, lastMsgID, replierAccount, lastMsgAt)
+	ret := m.ctrl.Call(m, "UpdateThreadRoomLastMessage", ctx, threadRoomID, lastMsgID, replyAccounts, lastMsgAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateThreadRoomLastMessage indicates an expected call of UpdateThreadRoomLastMessage.
-func (mr *MockThreadStoreMockRecorder) UpdateThreadRoomLastMessage(ctx, threadRoomID, lastMsgID, replierAccount, lastMsgAt any) *gomock.Call {
+func (mr *MockThreadStoreMockRecorder) UpdateThreadRoomLastMessage(ctx, threadRoomID, lastMsgID, replyAccounts, lastMsgAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateThreadRoomLastMessage", reflect.TypeOf((*MockThreadStore)(nil).UpdateThreadRoomLastMessage), ctx, threadRoomID, lastMsgID, replierAccount, lastMsgAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateThreadRoomLastMessage", reflect.TypeOf((*MockThreadStore)(nil).UpdateThreadRoomLastMessage), ctx, threadRoomID, lastMsgID, replyAccounts, lastMsgAt)
+}
+
+// AddReplyAccounts mocks base method.
+func (m *MockThreadStore) AddReplyAccounts(ctx context.Context, threadRoomID string, accounts []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddReplyAccounts", ctx, threadRoomID, accounts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddReplyAccounts indicates an expected call of AddReplyAccounts.
+func (mr *MockThreadStoreMockRecorder) AddReplyAccounts(ctx, threadRoomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddReplyAccounts", reflect.TypeOf((*MockThreadStore)(nil).AddReplyAccounts), ctx, threadRoomID, accounts)
 }
 
 // UpsertThreadSubscription mocks base method.

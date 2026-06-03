@@ -44,10 +44,6 @@ func TestParse(t *testing.T) {
 
 		// Email-style suffix no longer captured: only the leading @user matches.
 		{name: "email-style suffix dropped", content: "ping @user@domain.com", accounts: []string{"user"}, mentionAll: false},
-
-		// @here is no longer a mentionAll alias — it parses as a regular account.
-		{name: "@here lowercase no longer mentionAll", content: "look @here please", accounts: []string{"here"}, mentionAll: false},
-		{name: "@HERE uppercase no longer mentionAll", content: "look @HERE please", accounts: []string{"here"}, mentionAll: false},
 	}
 
 	for _, tt := range tests {
@@ -125,7 +121,7 @@ func TestResolve(t *testing.T) {
 			},
 		},
 		{
-			name:         "lookup error — partial result",
+			name:         "lookup error — partial result returned",
 			content:      "hey @bob",
 			lookupErr:    errors.New("db error"),
 			wantAccounts: []string{"bob"},

@@ -38,6 +38,18 @@ type SubscriptionUpdateEvent struct {
 	Timestamp    int64        `json:"timestamp" bson:"timestamp"`
 }
 
+// CanonicalMemberEventMuted is the only event type currently published on this stream.
+const CanonicalMemberEventMuted = "muted"
+
+// CanonicalMemberEvent is the room-scoped post-mutation event for roomsubcache invalidation (mute-only today).
+type CanonicalMemberEvent struct {
+	Type      string `json:"type"`
+	RoomID    string `json:"roomId"`
+	Account   string `json:"account"`
+	Muted     bool   `json:"muted"` // post-toggle state; false is a valid (unmuted) value, so no omitempty.
+	Timestamp int64  `json:"timestamp"`
+}
+
 type UpdateRoleRequest struct {
 	RoomID  string `json:"roomId"  bson:"roomId"`
 	Account string `json:"account" bson:"account"`
@@ -67,13 +79,6 @@ type InboxMemberEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty"`
 	JoinedAt           int64    `json:"joinedAt,omitempty"`
 	Timestamp          int64    `json:"timestamp" bson:"timestamp"`
-}
-
-type NotificationEvent struct {
-	Type      string  `json:"type"` // "new_message"
-	RoomID    string  `json:"roomId"`
-	Message   Message `json:"message"`
-	Timestamp int64   `json:"timestamp" bson:"timestamp"`
 }
 
 // OutboxEventType is the type tag on an OutboxEvent used to route it to the
@@ -140,12 +145,17 @@ type MemberAddEvent struct {
 }
 
 // Participant represents a user with display name info for client rendering.
+// DisplayName is the render-ready composed name (see pkg/displayfmt.CombineWithFallback)
+// and is the field push-service uses to render notifications; it is populated only
+// where pre-composition is meaningful (push event senders), left empty in
+// fan-out shapes that carry raw EngName/ChineseName (mentions, ClientMessage).
 type Participant struct {
-	UserID      string `json:"userId,omitempty" bson:"userId,omitempty"`
-	Account     string `json:"account" bson:"account"`
-	SiteID      string `json:"siteId,omitempty" bson:"siteId,omitempty"`
-	ChineseName string `json:"chineseName" bson:"chineseName"`
-	EngName     string `json:"engName" bson:"engName"`
+	UserID      string `json:"userId,omitempty"      bson:"userId,omitempty"`
+	Account     string `json:"account"               bson:"account"`
+	SiteID      string `json:"siteId,omitempty"      bson:"siteId,omitempty"`
+	ChineseName string `json:"chineseName"           bson:"chineseName"`
+	EngName     string `json:"engName"               bson:"engName"`
+	DisplayName string `json:"displayName,omitempty" bson:"displayName,omitempty"`
 }
 
 // ClientMessage wraps Message with enriched sender info for client consumption.

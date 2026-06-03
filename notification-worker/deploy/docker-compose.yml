@@ -11,6 +11,22 @@ services:
       - SITE_ID=site-local
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      - VALKEY_ADDRS=valkey:6379
+      - ROOMSUBCACHE_TTL=5m
+      - LARGE_ROOM_THRESHOLD=500
+      # Recipients per PUSH_NOTIFICATIONS event. Default 100; well under FCM's 500-token
+      # multicast cap and APNs HTTP/2 connection-frame ceiling.
+      - PUSH_RECIPIENT_BATCH_SIZE=100
+      # Title is resolved here from the rooms collection; sender display name is
+      # pre-composed by message-gatekeeper and propagated on the canonical message,
+      # so no users-collection lookup runs in this service.
+      - ROOM_META_CACHE_SIZE=10000
+      - ROOM_META_CACHE_TTL=2m
+      - PRESENCE_RPC_ENABLED=false
+      # Must match the broker's max_payload. Emitter rejects gzipped batches
+      # larger than this before publish so the failure surfaces with a clear
+      # error instead of a NATS NACK.
+      - NATS_MAX_PAYLOAD_BYTES=262144
       - BOOTSTRAP_STREAMS=true
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro

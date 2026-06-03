@@ -129,17 +129,32 @@ func (s *threadStoreMongo) MarkThreadSubscriptionMention(ctx context.Context, su
 	return nil
 }
 
-func (s *threadStoreMongo) UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID, replierAccount string, lastMsgAt time.Time) error {
-	_, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, bson.M{
+func (s *threadStoreMongo) UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID string, replyAccounts []string, lastMsgAt time.Time) error {
+	update := bson.M{
 		"$set": bson.M{
 			"lastMsgAt": lastMsgAt,
 			"lastMsgId": lastMsgID,
 			"updatedAt": lastMsgAt,
 		},
-		"$addToSet": bson.M{"replyAccounts": replierAccount},
+	}
+	if len(replyAccounts) > 0 {
+		update["$addToSet"] = bson.M{"replyAccounts": bson.M{"$each": replyAccounts}}
+	}
+	if _, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, update); err != nil {
+		return fmt.Errorf("update thread room last message: %w", err)
+	}
+	return nil
+}
+
+func (s *threadStoreMongo) AddReplyAccounts(ctx context.Context, threadRoomID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	_, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, bson.M{
+		"$addToSet": bson.M{"replyAccounts": bson.M{"$each": accounts}},
 	})
 	if err != nil {
-		return fmt.Errorf("update thread room last message: %w", err)
+		return fmt.Errorf("add reply accounts to thread room %s: %w", threadRoomID, err)
 	}
 	return nil
 }

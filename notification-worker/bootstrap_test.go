@@ -19,7 +19,6 @@ type fakeStreamManager struct {
 	failErr  error           // error to return when failing
 }
 
-// Returns nil for the Stream value because bootstrapStreams discards it.
 func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy the streamManager interface
 	if f.failOn != "" && cfg.Name == f.failOn {
 		return nil, f.failErr
@@ -58,10 +57,10 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "verify MESSAGES_CANONICAL stream",
 		},
 		{
-			name:        "enabled - creates MESSAGES_CANONICAL",
+			name:        "enabled - creates MESSAGES_CANONICAL and PUSH_NOTIFICATIONS",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES_CANONICAL_test"},
+			wantCreated: []string{"MESSAGES_CANONICAL_test", "PUSH_NOTIFICATIONS_test"},
 		},
 		{
 			name:       "enabled - wraps MESSAGES_CANONICAL creator error",
@@ -70,6 +69,14 @@ func TestBootstrapStreams(t *testing.T) {
 			failOn:     "MESSAGES_CANONICAL_test",
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create MESSAGES_CANONICAL stream",
+		},
+		{
+			name:       "enabled - wraps PUSH_NOTIFICATIONS creator error",
+			enabled:    true,
+			existing:   map[string]bool{},
+			failOn:     "PUSH_NOTIFICATIONS_test",
+			failErr:    errors.New("nats down"),
+			wantErrSub: "create PUSH_NOTIFICATIONS stream",
 		},
 	}
 	for _, tc := range tests {
