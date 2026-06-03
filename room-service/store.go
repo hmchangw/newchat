@@ -42,6 +42,13 @@ type ReadReceiptRow struct {
 	EngName     string `bson:"engName"`
 }
 
+// RoomBotAppEntry pairs an assistant's bot account with its owning
+// app name — the joined output of ListRoomBotApps.
+type RoomBotAppEntry struct {
+	AssistantName string `bson:"assistantName"`
+	AppName       string `bson:"appName"`
+}
+
 type RoomStore interface {
 	GetRoom(ctx context.Context, id string) (*model.Room, error)
 	ListRoomsByIDs(ctx context.Context, ids []string) ([]model.Room, error)
@@ -113,6 +120,20 @@ type RoomStore interface {
 	GetUser(ctx context.Context, account string) (*model.User, error)
 	// GetApp returns the app whose Assistant.Name == botAccount, or ErrAppNotFound.
 	GetApp(ctx context.Context, botAccount string) (*model.App, error)
+	// ListDefaultChannelTabApps returns apps whose channelTab.enabled AND
+	// channelTab.default are both true, sorted by channelTab.name asc.
+	// Projection: _id, avatarUrl, assistant, channelTab. Empty result is
+	// ([], nil).
+	ListDefaultChannelTabApps(ctx context.Context) ([]model.App, error)
+	// ListRoomBotApps returns one entry per bot subscribed to roomID,
+	// joined with the owning app via assistant.name == u.account. Only
+	// apps with assistant.enabled=true are emitted. Empty result is
+	// ([], nil); result order is assistantName asc.
+	ListRoomBotApps(ctx context.Context, roomID string) ([]RoomBotAppEntry, error)
+	// ListActiveCmdMenus returns bot_cmd_menu documents where
+	// activeStatus is true AND name IN assistantNames, sorted by name asc.
+	// Returns ([], nil) when assistantNames is empty (skips the query).
+	ListActiveCmdMenus(ctx context.Context, assistantNames []string) ([]model.BotCmdMenu, error)
 	// FindDMSubscription returns the requester's existing dm/botDM sub with Name == targetName, filtered by RoomType.
 	FindDMSubscription(ctx context.Context, account, targetName string) (*model.Subscription, error)
 

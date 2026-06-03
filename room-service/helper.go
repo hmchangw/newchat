@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"regexp"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -84,6 +90,11 @@ var (
 	errRoomNotFound             = errcode.NotFound("room not found")
 	errInvalidRenameSubject     = errcode.BadRequest("invalid rename subject")
 	errInvalidRestrictedSubject = errcode.BadRequest("invalid restricted subject")
+	// App-read RPC sentinels (app.tabs / app.cmd-menu). Forbidden when the
+	// caller is neither a room member nor a platform admin; Internal when a
+	// reply would exceed the negotiated NATS max_payload.
+	errAppAccessDenied  = errcode.Forbidden("not authorized to access this room's apps", errcode.WithReason(errcode.RoomNotMember))
+	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size")
 )
 
 var botPattern = regexp.MustCompile(`\.bot$|^p_`)
@@ -186,4 +197,55 @@ func stripAccount(slice []string, account string) []string {
 		}
 	}
 	return out
+}
+
+// marshalBounded marshals v and enforces h.maxResponseBytes (<= 0 disables
+// the bound). Returns (body, nil) on success, or (nil, err) suitable for
+// errnats.Reply: errResponseTooLarge on a size violation, a wrapped marshal
+// error (classified to a generic internal error) on a marshal failure.
+func (h *Handler) marshalBounded(v any) ([]byte, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshal bounded response: %w", err)
+	}
+	if h.maxResponseBytes > 0 && int64(len(body)) > h.maxResponseBytes {
+		return nil, errResponseTooLarge
+	}
+	return body, nil
+}
+
+// replyBoundedJSON sends v on msg's reply subject, enforcing the negotiated
+// NATS max_payload. nats* handlers use this in place of natsutil.ReplyJSON
+// when a response payload could exceed max_payload; an oversize payload is
+// surfaced to the caller via errnats.Reply rather than silently dropped.
+func (h *Handler) replyBoundedJSON(ctx context.Context, msg *nats.Msg, v any) {
+	body, err := h.marshalBounded(v)
+	if err != nil {
+		errnats.Reply(ctx, msg, err)
+		return
+	}
+	if err := msg.Respond(body); err != nil {
+		slog.ErrorContext(ctx, "reply failed", "error", err)
+	}
+}
+
+// isURLSafeIDToken reports whether s is safe to inline into a URL
+// template path without risk of injection. Allows alphanumerics,
+// hyphen, underscore, dot, and tilde (RFC3986 unreserved); rejects
+// characters that could escape the path segment (?, #, /, etc.).
+func isURLSafeIDToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.' || r == '~':
+		default:
+			return false
+		}
+	}
+	return true
 }

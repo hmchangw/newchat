@@ -46,6 +46,7 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      - SITE_URL=http://localhost:3000
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - MAX_ROOM_SIZE=1000

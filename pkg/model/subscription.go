@@ -74,6 +74,14 @@ type DMSubscription struct {
 	HRInfo *SubscriptionHRInfo `json:"hrInfo,omitempty" bson:"hrInfo,omitempty"`
 }
 
+// IsRoomMember reports whether sub represents an active membership.
+// Returns false for nil so callers can pass the result of a store lookup
+// that returned (nil, ErrSubscriptionNotFound) — the caller is expected
+// to have already classified the error and set sub to nil on not-found.
+func IsRoomMember(sub *Subscription) bool {
+	return sub != nil
+}
+
 // MessageThreadReadRequest is the body of the message.thread.read RPC.
 type MessageThreadReadRequest struct {
 	ThreadID string `json:"threadId"`

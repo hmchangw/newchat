@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,9 +50,11 @@ type Handler struct {
 	publishToStream          func(ctx context.Context, subj string, data []byte, msgID string) error
 	publishCore              func(ctx context.Context, subj string, data []byte) error
 	restrictedRoomMinMembers int
+	siteURL                  *url.URL
+	maxResponseBytes         int64
 }
 
-func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error) *Handler {
+func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, siteURL *url.URL, maxResponseBytes int64) *Handler {
 	return &Handler{
 		store:                    store,
 		keyStore:                 keyStore,
@@ -64,6 +67,8 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 		restrictedRoomMinMembers: restrictedRoomMinMembers,
 		publishToStream:          publishToStream,
 		publishCore:              publishCore,
+		siteURL:                  siteURL,
+		maxResponseBytes:         maxResponseBytes,
 	}
 }
 
@@ -116,7 +121,7 @@ func (h *Handler) RegisterCRUD(nc *otelnats.Conn) error {
 	if _, err := nc.QueueSubscribe(subject.MemberListWildcard(h.siteID), queue, h.natsListMembers); err != nil {
 		return fmt.Errorf("subscribe member list: %w", err)
 	}
-	if _, err := nc.QueueSubscribe(subject.OrgMembersWildcard(), queue, h.natsListOrgMembers); err != nil {
+	if _, err := nc.QueueSubscribe(subject.OrgMembersWildcard(h.siteID), queue, h.natsListOrgMembers); err != nil {
 		return fmt.Errorf("subscribe org members: %w", err)
 	}
 	if _, err := nc.QueueSubscribe(subject.RoomKeyEnsure(h.siteID), queue, h.NatsHandleEnsureRoomKey); err != nil {
@@ -136,6 +141,12 @@ func (h *Handler) RegisterCRUD(nc *otelnats.Conn) error {
 	}
 	if _, err := nc.QueueSubscribe(subject.RoomRestricted(h.siteID), queue, h.natsRoomRestricted); err != nil {
 		return fmt.Errorf("subscribe room restricted: %w", err)
+	}
+	if _, err := nc.QueueSubscribe(subject.RoomAppTabsWildcard(h.siteID), queue, h.natsGetRoomAppTabs); err != nil {
+		return fmt.Errorf("subscribe app tabs: %w", err)
+	}
+	if _, err := nc.QueueSubscribe(subject.RoomAppCmdMenuWildcard(h.siteID), queue, h.natsGetRoomAppCommandMenu); err != nil {
+		return fmt.Errorf("subscribe app cmd-menu: %w", err)
 	}
 	return nil
 }
@@ -441,7 +452,7 @@ func (h *Handler) natsListOrgMembers(m otelnats.Msg) {
 }
 
 func (h *Handler) handleListOrgMembers(ctx context.Context, subj string) (model.ListOrgMembersResponse, error) {
-	orgID, ok := subject.ParseOrgMembersSubject(subj)
+	orgID, _, ok := subject.ParseOrgMembersSubject(subj)
 	if !ok {
 		return model.ListOrgMembersResponse{}, fmt.Errorf("invalid org-members subject")
 	}
@@ -2009,4 +2020,210 @@ func (h *Handler) handleFavoriteToggle(ctx context.Context, subj string, _ []byt
 	}
 
 	return json.Marshal(model.FavoriteToggleResponse{Status: "ok", Favorite: sub.Favorite})
+}
+
+// authorizeRoomAppRead allows the request iff the caller has a
+// subscription in roomID OR is a platform admin in the local users
+// collection AND the room actually exists. The room-existence check
+// gates only the admin bypass — without it, an admin could query app
+// metadata for a fabricated room ID and receive a plausible-looking
+// response (e.g. a non-empty default-tabs list, or an empty cmd-menu
+// list that looks like success). Cross-site admin authority is out of
+// scope: an admin whose users document lives on a different site is
+// denied.
+func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) error {
+	sub, err := h.store.GetSubscription(ctx, account, roomID)
+	if err != nil && !errors.Is(err, model.ErrSubscriptionNotFound) {
+		return fmt.Errorf("check room membership: %w", err)
+	}
+	if model.IsRoomMember(sub) {
+		return nil
+	}
+	user, err := h.store.GetUser(ctx, account)
+	if err != nil && !errors.Is(err, ErrUserNotFound) {
+		return fmt.Errorf("check platform admin: %w", err)
+	}
+	if !model.IsPlatformAdmin(user) {
+		return errAppAccessDenied
+	}
+	// Admin bypass: verify the room exists before allowing the read.
+	// Without this, admins could query app metadata for fabricated room
+	// IDs and get plausible-looking responses.
+	if _, err := h.store.GetRoom(ctx, roomID); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return errAppAccessDenied
+		}
+		return fmt.Errorf("check room existence: %w", err)
+	}
+	return nil
+}
+
+// buildTabURL applies the SITE_URL-based scheme/host/path-prefix
+// rewrite and the ${roomId}/${siteId} substitution to a channelTab URL
+// template. Returns (url, true) on success; (_, false) when the
+// template is empty, unparseable, or when siteURL is nil or the IDs
+// fail the URL-safety check.
+func (h *Handler) buildTabURL(tmpl, roomID string) (string, bool) {
+	if tmpl == "" {
+		return "", false
+	}
+	if h.siteURL == nil {
+		return "", false
+	}
+	if !isURLSafeIDToken(roomID) || !isURLSafeIDToken(h.siteID) {
+		return "", false
+	}
+	// Substitute BEFORE parsing so url.URL.String() doesn't percent-encode
+	// the substituted values (roomID/siteID are URL-safe by construction).
+	tmpl = strings.ReplaceAll(tmpl, "${roomId}", roomID)
+	tmpl = strings.ReplaceAll(tmpl, "${siteId}", h.siteID)
+	u, err := url.Parse(tmpl)
+	if err != nil {
+		return "", false
+	}
+	joined := h.siteURL.JoinPath(u.Path)
+	joined.User = nil
+	joined.RawQuery = u.RawQuery
+	joined.Fragment = u.Fragment
+	return joined.String(), true
+}
+
+func (h *Handler) handleGetRoomAppTabs(ctx context.Context, subj string, _ []byte) (model.GetRoomAppTabsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok {
+		return model.GetRoomAppTabsResponse{}, errcode.BadRequest("invalid request")
+	}
+
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("site.id", h.siteID),
+			attribute.String("account", account),
+		)
+	}
+
+	if err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
+		return model.GetRoomAppTabsResponse{}, err
+	}
+
+	apps, err := h.store.ListDefaultChannelTabApps(ctx)
+	if err != nil {
+		return model.GetRoomAppTabsResponse{}, fmt.Errorf("list default channel-tab apps: %w", err)
+	}
+
+	out := make([]model.RoomApp, 0, len(apps))
+	for i := range apps {
+		app := &apps[i]
+		if app.ChannelTab == nil {
+			slog.Warn("skipping app with nil ChannelTab",
+				"appId", app.ID, "roomId", roomID,
+				"requestId", natsutil.RequestIDFromContext(ctx))
+			continue
+		}
+		tabURL, ok := h.buildTabURL(app.ChannelTab.URL.Default, roomID)
+		if !ok {
+			slog.Warn("skipping app with empty or unparseable channelTab url",
+				"appId", app.ID, "roomId", roomID,
+				"requestId", natsutil.RequestIDFromContext(ctx))
+			continue
+		}
+		out = append(out, model.RoomApp{
+			ID:        app.ID,
+			Name:      app.ChannelTab.Name,
+			TabURL:    tabURL,
+			Assistant: app.Assistant,
+			AvatarURL: app.AvatarURL,
+		})
+	}
+	return model.GetRoomAppTabsResponse{Apps: out}, nil
+}
+
+func (h *Handler) handleGetRoomAppCommandMenu(ctx context.Context, subj string, _ []byte) (model.GetRoomAppCommandMenuResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok {
+		return model.GetRoomAppCommandMenuResponse{}, errcode.BadRequest("invalid request")
+	}
+
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("site.id", h.siteID),
+			attribute.String("account", account),
+		)
+	}
+
+	if err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
+		return model.GetRoomAppCommandMenuResponse{}, err
+	}
+
+	bots, err := h.store.ListRoomBotApps(ctx, roomID)
+	if err != nil {
+		return model.GetRoomAppCommandMenuResponse{}, fmt.Errorf("list room bot apps: %w", err)
+	}
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(attribute.Int("bot.count", len(bots)))
+	}
+
+	if len(bots) == 0 {
+		return model.GetRoomAppCommandMenuResponse{
+			AppAssistants: make([]model.RoomAppAssistant, 0),
+		}, nil
+	}
+
+	names := make([]string, 0, len(bots))
+	for _, b := range bots {
+		names = append(names, b.AssistantName)
+	}
+	menus, err := h.store.ListActiveCmdMenus(ctx, names)
+	if err != nil {
+		return model.GetRoomAppCommandMenuResponse{}, fmt.Errorf("list active cmd menus: %w", err)
+	}
+	byName := make(map[string][]model.CmdBlock, len(menus))
+	for _, m := range menus {
+		byName[m.Name] = m.CmdBlocks
+	}
+
+	out := make([]model.RoomAppAssistant, 0, len(bots))
+	for _, b := range bots {
+		out = append(out, model.RoomAppAssistant{
+			AppName:   b.AppName,
+			Name:      b.AssistantName,
+			CmdBlocks: byName[b.AssistantName],
+		})
+	}
+	return model.GetRoomAppCommandMenuResponse{AppAssistants: out}, nil
+}
+
+func (h *Handler) natsGetRoomAppCommandMenu(m otelnats.Msg) {
+	ctx, err := wrappedCtx(m)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	resp, err := h.handleGetRoomAppCommandMenu(ctx, m.Msg.Subject, m.Msg.Data)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	h.replyBoundedJSON(ctx, m.Msg, resp)
+}
+
+func (h *Handler) natsGetRoomAppTabs(m otelnats.Msg) {
+	ctx, err := wrappedCtx(m)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	resp, err := h.handleGetRoomAppTabs(ctx, m.Msg.Subject, m.Msg.Data)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	h.replyBoundedJSON(ctx, m.Msg, resp)
 }

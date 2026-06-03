@@ -267,6 +267,36 @@ func (mr *MockRoomStoreMockRecorder) GetUserSiteID(ctx, account any) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserSiteID", reflect.TypeOf((*MockRoomStore)(nil).GetUserSiteID), ctx, account)
 }
 
+// ListActiveCmdMenus mocks base method.
+func (m *MockRoomStore) ListActiveCmdMenus(ctx context.Context, assistantNames []string) ([]model.BotCmdMenu, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListActiveCmdMenus", ctx, assistantNames)
+	ret0, _ := ret[0].([]model.BotCmdMenu)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListActiveCmdMenus indicates an expected call of ListActiveCmdMenus.
+func (mr *MockRoomStoreMockRecorder) ListActiveCmdMenus(ctx, assistantNames any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListActiveCmdMenus", reflect.TypeOf((*MockRoomStore)(nil).ListActiveCmdMenus), ctx, assistantNames)
+}
+
+// ListDefaultChannelTabApps mocks base method.
+func (m *MockRoomStore) ListDefaultChannelTabApps(ctx context.Context) ([]model.App, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListDefaultChannelTabApps", ctx)
+	ret0, _ := ret[0].([]model.App)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListDefaultChannelTabApps indicates an expected call of ListDefaultChannelTabApps.
+func (mr *MockRoomStoreMockRecorder) ListDefaultChannelTabApps(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDefaultChannelTabApps", reflect.TypeOf((*MockRoomStore)(nil).ListDefaultChannelTabApps), ctx)
+}
+
 // ListOrgMembers mocks base method.
 func (m *MockRoomStore) ListOrgMembers(ctx context.Context, orgID string) ([]model.OrgMember, error) {
 	m.ctrl.T.Helper()
@@ -295,6 +325,21 @@ func (m *MockRoomStore) ListReadReceipts(ctx context.Context, roomID string, sin
 func (mr *MockRoomStoreMockRecorder) ListReadReceipts(ctx, roomID, since, excludeAccount, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListReadReceipts", reflect.TypeOf((*MockRoomStore)(nil).ListReadReceipts), ctx, roomID, since, excludeAccount, limit)
+}
+
+// ListRoomBotApps mocks base method.
+func (m *MockRoomStore) ListRoomBotApps(ctx context.Context, roomID string) ([]RoomBotAppEntry, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListRoomBotApps", ctx, roomID)
+	ret0, _ := ret[0].([]RoomBotAppEntry)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListRoomBotApps indicates an expected call of ListRoomBotApps.
+func (mr *MockRoomStoreMockRecorder) ListRoomBotApps(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRoomBotApps", reflect.TypeOf((*MockRoomStore)(nil).ListRoomBotApps), ctx, roomID)
 }
 
 // ListRoomMembers mocks base method.
@@ -539,6 +584,44 @@ func (m *MockRoomKeyStore) Set(ctx context.Context, roomID string, pair roomkeys
 func (mr *MockRoomKeyStoreMockRecorder) Set(ctx, roomID, pair any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockRoomKeyStore)(nil).Set), ctx, roomID, pair)
+}
+
+// MockDEKProvisioner is a mock of DEKProvisioner interface.
+type MockDEKProvisioner struct {
+	ctrl     *gomock.Controller
+	recorder *MockDEKProvisionerMockRecorder
+	isgomock struct{}
+}
+
+// MockDEKProvisionerMockRecorder is the mock recorder for MockDEKProvisioner.
+type MockDEKProvisionerMockRecorder struct {
+	mock *MockDEKProvisioner
+}
+
+// NewMockDEKProvisioner creates a new mock instance.
+func NewMockDEKProvisioner(ctrl *gomock.Controller) *MockDEKProvisioner {
+	mock := &MockDEKProvisioner{ctrl: ctrl}
+	mock.recorder = &MockDEKProvisionerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockDEKProvisioner) EXPECT() *MockDEKProvisionerMockRecorder {
+	return m.recorder
+}
+
+// EnsureDEK mocks base method.
+func (m *MockDEKProvisioner) EnsureDEK(ctx context.Context, roomID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "EnsureDEK", ctx, roomID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// EnsureDEK indicates an expected call of EnsureDEK.
+func (mr *MockDEKProvisionerMockRecorder) EnsureDEK(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureDEK", reflect.TypeOf((*MockDEKProvisioner)(nil).EnsureDEK), ctx, roomID)
 }
 
 // MockMessageReader is a mock of MessageReader interface.

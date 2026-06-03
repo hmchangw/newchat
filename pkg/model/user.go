@@ -24,3 +24,17 @@ type User struct {
 	EmployeeID  string     `json:"employeeId"   bson:"employeeId"`
 	Roles       []UserRole `json:"roles,omitempty"        bson:"roles,omitempty"`
 }
+
+// IsPlatformAdmin reports whether u holds the platform admin role.
+// Returns false for nil receivers and for users without the role.
+func IsPlatformAdmin(u *User) bool {
+	if u == nil {
+		return false
+	}
+	for _, r := range u.Roles {
+		if r == UserRoleAdmin {
+			return true
+		}
+	}
+	return false
+}

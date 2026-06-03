@@ -55,8 +55,12 @@ type RoomMemberEntry struct {
 	// ListRoomMembers is called with enrich=true. Elided from JSON when zero.
 	EngName     string `json:"engName,omitempty"     bson:"-"`
 	ChineseName string `json:"chineseName,omitempty" bson:"-"`
+	// Name is the app's display name for bot members (account matching
+	// the ".bot" suffix). For humans, EngName/ChineseName are populated
+	// and Name stays empty. Caller chooses display: name ?? engName ?? account.
+	Name        string `json:"name,omitempty"        bson:"-"`
 	IsOwner     bool   `json:"isOwner,omitempty"     bson:"-"`
-	SectName    string `json:"sectName,omitempty"    bson:"-"`
+	OrgName     string `json:"orgName,omitempty"     bson:"-"`
 	MemberCount int    `json:"memberCount,omitempty" bson:"-"`
 }
 

@@ -14,10 +14,17 @@ func ParseUserRoomSubject(subj string) (account, roomID string, ok bool) {
 		return "", "", false
 	}
 	account = parts[2]
+	if !isValidAccountToken(account) {
+		return "", "", false
+	}
 	// Find "room" token after user position
 	for i := 3; i < len(parts)-1; i++ {
 		if parts[i] == "room" {
-			return account, parts[i+1], true
+			roomID = parts[i+1]
+			if !isValidAccountToken(roomID) {
+				return "", "", false
+			}
+			return account, roomID, true
 		}
 	}
 	return "", "", false
@@ -257,30 +264,42 @@ func MemberListWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.member.list", siteID)
 }
 
-// OrgMembers builds the subject for listing members of an org.
-func OrgMembers(account, orgID string) string {
-	return fmt.Sprintf("chat.user.%s.request.orgs.%s.members", account, orgID)
+// OrgMembers builds the subject for listing members of an org. siteID
+// selects which site's user directory to query — each site has its own
+// users collection, so org membership is per-site. Token order matches
+// the room-scoped builders ("identifier → site → action"). Panics on
+// any token containing NATS wildcard characters.
+func OrgMembers(account, orgID, siteID string) string {
+	if !isValidAccountToken(account) || !isValidAccountToken(orgID) || !isValidAccountToken(siteID) {
+		panic("invalid subject token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.orgs.%s.%s.members", account, orgID, siteID)
 }
 
-// OrgMembersWildcard is the subscription pattern for the list-org-members endpoint.
-func OrgMembersWildcard() string {
-	return "chat.user.*.request.orgs.*.members"
+// OrgMembersWildcard is the per-site subscription pattern for the
+// list-org-members endpoint.
+func OrgMembersWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.orgs.*.%s.members", siteID)
 }
 
-// ParseOrgMembersSubject returns the orgID from a subject matching the
-// pattern "chat.user.{account}.request.orgs.{orgId}.members".
-// Tokens (by strings.Split on "."): [0]chat [1]user [2]{account} [3]request
-// [4]orgs [5]{orgId} [6]members. orgID is at positional index 5.
-func ParseOrgMembersSubject(subj string) (orgID string, ok bool) {
+// ParseOrgMembersSubject returns (orgID, siteID) from a subject
+// matching "chat.user.{account}.request.orgs.{orgId}.{siteId}.members".
+// Tokens: [0]chat [1]user [2]{account} [3]request [4]orgs [5]{orgId}
+// [6]{siteId} [7]members. Returns ok=false when any token contains
+// NATS wildcard characters.
+func ParseOrgMembersSubject(subj string) (orgID, siteID string, ok bool) {
 	parts := strings.Split(subj, ".")
-	if len(parts) != 7 {
-		return "", false
+	if len(parts) != 8 {
+		return "", "", false
 	}
 	if parts[0] != "chat" || parts[1] != "user" || parts[3] != "request" ||
-		parts[4] != "orgs" || parts[6] != "members" {
-		return "", false
+		parts[4] != "orgs" || parts[7] != "members" {
+		return "", "", false
 	}
-	return parts[5], true
+	if !isValidAccountToken(parts[2]) || !isValidAccountToken(parts[5]) || !isValidAccountToken(parts[6]) {
+		return "", "", false
+	}
+	return parts[5], parts[6], true
 }
 
 func RoomCanonicalWildcard(siteID string) string {
@@ -447,6 +466,36 @@ func FavoriteToggle(account, roomID, siteID string) string {
 // FavoriteToggleWildcard is the per-site subscription pattern for the favorite.toggle RPC.
 func FavoriteToggleWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.favorite.toggle", siteID)
+}
+
+// RoomAppTabs returns the concrete subject for the GetRoomAppTabs RPC.
+// Pair with RoomAppTabsWildcard for room-service's QueueSubscribe.
+func RoomAppTabs(account, roomID, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.app.tabs", account, roomID, siteID)
+}
+
+// RoomAppTabsWildcard is the per-site subscription pattern for the
+// GetRoomAppTabs RPC.
+func RoomAppTabsWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.app.tabs", siteID)
+}
+
+// RoomAppCmdMenu returns the concrete subject for the
+// GetRoomAppCommandMenu RPC.
+func RoomAppCmdMenu(account, roomID, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.app.cmd-menu", account, roomID, siteID)
+}
+
+// RoomAppCmdMenuWildcard is the per-site subscription pattern for the
+// GetRoomAppCommandMenu RPC.
+func RoomAppCmdMenuWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.app.cmd-menu", siteID)
 }
 
 // RoomCreate: client→room-service create subject; siteID is the requester's site.

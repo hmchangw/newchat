@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"time"
 
@@ -25,6 +26,7 @@ type config struct {
 	NatsURL                  string          `env:"NATS_URL,required"`
 	NatsCredsFile            string          `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID                   string          `env:"SITE_ID"                   envDefault:"site-local"`
+	SiteURL                  string          `env:"SITE_URL,required"`
 	MongoURI                 string          `env:"MONGO_URI,required"`
 	MongoDB                  string          `env:"MONGO_DB"                  envDefault:"chat"`
 	MongoUsername            string          `env:"MONGO_USERNAME"            envDefault:""`
@@ -62,6 +64,13 @@ func main() {
 	}
 	if cfg.RestrictedRoomMinMembers <= 0 {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
+		os.Exit(1)
+	}
+
+	siteURL, err := url.Parse(cfg.SiteURL)
+	if err != nil || siteURL.Scheme == "" || siteURL.Host == "" {
+		slog.Error("invalid SITE_URL: must be an absolute URL with scheme and host",
+			"value", cfg.SiteURL, "error", err)
 		os.Exit(1)
 	}
 
@@ -165,6 +174,8 @@ func main() {
 			}
 			return nil
 		},
+		siteURL,
+		nc.NatsConn().MaxPayload(),
 	)
 	handler.dekProvisioner = dekProvisioner
 

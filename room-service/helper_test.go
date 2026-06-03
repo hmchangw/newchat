@@ -173,6 +173,37 @@ func TestIsPlatformAdmin(t *testing.T) {
 	}
 }
 
+func TestIsURLSafeIDToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty string", "", false},
+		{"simple alphanumeric", "site-a", true},
+		{"lowercase", "roomabc123", true},
+		{"uppercase", "SiteA", true},
+		{"underscore", "room_id", true},
+		{"dot", "v1.2.3", true},
+		{"tilde", "abc~def", true},
+		{"hyphen", "room-id-123", true},
+		{"question mark", "room?id", false},
+		{"hash", "room#id", false},
+		{"slash", "room/id", false},
+		{"asterisk", "room*", false},
+		{"greater than", "room>id", false},
+		{"less than", "room<id", false},
+		{"space", "room id", false},
+		{"percent", "room%20id", false},
+		{"at sign", "room@id", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isURLSafeIDToken(tt.input))
+		})
+	}
+}
+
 func TestDetermineRoomType(t *testing.T) {
 	tests := []struct {
 		name string

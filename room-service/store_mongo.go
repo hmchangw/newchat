@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -16,6 +17,14 @@ import (
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
+// botAccountRegex matches bot/app accounts by the ".bot" suffix.
+// Distinct from helper.go::botPattern which also matches "^p_" — that
+// clause is a pre-existing bug (p_ accounts are platform admins, not
+// bots) and is out of scope for this change.
+const botAccountRegex = `\.bot$`
+
+var botAccountPattern = regexp.MustCompile(botAccountRegex)
+
 type MongoStore struct {
 	rooms               *mongo.Collection
 	subscriptions       *mongo.Collection
@@ -23,6 +32,7 @@ type MongoStore struct {
 	roomMembers         *mongo.Collection
 	users               *mongo.Collection
 	apps                *mongo.Collection
+	botCmdMenus         *mongo.Collection
 }
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
@@ -33,6 +43,7 @@ func NewMongoStore(db *mongo.Database) *MongoStore {
 		roomMembers:         db.Collection("room_members"),
 		users:               db.Collection("users"),
 		apps:                db.Collection("apps"),
+		botCmdMenus:         db.Collection("bot_cmd_menu"),
 	}
 }
 
@@ -118,6 +129,20 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 		Keys: bson.D{{Key: "parentMessageId", Value: 1}, {Key: "userAccount", Value: 1}},
 	}); err != nil {
 		return fmt.Errorf("ensure thread_subscriptions (parentMessageId,userAccount) index: %w", err)
+	}
+	if _, err := s.apps.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "channelTab.default", Value: 1},
+			{Key: "channelTab.enabled", Value: 1},
+			{Key: "channelTab.name", Value: 1},
+		},
+	}); err != nil {
+		return fmt.Errorf("ensure apps (channelTab.default,enabled,name) index: %w", err)
+	}
+	if _, err := s.botCmdMenus.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "activeStatus", Value: 1}, {Key: "name", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure bot_cmd_menu (activeStatus,name) index: %w", err)
 	}
 	return nil
 }
@@ -426,7 +451,7 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 					name, tcName = d.OrgRaw.SectName, d.OrgRaw.SectTCName
 				}
 			}
-			rm.Member.SectName = displayfmt.CombineWithFallback(name, tcName, rm.Member.ID)
+			rm.Member.OrgName = displayfmt.CombineWithFallback(name, tcName, rm.Member.ID)
 		}
 		members = append(members, rm)
 	}
@@ -625,43 +650,113 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 	return members, nil
 }
 
-// attachUserDisplayNames batch-loads users for all individual members in the
-// slice and copies EngName / ChineseName onto each member entry in place.
-// Used only on the subscriptions-fallback + enrichment path.
+// attachUserDisplayNames batch-loads display fields for all individual
+// members in the slice and copies them onto each member entry in place.
+// Used on the subscriptions-fallback + enrichment path. Accounts are
+// partitioned by the ".bot$" pattern: human accounts are looked up in
+// users for EngName/ChineseName; bot accounts are looked up in apps
+// for Name. Each partition is queried only when non-empty.
 func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, members []model.RoomMember) error {
-	accounts := make([]string, 0, len(members))
+	var humanAccounts, botAccounts []string
 	for i := range members {
-		if members[i].Member.Type == model.RoomMemberIndividual && members[i].Member.Account != "" {
-			accounts = append(accounts, members[i].Member.Account)
+		if members[i].Member.Type != model.RoomMemberIndividual || members[i].Member.Account == "" {
+			continue
+		}
+		if botAccountPattern.MatchString(members[i].Member.Account) {
+			botAccounts = append(botAccounts, members[i].Member.Account)
+		} else {
+			humanAccounts = append(humanAccounts, members[i].Member.Account)
 		}
 	}
-	if len(accounts) == 0 {
-		return nil
+
+	var (
+		userByAccount  map[string]*model.User
+		appByAssistant map[string]string // assistant.name → app.name
+	)
+	if len(humanAccounts) > 0 {
+		u, err := s.findUsersForDisplay(ctx, humanAccounts)
+		if err != nil {
+			return fmt.Errorf("find users for room %q: %w", roomID, err)
+		}
+		userByAccount = u
 	}
+	if len(botAccounts) > 0 {
+		a, err := s.findAppsForDisplay(ctx, botAccounts)
+		if err != nil {
+			return fmt.Errorf("find apps for room %q: %w", roomID, err)
+		}
+		appByAssistant = a
+	}
+
+	for i := range members {
+		if members[i].Member.Type != model.RoomMemberIndividual {
+			continue
+		}
+		acct := members[i].Member.Account
+		if u, ok := userByAccount[acct]; ok {
+			members[i].Member.EngName = u.EngName
+			members[i].Member.ChineseName = u.ChineseName
+			continue
+		}
+		if name, ok := appByAssistant[acct]; ok {
+			members[i].Member.Name = name
+		}
+	}
+	return nil
+}
+
+// findUsersForDisplay returns engName/chineseName indexed by account
+// for every users document matching one of accounts. The existing
+// users.account index covers the $in filter.
+func (s *MongoStore) findUsersForDisplay(ctx context.Context, accounts []string) (map[string]*model.User, error) {
 	cursor, err := s.users.Find(ctx,
 		bson.M{"account": bson.M{"$in": accounts}},
 		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "engName": 1, "chineseName": 1}),
 	)
 	if err != nil {
-		return fmt.Errorf("find users for %q: %w", roomID, err)
+		return nil, fmt.Errorf("find users for display: %w", err)
 	}
 	defer cursor.Close(ctx)
 
 	var users []model.User
 	if err := cursor.All(ctx, &users); err != nil {
-		return fmt.Errorf("decode users for %q: %w", roomID, err)
+		return nil, fmt.Errorf("decode users for display: %w", err)
 	}
-	byAccount := make(map[string]*model.User, len(users))
+	out := make(map[string]*model.User, len(users))
 	for i := range users {
-		byAccount[users[i].Account] = &users[i]
+		out[users[i].Account] = &users[i]
 	}
-	for i := range members {
-		if u, ok := byAccount[members[i].Member.Account]; ok {
-			members[i].Member.EngName = u.EngName
-			members[i].Member.ChineseName = u.ChineseName
-		}
+	return out, nil
+}
+
+// findAppsForDisplay returns app.name indexed by assistant.name for
+// every apps document whose assistant.name matches one of botAccounts.
+// The existing apps (assistant.name) index covers the $in filter.
+func (s *MongoStore) findAppsForDisplay(ctx context.Context, botAccounts []string) (map[string]string, error) {
+	cursor, err := s.apps.Find(ctx,
+		bson.M{"assistant.name": bson.M{"$in": botAccounts}},
+		options.Find().SetProjection(bson.M{"_id": 0, "name": 1, "assistant.name": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find apps for display: %w", err)
 	}
-	return nil
+	defer cursor.Close(ctx)
+
+	type row struct {
+		Name      string `bson:"name"`
+		Assistant struct {
+			Name string `bson:"name"`
+		} `bson:"assistant"`
+	}
+	var rows []row
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode apps for display: %w", err)
+	}
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		out[r.Assistant.Name] = r.Name
+	}
+	return out, nil
 }
 
 func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, error) {
@@ -1025,6 +1120,101 @@ func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, a
 			account, roomID, model.ErrSubscriptionNotFound)
 	}
 	return nil
+}
+
+// ListDefaultChannelTabApps returns apps whose channelTab.enabled AND
+// channelTab.default are both true, sorted by channelTab.name asc.
+// Projection: _id, avatarUrl, assistant, channelTab. Empty result is ([], nil).
+func (s *MongoStore) ListDefaultChannelTabApps(ctx context.Context) ([]model.App, error) {
+	opts := options.Find().
+		SetSort(bson.D{{Key: "channelTab.name", Value: 1}}).
+		SetProjection(bson.M{
+			"_id":        1,
+			"avatarUrl":  1,
+			"assistant":  1,
+			"channelTab": 1,
+		})
+	cursor, err := s.apps.Find(ctx, bson.M{
+		"channelTab.enabled": true,
+		"channelTab.default": true,
+	}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list default channel-tab apps: %w", err)
+	}
+	defer cursor.Close(ctx)
+	apps := make([]model.App, 0, 8)
+	if err := cursor.All(ctx, &apps); err != nil {
+		return nil, fmt.Errorf("decode default channel-tab apps: %w", err)
+	}
+	return apps, nil
+}
+
+// ListRoomBotApps returns one entry per bot subscribed to roomID, joined with
+// the owning app via assistant.name == u.account. Only apps with
+// assistant.enabled=true are emitted. Empty result is ([], nil); result order
+// is assistantName asc.
+func (s *MongoStore) ListRoomBotApps(ctx context.Context, roomID string) ([]RoomBotAppEntry, error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"roomId": roomID, "u.isBot": true}}},
+		{{Key: "$lookup", Value: bson.M{
+			"from": "apps",
+			"let":  bson.M{"acct": "$u.account"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$and": bson.A{
+					bson.M{"$eq": bson.A{"$assistant.enabled", true}},
+					bson.M{"$eq": bson.A{"$assistant.name", "$$acct"}},
+				}}}},
+				bson.M{"$project": bson.M{
+					"_id":           0,
+					"assistantName": "$assistant.name",
+					"appName":       "$name",
+				}},
+			},
+			"as": "app",
+		}}},
+		{{Key: "$unwind", Value: "$app"}},
+		{{Key: "$replaceRoot", Value: bson.M{"newRoot": "$app"}}},
+		{{Key: "$sort", Value: bson.D{{Key: "assistantName", Value: 1}}}},
+	}
+	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("list room bot apps for %q: %w", roomID, err)
+	}
+	defer cursor.Close(ctx)
+	entries := make([]RoomBotAppEntry, 0, 4)
+	if err := cursor.All(ctx, &entries); err != nil {
+		return nil, fmt.Errorf("decode room bot apps for %q: %w", roomID, err)
+	}
+	return entries, nil
+}
+
+// ListActiveCmdMenus returns bot_cmd_menu documents where activeStatus is true
+// AND name IN assistantNames, sorted by name asc. Returns ([], nil) when
+// assistantNames is empty (skips the query).
+func (s *MongoStore) ListActiveCmdMenus(ctx context.Context, assistantNames []string) ([]model.BotCmdMenu, error) {
+	if len(assistantNames) == 0 {
+		return []model.BotCmdMenu{}, nil
+	}
+	opts := options.Find().
+		SetSort(bson.D{{Key: "name", Value: 1}}).
+		SetProjection(bson.M{
+			"_id":       0,
+			"name":      1,
+			"cmdBlocks": 1,
+		})
+	cursor, err := s.botCmdMenus.Find(ctx, bson.M{
+		"activeStatus": true,
+		"name":         bson.M{"$in": assistantNames},
+	}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list active cmd menus: %w", err)
+	}
+	defer cursor.Close(ctx)
+	menus := make([]model.BotCmdMenu, 0, len(assistantNames))
+	if err := cursor.All(ctx, &menus); err != nil {
+		return nil, fmt.Errorf("decode active cmd menus: %w", err)
+	}
+	return menus, nil
 }
 
 // No order-safety guard on the source-site write; the $lt guard lives on the inbox-worker side.

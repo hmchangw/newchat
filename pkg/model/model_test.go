@@ -39,6 +39,37 @@ func TestUserJSON_WithSectAndDept(t *testing.T) {
 	roundTrip(t, &u, &model.User{})
 }
 
+func TestUserJSON_RolesOmittedWhenEmpty(t *testing.T) {
+	u := model.User{ID: "u1", Account: "alice", SiteID: "site-a"}
+	data, err := json.Marshal(&u)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, has := raw["roles"]
+	assert.False(t, has, "nil Roles must be omitted from JSON")
+}
+
+func TestIsPlatformAdmin(t *testing.T) {
+	tests := []struct {
+		name string
+		u    *model.User
+		want bool
+	}{
+		{"nil receiver", nil, false},
+		{"nil roles", &model.User{Account: "alice"}, false},
+		{"empty roles", &model.User{Account: "alice", Roles: []model.UserRole{}}, false},
+		{"user role only", &model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleUser}}, false},
+		{"admin role present", &model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, true},
+		{"admin among many", &model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleUser, model.UserRoleAdmin, "auditor"}}, true},
+		{"case-sensitive (Admin not admin)", &model.User{Account: "alice", Roles: []model.UserRole{"Admin"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.IsPlatformAdmin(tt.u))
+		})
+	}
+}
+
 func TestRoomJSON(t *testing.T) {
 	lastMsg := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	lastMention := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
@@ -504,6 +535,12 @@ func TestSubscriptionJSON(t *testing.T) {
 
 		roundTrip(t, &s, &model.Subscription{})
 	})
+}
+
+func TestIsRoomMember(t *testing.T) {
+	assert.False(t, model.IsRoomMember(nil), "nil sub is not a member")
+	assert.True(t, model.IsRoomMember(&model.Subscription{}), "zero-value sub is a member (no role gating)")
+	assert.True(t, model.IsRoomMember(&model.Subscription{RoomID: "r1"}), "populated sub is a member")
 }
 
 func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
@@ -1481,7 +1518,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"engName", "chineseName", "isOwner", "sectName", "memberCount"} {
+	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "memberCount"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q should be omitted when zero", k)
 	}
@@ -1490,7 +1527,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	entry := model.RoomMemberEntry{
 		ID: "org-1", Type: model.RoomMemberOrg,
-		SectName: "Engineering", MemberCount: 42,
+		OrgName: "Engineering", MemberCount: 42,
 	}
 	data, err := bson.Marshal(&entry)
 	require.NoError(t, err)
@@ -1499,10 +1536,70 @@ func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &got))
 	assert.Equal(t, "org-1", got["id"])
 	assert.Equal(t, "org", got["type"])
-	for _, k := range []string{"engName", "chineseName", "isOwner", "sectName", "memberCount"} {
+	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "memberCount"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q must not be persisted to BSON", k)
 	}
+}
+
+func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
+	t.Run("bot member name round-trips via JSON", func(t *testing.T) {
+		entry := model.RoomMemberEntry{
+			ID:      "u-bot",
+			Type:    model.RoomMemberIndividual,
+			Account: "weather.bot",
+			Name:    "Weather App",
+		}
+		data, err := json.Marshal(&entry)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		assert.Equal(t, "Weather App", raw["name"])
+		// Human display fields must be absent for a bot entry.
+		_, hasEngName := raw["engName"]
+		assert.False(t, hasEngName, "engName must be absent for bot entry")
+		_, hasChineseName := raw["chineseName"]
+		assert.False(t, hasChineseName, "chineseName must be absent for bot entry")
+
+		var dst model.RoomMemberEntry
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, entry, dst)
+	})
+
+	t.Run("name not persisted to BSON", func(t *testing.T) {
+		entry := model.RoomMemberEntry{
+			ID:      "u-bot",
+			Type:    model.RoomMemberIndividual,
+			Account: "weather.bot",
+			Name:    "Weather App",
+		}
+		data, err := bson.Marshal(&entry)
+		require.NoError(t, err)
+		var got bson.M
+		require.NoError(t, bson.Unmarshal(data, &got))
+		_, hasName := got["name"]
+		assert.False(t, hasName, "name must not be persisted to BSON")
+	})
+
+	t.Run("orgName round-trips via JSON", func(t *testing.T) {
+		entry := model.RoomMemberEntry{
+			ID:      "sect-eng",
+			Type:    model.RoomMemberOrg,
+			OrgName: "Engineering",
+		}
+		data, err := json.Marshal(&entry)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		assert.Equal(t, "Engineering", raw["orgName"])
+		_, hasSectName := raw["sectName"]
+		assert.False(t, hasSectName, "sectName key must not appear (renamed to orgName)")
+
+		var dst model.RoomMemberEntry
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, entry, dst)
+	})
 }
 
 func TestOrgMemberJSON(t *testing.T) {
@@ -2195,6 +2292,150 @@ func TestAppAssistantDisabledRoundtrip(t *testing.T) {
 	roundTrip(t, &a, &dst)
 	require.NotNil(t, dst.Assistant)
 	assert.False(t, dst.Assistant.Enabled)
+}
+
+func TestAppRoundtrip_WithChannelTabAndAvatar(t *testing.T) {
+	a := model.App{
+		ID:        "app1",
+		Name:      "Calendar",
+		AvatarURL: "https://cdn.example.com/avatars/calendar.png",
+		Assistant: &model.AppAssistant{Enabled: true, Name: "calendar.bot"},
+		ChannelTab: &model.AppChannelTab{
+			Enabled: true,
+			Default: true,
+			Name:    "Calendar",
+			URL: model.AppChannelTabURL{
+				Default: "https://upstream.example.com/calendar/${roomId}/${siteId}/index",
+			},
+		},
+	}
+	var dst model.App
+	roundTrip(t, &a, &dst)
+	require.NotNil(t, dst.ChannelTab)
+	assert.True(t, dst.ChannelTab.Enabled)
+	assert.True(t, dst.ChannelTab.Default)
+	assert.Equal(t, "Calendar", dst.ChannelTab.Name)
+	assert.Equal(t, "https://upstream.example.com/calendar/${roomId}/${siteId}/index",
+		dst.ChannelTab.URL.Default)
+	assert.Equal(t, "https://cdn.example.com/avatars/calendar.png", dst.AvatarURL)
+}
+
+func TestAppChannelTabRoundtrip(t *testing.T) {
+	tab := model.AppChannelTab{
+		Enabled: true,
+		Default: false,
+		Name:    "Notes",
+		URL:     model.AppChannelTabURL{Default: "https://upstream/notes"},
+	}
+	var dst model.AppChannelTab
+	roundTrip(t, &tab, &dst)
+}
+
+func TestBotCmdMenuRoundtrip(t *testing.T) {
+	m := model.BotCmdMenu{
+		ID:           "bcm1",
+		Name:         "weather.bot",
+		ActiveStatus: true,
+		CmdBlocks: []model.CmdBlock{
+			{Text: "/weather", ActionType: "command", Payload: "weather"},
+		},
+	}
+	var dst model.BotCmdMenu
+	roundTrip(t, &m, &dst)
+	require.Len(t, dst.CmdBlocks, 1)
+	assert.Equal(t, "/weather", dst.CmdBlocks[0].Text)
+}
+
+func TestBotCmdMenuRoundtrip_Inactive(t *testing.T) {
+	m := model.BotCmdMenu{
+		ID:           "bcm2",
+		Name:         "weather.bot",
+		ActiveStatus: false,
+	}
+	var dst model.BotCmdMenu
+	roundTrip(t, &m, &dst)
+	assert.False(t, dst.ActiveStatus)
+	assert.Nil(t, dst.CmdBlocks)
+}
+
+func TestCmdBlockRoundtrip_Recursive(t *testing.T) {
+	block := model.CmdBlock{
+		Text:        "menu",
+		ActionType:  "open",
+		Description: "open the menu",
+		Modal: &model.CmdModal{
+			Command: "menu.open",
+			Param:   "weather",
+		},
+		Blocks: []model.CmdBlock{
+			{Text: "today", Payload: "today"},
+			{Text: "tomorrow", Payload: "tomorrow", Blocks: []model.CmdBlock{
+				{Text: "morning", Payload: "tomorrow.am"},
+			}},
+		},
+	}
+	var dst model.CmdBlock
+	roundTrip(t, &block, &dst)
+	require.NotNil(t, dst.Modal)
+	assert.Equal(t, "menu.open", dst.Modal.Command)
+	assert.Equal(t, "weather", dst.Modal.Param)
+	require.Len(t, dst.Blocks, 2)
+	require.Len(t, dst.Blocks[1].Blocks, 1)
+	assert.Equal(t, "morning", dst.Blocks[1].Blocks[0].Text)
+}
+
+func TestGetRoomAppTabsResponseRoundtrip(t *testing.T) {
+	src := model.GetRoomAppTabsResponse{
+		Apps: []model.RoomApp{
+			{
+				ID:        "app1",
+				Name:      "Calendar",
+				TabURL:    "https://chat.example.com/calendar/r1/site-a/index",
+				Assistant: &model.AppAssistant{Enabled: true, Name: "cal.bot"},
+				AvatarURL: "https://cdn/cal.png",
+			},
+		},
+	}
+	var dst model.GetRoomAppTabsResponse
+	roundTrip(t, &src, &dst)
+	require.Len(t, dst.Apps, 1)
+	assert.Equal(t, "Calendar", dst.Apps[0].Name)
+}
+
+func TestGetRoomAppTabsResponse_EmptyIsArrayNotNull(t *testing.T) {
+	src := model.GetRoomAppTabsResponse{Apps: []model.RoomApp{}}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"apps":[]`)
+	assert.NotContains(t, string(data), `"apps":null`)
+}
+
+func TestGetRoomAppCommandMenuResponseRoundtrip(t *testing.T) {
+	src := model.GetRoomAppCommandMenuResponse{
+		AppAssistants: []model.RoomAppAssistant{
+			{
+				AppName: "Weather Bot",
+				Name:    "weather.bot",
+				CmdBlocks: []model.CmdBlock{
+					{Text: "/forecast", Payload: "forecast"},
+				},
+			},
+		},
+	}
+	var dst model.GetRoomAppCommandMenuResponse
+	roundTrip(t, &src, &dst)
+	require.Len(t, dst.AppAssistants, 1)
+	assert.Equal(t, "weather.bot", dst.AppAssistants[0].Name)
+}
+
+func TestGetRoomAppCommandMenuResponse_EmptyIsArrayNotNull(t *testing.T) {
+	src := model.GetRoomAppCommandMenuResponse{
+		AppAssistants: []model.RoomAppAssistant{},
+	}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"appAssistants":[]`)
+	assert.NotContains(t, string(data), `"appAssistants":null`)
 }
 
 func TestCreateRoomReplyRoundtrip(t *testing.T) {

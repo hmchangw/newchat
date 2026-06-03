@@ -708,7 +708,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 |----------|---------|----------|-------|
 | `limit`  | number  | no       | If set, must be `> 0`. Caps the number of members returned. |
 | `offset` | number  | no       | If set, must be `>= 0`. For pagination. |
-| `enrich` | boolean | no       | When `true`, populates the display fields (`engName`, `chineseName`, `isOwner`, `sectName`, `memberCount`) on each entry. Omitted-or-`false` returns the lean record only. |
+| `enrich` | boolean | no       | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `orgName`, `memberCount`) on each entry. Omitted-or-`false` returns the lean record only. |
 
 ```json
 { "limit": 50, "enrich": true }
@@ -738,8 +738,9 @@ When the synchronous reply is an error envelope, the request was rejected before
 | `account`     | string  | Optional. Account name (set for individuals). |
 | `engName`     | string  | Optional. Populated only when request had `enrich: true`. |
 | `chineseName` | string  | Optional. Populated only when `enrich: true`. |
+| `name`        | string  | Optional. Bot/app display name from `apps.name` when the member's account ends with `.bot`. Mutually exclusive with `engName`/`chineseName`. |
 | `isOwner`     | boolean | Optional. Populated only when `enrich: true`. |
-| `sectName`    | string  | Optional. Populated only when `enrich: true` and entry is an org. |
+| `orgName`     | string  | Optional. Org's display name (dept name preferred, sect name fallback). Populated only when `enrich: true` and entry is an org. |
 | `memberCount` | number  | Optional. Populated only when `enrich: true` and entry is an org. |
 
 ```json
@@ -1063,10 +1064,12 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 #### List Org Members
 
-**Subject:** `chat.user.{account}.request.orgs.{orgID}.members`
+**Subject:** `chat.user.{account}.request.orgs.{orgID}.{siteID}.members`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-The org ID is the second-to-last subject segment — there is no request body. `orgID` matches a user's `sectId` OR `deptId`; the response includes every user whose either field equals `orgID`. This mirrors the dept-aware org membership pipelines on the server side (a room may be added by sect-level or dept-level org and either form resolves through this endpoint).
+- `{siteID}` selects which site's user directory to query for org membership. Each site has its own `users` collection, so the returned membership set is per-site. (When the caller is composing for a specific room, this is typically the room's origin `siteID` — the same value used for `member.list` — but the endpoint itself is org-scoped, not room-scoped.)
+
+The org ID is the third-from-last subject segment — there is no request body. `orgID` matches a user's `sectId` OR `deptId`; the response includes every user whose either field equals `orgID`. This mirrors the dept-aware org membership pipelines on the server side (a room may be added by sect-level or dept-level org and either form resolves through this endpoint).
 
 ##### Request body
 
@@ -1113,6 +1116,86 @@ See [Error envelope](#6-error-envelope-reference).
 ```json
 { "code": "bad_request", "error": "invalid org" }
 ```
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### Get Room App Tabs
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.app.tabs`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+
+##### Request body
+
+Empty body (`{}` is tolerated). All inputs come from the subject.
+
+##### Success response
+
+| Field    | Type           | Notes |
+|----------|----------------|-------|
+| `apps`   | array<RoomApp> | Apps whose `channelTab.enabled` AND `channelTab.default` are both true, sorted by `channelTab.name asc`. Empty by default in DM/botDM rooms. |
+
+`RoomApp` fields:
+
+| Field       | Type                | Notes |
+|-------------|---------------------|-------|
+| `id`        | string              | `apps._id`. |
+| `name`      | string              | `apps.channelTab.name`. |
+| `tabUrl`    | string              | Computed: `SITE_URL`'s scheme/host/path-prefix + `apps.channelTab.url.default`'s path; `${roomId}` and `${siteId}` are substituted. Apps whose template URL is empty or unparseable are silently skipped. |
+| `assistant` | object (optional)   | `apps.assistant` subdocument if set. |
+| `avatarUrl` | string (optional)   | `apps.avatarUrl` if set. |
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors: `"not authorized to access this room's apps"` (caller is neither a room member nor a platform admin on the room's site), `"response payload exceeds maximum size"` (rare: response would exceed the NATS server's `max_payload`).
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### Get Room App Command Menu
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.app.cmd-menu`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's origin `siteID`.
+
+##### Request body
+
+Empty body (`{}` is tolerated).
+
+##### Success response
+
+| Field           | Type                    | Notes |
+|-----------------|-------------------------|-------|
+| `appAssistants` | array<RoomAppAssistant> | One entry per bot currently subscribed in the room whose owning app has `assistant.enabled=true`. Sorted by `name asc`. |
+
+`RoomAppAssistant` fields:
+
+| Field       | Type             | Notes |
+|-------------|------------------|-------|
+| `appName`   | string           | `apps.name`. |
+| `name`      | string           | `apps.assistant.name` (the bot account). |
+| `cmdBlocks` | array<CmdBlock> (optional) | Active command-menu blocks from `bot_cmd_menu` joined by name. Omitted/nil if no active menu exists for the bot. `CmdBlock` is recursive (`blocks` may contain further `CmdBlock`s) and may carry a `modal` object with `command` and `param`. |
+
+##### Error response
+
+Same envelope and sentinels as Get Room App Tabs.
 
 ##### Triggered events — success path
 
