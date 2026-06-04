@@ -66,7 +66,7 @@ func TestValidateInjectShape(t *testing.T) {
 }
 
 func TestBuiltinMembersPreset(t *testing.T) {
-	cases := []string{"members-small", "members-medium", "members-capacity"}
+	cases := []string{"members-small", "members-medium", "members-capacity", "members-heavy"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			p, ok := BuiltinMembersPreset(name)

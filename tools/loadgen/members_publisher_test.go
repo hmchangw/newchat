@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -73,6 +74,72 @@ func TestCanonicalMemberPublisher_PublishesToRoomCanonical(t *testing.T) {
 		assert.Equal(t, req.Users, got.Users)
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not receive canonical publish within 2s")
+	}
+}
+
+func TestCanonicalMemberPublisher_SetsRequestIDHeader(t *testing.T) {
+	nc, js := startEmbeddedJetStream(t)
+
+	siteID := "site-A"
+	_, err := js.CreateStream(context.Background(), jetstream.StreamConfig{
+		Name:     stream.Rooms(siteID).Name,
+		Subjects: stream.Rooms(siteID).Subjects,
+	})
+	require.NoError(t, err)
+
+	captured := make(chan *nats.Msg, 1)
+	sub, err := nc.Subscribe(subject.RoomCanonicalWildcard(siteID), func(m *nats.Msg) {
+		captured <- m
+	})
+	require.NoError(t, err)
+	defer func() { _ = sub.Unsubscribe() }()
+
+	p := newCanonicalMemberPublisher(js, siteID)
+
+	req := &model.AddMembersRequest{
+		RoomID:           "room-1",
+		Users:            []string{"u1", "u2"},
+		RequesterAccount: "owner-1",
+		Timestamp:        time.Now().UTC().UnixMilli(),
+	}
+	const corrID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	require.NoError(t, p.Publish(context.Background(), "owner-1", "room-1", req, corrID))
+
+	select {
+	case m := <-captured:
+		assert.Equal(t, corrID, m.Header.Get(natsutil.RequestIDHeader),
+			"canonical publish must carry the corrID as the X-Request-ID header")
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive canonical publish within 2s")
+	}
+}
+
+func TestFrontdoorMemberPublisher_SetsRequestIDHeader(t *testing.T) {
+	nc, _ := startEmbeddedJetStream(t)
+	siteID := "site-A"
+
+	captured := make(chan *nats.Msg, 1)
+	sub, err := nc.Subscribe(subject.MemberAddWildcard(siteID), func(m *nats.Msg) {
+		captured <- m
+		_ = m.Respond([]byte(`{"status":"accepted"}`))
+	})
+	require.NoError(t, err)
+	defer func() { _ = sub.Unsubscribe() }()
+
+	p, err := newFrontdoorMemberPublisher(nc, siteID, func(string, []byte, time.Time) {})
+	require.NoError(t, err)
+	defer p.Close()
+
+	req := &model.AddMembersRequest{RoomID: "room-X", Users: []string{"u1"}}
+	const corrID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	require.NoError(t, p.Publish(context.Background(), "owner-9", "room-X", req, corrID))
+
+	select {
+	case m := <-captured:
+		assert.Equal(t, corrID, m.Header.Get(natsutil.RequestIDHeader),
+			"frontdoor publish must carry the corrID as the X-Request-ID header")
+	case <-time.After(2 * time.Second):
+		t.Fatal("never received request")
 	}
 }
 

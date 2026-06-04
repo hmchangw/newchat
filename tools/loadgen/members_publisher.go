@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -30,12 +31,19 @@ func newCanonicalMemberPublisher(js jetstream.JetStream, siteID string) *canonic
 }
 
 func (p *canonicalMemberPublisher) Publish(ctx context.Context, _ string, _ string,
-	req *model.AddMembersRequest, _ string) error {
+	req *model.AddMembersRequest, corrID string) error {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshal add-members canonical event: %w", err)
 	}
-	if _, err := p.js.Publish(ctx, subject.RoomCanonical(p.siteID, "member.add"), data); err != nil {
+	// room-worker rejects canonical events without an X-Request-ID header as a
+	// permanent error; stamp corrID so the event carries one and traces end-to-end.
+	msg := &nats.Msg{
+		Subject: subject.RoomCanonical(p.siteID, "member.add"),
+		Data:    data,
+		Header:  nats.Header{natsutil.RequestIDHeader: []string{corrID}},
+	}
+	if _, err := p.js.PublishMsg(ctx, msg); err != nil {
 		return fmt.Errorf("jetstream publish: %w", err)
 	}
 	return nil
@@ -89,7 +97,15 @@ func (p *frontdoorMemberPublisher) Publish(_ context.Context, requesterAccount, 
 	}
 	subj := subject.MemberAdd(requesterAccount, roomID, p.siteID)
 	reply := p.inboxPrefix + "." + corrID
-	if err := p.nc.PublishRequest(subj, reply, data); err != nil {
+	// room-service requires an X-Request-ID header on the request; stamp corrID
+	// so the request ID and reply-correlation token are the same across the pipeline.
+	msg := &nats.Msg{
+		Subject: subj,
+		Reply:   reply,
+		Data:    data,
+		Header:  nats.Header{natsutil.RequestIDHeader: []string{corrID}},
+	}
+	if err := p.nc.PublishMsg(msg); err != nil {
 		return fmt.Errorf("nats publish request: %w", err)
 	}
 	return nil

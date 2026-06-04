@@ -114,8 +114,28 @@ make -C tools/loadgen/deploy reset-members PRESET=members-medium
 | preset             | rooms | baseline | candidate pool | use case                                |
 |--------------------|-------|----------|----------------|-----------------------------------------|
 | `members-small`    | 5     | 10       | 50             | smoke / dev                             |
-| `members-medium`   | 100   | 100      | 500            | sustained-throughput default            |
+| `members-medium`   | 100   | 100      | 900            | sustained-throughput default            |
+| `members-heavy`    | 700   | 10       | 990            | high-rate sustained (≈1000 req/s)       |
 | `members-capacity` | 5     | 1        | 990            | capacity-growth, fills up to ~MAX_ROOM_SIZE |
+
+A candidate is single-use — once added it's a room member and can't be
+re-added, and `baseline + candidate pool` is capped at `MAX_ROOM_SIZE` (1000).
+So a sustained run can make at most `rooms × ⌊candidate pool ÷ users-per-add⌋`
+add-member publishes total. `members-medium` (100 × ⌊900÷10⌋ = 9000 ops)
+sustains the default `RATE=100 DURATION=60s` (6000 ops) with margin;
+`members-small` is a smoke preset and cannot sustain that load.
+
+For higher rates, add rooms rather than pool (pool is capped per room). To
+sustain **1000 req/s for 60s** (60,000 ops) at the default `users-per-add=10`,
+use `members-heavy` (700 × ⌊990÷10⌋ = 69,300 ops, ≈69s of headroom):
+
+```
+make -C tools/loadgen/deploy seed-members  PRESET=members-heavy
+make -C tools/loadgen/deploy run-sustained PRESET=members-heavy RATE=1000 DURATION=60s
+```
+
+If instead each request need only add one member, `members-medium` at
+`USERS_PER_ADD=1` already supplies 90,000 ops — no heavy preset required.
 
 ### Subcommands
 
@@ -143,14 +163,19 @@ for the rationale and the v2 plan.
 
 - **Sustained mode**: `final_pending == 0` on room-worker + zero errors →
   pipeline is sustaining the target rate. Climbing `final_pending` or
-  non-zero errors → over capacity. If you see `aborted early — pools
-  exhausted` in the logs, your `rate × duration × users-per-add` exceeded
-  the preset's `CandidatePool` budget; pick a bigger preset or shorter
-  duration.
+  non-zero errors → over capacity. If `rate × duration` would exceed the
+  preset's pool budget (see the preset table above), the command now
+  **refuses to start** and prints the achievable max `--rate`/`--duration`
+  for the preset — lower one of them or pick a bigger preset. (The old
+  behaviour ran for ~50s and then logged `aborted early — pools exhausted`.)
 - **Capacity mode**: the size-bucket table shows latency at four
   size ranges; the `final sizes` block confirms each room hit
   `--target-size`. A row with `count > 0` whose `e2_p99` is much larger
-  than smaller-size buckets indicates a per-room-size degradation.
+  than smaller-size buckets indicates a per-room-size degradation. Like
+  sustained mode, capacity mode **refuses to start** if `--target-size`
+  is unreachable from the preset's per-room pool (`baseline +
+  ⌊pool ÷ users-per-add⌋ × users-per-add`); it prints the reachable
+  ceiling — lower `--target-size` or pick a larger preset.
 
 ## Room-read workload (mark-as-read benchmark)
 

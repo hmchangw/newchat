@@ -47,11 +47,15 @@ var builtinMembersPresets = map[string]MembersPreset{
 	},
 	"members-medium": {
 		Name: "members-medium", Users: 5000, Rooms: 100,
-		BaselineSize: 100, CandidatePool: 500,
+		BaselineSize: 100, CandidatePool: 900, // baseline+pool = 1000 = MAX_ROOM_SIZE
 	},
 	"members-capacity": {
 		Name: "members-capacity", Users: 12000, Rooms: 5,
 		BaselineSize: 1, CandidatePool: 990, // fits under MAX_ROOM_SIZE=1000
+	},
+	"members-heavy": {
+		Name: "members-heavy", Users: 5000, Rooms: 700,
+		BaselineSize: 10, CandidatePool: 990, // 700 × ⌊990/10⌋ = 69,300 ops ≈ 69s at 1000/s
 	},
 }
 
