@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func ms(n int) time.Duration { return time.Duration(n) * time.Millisecond }
@@ -194,4 +195,20 @@ func TestVerdictKind_String(t *testing.T) {
 	assert.Equal(t, "PASS", verdictPass.String())
 	assert.Equal(t, "TRIP", verdictTrip.String())
 	assert.Equal(t, "INCONCLUSIVE", verdictInconclusive.String())
+}
+
+func TestEvaluateRPSStep_CopiesPending(t *testing.T) {
+	in := &rpsStepInputs{
+		TargetRPS:    1000,
+		Hold:         30 * time.Second,
+		AttemptedOps: 30000,
+		Pending: []consumerPendingDelta{
+			{Durable: "message-worker", Start: 0, End: 5000},
+			{Durable: "broadcast-worker", Start: 0, End: 10},
+		},
+	}
+	res := evaluateRPSStep(in, buildThresholds(100*time.Millisecond, 250*time.Millisecond, 0.001, 1000, 0.05))
+	require.Len(t, res.Pending, 2)
+	assert.Equal(t, "message-worker", res.Pending[0].Durable)
+	assert.Equal(t, int64(5000), res.Pending[0].Delta())
 }

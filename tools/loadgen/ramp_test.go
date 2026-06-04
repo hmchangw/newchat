@@ -139,6 +139,31 @@ func TestRunRamp_StopsWhenCooldownCancelled(t *testing.T) {
 	require.Len(t, results, 1)
 }
 
+type windowFakeWorkload struct{}
+
+func (f windowFakeWorkload) Label() string { return "fake" }
+func (f windowFakeWorkload) RunStep(ctx context.Context, rps int, warmup, hold time.Duration) (rpsStepInputs, error) {
+	return rpsStepInputs{TargetRPS: rps, Hold: hold, AttemptedOps: rps}, nil
+}
+
+func TestRunRamp_RecordsHoldWindow(t *testing.T) {
+	before := time.Now()
+	results := runRamp(context.Background(), windowFakeWorkload{}, &rampConfig{
+		Steps:      []int{100},
+		Hold:       30 * time.Second,
+		Warmup:     1 * time.Millisecond,
+		Thresholds: buildThresholds(time.Second, time.Second, 1, 1<<62, 0),
+	})
+	after := time.Now()
+	require.Len(t, results, 1)
+	assert.False(t, results[0].HoldStart.IsZero(), "HoldStart should be set")
+	assert.False(t, results[0].HoldEnd.IsZero(), "HoldEnd should be set")
+	// HoldStart = stepStart + Warmup, so it must not be before before+1ms.
+	assert.False(t, results[0].HoldStart.Before(before.Add(1*time.Millisecond)), "HoldStart should reflect start+warmup")
+	// HoldEnd = stepEnd, which is before the ramp returned to the caller.
+	assert.False(t, results[0].HoldEnd.After(after), "HoldEnd should be no later than when runRamp returned")
+}
+
 func TestMaxRPSExitCode(t *testing.T) {
 	pass := []rpsStepResult{{Kind: verdictPass}, {Kind: verdictTrip}}
 	none := []rpsStepResult{{Kind: verdictInconclusive}, {Kind: verdictTrip}}

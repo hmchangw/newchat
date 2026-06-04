@@ -28,6 +28,7 @@ services:
       # the port. Off by default so the metrics endpoint doesn't expose
       # profiling.
       # - PPROF_ADDR=:6060
+      - BOTTLENECK_PROM_URL=http://prometheus:9090
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     ports:
@@ -36,9 +37,35 @@ services:
     networks:
       - chat-local
 
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: [dashboards]
+    privileged: true
+    cgroup: host
+    pid: host
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - chat-local
+
   prometheus:
     image: prom/prometheus:v2.55.0
     profiles: [dashboards]
+    depends_on:
+      cadvisor:
+        condition: service_healthy
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:

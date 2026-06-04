@@ -82,6 +82,12 @@ type rpsStepResult struct {
 	WorstDelta   int64
 	Kind         verdictKind
 	Reasons      []string
+	// Pending carries every durable's backlog delta for the step (not just the
+	// worst), so the bottleneck engine can map a delta to a pipeline stage.
+	Pending []consumerPendingDelta
+	// HoldStart/HoldEnd bound the step's measurement window in wall-clock time,
+	// set by runRamp. Used to query container metrics over the same interval.
+	HoldStart, HoldEnd time.Time
 }
 
 // evaluateRPSStep classifies a step PASS / TRIP / INCONCLUSIVE.
@@ -100,6 +106,7 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 		FailedOps:    in.FailedOps,
 		Saturation:   in.Saturation,
 	}
+	res.Pending = in.Pending
 	if in.Hold > 0 {
 		res.AchievedRPS = float64(in.AttemptedOps) / in.Hold.Seconds()
 	}

@@ -5,6 +5,7 @@
 bin/
 demo
 /seed-sample-data
+/loadgen
 *.exe
 *.exe~
 *.dll

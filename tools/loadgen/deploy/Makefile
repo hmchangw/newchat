@@ -77,6 +77,7 @@ run-dashboards:
 
 run-max-rps: ## Ramp RPS to find the max under SLO (WORKLOAD=messages|history PRESET=.. STEPS=..)
 	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
+	$(COMPOSE) --profile dashboards up -d cadvisor prometheus
 	$(COMPOSE) exec -T loadgen /loadgen max-rps \
 	    --workload=$(WORKLOAD) \
 	    --preset=$(PRESET) \

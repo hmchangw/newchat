@@ -87,7 +87,9 @@ func runRamp(ctx context.Context, w rpsWorkload, cfg *rampConfig) []rpsStepResul
 		if ctx.Err() != nil {
 			break
 		}
+		stepStart := time.Now()
 		in, err := w.RunStep(ctx, n, cfg.Warmup, cfg.Hold)
+		stepEnd := time.Now()
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
@@ -96,6 +98,12 @@ func runRamp(ctx context.Context, w rpsWorkload, cfg *rampConfig) []rpsStepResul
 			break
 		}
 		res := evaluateRPSStep(&in, cfg.Thresholds)
+		// RunStep does warmup then hold sequentially; approximate the hold
+		// window as [start+warmup, end] so metric queries skip the ramp-up.
+		// Note: stepEnd includes any post-hold drain the adapter performs, so
+		// HoldEnd may trail the true hold end by the drain duration.
+		res.HoldStart = stepStart.Add(cfg.Warmup)
+		res.HoldEnd = stepEnd
 		results = append(results, res)
 		slog.Info("step complete", "rps", n, "verdict", res.Kind.String(),
 			"achieved", res.AchievedRPS, "reasons", res.Reasons)

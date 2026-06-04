@@ -30,6 +30,17 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+// bottleneckConfig tunes the max-rps(messages) bottleneck attribution. It is
+// additive: when Enabled is false (or PromURL is empty) the run behaves exactly
+// as before.
+type bottleneckConfig struct {
+	Enabled       bool          `env:"ENABLED"        envDefault:"true"`
+	PromURL       string        `env:"PROM_URL"       envDefault:""`
+	KneeTolerance float64       `env:"KNEE_TOLERANCE" envDefault:"0.10"`
+	QueryStep     time.Duration `env:"QUERY_STEP"     envDefault:"5s"`
+	ContainerMap  string        `env:"CONTAINER_MAP"  envDefault:""`
+}
+
 type config struct {
 	NatsURL        string   `env:"NATS_URL,required"`
 	NatsCredsFile  string   `env:"NATS_CREDS_FILE" envDefault:""`
@@ -56,7 +67,8 @@ type config struct {
 	// JetStream consumer pending counts. Defaults to the docker-compose
 	// service name. Override (e.g. `http://127.0.0.1:8222/jsz` on the host,
 	// or a custom monitoring port) when running against non-default infra.
-	NatsMonitoringURL string `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
+	NatsMonitoringURL string           `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
+	Bottleneck        bottleneckConfig `envPrefix:"BOTTLENECK_"`
 }
 
 func main() {

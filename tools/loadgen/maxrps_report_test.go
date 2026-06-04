@@ -49,13 +49,14 @@ func TestLastPassRPS(t *testing.T) {
 
 func TestWriteRPSCSV(t *testing.T) {
 	var buf bytes.Buffer
-	require.NoError(t, writeRPSCSV(&buf, sampleResults()))
+	require.NoError(t, writeRPSCSV(&buf, sampleResults(), nil))
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	require.Len(t, lines, 4) // header + 3 rows
 	assert.Contains(t, lines[0], "target_rps")
 	assert.Contains(t, lines[0], "achieved_rps")
 	assert.Contains(t, lines[0], "E1_p95_ms")
 	assert.Contains(t, lines[0], "verdict")
+	assert.Contains(t, lines[0], "bottleneck_component")
 	assert.Contains(t, lines[3], "2000")
 	assert.Contains(t, lines[3], "TRIP")
 }
@@ -104,7 +105,7 @@ func TestRenderRPSReport_MultiSeriesAlignment(t *testing.T) {
 	assert.Contains(t, out, "E2 p95")
 
 	var csvBuf bytes.Buffer
-	require.NoError(t, writeRPSCSV(&csvBuf, results))
+	require.NoError(t, writeRPSCSV(&csvBuf, results, nil))
 	lines := strings.Split(strings.TrimSpace(csvBuf.String()), "\n")
 	require.Len(t, lines, 3) // header + 2 rows
 	assert.Contains(t, lines[0], "E1_p95_ms,E1_p99_ms,E2_p95_ms,E2_p99_ms")
@@ -112,4 +113,25 @@ func TestRenderRPSReport_MultiSeriesAlignment(t *testing.T) {
 	require.GreaterOrEqual(t, len(cols), 6)
 	assert.Equal(t, "0", cols[4]) // E2_p95_ms
 	assert.Equal(t, "0", cols[5]) // E2_p99_ms
+}
+
+func TestRenderRPSReport_AppendsBottleneck(t *testing.T) {
+	results := []rpsStepResult{
+		{TargetRPS: 1000, Kind: verdictPass},
+		{TargetRPS: 2000, Kind: verdictTrip, Reasons: []string{"E2 p95=143ms > 100ms"}},
+	}
+	bn := bottleneckVerdict{Component: "message-worker", Resource: "Cassandra", Confidence: "high", Determined: true,
+		Reasons: []string{"message-worker consumer backlog grew"}}
+	var sb strings.Builder
+	require.NoError(t, renderRPSReportWithBottleneck(&sb, results, "messages", "medium", &bn))
+	out := sb.String()
+	assert.Contains(t, out, "ANSWER: max RPS = 1000")
+	assert.Contains(t, out, "BOTTLENECK: message-worker (Cassandra-bound)")
+}
+
+func TestRenderRPSReport_NilBottleneckUnchanged(t *testing.T) {
+	results := []rpsStepResult{{TargetRPS: 1000, Kind: verdictPass}}
+	var sb strings.Builder
+	require.NoError(t, renderRPSReportWithBottleneck(&sb, results, "messages", "medium", nil))
+	assert.NotContains(t, sb.String(), "BOTTLENECK:")
 }
