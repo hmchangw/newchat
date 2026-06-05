@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
@@ -676,6 +677,59 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	return nil
 }
 
+// addMemberInputs bundles the three independent up-front reads processAddMembers
+// needs. None depends on another, so loadAddMemberInputs fetches them
+// concurrently to collapse three serial Mongo round trips into one.
+type addMemberInputs struct {
+	room          *model.Room
+	candidates    []AddMemberCandidate
+	hadOrgsBefore bool
+}
+
+// loadAddMemberInputs runs GetRoom, ListAddMemberCandidates, and
+// HasOrgRoomMembers concurrently, collapsing three serial Mongo round trips into
+// one. A plain errgroup.Group (not WithContext) is used deliberately: these are
+// independent reads, so a failure in one need not cancel the others — matching
+// the prior serial code, which returned the first error without cancellation.
+// g.Wait returns the first error; each is wrapped exactly as the serial code
+// did. Each goroutine writes a distinct field of out (no race) and g.Wait
+// establishes the happens-before for the reads of out below.
+func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembersRequest) (addMemberInputs, error) {
+	var (
+		out addMemberInputs
+		g   errgroup.Group
+	)
+	g.Go(func() error {
+		room, err := h.store.GetRoom(ctx, req.RoomID)
+		if err != nil {
+			return fmt.Errorf("get room: %w", err)
+		}
+		out.room = room
+		return nil
+	})
+	g.Go(func() error {
+		candidates, err := h.store.ListAddMemberCandidates(ctx, req.Orgs, req.Users, req.RoomID)
+		if err != nil {
+			return fmt.Errorf("list add-member candidates: %w", err)
+		}
+		out.candidates = candidates
+		return nil
+	})
+	g.Go(func() error {
+		// Fail closed: defaulting hadOrgsBefore=false on error would trigger spurious first-org backfill.
+		hadOrgsBefore, err := h.store.HasOrgRoomMembers(ctx, req.RoomID)
+		if err != nil {
+			return fmt.Errorf("check existing org room members: %w", err)
+		}
+		out.hadOrgsBefore = hadOrgsBefore
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return addMemberInputs{}, err
+	}
+	return out, nil
+}
+
 func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error) {
 	// Defer must cover early failures; populate requesterAccount/roomID once available.
 	var (
@@ -696,31 +750,22 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		req.Timestamp = time.Now().UTC().UnixMilli()
 	}
 
-	room, err := h.store.GetRoom(ctx, req.RoomID)
+	// Fetch the three independent inputs concurrently (one round trip instead
+	// of three). candidates carries per-candidate flags (has-sub /
+	// has-individual-row) that split the writes into needSub (no subscription
+	// yet) and needIRM (no individual room_members row yet, writeIndividuals-
+	// gated) — this is what makes the org→individual upgrade path work.
+	inputs, err := h.loadAddMemberInputs(ctx, &req)
 	if err != nil {
-		return fmt.Errorf("get room: %w", err)
+		return err
 	}
+	room := inputs.room
 	// Defensive channel-only guard.
 	if room.Type != model.RoomTypeChannel {
 		return permanent(errcode.BadRequest(fmt.Sprintf("add-member only valid on channel rooms, got %s", room.Type)))
 	}
-
-	// Resolve candidates and per-candidate flags (has-sub / has-individual-row).
-	// Splits the writes into needSub (no subscription yet) and needIRM (no
-	// individual room_members row yet, writeIndividuals-gated): this is what
-	// makes the org→individual upgrade path work — alice already has a sub
-	// from an earlier org expansion, but no individual row, so an explicit
-	// re-add via req.Users only needs to write the missing IRM row.
-	candidates, err := h.store.ListAddMemberCandidates(ctx, req.Orgs, req.Users, req.RoomID)
-	if err != nil {
-		return fmt.Errorf("list add-member candidates: %w", err)
-	}
-
-	// Fail closed: defaulting hadOrgsBefore=false on error would trigger spurious first-org backfill.
-	hadOrgsBefore, err := h.store.HasOrgRoomMembers(ctx, req.RoomID)
-	if err != nil {
-		return fmt.Errorf("check existing org room members: %w", err)
-	}
+	candidates := inputs.candidates
+	hadOrgsBefore := inputs.hadOrgsBefore
 	writeIndividuals := len(req.Orgs) > 0 || hadOrgsBefore
 
 	allowedIndividual := make(map[string]struct{}, len(req.Users))

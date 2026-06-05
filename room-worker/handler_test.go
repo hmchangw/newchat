@@ -321,6 +321,10 @@ func TestHandler_ProcessAddMembers_FallsBackToNowOnInvalidTimestamp(t *testing.T
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, fmt.Errorf("db error"))
+	// The three up-front reads now run concurrently, so candidates/has-orgs are
+	// issued alongside GetRoom; their results are discarded once GetRoom errors.
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil).AnyTimes()
+	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil).AnyTimes()
 	h := NewHandler(store, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
 	}, testKeyStore, testKeySender)
@@ -3437,6 +3441,10 @@ func TestProcessAddMembers_RejectsNonChannel(t *testing.T) {
 	mockStore.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Type: model.RoomTypeDM, SiteID: "site-a",
 	}, nil)
+	// The up-front reads run concurrently, so candidates/has-orgs fire before the
+	// channel guard rejects the non-channel room; their results are discarded.
+	mockStore.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil).AnyTimes()
+	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil).AnyTimes()
 
 	h := NewHandler(mockStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
 	req := model.AddMembersRequest{RoomID: "r1", RequesterAccount: "alice", Users: []string{"x"}, Timestamp: 1}
