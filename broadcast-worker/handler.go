@@ -71,6 +71,8 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return h.handlePinned(ctx, &evt)
 	case model.EventUnpinned:
 		return h.handleUnpinned(ctx, &evt)
+	case model.EventReacted:
+		return h.handleReacted(ctx, &evt)
 	default:
 		slog.Warn("unknown message event type, skipping", "event", evt.Event, "messageID", evt.Message.ID)
 		return nil
@@ -285,6 +287,48 @@ func (h *Handler) handleUnpinned(ctx context.Context, evt *model.MessageEvent) e
 		UnpinnedAt: time.UnixMilli(evt.Timestamp).UTC(),
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageUnpinned, msg.ID, &unpin)
+}
+
+// handleReacted fans out a single-actor reaction delta to clients in the
+// room. Reactions carry no content, so the encryption branch is skipped.
+func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) error {
+	msg := evt.Message
+	// Log-and-drop on malformed payloads: NAK would loop forever on a publisher contract violation.
+	if evt.ReactionDelta == nil {
+		slog.Error("reacted event missing ReactionDelta; dropping",
+			"messageID", msg.ID,
+			"roomID", msg.RoomID,
+			"siteID", evt.SiteID,
+		)
+		return nil
+	}
+	if msg.UpdatedAt == nil {
+		slog.Error("reacted event missing UpdatedAt; dropping",
+			"messageID", msg.ID,
+			"roomID", msg.RoomID,
+			"siteID", evt.SiteID,
+		)
+		return nil
+	}
+
+	room, err := h.store.GetRoom(ctx, msg.RoomID)
+	if err != nil {
+		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
+	}
+
+	react := model.ReactRoomEvent{
+		Type:      model.RoomEventMessageReacted,
+		RoomID:    room.ID,
+		SiteID:    room.SiteID,
+		Timestamp: time.Now().UTC().UnixMilli(),
+		MessageID: msg.ID,
+		Shortcode: evt.ReactionDelta.Shortcode,
+		Action:    evt.ReactionDelta.Action,
+		Actor:     evt.ReactionDelta.Actor,
+		ReactedAt: *msg.UpdatedAt,
+		UpdatedAt: *msg.UpdatedAt,
+	}
+	return h.publishMutation(ctx, room, model.RoomEventMessageReacted, msg.ID, &react)
 }
 
 // publishMutation marshals a flattened edit/delete event and routes it by room

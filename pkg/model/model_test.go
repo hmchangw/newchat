@@ -977,6 +977,33 @@ func TestRoomKeyGetResponseJSON(t *testing.T) {
 	roundTrip(t, &src, &dst)
 }
 
+// TestNotificationEventJSON_Reaction round-trips the reaction notification
+// envelope published on chat.user.{account}.notification when someone reacts
+// to a message.
+func TestNotificationEventJSON_Reaction(t *testing.T) {
+	src := model.NotificationEvent{
+		Type:   "reaction",
+		RoomID: "room-1",
+		Message: model.Message{
+			ID: "m1", RoomID: "room-1", UserID: "u1", UserAccount: "bob",
+			CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		},
+		ReactionDelta: &model.ReactionDelta{
+			Shortcode: "thumbsup",
+			Action:    "added",
+			Actor: model.Participant{
+				UserID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice",
+			},
+		},
+		Timestamp: 1735689600000,
+	}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+	var dst model.NotificationEvent
+	require.NoError(t, json.Unmarshal(data, &dst))
+	assert.Equal(t, src, dst)
+}
+
 func TestUpdateRoleRequestJSON(t *testing.T) {
 	src := model.UpdateRoleRequest{RoomID: "r1", Account: "bob", NewRole: model.RoleOwner, Timestamp: 1735689600000}
 	roundTrip(t, &src, &model.UpdateRoleRequest{})
@@ -2713,6 +2740,119 @@ func TestDeleteRoomEventJSON(t *testing.T) {
 		UpdatedAt: deletedAt,
 	}
 	roundTrip(t, &evt, &model.DeleteRoomEvent{})
+}
+
+func TestEventReactedConstant(t *testing.T) {
+	assert.Equal(t, model.EventType("reacted"), model.EventReacted)
+}
+
+func TestRoomEventMessageReactedConstant(t *testing.T) {
+	assert.Equal(t, model.RoomEventType("message_reacted"), model.RoomEventMessageReacted)
+}
+
+func TestReactionDeltaRoundtrip(t *testing.T) {
+	d := model.ReactionDelta{
+		Shortcode: "thumbsup",
+		Action:    "added",
+		Actor: model.Participant{
+			UserID:  "u-1",
+			Account: "alice",
+			SiteID:  "site-a",
+			EngName: "Alice",
+		},
+	}
+	var dst model.ReactionDelta
+	roundTrip(t, &d, &dst)
+}
+
+func TestMessageEventWithReactionDeltaJSON(t *testing.T) {
+	evt := model.MessageEvent{
+		Event: model.EventReacted,
+		Message: model.Message{
+			ID:          "msg-uuid",
+			RoomID:      "r1",
+			UserID:      "u-author",
+			UserAccount: "bob",
+			CreatedAt:   time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		},
+		SiteID:    "site-a",
+		Timestamp: 1747800000000,
+		ReactionDelta: &model.ReactionDelta{
+			Shortcode: "thumbsup",
+			Action:    "added",
+			Actor: model.Participant{
+				UserID:  "u-1",
+				Account: "alice",
+				SiteID:  "site-a",
+				EngName: "Alice",
+			},
+		},
+	}
+	roundTrip(t, &evt, &model.MessageEvent{})
+}
+
+func TestMessageEventOmitsReactionDeltaWhenAbsent(t *testing.T) {
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		Message:   model.Message{ID: "msg-uuid", RoomID: "r1"},
+		SiteID:    "site-a",
+		Timestamp: 1747800000000,
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "reactionDelta")
+}
+
+func TestReactRoomEventJSON(t *testing.T) {
+	reactedAt := time.Date(2026, 5, 14, 12, 15, 0, 0, time.UTC)
+	evt := model.ReactRoomEvent{
+		Type:      model.RoomEventMessageReacted,
+		RoomID:    "r1",
+		SiteID:    "site-a",
+		Timestamp: 1746518900123,
+		MessageID: "msg-uuid",
+		Shortcode: "thumbsup",
+		Action:    "added",
+		Actor: model.Participant{
+			UserID:  "u-1",
+			Account: "alice",
+			SiteID:  "site-a",
+			EngName: "Alice",
+		},
+		ReactedAt: reactedAt,
+		UpdatedAt: reactedAt,
+	}
+	roundTrip(t, &evt, &model.ReactRoomEvent{})
+}
+
+func TestCustomEmojiRoundtrip(t *testing.T) {
+	e := model.CustomEmoji{
+		ID:        "0190a0f000007c9aabcde0123456789f",
+		SiteID:    "site-a",
+		Shortcode: "acme_party",
+		ImageURL:  "https://cdn.example.com/emoji/acme_party.png",
+		CreatedBy: "alice",
+		CreatedAt: 1747800000000,
+	}
+	var dst model.CustomEmoji
+	roundTrip(t, &e, &dst)
+	assert.Equal(t, "acme_party", dst.Shortcode)
+}
+
+func TestCustomEmojiBSON(t *testing.T) {
+	e := model.CustomEmoji{
+		ID:        "0190a0f000007c9aabcde0123456789f",
+		SiteID:    "site-a",
+		Shortcode: "acme_party",
+		ImageURL:  "https://cdn.example.com/emoji/acme_party.png",
+		CreatedBy: "alice",
+		CreatedAt: 1747800000000,
+	}
+	data, err := bson.Marshal(&e)
+	require.NoError(t, err)
+	var dst model.CustomEmoji
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, e, dst)
 }
 
 func TestMessageThreadReadRequestJSON(t *testing.T) {

@@ -9,12 +9,25 @@ import (
 	"sort"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
+	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// natsPublisher is a thin Publisher backed by a *nats.Conn for the reaction
+// notification fan-out. Sync publish; caller wraps errors.
+type natsPublisher struct {
+	nc *nats.Conn
+}
+
+func (p natsPublisher) Publish(_ context.Context, subj string, data []byte) error {
+	return p.nc.Publish(subj, data)
+}
 
 // defaultRecipientBatchSize mirrors PUSH_RECIPIENT_BATCH_SIZE's envDefault so unit tests don't re-declare it.
 const defaultRecipientBatchSize = 100
@@ -30,6 +43,13 @@ type RoomMetaGetter interface {
 	Get(ctx context.Context, roomID string) (roommetacache.Meta, error)
 }
 
+// Publisher publishes a single message-author notification for reaction events.
+// Separate from Emitter (which batches mobile push); reactions go to the legacy
+// chat.user.{account}.notification subject the FE already listens on.
+type Publisher interface {
+	Publish(ctx context.Context, subj string, data []byte) error
+}
+
 // HandlerDeps groups the handler's collaborators.
 type HandlerDeps struct {
 	Members            MemberCache
@@ -37,6 +57,7 @@ type HandlerDeps struct {
 	Presence           PresenceSnapshotter
 	Hook               Vetoer
 	Emitter            Emitter
+	ReactionPub        Publisher      // nil → reaction notifications are dropped
 	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
 	LargeRoomThreshold int
 	RecipientBatchSize int // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
@@ -68,6 +89,16 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return fmt.Errorf("unmarshal message event: %w", err)
+	}
+	// Reactions take a separate author-only path; the full push pipeline below
+	// is for create events. Edits/deletes are silently dropped.
+	switch evt.Event {
+	case model.EventReacted:
+		return h.handleReaction(ctx, &evt)
+	case model.EventCreated, "":
+		// fall through to push pipeline
+	default:
+		return nil
 	}
 	msg := evt.Message
 
@@ -277,4 +308,43 @@ func (h *Handler) resolveTitle(ctx context.Context, roomID string, roomType mode
 		return sender.Account
 	}
 	return ""
+}
+
+// handleReaction notifies the message author of a reaction. Only "added"
+// toggles notify; un-reacts and self-reacts are silent.
+func (h *Handler) handleReaction(ctx context.Context, evt *model.MessageEvent) error {
+	if h.deps.ReactionPub == nil {
+		return nil
+	}
+	if evt.ReactionDelta == nil {
+		slog.Error("reacted event missing ReactionDelta; dropping",
+			"messageID", evt.Message.ID,
+			"roomID", evt.Message.RoomID,
+			"siteID", evt.SiteID,
+		)
+		return nil
+	}
+	if evt.ReactionDelta.Action != model.ReactionActionAdded {
+		return nil
+	}
+	authorAccount := evt.Message.UserAccount
+	if authorAccount == "" || authorAccount == evt.ReactionDelta.Actor.Account {
+		return nil
+	}
+
+	notif := model.NotificationEvent{
+		Type:          "reaction",
+		RoomID:        evt.Message.RoomID,
+		Message:       evt.Message,
+		ReactionDelta: evt.ReactionDelta,
+		Timestamp:     time.Now().UTC().UnixMilli(),
+	}
+	data, err := natsutil.MarshalResponse(notif)
+	if err != nil {
+		return fmt.Errorf("marshal reaction notification: %w", err)
+	}
+	if err := h.deps.ReactionPub.Publish(ctx, subject.Notification(authorAccount), data); err != nil {
+		return fmt.Errorf("publish reaction notification to %s: %w", authorAccount, err)
+	}
+	return nil
 }

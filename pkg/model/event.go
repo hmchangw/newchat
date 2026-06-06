@@ -13,13 +13,33 @@ const (
 	EventDeleted  EventType = "deleted"
 	EventPinned   EventType = "pinned"
 	EventUnpinned EventType = "unpinned"
+	EventReacted  EventType = "reacted"
 )
 
 type MessageEvent struct {
-	Event     EventType `json:"event,omitempty" bson:"event,omitempty"`
-	Message   Message   `json:"message"`
-	SiteID    string    `json:"siteId"`
-	Timestamp int64     `json:"timestamp" bson:"timestamp"`
+	Event   EventType `json:"event,omitempty" bson:"event,omitempty"`
+	Message Message   `json:"message"`
+	SiteID  string    `json:"siteId"`
+	// ReactionDelta is set only when Event == EventReacted.
+	ReactionDelta *ReactionDelta `json:"reactionDelta,omitempty" bson:"reactionDelta,omitempty"`
+	Timestamp     int64          `json:"timestamp"               bson:"timestamp"`
+}
+
+// ReactionAction is the toggle direction on ReactionDelta.Action; defined
+// type (not alias) so constants give compile-time safety vs raw strings.
+type ReactionAction string
+
+const (
+	ReactionActionAdded   ReactionAction = "added"
+	ReactionActionRemoved ReactionAction = "removed"
+)
+
+// ReactionDelta is the per-toggle reaction payload. Actor produced the toggle;
+// the reacted-to message's author is on the enclosing MessageEvent.Message.
+type ReactionDelta struct {
+	Shortcode string         `json:"shortcode" bson:"shortcode"`
+	Action    ReactionAction `json:"action"    bson:"action"`
+	Actor     Participant    `json:"actor"     bson:"actor"`
 }
 
 type RoomMetadataUpdateEvent struct {
@@ -79,6 +99,18 @@ type InboxMemberEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty"`
 	JoinedAt           int64    `json:"joinedAt,omitempty"`
 	Timestamp          int64    `json:"timestamp" bson:"timestamp"`
+}
+
+// NotificationEvent is the per-user reaction notification published on
+// chat.user.{account}.notification when someone reacts to a message.
+// Distinct from PushNotificationEvent — push is the batched mobile pipeline;
+// this is the legacy single-user envelope the FE already listens on.
+type NotificationEvent struct {
+	Type          string         `json:"type"` // "reaction"
+	RoomID        string         `json:"roomId"`
+	Message       Message        `json:"message"`
+	ReactionDelta *ReactionDelta `json:"reactionDelta,omitempty" bson:"reactionDelta,omitempty"`
+	Timestamp     int64          `json:"timestamp"               bson:"timestamp"`
 }
 
 // OutboxEventType is the type tag on an OutboxEvent used to route it to the
@@ -174,6 +206,7 @@ const (
 	RoomEventMessageUnpinned RoomEventType = "message_unpinned"
 	RoomEventRoomRenamed     RoomEventType = "room_renamed"
 	RoomEventRoomRestricted  RoomEventType = "room_restricted"
+	RoomEventMessageReacted  RoomEventType = "message_reacted"
 )
 
 // RoomEvent is the live fan-out event for a newly created message
@@ -285,6 +318,21 @@ type RoomRestrictedRoomEvent struct {
 	OwnerAccount   string        `json:"ownerAccount,omitempty" bson:"ownerAccount,omitempty"`
 	ByAccount      string        `json:"byAccount" bson:"byAccount"`
 	ChangedAt      time.Time     `json:"changedAt" bson:"changedAt"`
+}
+
+// ReactRoomEvent is the live event published when a reaction is toggled.
+// Actor carries the full Participant so clients can render display names without a side lookup.
+type ReactRoomEvent struct {
+	Type      RoomEventType  `json:"type" bson:"type"`
+	RoomID    string         `json:"roomId" bson:"roomId"`
+	SiteID    string         `json:"siteId" bson:"siteId"`
+	Timestamp int64          `json:"timestamp" bson:"timestamp"`
+	MessageID string         `json:"messageId" bson:"messageId"`
+	Shortcode string         `json:"shortcode" bson:"shortcode"`
+	Action    ReactionAction `json:"action"    bson:"action"`
+	Actor     Participant    `json:"actor"     bson:"actor"`
+	ReactedAt time.Time      `json:"reactedAt" bson:"reactedAt"`
+	UpdatedAt time.Time      `json:"updatedAt" bson:"updatedAt"`
 }
 
 // RemovedSubscriptionRef is the minimal subscription identity carried on a

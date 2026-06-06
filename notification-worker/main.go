@@ -198,6 +198,7 @@ func main() {
 		Presence:           presence,
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
+		ReactionPub:        natsPublisher{nc: nc.NatsConn()},
 		RoomMeta:           roomMetaCache,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,

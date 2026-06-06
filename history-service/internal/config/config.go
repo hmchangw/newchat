@@ -58,6 +58,10 @@ type Config struct {
 	RoomCacheSize int           `env:"HISTORY_ROOM_CACHE_SIZE" envDefault:"50000"`
 	RoomCacheTTL  time.Duration `env:"HISTORY_ROOM_CACHE_TTL"  envDefault:"10s"`
 
+	// LRU+TTL bounds for the per-site custom_emojis existence-lookup cache.
+	CustomEmojiCacheSize int           `env:"CUSTOM_EMOJI_CACHE_SIZE" envDefault:"4096"`
+	CustomEmojiCacheTTL  time.Duration `env:"CUSTOM_EMOJI_CACHE_TTL"  envDefault:"60s"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 }

@@ -207,7 +207,10 @@ CREATE TABLE IF NOT EXISTS pinned_messages_by_room(
   card_action FROZEN<"CardAction">,
   quoted_parent_message FROZEN<"QuotedParentMessage">,
   visible_to TEXT,
-  reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
+  -- No reactions column: pinned panel does not render reactions, so this
+  -- table is not a reactions mirror (unlike messages_by_id / by_room /
+  -- thread_messages_by_thread). Reads needing reactions side-fetch from
+  -- messages_by_id.
   deleted BOOLEAN,
   type TEXT,
   sys_msg_data BLOB,

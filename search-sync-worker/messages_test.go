@@ -344,3 +344,23 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 		assert.Len(t, actions, 1)
 	})
 }
+
+func TestMessageCollection_BuildAction_ReactedSkipped(t *testing.T) {
+	coll := newMessageCollection("msgs-v1", time.Time{})
+	evt := model.MessageEvent{
+		Event: model.EventReacted,
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+			CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		},
+		SiteID: "site-a", Timestamp: 100,
+		ReactionDelta: &model.ReactionDelta{
+			Shortcode: "thumbsup", Action: "added",
+			Actor: model.Participant{Account: "bob"},
+		},
+	}
+	data, _ := json.Marshal(evt)
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "reactions must not produce an ES action — content is unchanged")
+}

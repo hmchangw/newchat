@@ -155,6 +155,19 @@ These subjects are used exclusively by backend services via JetStream. Clients n
 
 Stream wildcard: `chat.user.*.room.*.{siteID}.msg.>`
 
+### MESSAGES_CANONICAL Stream (`MESSAGES_CANONICAL_{siteID}`)
+
+The single source of truth for downstream consumers (broadcast-worker, notification-worker, search-sync-worker). One subject per mutation kind keeps consumers filterable.
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.msg.canonical.{siteID}.created` | message-gatekeeper | broadcast-worker, notification-worker, search-sync-worker | New message persisted |
+| `chat.msg.canonical.{siteID}.updated` | history-service | broadcast-worker, search-sync-worker | Message edited |
+| `chat.msg.canonical.{siteID}.deleted` | history-service | broadcast-worker, search-sync-worker | Message soft-deleted |
+| `chat.msg.canonical.{siteID}.reacted` | history-service | broadcast-worker, notification-worker, search-sync-worker (skips) | Reaction toggled (add/remove). Payload carries a `ReactionDelta`. search-sync-worker subscribes via the stream wildcard but no-ops on this subject because reactions don't change indexed content. |
+
+Stream wildcard: `chat.msg.canonical.{siteID}.>`
+
 ### FANOUT Stream (`FANOUT_{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |

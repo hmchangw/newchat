@@ -10,7 +10,9 @@ import (
 
 // ReactionKey is the map-key UDT for Message.Reactions.
 type ReactionKey struct {
-	// Emoji must be NFC-normalised by writers; enforcement is in the message gatekeeper, not this type.
+	// Emoji must be NFC-normalised by writers; enforcement is in
+	// pkg/emoji.Validator (the single chokepoint history-service uses
+	// before binding a value into this field), not this type.
 	Emoji       string `json:"emoji"       cql:"emoji"`
 	UserAccount string `json:"userAccount" cql:"user_account"`
 }

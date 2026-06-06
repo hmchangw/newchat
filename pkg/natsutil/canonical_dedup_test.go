@@ -62,6 +62,28 @@ func TestCanonicalDedupID(t *testing.T) {
 			},
 			want: fmt.Sprintf("msg-1:unpinned:%d", unpinnedAtMs),
 		},
+		{
+			name: "reacted includes actor + shortcode + action + timestamp",
+			evt: &model.MessageEvent{
+				Event:     model.EventReacted,
+				Message:   model.Message{ID: "msg-1"},
+				Timestamp: 1746518900123,
+				ReactionDelta: &model.ReactionDelta{
+					Shortcode: "thumbsup",
+					Action:    "added",
+					Actor:     model.Participant{Account: "alice"},
+				},
+			},
+			want: "msg-1:reacted:alice:thumbsup:added:1746518900123",
+		},
+		{
+			name: "reacted with nil delta falls back to bare messageID",
+			evt: &model.MessageEvent{
+				Event:   model.EventReacted,
+				Message: model.Message{ID: "msg-1"},
+			},
+			want: "msg-1",
+		},
 	}
 
 	for _, tc := range tests {

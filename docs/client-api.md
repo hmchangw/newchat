@@ -2016,6 +2016,96 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 ---
 
+#### React to Message
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.react`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Toggles a reaction on a message. Any subscribed room member may react — the server decides add vs remove by checking whether the calling user is already in the message's reactor map for that shortcode. Reactions can always be _removed_ from a soft-deleted message (so users can clean up after a delete), but cannot be _added_ to one.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `messageId` | string | yes | The message to react to. |
+| `shortcode` | string | yes | The bare reaction shortcode without surrounding colons (e.g. `acme_party`). Must match `^[a-z0-9_+-]{1,32}$` after NFC normalisation. The server resolves the shortcode against the `custom_emojis` collection for the site; an unregistered shortcode returns `"invalid reaction shortcode"`. |
+
+```json
+{
+  "messageId": "01970a4f8c2d7c9aQRST",
+  "shortcode": "acme_party"
+}
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `messageId` | string | Echoes the input. |
+| `shortcode` | string | The canonical NFC-normalised form of the input. ASCII shortcodes (`acme_party`, etc.) are byte-identical to the request; Unicode codepoints in alternate encodings (NFD, ZWJ variants) would collapse to NFC. Clients should treat this — not their request value — as the storage key. |
+| `action`    | string | `"added"` or `"removed"` — which side of the toggle the server applied. |
+| `reactedAt` | number | Milliseconds since Unix epoch (UTC). |
+
+```json
+{
+  "messageId": "01970a4f8c2d7c9aQRST",
+  "shortcode": "acme_party",
+  "action": "added",
+  "reactedAt": 1746518900000
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors: `"messageId is required"`, `"shortcode is required"`, `"invalid reaction shortcode"` (format or unknown custom emoji), `"message not found"` (also returned when attempting to _add_ a reaction to a soft-deleted message), `"not subscribed to room"`, `"failed to add reaction"`, `"failed to remove reaction"`.
+
+##### Triggered events — success path
+
+**`chat.room.{roomID}.event`** — `ReactRoomEvent`. Recipients: every client subscribed to the room (channel rooms); for DMs, each non-bot member receives the event on `chat.user.{account}.event.room`.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `type` | string | Always `"message_reacted"`. |
+| `roomId` | string | |
+| `siteId` | string | |
+| `timestamp` | number | Milliseconds since Unix epoch (UTC). Event publish time. |
+| `messageId` | string | The reacted-to message's ID. |
+| `shortcode` | string | The bare reaction shortcode. |
+| `action`    | string | `"added"` or `"removed"`. |
+| `actor`     | object | The user whose toggle produced this event. Fields: `userId`, `account`, `siteId`, `engName`, `chineseName`. |
+| `reactedAt` | string (RFC 3339) | Domain time of the toggle. |
+| `updatedAt` | string (RFC 3339) | Mirrors `reactedAt`. |
+
+```json
+{
+  "type": "message_reacted",
+  "roomId": "01970a4f8c2d7c9aQ",
+  "siteId": "site-a",
+  "timestamp": 1746518900123,
+  "messageId": "01970a4f8c2d7c9aQRST",
+  "shortcode": "acme_party",
+  "action": "added",
+  "actor": {
+    "userId": "u-alice",
+    "account": "alice",
+    "siteId": "site-a",
+    "engName": "Alice"
+  },
+  "reactedAt": "2026-05-06T11:28:20Z",
+  "updatedAt": "2026-05-06T11:28:20Z"
+}
+```
+
+**`chat.user.{account}.notification`** — `NotificationEvent` with `type: "reaction"`. Recipients: the message author only, and only when the toggle is an `"added"` action and the actor is not the author. The notification carries the same `reactionDelta` as the canonical event so the client can render which emoji was added and by whom.
+
+To reconcile this delta with the grouped per-message `reactions` map returned by history endpoints (`map<emoji, [{account, displayName}]>`), clients append or remove one entry under `reactions[shortcode]` keyed on `actor.account`. See the "Message schema" section for the history-side shape.
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 #### Get Thread Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.thread`

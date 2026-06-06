@@ -150,7 +150,7 @@ func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -214,7 +214,7 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -276,7 +276,7 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,

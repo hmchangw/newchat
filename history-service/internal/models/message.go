@@ -1,6 +1,9 @@
 package models
 
-import "github.com/hmchangw/chat/pkg/model/cassandra"
+import (
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
+)
 
 type Message = cassandra.Message
 type Participant = cassandra.Participant
@@ -105,6 +108,20 @@ type ListPinnedMessagesResponse struct {
 	Messages   []Message `json:"messages"`
 	NextCursor string    `json:"nextCursor,omitempty"`
 	HasNext    bool      `json:"hasNext"`
+}
+
+// ReactMessageRequest is the client payload for the reaction toggle handler.
+type ReactMessageRequest struct {
+	MessageID string `json:"messageId"`
+	Shortcode string `json:"shortcode"`
+}
+
+// ReactMessageResponse echoes the action the server applied ("added" or "removed").
+type ReactMessageResponse struct {
+	MessageID string               `json:"messageId"`
+	Shortcode string               `json:"shortcode"`
+	Action    model.ReactionAction `json:"action"`
+	ReactedAt int64                `json:"reactedAt"` // UTC millis
 }
 
 type GetThreadMessagesRequest struct {

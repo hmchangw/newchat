@@ -80,6 +80,11 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if !c.syncFrom.IsZero() && evt.Message.CreatedAt.Before(c.syncFrom) {
 		return nil, nil
 	}
+	// Reactions don't change indexed content; skip rather than re-upserting
+	// the same document with a bumped updatedAt.
+	if evt.Event == model.EventReacted {
+		return nil, nil
+	}
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
 }
 

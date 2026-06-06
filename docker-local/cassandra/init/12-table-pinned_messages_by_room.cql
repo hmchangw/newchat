@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS chat.pinned_messages_by_room (
   card_action           FROZEN<"CardAction">,
   quoted_parent_message FROZEN<"QuotedParentMessage">,
   visible_to            TEXT,
-  reactions             MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
+  -- No reactions column: the pinned panel does not render reactions, so the
+  -- v3 reactions feature does not mirror them here. Reads of the pinned
+  -- panel that need reactions must side-fetch from messages_by_id.
   deleted               BOOLEAN,
   type                  TEXT,
   sys_msg_data          BLOB,

@@ -197,6 +197,10 @@ func MsgCanonicalUnpinned(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.unpinned", siteID)
 }
 
+func MsgCanonicalReacted(siteID string) string {
+	return fmt.Sprintf("chat.msg.canonical.%s.reacted", siteID)
+}
+
 func RoomEvent(roomID string) string {
 	return fmt.Sprintf("chat.room.%s.event", roomID)
 }
@@ -387,6 +391,12 @@ func MsgUnpinPattern(siteID string) string {
 // MsgPinnedListPattern is the natsrouter pattern for listing a room's pinned messages.
 func MsgPinnedListPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.msg.pinned.list", siteID)
+}
+
+// MsgReactPattern is the natsrouter pattern for toggling a reaction on a message.
+// The {account} and {roomID} placeholders are extracted by natsrouter.
+func MsgReactPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.msg.react", siteID)
 }
 
 func MsgThreadPattern(siteID string) string {
