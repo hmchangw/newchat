@@ -765,7 +765,146 @@ When the synchronous reply is an error envelope, the request was rejected before
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Common errors: `"only room members can list members"` (requester has no subscription in the room), `"limit must be > 0"`, `"offset must be >= 0"`.
+See [Error envelope](#6-error-envelope-reference). Common errors: `"only room members can perform this action"` (requester has no subscription in the room), `"limit must be > 0"`, `"offset must be >= 0"`.
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### Get Member Statuses
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.member.statuses`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+
+##### Request body
+
+| Field   | Type   | Required | Notes |
+|---------|--------|----------|-------|
+| `limit` | number | no       | When omitted, the server uses `min(3, room.userCount)` (so a 2-member room returns 2 rows, an empty room returns an empty list). When supplied, must be `> 0` and `<= room.userCount`. |
+
+```json
+{ "limit": 5 }
+```
+
+##### Success response
+
+| Field     | Type                | Notes |
+|-----------|---------------------|-------|
+| `members` | array<MemberStatus> | One entry per room subscription, projected from the joined `users` document. |
+
+`MemberStatus`:
+
+| Field          | Type    | Notes |
+|----------------|---------|-------|
+| `account`      | string  | The user's account. |
+| `engName`      | string  | English display name. |
+| `chineseName`  | string  | Chinese display name. |
+| `statusIsShow` | boolean | Whether the user has chosen to surface their status text. |
+| `statusText`   | string  | Free-form presence text (e.g. `"available"`, `"in a meeting"`). Empty for users who have never set a status. |
+
+```json
+{
+  "members": [
+    {
+      "account": "alice",
+      "engName": "Alice Wang",
+      "chineseName": "愛麗絲",
+      "statusIsShow": true,
+      "statusText": "available"
+    }
+  ]
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- `"only room members can perform this action"` — caller has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"limit must be > 0 and <= room user count"` — limit was `0`, negative, or larger than the room's current `userCount`.
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### Get Mentionable Subscriptions
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.subscription.mentionable`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`**.
+
+Used by the message composer's `@…` mention autocomplete. Returns subscriptions discriminated as `user` or `app`. The caller is always excluded from the result set. Platform-admin / webhook accounts (those whose `account` is prefixed `p_`) are also excluded — they are not `@`-mentionable.
+
+##### Request body
+
+| Field    | Type   | Required | Notes |
+|----------|--------|----------|-------|
+| `limit`  | number | no       | When omitted, the server uses `min(3, room.userCount + room.appCount)` (small rooms cap automatically, empty rooms return an empty list). When supplied, must be `> 0` and `<= room.userCount + room.appCount`. |
+| `filter` | string | no       | Defaults to `""` (matches everything). Treated as a literal substring; regex metacharacters are escaped server-side. Matched case-insensitively against a dash-joined keyword built from `account`, `engName`, `chineseName`, `app.name`, and `app.assistant.name`. |
+
+```json
+{ "limit": 10, "filter": "ali" }
+```
+
+##### Success response
+
+| Field           | Type                            | Notes |
+|-----------------|---------------------------------|-------|
+| `subscriptions` | array<MentionableSubscription>  | At most `limit` rows in arbitrary order. |
+
+`MentionableSubscription` (discriminated by `optionType`):
+
+| Field        | Type    | Notes |
+|--------------|---------|-------|
+| `optionType` | string  | `"user"` for human accounts; `"app"` for assistant bots (`.bot` suffix). |
+| `userId`     | string  | The subscription's `u._id` (the user's `_id`). |
+| `account`    | string  | The user/bot account. |
+| `siteId`     | string  | User's home site for `"user"` rows; **empty string** for `"app"` rows. |
+| `hrInfo`     | object  | Present **only for `"user"` rows**. `{ engName, chineseName }`. |
+| `app`        | object  | Present **only for `"app"` rows**. `{ name, assistant: { name } }`. |
+
+```json
+{
+  "subscriptions": [
+    {
+      "optionType": "user",
+      "userId": "u-alice",
+      "account": "alice",
+      "siteId": "site-a",
+      "hrInfo": { "engName": "Alice Wang", "chineseName": "愛麗絲" }
+    },
+    {
+      "optionType": "app",
+      "userId": "u-helper",
+      "account": "helper.bot",
+      "siteId": "",
+      "app": { "name": "Helper", "assistant": { "name": "helper.bot" } }
+    }
+  ]
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- `"only room members can perform this action"` — caller has no subscription in the room.
+- `"limit must be > 0 and <= room user count + app count"` — limit was `0`, negative, or larger than the room's combined user + app population.
 
 ##### Triggered events — success path
 
@@ -804,11 +943,11 @@ The subject already carries `account` and `roomID`, so no body fields are requir
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- `"only room members can list members"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"only room members can perform this action"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
 - A malformed subject surfaces as a generic `"internal error"` (the specific reason is sanitized away). Not normally reachable — the wildcard subscription guarantees a well-formed subject.
 
 ```json
-{ "code": "forbidden", "reason": "not_room_member", "error": "only room members can list members" }
+{ "code": "forbidden", "reason": "not_room_member", "error": "only room members can perform this action" }
 ```
 
 ##### Behaviour notes
@@ -860,7 +999,7 @@ A **synchronous RPC** that clears a single thread's unread state for the caller.
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- `"only room members can list members"` — the caller has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"only room members can perform this action"` — the caller has no subscription in the room (sentinel reused across membership-gated RPCs).
 - `"thread subscription not found"` — the caller has no `ThreadSubscription` for the supplied `threadId` in the supplied room. Also returned when the thread exists but belongs to a different room than the one in the subject.
 - `"threadId is required"` — body is missing `threadId` or sends an empty string.
 - `"invalid message-thread-read subject: …"` — the subject is malformed.
@@ -913,7 +1052,7 @@ The subject already carries `account` and `roomID`, so no body fields are requir
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- `"only room members can list members"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"only room members can perform this action"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
 - `"invalid mute-toggle subject: …"` — the subject is malformed.
 
 ##### Triggered events — success path
@@ -1034,7 +1173,7 @@ A **synchronous, sender-only** RPC. Returns the list of users on the local site 
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- `"only room members can list members"` — the requester has no subscription in the room.
+- `"only room members can perform this action"` — the requester has no subscription in the room.
 - `"message not found"` — no message matches `messageId`.
 - `"message does not belong to this room"` — `messageId` exists but its `roomId` differs from the subject roomID.
 - `"only the message sender can view read receipts"` — requester is not the author of `messageId`.

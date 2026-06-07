@@ -1237,6 +1237,160 @@ func (s *MongoStore) ListActiveCmdMenus(ctx context.Context, assistantNames []st
 	return menus, nil
 }
 
+// ListMemberStatuses returns up to `limit` members of roomID, each projected
+// from the joined users document as MemberStatus. Subscriptions whose user
+// document has been deleted are dropped by the $unwind with
+// preserveNullAndEmptyArrays:false rather than returned half-populated.
+// $limit runs AFTER the join so the wire contract ("up to limit live rows")
+// holds even when the room contains orphan subscriptions whose user document
+// has been hard-deleted. Pre-join $limit would silently under-deliver in that
+// case. Mirrors ListReadReceipts.
+func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limit int) ([]model.MemberStatus, error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"roomId": roomID}}},
+		// Join on u.account → users.account (the account-indexed majority pattern
+		// here, as in GetSubscriptionWithMembership/enrichRoomMembersStages), not
+		// the u._id → users._id join ListReadReceipts uses. account is not a unique
+		// index, so the inner $limit 1 caps a duplicate-account match to one doc.
+		{{Key: "$lookup", Value: bson.M{
+			"from": "users",
+			"let":  bson.M{"acct": "$u.account"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$account", "$$acct"}}}},
+				bson.M{"$limit": 1},
+				bson.M{"$project": bson.M{
+					"_id":          0,
+					"account":      1,
+					"engName":      1,
+					"chineseName":  1,
+					"statusIsShow": 1,
+					"statusText":   1,
+				}},
+			},
+			"as": "user",
+		}}},
+		{{Key: "$unwind", Value: bson.M{"path": "$user", "preserveNullAndEmptyArrays": false}}},
+		{{Key: "$replaceWith", Value: "$user"}},
+		{{Key: "$limit", Value: int64(limit)}},
+	}
+	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate member statuses for %q: %w", roomID, err)
+	}
+	defer cursor.Close(ctx)
+	members := []model.MemberStatus{}
+	if err := cursor.All(ctx, &members); err != nil {
+		return nil, fmt.Errorf("decode member statuses for %q: %w", roomID, err)
+	}
+	return members, nil
+}
+
+// ListMentionableSubscriptions returns up to `limit` mentionable members of
+// roomID whose dash-joined keyword (account, engName, chineseName, app.name,
+// app.assistant.name) matches escapedFilter under case-insensitive regex.
+// excludeAccount is dropped at the $match stage so the caller never sees
+// themselves. Platform-admin / webhook accounts (`p_` prefix; see
+// platformAdminRegex) are also dropped — they are not mentionable.
+// `.bot` accounts classify as `app` and emit a non-nil App + empty SiteID;
+// human accounts classify as `user` with a non-nil HRInfo. Orphan rows
+// (bot sub with no apps doc, or human sub with no users doc) return empty
+// strings rather than null leaves so the wire shape is well-typed.
+func (s *MongoStore) ListMentionableSubscriptions(
+	ctx context.Context, roomID, excludeAccount, escapedFilter string, limit int,
+) ([]model.MentionableSubscription, error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"roomId": roomID,
+			"u.account": bson.M{
+				"$ne":  excludeAccount,
+				"$not": bson.M{"$regex": platformAdminRegex},
+			},
+		}}},
+		{{Key: "$lookup", Value: bson.M{
+			"from": "users",
+			"let":  bson.M{"acct": "$u.account"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$account", "$$acct"}}}},
+				bson.M{"$limit": 1},
+				bson.M{"$project": bson.M{
+					"_id": 0, "account": 1, "engName": 1, "chineseName": 1, "siteId": 1,
+				}},
+			},
+			"as": "_users",
+		}}},
+		{{Key: "$lookup", Value: bson.M{
+			"from": "apps",
+			"let":  bson.M{"acct": "$u.account"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$assistant.name", "$$acct"}}}},
+				bson.M{"$limit": 1},
+				bson.M{"$project": bson.M{
+					"_id": 0, "name": 1, "assistant.name": 1,
+				}},
+			},
+			"as": "_apps",
+		}}},
+		{{Key: "$addFields", Value: bson.M{
+			"isApp":   bson.M{"$regexMatch": bson.M{"input": "$u.account", "regex": botAccountRegex}},
+			"userDoc": bson.M{"$arrayElemAt": bson.A{"$_users", 0}},
+			"appDoc":  bson.M{"$arrayElemAt": bson.A{"$_apps", 0}},
+		}}},
+		{{Key: "$addFields", Value: bson.M{
+			"keyword": bson.M{"$concat": bson.A{
+				bson.M{"$ifNull": bson.A{"$u.account", ""}}, "-",
+				bson.M{"$ifNull": bson.A{"$userDoc.engName", ""}}, "-",
+				bson.M{"$ifNull": bson.A{"$userDoc.chineseName", ""}}, "-",
+				bson.M{"$ifNull": bson.A{"$appDoc.name", ""}}, "-",
+				bson.M{"$ifNull": bson.A{"$appDoc.assistant.name", ""}},
+			}},
+		}}},
+		{{Key: "$match", Value: bson.M{
+			"keyword": bson.M{"$regex": escapedFilter, "$options": "i"},
+		}}},
+		{{Key: "$limit", Value: int64(limit)}},
+		{{Key: "$project", Value: bson.M{
+			"_id":        0,
+			"optionType": bson.M{"$cond": bson.A{"$isApp", "app", "user"}},
+			"userId":     "$u._id",
+			"account":    "$u.account",
+			"siteId": bson.M{"$cond": bson.A{
+				"$isApp",
+				"",
+				bson.M{"$ifNull": bson.A{"$userDoc.siteId", ""}},
+			}},
+			"hrInfo": bson.M{"$cond": bson.A{
+				"$isApp",
+				"$$REMOVE",
+				bson.M{
+					"engName":     bson.M{"$ifNull": bson.A{"$userDoc.engName", ""}},
+					"chineseName": bson.M{"$ifNull": bson.A{"$userDoc.chineseName", ""}},
+				},
+			}},
+			"app": bson.M{"$cond": bson.A{
+				"$isApp",
+				bson.M{
+					"name": bson.M{"$ifNull": bson.A{"$appDoc.name", ""}},
+					"assistant": bson.M{
+						"name": bson.M{"$ifNull": bson.A{"$appDoc.assistant.name", ""}},
+					},
+				},
+				"$$REMOVE",
+			}},
+		}}},
+	}
+
+	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate mentionable subscriptions for %q: %w", roomID, err)
+	}
+	defer cursor.Close(ctx)
+	subs := []model.MentionableSubscription{}
+	if err := cursor.All(ctx, &subs); err != nil {
+		return nil, fmt.Errorf("decode mentionable subscriptions for %q: %w", roomID, err)
+	}
+	return subs, nil
+}
+
 // No order-safety guard on the source-site write; the $lt guard lives on the inbox-worker side.
 func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
 	filter := bson.M{"threadRoomId": threadRoomID, "userAccount": account}

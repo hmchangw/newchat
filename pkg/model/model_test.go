@@ -70,6 +70,16 @@ func TestIsPlatformAdmin(t *testing.T) {
 	}
 }
 
+func TestUserJSON_WithStatus(t *testing.T) {
+	u := model.User{
+		ID: "u1", Account: "alice", SiteID: "site-a",
+		EngName: "Alice Wang", ChineseName: "愛麗絲",
+		StatusIsShow: true,
+		StatusText:   "available",
+	}
+	roundTrip(t, &u, &model.User{})
+}
+
 func TestRoomJSON(t *testing.T) {
 	lastMsg := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	lastMention := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
@@ -2245,6 +2255,100 @@ func TestReadReceiptResponseJSON(t *testing.T) {
 		},
 	}
 	roundTrip(t, &r, &model.ReadReceiptResponse{})
+}
+
+func TestListMemberStatusesRequestJSON(t *testing.T) {
+	limit := 5
+	r := model.ListMemberStatusesRequest{Limit: &limit}
+	roundTrip(t, &r, &model.ListMemberStatusesRequest{})
+}
+
+// Nil Limit must omit the wire key (omitempty contract) so the server can
+// distinguish "client supplied an explicit value" from "use the server default".
+func TestListMemberStatusesRequestJSON_NilLimitOmitted(t *testing.T) {
+	data, err := json.Marshal(model.ListMemberStatusesRequest{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := string(data); got != "{}" {
+		t.Errorf("nil Limit must marshal to {}, got %s", got)
+	}
+}
+
+func TestMemberStatusJSON(t *testing.T) {
+	m := model.MemberStatus{
+		Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲",
+		StatusIsShow: true, StatusText: "in a meeting",
+	}
+	roundTrip(t, &m, &model.MemberStatus{})
+}
+
+func TestListMemberStatusesResponseJSON(t *testing.T) {
+	r := model.ListMemberStatusesResponse{Members: []model.MemberStatus{
+		{Account: "alice", EngName: "Alice", ChineseName: "愛麗絲", StatusIsShow: true, StatusText: "busy"},
+		{Account: "bob", EngName: "Bob", ChineseName: "陳博"},
+	}}
+	roundTrip(t, &r, &model.ListMemberStatusesResponse{})
+}
+
+func TestMentionableSubscriptionsRequestJSON(t *testing.T) {
+	limit := 10
+	r := model.MentionableSubscriptionsRequest{Limit: &limit, Filter: "ali"}
+	roundTrip(t, &r, &model.MentionableSubscriptionsRequest{})
+}
+
+// Nil Limit + empty Filter must marshal to {} so the server can apply its
+// default limit and treat the filter as "match everything".
+func TestMentionableSubscriptionsRequestJSON_NilLimitOmitted(t *testing.T) {
+	data, err := json.Marshal(model.MentionableSubscriptionsRequest{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := string(data); got != "{}" {
+		t.Errorf("nil Limit + empty Filter must marshal to {}, got %s", got)
+	}
+}
+
+func TestMentionableSubscription_UserShape_JSON(t *testing.T) {
+	s := model.MentionableSubscription{
+		OptionType: "user",
+		UserID:     "u-alice",
+		Account:    "alice",
+		SiteID:     "site-a",
+		HRInfo:     &model.MentionableHRInfo{EngName: "Alice Wang", ChineseName: "愛麗絲"},
+	}
+	roundTrip(t, &s, &model.MentionableSubscription{})
+
+	data, err := json.Marshal(s)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"app"`, "user-shape must omit app")
+}
+
+func TestMentionableSubscription_AppShape_JSON(t *testing.T) {
+	s := model.MentionableSubscription{
+		OptionType: "app",
+		UserID:     "u-bot",
+		Account:    "helper.bot",
+		App: &model.MentionableApp{
+			Name:      "Helper",
+			Assistant: model.MentionableAppAssistant{Name: "helper.bot"},
+		},
+	}
+	roundTrip(t, &s, &model.MentionableSubscription{})
+
+	data, err := json.Marshal(s)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"hrInfo"`, "app-shape must omit hrInfo")
+}
+
+func TestMentionableSubscriptionsResponseJSON(t *testing.T) {
+	r := model.MentionableSubscriptionsResponse{Subscriptions: []model.MentionableSubscription{
+		{OptionType: "user", UserID: "u-a", Account: "a", SiteID: "site-a",
+			HRInfo: &model.MentionableHRInfo{EngName: "A", ChineseName: "A"}},
+		{OptionType: "app", UserID: "u-b", Account: "b.bot",
+			App: &model.MentionableApp{Name: "B", Assistant: model.MentionableAppAssistant{Name: "b.bot"}}},
+	}}
+	roundTrip(t, &r, &model.MentionableSubscriptionsResponse{})
 }
 
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.

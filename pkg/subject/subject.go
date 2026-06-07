@@ -268,6 +268,29 @@ func MemberListWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.member.list", siteID)
 }
 
+// MemberStatuses is the concrete subject for the per-room member.statuses RPC.
+// Pair with MemberStatusesWildcard for room-service's QueueSubscribe.
+func MemberStatuses(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.member.statuses", account, roomID, siteID)
+}
+
+// MemberStatusesWildcard is the per-site subscription pattern for member.statuses.
+func MemberStatusesWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.member.statuses", siteID)
+}
+
+// MentionableSubscriptions is the concrete subject for the per-room
+// subscription.mentionable RPC. Pair with MentionableSubscriptionsWildcard
+// for room-service's QueueSubscribe.
+func MentionableSubscriptions(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.subscription.mentionable", account, roomID, siteID)
+}
+
+// MentionableSubscriptionsWildcard is the per-site subscription pattern for subscription.mentionable.
+func MentionableSubscriptionsWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.subscription.mentionable", siteID)
+}
+
 // OrgMembers builds the subject for listing members of an org. siteID
 // selects which site's user directory to query — each site has its own
 // users collection, so org membership is per-site. Token order matches

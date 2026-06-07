@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2916,4 +2917,361 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		require.NoError(t, json.Unmarshal(reply.Data, &errResp))
 		assert.Contains(t, errResp.Message, "only admins can change room restricted state")
 	})
+}
+
+func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("projects five fields and respects limit", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲",
+			StatusIsShow: true, StatusText: "available",
+		})
+		mustInsertUser(t, db, &model.User{
+			ID: "u-bob", Account: "bob", EngName: "Bob Chen", ChineseName: "陳博",
+			StatusIsShow: false, StatusText: "in a meeting",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-b", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		byAcct := map[string]model.MemberStatus{}
+		for _, m := range got {
+			byAcct[m.Account] = m
+		}
+		assert.Equal(t, model.MemberStatus{
+			Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲",
+			StatusIsShow: true, StatusText: "available",
+		}, byAcct["alice"])
+		assert.Equal(t, model.MemberStatus{
+			Account: "bob", EngName: "Bob Chen", ChineseName: "陳博",
+			StatusIsShow: false, StatusText: "in a meeting",
+		}, byAcct["bob"])
+	})
+
+	t.Run("limit caps the result count", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		for i := 0; i < 5; i++ {
+			acct := fmt.Sprintf("user%d", i)
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct})
+			mustInsertSub(t, db, &model.Subscription{
+				ID: "sub-" + acct, User: model.SubscriptionUser{ID: "u-" + acct, Account: acct},
+				RoomID: "r1", SiteID: "site-a",
+			})
+		}
+		got, err := store.ListMemberStatuses(ctx, "r1", 2)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+	})
+
+	t.Run("subscription with missing user doc is dropped", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛", StatusText: "x",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-ghost", User: model.SubscriptionUser{ID: "u-ghost", Account: "ghost"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		got, err := store.ListMemberStatuses(ctx, "r1", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "alice", got[0].Account)
+	})
+
+	t.Run("post-join limit returns full result when orphans precede live subs", func(t *testing.T) {
+		// Regression: pre-join $limit would drop orphan-prefix subs *before*
+		// the user join, under-returning when the first K subscriptions in
+		// _id order reference deleted users. Post-join $limit must always
+		// return min(limit, liveCount) rows regardless of orphan position.
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		// Insert orphan subs first so they own the earliest _id values
+		// (deterministic ordering — Mongo serves them first under pre-join $limit).
+		for i := 0; i < 3; i++ {
+			acct := fmt.Sprintf("ghost%d", i)
+			mustInsertSub(t, db, &model.Subscription{
+				ID:     fmt.Sprintf("sub-ghost%d", i),
+				User:   model.SubscriptionUser{ID: "u-" + acct, Account: acct},
+				RoomID: "r1", SiteID: "site-a",
+			})
+		}
+		// Then 3 live subs.
+		for i := 0; i < 3; i++ {
+			acct := fmt.Sprintf("live%d", i)
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct})
+			mustInsertSub(t, db, &model.Subscription{
+				ID:     fmt.Sprintf("sub-live%d", i),
+				User:   model.SubscriptionUser{ID: "u-" + acct, Account: acct},
+				RoomID: "r1", SiteID: "site-a",
+			})
+		}
+		got, err := store.ListMemberStatuses(ctx, "r1", 3)
+		require.NoError(t, err)
+		require.Len(t, got, 3, "post-join $limit must deliver full count even when orphans are in the prefix")
+		for _, m := range got {
+			assert.Contains(t, m.Account, "live", "every returned row must be a live sub, got %q", m.Account)
+		}
+	})
+
+	t.Run("empty room returns empty slice", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		got, err := store.ListMemberStatuses(ctx, "r-empty", 5)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+}
+
+func TestMongoStore_ListMentionableSubscriptions_Integration(t *testing.T) {
+	ctx := context.Background()
+
+	seedThree := func(t *testing.T, db *mongo.Database) {
+		t.Helper()
+		mustInsertUser(t, db, &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a",
+			EngName: "Alice Wang", ChineseName: "愛麗絲"})
+		mustInsertUser(t, db, &model.User{ID: "u-bob", Account: "bob", SiteID: "site-b",
+			EngName: "Bob Chen", ChineseName: "陳博"})
+		// Bot user document — apps still join through this row when present.
+		mustInsertUser(t, db, &model.User{ID: "u-bot", Account: "helper.bot"})
+		_, err := db.Collection("apps").InsertOne(ctx, model.App{
+			ID:        "app-1",
+			Name:      "Helper",
+			Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+		})
+		require.NoError(t, err)
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-a",
+			User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomID: "r1", SiteID: "site-a"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-b",
+			User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}, RoomID: "r1", SiteID: "site-a"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-bot",
+			User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot", IsBot: true},
+			RoomID: "r1", SiteID: "site-a"})
+	}
+
+	t.Run("classifies user vs app and shapes response", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		seedThree(t, db)
+
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 3)
+
+		byAcct := map[string]model.MentionableSubscription{}
+		for _, s := range got {
+			byAcct[s.Account] = s
+		}
+
+		require.Contains(t, byAcct, "alice")
+		assert.Equal(t, "user", byAcct["alice"].OptionType)
+		assert.Equal(t, "u-alice", byAcct["alice"].UserID)
+		assert.Equal(t, "site-a", byAcct["alice"].SiteID)
+		require.NotNil(t, byAcct["alice"].HRInfo)
+		assert.Equal(t, "Alice Wang", byAcct["alice"].HRInfo.EngName)
+		assert.Equal(t, "愛麗絲", byAcct["alice"].HRInfo.ChineseName)
+		assert.Nil(t, byAcct["alice"].App)
+
+		require.Contains(t, byAcct, "helper.bot")
+		assert.Equal(t, "app", byAcct["helper.bot"].OptionType)
+		assert.Equal(t, "u-bot", byAcct["helper.bot"].UserID)
+		assert.Equal(t, "", byAcct["helper.bot"].SiteID, "app rows must have empty siteId")
+		assert.Nil(t, byAcct["helper.bot"].HRInfo)
+		require.NotNil(t, byAcct["helper.bot"].App)
+		assert.Equal(t, "Helper", byAcct["helper.bot"].App.Name)
+		assert.Equal(t, "helper.bot", byAcct["helper.bot"].App.Assistant.Name)
+	})
+
+	t.Run("excludeAccount filters caller", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		seedThree(t, db)
+
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "alice", "", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		for _, s := range got {
+			assert.NotEqual(t, "alice", s.Account)
+		}
+	})
+
+	t.Run("filter is case-insensitive substring on keyword", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		seedThree(t, db)
+
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "BOB", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "bob", got[0].Account)
+
+		got, err = store.ListMentionableSubscriptions(ctx, "r1", "", "陳", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "bob", got[0].Account)
+
+		got, err = store.ListMentionableSubscriptions(ctx, "r1", "", "Helper", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "helper.bot", got[0].Account)
+	})
+
+	t.Run("escaped filter treats . as a literal dot, not a wildcard", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		// Real bot account with a dot before "bot".
+		mustInsertUser(t, db, &model.User{ID: "u-bot", Account: "helper.bot"})
+		_, err := db.Collection("apps").InsertOne(ctx, model.App{
+			ID: "app-1", Name: "Helper",
+			Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+		})
+		require.NoError(t, err)
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-bot",
+			User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot", IsBot: true},
+			RoomID: "r1", SiteID: "site-a"})
+		// Decoy account that would also match if "." were treated as a wildcard
+		// ("helperXbot"). It is a normal (non-bot) account so it classifies as a user.
+		mustInsertUser(t, db, &model.User{ID: "u-x", Account: "helperxbot", EngName: "X"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-x",
+			User: model.SubscriptionUser{ID: "u-x", Account: "helperxbot"},
+			RoomID: "r1", SiteID: "site-a"})
+
+		// `helper\.bot` is regexp.QuoteMeta("helper.bot") — the escaped form the
+		// handler passes to the store. As a literal it matches only "helper.bot";
+		// if the pipeline treated "." as a wildcard it would also match "helperxbot".
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", `helper\.bot`, 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "helper.bot", got[0].Account)
+	})
+
+	t.Run("p_ prefix is hidden from mentionable results", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{ID: "u-pa", Account: "p_admin", EngName: "Platform Admin"})
+		mustInsertUser(t, db, &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-pa",
+			User:   model.SubscriptionUser{ID: "u-pa", Account: "p_admin"},
+			RoomID: "r1", SiteID: "site-a"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-alice",
+			User:   model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a"})
+
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "p_ accounts must be excluded from mentionable results")
+		assert.Equal(t, "alice", got[0].Account)
+		assert.Equal(t, "user", got[0].OptionType)
+	})
+
+	t.Run("limit caps the result count", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		seedThree(t, db)
+
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", 2)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+	})
+
+	t.Run("empty room returns empty slice", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		got, err := store.ListMentionableSubscriptions(ctx, "r-empty", "", "", 5)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+
+	t.Run("orphan bot subscription returns empty app strings, not null", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{ID: "u-ghost", Account: "ghost.bot"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-ghost",
+			User: model.SubscriptionUser{ID: "u-ghost", Account: "ghost.bot", IsBot: true},
+			RoomID: "r1", SiteID: "site-a"})
+
+		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "app", got[0].OptionType)
+		require.NotNil(t, got[0].App)
+		assert.Equal(t, "", got[0].App.Name)
+		assert.Equal(t, "", got[0].App.Assistant.Name)
+	})
+}
+
+func TestBotAndAdminPredicate_GoAndMongoAgree_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	// Probe set covers .bot suffix, p_ prefix, non-system accounts, and
+	// tricky lookalikes.
+	probes := []string{
+		"alice",
+		"bob.bot",
+		"p_assistant",
+		"botanist",           // contains "bot" but not at end
+		"p",                  // single char, no underscore
+		"weird.botanist",     // ends in 'ist', not '.bot'
+		"helper.bot.archive", // ".bot" not anchored at end
+		"p_",                 // edge: p_ with nothing after
+		"P_admin",            // case-sensitive — uppercase P should NOT match
+	}
+
+	for _, acct := range probes {
+		mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct})
+		mustInsertSub(t, db, &model.Subscription{
+			ID:     "sub-" + acct,
+			User:   model.SubscriptionUser{ID: "u-" + acct, Account: acct, IsBot: strings.HasSuffix(acct, ".bot")},
+			RoomID: "r1", SiteID: "site-a",
+		})
+	}
+
+	got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", len(probes)+5)
+	require.NoError(t, err)
+
+	// Build the observed Mongo classification: presence in results plus optionType.
+	type seen struct {
+		present bool
+		isApp   bool
+	}
+	mongo := map[string]seen{}
+	for _, s := range got {
+		mongo[s.Account] = seen{present: true, isApp: s.OptionType == "app"}
+	}
+
+	// Locks Go and Mongo in agreement on bot vs platform-admin vs human:
+	//   `.bot` suffix => present + optionType "app"   (Mongo: botAccountRegex)
+	//   `p_` prefix   => absent                       (Mongo: $not platformAdminRegex)
+	//   otherwise     => present + optionType "user"
+	for _, acct := range probes {
+		switch {
+		case strings.HasSuffix(acct, ".bot"):
+			assert.True(t, mongo[acct].present, "%q: bot should appear", acct)
+			assert.True(t, mongo[acct].isApp, "%q: bot should be optionType=app", acct)
+		case strings.HasPrefix(acct, "p_"):
+			assert.False(t, mongo[acct].present, "%q: platform admin must be hidden", acct)
+		default:
+			assert.True(t, mongo[acct].present, "%q: human should appear", acct)
+			assert.False(t, mongo[acct].isApp, "%q: human should be optionType=user", acct)
+		}
+	}
 }

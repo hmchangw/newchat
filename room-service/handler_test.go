@@ -4661,6 +4661,245 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 	}
 }
 
+func TestHandler_ListMemberStatuses(t *testing.T) {
+	const siteID = "site-a"
+	const roomID = "r1"
+	const requester = "alice"
+	subj := subject.MemberStatuses(requester, roomID, siteID)
+
+	stub := []model.MemberStatus{
+		{Account: "alice", EngName: "Alice", ChineseName: "愛", StatusIsShow: true, StatusText: "available"},
+		{Account: "bob", EngName: "Bob", ChineseName: "博"},
+	}
+
+	type want struct {
+		errContains string
+		errIs       error
+		members     []model.MemberStatus
+	}
+	tests := []struct {
+		name      string
+		subject   string
+		body      []byte
+		setupMock func(*MockRoomStore)
+		want      want
+	}{
+		{
+			name:    "default limit 3, happy path",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+				s.EXPECT().ListMemberStatuses(gomock.Any(), roomID, 3).Return(stub, nil)
+			},
+			want: want{members: stub},
+		},
+		{
+			// Nil-Limit must clamp to the room cap, not fail validation. Without
+			// the clamp a 2-member room receiving a no-limit request would get
+			// errMemberStatusesLimitInvalid from the default-3 vs cap-2 check —
+			// an error the client did not cause.
+			name:    "nil limit clamped to small UserCount",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 2}, nil)
+				s.EXPECT().ListMemberStatuses(gomock.Any(), roomID, 2).Return(stub, nil)
+			},
+			want: want{members: stub},
+		},
+		{
+			// Empty-room short-circuit: no store call, empty response. Without
+			// this branch the cap=0 would still trip the explicit-limit guard
+			// against the default.
+			name:    "nil limit + empty room returns empty without store call",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 0}, nil)
+			},
+			want: want{members: []model.MemberStatus{}},
+		},
+		{
+			name:    "explicit limit passes through",
+			subject: subj,
+			body:    []byte(`{"limit":7}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+				s.EXPECT().ListMemberStatuses(gomock.Any(), roomID, 7).Return(stub, nil)
+			},
+			want: want{members: stub},
+		},
+		{
+			// GetRoom is dispatched in parallel with GetSubscription; it may
+			// or may not be invoked depending on goroutine timing before
+			// errgroup observes the membership error. AnyTimes() accepts
+			// both racing outcomes.
+			name:    "requester not a member",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(nil, fmt.Errorf("missing: %w", model.ErrSubscriptionNotFound))
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil).AnyTimes()
+			},
+			want: want{errIs: errNotRoomMember},
+		},
+		{
+			// Precedence regression: when BOTH the membership probe and the
+			// room read fail concurrently, errNotRoomMember must still win.
+			// Plain errgroup.Group (no WithContext) prevents GetRoom's failure
+			// from cancelling GetSubscription mid-flight and surfacing as
+			// context.Canceled, which would mask the not-member signal.
+			name:    "not-member takes precedence over GetRoom error",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(nil, fmt.Errorf("missing: %w", model.ErrSubscriptionNotFound))
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(nil, fmt.Errorf("mongo exploded"))
+			},
+			want: want{errIs: errNotRoomMember},
+		},
+		{
+			name:    "GetSubscription infra error",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(nil, fmt.Errorf("mongo exploded"))
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil).AnyTimes()
+			},
+			want: want{errContains: "check room membership"},
+		},
+		{
+			name:    "limit zero",
+			subject: subj,
+			body:    []byte(`{"limit":0}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+			},
+			want: want{errIs: errMemberStatusesLimitInvalid},
+		},
+		{
+			name:    "limit negative",
+			subject: subj,
+			body:    []byte(`{"limit":-1}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+			},
+			want: want{errIs: errMemberStatusesLimitInvalid},
+		},
+		{
+			name:    "limit exceeds room.UserCount",
+			subject: subj,
+			body:    []byte(`{"limit":11}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+			},
+			want: want{errIs: errMemberStatusesLimitInvalid},
+		},
+		{
+			name:    "limit equal to room.UserCount is valid",
+			subject: subj,
+			body:    []byte(`{"limit":10}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+				s.EXPECT().ListMemberStatuses(gomock.Any(), roomID, 10).Return(stub, nil)
+			},
+			want: want{members: stub},
+		},
+		{
+			name:    "GetRoom errors",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(nil, fmt.Errorf("mongo exploded"))
+			},
+			want: want{errContains: "get room"},
+		},
+		{
+			name:    "store errors",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, UserCount: 10}, nil)
+				s.EXPECT().ListMemberStatuses(gomock.Any(), roomID, 3).
+					Return(nil, fmt.Errorf("mongo exploded"))
+			},
+			want: want{errContains: "list member statuses"},
+		},
+		{
+			name:      "invalid subject",
+			subject:   "chat.garbage",
+			body:      nil,
+			setupMock: func(s *MockRoomStore) {},
+			want:      want{errContains: "invalid member-statuses subject"},
+		},
+		{
+			// Body parse now precedes the parallel store dispatch; a malformed
+			// body short-circuits before any read.
+			name:      "malformed JSON body",
+			subject:   subj,
+			body:      []byte("{not json"),
+			setupMock: func(s *MockRoomStore) {},
+			want:      want{errContains: "invalid request"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+			tc.setupMock(store)
+
+			h := &Handler{store: store, siteID: siteID}
+			resp, err := h.handleListMemberStatuses(context.Background(), tc.subject, tc.body)
+
+			if tc.want.errContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.want.errContains)
+				return
+			}
+			if tc.want.errIs != nil {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, tc.want.errIs), "error chain should contain %v, got %v", tc.want.errIs, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want.members, resp.Members)
+		})
+	}
+}
+
 // publishCore failure is intentionally non-fatal: the DB write is the source
 // of truth and other client sessions reconcile on their next subscription
 // refetch. The handler must still reply ok.
@@ -5584,4 +5823,269 @@ func TestHandler_handleGetRoomAppCommandMenu_ContextTimeout(t *testing.T) {
 	assert.True(t,
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
 		"expected wrapped context error, got %v", err)
+}
+
+func TestHandler_ListMentionableSubscriptions(t *testing.T) {
+	const siteID = "site-a"
+	const roomID = "r1"
+	const requester = "alice"
+	subj := subject.MentionableSubscriptions(requester, roomID, siteID)
+
+	stub := []model.MentionableSubscription{
+		{OptionType: "user", UserID: "u-bob", Account: "bob", SiteID: "site-a",
+			HRInfo: &model.MentionableHRInfo{EngName: "Bob", ChineseName: "博"}},
+	}
+
+	type want struct {
+		errContains string
+		errIs       error
+		subs        []model.MentionableSubscription
+	}
+	tests := []struct {
+		name      string
+		subject   string
+		body      []byte
+		setupMock func(*MockRoomStore)
+		want      want
+	}{
+		{
+			name:    "default limit 3, empty filter, happy path",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+				s.EXPECT().
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 3).
+					Return(stub, nil)
+			},
+			want: want{subs: stub},
+		},
+		{
+			// Nil-Limit clamps to UserCount+AppCount (the cap), not the default 3.
+			// A small room with 1 user + 1 app would otherwise spuriously fail
+			// validation with the default 3 vs cap 2.
+			name:    "nil limit clamped to small UserCount+AppCount",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 1, AppCount: 1}, nil)
+				s.EXPECT().
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 2).
+					Return(stub, nil)
+			},
+			want: want{subs: stub},
+		},
+		{
+			// Empty-room short-circuit: skip the store call, return empty.
+			name:    "nil limit + empty room returns empty without store call",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 0, AppCount: 0}, nil)
+			},
+			want: want{subs: []model.MentionableSubscription{}},
+		},
+		{
+			name:    "explicit limit and filter passed through",
+			subject: subj,
+			body:    []byte(`{"limit":3,"filter":"bo"}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+				s.EXPECT().
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "bo", 3).
+					Return(stub, nil)
+			},
+			want: want{subs: stub},
+		},
+		{
+			name:    "regex metacharacters in filter are escaped",
+			subject: subj,
+			body:    []byte(`{"limit":3,"filter":"a.b(c"}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+				s.EXPECT().
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, `a\.b\(c`, 3).
+					Return([]model.MentionableSubscription{}, nil)
+			},
+			want: want{subs: []model.MentionableSubscription{}},
+		},
+		{
+			// GetRoom is dispatched in parallel with GetSubscription; it may
+			// or may not be invoked depending on goroutine timing before
+			// errgroup observes the membership error. AnyTimes() accepts
+			// both racing outcomes.
+			name:    "requester not a member",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(nil, fmt.Errorf("missing: %w", model.ErrSubscriptionNotFound))
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil).AnyTimes()
+			},
+			want: want{errIs: errNotRoomMember},
+		},
+		{
+			// Precedence regression: when BOTH the membership probe and the
+			// room read fail concurrently, errNotRoomMember must still win.
+			// Plain errgroup.Group (no WithContext) prevents GetRoom's failure
+			// from cancelling GetSubscription mid-flight and surfacing as
+			// context.Canceled, which would mask the not-member signal.
+			name:    "not-member takes precedence over GetRoom error",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(nil, fmt.Errorf("missing: %w", model.ErrSubscriptionNotFound))
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(nil, fmt.Errorf("mongo exploded"))
+			},
+			want: want{errIs: errNotRoomMember},
+		},
+		{
+			name:    "GetSubscription infra error",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(nil, fmt.Errorf("mongo exploded"))
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil).AnyTimes()
+			},
+			want: want{errContains: "check room membership"},
+		},
+		{
+			name:    "limit zero",
+			subject: subj,
+			body:    []byte(`{"limit":0}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+			},
+			want: want{errIs: errMentionableLimitInvalid},
+		},
+		{
+			name:    "limit negative",
+			subject: subj,
+			body:    []byte(`{"limit":-1}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+			},
+			want: want{errIs: errMentionableLimitInvalid},
+		},
+		{
+			name:    "limit exceeds UserCount + AppCount",
+			subject: subj,
+			body:    []byte(`{"limit":8}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+			},
+			want: want{errIs: errMentionableLimitInvalid},
+		},
+		{
+			name:    "limit at cap is accepted",
+			subject: subj,
+			body:    []byte(`{"limit":7}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+				s.EXPECT().
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 7).
+					Return(stub, nil)
+			},
+			want: want{subs: stub},
+		},
+		{
+			name:    "GetRoom errors",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(nil, fmt.Errorf("mongo exploded"))
+			},
+			want: want{errContains: "get room"},
+		},
+		{
+			name:    "store errors",
+			subject: subj,
+			body:    nil,
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), requester, roomID).
+					Return(&model.Subscription{User: model.SubscriptionUser{Account: requester}, RoomID: roomID}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), roomID).
+					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
+				s.EXPECT().
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 3).
+					Return(nil, fmt.Errorf("mongo exploded"))
+			},
+			want: want{errContains: "list mentionable subscriptions"},
+		},
+		{
+			name:      "invalid subject",
+			subject:   "chat.garbage",
+			body:      nil,
+			setupMock: func(s *MockRoomStore) {},
+			want:      want{errContains: "invalid mentionable-subscriptions subject"},
+		},
+		{
+			// Body parse now precedes the parallel store dispatch; a malformed
+			// body short-circuits before any read.
+			name:      "malformed JSON body",
+			subject:   subj,
+			body:      []byte("{not json"),
+			setupMock: func(s *MockRoomStore) {},
+			want:      want{errContains: "invalid request"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+			tc.setupMock(store)
+
+			h := &Handler{store: store, siteID: siteID}
+			resp, err := h.handleListMentionableSubscriptions(context.Background(), tc.subject, tc.body)
+
+			if tc.want.errContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.want.errContains)
+				return
+			}
+			if tc.want.errIs != nil {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, tc.want.errIs), "error chain should contain %v, got %v", tc.want.errIs, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want.subs, resp.Subscriptions)
+		})
+	}
 }

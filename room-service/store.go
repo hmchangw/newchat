@@ -53,6 +53,18 @@ type RoomStore interface {
 	GetRoom(ctx context.Context, id string) (*model.Room, error)
 	ListRoomsByIDs(ctx context.Context, ids []string) ([]model.Room, error)
 	GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error)
+	// ListMemberStatuses returns up to `limit` members of roomID, each
+	// projected from the corresponding users document as {account, engName,
+	// chineseName, statusIsShow, statusText}. Subscriptions whose user
+	// document is missing are dropped. Caller is responsible for the limit
+	// cap (handler enforces > 0 and <= room.UserCount).
+	ListMemberStatuses(ctx context.Context, roomID string, limit int) ([]model.MemberStatus, error)
+	// ListMentionableSubscriptions returns up to `limit` mentionable members
+	// of roomID (users + apps), excluding excludeAccount, whose searchable
+	// keyword matches escapedFilter (case-insensitive substring). escapedFilter
+	// must already be regex-escaped (the handler runs regexp.QuoteMeta).
+	// Empty escapedFilter matches everything.
+	ListMentionableSubscriptions(ctx context.Context, roomID, excludeAccount, escapedFilter string, limit int) ([]model.MentionableSubscription, error)
 	GetSubscriptionWithMembership(ctx context.Context, roomID, account string) (*SubscriptionWithMembership, error)
 	CountMembersAndOwners(ctx context.Context, roomID string) (*RoomCounts, error)
 	CountOwners(ctx context.Context, roomID string) (int, error)

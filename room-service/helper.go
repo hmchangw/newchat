@@ -36,9 +36,9 @@ var (
 	errRoomTypeGuard         = errcode.BadRequest("role update is only allowed in channel rooms", errcode.WithReason(errcode.RoomNonChannelOperation))
 	errAddMembersChannelOnly = errcode.BadRequest("cannot add members to a non-channel room", errcode.WithReason(errcode.RoomNonChannelOperation))
 	errTargetNotMember       = errcode.BadRequest("target user is not a member of this room", errcode.WithReason(errcode.RoomTargetNotMember))
-	// Used by both list-members (requester subscription check) and add-member
-	// channel-source expansion. Both contexts mean "the requester is not a
-	// member of the room they are asking about".
+	// Shared sentinel for any membership-gated RPC (list-members,
+	// member.statuses, subscription.mentionable, message.read) and the
+	// add-member channel-source expansion.
 	errNotRoomMember     = errcode.Forbidden("only room members can perform this action", errcode.WithReason(errcode.RoomNotMember))
 	errInvalidThreadID   = errcode.BadRequest("threadId is required")
 	errThreadSubNotFound = errcode.NotFound("thread subscription not found")
@@ -73,6 +73,10 @@ var (
 	errListLimitInvalid  = errcode.BadRequest("limit must be > 0")
 	errListOffsetInvalid = errcode.BadRequest("offset must be >= 0")
 
+	// Sentinels for member.statuses + subscription.mentionable limit validation.
+	errMemberStatusesLimitInvalid = errcode.BadRequest("limit must be > 0 and <= room user count")
+	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0 and <= room user count + app count")
+
 	// errRoomKeyAbsent is returned when the requested key version is not held
 	// by the key store (either the current key is missing or the historical
 	// version has aged out of the grace window).
@@ -98,6 +102,11 @@ var (
 )
 
 var botPattern = regexp.MustCompile(`\.bot$|^p_`)
+
+// platformAdminRegex matches platform-admin / webhook accounts by their `p_`
+// prefix. Mentionable autocomplete hides these accounts entirely so they do
+// not appear as `@`-mention targets.
+const platformAdminRegex = `^p_`
 
 // sameFloor reports whether two read-floor pointers represent the same instant.
 // Two nil pointers are equal (both "no floor"); a nil and a non-nil differ; two

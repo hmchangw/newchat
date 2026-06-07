@@ -70,6 +70,10 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.user.alice.request.room.r1.site-a.member.list"},
 		{"MemberListWildcard", subject.MemberListWildcard("site-a"),
 			"chat.user.*.request.room.*.site-a.member.list"},
+		{"MemberStatuses", subject.MemberStatuses("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.member.statuses"},
+		{"MentionableSubscriptions", subject.MentionableSubscriptions("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.subscription.mentionable"},
 		{"OrgMembers", subject.OrgMembers("alice", "sect-eng", "site-a"),
 			"chat.user.alice.request.orgs.sect-eng.site-a.members"},
 		{"OrgMembersWildcard", subject.OrgMembersWildcard("site-a"),
@@ -271,6 +275,10 @@ func TestWildcardPatterns(t *testing.T) {
 			"chat.user.*.request.room.*.site-a.msg.thread.parent"},
 		{"RoomKeyGetWildcard", subject.RoomKeyGetWildcard("site-a"),
 			"chat.user.*.request.room.*.site-a.key.get"},
+		{"MemberStatusesWild", subject.MemberStatusesWildcard("site-a"),
+			"chat.user.*.request.room.*.site-a.member.statuses"},
+		{"MentionableSubscriptionsWild", subject.MentionableSubscriptionsWildcard("site-a"),
+			"chat.user.*.request.room.*.site-a.subscription.mentionable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -733,6 +741,22 @@ func TestRoomAppTabs_ParseUserRoomSubject(t *testing.T) {
 
 func TestRoomAppCmdMenu_ParseUserRoomSubject(t *testing.T) {
 	subj := subject.RoomAppCmdMenu("alice", "r1", "site-a")
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	assert.True(t, ok)
+	assert.Equal(t, "alice", account)
+	assert.Equal(t, "r1", roomID)
+}
+
+func TestMemberStatuses_ParseUserRoomSubject(t *testing.T) {
+	subj := subject.MemberStatuses("alice", "r1", "site-a")
+	account, roomID, ok := subject.ParseUserRoomSubject(subj)
+	assert.True(t, ok)
+	assert.Equal(t, "alice", account)
+	assert.Equal(t, "r1", roomID)
+}
+
+func TestMentionableSubscriptions_ParseUserRoomSubject(t *testing.T) {
+	subj := subject.MentionableSubscriptions("alice", "r1", "site-a")
 	account, roomID, ok := subject.ParseUserRoomSubject(subj)
 	assert.True(t, ok)
 	assert.Equal(t, "alice", account)

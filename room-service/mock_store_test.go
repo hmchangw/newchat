@@ -297,6 +297,36 @@ func (mr *MockRoomStoreMockRecorder) ListDefaultChannelTabApps(ctx any) *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDefaultChannelTabApps", reflect.TypeOf((*MockRoomStore)(nil).ListDefaultChannelTabApps), ctx)
 }
 
+// ListMemberStatuses mocks base method.
+func (m *MockRoomStore) ListMemberStatuses(ctx context.Context, roomID string, limit int) ([]model.MemberStatus, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListMemberStatuses", ctx, roomID, limit)
+	ret0, _ := ret[0].([]model.MemberStatus)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListMemberStatuses indicates an expected call of ListMemberStatuses.
+func (mr *MockRoomStoreMockRecorder) ListMemberStatuses(ctx, roomID, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListMemberStatuses", reflect.TypeOf((*MockRoomStore)(nil).ListMemberStatuses), ctx, roomID, limit)
+}
+
+// ListMentionableSubscriptions mocks base method.
+func (m *MockRoomStore) ListMentionableSubscriptions(ctx context.Context, roomID, excludeAccount, escapedFilter string, limit int) ([]model.MentionableSubscription, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListMentionableSubscriptions", ctx, roomID, excludeAccount, escapedFilter, limit)
+	ret0, _ := ret[0].([]model.MentionableSubscription)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListMentionableSubscriptions indicates an expected call of ListMentionableSubscriptions.
+func (mr *MockRoomStoreMockRecorder) ListMentionableSubscriptions(ctx, roomID, excludeAccount, escapedFilter, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListMentionableSubscriptions", reflect.TypeOf((*MockRoomStore)(nil).ListMentionableSubscriptions), ctx, roomID, excludeAccount, escapedFilter, limit)
+}
+
 // ListOrgMembers mocks base method.
 func (m *MockRoomStore) ListOrgMembers(ctx context.Context, orgID string) ([]model.OrgMember, error) {
 	m.ctrl.T.Helper()

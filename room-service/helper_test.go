@@ -116,6 +116,8 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 		{"remove channel only", errRemoveChannelOnly, errcode.CodeBadRequest, errcode.RoomNonChannelOperation},
 		{"list limit invalid", errListLimitInvalid, errcode.CodeBadRequest, ""},
 		{"list offset invalid", errListOffsetInvalid, errcode.CodeBadRequest, ""},
+		{"member statuses limit invalid", errMemberStatusesLimitInvalid, errcode.CodeBadRequest, ""},
+		{"mentionable limit invalid", errMentionableLimitInvalid, errcode.CodeBadRequest, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,7 +249,6 @@ func TestDetermineRoomType(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			got := determineRoomType(&tt.req)
 			assert.Equal(t, tt.want, got)

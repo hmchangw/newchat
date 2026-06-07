@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -147,6 +149,12 @@ func (h *Handler) RegisterCRUD(nc *otelnats.Conn) error {
 	}
 	if _, err := nc.QueueSubscribe(subject.RoomAppCmdMenuWildcard(h.siteID), queue, h.natsGetRoomAppCommandMenu); err != nil {
 		return fmt.Errorf("subscribe app cmd-menu: %w", err)
+	}
+	if _, err := nc.QueueSubscribe(subject.MemberStatusesWildcard(h.siteID), queue, h.natsListMemberStatuses); err != nil {
+		return fmt.Errorf("subscribe member statuses: %w", err)
+	}
+	if _, err := nc.QueueSubscribe(subject.MentionableSubscriptionsWildcard(h.siteID), queue, h.natsListMentionableSubscriptions); err != nil {
+		return fmt.Errorf("subscribe mentionable subscriptions: %w", err)
 	}
 	return nil
 }
@@ -569,6 +577,173 @@ func (h *Handler) handleGetRoomKey(ctx context.Context, subj string, data []byte
 		Version:    *req.Version,
 		PrivateKey: pair.PrivateKey,
 	})
+}
+
+const (
+	defaultMemberStatusesLimit = 3
+	defaultMentionableLimit    = 3
+)
+
+func (h *Handler) natsListMemberStatuses(m otelnats.Msg) {
+	ctx, err := wrappedCtx(m)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	resp, err := h.handleListMemberStatuses(ctx, m.Msg.Subject, m.Msg.Data)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	natsutil.ReplyJSON(m.Msg, resp)
+}
+
+// requireMembershipAndGetRoom checks the requester's room membership and
+// loads the room document in parallel — both reads are independent and the
+// second RTT is wasted on the happy path. Uses sync.WaitGroup (not
+// errgroup.WithContext) so a fast GetRoom failure doesn't cancel
+// GetSubscription and surface as context.Canceled, masking the real
+// not-member sentinel. Membership errors take precedence over room-fetch
+// errors so a non-member always sees errNotRoomMember regardless of which
+// goroutine returns first. The subscription itself is discarded; callers
+// only need the gate to pass.
+func (h *Handler) requireMembershipAndGetRoom(ctx context.Context, account, roomID string) (*model.Room, error) {
+	var (
+		room    *model.Room
+		subErr  error
+		roomErr error
+		wg      sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, subErr = h.store.GetSubscription(ctx, account, roomID)
+	}()
+	go func() {
+		defer wg.Done()
+		room, roomErr = h.store.GetRoom(ctx, roomID)
+	}()
+	wg.Wait()
+	if errors.Is(subErr, model.ErrSubscriptionNotFound) {
+		return nil, errNotRoomMember
+	}
+	if subErr != nil {
+		return nil, fmt.Errorf("check room membership: %w", subErr)
+	}
+	if roomErr != nil {
+		return nil, fmt.Errorf("get room: %w", roomErr)
+	}
+	return room, nil
+}
+
+func (h *Handler) handleListMemberStatuses(ctx context.Context, subj string, data []byte) (model.ListMemberStatusesResponse, error) {
+	requesterAccount, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok {
+		return model.ListMemberStatusesResponse{}, errcode.BadRequest("invalid member-statuses subject")
+	}
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("site.id", h.siteID),
+		)
+	}
+
+	var req model.ListMemberStatusesRequest
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &req); err != nil {
+			return model.ListMemberStatusesResponse{}, errcode.BadRequest("invalid request")
+		}
+	}
+
+	room, err := h.requireMembershipAndGetRoom(ctx, requesterAccount, roomID)
+	if err != nil {
+		return model.ListMemberStatusesResponse{}, err
+	}
+
+	// Clamp the default to the room cap so a small room with a no-limit
+	// request doesn't trip the explicit-limit guard. Client-supplied values
+	// remain strictly validated.
+	var limit int
+	if req.Limit == nil {
+		if room.UserCount == 0 {
+			return model.ListMemberStatusesResponse{Members: []model.MemberStatus{}}, nil
+		}
+		limit = min(defaultMemberStatusesLimit, room.UserCount)
+	} else {
+		limit = *req.Limit
+		if limit <= 0 || limit > room.UserCount {
+			return model.ListMemberStatusesResponse{}, errMemberStatusesLimitInvalid
+		}
+	}
+
+	members, err := h.store.ListMemberStatuses(ctx, roomID, limit)
+	if err != nil {
+		return model.ListMemberStatusesResponse{}, fmt.Errorf("list member statuses: %w", err)
+	}
+	return model.ListMemberStatusesResponse{Members: members}, nil
+}
+
+func (h *Handler) natsListMentionableSubscriptions(m otelnats.Msg) {
+	ctx, err := wrappedCtx(m)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	resp, err := h.handleListMentionableSubscriptions(ctx, m.Msg.Subject, m.Msg.Data)
+	if err != nil {
+		errnats.Reply(ctx, m.Msg, err)
+		return
+	}
+	natsutil.ReplyJSON(m.Msg, resp)
+}
+
+func (h *Handler) handleListMentionableSubscriptions(ctx context.Context, subj string, data []byte) (model.MentionableSubscriptionsResponse, error) {
+	requesterAccount, roomID, ok := subject.ParseUserRoomSubject(subj)
+	if !ok {
+		return model.MentionableSubscriptionsResponse{}, errcode.BadRequest("invalid mentionable-subscriptions subject")
+	}
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("site.id", h.siteID),
+		)
+	}
+
+	var req model.MentionableSubscriptionsRequest
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &req); err != nil {
+			return model.MentionableSubscriptionsResponse{}, errcode.BadRequest("invalid request")
+		}
+	}
+
+	room, err := h.requireMembershipAndGetRoom(ctx, requesterAccount, roomID)
+	if err != nil {
+		return model.MentionableSubscriptionsResponse{}, err
+	}
+
+	mentionableCap := room.UserCount + room.AppCount
+	var limit int
+	if req.Limit == nil {
+		if mentionableCap == 0 {
+			return model.MentionableSubscriptionsResponse{Subscriptions: []model.MentionableSubscription{}}, nil
+		}
+		limit = min(defaultMentionableLimit, mentionableCap)
+	} else {
+		limit = *req.Limit
+		if limit <= 0 || limit > mentionableCap {
+			return model.MentionableSubscriptionsResponse{}, errMentionableLimitInvalid
+		}
+	}
+
+	// Filter is a literal substring. QuoteMeta escapes regex metacharacters
+	// so a user typing "a.b" doesn't match every "a<any>b" account. Empty stays empty.
+	escapedFilter := regexp.QuoteMeta(req.Filter)
+
+	subs, err := h.store.ListMentionableSubscriptions(ctx, roomID, requesterAccount, escapedFilter, limit)
+	if err != nil {
+		return model.MentionableSubscriptionsResponse{}, fmt.Errorf("list mentionable subscriptions: %w", err)
+	}
+	return model.MentionableSubscriptionsResponse{Subscriptions: subs}, nil
 }
 
 func (h *Handler) handleRemoveMember(ctx context.Context, subj string, data []byte) ([]byte, error) {

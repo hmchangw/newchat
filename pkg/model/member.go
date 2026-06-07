@@ -135,6 +135,70 @@ type ListOrgMembersResponse struct {
 	Members []OrgMember `json:"members"`
 }
 
+// ListMemberStatusesRequest is the body for the member.statuses RPC.
+// When Limit is nil the server returns min(3, room.UserCount) rows, or an
+// empty list when the room has no users. Explicit Limit values must be > 0
+// and <= room.UserCount.
+type ListMemberStatusesRequest struct {
+	Limit *int `json:"limit,omitempty"`
+}
+
+// MemberStatus is the projection returned by the member.statuses RPC.
+// All five fields are sourced from the users collection via $lookup.
+type MemberStatus struct {
+	Account      string `json:"account"      bson:"account"`
+	EngName      string `json:"engName"      bson:"engName"`
+	ChineseName  string `json:"chineseName"  bson:"chineseName"`
+	StatusIsShow bool   `json:"statusIsShow" bson:"statusIsShow"`
+	StatusText   string `json:"statusText"   bson:"statusText"`
+}
+
+type ListMemberStatusesResponse struct {
+	Members []MemberStatus `json:"members"`
+}
+
+// MentionableSubscriptionsRequest is the body for the subscription.mentionable RPC.
+// When Limit is nil the server returns min(3, room.UserCount + room.AppCount)
+// rows, or an empty list when the room is empty. Explicit Limit values must
+// be > 0 and <= room.UserCount + room.AppCount.
+// Filter is treated as a literal substring (regex metacharacters are escaped
+// by the handler).
+type MentionableSubscriptionsRequest struct {
+	Limit  *int   `json:"limit,omitempty"`
+	Filter string `json:"filter,omitempty"`
+}
+
+type MentionableHRInfo struct {
+	EngName     string `json:"engName"     bson:"engName"`
+	ChineseName string `json:"chineseName" bson:"chineseName"`
+}
+
+type MentionableAppAssistant struct {
+	Name string `json:"name" bson:"name"`
+}
+
+type MentionableApp struct {
+	Name      string                  `json:"name"      bson:"name"`
+	Assistant MentionableAppAssistant `json:"assistant" bson:"assistant"`
+}
+
+// MentionableSubscription is the projection returned by the
+// subscription.mentionable RPC. HRInfo is populated only for user rows
+// (OptionType == "user") and App only for app rows (OptionType == "app").
+// SiteID is empty for app rows because apps have no per-site identity.
+type MentionableSubscription struct {
+	OptionType string             `json:"optionType" bson:"optionType"`
+	UserID     string             `json:"userId"     bson:"userId"`
+	Account    string             `json:"account"    bson:"account"`
+	SiteID     string             `json:"siteId"     bson:"siteId"`
+	HRInfo     *MentionableHRInfo `json:"hrInfo,omitempty" bson:"hrInfo,omitempty"`
+	App        *MentionableApp    `json:"app,omitempty"    bson:"app,omitempty"`
+}
+
+type MentionableSubscriptionsResponse struct {
+	Subscriptions []MentionableSubscription `json:"subscriptions"`
+}
+
 // CreateRoomRequest is the canonical event payload (X-Request-ID rides on the NATS header).
 // Users/Orgs/Channels are the literal client request; ResolvedUsers/ResolvedOrgs carry the
 // post-expansion (channel-ref-merged, requester-stripped, dedup'd) sets the worker uses for
