@@ -58,3 +58,19 @@ export async function redirectToReloginOnTokenInvalid() {
     // generic error.
   }
 }
+
+/**
+ * Obtain a fresh SSO access token in the background using the OIDC refresh
+ * token (refresh_token grant via oidc-client-ts signinSilent — no redirect,
+ * no iframe). Returns the same token shape login uses (`user.access_token`,
+ * see OidcCallback.jsx). Throws when silent renewal is not possible (e.g. the
+ * SSO session has ended); callers fall back to redirectToReloginOnTokenInvalid().
+ */
+export async function renewSsoToken() {
+  const mgr = getOidcManager()
+  const user = await mgr.signinSilent()
+  if (!user || !user.access_token) {
+    throw new Error('silent renew returned no access token')
+  }
+  return user.access_token
+}

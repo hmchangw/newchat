@@ -349,3 +349,66 @@ func TestHandleHealth(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "ok")
 }
+
+func TestWithJitter_Clamping(t *testing.T) {
+	kp := mustAccountKP(t)
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{"negative clamps to zero", -0.5, 0},
+		{"zero stays zero", 0, 0},
+		{"mid passes through", 0.5, 0.5},
+		{"upper bound stays", 0.9, 0.9},
+		{"above max clamps to 0.9", 1.5, 0.9},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewAuthHandler(nil, kp, time.Hour, true, WithJitter(tc.in))
+			assert.Equal(t, tc.want, h.jwtJitter)
+		})
+	}
+}
+
+func TestSignNATSJWT_LifetimeJitter(t *testing.T) {
+	signingKP := mustAccountKP(t)
+	validator := &fakeValidator{account: "alice", subject: "uuid-alice"}
+	base := 100 * time.Minute
+
+	tests := []struct {
+		name      string
+		rnd       float64
+		wantRatio float64 // expected multiple of base
+	}{
+		{"low end", 0.0, 0.9},
+		{"midpoint", 0.5, 1.0},
+		{"high end", 1.0, 1.1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewAuthHandler(validator, signingKP, base, false,
+				WithJitter(0.1), WithRandFloat(func() float64 { return tt.rnd }))
+			router := setupRouter(t, handler)
+
+			userPub := mustUserNKey(t)
+			body := `{"ssoToken":"valid","natsPublicKey":"` + userPub + `"}`
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+
+			before := time.Now()
+			router.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+
+			var resp authResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			claims, err := jwt.DecodeUserClaims(resp.NATSJWT)
+			require.NoError(t, err)
+
+			wantLifeSec := (time.Duration(float64(base) * tt.wantRatio)).Seconds()
+			gotLifeSec := time.Unix(claims.Expires, 0).Sub(before).Seconds()
+			assert.InDelta(t, wantLifeSec, gotLifeSec, 5) // 5s slack for exec time
+		})
+	}
+}

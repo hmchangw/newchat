@@ -1,7 +1,8 @@
 import { createContext, useContext, useRef, useState, useCallback, useMemo } from 'react'
-import { connect as natsConnect, StringCodec, jwtAuthenticator } from 'nats.ws'
+import { connect as natsConnect, StringCodec } from 'nats.ws'
 import { createUser } from 'nkeys.js'
 import { AUTH_URL, NATS_URL } from '@/lib/runtimeConfig'
+import { useJwtRefresh } from './useJwtRefresh'
 import {
   requestWithAsyncResult as asyncJobRequest,
   AsyncJobError,
@@ -20,6 +21,8 @@ export function NatsProvider({ children }) {
 
   const authUrl = AUTH_URL
   const natsUrl = NATS_URL
+
+  const { authenticator, setCredentials, stop } = useJwtRefresh({ authUrl, ncRef })
 
   /**
    * Authenticate against auth-service and open the NATS WebSocket
@@ -66,9 +69,18 @@ export function NatsProvider({ children }) {
 
     const { natsJwt, user: userInfo } = await authResp.json()
 
+    // Populate the credential refs BEFORE connecting so the dynamic
+    // authenticator's getters return the right values during the handshake.
+    setCredentials({
+      jwt: natsJwt,
+      seed: nkey.getSeed(),
+      natsPublicKey,
+      refreshable: mode === 'sso',
+    })
+
     const nc = await natsConnect({
       servers: natsUrl,
-      authenticator: jwtAuthenticator(natsJwt, nkey.getSeed()),
+      authenticator,
     })
 
     ncRef.current = nc
@@ -81,7 +93,7 @@ export function NatsProvider({ children }) {
       }
       setConnected(false)
     })
-  }, [authUrl, natsUrl])
+  }, [authUrl, natsUrl, authenticator, setCredentials])
 
   /**
    * Send a synchronous NATS request/reply. Use this for handlers that
@@ -188,13 +200,14 @@ export function NatsProvider({ children }) {
    * provider is a no-op.
    */
   const disconnect = useCallback(async () => {
+    stop()
     if (ncRef.current) {
       await ncRef.current.drain()
       ncRef.current = null
     }
     setConnected(false)
     setUser(null)
-  }, [])
+  }, [stop])
 
   // Memoise so consumers that only read stable callbacks don't re-render
   // on every provider render. The value identity flips only when one of

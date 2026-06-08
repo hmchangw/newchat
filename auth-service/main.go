@@ -17,10 +17,11 @@ import (
 )
 
 type config struct {
-	Port           string        `env:"PORT"                  envDefault:"8080"`
-	DevMode        bool          `env:"DEV_MODE"              envDefault:"false"`
-	AuthSigningKey string        `env:"AUTH_SIGNING_KEY,required"`
-	NATSJWTExpiry  time.Duration `env:"NATS_JWT_EXPIRY"       envDefault:"2h"`
+	Port                string        `env:"PORT"                  envDefault:"8080"`
+	DevMode             bool          `env:"DEV_MODE"              envDefault:"false"`
+	AuthSigningKey      string        `env:"AUTH_SIGNING_KEY,required"`
+	NATSJWTExpiry       time.Duration `env:"NATS_JWT_EXPIRY"        envDefault:"2h"`
+	NATSJWTExpiryJitter float64       `env:"NATS_JWT_EXPIRY_JITTER" envDefault:"0.1"`
 
 	// OIDC settings — required when DEV_MODE is false.
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
@@ -54,7 +55,7 @@ func run() error {
 
 	if cfg.DevMode {
 		slog.Info("dev mode enabled — OIDC validation disabled")
-		handler = NewAuthHandler(nil, signingKP, cfg.NATSJWTExpiry, true)
+		handler = NewAuthHandler(nil, signingKP, cfg.NATSJWTExpiry, true, WithJitter(cfg.NATSJWTExpiryJitter))
 	} else {
 		if cfg.OIDCIssuerURL == "" || len(cfg.OIDCAudiences) == 0 {
 			return fmt.Errorf("OIDC_ISSUER_URL and OIDC_AUDIENCES are required when DEV_MODE is false")
@@ -70,7 +71,7 @@ func run() error {
 			return fmt.Errorf("create oidc validator: %w", err)
 		}
 		slog.Info("oidc validator initialized", "issuer", cfg.OIDCIssuerURL)
-		handler = NewAuthHandler(oidcValidator, signingKP, cfg.NATSJWTExpiry, false)
+		handler = NewAuthHandler(oidcValidator, signingKP, cfg.NATSJWTExpiry, false, WithJitter(cfg.NATSJWTExpiryJitter))
 	}
 
 	gin.SetMode(gin.ReleaseMode)

@@ -187,6 +187,14 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 The returned `natsJwt` has a server-configured lifetime (default 2h). Clients should re-call `POST /auth` to refresh before it expires.
 
+> **Background renewal.** The web client also calls `POST /auth` periodically to
+> renew the NATS user JWT before it expires (at ~80% of the token's lifetime,
+> jittered). It obtains a fresh SSO access token in the background via the OIDC
+> refresh token (silent renew) and re-mints with the **same** `natsPublicKey`,
+> so the request/response schema is identical to the initial login call. When
+> silent renewal fails (the SSO session has ended), the client performs a
+> graceful re-login redirect instead.
+
 #### Triggered events — success path
 
 `None — HTTP-only.`
