@@ -89,7 +89,7 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	room, err := h.store.GetRoom(ctx, roomID)
+	siteID, err := h.store.GetRoomSiteID(ctx, roomID)
 	if err != nil {
 		if errIsRoomNotFound(err) {
 			errhttp.Write(ctx, c, errcode.NotFound("room not found"))
@@ -122,13 +122,13 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	responses, err := h.drive.UploadGroupImages(user.Account, user.DisplayName(), user.Email, roomID, room.SiteID, fileHeaders)
+	responses, err := h.drive.UploadGroupImages(user.Account, user.DisplayName(), user.Email, roomID, siteID, fileHeaders)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("upload images to drive: %w", err))
 		return
 	}
 
-	driveHost := h.drive.GetBaseURLFromRoomOrigin(room.SiteID)
+	driveHost := h.drive.GetBaseURLFromRoomOrigin(siteID)
 	for _, resp := range responses {
 		item := uploadResultItem{Name: resp.File.Filename, Status: resp.Status, Error: resp.Error}
 		if resp.Status == driveStatusSuccess {

@@ -16,7 +16,7 @@ import (
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-func TestMongoStore_IsMemberAndGetRoom(t *testing.T) {
+func TestMongoStore_IsMemberAndGetRoomSiteID(t *testing.T) {
 	db := testutil.MongoDB(t, "uploadsvc")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -38,10 +38,10 @@ func TestMongoStore_IsMemberAndGetRoom(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, member)
 
-	room, err := s.GetRoom(ctx, "r1")
+	siteID, err := s.GetRoomSiteID(ctx, "r1")
 	require.NoError(t, err)
-	require.Equal(t, "site-x", room.SiteID)
+	require.Equal(t, "site-x", siteID)
 
-	_, err = s.GetRoom(ctx, "missing")
+	_, err = s.GetRoomSiteID(ctx, "missing")
 	require.True(t, errors.Is(err, ErrRoomNotFound))
 }

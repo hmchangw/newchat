@@ -8,8 +8,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-
-	"github.com/hmchangw/chat/pkg/model"
 )
 
 type mongoStore struct {
@@ -41,13 +39,19 @@ func (s *mongoStore) IsMember(ctx context.Context, roomID, account string) (bool
 	return true, nil
 }
 
-func (s *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
-	var room model.Room
-	if err := s.rooms.FindOne(ctx, bson.M{"_id": roomID}).Decode(&room); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, fmt.Errorf("get room %s: %w", roomID, ErrRoomNotFound)
-		}
-		return nil, fmt.Errorf("get room %s: %w", roomID, err)
+func (s *mongoStore) GetRoomSiteID(ctx context.Context, roomID string) (string, error) {
+	var room struct {
+		SiteID string `bson:"siteId"`
 	}
-	return &room, nil
+	err := s.rooms.FindOne(ctx,
+		bson.M{"_id": roomID},
+		options.FindOne().SetProjection(bson.M{"siteId": 1}),
+	).Decode(&room)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", fmt.Errorf("get room %s: %w", roomID, ErrRoomNotFound)
+		}
+		return "", fmt.Errorf("get room %s: %w", roomID, err)
+	}
+	return room.SiteID, nil
 }

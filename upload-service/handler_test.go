@@ -140,7 +140,7 @@ func TestUpload_RoomNotFound_404(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, ErrRoomNotFound)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("", ErrRoomNotFound)
 	h := newHandler(store, &fakeDrive{})
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
@@ -153,7 +153,7 @@ func TestUpload_NotMultipart_400(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-x"}, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	h := newHandler(store, &fakeDrive{})
 	c, w := newUploadCtx(t, "r1", bytes.NewBufferString("not-multipart"), "text/plain", okUser())
 	h.HandleUploadImages(c)
@@ -165,7 +165,7 @@ func TestUpload_TooManyFiles_400(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-x"}, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	h := NewHandler(store, &fakeDrive{}, 1, testMaxImageSize) // limit 1
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x"), "b.png": []byte("y")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
@@ -178,7 +178,7 @@ func TestUpload_AllRejected_EarlyExit_NoDriveCall(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-x"}, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	fd := &fakeDrive{}
 	h := newHandler(store, fd)
 	// .exe is an invalid type -> rejected in preprocessing.
@@ -200,7 +200,7 @@ func TestUpload_OversizeRejectedPerFile(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-x"}, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	fd := &fakeDrive{}
 	h := NewHandler(store, fd, testMaxFiles, 4) // 4-byte per-image ceiling
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("0123456789")})
@@ -221,7 +221,7 @@ func TestUpload_MixedSuccessAndFailure_Merges(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-x"}, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	fd := &fakeDrive{
 		baseURL: "https://drive.example.com",
 		uploadResp: []drive.UploadGroupImageResponse{
@@ -264,7 +264,7 @@ func TestUpload_DriveError_500(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", SiteID: "site-x"}, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	fd := &fakeDrive{uploadErr: errors.New("boom")}
 	h := newHandler(store, fd)
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})

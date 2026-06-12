@@ -13,7 +13,6 @@ import (
 	context "context"
 	reflect "reflect"
 
-	model "github.com/hmchangw/chat/pkg/model"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -41,19 +40,19 @@ func (m *MockStore) EXPECT() *MockStoreMockRecorder {
 	return m.recorder
 }
 
-// GetRoom mocks base method.
-func (m *MockStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
+// GetRoomSiteID mocks base method.
+func (m *MockStore) GetRoomSiteID(ctx context.Context, roomID string) (string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetRoom", ctx, roomID)
-	ret0, _ := ret[0].(*model.Room)
+	ret := m.ctrl.Call(m, "GetRoomSiteID", ctx, roomID)
+	ret0, _ := ret[0].(string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// GetRoom indicates an expected call of GetRoom.
-func (mr *MockStoreMockRecorder) GetRoom(ctx, roomID any) *gomock.Call {
+// GetRoomSiteID indicates an expected call of GetRoomSiteID.
+func (mr *MockStoreMockRecorder) GetRoomSiteID(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoom", reflect.TypeOf((*MockStore)(nil).GetRoom), ctx, roomID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomSiteID", reflect.TypeOf((*MockStore)(nil).GetRoomSiteID), ctx, roomID)
 }
 
 // IsMember mocks base method.

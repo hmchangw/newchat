@@ -34,15 +34,6 @@ type GetGroupImageResponse struct {
 	ContentLength int64
 }
 
-// UploadImageResponse is the public-image equivalent (kept for parity; unused
-// by the protected-image flow).
-type UploadImageResponse struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Error      string `json:"error,omitempty"`
-	PreviewURL string `json:"previewUrl,omitempty"`
-}
-
 // File is one staged upload file.
 type File struct {
 	Reader      io.Reader
