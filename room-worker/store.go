@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -117,7 +118,9 @@ type SubscriptionStore interface {
 	UpdateRoomName(ctx context.Context, roomID, newName string) error
 
 	// UpdateSubscriptionNamesForRoom updateMany on subscriptions matching {roomId: roomID}.
-	UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string) error
+	// Stamps nameUpdatedAt so the origin doc carries the same high-water mark the
+	// federated rename event publishes (inbox-worker guards remote applies against it).
+	UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string, nameUpdatedAt time.Time) error
 
 	// ListByRoom returns all subscriptions for roomID across every site.
 	// Used by the rename processor to bucket accounts by remote site for

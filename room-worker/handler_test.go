@@ -4767,7 +4767,7 @@ func TestProcessRoomRename_TransientSubscriptionUpdateError(t *testing.T) {
 
 	requestID := testRequestID
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "renamed").Return(nil)
-	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), "r1", "renamed").Return(errors.New("mongo timeout"))
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), "r1", "renamed", gomock.Any()).Return(errors.New("mongo timeout"))
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
@@ -4794,7 +4794,7 @@ func TestProcessRoomRename_HappyPathNoRemoteSites(t *testing.T) {
 	}
 
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
-	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName).Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(subs, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
@@ -4839,7 +4839,7 @@ func TestProcessRoomRename_HappyPathWithRemoteSite(t *testing.T) {
 	}
 
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
-	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName).Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(subs, nil)
 	// Bob is on a remote site.
@@ -4900,7 +4900,7 @@ func TestProcessRoomRename_ErrorThenOkRetrySequence(t *testing.T) {
 
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "x").Return(errors.New("mongo timeout"))
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "x").Return(nil)
-	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), "r1", "x").Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), "r1", "x", gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
 	// Empty subs → accounts is empty → findRemoteSitesForAccounts short-circuits (no FindUsersByAccounts call).
 	store.EXPECT().ListByRoom(gomock.Any(), "r1").Return([]model.Subscription{}, nil)

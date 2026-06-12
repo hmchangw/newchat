@@ -1911,3 +1911,58 @@ func TestIntegration_ProcessRoomRename(t *testing.T) {
 	assert.Equal(t, roomID, outboxPayload.RoomID)
 	assert.Equal(t, newName, outboxPayload.NewName)
 }
+
+// TestMongoStore_UpdateSubscriptionNamesForRoom_StampsTimestamp asserts the
+// origin rename write stamps nameUpdatedAt so the doc shares the federated
+// event's high-water mark (inbox-worker guards remote applies against it).
+func TestMongoStore_UpdateSubscriptionNamesForRoom_StampsTimestamp(t *testing.T) {
+	db := testutil.MongoDB(t, "room-worker-rename-stamp")
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	mustInsertSub(t, db, &model.Subscription{
+		ID:       "s1",
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID:   "r1",
+		SiteID:   "site-a",
+		RoomType: model.RoomTypeChannel,
+		Roles:    []model.Role{model.RoleMember},
+		JoinedAt: time.Now().UTC(),
+		Name:     "old",
+	})
+
+	subName := func() (string, time.Time) {
+		t.Helper()
+		var doc bson.M
+		require.NoError(t, db.Collection("subscriptions").
+			FindOne(ctx, bson.M{"roomId": "r1", "u.account": "alice"}).Decode(&doc))
+		dt, ok := doc["nameUpdatedAt"].(bson.DateTime)
+		require.True(t, ok, "nameUpdatedAt is %T, want bson.DateTime", doc["nameUpdatedAt"])
+		return doc["name"].(string), dt.Time().UTC()
+	}
+
+	ts := time.Now().UTC()
+	require.NoError(t, store.UpdateSubscriptionNamesForRoom(ctx, "r1", "new", ts))
+	gotName, gotTs := subName()
+	assert.Equal(t, "new", gotName)
+	assert.Equal(t, ts.UnixMilli(), gotTs.UnixMilli())
+
+	// Older rename is a guarded no-op — name and high-water mark unchanged.
+	require.NoError(t, store.UpdateSubscriptionNamesForRoom(ctx, "r1", "stale", ts.Add(-time.Second)))
+	gotName, gotTs = subName()
+	assert.Equal(t, "new", gotName, "stale rename must not regress a newer name")
+	assert.Equal(t, ts.UnixMilli(), gotTs.UnixMilli())
+
+	// Equal-timestamp replay is a guarded no-op — the guard is strict $lt.
+	require.NoError(t, store.UpdateSubscriptionNamesForRoom(ctx, "r1", "same-ts", ts))
+	gotName, gotTs = subName()
+	assert.Equal(t, "new", gotName, "same-timestamp rename must not modify state")
+	assert.Equal(t, ts.UnixMilli(), gotTs.UnixMilli())
+
+	// Newer rename advances both name and high-water mark.
+	newer := ts.Add(time.Second)
+	require.NoError(t, store.UpdateSubscriptionNamesForRoom(ctx, "r1", "newest", newer))
+	gotName, gotTs = subName()
+	assert.Equal(t, "newest", gotName)
+	assert.Equal(t, newer.UnixMilli(), gotTs.UnixMilli())
+}

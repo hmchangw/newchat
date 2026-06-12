@@ -43,17 +43,17 @@ func (m *MockInboxStore) EXPECT() *MockInboxStoreMockRecorder {
 }
 
 // ApplySubscriptionVisibility mocks base method.
-func (m *MockInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string) error {
+func (m *MockInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ApplySubscriptionVisibility", ctx, roomID, restricted, externalAccess, ownerAccount)
+	ret := m.ctrl.Call(m, "ApplySubscriptionVisibility", ctx, roomID, restricted, externalAccess, ownerAccount, visibilityUpdatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ApplySubscriptionVisibility indicates an expected call of ApplySubscriptionVisibility.
-func (mr *MockInboxStoreMockRecorder) ApplySubscriptionVisibility(ctx, roomID, restricted, externalAccess, ownerAccount any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) ApplySubscriptionVisibility(ctx, roomID, restricted, externalAccess, ownerAccount, visibilityUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySubscriptionVisibility", reflect.TypeOf((*MockInboxStore)(nil).ApplySubscriptionVisibility), ctx, roomID, restricted, externalAccess, ownerAccount)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySubscriptionVisibility", reflect.TypeOf((*MockInboxStore)(nil).ApplySubscriptionVisibility), ctx, roomID, restricted, externalAccess, ownerAccount, visibilityUpdatedAt)
 }
 
 // ApplyThreadRead mocks base method.
@@ -128,45 +128,45 @@ func (mr *MockInboxStoreMockRecorder) FindUsersByAccounts(ctx, accounts any) *go
 }
 
 // UpdateSubscriptionFavorite mocks base method.
-func (m *MockInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool) error {
+func (m *MockInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateSubscriptionFavorite", ctx, roomID, account, favorite)
+	ret := m.ctrl.Call(m, "UpdateSubscriptionFavorite", ctx, roomID, account, favorite, favoriteUpdatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateSubscriptionFavorite indicates an expected call of UpdateSubscriptionFavorite.
-func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionFavorite(ctx, roomID, account, favorite any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionFavorite(ctx, roomID, account, favorite, favoriteUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionFavorite", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionFavorite), ctx, roomID, account, favorite)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionFavorite", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionFavorite), ctx, roomID, account, favorite, favoriteUpdatedAt)
 }
 
 // UpdateSubscriptionMute mocks base method.
-func (m *MockInboxStore) UpdateSubscriptionMute(ctx context.Context, roomID, account string, muted bool) error {
+func (m *MockInboxStore) UpdateSubscriptionMute(ctx context.Context, roomID, account string, muted bool, muteUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateSubscriptionMute", ctx, roomID, account, muted)
+	ret := m.ctrl.Call(m, "UpdateSubscriptionMute", ctx, roomID, account, muted, muteUpdatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateSubscriptionMute indicates an expected call of UpdateSubscriptionMute.
-func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionMute(ctx, roomID, account, muted any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionMute(ctx, roomID, account, muted, muteUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionMute", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionMute), ctx, roomID, account, muted)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionMute", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionMute), ctx, roomID, account, muted, muteUpdatedAt)
 }
 
 // UpdateSubscriptionNamesForRoom mocks base method.
-func (m *MockInboxStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string) error {
+func (m *MockInboxStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string, nameUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateSubscriptionNamesForRoom", ctx, roomID, newName)
+	ret := m.ctrl.Call(m, "UpdateSubscriptionNamesForRoom", ctx, roomID, newName, nameUpdatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateSubscriptionNamesForRoom indicates an expected call of UpdateSubscriptionNamesForRoom.
-func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionNamesForRoom(ctx, roomID, newName any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionNamesForRoom(ctx, roomID, newName, nameUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionNamesForRoom", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionNamesForRoom), ctx, roomID, newName)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionNamesForRoom", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionNamesForRoom), ctx, roomID, newName, nameUpdatedAt)
 }
 
 // UpdateSubscriptionRead mocks base method.
@@ -184,17 +184,17 @@ func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionRead(ctx, roomID, accoun
 }
 
 // UpdateSubscriptionRoles mocks base method.
-func (m *MockInboxStore) UpdateSubscriptionRoles(ctx context.Context, account, roomID string, roles []model.Role) error {
+func (m *MockInboxStore) UpdateSubscriptionRoles(ctx context.Context, account, roomID string, roles []model.Role, rolesUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateSubscriptionRoles", ctx, account, roomID, roles)
+	ret := m.ctrl.Call(m, "UpdateSubscriptionRoles", ctx, account, roomID, roles, rolesUpdatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateSubscriptionRoles indicates an expected call of UpdateSubscriptionRoles.
-func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionRoles(ctx, account, roomID, roles any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionRoles(ctx, account, roomID, roles, rolesUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRoles", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionRoles), ctx, account, roomID, roles)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRoles", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionRoles), ctx, account, roomID, roles, rolesUpdatedAt)
 }
 
 // UpsertRoom mocks base method.

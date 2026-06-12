@@ -1834,7 +1834,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		}
 		return fmt.Errorf("update room name: %w", err)
 	}
-	if err = h.store.UpdateSubscriptionNamesForRoom(ctx, req.RoomID, req.NewName); err != nil {
+	if err = h.store.UpdateSubscriptionNamesForRoom(ctx, req.RoomID, req.NewName, time.UnixMilli(req.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription names: %w", err)
 	}
 

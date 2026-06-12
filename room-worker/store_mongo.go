@@ -478,10 +478,20 @@ func (s *MongoStore) updateChannelRoom(ctx context.Context, roomID string, updat
 	return nil
 }
 
-func (s *MongoStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string) error {
-	if _, err := s.subscriptions.UpdateMany(ctx,
-		bson.M{"roomId": roomID},
-		bson.M{"$set": bson.M{"name": newName}}); err != nil {
+func (s *MongoStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string, nameUpdatedAt time.Time) error {
+	// Guard each subscription on a monotonic nameUpdatedAt high-water mark so a
+	// stale or reordered rename can't regress a newer name — and so the origin
+	// doc never diverges from the nameUpdatedAt it federates. Mirrors
+	// inbox-worker's guarded apply. Evaluated per document by UpdateMany.
+	filter := bson.M{
+		"roomId": roomID,
+		"$or": bson.A{
+			bson.M{"nameUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"nameUpdatedAt": bson.M{"$lt": nameUpdatedAt}},
+		},
+	}
+	update := bson.M{"$set": bson.M{"name": newName, "nameUpdatedAt": nameUpdatedAt}}
+	if _, err := s.subscriptions.UpdateMany(ctx, filter, update); err != nil {
 		return fmt.Errorf("update subscription names for room %s: %w", roomID, err)
 	}
 	return nil

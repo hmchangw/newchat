@@ -105,17 +105,23 @@ type RoomStore interface {
 	// keyed by (roomID, account). Returns model.ErrSubscriptionNotFound
 	// (wrapped) when no subscription matches.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
-	// ToggleSubscriptionMute atomically flips muted via a single FindOneAndUpdate.
+	// ToggleSubscriptionMute atomically flips muted via a single FindOneAndUpdate,
+	// stamping muteUpdatedAt so the origin doc carries the same high-water mark the
+	// federated event publishes (inbox-worker guards remote applies against it).
 	// Returns the post-flip subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
-	ToggleSubscriptionMute(ctx context.Context, roomID, account string) (*model.Subscription, error)
-	// ToggleSubscriptionFavorite atomically flips favorite via a single FindOneAndUpdate.
+	ToggleSubscriptionMute(ctx context.Context, roomID, account string, muteUpdatedAt time.Time) (*model.Subscription, error)
+	// ToggleSubscriptionFavorite atomically flips favorite via a single FindOneAndUpdate,
+	// stamping favoriteUpdatedAt so the origin doc carries the same high-water mark the
+	// federated event publishes (inbox-worker guards remote applies against it).
 	// Returns the post-flip subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
-	ToggleSubscriptionFavorite(ctx context.Context, roomID, account string) (*model.Subscription, error)
+	ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error)
 	// SetOwnerRole atomically grants (makeOwner=true) or revokes (makeOwner=false)
 	// the owner role on the subscription keyed by (roomID, account) via a single
-	// FindOneAndUpdate. Other roles (e.g. member) are retained. Returns the
-	// updated subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
-	SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool) (*model.Subscription, error)
+	// FindOneAndUpdate. Other roles (e.g. member) are retained. Stamps rolesUpdatedAt
+	// so the origin doc carries the same high-water mark the federated event publishes
+	// (inbox-worker guards remote applies against it). Returns the updated
+	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
+	SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool, rolesUpdatedAt time.Time) (*model.Subscription, error)
 	// GetUserSiteID returns the home site of a user looked up by account.
 	// Returns ("", nil) when the user is not found locally; callers treat
 	// that as "skip cross-site outbox".
@@ -172,8 +178,10 @@ type RoomStore interface {
 	// ownerAccount is non-empty, an aggregation-pipeline $cond also rewrites
 	// roles so only ownerAccount holds RoleOwner. Returns ErrOwnerNotSubscribed
 	// when ownerAccount has no active subscription in the room (the rewrite
-	// would leave zero owners).
-	ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string) error
+	// would leave zero owners). Stamps visibilityUpdatedAt so the origin doc
+	// carries the same high-water mark the federated event publishes (inbox-worker
+	// guards remote applies against it).
+	ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error
 	// ListSubscriptionsByRoom returns every subscription in the room. Used to
 	// drive cross-site outbox fan-out (one event per remote site).
 	ListSubscriptionsByRoom(ctx context.Context, roomID string) ([]model.Subscription, error)

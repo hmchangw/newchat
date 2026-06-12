@@ -948,25 +948,33 @@ func (s *MongoStore) findOneAndUpdateSub(ctx context.Context, roomID, account, o
 }
 
 // ToggleSubscriptionMute flips muted. $ifNull treats an absent field as false so
-// legacy docs toggle to true on first call.
-func (s *MongoStore) ToggleSubscriptionMute(ctx context.Context, roomID, account string) (*model.Subscription, error) {
+// legacy docs toggle to true on first call. muteUpdatedAt is stamped from the same
+// instant the caller publishes as the event timestamp, keeping the origin doc and
+// every federated replica on one high-water mark.
+func (s *MongoStore) ToggleSubscriptionMute(ctx context.Context, roomID, account string, muteUpdatedAt time.Time) (*model.Subscription, error) {
 	return s.findOneAndUpdateSub(ctx, roomID, account, "toggle mute", bson.M{
-		"muted": bson.M{"$not": bson.A{bson.M{"$ifNull": bson.A{"$muted", false}}}},
+		"muted":         bson.M{"$not": bson.A{bson.M{"$ifNull": bson.A{"$muted", false}}}},
+		"muteUpdatedAt": muteUpdatedAt,
 	})
 }
 
 // ToggleSubscriptionFavorite flips favorite. $ifNull treats an absent field as
-// false so legacy docs toggle to true on first call.
-func (s *MongoStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, account string) (*model.Subscription, error) {
+// false so legacy docs toggle to true on first call. favoriteUpdatedAt is stamped
+// from the same instant the caller publishes as the event timestamp, keeping the
+// origin doc and every federated replica on one high-water mark.
+func (s *MongoStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error) {
 	return s.findOneAndUpdateSub(ctx, roomID, account, "toggle favorite", bson.M{
-		"favorite": bson.M{"$not": bson.A{bson.M{"$ifNull": bson.A{"$favorite", false}}}},
+		"favorite":          bson.M{"$not": bson.A{bson.M{"$ifNull": bson.A{"$favorite", false}}}},
+		"favoriteUpdatedAt": favoriteUpdatedAt,
 	})
 }
 
 // SetOwnerRole atomically grants or revokes the owner role, returning the updated
 // subscription. Promote appends "owner" only when absent; demote filters "owner"
 // out. Any other roles (e.g. "member") are preserved and array order stays stable.
-func (s *MongoStore) SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool) (*model.Subscription, error) {
+// rolesUpdatedAt is stamped from the same instant the caller publishes as the event
+// timestamp, keeping the origin doc and every federated replica on one high-water mark.
+func (s *MongoStore) SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool, rolesUpdatedAt time.Time) (*model.Subscription, error) {
 	currentRoles := bson.M{"$ifNull": bson.A{"$roles", bson.A{}}}
 	var rolesExpr bson.M
 	if makeOwner {
@@ -989,7 +997,10 @@ func (s *MongoStore) SetOwnerRole(ctx context.Context, roomID, account string, m
 			"else": bson.M{"$concatArrays": bson.A{withoutOwner, bson.A{model.RoleMember}}},
 		}}
 	}
-	return s.findOneAndUpdateSub(ctx, roomID, account, "set owner role", bson.M{"roles": rolesExpr})
+	return s.findOneAndUpdateSub(ctx, roomID, account, "set owner role", bson.M{
+		"roles":          rolesExpr,
+		"rolesUpdatedAt": rolesUpdatedAt,
+	})
 }
 
 // GetUserSiteID looks up users.siteId by account. Returns ("", nil) if no
@@ -1465,7 +1476,7 @@ func (s *MongoStore) UpdateRoomVisibility(ctx context.Context, roomID string, re
 // ownerAccount holds RoleOwner — atomically, so the restrict transition cannot
 // land in a zero-owner state. Returns ErrOwnerNotSubscribed when ownerAccount
 // has no active subscription in the room.
-func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string) error {
+func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error {
 	filter := bson.M{"roomId": roomID}
 
 	if restricted && ownerAccount != "" {
@@ -1481,8 +1492,9 @@ func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID str
 		}
 		pipeline := mongo.Pipeline{
 			bson.D{{Key: "$set", Value: bson.M{
-				"restricted":     true,
-				"externalAccess": externalAccess,
+				"restricted":          true,
+				"externalAccess":      externalAccess,
+				"visibilityUpdatedAt": visibilityUpdatedAt,
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
@@ -1497,7 +1509,7 @@ func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID str
 	}
 
 	if _, err := s.subscriptions.UpdateMany(ctx, filter, bson.M{
-		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess},
+		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess, "visibilityUpdatedAt": visibilityUpdatedAt},
 	}); err != nil {
 		return fmt.Errorf("apply visibility (flags only): %w", err)
 	}

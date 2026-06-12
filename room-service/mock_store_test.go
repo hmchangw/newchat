@@ -44,17 +44,17 @@ func (m *MockRoomStore) EXPECT() *MockRoomStoreMockRecorder {
 }
 
 // ApplySubscriptionVisibility mocks base method.
-func (m *MockRoomStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string) error {
+func (m *MockRoomStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ApplySubscriptionVisibility", ctx, roomID, restricted, externalAccess, ownerAccount)
+	ret := m.ctrl.Call(m, "ApplySubscriptionVisibility", ctx, roomID, restricted, externalAccess, ownerAccount, visibilityUpdatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ApplySubscriptionVisibility indicates an expected call of ApplySubscriptionVisibility.
-func (mr *MockRoomStoreMockRecorder) ApplySubscriptionVisibility(ctx, roomID, restricted, externalAccess, ownerAccount any) *gomock.Call {
+func (mr *MockRoomStoreMockRecorder) ApplySubscriptionVisibility(ctx, roomID, restricted, externalAccess, ownerAccount, visibilityUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySubscriptionVisibility", reflect.TypeOf((*MockRoomStore)(nil).ApplySubscriptionVisibility), ctx, roomID, restricted, externalAccess, ownerAccount)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySubscriptionVisibility", reflect.TypeOf((*MockRoomStore)(nil).ApplySubscriptionVisibility), ctx, roomID, restricted, externalAccess, ownerAccount, visibilityUpdatedAt)
 }
 
 // CountMembersAndOwners mocks base method.
@@ -433,48 +433,48 @@ func (mr *MockRoomStoreMockRecorder) MinSubscriptionLastSeenByRoomID(ctx, roomID
 }
 
 // SetOwnerRole mocks base method.
-func (m *MockRoomStore) SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool) (*model.Subscription, error) {
+func (m *MockRoomStore) SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool, rolesUpdatedAt time.Time) (*model.Subscription, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetOwnerRole", ctx, roomID, account, makeOwner)
+	ret := m.ctrl.Call(m, "SetOwnerRole", ctx, roomID, account, makeOwner, rolesUpdatedAt)
 	ret0, _ := ret[0].(*model.Subscription)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // SetOwnerRole indicates an expected call of SetOwnerRole.
-func (mr *MockRoomStoreMockRecorder) SetOwnerRole(ctx, roomID, account, makeOwner any) *gomock.Call {
+func (mr *MockRoomStoreMockRecorder) SetOwnerRole(ctx, roomID, account, makeOwner, rolesUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetOwnerRole", reflect.TypeOf((*MockRoomStore)(nil).SetOwnerRole), ctx, roomID, account, makeOwner)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetOwnerRole", reflect.TypeOf((*MockRoomStore)(nil).SetOwnerRole), ctx, roomID, account, makeOwner, rolesUpdatedAt)
 }
 
 // ToggleSubscriptionFavorite mocks base method.
-func (m *MockRoomStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, account string) (*model.Subscription, error) {
+func (m *MockRoomStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ToggleSubscriptionFavorite", ctx, roomID, account)
+	ret := m.ctrl.Call(m, "ToggleSubscriptionFavorite", ctx, roomID, account, favoriteUpdatedAt)
 	ret0, _ := ret[0].(*model.Subscription)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ToggleSubscriptionFavorite indicates an expected call of ToggleSubscriptionFavorite.
-func (mr *MockRoomStoreMockRecorder) ToggleSubscriptionFavorite(ctx, roomID, account any) *gomock.Call {
+func (mr *MockRoomStoreMockRecorder) ToggleSubscriptionFavorite(ctx, roomID, account, favoriteUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ToggleSubscriptionFavorite", reflect.TypeOf((*MockRoomStore)(nil).ToggleSubscriptionFavorite), ctx, roomID, account)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ToggleSubscriptionFavorite", reflect.TypeOf((*MockRoomStore)(nil).ToggleSubscriptionFavorite), ctx, roomID, account, favoriteUpdatedAt)
 }
 
 // ToggleSubscriptionMute mocks base method.
-func (m *MockRoomStore) ToggleSubscriptionMute(ctx context.Context, roomID, account string) (*model.Subscription, error) {
+func (m *MockRoomStore) ToggleSubscriptionMute(ctx context.Context, roomID, account string, muteUpdatedAt time.Time) (*model.Subscription, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ToggleSubscriptionMute", ctx, roomID, account)
+	ret := m.ctrl.Call(m, "ToggleSubscriptionMute", ctx, roomID, account, muteUpdatedAt)
 	ret0, _ := ret[0].(*model.Subscription)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ToggleSubscriptionMute indicates an expected call of ToggleSubscriptionMute.
-func (mr *MockRoomStoreMockRecorder) ToggleSubscriptionMute(ctx, roomID, account any) *gomock.Call {
+func (mr *MockRoomStoreMockRecorder) ToggleSubscriptionMute(ctx, roomID, account, muteUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ToggleSubscriptionMute", reflect.TypeOf((*MockRoomStore)(nil).ToggleSubscriptionMute), ctx, roomID, account)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ToggleSubscriptionMute", reflect.TypeOf((*MockRoomStore)(nil).ToggleSubscriptionMute), ctx, roomID, account, muteUpdatedAt)
 }
 
 // UpdateRoomMinUserLastSeenAt mocks base method.

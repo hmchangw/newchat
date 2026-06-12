@@ -4,12 +4,46 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+func TestConfig_MaxWorkers(t *testing.T) {
+	t.Run("defaults to 100", func(t *testing.T) {
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 100, cfg.MaxWorkers)
+	})
+
+	t.Run("honors MAX_WORKERS override", func(t *testing.T) {
+		t.Setenv("MAX_WORKERS", "32")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 32, cfg.MaxWorkers)
+	})
+}
+
+func TestIsMembershipSubject(t *testing.T) {
+	const siteID = "site-a"
+	t.Run("member_added is membership", func(t *testing.T) {
+		assert.True(t, isMembershipSubject(subject.InboxMemberAddedAggregate(siteID), siteID))
+	})
+	t.Run("member_removed is membership", func(t *testing.T) {
+		assert.True(t, isMembershipSubject(subject.InboxMemberRemovedAggregate(siteID), siteID))
+	})
+	t.Run("read receipts are not membership", func(t *testing.T) {
+		assert.False(t, isMembershipSubject("chat.inbox.site-a.aggregate.subscription_read", siteID))
+		assert.False(t, isMembershipSubject("chat.inbox.site-a.aggregate.thread_read", siteID))
+	})
+	t.Run("another site's membership subject does not match", func(t *testing.T) {
+		assert.False(t, isMembershipSubject(subject.InboxMemberAddedAggregate("site-b"), siteID))
+	})
+}
 
 func TestBuildConsumerConfig(t *testing.T) {
 	siteID := "site-a"

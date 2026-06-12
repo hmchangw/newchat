@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -33,6 +35,7 @@ type config struct {
 	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
 	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 }
@@ -50,25 +53,81 @@ func (s *mongoInboxStore) CreateSubscription(ctx context.Context, sub *model.Sub
 	return err
 }
 
+// UpsertRoom replicates room metadata, guarded by the incoming room's
+// UpdatedAt so out-of-order federated delivery cannot regress it. The guard
+// is in the filter, so an event whose UpdatedAt is not strictly newer than the
+// stored one fails to match; with upsert enabled that falls back to an insert
+// which collides on _id (the room already exists) — a duplicate-key error we
+// treat as a no-op. A genuinely new room (no stored doc) is inserted normally.
 func (s *mongoInboxStore) UpsertRoom(ctx context.Context, room *model.Room) error {
-	filter := bson.M{"_id": room.ID}
+	filter := bson.M{
+		"_id": room.ID,
+		"$or": bson.A{
+			bson.M{"updatedAt": bson.M{"$exists": false}},
+			bson.M{"updatedAt": bson.M{"$lt": room.UpdatedAt}},
+		},
+	}
 	update := bson.M{"$set": room}
 	opts := options.UpdateOne().SetUpsert(true)
-	_, err := s.roomCol.UpdateOne(ctx, filter, update, opts)
-	return err
+	if _, err := s.roomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			// Guard rejected a stale/duplicate room_sync; the existing doc is
+			// newer-or-equal, so dropping this event is correct.
+			return nil
+		}
+		return fmt.Errorf("upsert room %q: %w", room.ID, err)
+	}
+	return nil
 }
 
-func (s *mongoInboxStore) UpdateSubscriptionRoles(ctx context.Context, account, roomID string, roles []model.Role) error {
-	filter := bson.M{"u.account": account, "roomId": roomID}
-	update := bson.M{"$set": bson.M{"roles": roles}}
+// UpdateSubscriptionRoles applies roles under a rolesUpdatedAt guard so an
+// out-of-order or duplicate role_updated cannot regress roles. A MatchedCount
+// of 0 is ambiguous — either the subscription is missing (federation race:
+// surface an error so the event is redelivered until member_added lands) or
+// the guard rejected a stale event (the sub exists with rolesUpdatedAt >= the
+// incoming one — a silent no-op). One existence check on this cold path
+// disambiguates the two.
+func (s *mongoInboxStore) UpdateSubscriptionRoles(ctx context.Context, account, roomID string, roles []model.Role, rolesUpdatedAt time.Time) error {
+	filter := bson.M{
+		"u.account": account,
+		"roomId":    roomID,
+		"$or": bson.A{
+			bson.M{"rolesUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"rolesUpdatedAt": bson.M{"$lt": rolesUpdatedAt}},
+		},
+	}
+	update := bson.M{"$set": bson.M{"roles": roles, "rolesUpdatedAt": rolesUpdatedAt}}
 	res, err := s.subCol.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("update subscription roles for %q in room %q: %w", account, roomID, err)
 	}
-	if res.MatchedCount == 0 {
+	if res.MatchedCount > 0 {
+		return nil
+	}
+	exists, err := s.subscriptionExists(ctx, account, roomID)
+	if err != nil {
+		return fmt.Errorf("check subscription exists for %q in room %q: %w", account, roomID, err)
+	}
+	if !exists {
 		return fmt.Errorf("subscription not found for %q in room %q", account, roomID)
 	}
 	return nil
+}
+
+// subscriptionExists reports whether a subscription for (account, roomID) is
+// present, used to distinguish a missing sub from a guard rejection.
+func (s *mongoInboxStore) subscriptionExists(ctx context.Context, account, roomID string) (bool, error) {
+	err := s.subCol.FindOne(ctx,
+		bson.M{"u.account": account, "roomId": roomID},
+		options.FindOne().SetProjection(bson.M{"_id": 1}),
+	).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *mongoInboxStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) error {
@@ -116,25 +175,41 @@ func (s *mongoInboxStore) BulkCreateSubscriptions(ctx context.Context, subs []*m
 	return nil
 }
 
-// UpdateSubscriptionMute sets muted by (roomID, account); missing is a silent no-op.
-func (s *mongoInboxStore) UpdateSubscriptionMute(ctx context.Context, roomID, account string, muted bool) error {
-	_, err := s.subCol.UpdateOne(ctx,
-		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$set": bson.M{"muted": muted}},
-	)
-	if err != nil {
+// UpdateSubscriptionMute sets muted by (roomID, account) under a muteUpdatedAt
+// guard so an out-of-order or duplicate toggle cannot regress mute state.
+// Missing-sub and guard-rejected events both leave MatchedCount 0 and are
+// silent no-ops.
+func (s *mongoInboxStore) UpdateSubscriptionMute(ctx context.Context, roomID, account string, muted bool, muteUpdatedAt time.Time) error {
+	filter := bson.M{
+		"roomId":    roomID,
+		"u.account": account,
+		"$or": bson.A{
+			bson.M{"muteUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"muteUpdatedAt": bson.M{"$lt": muteUpdatedAt}},
+		},
+	}
+	update := bson.M{"$set": bson.M{"muted": muted, "muteUpdatedAt": muteUpdatedAt}}
+	if _, err := s.subCol.UpdateOne(ctx, filter, update); err != nil {
 		return fmt.Errorf("update subscription mute for %q in room %q: %w", account, roomID, err)
 	}
 	return nil
 }
 
-// UpdateSubscriptionFavorite sets favorite by (roomID, account); missing is a silent no-op.
-func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool) error {
-	_, err := s.subCol.UpdateOne(ctx,
-		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$set": bson.M{"favorite": favorite}},
-	)
-	if err != nil {
+// UpdateSubscriptionFavorite sets favorite by (roomID, account) under a
+// favoriteUpdatedAt guard so an out-of-order or duplicate toggle cannot regress
+// favorite state. Missing-sub and guard-rejected events both leave MatchedCount
+// 0 and are silent no-ops.
+func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error {
+	filter := bson.M{
+		"roomId":    roomID,
+		"u.account": account,
+		"$or": bson.A{
+			bson.M{"favoriteUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"favoriteUpdatedAt": bson.M{"$lt": favoriteUpdatedAt}},
+		},
+	}
+	update := bson.M{"$set": bson.M{"favorite": favorite, "favoriteUpdatedAt": favoriteUpdatedAt}}
+	if _, err := s.subCol.UpdateOne(ctx, filter, update); err != nil {
 		return fmt.Errorf("update subscription favorite for %q in room %q: %w", account, roomID, err)
 	}
 	return nil
@@ -206,22 +281,44 @@ func (s *mongoInboxStore) UpsertThreadSubscription(ctx context.Context, sub *mod
 	return nil
 }
 
-func (s *mongoInboxStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string) error {
-	if _, err := s.subCol.UpdateMany(ctx,
-		bson.M{"roomId": roomID},
-		bson.M{"$set": bson.M{"name": newName}}); err != nil {
+// UpdateSubscriptionNamesForRoom sets name on every subscription in the room,
+// each guarded by its own nameUpdatedAt ($lt) so an out-of-order rename cannot
+// regress a sub to a stale name. UpdateMany applies the guard per document, so
+// subs already carrying a newer rename are skipped while the rest advance.
+func (s *mongoInboxStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string, nameUpdatedAt time.Time) error {
+	filter := bson.M{
+		"roomId": roomID,
+		"$or": bson.A{
+			bson.M{"nameUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"nameUpdatedAt": bson.M{"$lt": nameUpdatedAt}},
+		},
+	}
+	update := bson.M{"$set": bson.M{"name": newName, "nameUpdatedAt": nameUpdatedAt}}
+	if _, err := s.subCol.UpdateMany(ctx, filter, update); err != nil {
 		return fmt.Errorf("update subscription names for room %s: %w", roomID, err)
 	}
 	return nil
 }
 
-func (s *mongoInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string) error {
-	filter := bson.M{"roomId": roomID}
+// ApplySubscriptionVisibility writes {restricted, externalAccess, roles} to all
+// subs in the room, each guarded by its own visibilityUpdatedAt ($lt) so an
+// out-of-order visibility change cannot regress the flags/roles. The guard lives
+// in the filter for both the restrict-with-owner pipeline branch and the
+// flags-only branch.
+func (s *mongoInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error {
+	filter := bson.M{
+		"roomId": roomID,
+		"$or": bson.A{
+			bson.M{"visibilityUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"visibilityUpdatedAt": bson.M{"$lt": visibilityUpdatedAt}},
+		},
+	}
 	if restricted && ownerAccount != "" {
 		pipeline := mongo.Pipeline{
 			bson.D{{Key: "$set", Value: bson.M{
-				"restricted":     true,
-				"externalAccess": externalAccess,
+				"restricted":          true,
+				"externalAccess":      externalAccess,
+				"visibilityUpdatedAt": visibilityUpdatedAt,
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
@@ -235,7 +332,7 @@ func (s *mongoInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomI
 		return nil
 	}
 	if _, err := s.subCol.UpdateMany(ctx, filter, bson.M{
-		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess},
+		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess, "visibilityUpdatedAt": visibilityUpdatedAt},
 	}); err != nil {
 		return fmt.Errorf("apply visibility (flags only): %w", err)
 	}
@@ -344,44 +441,120 @@ func main() {
 
 	handler := NewHandler(store)
 
-	cctx, err := cons.Consume(func(m oteljetstream.Msg) {
-		handlerCtx, _ := natsutil.StampRequestID(m.Context(), m.Headers(), m.Subject())
-		if err := handler.HandleEvent(handlerCtx, m.Data()); err != nil {
+	// Two-lane pull pattern over the single INBOX aggregate consumer:
+	//
+	//   - Membership events (member_added/member_removed) run on ONE
+	//     sequential lane. They are NOT individually order-safe — a physical
+	//     delete carries no high-water mark, so a stale add could otherwise
+	//     resurrect a removed membership (and vice versa). Serializing them
+	//     restores in-order processing within this instance and keeps the
+	//     add/remove resurrection race at its pre-fan-out baseline.
+	//   - Everything else (the high-volume subscription_read/thread_read
+	//     receipts, plus role/mute/room_sync) fans out across a bounded
+	//     worker pool. Those handlers are idempotent and order-safe (Mongo
+	//     $lt/$max/$setOnInsert guards), so concurrent processing is correct.
+	//
+	// Membership traffic is a tiny fraction of the lane, so serializing it
+	// costs negligible throughput while the read-receipt path keeps its full
+	// MaxWorkers concurrency.
+	iter, err := cons.Messages(jetstream.PullMaxMessages(2 * cfg.MaxWorkers))
+	if err != nil {
+		slog.Error("messages failed", "error", err)
+		os.Exit(1)
+	}
+
+	sem := make(chan struct{}, cfg.MaxWorkers)
+	membershipCh := make(chan oteljetstream.Msg, cfg.MaxWorkers)
+	var wg sync.WaitGroup
+
+	process := func(msg oteljetstream.Msg) {
+		handlerCtx, _ := natsutil.StampRequestID(msg.Context(), msg.Headers(), msg.Subject())
+		if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
 			// Permanent failures (poison messages) Ack so JetStream stops
 			// redelivering; transient infra errors Nak for redelivery.
 			if _, isPermanent := errcode.IsPermanent(err); isPermanent {
 				slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := m.Ack(); err != nil {
+				if err := msg.Ack(); err != nil {
 					slog.Error("failed to ack permanent message", "error", err)
 				}
 				return
 			}
 			slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-			if err := m.Nak(); err != nil {
+			if err := msg.Nak(); err != nil {
 				slog.Error("failed to nak message", "error", err)
 			}
 			return
 		}
-		if err := m.Ack(); err != nil {
+		if err := msg.Ack(); err != nil {
 			slog.Error("failed to ack message", "error", err)
 		}
-	})
-	if err != nil {
-		slog.Error("consume failed", "error", err)
-		os.Exit(1)
 	}
+
+	// Membership lane: a single worker drains membershipCh in FIFO order, so
+	// add/remove for the same (room, account) are applied in arrival order.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for msg := range membershipCh {
+			process(msg)
+		}
+	}()
+
+	go func() {
+		defer close(membershipCh)
+		for {
+			msgCtx, msg, err := iter.Next()
+			if err != nil {
+				return
+			}
+			m := oteljetstream.Msg{Msg: msg, Ctx: msgCtx}
+			if isMembershipSubject(msg.Subject(), cfg.SiteID) {
+				membershipCh <- m
+				continue
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func() {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				process(m)
+			}()
+		}
+	}()
 
 	slog.Info("inbox-worker started", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error {
-			cctx.Stop()
+			iter.Stop()
 			return nil
+		},
+		func(ctx context.Context) error {
+			done := make(chan struct{})
+			go func() { wg.Wait(); close(done) }()
+			select {
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
+			}
 		},
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 	)
+}
+
+// isMembershipSubject reports whether an INBOX aggregate-lane subject carries a
+// membership event (member_added/member_removed) for this site. Those events
+// are routed to a single sequential lane because, unlike the read-receipt and
+// role/mute/room_sync handlers, they have no per-document high-water-mark guard
+// and so must be applied in order to avoid the add/remove resurrection race.
+func isMembershipSubject(subj, siteID string) bool {
+	return subj == subject.InboxMemberAddedAggregate(siteID) ||
+		subj == subject.InboxMemberRemovedAggregate(siteID)
 }
 
 // buildConsumerConfig returns the durable consumer config for
