@@ -3187,6 +3187,7 @@ The same subject and request body cover three send variants: plain message, thre
 | `requestId` | string | yes | A 36-char hyphenated UUID (v4 or v7) the client generates. **Validated** — an empty or malformed `requestId` is rejected with no message published. The async reply is delivered to `chat.user.{account}.response.{requestId}`. |
 | `threadParentMessageId` | string | no | Set when posting a thread reply. Must be a valid 20-char base62 message ID. Pair with `threadParentMessageCreatedAt`. |
 | `threadParentMessageCreatedAt` | number | no | Required when `threadParentMessageId` is set. Epoch ms (UTC). |
+| `tshow` | boolean | no | The "Also send to channel" option. Only meaningful on a thread reply (`threadParentMessageId` set): the reply is persisted into the parent room's channel timeline as well as the thread (dual-write into `messages_by_room` in addition to `thread_messages_by_thread` + `messages_by_id`), and is surfaced with `tshow: true` on the persisted message. On a non-thread send the flag is **ignored and normalized to `false`** — the request is not rejected. |
 | `quotedParentMessageId` | string | no | Set when posting a quoted message. The gatekeeper fetches the parent and embeds a snapshot in the persisted message; the client does not send the snapshot itself. |
 
 ##### Plain message
@@ -3237,9 +3238,10 @@ Delivered on `chat.user.{account}.response.{requestId}`. The body is the persist
 | `createdAt` | string | RFC 3339. Server-assigned send time (UTC). |
 | `threadParentMessageId` | string | Present only for a thread reply (echoes the request). |
 | `threadParentMessageCreatedAt` | string | Present only for a thread reply. RFC 3339. |
+| `tshow` | boolean | Present only when the request set `tshow: true` on a thread reply (absent when the flag was normalized away on a non-thread send). |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Present only for a quoted send — the server-fetched snapshot of the quoted parent. |
 
-The gatekeeper does **not** populate `mentions`, `editedAt`/`updatedAt`, `tshow`, `type`, or `sysMsgData` on this reply (all `omitempty`, so they are absent). Mention resolution and the enriched `sender` happen in the broadcast fan-out event ([§4 triggered events](#triggered-events--success-path)), not in this reply.
+The gatekeeper does **not** populate `mentions`, `editedAt`/`updatedAt`, `type`, or `sysMsgData` on this reply (all `omitempty`, so they are absent). Mention resolution and the enriched `sender` happen in the broadcast fan-out event ([§4 triggered events](#triggered-events--success-path)), not in this reply.
 
 ```json
 {

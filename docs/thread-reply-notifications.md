@@ -30,8 +30,12 @@ if evt.Event != model.EventCreated {
 
 ### 2. Route thread replies to thread subscribers only
 
-Thread replies have `ThreadParentMessageID != ""` and `TShow == false`. They are invisible in the
-main room and should notify only the thread's subscribers — not all room members.
+Thread-only replies have `ThreadParentMessageID != ""` and `TShow == false`. They are invisible
+in the main room and should notify only the thread's subscribers — not all room members.
+Replies sent with the "Also send to channel" option (`TShow == true`) are NOT thread-only: they
+appear in the room timeline and are treated as channel messages for notification fan-out
+(`isThreadOnlyReply` in notification-worker/handler.go; covered by
+TestHandle_ThreadReply_TShow_TreatedAsChannelMessage).
 
 This requires:
 

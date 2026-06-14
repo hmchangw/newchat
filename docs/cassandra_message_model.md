@@ -166,6 +166,14 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
     'compaction_window_size': '72'
   };
 ```
+
+Note: `messages_by_room` rows originate from channel messages AND from
+`tshow=true` ("also send to channel") thread replies — message-worker
+dual-writes such replies here (keyed by the reply's own `created_at`/bucket,
+with `tshow`, `thread_parent_id`, `thread_parent_created_at` populated) in
+addition to the usual `thread_messages_by_thread` + `messages_by_id` writes.
+Edits and soft-deletes of a tshow reply propagate to this copy as well.
+
 #### thread_messages_by_thread
 ```cql
 CREATE TABLE IF NOT EXISTS thread_messages_by_thread(

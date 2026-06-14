@@ -62,6 +62,12 @@ type SendMessageRequest struct {
 	ThreadParentMessageID        string `json:"threadParentMessageId,omitempty"`
 	ThreadParentMessageCreatedAt *int64 `json:"threadParentMessageCreatedAt,omitempty"`
 	QuotedParentMessageID        string `json:"quotedParentMessageId,omitempty"`
+	// TShow requests that a thread reply also appear in the parent room's
+	// channel timeline (the "Also send to channel" option). Only meaningful
+	// when ThreadParentMessageID is set — message-gatekeeper normalizes it to
+	// false on non-thread sends. Maps onto Message.TShow; same wire name as
+	// the persisted message field the reply echoes back.
+	TShow bool `json:"tshow,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's

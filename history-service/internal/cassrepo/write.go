@@ -239,6 +239,15 @@ func (r *Repository) UpdateMessageContent(ctx context.Context, msg *models.Messa
 		if err := r.editInThreadMessagesByThread(ctx, msg, ep, editedAt); err != nil {
 			return fmt.Errorf("update thread_messages_by_thread for message %s thread %s: %w", msg.MessageID, msg.ThreadRoomID, err)
 		}
+		// A TShow ("also send to channel") thread reply is dual-written into
+		// messages_by_room at create time, so the edit must also land there or
+		// the channel-timeline copy goes stale. Additive on top of the thread
+		// edit — same shape as the PinnedAt branch below.
+		if msg.TShow {
+			if err := r.editInMessagesByRoom(ctx, msg, ep, editedAt); err != nil {
+				return fmt.Errorf("update messages_by_room for tshow thread message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+			}
+		}
 	}
 
 	if msg.PinnedAt != nil {
@@ -306,6 +315,15 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 	} else {
 		if err := r.session.Query(threadMsgQ, deletedAt, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec(); err != nil {
 			return time.Time{}, false, nil, fmt.Errorf("update thread_messages_by_thread for message %s thread %s: %w", msg.MessageID, msg.ThreadRoomID, err)
+		}
+		// A TShow ("also send to channel") thread reply is dual-written into
+		// messages_by_room at create time; soft-delete must also hit that copy
+		// or it stays visible in the channel timeline. Additive on top of the
+		// thread delete — same shape as the PinnedAt branch below.
+		if msg.TShow {
+			if err := r.deleteInMessagesByRoom(ctx, msgByRoomQ, msg, deletedAt); err != nil {
+				return time.Time{}, false, nil, fmt.Errorf("update messages_by_room for tshow thread message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+			}
 		}
 	}
 

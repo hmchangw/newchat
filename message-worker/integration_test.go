@@ -103,6 +103,9 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			card                  FROZEN<"Card">,
 			card_action           FROZEN<"CardAction">,
 			file                  FROZEN<"File">,
+			thread_room_id           TEXT,
+			thread_parent_id         TEXT,
+			thread_parent_created_at TIMESTAMP,
 			tcount                INT,
 			tshow                 BOOLEAN,
 			type                  TEXT,
@@ -1587,4 +1590,141 @@ func TestSaveThreadMessage_EncryptedPath_SkipsTcountOnRedelivery(t *testing.T) {
 		).Scan(&tcount))
 		assert.Equal(t, 1, tcount, "redelivery must not double-increment tcount in messages_by_room")
 	})
+}
+
+// TestCassandraStore_SaveThreadMessage_TShowDualWrite verifies the
+// "also send to channel" persistence contract: a TShow=true thread reply gets
+// a third INSERT into messages_by_room — keyed by the reply's own created_at
+// and bucket — carrying tshow, thread_parent_id, and thread_parent_created_at
+// (history-service redacts TShow rows that lack the parent fields). A
+// TShow=false reply must keep the legacy two-table shape.
+func TestCassandraStore_SaveThreadMessage_TShowDualWrite(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	replyCreatedAt := parentCreatedAt.Add(30 * time.Second)
+	sender := &cassParticipant{ID: "u-1", Account: "alice", EngName: "Alice Wang"}
+
+	msg := &model.Message{
+		ID:                           "m-tshow-1",
+		RoomID:                       "r-tshow-1",
+		UserID:                       "u-1",
+		UserAccount:                  "alice",
+		Content:                      "tshow reply",
+		CreatedAt:                    replyCreatedAt,
+		ThreadParentMessageID:        "m-tshow-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+		TShow:                        true,
+	}
+	const threadRoomID = "tr-tshow-1"
+	_, err := store.SaveThreadMessage(ctx, msg, sender, "site-a", threadRoomID)
+	require.NoError(t, err)
+
+	t.Run("messages_by_room row exists with tshow and thread-parent fields", func(t *testing.T) {
+		var gotMsg, gotThreadParentID, gotThreadRoomID, gotSiteID string
+		var gotTShow bool
+		var gotThreadParentCreatedAt, gotUpdatedAt time.Time
+		require.NoError(t, cassSession.Query(
+			`SELECT msg, tshow, thread_parent_id, thread_parent_created_at, thread_room_id, site_id, updated_at
+			 FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			"r-tshow-1", bucket.Of(replyCreatedAt), replyCreatedAt, "m-tshow-1",
+		).Scan(&gotMsg, &gotTShow, &gotThreadParentID, &gotThreadParentCreatedAt, &gotThreadRoomID, &gotSiteID, &gotUpdatedAt))
+		assert.Equal(t, "tshow reply", gotMsg)
+		assert.True(t, gotTShow)
+		assert.Equal(t, "m-tshow-parent", gotThreadParentID)
+		assert.Equal(t, parentCreatedAt, gotThreadParentCreatedAt.UTC())
+		assert.Equal(t, threadRoomID, gotThreadRoomID)
+		assert.Equal(t, "site-a", gotSiteID)
+		assert.Equal(t, replyCreatedAt, gotUpdatedAt.UTC())
+	})
+
+	t.Run("messages_by_id and thread_messages_by_thread still written", func(t *testing.T) {
+		var gotMsg string
+		require.NoError(t, cassSession.Query(
+			`SELECT msg FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
+			"m-tshow-1", replyCreatedAt,
+		).Scan(&gotMsg))
+		assert.Equal(t, "tshow reply", gotMsg)
+		require.NoError(t, cassSession.Query(
+			`SELECT msg FROM thread_messages_by_thread WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`,
+			threadRoomID, replyCreatedAt, "m-tshow-1",
+		).Scan(&gotMsg))
+		assert.Equal(t, "tshow reply", gotMsg)
+	})
+
+	t.Run("TShow=false reply writes no messages_by_room row", func(t *testing.T) {
+		noShowCreatedAt := replyCreatedAt.Add(time.Second)
+		noShow := &model.Message{
+			ID:                           "m-tshow-2",
+			RoomID:                       "r-tshow-2",
+			UserID:                       "u-1",
+			UserAccount:                  "alice",
+			Content:                      "plain reply",
+			CreatedAt:                    noShowCreatedAt,
+			ThreadParentMessageID:        "m-tshow-parent-2",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+		}
+		_, err := store.SaveThreadMessage(ctx, noShow, sender, "site-a", "tr-tshow-2")
+		require.NoError(t, err)
+
+		var gotMsg string
+		err = cassSession.Query(
+			`SELECT msg FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			"r-tshow-2", bucket.Of(noShowCreatedAt), noShowCreatedAt, "m-tshow-2",
+		).Scan(&gotMsg)
+		require.ErrorIs(t, err, gocql.ErrNotFound, "TShow=false reply must not appear in messages_by_room")
+	})
+}
+
+// TestCassandraStore_SaveThreadMessage_TShowDualWrite_Encrypted verifies the
+// cipher-enabled variant: the messages_by_room dual-write row carries the
+// encrypted bundle (enc_payload + enc_meta), NULL plaintext body columns, and
+// the same tshow/thread-parent metadata as the plaintext path.
+func TestCassandraStore_SaveThreadMessage_TShowDualWrite_Encrypted(t *testing.T) {
+	ctx := context.Background()
+	cassSession := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, cipher)
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	replyCreatedAt := parentCreatedAt.Add(30 * time.Second)
+	sender := &cassParticipant{ID: "u-1", Account: "alice", EngName: "Alice Wang"}
+
+	msg := &model.Message{
+		ID:                           "m-enc-tshow-1",
+		RoomID:                       "r-enc-tshow-1",
+		UserID:                       "u-1",
+		UserAccount:                  "alice",
+		Content:                      "encrypted tshow reply",
+		CreatedAt:                    replyCreatedAt,
+		ThreadParentMessageID:        "m-enc-tshow-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+		TShow:                        true,
+	}
+	_, err := store.SaveThreadMessage(ctx, msg, sender, "site-a", "tr-enc-tshow-1")
+	require.NoError(t, err)
+
+	var gotMsg *string
+	var gotPayload []byte
+	var gotTShow bool
+	var gotThreadParentID string
+	var gotThreadParentCreatedAt time.Time
+	require.NoError(t, cassSession.Query(
+		`SELECT msg, enc_payload, tshow, thread_parent_id, thread_parent_created_at
+		 FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		"r-enc-tshow-1", bucket.Of(replyCreatedAt), replyCreatedAt, "m-enc-tshow-1",
+	).Scan(&gotMsg, &gotPayload, &gotTShow, &gotThreadParentID, &gotThreadParentCreatedAt))
+	assert.Nil(t, gotMsg, "plaintext msg column must be NULL on the encrypted path")
+	assert.NotEmpty(t, gotPayload, "enc_payload must carry the encrypted bundle")
+	assert.True(t, gotTShow)
+	assert.Equal(t, "m-enc-tshow-parent", gotThreadParentID)
+	assert.Equal(t, parentCreatedAt, gotThreadParentCreatedAt.UTC())
 }
