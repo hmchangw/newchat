@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -3397,4 +3398,55 @@ func TestMessageEvent_NewTCount(t *testing.T) {
 		assert.True(t, present, "zero NewTCount must be present in BSON — bson omitempty must not be used")
 		assert.EqualValues(t, 0, val, "zero BSON value must be 0, not missing")
 	})
+}
+func TestMessageReadEventJSON(t *testing.T) {
+	floor := time.Date(2026, 6, 9, 10, 30, 0, 0, time.UTC)
+
+	t.Run("floor present round-trips", func(t *testing.T) {
+		src := model.MessageReadEvent{
+			Type:              model.RoomEventMessageRead,
+			RoomID:            "room-1",
+			MinUserLastSeenAt: &floor,
+			Timestamp:         floor.UnixMilli(),
+		}
+		data, err := json.Marshal(src)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var dst model.MessageReadEvent
+		if err := json.Unmarshal(data, &dst); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(src, dst) {
+			t.Errorf("round-trip mismatch:\n  got  %+v\n  want %+v", dst, src)
+		}
+	})
+
+	t.Run("nil floor omitted from wire", func(t *testing.T) {
+		src := model.MessageReadEvent{
+			Type:      model.RoomEventMessageRead,
+			RoomID:    "room-2",
+			Timestamp: floor.UnixMilli(),
+		}
+		data, err := json.Marshal(src)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(data), "minUserLastSeenAt") {
+			t.Errorf("nil floor must be omitted, got %s", data)
+		}
+		var dst model.MessageReadEvent
+		if err := json.Unmarshal(data, &dst); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if dst.MinUserLastSeenAt != nil {
+			t.Errorf("expected nil floor, got %v", dst.MinUserLastSeenAt)
+		}
+	})
+}
+
+func TestRoomEventMessageReadValue(t *testing.T) {
+	if model.RoomEventMessageRead != "message_read" {
+		t.Errorf("RoomEventMessageRead = %q, want %q", model.RoomEventMessageRead, "message_read")
+	}
 }

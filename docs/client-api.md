@@ -1266,11 +1266,30 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 - **No `JoinedAt` fallback for the early-return:** if `subscription.lastSeenAt` is null (the user was invited but has never opened the room), the handler does **not** treat `joinedAt` as a synthetic read position — being invited isn't reading. The room-floor recompute runs in this case so a member who has just read for the first time is reflected in the floor.
 - **Room-floor recompute (`Room.MinUserLastSeenAt`):** the room's read floor (surfaced as `minUserLastSeenAt` in history responses) is a **strict "everyone has read" marker**: `MIN(lastSeenAt)` across **all** of the room's subscriptions, set **only when every subscription has a usable `lastSeenAt`**. If **any** member has never read the room (no/zero `lastSeenAt` — e.g. invited but never opened), the floor is `$unset` (null). Bots are counted like any other member, so a **botDM room — where the bot never reads — always has a null floor**. Reading a room can advance the floor (or, if this was the last unread member, raise it from null to a value).
 - **Recompute trigger & a known gap:** the floor is recomputed only on this Mark Read path, and only when the caller was not already past `room.lastMsgAt` (the early-return above). Adding a member does not itself recompute the floor, so a newly-invited, never-read member will not flip an existing non-null floor to null until the next recompute is triggered (e.g. that member reads, or another member reads while the room has content).
-- **No system message, no fan-out events:** read receipts are silent; only the requester receives the `accepted` reply.
+- **Read-floor fan-out:** when (and only when) the recompute above changes `Room.MinUserLastSeenAt`, the server publishes a `message_read` room event carrying the new floor, so peers can advance read-receipt / unread UI live. Fan-out is best-effort (a publish failure does not fail the RPC) and never fires on the early-return paths or when the floor is unchanged. No system message is written.
 
 ##### Triggered events — success path
 
-`None — reply only.`
+Emitted **only when the room read floor (`Room.MinUserLastSeenAt`) changes** (best-effort, core NATS):
+
+- **Channel rooms — `chat.room.{roomID}.event`** — a single `message_read` event to every client subscribed to the room.
+- **DM rooms — `chat.user.{account}.event.room`** — one `message_read` event per subscriber.
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | string | Always `"message_read"`. |
+| `roomId` | string | The room whose floor advanced. |
+| `minUserLastSeenAt` | string | Optional. RFC3339 UTC timestamp of the new read floor. **Omitted** when the floor is null (a member is still fully unread). |
+| `timestamp` | number | Event publish time, UTC milliseconds since Unix epoch. |
+
+```json
+{
+  "type": "message_read",
+  "roomId": "Rb3kQ2",
+  "minUserLastSeenAt": "2026-06-09T10:30:00Z",
+  "timestamp": 1749465000123
+}
+```
 
 ##### Triggered events — error path
 

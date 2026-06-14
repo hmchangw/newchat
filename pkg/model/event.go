@@ -214,6 +214,7 @@ const (
 	RoomEventRoomRestricted        RoomEventType = "room_restricted"
 	RoomEventMessageReacted        RoomEventType = "message_reacted"
 	RoomEventThreadMetadataUpdated RoomEventType = "thread_metadata_updated"
+	RoomEventMessageRead           RoomEventType = "message_read"
 )
 
 // ThreadAction identifies what operation triggered a ThreadMetadataUpdatedEvent.
@@ -248,6 +249,21 @@ type RoomEvent struct {
 
 	Message          *ClientMessage  `json:"message,omitempty"`
 	EncryptedMessage json.RawMessage `json:"encryptedMessage,omitempty"`
+}
+
+// MessageReadEvent is the live event published when a room's read floor
+// (minUserLastSeenAt) advances after a member marks the room read. Channel
+// rooms receive it once on the room event subject; DM rooms receive it per
+// member on their user event subject. MinUserLastSeenAt is nil when any member
+// is still fully unread (the floor cannot be established), in which case the
+// field is omitted. No siteId: consumers key rooms by roomId and already cache
+// the room's origin site, and this event never reaches a client for a room it
+// is not already subscribed to.
+type MessageReadEvent struct {
+	Type              RoomEventType `json:"type" bson:"type"`
+	RoomID            string        `json:"roomId" bson:"roomId"`
+	MinUserLastSeenAt *time.Time    `json:"minUserLastSeenAt,omitempty" bson:"minUserLastSeenAt,omitempty"`
+	Timestamp         int64         `json:"timestamp" bson:"timestamp"`
 }
 
 // EditRoomEvent is the live event published when a message is edited. Fields are

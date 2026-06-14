@@ -1228,9 +1228,71 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		if err := h.store.UpdateRoomMinUserLastSeenAt(ctx, roomID, minTime); err != nil {
 			return nil, fmt.Errorf("update room minUserLastSeenAt: %w", err)
 		}
+		// Fan out the read-floor advance to clients. Best-effort: the floor write
+		// above is the source of truth; a publish failure must not fail the RPC.
+		switch room.Type {
+		case model.RoomTypeChannel:
+			h.publishChannelEvent(ctx, roomID, minTime)
+		case model.RoomTypeDM:
+			h.publishDMEvents(ctx, roomID, minTime)
+		default:
+			// botDM (floor is always nil) and other types get no read-floor
+			// fan-out — only channel and dm rooms surface read receipts.
+		}
 	}
 
 	return &model.StatusReply{Status: "accepted"}, nil
+}
+
+// buildMessageReadEvent constructs the wire payload announcing that a room's
+// read floor advanced to floor (nil when no floor can be established).
+func (h *Handler) buildMessageReadEvent(roomID string, floor *time.Time) model.MessageReadEvent {
+	return model.MessageReadEvent{
+		Type:              model.RoomEventMessageRead,
+		RoomID:            roomID,
+		MinUserLastSeenAt: floor,
+		Timestamp:         time.Now().UTC().UnixMilli(),
+	}
+}
+
+// publishChannelEvent fans a read-floor advance out once to the channel's shared
+// room event subject. Best-effort: a marshal or publish failure is logged, not
+// returned. Used for RoomTypeChannel.
+func (h *Handler) publishChannelEvent(ctx context.Context, roomID string, floor *time.Time) {
+	evt := h.buildMessageReadEvent(roomID, floor)
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		slog.Error("marshal message_read channel event failed", "error", err, "roomId", roomID)
+		return
+	}
+	if err := h.publishCore(ctx, subject.RoomEvent(roomID), payload); err != nil {
+		slog.Error("publish message_read channel event failed", "error", err, "roomId", roomID)
+	}
+}
+
+// publishDMEvents fans a read-floor advance out to each DM member on their
+// per-user event subject. Mirrors broadcast-worker's publishDMEvents: it lists
+// the room's subscriptions and publishes once per subscriber. Best-effort per
+// account; a list, marshal, or publish failure is logged, not returned. Used
+// for RoomTypeDM.
+func (h *Handler) publishDMEvents(ctx context.Context, roomID string, floor *time.Time) {
+	subs, err := h.store.ListSubscriptionsByRoom(ctx, roomID)
+	if err != nil {
+		slog.Error("list subscriptions for message_read DM fan-out failed", "error", err, "roomId", roomID)
+		return
+	}
+	evt := h.buildMessageReadEvent(roomID, floor)
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		slog.Error("marshal message_read DM event failed", "error", err, "roomId", roomID)
+		return
+	}
+	for i := range subs {
+		account := subs[i].User.Account
+		if err := h.publishCore(ctx, subject.UserRoomEvent(account), payload); err != nil {
+			slog.Error("publish message_read DM event failed", "error", err, "roomId", roomID, "account", account)
+		}
+	}
 }
 
 func (h *Handler) messageReadReceipt(c *natsrouter.Context, req model.ReadReceiptRequest) (*model.ReadReceiptResponse, error) {
