@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -109,6 +110,9 @@ func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest)
 	if err != nil {
 		return nil, err
 	}
+	// debug: the classified room type drives all downstream routing.
+	slog.DebugContext(ctx, "room-service createRoom classified",
+		"request_id", natsutil.RequestIDFromContext(ctx), "type", roomType)
 
 	requester, err := h.store.GetUser(ctx, requesterAccount)
 	if err != nil {
@@ -205,6 +209,9 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 	// the deterministic "open-or-create" contract for DMs.
 	existing, err := h.store.FindDMSubscription(ctx, requester.Account, other.Account)
 	if err == nil && existing != nil {
+		// debug: open-or-create short-circuit — the DM already exists.
+		slog.DebugContext(ctx, "room-service DM exists, returning existing",
+			"request_id", natsutil.RequestIDFromContext(ctx), "room_id", existing.RoomID)
 		// DM already exists: this is a success ("open-or-create"), not an error.
 		// Return the existing room ID so the client opens it. RoomType is left
 		// empty on this branch, matching the prior error-reply behaviour.
@@ -318,6 +325,9 @@ func (h *Handler) publishCreateRoom(ctx context.Context, req *model.CreateRoomRe
 	if err := h.publishToStream(ctx, subject.RoomCanonical(h.siteID, "create"), payload, ""); err != nil {
 		return nil, fmt.Errorf("publish canonical: %w", err)
 	}
+	// flow: the sync RPC accepted and handed the room create off to room-worker.
+	slog.Log(ctx, logctx.LevelFlow, "room-service create handoff", "phase", "published",
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", req.RoomID, "type", roomType)
 	return &model.CreateRoomReply{
 		Status:   model.CreateRoomReplyAccepted,
 		RoomID:   req.RoomID,
@@ -830,6 +840,12 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, fmt.Errorf("count new members: %w", err)
 	}
 
+	// debug: how the requested refs resolved and the capacity arithmetic.
+	slog.DebugContext(ctx, "room-service addMembers resolved",
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID,
+		"orgs", len(allOrgs), "users", len(allUsers), "new_count", newCount,
+		"current_count", room.UserCount, "max_size", h.maxRoomSize)
+
 	// 8. Capacity check — use room.UserCount (kept current by room-worker's
 	// ReconcileUserCount after each membership change) instead of issuing a
 	// separate CountSubscriptions query.
@@ -858,6 +874,9 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	if err := h.publishToStream(ctx, subject.RoomCanonical(h.siteID, "member.add"), normalized, ""); err != nil {
 		return nil, fmt.Errorf("publish to stream: %w", err)
 	}
+	// flow: accepted and handed the member-add off to room-worker.
+	slog.Log(ctx, logctx.LevelFlow, "room-service member.add handoff", "phase", "published",
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "new_count", newCount)
 
 	// 10. Reply accepted
 	return &model.StatusReply{Status: "accepted"}, nil

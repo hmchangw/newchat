@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
@@ -711,4 +713,47 @@ func TestRouter_admit_BoundedSaturated(t *testing.T) {
 	admitted2, release2 := r.admit()
 	require.False(t, admitted2)
 	require.Nil(t, release2, "rejected admit must return nil release (footgun protection)")
+}
+
+// Payload capture: when DEBUG_LOG_PAYLOADS is on and the request carries
+// X-Debug-Payload, Register logs the full request and reply payloads; when the
+// flag is off, nothing is logged even with the header (prod invariant).
+func TestRegister_PayloadCapture(t *testing.T) {
+	const validUUID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	run := func(t *testing.T, payloadsEnabled bool) *flowRecorder {
+		rec := &flowRecorder{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(rec))
+		logctx.Configure(logctx.Config{Rate: 1e6, Burst: 1 << 20, Payloads: payloadsEnabled})
+		t.Cleanup(func() { slog.SetDefault(prev); logctx.Configure(logctx.Config{Rate: 0, Burst: 0}) })
+
+		nc := startTestNATS(t)
+		r := New(nc, "test-service")
+		r.Use(RequestID())
+		Register(r, "test.{id}", func(c *Context, req testReq) (*testResp, error) {
+			return &testResp{Greeting: "hi " + req.Name}, nil
+		})
+
+		reqData, _ := json.Marshal(testReq{Name: "alice"})
+		msg := &nats.Msg{Subject: "test.123", Data: reqData, Header: nats.Header{
+			natsutil.RequestIDHeader:    []string{validUUID},
+			natsutil.DebugPayloadHeader: []string{"1"},
+		}}
+		reply, err := nc.NatsConn().RequestMsg(msg, 2*time.Second)
+		require.NoError(t, err)
+		_ = reply
+		return rec
+	}
+
+	t.Run("enabled: request + reply captured", func(t *testing.T) {
+		rec := run(t, true)
+		got := rec.payloads()
+		assert.Contains(t, got, `{"name":"alice"}`, "request payload captured")
+		assert.Contains(t, got, `{"greeting":"hi alice"}`, "reply payload captured")
+	})
+
+	t.Run("disabled: nothing captured even with the header", func(t *testing.T) {
+		rec := run(t, false)
+		assert.Empty(t, rec.payloads(), "prod invariant: no body when DEBUG_LOG_PAYLOADS is off")
+	})
 }

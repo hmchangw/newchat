@@ -2,12 +2,14 @@ package natsrouter
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
@@ -211,5 +213,12 @@ func (c *Context) GetHeader(key string) string {
 
 // ReplyJSON marshals v as JSON and sends it as the reply.
 func (c *Context) ReplyJSON(v any) {
+	// dev-only full-reply-payload capture (gated by DEBUG_LOG_PAYLOADS +
+	// X-Debug-Payload); ShouldCapture guards the marshal so prod pays nothing.
+	if logctx.ShouldCapture(c) {
+		if b, err := json.Marshal(v); err == nil {
+			logctx.CapturePayload(c, "reply", c.Msg.Subject, b)
+		}
+	}
 	natsutil.ReplyJSON(c.Msg, v)
 }

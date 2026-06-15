@@ -14,6 +14,7 @@ import (
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/otelutil"
@@ -45,16 +46,21 @@ type config struct {
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	DebugLog           logctx.Config           `envPrefix:"DEBUG_LOG_"`
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	// Wrap the base JSON handler so per-request X-Debug rungs can surface
+	// flow/debug/trace edges even though the floor stays at INFO; RenderLevelNames
+	// prints the custom FLOW/TRACE levels by name.
+	logctx.SetupDefault(os.Stdout)
 
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
+	logctx.Configure(cfg.DebugLog)
 
 	ctx := context.Background()
 
@@ -165,6 +171,8 @@ func main() {
 					wg.Done()
 				}()
 				handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+				handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+				logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 				handler.HandleJetStreamMsg(handlerCtx, msg)
 			}()
 		}

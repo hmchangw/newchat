@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -78,9 +79,13 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		"request_id", req.RequestID,
 		"account", accountFromSubject(msg.Subject()))
 
+	// flow: the gatekeeper hop entry — carries stream-wait latency and size.
+	debugFlowReceived(ctx, msg, req.RequestID)
+
 	account, roomID, siteID, ok := subject.ParseUserRoomSiteSubject(msg.Subject())
 	if !ok {
 		slog.Warn("invalid subject", "subject", msg.Subject())
+		debugFlowRejected(ctx, req.RequestID, "invalid_subject")
 		// Best-effort error reply so the client doesn't hang; sendReply no-ops
 		// when account or requestId is unusable. Ack — malformed is not retryable.
 		h.sendReply(ctx, accountFromSubject(msg.Subject()), &req, errnats.Marshal(ctx, errcode.BadRequest("invalid message subject")))
@@ -96,6 +101,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// Do not WithCause(parseErr) — json.SyntaxError strings embed the
 		// offending substring from an unauthenticated entry-point (see doc.go).
 		bad := errcode.BadRequest("unmarshal send message request")
+		debugFlowRejected(ctx, req.RequestID, "unmarshal")
 		h.sendReply(ctx, account, &req, errnats.Marshal(ctx, bad))
 		if err := msg.Ack(); err != nil {
 			slog.Error("failed to ack message", "error", err)
@@ -111,11 +117,14 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// validation branch must NOT also log here. Infra branch owns its log.
 		var ee *errcode.Error
 		if errors.As(err, &ee) {
+			debugFlowRejected(ctx, req.RequestID, string(ee.Code))
 			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
 			if err := msg.Ack(); err != nil {
 				slog.Error("failed to ack message", "error", err)
 			}
 		} else {
+			// flow terminal for the infra path; the Error line below carries the cause.
+			slog.Log(ctx, logctx.LevelFlow, "gatekeeper nak", "phase", "nak", "request_id", req.RequestID)
 			slog.ErrorContext(ctx, "process message failed (infra)", "error", err, "account", account, "room_id", roomID)
 			if err := msg.Nak(); err != nil {
 				slog.Error("failed to nack message", "error", err)
@@ -129,6 +138,30 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	if err := msg.Ack(); err != nil {
 		slog.Error("failed to ack message", "err", err)
 	}
+}
+
+// debugFlowReceived emits the flow-rung "received" breadcrumb at the gatekeeper
+// hop entry. It carries payload size and stream_wait_ms — the time the message
+// sat in MESSAGES before this consumer picked it up, the queue latency that
+// inter-hop timestamp-diffing cannot see. Metadata only — never the body.
+func debugFlowReceived(ctx context.Context, msg jetstream.Msg, requestID string) {
+	if !logctx.Enabled(ctx, logctx.LevelFlow) {
+		return // skip msg.Metadata() and arg-building on the unflagged hot path
+	}
+	streamWaitMs := int64(-1)
+	if meta, err := msg.Metadata(); err == nil && meta != nil {
+		streamWaitMs = time.Since(meta.Timestamp).Milliseconds()
+	}
+	slog.Log(ctx, logctx.LevelFlow, "gatekeeper received",
+		"phase", "received", "request_id", requestID, "subject", msg.Subject(),
+		"bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
+}
+
+// debugFlowRejected emits the flow-rung terminal breadcrumb for a message the
+// gatekeeper rejected; reason is a coarse, body-free tag.
+func debugFlowRejected(ctx context.Context, requestID, reason string) {
+	slog.Log(ctx, logctx.LevelFlow, "gatekeeper rejected",
+		"phase", "rejected", "request_id", requestID, "reason", reason)
 }
 
 // sendReply publishes the reply payload to the user's response subject. Pass
@@ -220,6 +253,8 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		}
 		return nil, fmt.Errorf("get subscription for user %s in room %s: %w", account, roomID, err)
 	}
+	// debug: sender is subscribed — the first decision a flagged message clears.
+	slog.DebugContext(ctx, "gatekeeper subscription resolved", "request_id", req.RequestID, "roles", len(sub.Roles))
 
 	// Large-room post restriction: in rooms with more than the configured
 	// threshold of members, only owners, admins, and bots may send top-level
@@ -228,7 +263,8 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// room size. Both bypasses skip the Room fetch entirely (approach B —
 	// owner fast-path generalized).
 	isThreadReply := req.ThreadParentMessageID != ""
-	if !isThreadReply && !canBypassLargeRoomCap(sub) {
+	bypass := canBypassLargeRoomCap(sub)
+	if !isThreadReply && !bypass {
 		meta, err := h.store.GetRoomMeta(ctx, roomID)
 		if err != nil {
 			return nil, fmt.Errorf("get room meta for %s: %w", roomID, err)
@@ -244,6 +280,9 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 			return nil, errLargeRoomPostRestricted
 		}
 	}
+	// debug: how the large-room gate was decided (metadata only).
+	slog.DebugContext(ctx, "gatekeeper large-room gate", "request_id", req.RequestID,
+		"thread_reply", isThreadReply, "bypassed", bypass)
 
 	// Build Message
 	now := time.Now().UTC()
@@ -257,6 +296,10 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	quotedSnapshot, err := h.resolveQuoteSnapshot(ctx, account, roomID, siteID, req.QuotedParentMessageID, req.ThreadParentMessageID)
 	if err != nil {
 		return nil, err
+	}
+	if req.QuotedParentMessageID != "" {
+		// debug: quote passed the same-conversation-context check.
+		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID)
 	}
 
 	// Compose the sender's render-ready display name once at write time so every
@@ -308,6 +351,9 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
 		return nil, fmt.Errorf("publish to MESSAGES_CANONICAL: %w", err)
 	}
+	// flow: the message cleared the gate and was handed off to MESSAGES_CANONICAL.
+	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
+		"phase", "published", "request_id", req.RequestID, "subject", canonicalSubj, "bytes", len(evtData))
 
 	return json.Marshal(msg)
 }

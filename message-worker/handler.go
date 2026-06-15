@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -41,7 +42,21 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 }
 
 func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
+	// flow: hop entry — stream-wait latency the inter-hop time-diff can't see.
+	// Gate the whole block so msg.Metadata() and arg-building are skipped on the
+	// unflagged hot path (slog.Log evaluates its args before Enabled runs).
+	if logctx.Enabled(ctx, logctx.LevelFlow) {
+		streamWaitMs := int64(-1)
+		if meta, err := msg.Metadata(); err == nil && meta != nil {
+			streamWaitMs = time.Since(meta.Timestamp).Milliseconds()
+		}
+		slog.Log(ctx, logctx.LevelFlow, "message-worker received",
+			"phase", "received", "request_id", natsutil.RequestIDFromContext(ctx),
+			"subject", msg.Subject(), "bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
+	}
+
 	if err := h.processMessage(ctx, msg.Data()); err != nil {
+		slog.Log(ctx, logctx.LevelFlow, "message-worker nak", "phase", "nak", "request_id", natsutil.RequestIDFromContext(ctx))
 		slog.ErrorContext(ctx, "process message failed", "error", err, "request_id", natsutil.RequestIDFromContext(ctx))
 		if nakErr := msg.Nak(); nakErr != nil {
 			slog.ErrorContext(ctx, "failed to nack message", "error", nakErr, "request_id", natsutil.RequestIDFromContext(ctx))
@@ -65,6 +80,9 @@ func (h *Handler) processMessage(ctx context.Context, data []byte) error {
 		return fmt.Errorf("resolve mentions: %w", err)
 	}
 	evt.Message.Mentions = resolved.Participants
+	// debug: mention resolution is the first decision step — count only, no content.
+	slog.DebugContext(ctx, "message-worker mentions resolved",
+		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(resolved.Participants))
 
 	var sender *cassParticipant
 	user, err := h.userStore.FindUserByID(ctx, evt.Message.UserID)
@@ -85,6 +103,9 @@ func (h *Handler) processMessage(ctx context.Context, data []byte) error {
 			Account:     evt.Message.UserAccount,
 		}
 	}
+	// debug: which sender the message resolved to (system messages have none).
+	slog.DebugContext(ctx, "message-worker sender resolved",
+		"request_id", natsutil.RequestIDFromContext(ctx), "has_sender", sender != nil)
 
 	if evt.Message.ThreadParentMessageID != "" {
 		// Resolve (or create) the thread room first so we have the threadRoomID
@@ -100,6 +121,7 @@ func (h *Handler) processMessage(ctx context.Context, data []byte) error {
 		if err != nil {
 			return fmt.Errorf("save thread message: %w", err)
 		}
+		debugFlowPersisted(ctx, evt.Message.ID, true)
 		if newTcount != nil {
 			if err := h.publishThreadReplyEvent(ctx, &evt.Message, *newTcount); err != nil {
 				return fmt.Errorf("publish thread reply event: %w", err)
@@ -109,9 +131,18 @@ func (h *Handler) processMessage(ctx context.Context, data []byte) error {
 		if err := h.store.SaveMessage(ctx, &evt.Message, sender, evt.SiteID); err != nil {
 			return fmt.Errorf("save message: %w", err)
 		}
+		debugFlowPersisted(ctx, evt.Message.ID, false)
 	}
 
 	return nil
+}
+
+// debugFlowPersisted emits the flow-rung breadcrumb marking the message as
+// stored — the "was it persisted?" handoff for this hop. Metadata only.
+func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
+	slog.Log(ctx, logctx.LevelFlow, "message-worker persisted",
+		"phase", "persisted", "request_id", natsutil.RequestIDFromContext(ctx),
+		"message_id", messageID, "thread", thread)
 }
 
 // handleThreadRoomAndSubscriptions creates the ThreadRoom on first reply and

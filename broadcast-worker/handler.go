@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -160,6 +161,10 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	clientMsg := buildClientMessage(&msg, userByAccount)
+
+	// debug: how this message was routed for fan-out (metadata only).
+	slog.DebugContext(ctx, "broadcast routing", "request_id", natsutil.RequestIDFromContext(ctx),
+		"room_id", meta.ID, "type", meta.Type, "mentions", len(resolved.Accounts), "mention_all", resolved.MentionAll)
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
@@ -766,7 +771,30 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta roommetacache.Me
 	if err != nil {
 		return fmt.Errorf("marshal channel event: %w", err)
 	}
+	// flow: one room-stream publish; NATS fans out to subscribers downstream, so
+	// this reports the room audience, not per-recipient deliveries from here.
+	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", meta.ID,
+		"type", string(meta.Type), "delivery", "room-stream", "audience", meta.UserCount)
 	return h.pub.Publish(ctx, subject.RoomEvent(meta.ID), payload)
+}
+
+// debugFlowFanout emits the flow-rung outcome of a per-recipient fan-out:
+// recipients = individual deliveries attempted in this hop, failed = how many of
+// those errored (delivered = recipients - failed). Metadata only. The room-stream
+// (channel) path is NOT per-recipient — it reports `audience` inline instead.
+func debugFlowFanout(ctx context.Context, roomID, roomType, delivery string, recipients, failed int) {
+	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID,
+		"type", roomType, "delivery", delivery, "recipients", recipients, "failed", failed)
+}
+
+// debugTraceDelivered emits the trace-rung per-recipient delivery line — the
+// "did it reach user X?" detail. Recipient account identifiers are permitted at
+// trace (never message content); off unless a request is flagged trace.
+func debugTraceDelivered(ctx context.Context, account, roomID string) {
+	slog.Log(ctx, logctx.LevelTrace, "broadcast delivered",
+		"request_id", natsutil.RequestIDFromContext(ctx), "account", account, "room_id", roomID)
 }
 
 func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string) error {
@@ -780,6 +808,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, 
 		mentionSet[name] = struct{}{}
 	}
 
+	recipients, failed := 0, 0
 	for i := range subs {
 		account := subs[i].User.Account
 		// Skip bots: live UI events go to human clients only, consistent with
@@ -797,6 +826,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, 
 		if err != nil {
 			return fmt.Errorf("marshal DM event for user %s: %w", account, err)
 		}
+		recipients++
 		// Publish errors are intentionally swallowed here (log-and-continue). DM thread
 		// replies have no JetStream retry guarantee by design — the DM path uses
 		// publishDMEvents which is fire-and-forget, consistent with how all DM fan-out
@@ -808,8 +838,12 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, 
 				"account", account,
 				"room_id", meta.ID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
+			failed++
+			continue // don't emit a "delivered" trace for a failed publish
 		}
+		debugTraceDelivered(ctx, account, meta.ID)
 	}
+	debugFlowFanout(ctx, meta.ID, string(meta.Type), "per-member", recipients, failed)
 	return nil
 }
 
@@ -869,10 +903,13 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 					"parentMessageID", parentMsgID,
 					"request_id", natsutil.RequestIDFromContext(ctx))
 				failCount.Add(1)
+				return
 			}
+			debugTraceDelivered(ctx, account, parentMsgID)
 		}()
 	}
 	wg.Wait()
+	debugFlowFanout(ctx, parentMsgID, "thread", "per-follower", len(accounts), int(failCount.Load()))
 	if failCount.Load() == int64(len(accounts)) {
 		return fmt.Errorf("all %d thread account publishes failed for parent %s", len(accounts), parentMsgID)
 	}

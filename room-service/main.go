@@ -15,6 +15,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -45,18 +46,20 @@ type config struct {
 	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
-	Atrest atrest.Config      // env vars already prefixed ATREST_*
-	Vault  atrest.VaultConfig // env vars already prefixed (VAULT_*, ATREST_VAULT_*)
+	Atrest   atrest.Config      // env vars already prefixed ATREST_*
+	Vault    atrest.VaultConfig // env vars already prefixed (VAULT_*, ATREST_VAULT_*)
+	DebugLog logctx.Config      `envPrefix:"DEBUG_LOG_"`
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	logctx.SetupDefault(os.Stdout)
 
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
+	logctx.Configure(cfg.DebugLog)
 	if cfg.MemberListTimeout <= 0 {
 		slog.Error("invalid MEMBER_LIST_TIMEOUT: must be > 0", "value", cfg.MemberListTimeout)
 		os.Exit(1)

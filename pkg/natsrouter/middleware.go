@@ -9,6 +9,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
@@ -22,7 +23,11 @@ const requestIDKey = "requestID"
 // RequestID extracts X-Request-ID (or mints via idgen), stores it on the
 // natsrouter keys map AND the underlying ctx, AND enriches the ctx logger so
 // every Classify line on this request automatically carries request_id —
-// handlers don't need to re-pass it.
+// handlers don't need to re-pass it. It also admits the inbound X-Debug rung
+// (logctx.Admit) so verbose-logging intent both propagates downstream and,
+// within this instance's rate budget, gates the handler's flow/debug/trace
+// edges. This is the single global boundary every router installs, so every
+// handler gets debug admission with no per-handler work.
 func RequestID() HandlerFunc {
 	return func(c *Context) {
 		var (
@@ -34,9 +39,16 @@ func RequestID() HandlerFunc {
 			subj = c.Msg.Subject
 		}
 		ctx, reqID := natsutil.StampRequestID(c.ctx, headers, subj)
+		ctx = logctx.Admit(ctx, headers)
 		c.Set(requestIDKey, reqID)
 		c.SetContext(ctx)
 		c.WithLogValues("request_id", reqID)
+		// dev-only request-payload capture (no-op unless DEBUG_LOG_PAYLOADS +
+		// X-Debug-Payload); central here so every RPC is covered once, after
+		// admission has stamped the intent onto ctx.
+		if c.Msg != nil {
+			logctx.CapturePayload(ctx, "request", subj, c.Msg.Data)
+		}
 		c.Next()
 	}
 }
@@ -98,13 +110,18 @@ func Recovery() HandlerFunc {
 	}
 }
 
-// Logging returns middleware that logs each request with subject, duration, and request ID.
+// Logging returns middleware that records a per-request breadcrumb (subject,
+// duration, request ID) at the on-demand FLOW level — NOT always-on INFO.
+// Steady-state per-RPC visibility comes from metrics and OTel traces; the
+// per-request line surfaces only when the client flags the request via X-Debug
+// (see pkg/logctx), so it costs nothing for unflagged traffic. Errors are
+// unaffected — they are logged once by errcode.Classify at the reply boundary.
 func Logging() HandlerFunc {
 	return func(c *Context) {
 		start := time.Now()
 		c.Next()
 		attrs := append(requestAttrs(c), "duration", time.Since(start))
-		slog.Info("nats request", attrs...)
+		slog.Log(c, logctx.LevelFlow, "nats request", attrs...)
 	}
 }
 

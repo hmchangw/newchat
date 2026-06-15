@@ -7,6 +7,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/logctx"
 )
 
 // CassandraConfig holds Cassandra connection settings (env prefix: CASSANDRA_).
@@ -64,6 +65,10 @@ type Config struct {
 
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
+
+	// DebugLog gates the X-Debug ladder rate cap and DEBUG_LOG_PAYLOADS
+	// (dev-only full request/reply payload logging). Default: payloads off.
+	DebugLog logctx.Config `envPrefix:"DEBUG_LOG_"`
 }
 
 // Load parses environment variables into Config; returns an error when required vars are absent.

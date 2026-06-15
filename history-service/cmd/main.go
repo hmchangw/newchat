@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/emoji"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -49,13 +50,14 @@ func checkConfig(cfg *config.Config) {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	logctx.SetupDefault(os.Stdout)
 
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
+	logctx.Configure(cfg.DebugLog)
 
 	checkConfig(&cfg)
 	slog.Info("message bucket configured",

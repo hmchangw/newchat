@@ -36,13 +36,28 @@ func RequestIDFromContext(ctx context.Context) string {
 	return id
 }
 
-// HeaderForContext returns a nats.Header carrying X-Request-ID from ctx, or nil if ctx has no request ID.
+// HeaderForContext returns a nats.Header carrying the propagated correlation
+// values from ctx — X-Request-ID and, when a verbose rung was requested,
+// X-Debug. Returns nil when ctx carries neither, so callers still get a nil
+// (not empty) header on the common path.
 func HeaderForContext(ctx context.Context) nats.Header {
 	id := RequestIDFromContext(ctx)
-	if id == "" {
+	debug := DebugLevelFromContext(ctx)
+	payload := PayloadCaptureFromContext(ctx)
+	if id == "" && debug == DebugOff && !payload {
 		return nil
 	}
-	return nats.Header{RequestIDHeader: []string{id}}
+	h := nats.Header{}
+	if id != "" {
+		h[RequestIDHeader] = []string{id}
+	}
+	if debug != DebugOff {
+		h[DebugHeader] = []string{debug.String()}
+	}
+	if payload {
+		h[DebugPayloadHeader] = []string{"1"}
+	}
+	return h
 }
 
 // NewMsg builds a *nats.Msg with subj, data, and X-Request-ID drawn from ctx (nil header if no ID).

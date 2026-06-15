@@ -102,6 +102,19 @@ Clients **may** include an `X-Request-ID` NATS message header on outbound reques
 
 The `msg.send` flow is different — see [§4](#4-message-send): the client puts the request ID in the JSON payload (`requestId` field), and the server replies on `chat.user.{account}.response.{requestID}`.
 
+### Debug tracing (`X-Debug`)
+
+Clients **may** include an optional `X-Debug` NATS header to turn on verbose, server-side, per-request tracing for a **single** request — useful when diagnosing "what happened to my message?". It changes neither the request schema, the reply, nor any triggered event; output is written only to the server logs, joinable by `request_id`.
+
+| Value | Effect |
+|-------|--------|
+| _(absent)_ / `0` / `false` / `off` | Off — the default. Any unrecognized value is also treated as off. |
+| `flow` | Cross-service path + timing breadcrumbs (how far the request got, where latency was spent). |
+| `debug` (also `1` / `true` / `on`) | Adds in-service decision detail. |
+| `trace` | Adds per-item / per-recipient detail (most verbose). |
+
+Each rung includes the ones below it. The header propagates across every service the request touches. It is **best-effort and rate-limited** per server instance: under load, verbose output for some flagged requests may be dropped (the request itself is unaffected). Treat it as a diagnostic aid, not a guaranteed log.
+
 ### Reply patterns
 
 - **Standard NATS request/reply** — the NATS client library auto-generates a reply subject under `_INBOX.>` and routes the reply back to the caller. Used by every method in §3.

@@ -15,7 +15,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -97,4 +99,55 @@ func buildHandlerWithCapture(t *testing.T, db *mongo.Database) (*Handler, func()
 	reply := func(_ context.Context, _ *nats.Msg) error { return nil }
 	return NewHandler(NewMongoStore(db, nil, 0), users, pub, reply, "site-a", nil, 500),
 		func() *nats.Msg { return captured }
+}
+
+// TestGatekeeper_DebugBreadcrumbsAndPropagation_Integration walks a real
+// Mongo-backed processMessage and asserts the two end-to-end debug behaviors
+// that are only verifiable past the package boundary: (1) a flagged request
+// emits the flow breadcrumb, and (2) the X-Debug rung rides onto the outbound
+// MESSAGES_CANONICAL message so it propagates to downstream workers. The
+// unflagged control proves zero added output and no header bleed.
+func TestGatekeeper_DebugBreadcrumbsAndPropagation_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "message_gatekeeper_test")
+	ctx := context.Background()
+
+	user := model.User{ID: "u-bob", Account: "bob", EngName: "Bob"}
+	seedUserAndSubscription(t, ctx, db, user, "r-flow")
+
+	rec := installRecorder(t)
+	handler, getCaptured := buildHandlerWithCapture(t, db)
+
+	newReq := func() model.SendMessageRequest {
+		return model.SendMessageRequest{
+			ID:        idgen.GenerateMessageID(),
+			Content:   "hi",
+			RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		}
+	}
+
+	t.Run("flagged: flow breadcrumb emitted and X-Debug propagates onto canonical", func(t *testing.T) {
+		rec.reset()
+		req := newReq()
+		_, perr := handler.processMessage(admitRung("flow"), user.Account, "r-flow", "site-a", &req)
+		require.NoError(t, perr)
+
+		assert.True(t, rec.has(logctx.LevelFlow, "gatekeeper published to canonical"),
+			"flagged request must emit the flow breadcrumb")
+		captured := getCaptured()
+		require.NotNil(t, captured, "canonical event was never published")
+		assert.Equal(t, "flow", captured.Header.Get(natsutil.DebugHeader),
+			"X-Debug rung must ride onto the canonical message for downstream propagation")
+	})
+
+	t.Run("unflagged control: no flow breadcrumb, no X-Debug header", func(t *testing.T) {
+		rec.reset()
+		req := newReq()
+		_, perr := handler.processMessage(context.Background(), user.Account, "r-flow", "site-a", &req)
+		require.NoError(t, perr)
+
+		assert.False(t, rec.hasLevel(logctx.LevelFlow), "unflagged traffic must emit no flow lines")
+		captured := getCaptured()
+		require.NotNil(t, captured)
+		assert.Empty(t, captured.Header.Get(natsutil.DebugHeader), "no X-Debug header on unflagged traffic")
+	})
 }
