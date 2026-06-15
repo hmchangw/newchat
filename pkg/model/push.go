@@ -1,6 +1,6 @@
 package model
 
-// PushNotificationEvent is the batched push envelope published to PUSH_NOTIFICATIONS_{siteID}.
+// PushNotificationEvent is the batched push envelope published to PUSH_NOTIFICATION_{siteID}.
 // Accounts carries up to PUSH_RECIPIENT_BATCH_SIZE recipients sharing one canonical message;
 // ID is "{messageID}-b{batchIndex}" and doubles as the Nats-Msg-Id dedup key.
 type PushNotificationEvent struct {

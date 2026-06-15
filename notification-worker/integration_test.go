@@ -136,7 +136,7 @@ func (c *pushCollector) collect(t *testing.T, timeout time.Duration, want int) [
 	}
 }
 
-// directNATSAsyncPub bypasses JetStream so the test can observe pushes without the PUSH_NOTIFICATIONS stream.
+// directNATSAsyncPub bypasses JetStream so the test can observe pushes without the PUSH_NOTIFICATION stream.
 type directNATSAsyncPub struct{ nc *nats.Conn }
 
 func (d *directNATSAsyncPub) PublishMsg(_ context.Context, msg *nats.Msg) error {

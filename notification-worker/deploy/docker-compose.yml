@@ -14,7 +14,7 @@ services:
       - VALKEY_ADDRS=valkey:6379
       - ROOMSUBCACHE_TTL=5m
       - LARGE_ROOM_THRESHOLD=500
-      # Recipients per PUSH_NOTIFICATIONS event. Default 100; well under FCM's 500-token
+      # Recipients per PUSH_NOTIFICATION event. Default 100; well under FCM's 500-token
       # multicast cap and APNs HTTP/2 connection-frame ceiling.
       - PUSH_RECIPIENT_BATCH_SIZE=100
       # Title is resolved here from the rooms collection; sender display name is

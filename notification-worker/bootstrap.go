@@ -22,7 +22,7 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (oteljetstream.Stream, error)
 }
 
-// bootstrapStreams creates MESSAGES_CANONICAL + PUSH_NOTIFICATIONS when enabled (dev/integration).
+// bootstrapStreams creates MESSAGES_CANONICAL + PUSH_NOTIFICATION when enabled (dev/integration).
 // When disabled it verifies MESSAGES_CANONICAL exists so a misconfigured deploy fails at startup.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	canonicalCfg := stream.MessagesCanonical(siteID)
@@ -33,7 +33,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 		}); err != nil {
 			return fmt.Errorf("create MESSAGES_CANONICAL stream: %w", err)
 		}
-		pushCfg := stream.PushNotifications(siteID)
+		pushCfg := stream.PushNotification(siteID)
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     pushCfg.Name,
 			Subjects: pushCfg.Subjects,
@@ -42,11 +42,11 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 			// inter-replica wire bytes, S2 shrinks on-disk bytes after gzip overhead.
 			Compression: jetstream.S2Compression,
 		}); err != nil {
-			return fmt.Errorf("create PUSH_NOTIFICATIONS stream: %w", err)
+			return fmt.Errorf("create PUSH_NOTIFICATION stream: %w", err)
 		}
 		return nil
 	}
-	// PUSH_NOTIFICATIONS absence is non-fatal: async publish surfaces errors per-publish.
+	// PUSH_NOTIFICATION absence is non-fatal: async publish surfaces errors per-publish.
 	if _, err := js.Stream(ctx, canonicalCfg.Name); err != nil {
 		return fmt.Errorf("verify MESSAGES_CANONICAL stream: %w", err)
 	}

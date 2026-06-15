@@ -57,10 +57,10 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "verify MESSAGES_CANONICAL stream",
 		},
 		{
-			name:        "enabled - creates MESSAGES_CANONICAL and PUSH_NOTIFICATIONS",
+			name:        "enabled - creates MESSAGES_CANONICAL and PUSH_NOTIFICATION",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES_CANONICAL_test", "PUSH_NOTIFICATIONS_test"},
+			wantCreated: []string{"MESSAGES_CANONICAL_test", "PUSH_NOTIFICATION_test"},
 		},
 		{
 			name:       "enabled - wraps MESSAGES_CANONICAL creator error",
@@ -71,12 +71,12 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "create MESSAGES_CANONICAL stream",
 		},
 		{
-			name:       "enabled - wraps PUSH_NOTIFICATIONS creator error",
+			name:       "enabled - wraps PUSH_NOTIFICATION creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
-			failOn:     "PUSH_NOTIFICATIONS_test",
+			failOn:     "PUSH_NOTIFICATION_test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create PUSH_NOTIFICATIONS stream",
+			wantErrSub: "create PUSH_NOTIFICATION stream",
 		},
 	}
 	for _, tc := range tests {

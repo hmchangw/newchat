@@ -26,7 +26,7 @@ On connect, every client subscribes to `chat.user.{account}.>`. This single wild
 | Subject | Direction | Publisher | Purpose |
 |---------|-----------|-----------|---------|
 | `chat.user.{account}.stream.msg` | Server → Client | broadcast-worker | DM message delivery |
-| `chat.user.{account}.notification` | Server → Client | _(removed — see PUSH_NOTIFICATIONS stream below)_ | _(deprecated)_ |
+| `chat.user.{account}.notification` | Server → Client | _(removed — see PUSH_NOTIFICATION stream below)_ | _(deprecated)_ |
 | `chat.user.{account}.event.subscription.update` | Server → Client | room-worker, inbox-worker | Room added/removed from user's list |
 | `chat.user.{account}.event.room.metadata.update` | Server → Client | room-worker | Room metadata changed (for rooms in sidebar) |
 | `chat.user.{account}.response.{requestID}` | Server → Client | various services | Response to a client request |
@@ -91,7 +91,7 @@ When offline, clients miss messages on non-active sidebar rooms. To restore ment
 
 #### Desktop Banner Notifications (Mobile Push)
 
-notification-worker publishes a `PushNotificationEvent` to `chat.server.notification.push.{siteID}.send` (captured by the `PUSH_NOTIFICATIONS_{siteID}` JetStream stream) for each eligible recipient. The push service consumes this stream and delivers the notification to the recipient's mobile device. The old per-user NATS core subject `chat.user.{account}.notification` is no longer used.
+notification-worker publishes a `PushNotificationEvent` to `chat.server.notification.push.{siteID}.send` (captured by the `PUSH_NOTIFICATION_{siteID}` JetStream stream) for each eligible recipient. The push service consumes this stream and delivers the notification to the recipient's mobile device. The old per-user NATS core subject `chat.user.{account}.notification` is no longer used.
 
 #### Reconnect Badge Restoration
 
@@ -194,7 +194,7 @@ Stream wildcard: `chat.user.*.request.room.*.{siteID}.member.>`
 
 Stream wildcard: `outbox.{siteID}.>`
 
-### PUSH_NOTIFICATIONS Stream (`PUSH_NOTIFICATIONS_{siteID}`)
+### PUSH_NOTIFICATION Stream (`PUSH_NOTIFICATION_{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -299,7 +299,7 @@ Client A (sender)                    NATS                         Client B (rece
     |                                  |--- pub: chat.server.          |
     |                                  |    notification.push.         |
     |                                  |    {siteID}.send              |
-    |                                  |   (PUSH_NOTIFICATIONS stream) |
+    |                                  |   (PUSH_NOTIFICATION stream)  |
     |                                  |                               |
     |--- pub: chat.user.A             |                               |
     |        .room.R1.typing -------->|                               |
