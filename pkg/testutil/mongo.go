@@ -23,6 +23,7 @@ var (
 	mongoOnce      sync.Once
 	mongoClient    *mongo.Client
 	mongoContainer testcontainers.Container
+	mongoURI       string
 	mongoInitErr   error
 )
 
@@ -48,8 +49,20 @@ func ensureMongoClient() (*mongo.Client, error) {
 		}
 		mongoClient = c
 		mongoContainer = container
+		mongoURI = uri
 	})
 	return mongoClient, mongoInitErr
+}
+
+// MongoURI returns the connection string of the shared Mongo container, for
+// tests that build their own (e.g. instrumented) client rather than using the
+// shared one from MongoDB.
+func MongoURI(t *testing.T) string {
+	t.Helper()
+	if _, err := ensureMongoClient(); err != nil {
+		t.Fatalf("testutil.MongoURI: %v", err)
+	}
+	return mongoURI
 }
 
 // TerminateMongo disconnects the shared client and stops the shared
@@ -69,6 +82,7 @@ func TerminateMongo() {
 		}
 		mongoContainer = nil
 	}
+	mongoURI = ""
 }
 
 // EnsureMongo starts the shared Mongo container if not already started.
