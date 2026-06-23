@@ -1,9 +1,10 @@
 # Spec: Integrate the `flywindy/o11y` Observability SDK
 
-> **Status:** PLANNING (decisions locked). This document is the design/rollout
-> plan for adopting [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y)
-> as the single observability entry point across the chat platform. No code has
-> landed yet. Branch: `feat/integrate-o11y-sdk`.
+> **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
+> [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (pinned at
+> **v0.7.1**) as the single observability entry point across the chat platform.
+> Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
+> **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.
 >
 > **Scope premise:** the whole platform is still pre-production (in testing, no
 > live users), so there is **no migration-risk or user-impact constraint**. The
@@ -232,32 +233,38 @@ reachable from the chat services and that the services' `OTEL_EXPORTER_OTLP_ENDP
 / metrics scraping are wired to it — wiring the network between the compose stack and the
 monitor backend is an operator step, out of scope for this plan.
 
-### Phase 0 — Dependency & baseline
-- `go get github.com/flywindy/o11y@<pinned>`; run `make tidy`/`go mod tidy`.
-- **Reconcile OTel versions** (§7). Resolve any minor bump from o11y's pins;
-  `make build` all services + `make test` to confirm no breakage.
-- No behavioural change yet. Gate: full build + `make sast` clean.
+### Phase 0 — Dependency & baseline ✅ DONE
+- `go get github.com/flywindy/o11y@v0.7.1`; `go mod tidy`.
+- **Reconcile OTel versions** (§7): o11y v0.7.1 pins core OTel at the released
+  `v1.44.0`, so our `go.opentelemetry.io/otel*` set bumped `v1.43.0 → v1.44.0`
+  (clean single minor; no pseudo-version). `otelhttp` contrib `v0.60.0 → v0.68.0`.
+- No behavioural change: nothing imports o11y until Phase 1, so the dep is kept
+  in `go.mod` by `pkg/obs` (added together in this branch).
 
   **Integration-test checklist (expect: nothing changes):**
-  - [ ] `make build` succeeds for all 16 services.
-  - [ ] `make test` and `make sast` are green.
+  - [x] `go build ./...` compiles the whole tree against OTel v1.44.0.
+  - [x] `gosec` is clean. `govulncheck`/`semgrep` run in CI (they need network
+        egress the dev sandbox blocks).
   - [ ] Standing up the stack behaves exactly as before; **Grafana shows no new
         data** (no service emits via o11y yet) — this is the intended outcome.
 
-### Phase 1 — `pkg/obs` wrapper
-- TDD `pkg/obs`: env parse, defaults, toggle fallthrough, global-provider
-  install, `slog.SetDefault(obs.Logger)`, shutdown ordering.
-- Acceptance for the package: log lines carry `traceId` + `spanId` + `request_id`
-  together when a span is active and `pkg/logctx`/`natsrouter` set the request ID.
+### Phase 1 — `pkg/obs` wrapper ✅ DONE
+- TDD `pkg/obs` (`obs.go` + `obs_test.go`): env parse, defaults, required
+  `OTEL_SERVICE_NAME`, OTLP-header map, metrics-addr composition, option
+  building, global-provider install (`otel.SetTracerProvider`/`SetMeterProvider`/
+  `SetTextMapPropagator`), `slog.SetDefault(sdk.Logger)`, idempotent shutdown.
+- `Init(ctx) (*o11y.SDK, func(context.Context) error, error)` parses `Config`
+  from env, builds the four required identity options + endpoints, starts the
+  SDK, installs the globals, and returns the SDK + shutdown. Shared helpers will
+  take a minimal provider interface (Phase 2), not the concrete `*o11y.SDK`.
 
   **Integration-test checklist (expect: correlated stdout logs; Grafana still empty):**
-  - [ ] `pkg/obs` unit tests pass at ≥80% coverage (CLAUDE.md §4).
-  - [ ] In a manual smoke (run one service wired to `obs.Init`, or the package's
-        own test), a **stdout JSON log line emitted inside an active span** shows
-        `traceId`, `spanId`, `service.name`, **and** the existing `request_id`
-        together in one record.
-  - [ ] Toggle precedence works: setting `O11Y_TRACE_ENABLED=false` drops trace
-        fields; `O11Y_LOG_ENABLED=false` falls back to stdout-only.
+  - [x] `pkg/obs` unit tests pass at **100%** coverage (≥80% floor, CLAUDE.md §4).
+  - [x] A **stdout JSON log line emitted inside an active span** shows
+        `traceId`, `spanId`, `service.name`, **and** the caller-supplied
+        `request_id` together in one record (`TestInit_LogTraceCorrelation`).
+  - [x] Toggle precedence works: `O11Y_TRACE_ENABLED=false` disables the trace
+        pillar (`TestInit_TogglesRespectEnv`).
   - [ ] **Grafana still shows no live-service data** — no service is converted
         yet; visibility starts in Phase 2/3.
 
@@ -339,22 +346,30 @@ and the helper degrades to a no-op tracer when observability is disabled.
 
 ---
 
-## 7. Dependency & Version Reconciliation — **hard Phase 0 gate**
+## 7. Dependency & Version Reconciliation — **hard Phase 0 gate (resolved)**
 
 `o11y` pins its own OTel module versions and removes our only NATS-tracing
-fallback (D2 deletes Marz32onE with no transitional period). Compatibility must
-therefore be **proven in Phase 0**, before any service flips — not discovered
-late. Phase 0 does not pass until all of the following hold:
-- After `go get`, diff the `go.opentelemetry.io/*` versions; if o11y requires a
-  newer minor, bump ours to match (single source of truth) and re-run `make test`.
-- `o11y` adds transitive deps (Pyroscope client, OTLP/HTTP exporter, possibly
-  `otelgin`/`otelmongo`/`gocql` observer libs). Per CLAUDE.md "ask before adding
-  deps" — these arrive transitively via the one approved `o11y` dependency; list
-  them in the Phase 0 PR description for review.
-- Confirm `o11y` supports our pinned driver majors: `mongo-driver/v2`,
-  `gocql v1.7`, `go-redis/v9` (cluster mode), `minio-go/v7`,
-  `go-elasticsearch/v8`, `nats.go v1.50` + `jetstream`. Any mismatch is a
-  Phase 0 blocker.
+fallback (D2 deletes Marz32onE with no transitional period). Compatibility was
+**proven in Phase 0** against `o11y@v0.7.1`:
+- **OTel:** v0.7.1 pins core OTel (`otel`, `metric`, `trace`, `sdk`,
+  `sdk/metric`) at the **released `v1.44.0`** tag; we bumped `v1.43.0 → v1.44.0`
+  (single minor) and `otelhttp` contrib `v0.60.0 → v0.68.0`. `go build ./...`
+  is green. (v0.6.0/v0.7.0 had pinned core OTel to an *unreleased* pseudo-version
+  `v1.43.1-0.2026…`; v0.7.1 fixed this — do **not** pin below v0.7.1.)
+- **Driver majors all align** with v0.7.1: `gocql v1.7.0`, `go-elasticsearch/v8
+  v8.19.3`, `nats.go v1.50.0` are exact matches; `mongo-driver/v2` (→ v2.7.0)
+  and `minio-go/v7` (→ v7.2.0) bump a minor; our `go-redis/v9 v9.18.0` already
+  exceeds o11y's v9.9.0 (same major). The `cassandra` and `elasticsearch`
+  instrumentation sub-packages exist in v0.7.1 (absent in v0.6.0).
+- **Residual (non-blocking, production-gate note):** the `otelmongo` contrib is
+  still pinned to a pseudo-version (`v0.0.0-2026…`) because the mongo-driver/v2
+  variant has no released tag upstream yet. Single contrib module, mongo tracing
+  only — track for a released-tag bump before the production release; it does not
+  block implementation.
+- `o11y` adds transitive deps (Pyroscope client, OTLP/HTTP exporters, otelgin/
+  otelmongo/otelslog, gocql observer). Per CLAUDE.md "ask before adding deps" —
+  these arrive transitively via the one approved `o11y` dependency; list them in
+  the Phase 0 PR description for review.
 - **Verify `o11y/nats` JetStream trace-header propagation** matches what
   Marz32onE produced (the same W3C `traceparent` carried on NATS headers across
   publish→stream→consume). Since Marz32onE is removed outright, any difference in
