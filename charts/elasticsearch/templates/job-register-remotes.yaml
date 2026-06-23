@@ -54,11 +54,18 @@ spec:
           value: {{ .Values.cluster.name | quote }}
         - name: HEALTH_TIMEOUT_SECONDS
           value: {{ .Values.ccs.registrationJob.healthTimeoutSeconds | quote }}
-        - name: ELASTIC_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "chat.es.fullname" . }}-es-elastic-user
-              key: elastic
+        # The elastic password is read at RUNTIME from this mounted Secret file,
+        # NOT injected via env secretKeyRef. An env var freezes the value at pod
+        # start; if the Job starts before VSO overwrites ECK's auto-generated
+        # password with the Vault one, that frozen value is stale → 401 forever
+        # (the Job hangs on the health check, the Helm post-install hook times
+        # out, and `set -e` aborts the whole install). A mounted Secret volume
+        # updates in place, so re-reading the file each attempt always uses the
+        # current password.
+        volumeMounts:
+        - name: es-elastic-user
+          mountPath: /mnt/es-elastic-user
+          readOnly: true
         command: ["/bin/sh", "-eu", "-c"]
         args:
         - |
@@ -71,18 +78,23 @@ spec:
           echo "Peers:          ${PEERS}"
           echo
 
+          # Read the elastic password fresh from the mounted Secret on every
+          # call — the file tracks the live Secret, so we never get stuck on a
+          # value that was current at pod start but has since been rotated by
+          # VSO. (See the volumeMount note above.)
+          es_curl() { curl -sk -u "elastic:$(cat /mnt/es-elastic-user/elastic)" "$@"; }
+
           # 1. Wait for local ES /_cluster/health to be green or yellow.
           echo "Waiting up to ${HEALTH_TIMEOUT_SECONDS}s for ES health..."
           deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
           while :; do
-            if curl -sk -u "elastic:${ELASTIC_PASSWORD}" "${ES_URL}/_cluster/health" \
-                | grep -qE '"status":"(green|yellow)"'; then
+            if es_curl "${ES_URL}/_cluster/health" | grep -qE '"status":"(green|yellow)"'; then
               echo "ES is healthy."
               break
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "ERROR: ES not healthy within ${HEALTH_TIMEOUT_SECONDS}s" >&2
-              curl -sk -u "elastic:${ELASTIC_PASSWORD}" "${ES_URL}/_cluster/health" >&2 || true
+              es_curl "${ES_URL}/_cluster/health" >&2 || true
               exit 1
             fi
             sleep 5
@@ -125,7 +137,7 @@ spec:
           # 3. Apply settings.
           echo
           echo "PUT ${ES_URL}/_cluster/settings"
-          curl -sk -u "elastic:${ELASTIC_PASSWORD}" \
+          es_curl \
             -X PUT "${ES_URL}/_cluster/settings" \
             -H 'content-type: application/json' \
             -d "${SETTINGS}" \
@@ -135,6 +147,10 @@ spec:
           # 4. Verify.
           echo
           echo "GET ${ES_URL}/_remote/info"
-          curl -sk -u "elastic:${ELASTIC_PASSWORD}" "${ES_URL}/_remote/info"
+          es_curl "${ES_URL}/_remote/info"
           echo
+      volumes:
+      - name: es-elastic-user
+        secret:
+          secretName: {{ include "chat.es.fullname" . }}-es-elastic-user
 {{- end }}

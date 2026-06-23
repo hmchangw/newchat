@@ -33,7 +33,7 @@ spec:
   transport:
     tls:
       certificate:
-        secretName: {{ required "ccs.transport.caSecretName must be set when ccs.transport.enabled" .Values.ccs.transport.caSecretName }}
+        secretName: {{ include "chat.transport.caSecretName" . }}
       {{- if .Values.ccs.publicEndpoint.enabled }}
       subjectAltNames:
       - dns: {{ include "chat.hosts.esRemote" . }}

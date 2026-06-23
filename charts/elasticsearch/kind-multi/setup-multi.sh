@@ -168,41 +168,16 @@ EOF
 for site in "${SITES[@]}"; do install_infra "${site}"; done
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Helm install the chart on each cluster
-# ─────────────────────────────────────────────────────────────────────────────
-for site in "${SITES[@]}"; do
-  ctx="$(ctx_name "${site}")"
-  log "[${site}] helm install es-chat-${site}"
-  helm --kube-context "${ctx}" upgrade --install "es-chat-${site}" \
-    "${ROOT}/charts/elasticsearch" \
-    -n "${APP_NS}" --force-conflicts \
-    -f "${KIND_MULTI}/values/${site}-multi.yaml"
-done
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. Wait for both clusters green
-# ─────────────────────────────────────────────────────────────────────────────
-for site in "${SITES[@]}"; do
-  ctx="$(ctx_name "${site}")"
-  log "[${site}] waiting for es-chat-${site} → green"
-  kubectl --context "${ctx}" -n "${APP_NS}" \
-    wait --for=jsonpath='{.status.health}'=green \
-    "elasticsearch/es-chat-${site}" --timeout=600s
-done
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Patch each cluster's CoreDNS to resolve PEER's public hostname to peer's
-#    container IP. Without this, ES inside cluster A can't resolve
-#    es-remote-siteB.chat.com — there's no public DNS in this test rig.
+# 3. Patch CoreDNS BEFORE the chart install, so ES resolves its peers on the
+#    very first connection attempt. If ES starts before DNS is ready, the JVM
+#    caches the negative lookup and the remote stays disconnected until a manual
+#    reconnect. No public DNS in this rig → map each peer's public hostname to
+#    its kind container IP via the hosts plugin.
 # ─────────────────────────────────────────────────────────────────────────────
 patch_coredns() {
   local site="$1" peer="$2" peer_ip="$3"
   local ctx="$(ctx_name "${site}")"
   log "[${site}] patching CoreDNS so es-remote-${peer}.chat.com resolves to ${peer_ip}"
-
-  # Replace the entire Corefile with a known-good version that includes a
-  # `hosts` plugin block mapping the peer's public hostname to its container
-  # IP. Simpler and more robust than patching the existing Corefile in place.
   local corefile
   corefile=".:53 {
     errors
@@ -228,15 +203,37 @@ patch_coredns() {
     reload
     loadbalance
 }"
-
   kubectl --context "${ctx}" -n kube-system create cm coredns \
     --from-literal=Corefile="${corefile}" --dry-run=client -o yaml | \
     kubectl --context "${ctx}" -n kube-system apply -f -
   kubectl --context "${ctx}" -n kube-system rollout restart deployment/coredns
-  kubectl --context "${ctx}" -n kube-system rollout status deployment/coredns --timeout=60s
+  kubectl --context "${ctx}" -n kube-system rollout status deployment/coredns --timeout=120s
 }
 patch_coredns site1 site2 "${IP_site2}"
 patch_coredns site2 site1 "${IP_site1}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Helm install the chart on each cluster
+# ─────────────────────────────────────────────────────────────────────────────
+for site in "${SITES[@]}"; do
+  ctx="$(ctx_name "${site}")"
+  log "[${site}] helm install es-chat-${site}"
+  helm --kube-context "${ctx}" upgrade --install "es-chat-${site}" \
+    "${ROOT}/charts/elasticsearch" \
+    -n "${APP_NS}" --force-conflicts \
+    -f "${KIND_MULTI}/values/${site}-multi.yaml"
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Wait for both clusters green
+# ─────────────────────────────────────────────────────────────────────────────
+for site in "${SITES[@]}"; do
+  ctx="$(ctx_name "${site}")"
+  log "[${site}] waiting for es-chat-${site} → green"
+  kubectl --context "${ctx}" -n "${APP_NS}" \
+    wait --for=jsonpath='{.status.health}'=green \
+    "elasticsearch/es-chat-${site}" --timeout=600s
+done
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. CCS is wired automatically by the chart's post-install Job
@@ -251,6 +248,53 @@ patch_coredns site2 site1 "${IP_site1}"
 #
 #    For ad-hoc surgery, register-remotes.sh stays in kind/ — same logic.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Settle + verify CCS. The chart installs site1 before site2, so site1's
+#    first connection attempt fails (peer not up yet) and ES backs off. Now that
+#    BOTH clusters are healthy, bounce each remote once to force an immediate
+#    fresh connect, then assert connected:true. In real prod (peers already
+#    running, real DNS) this settle step is unnecessary — ES connects on its own.
+# ─────────────────────────────────────────────────────────────────────────────
+settle_remote() {
+  local site="$1" peer="$2"
+  local ctx="$(ctx_name "${site}")"
+  local es="https://es-chat-${site}-es-http.${APP_NS}.svc.cluster.local:9200"
+  local rk="es-chat-${peer}"
+  local addr="es-remote-${peer}.chat.com:30443"
+  kubectl --context "${ctx}" -n "${APP_NS}" exec deploy/chat-ingressgateway -- \
+    curl -k -sS -u "elastic:${SHARED_ELASTIC_PW}" -X PUT "${es}/_cluster/settings" \
+    -H 'content-type: application/json' \
+    -d "{\"persistent\":{\"cluster.remote.${rk}.mode\":null,\"cluster.remote.${rk}.proxy_address\":null,\"cluster.remote.${rk}.server_name\":null}}" >/dev/null
+  sleep 2
+  kubectl --context "${ctx}" -n "${APP_NS}" exec deploy/chat-ingressgateway -- \
+    curl -k -sS -u "elastic:${SHARED_ELASTIC_PW}" -X PUT "${es}/_cluster/settings" \
+    -H 'content-type: application/json' \
+    -d "{\"persistent\":{\"cluster.remote.${rk}.mode\":\"proxy\",\"cluster.remote.${rk}.proxy_address\":\"${addr}\",\"cluster.remote.${rk}.server_name\":\"es-remote-${peer}.chat.com\",\"cluster.remote.${rk}.skip_unavailable\":true}}" >/dev/null
+}
+log "Settling CCS connections (bounce each remote now that both clusters are up)"
+settle_remote site1 site2
+settle_remote site2 site1
+
+assert_connected() {
+  local site="$1" peer="$2"
+  local ctx="$(ctx_name "${site}")"
+  local es="https://es-chat-${site}-es-http.${APP_NS}.svc.cluster.local:9200"
+  local i out
+  for i in $(seq 1 24); do
+    out=$(kubectl --context "${ctx}" -n "${APP_NS}" exec deploy/chat-ingressgateway -- \
+      curl -k -sS -u "elastic:${SHARED_ELASTIC_PW}" "${es}/_resolve/cluster/es-chat-${peer}:*" 2>/dev/null)
+    case "${out}" in *'"connected":true'*) sub "[${site}] → ${peer}: connected:true"; return 0;; esac
+    sleep 5
+  done
+  echo "ERROR: [${site}] → ${peer} did not reach connected:true" >&2
+  echo "  last: ${out}" >&2
+  return 1
+}
+log "Verifying CCS reaches connected:true both directions"
+ccs_ok=0
+assert_connected site1 site2 || ccs_ok=1
+assert_connected site2 site1 || ccs_ok=1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Done
@@ -278,3 +322,9 @@ To tear down both clusters:
   ${KIND_MULTI}/teardown-multi.sh
 ─────────────────────────────────────────────────────────────────────
 EOF
+
+if [ "${ccs_ok}" -ne 0 ]; then
+  echo "✗ CCS verification FAILED — see errors above" >&2
+  exit 1
+fi
+echo "✓ CCS verified: connected:true both directions"

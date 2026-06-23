@@ -138,7 +138,7 @@ Drops the entire kind cluster (everything inside it goes with it).
 | Remote registration | `PUT /_cluster/settings` with `proxy_address: <peer>-es-transport.chat.svc.cluster.local:9300` | `PUT /_cluster/settings` with `proxy_address: es-remote-<peer>.chat.com:443` (Istio passthrough → 9300) |
 | Istio Gateway | Only `es-<site>` / `kibana-<site>` (HTTP/UI access). `ccs.publicEndpoint.enabled=false` — no public transport endpoint needed | All three per site (`ccs.publicEndpoint.enabled=true`); `es-remote-<site>` Gateway routes 443 → transport 9300 |
 | AuthorizationPolicy | Workload-selector-scoped to ES + Kibana pods only — does NOT cover the gateway pod (port 443) | Same scoping |
-| DestinationRule | `chat-es-passthrough` disables sidecar mTLS originate to `*.chat.svc.cluster.local` so gateway PASSTHROUGH lands on ES's own TLS | Same |
+| DestinationRule | per-host `<es>-es-http-passthrough` + `<es>-es-transport-passthrough` disable sidecar mTLS-originate to the ES Services so gateway PASSTHROUGH lands on ES's own TLS | Same |
 | Vault secrets | `elastic-user` (shared), `transport-ca` (shared), `<site>/minio` (dummy — chart references it but kind has no MinIO) | `elastic-user`, `transport-ca`, `<site>/minio` (real) |
 | Sidecar exclusions | 9200, 9300 excluded inbound; 9300 outbound via `cluster.istioConfig` annotations | Same |
 | Storage | `standard` (kind default), 2Gi | Region-specific SSD class, 50–500Gi |

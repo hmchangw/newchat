@@ -79,6 +79,10 @@ ccs:
 
   registrationJob:
     enabled: true
+    # The shipped Job only needs `curl` (health is parsed with grep, the PUT
+    # body is built in shell) — so the official curlimages/curl is enough. If
+    # you customise the Job to parse JSON, point this at an image that also has
+    # `jq` (e.g. a curl+jq alpine image); the default has curl only.
     image: curlimages/curl:8.10.0
     backoffLimit: 6
     healthTimeoutSeconds: 600
@@ -86,16 +90,15 @@ ccs:
 
   transport:
     enabled: false
-    # Name of the K8s Secret containing the shared transport CA cert+key
-    # (kind: tls). Every site references the same Secret name so node certs
-    # all chain to one root.
-    caSecretName: chat-transport-ca
-    # Whether THIS chart release manages the VaultStaticSecret that produces
-    # the shared CA. The Secret itself is shared across every release in the
-    # namespace, so exactly ONE release should own it (else Helm refuses the
-    # second install). Convention: site1's release sets this true, all others
-    # set false.
-    manageCASecret: false
+    # Local K8s Secret (kind: tls) holding this cluster's copy of the shared
+    # transport CA cert+key. Each cluster always creates its own copy from the
+    # shared Vault path (vault.paths.transportCA) — the CONTENT is identical
+    # across clusters (→ mutual trust), only the local NAME differs.
+    #
+    # Defaults to "<cluster.name>-<division>-transport-ca" (unique per cluster,
+    # so two releases in one namespace never collide). Leave unset; only
+    # override if you must pin a specific name.
+    # caSecretName: ""
 
   publicEndpoint:
     enabled: false

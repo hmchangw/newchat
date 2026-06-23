@@ -140,7 +140,7 @@ kind-multi/
 ├── setup-multi.sh             # bring-up + cross-cluster wiring + registration
 ├── teardown-multi.sh          # delete both kind clusters
 └── values/
-    ├── site1-multi.yaml       # site1 chart values (publicEndpoint.enabled, manageCASecret)
+    ├── site1-multi.yaml       # site1 chart values (publicEndpoint.enabled)
     └── site2-multi.yaml       # site2 chart values
 ```
 

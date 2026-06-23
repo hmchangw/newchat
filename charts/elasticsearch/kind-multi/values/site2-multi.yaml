@@ -52,8 +52,6 @@ ccs:
     publicPort: "30443"          # multi-kind exposes Istio LB on NodePort 30443
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: true
   publicEndpoint:
     enabled: true
 

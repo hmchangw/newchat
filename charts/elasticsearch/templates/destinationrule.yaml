@@ -1,23 +1,55 @@
-{{- if and .Values.enableApps.virtualService .Values.ccs.transport.manageCASecret }}
-{{- /* Gated on manageCASecret because both this DestinationRule and the
-       shared CA Secret are namespace-level singletons — only one release
-       should own them. By convention site1 manages both. */}}
+{{- if .Values.enableApps.virtualService }}
 {{- /*
    Disables Istio sidecar mTLS origination for traffic the ingressgateway
-   sends to ES + Kibana backend Services. Without this, the gateway tries to
-   wrap the connection in mTLS but the ES pods have port 9200/5601 excluded
-   from the sidecar (so they speak plain HTTPS, not mTLS). Result: TLS
-   handshake aborts with TCP RST. With tls.mode=DISABLE the gateway forwards
-   the original PASSTHROUGH bytes straight to the pod's HTTPS listener.
+   sends to the ES backend Services. The ES pods exclude ports 9200/9300/5601
+   from the sidecar, so they speak their OWN native TLS, not Istio mTLS. Without
+   this rule the gateway tries to originate mTLS to those backends and the
+   handshake aborts with a TCP RST (ECONNRESET).
+
+   Scoped to specific per-cluster Service hosts (NOT a namespace wildcard), so
+   each is a per-release resource with a unique name — two releases in one
+   namespace never collide, and no "who owns it" gate is needed.
+
+   Two hosts need it, for two distinct gateway paths:
+     - es-http      → client access (es-<site>.<domain> → es-http:9200)
+     - es-transport → INBOUND CCS (es-remote-<site>.<domain> → es-transport:9300)
+   Verified empirically: without the es-transport rule, a peer's CCS handshake
+   to this cluster RSTs (errno 104) and the remote stays disconnected.
 */}}
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
-  name: chat-es-passthrough
+  name: {{ include "chat.es.fullname" . }}-es-http-passthrough
   namespace: {{ .Values.cluster.namespace }}
 spec:
-  host: "*.{{ .Values.cluster.namespace }}.svc.cluster.local"
+  host: {{ include "chat.es.fullname" . }}-es-http.{{ .Values.cluster.namespace }}.svc.cluster.local
   trafficPolicy:
     tls:
       mode: DISABLE
+{{- if .Values.ccs.transport.enabled }}
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "chat.es.fullname" . }}-es-transport-passthrough
+  namespace: {{ .Values.cluster.namespace }}
+spec:
+  host: {{ include "chat.es.fullname" . }}-es-transport.{{ .Values.cluster.namespace }}.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+{{- end }}
+{{- if .Values.enableApps.kibana }}
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "chat.kibana.fullname" . }}-kb-http-passthrough
+  namespace: {{ .Values.cluster.namespace }}
+spec:
+  host: {{ include "chat.kibana.fullname" . }}-kb-http.{{ .Values.cluster.namespace }}.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+{{- end }}
 {{- end }}

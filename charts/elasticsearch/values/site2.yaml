@@ -1,4 +1,4 @@
-# Phase 2 prod — site2 (mirror of site1.yaml; manageCASecret=false).
+# Phase 2 prod — site2.
 properties:
   site: site2
   stage: PROD
@@ -14,8 +14,6 @@ ccs:
     enabled: true              # post-install Job runs PUT /_cluster/settings for every peer
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: false      # site1 owns the shared CA Secret in this ns
   publicEndpoint:
     enabled: true
 

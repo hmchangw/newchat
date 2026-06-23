@@ -25,8 +25,10 @@ ECK's `spec.remoteClusters` automation is Enterprise-gated).
      for **TLS PASSTHROUGH** — the gateway does NOT terminate TLS.
    - The `VirtualService` routes the TLS-encrypted bytes to the backend
      Service `es-chat-site1-es-http:9200`.
-   - The `DestinationRule` `chat-es-passthrough` sets `tls.mode: DISABLE`,
-     telling the gateway's Envoy NOT to mTLS-originate to the backend.
+   - The per-host `DestinationRule`s (`<es>-es-http-passthrough` and
+     `<es>-es-transport-passthrough`) set `tls.mode: DISABLE`, telling the
+     gateway's Envoy NOT to mTLS-originate to the backend. Both are required:
+     es-http for client access, es-transport for inbound CCS.
    - The pod-level `traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"`
      annotation makes the receiving sidecar transparent — bytes go directly
      to the ES container, which terminates the client's TLS.
@@ -149,22 +151,26 @@ helm upgrade --install es-chat-site2 ./charts/elasticsearch \
   -f charts/elasticsearch/kind/values/site2-kind.yaml
 ```
 
-The key bit in the values files:
+The key bit in the values files is just enabling transport CCS — every cluster
+is symmetric:
 
 ```yaml
-# site1-kind.yaml
+# site1-kind.yaml AND site2-kind.yaml — identical transport block
 ccs:
   enabled: true
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: true       # site1 ONLY — creates the namespace's shared CA Secret + DestinationRule
-
-# site2-kind.yaml
-ccs:
-  transport:
-    manageCASecret: false      # every other site references but doesn't manage
+    # caSecretName is auto-derived as <cluster.name>-<division>-transport-ca
+    # (unique per cluster). Each cluster always creates its own copy of the
+    # shared CA from Vault path vault.paths.transportCA — same CONTENT, local
+    # NAME. No manageCASecret / "who owns the shared Secret" flag exists.
 ```
+
+> Historical note: earlier versions used a single shared-name Secret guarded by
+> `ccs.transport.manageCASecret` (true on one release, false on the rest). That
+> footgun is gone — the per-cluster name means two releases in one namespace
+> never collide, so the Secret (and the per-host DestinationRules) are always
+> created. A stray `manageCASecret: false` was what starved a cluster of its CA.
 
 `--force-conflicts` is necessary because ECK takes server-side-apply
 ownership of `spec.nodeSets` after first reconciliation.
@@ -285,11 +291,11 @@ GET messages-*,es-chat-site2:messages-*/_search
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Helm install fails: `chat-transport-ca exists and cannot be imported into the current release` | Both releases trying to manage the same namespace-singleton Secret | Set `ccs.transport.manageCASecret: true` on exactly one release, `false` on all others |
 | `helm upgrade` fails: `conflict with elastic-operator using elasticsearch.k8s.elastic.co: .spec.nodeSets` | ECK has SSA ownership of nodeSets after first reconcile | Add `--force-conflicts` |
-| `_remote/info` returns `connected: false` | Both clusters not signed by the same CA | Verify `kubectl -n chat get secret chat-transport-ca` exists and both clusters reference it via `spec.transport.tls.certificate` |
+| `_remote/info` returns `connected: false`, leaf cert issuer is `CN=elastic-<cluster>-transport` | ECK fell back to self-signing — it never consumed the shared CA | Confirm `kubectl -n <ns> get secret <es>-transport-ca` exists, is `type: kubernetes.io/tls`, and **has `tls.key`** (cert-only → ECK can't sign); and that `spec.transport.tls.certificate.secretName` references it. See `docs/CCS-OPERATIONAL-NOTES.md` §1. |
+| `_remote/info` connected:false, error `connect_exception` / `errno=104` (RST) on the transport handshake | Gateway is mTLS-originating to the sidecar-excluded `es-transport:9300` | Verify the `<es>-es-transport-passthrough` DestinationRule exists (`tls.mode: DISABLE`). Both `es-http` AND `es-transport` rules are required. |
 | `_remote/info` shows connected, but `_search` returns `unable to authenticate user` | Calling user has different password on remote | Confirm the Vault path `elasticsearch/elastic-user` is consumed by both releases (check `vault.paths.elasticUser` in both values files) |
-| `https://es-site1.chat.com` returns RST after TLS handshake | Gateway is mTLS-originating to ES whose 9200 is sidecar-excluded | Verify the `chat-es-passthrough` DestinationRule exists (created when at least one release has `manageCASecret: true`) |
+| `https://es-site1.chat.com` returns RST after TLS handshake | Gateway is mTLS-originating to ES whose 9200 is sidecar-excluded | Verify the `<es>-es-http-passthrough` DestinationRule exists (`tls.mode: DISABLE`) |
 | `https://es-site1.chat.com` returns immediate connection close | AuthorizationPolicy missing the workload selector and blocking the gateway pod (port 443) | Verify `kubectl -n chat get authorizationpolicy chat-es-site1-authz -o yaml` has `spec.selector.matchLabels.common.k8s.elastic.co/type: elasticsearch` (default) |
 | ES pods crash-loop with `xpack.security.remote_cluster_server.ssl - server ssl configuration requires a key and certificate` | Stale state — the chart used to inject this; latest chart removed it | `helm upgrade --force-conflicts` to re-render with the current template |
 | `helm install` fails with `Job register-remotes-<site> failed` | Job timed out waiting for ES health, or PUT failed with non-200 | `kubectl -n chat logs job/register-remotes-<site>` to see why; common causes: ES not green within `ccs.registrationJob.healthTimeoutSeconds` (bump it), wrong elastic password (check Vault), peer hostname unresolvable when `mode: public` (verify DNS) |
@@ -303,18 +309,18 @@ GET messages-*,es-chat-site2:messages-*/_search
 charts/elasticsearch/
 ├── values.yaml                          # Defaults — sized for kind (3+1+3 nodes, 256Mi/512Mi)
 ├── values/
-│   ├── site1.yaml                       # Phase 2 prod values (manageCASecret=true)
-│   └── site2.yaml                       # Phase 2 prod values (manageCASecret=false)
+│   ├── site1.yaml                       # Phase 2 prod values (symmetric across sites)
+│   └── site2.yaml                       # Phase 2 prod values (symmetric across sites)
 ├── templates/
 │   ├── es-cluster.yaml                  # Elasticsearch CR (shared transport CA reference)
 │   ├── kibana.yaml                      # Kibana CR
 │   ├── gateway.yaml                     # Istio Gateways — 443 TLS PASSTHROUGH per hostname
 │   ├── virtualservice.yaml              # SNI-routed VirtualServices (443 → 9200 / 5601 / 9300)
 │   ├── authorization-policy.yaml        # Workload-selector-scoped to ES + Kibana
-│   ├── destinationrule.yaml             # chat-es-passthrough — gated on manageCASecret
+│   ├── destinationrule.yaml             # per-host es-http + es-transport (+ kibana) tls.mode=DISABLE
 │   ├── job-register-remotes.yaml       # Post-install Job — registers ccs.peers via PUT /_cluster/settings
 │   ├── vault-secret-elastic-user.yaml   # Per-site VaultStaticSecret for elastic password
-│   ├── vault-secret-transport-ca.yaml   # Shared CA VaultStaticSecret — gated on manageCASecret
+│   ├── vault-secret-transport-ca.yaml   # Per-cluster copy of the shared CA (from Vault), always created
 │   └── vault-secret-es-minio.yaml       # MinIO snapshot creds VaultStaticSecret
 └── kind/                                # Local kind setup that exercises this chart
     ├── README.md                        # End-to-end bring-up instructions

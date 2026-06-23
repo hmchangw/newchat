@@ -59,8 +59,6 @@ ccs:
     enabled: true                # post-install Job auto-registers site2
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: true         # site1 owns the shared CA VaultStaticSecret in this ns
   publicEndpoint:
     enabled: false               # same-namespace, no public hostname needed
 

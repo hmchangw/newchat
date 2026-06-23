@@ -102,6 +102,26 @@ for every per-cluster Service / Secret / certificate name ECK creates.
 {{- end -}}
 
 {{/*
+Name of the local K8s Secret holding THIS cluster's copy of the shared
+transport CA. Defaults to <es-fullname>-transport-ca, which is unique per
+cluster — so two releases in one namespace never collide on the Secret, and
+there is no "who owns the shared Secret" question to get wrong.
+
+The NAME is per-cluster and purely local (each cluster's
+spec.transport.tls.certificate.secretName points at its own). The CONTENT is
+shared: every cluster's VaultStaticSecret reads the same Vault path
+(vault.paths.transportCA), so all node certs chain to one root and mutually
+trust. Override via ccs.transport.caSecretName only if you must.
+*/}}
+{{- define "chat.transport.caSecretName" -}}
+{{- if .Values.ccs.transport.caSecretName -}}
+{{- .Values.ccs.transport.caSecretName -}}
+{{- else -}}
+{{- printf "%s-transport-ca" (include "chat.es.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Kibana fullname: <kibana.name>-<properties.division>
 */}}
 {{- define "chat.kibana.fullname" -}}

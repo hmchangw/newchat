@@ -1,5 +1,5 @@
 # Phase 1 same-namespace kind test — site2 (cert-based CCS, Basic tier).
-# Mirror of site1-kind.yaml — only differs in site identifier and manageCASecret=false.
+# Mirror of site1-kind.yaml — only differs in site identifier.
 properties:
   site: site2
   stage: PROD
@@ -45,8 +45,6 @@ ccs:
     enabled: true                # post-install Job auto-registers site1
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: false        # site1 owns the shared CA Secret in this ns
   publicEndpoint:
     enabled: false
 

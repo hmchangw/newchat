@@ -16,8 +16,6 @@ ccs:
     enabled: true              # post-install Job runs PUT /_cluster/settings for every peer
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: true       # site1 owns the shared CA VaultStaticSecret in this ns; site2..site12 set false
   publicEndpoint:
     enabled: true              # render es-remote-site1.chat.com Gateway+VS (443 → transport 9300)
 

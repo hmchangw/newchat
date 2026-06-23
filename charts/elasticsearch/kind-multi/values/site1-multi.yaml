@@ -58,8 +58,6 @@ ccs:
     publicPort: "30443"          # multi-kind exposes Istio LB on NodePort 30443
   transport:
     enabled: true
-    caSecretName: chat-transport-ca
-    manageCASecret: true         # each cluster owns its own copy in its own ns
   publicEndpoint:
     enabled: true                # render Gateway+VS for es-remote-site1.chat.com → transport 9300
 
