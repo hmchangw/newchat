@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"time"
 
+	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -36,11 +37,17 @@ type clusterClient struct {
 
 // ConnectCluster dials a Valkey cluster via the provided seed addresses,
 // verifies connectivity with PING, and returns a Client.
-func ConnectCluster(ctx context.Context, addrs []string, password string) (Client, error) {
+func ConnectCluster(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
 	c := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:    addrs,
 		Password: password,
 	})
+	if err := instrumentCluster(c, newConnectConfig(opts...)); err != nil {
+		if closeErr := c.Close(); closeErr != nil {
+			slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
+		}
+		return nil, err
+	}
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := c.Ping(pingCtx).Err(); err != nil {
@@ -53,6 +60,20 @@ func ConnectCluster(ctx context.Context, addrs []string, password string) (Clien
 	}
 	slog.Info("connected to Valkey cluster", "addrs", addrs)
 	return &clusterClient{c: c}, nil
+}
+
+// instrumentCluster attaches o11y/redis tracing and metrics hooks to c when
+// observability is configured. o11yredis.Wrap mutates the client in place
+// (adding hooks) and is idempotent, registering its own metrics teardown via a
+// runtime cleanup — so Disconnect needs no extra handling.
+func instrumentCluster(c *redis.ClusterClient, cc connectConfig) error {
+	if cc.obs == nil {
+		return nil
+	}
+	if _, err := o11yredis.Wrap(c, cc.obs.TracerProvider(), cc.obs.MeterProvider()); err != nil {
+		return fmt.Errorf("instrument valkey client: %w", err)
+	}
+	return nil
 }
 
 // WrapClusterClient wraps a pre-built *redis.ClusterClient as a Client.
