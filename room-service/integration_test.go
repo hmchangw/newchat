@@ -14,13 +14,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -1479,7 +1481,7 @@ func TestAddMembers_TwoSiteEndToEnd(t *testing.T) {
 	storeA := NewMongoStore(dbA)
 	storeB := NewMongoStore(dbB)
 
-	otelNCb, err := otelnats.Connect(natsURLb)
+	otelNCb, err := o11ynats.Connect(context.Background(), natsURLb, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNCb.Drain() })
 
@@ -1562,7 +1564,7 @@ func TestAddMembers_CrossSiteTimeout(t *testing.T) {
 	natsURL := setupNATS(t)
 	keyStore := setupKeyStore(t, db)
 	store := NewMongoStore(db)
-	otelNC, err := otelnats.Connect(natsURL)
+	otelNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
@@ -1613,7 +1615,7 @@ func TestRoomsInfoBatchRPC_NoRequestID(t *testing.T) {
 
 	mustInsertRoom(t, db, &model.Room{ID: "r1", Name: "room-1", Type: model.RoomTypeChannel, SiteID: "site-a"})
 
-	otelNC, err := otelnats.Connect(natsURL)
+	otelNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
@@ -1670,7 +1672,7 @@ func TestRoomsInfoBatchRPC(t *testing.T) {
 	_, err = keyStore.Set(ctx, "r2", roomkeystore.RoomKeyPair{PrivateKey: privKey2})
 	require.NoError(t, err)
 
-	otelNC, err := otelnats.Connect(natsURL)
+	otelNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
@@ -3095,7 +3097,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 		js := setupRoomsStream(t, clientNC, siteID)
 
 		// Wire a JetStream-backed publishToStream on the handler.
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3168,7 +3170,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 		store := NewMongoStore(db)
 
 		natsURL := setupNATS(t)
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3230,7 +3232,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = clientNC.Drain() })
 
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3337,7 +3339,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		store := NewMongoStore(db)
 
 		natsURL := setupNATS(t)
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 

@@ -12,7 +12,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 )
 
 func TestReadPreference(t *testing.T) {
@@ -74,16 +74,16 @@ func TestNowMs(t *testing.T) {
 	assert.Positive(t, a)
 }
 
-// fakeJetStream embeds the oteljetstream.JetStream interface (unimplemented methods panic if
+// fakeJetStream embeds the o11ynats.JetStream interface (unimplemented methods panic if
 // called, which these tests never do) and overrides only CreateOrUpdateConsumer.
 type fakeJetStream struct {
-	oteljetstream.JetStream
+	o11ynats.JetStream
 	calls int
 	err   error
 }
 
-//nolint:gocritic // cfg by value matches the oteljetstream.JetStream interface signature.
-func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ jetstream.ConsumerConfig) (oteljetstream.Consumer, error) {
+//nolint:gocritic // cfg by value matches the o11ynats.JetStream interface signature.
+func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
 	f.calls++
 	return nil, f.err
 }

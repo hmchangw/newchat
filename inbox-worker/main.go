@@ -15,15 +15,13 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
-	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -451,6 +449,15 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoo
 	return nil
 }
 
+// laneMsg pairs a consumed JetStream message with the per-message context
+// carrying its consumer span. The o11y/nats facade delivers (ctx, jetstream.Msg)
+// separately rather than an o11y-owned message type, so the two-lane dispatch
+// carries them together through membershipCh.
+type laneMsg struct {
+	ctx context.Context
+	msg jetstream.Msg
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -462,13 +469,13 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "inbox-worker")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -485,13 +492,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
@@ -529,25 +536,43 @@ func main() {
 	// Membership traffic is a tiny fraction of the lane, so serializing it
 	// costs negligible throughput while the read-receipt path keeps its full
 	// MaxWorkers concurrency.
-	iter, err := cons.Messages(jetstream.PullMaxMessages(2 * cfg.MaxWorkers))
+	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
-	membershipCh := make(chan oteljetstream.Msg, cfg.MaxWorkers)
+	membershipCh := make(chan laneMsg, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	process := func(msg oteljetstream.Msg) {
+	process := func(m laneMsg) {
 		// jobguard recovers handler panics — both the membership lane and the
 		// fan-out goroutines run outside natsrouter's Recovery middleware, so an
 		// unrecovered panic would crash the worker and crash-loop on JetStream
 		// redelivery. On panic it Acks (poison drop).
-		jobguard.Run(msg.Msg, func() {
-			handlerCtx, _ := natsutil.StampRequestID(msg.Context(), msg.Headers(), msg.Subject())
-			// Federated events: Ack-drop poison, Nak transient with backoff.
-			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
+		jobguard.Run(m.msg, func() {
+			msg := m.msg
+			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
+			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
+				// Permanent failures (poison messages) Ack so JetStream stops
+				// redelivering; transient infra errors Nak for redelivery.
+				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
+					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
+					if err := msg.Ack(); err != nil {
+						slog.Error("failed to ack permanent message", "error", err)
+					}
+					return
+				}
+				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
+				if err := msg.Nak(); err != nil {
+					slog.Error("failed to nak message", "error", err)
+				}
+				return
+			}
+			if err := msg.Ack(); err != nil {
+				slog.Error("failed to ack message", "error", err)
+			}
 		})
 	}
 
@@ -568,7 +593,7 @@ func main() {
 			if err != nil {
 				return
 			}
-			m := oteljetstream.Msg{Msg: msg, Ctx: msgCtx}
+			m := laneMsg{ctx: msgCtx, msg: msg}
 			if isMembershipSubject(msg.Subject(), cfg.SiteID) {
 				membershipCh <- m
 				continue
@@ -611,9 +636,9 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
 

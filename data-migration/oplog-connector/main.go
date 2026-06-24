@@ -18,12 +18,12 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -38,14 +38,9 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "oplog-connector")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
-		os.Exit(1)
-	}
-	meterShutdown, err := otelutil.InitMeter("oplog-connector")
-	if err != nil {
-		slog.Error("init meter failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 	// role distinguishes the two split deployments in logs and metrics (PR #482 review).
@@ -74,7 +69,7 @@ func main() {
 		}
 	}()
 
-	conn, err := start(ctx, &cfg, m)
+	conn, err := start(ctx, &cfg, m, sdk, sdk.Propagator)
 	if err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
@@ -96,8 +91,7 @@ func main() {
 		case err := <-conn.Fatal():
 			if err != nil {
 				slog.Error("fatal watcher error — exiting", "error", err)
-				_ = tracerShutdown(context.Background())
-				_ = meterShutdown(context.Background())
+				_ = obsShutdown(context.Background())
 				conn.Close()
 				os.Exit(1)
 			}
@@ -111,8 +105,7 @@ func main() {
 		func(context.Context) error { conn.beginShutdown(); return nil },
 		func(ctx context.Context) error { return conn.awaitWatchers(ctx) },
 		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
-		func(ctx context.Context) error { return meterShutdown(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 		func(context.Context) error { return conn.nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, conn.client); return nil },
 	)
@@ -138,7 +131,7 @@ func newMetricsServer() *http.Server {
 // connector owns the running watchers and the connections they share. Close stops watchers (flushing final checkpoints), then drains NATS, then Mongo.
 type connector struct {
 	client *mongo.Client
-	nc     *otelnats.Conn
+	nc     *o11ynats.Conn
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	fatal  chan error
@@ -147,7 +140,7 @@ type connector struct {
 }
 
 // start connects Mongo + NATS, bootstraps the stream, and launches one watcher per collection. Returns a running connector driven via Fatal()/Close().
-func start(ctx context.Context, cfg *config, m *metrics) (*connector, error) {
+func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Observability, prop propagation.TextMapPropagator) (*connector, error) {
 	if cfg.StartResumeToken != "" || cfg.StartAtTime != "" {
 		// One-off seed overrides: left set, they force a reseed (ignoring the checkpoint)
 		// on every restart — so warn loudly. Prefer a seed checkpoint doc.
@@ -155,17 +148,17 @@ func start(ctx context.Context, cfg *config, m *metrics) (*connector, error) {
 			"startResumeTokenSet", cfg.StartResumeToken != "", "startAtTime", cfg.StartAtTime)
 	}
 
-	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword)
+	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword, mongoutil.WithObservability(obsProv))
 	if err != nil {
 		return nil, fmt.Errorf("source mongo connect: %w", err)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, obsProv.TracerProvider(), prop)
 	if err != nil {
 		mongoutil.Disconnect(ctx, client)
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		_ = nc.Drain()
 		mongoutil.Disconnect(ctx, client)

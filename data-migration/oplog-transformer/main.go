@@ -17,12 +17,12 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -39,14 +39,9 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "oplog-transformer")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
-		os.Exit(1)
-	}
-	meterShutdown, err := otelutil.InitMeter("oplog-transformer")
-	if err != nil {
-		slog.Error("init meter failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 	m, err := newMetrics()
@@ -70,7 +65,7 @@ func main() {
 		}
 	}()
 
-	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword)
+	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("source mongo connect failed", "error", err)
 		os.Exit(1)
@@ -85,13 +80,13 @@ func main() {
 	sourceColl := client.Database(cfg.SourceDB).
 		Collection(cfg.SourceMessageCollection, options.Collection().SetReadPreference(rp))
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, client)
 		os.Exit(1)
 	}
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		_ = nc.Drain()
@@ -125,8 +120,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	cc, err := cons.Consume(func(msg oteljetstream.Msg) {
-		processOne(msg.Context(), h, msg, m, cfg.MaxDeliver, cfg.DeleteMaxDeliver)
+	cc, err := cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+		processOne(msgCtx, h, msg, m, cfg.MaxDeliver, cfg.DeleteMaxDeliver)
 	})
 	if err != nil {
 		slog.Error("consume failed", "stream", streamName, "error", err)
@@ -143,8 +138,7 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { cc.Stop(); return nil },
 		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
-		func(ctx context.Context) error { return meterShutdown(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 		func(context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, client); return nil },
 	)
@@ -218,7 +212,7 @@ const streamWaitTimeout = 60 * time.Second
 // (the connector creates it independently); other errors and streamWaitTimeout are returned.
 //
 //nolint:gocritic // hugeParam: cfg is passed by value to match jetstream.CreateOrUpdateConsumer's signature.
-func createConsumerWithRetry(ctx context.Context, js oteljetstream.JetStream, streamName string, cfg jetstream.ConsumerConfig) (oteljetstream.Consumer, error) {
+func createConsumerWithRetry(ctx context.Context, js o11ynats.JetStream, streamName string, cfg jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
 	deadline := time.Now().Add(streamWaitTimeout)
 	for {
 		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, cfg)

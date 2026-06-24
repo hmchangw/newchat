@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -15,10 +15,10 @@ import (
 // event lands in the destination site's INBOX stream across the supercluster.
 // Status events are last-write-wins and idempotent, so no Nats-Msg-Id dedup is
 // needed — a redelivered status overwrite converges to the same value.
-type Publisher struct{ js oteljetstream.JetStream }
+type Publisher struct{ js o11ynats.JetStream }
 
 // New returns a Publisher backed by the given JetStream context.
-func New(js oteljetstream.JetStream) *Publisher { return &Publisher{js: js} }
+func New(js o11ynats.JetStream) *Publisher { return &Publisher{js: js} }
 
 // Publish sends data to subject via JetStream PublishMsg (blocking on PubAck) so
 // X-Request-ID from ctx propagates onto the outgoing message and the event is

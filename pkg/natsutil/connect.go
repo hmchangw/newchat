@@ -1,13 +1,16 @@
 package natsutil
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const defaultReconnectWait = 2 * time.Second
@@ -22,7 +25,19 @@ const defaultReconnectWait = 2 * time.Second
 // The initial connect fails fast: if NATS is unreachable at startup, the
 // caller receives the error and is expected to log + exit. Reconnect handlers
 // fire only after the first successful connect.
-func Connect(url, credsFile string, opts ...nats.Option) (*otelnats.Conn, error) {
+//
+// tp and prop are wired into the underlying o11y/nats layer so trace context
+// propagates across publishers and subscribers without touching global
+// OpenTelemetry state — pass sdk.TracerProvider() and sdk.Propagator from the
+// service's obs.Init.
+func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, opts ...nats.Option) (*o11ynats.Conn, error) {
+	// o11y/nats gates trace-context propagation on two env flags (both default
+	// off) and exposes no programmatic override — when unset, Publish/Subscribe
+	// skip header injection/extraction and cross-NATS trace continuity silently
+	// breaks. This system always wants NATS tracing on, so enable the flags here
+	// unless an operator explicitly set them (e.g. to "false" to opt out).
+	enableNATSTracing()
+
 	if credsFile != "" {
 		if _, err := os.Stat(credsFile); err != nil {
 			return nil, fmt.Errorf("nats creds file %q: %w", credsFile, err)
@@ -49,17 +64,30 @@ func Connect(url, credsFile string, opts ...nats.Option) (*otelnats.Conn, error)
 		}),
 	}
 	baseOpts = append(baseOpts, opts...)
-
-	if credsFile == "" {
-		conn, err := otelnats.ConnectWithOptions(url, baseOpts)
-		if err != nil {
-			return nil, fmt.Errorf("connect nats: %w", err)
-		}
-		return conn, nil
+	// Credentials are just another nats.Option in the o11y/nats path; mounting
+	// them via UserCredentials keeps a single Connect call regardless of auth.
+	if credsFile != "" {
+		baseOpts = append(baseOpts, nats.UserCredentials(credsFile))
 	}
-	conn, err := otelnats.ConnectWithCredentialsWithOptions(url, credsFile, baseOpts)
+
+	conn, err := o11ynats.Connect(ctx, url, tp, prop, baseOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("connect nats with credentials: %w", err)
+		return nil, fmt.Errorf("connect nats: %w", err)
 	}
 	return conn, nil
+}
+
+// enableNATSTracing turns on the o11y/nats (Marz otelnats/oteljetstream) trace
+// gates unless an operator already set them. Both must be truthy for traceparent
+// to flow across NATS; there is no programmatic override, so this is the single
+// enforcement point for every entrypoint (services, dev, tools, tests).
+func enableNATSTracing() {
+	for _, k := range []string{
+		"OTEL_INSTRUMENTATION_GO_TRACING_ENABLED",
+		"OTEL_NATS_TRACING_ENABLED",
+	} {
+		if _, ok := os.LookupEnv(k); !ok {
+			_ = os.Setenv(k, "true")
+		}
+	}
 }

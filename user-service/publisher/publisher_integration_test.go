@@ -7,12 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
+
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -24,14 +26,14 @@ var _ service.EventPublisher = (*Publisher)(nil)
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-// dial returns a connected *otelnats.Conn + JetStream backed by the shared test
-// NATS server. The connection is drained on test cleanup.
-func dial(t *testing.T) (*otelnats.Conn, oteljetstream.JetStream) {
+// dial returns a connected *o11ynats.Conn backed by the shared test NATS
+// server. The connection is drained on test cleanup.
+func dial(t *testing.T) (*o11ynats.Conn, o11ynats.JetStream) {
 	t.Helper()
-	nc, err := otelnats.Connect(testutil.NATS(t))
+	nc, err := o11ynats.Connect(context.Background(), testutil.NATS(t), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	require.NoError(t, err)
 	return nc, js
 }
@@ -54,8 +56,8 @@ func TestPublish_Integration(t *testing.T) {
 	// A core subscriber on the subject receives the JetStream publish directly,
 	// letting us assert the payload + propagated X-Request-ID header.
 	received := make(chan *nats.Msg, 1)
-	sub, err := nc.Subscribe(subj, func(m otelnats.Msg) {
-		received <- m.Msg
+	sub, err := nc.Subscribe(context.Background(), subj, func(_ context.Context, m *nats.Msg) {
+		received <- m
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sub.Unsubscribe() })

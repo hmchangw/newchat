@@ -11,7 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
@@ -19,7 +19,7 @@ import (
 
 // Router manages NATS subscriptions with pattern-based routing and middleware.
 type Router struct {
-	nc         *otelnats.Conn
+	nc         *o11ynats.Conn
 	queue      string
 	middleware []HandlerFunc
 
@@ -72,7 +72,7 @@ func WithMaxConcurrency(n int) Option {
 // New creates a Router with the given NATS connection and queue group.
 // By default, the router spawns handlers unboundedly (no admission
 // control). Use WithMaxConcurrency to opt into a concurrency cap.
-func New(nc *otelnats.Conn, queue string, opts ...Option) *Router {
+func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := &Router{
 		nc:    nc,
 		queue: queue,
@@ -101,7 +101,7 @@ func New(nc *otelnats.Conn, queue string, opts ...Option) *Router {
 // Logging measures via time.Since(start) in its post-c.Next() phase, so
 // the logged duration captures the full chain regardless of where
 // HandlerTimeout sits relative to Logging in the chain.
-func Default(nc *otelnats.Conn, queue string, opts ...Option) *Router {
+func Default(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := New(nc, queue, opts...)
 	r.Use(Recovery(), RequestID(), Logging())
 	return r
@@ -167,16 +167,16 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	all = append(all, r.middleware...)
 	all = append(all, handlers...)
 
-	natsHandler := func(m otelnats.Msg) {
+	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
-			r.replyBusy(m.Msg)
+			r.replyBusy(m)
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
-			r.replyBusy(m.Msg)
+			r.replyBusy(m)
 			return
 		}
 		r.wg.Add(1)
@@ -199,22 +199,27 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 					// "operator should fix the middleware setup", not
 					// "production incident".
 					slog.Warn("natsrouter: panic in handler caught by spawn backstop",
-						"subject", m.Msg.Subject,
+						"subject", m.Subject,
 						"panic", rec,
 						"stack", string(debug.Stack()))
-					if m.Msg.Reply != "" {
+					if m.Reply != "" {
 						// Already logged via the Warn above; ReplyQuiet avoids a second line.
-						errnats.ReplyQuiet(m.Msg, errcode.Internal("internal error"))
+						errnats.ReplyQuiet(m, errcode.Internal("internal error"))
 					}
 				}
 			}()
-			c := acquireContext(m.Context(), m.Msg, rt.extractParams(m.Msg.Subject), all)
+			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all)
 			defer releaseContext(c)
 			c.Next()
 		}()
 	}
 
-	sub, err := r.nc.QueueSubscribe(rt.natsSubject, r.queue, natsHandler)
+	// context.Background is intentional: o11y/nats QueueSubscribe consults ctx
+	// only as a registration-time guard (an already-cancelled ctx is rejected)
+	// and never plumbs it into delivery. Subscription lifetime is managed by
+	// Shutdown via Subscription.Drain, not ctx. Per-message trace context flows
+	// from the inbound headers into the handler's ctx argument.
+	sub, err := r.nc.QueueSubscribe(context.Background(), rt.natsSubject, r.queue, natsHandler)
 	if err != nil {
 		panic(fmt.Sprintf("natsrouter: subscribing to %s: %v", rt.natsSubject, err))
 	}

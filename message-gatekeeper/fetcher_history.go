@@ -6,8 +6,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
-
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
@@ -21,11 +20,11 @@ const historyRequestTimeout = 2 * time.Second
 // request to history-service's GetMessageByID handler. The base URL is used
 // to build messageLink; it is injected so unit tests can supply any value.
 type historyParentFetcher struct {
-	nc          *otelnats.Conn
+	nc          *o11ynats.Conn
 	chatBaseURL string
 }
 
-func newHistoryParentFetcher(nc *otelnats.Conn, chatBaseURL string) *historyParentFetcher {
+func newHistoryParentFetcher(nc *o11ynats.Conn, chatBaseURL string) *historyParentFetcher {
 	return &historyParentFetcher{nc: nc, chatBaseURL: chatBaseURL}
 }
 

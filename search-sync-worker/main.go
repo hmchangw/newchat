@@ -15,7 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -160,9 +160,9 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "search-sync-worker")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -172,7 +172,7 @@ func main() {
 		Username:      cfg.SearchUsername,
 		Password:      cfg.SearchPassword,
 		TLSSkipVerify: cfg.SearchTLSSkipVerify,
-	})
+	}, searchengine.WithObservability(sdk))
 	if err != nil {
 		slog.Error("search engine connect failed", "error", err)
 		os.Exit(1)
@@ -216,12 +216,15 @@ func main() {
 		}
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
-	js, err := oteljetstream.New(nc)
+	// Local JetStream consumers use oteljetstream so Fetch deliveries carry
+	// consumer spans. The HR domain path below stays raw because oteljetstream
+	// has no domain-scoped constructor.
+	js, err := oteljetstream.New(nc.NatsConn())
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
@@ -360,7 +363,7 @@ func main() {
 			}
 			return nil
 		},
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return healthStop(ctx) },
 	)

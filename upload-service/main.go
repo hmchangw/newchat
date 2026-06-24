@@ -14,8 +14,8 @@ import (
 	"github.com/hmchangw/chat/pkg/drive"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
-	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -81,12 +81,12 @@ func run() error {
 	ctx := context.Background()
 	cfg.Drive.LoadBaseURLs()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "upload-service")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		return fmt.Errorf("init tracer: %w", err)
+		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("mongo connect: %w", err)
 	}
@@ -150,7 +150,7 @@ func run() error {
 		defer close(shutdownDone)
 		shutdown.Wait(ctx, 25*time.Second,
 			func(ctx context.Context) error { return srv.Shutdown(ctx) },
-			func(ctx context.Context) error { return tracerShutdown(ctx) },
+			func(ctx context.Context) error { return obsShutdown(ctx) },
 			func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		)
 	}()

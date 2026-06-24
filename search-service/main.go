@@ -17,7 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
@@ -111,9 +111,9 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "search-service")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -123,25 +123,25 @@ func main() {
 		Username:      cfg.ES.Username,
 		Password:      cfg.ES.Password,
 		TLSSkipVerify: cfg.ES.TLSSkipVerify,
-	})
+	}, searchengine.WithObservability(sdk))
 	if err != nil {
 		slog.Error("search engine connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password)
+	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password, valkeyutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(cfg.NATS.URL, cfg.NATS.CredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -225,10 +225,10 @@ func main() {
 		// Wait for in-flight handlers BEFORE nc.Drain so they can't touch torn-down deps.
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkey); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		// /metrics last so Prometheus can scrape the final drain-window observations.
 		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
