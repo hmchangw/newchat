@@ -33,8 +33,6 @@ var (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("parse config", "error", err)

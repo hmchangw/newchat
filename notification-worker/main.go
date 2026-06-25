@@ -115,7 +115,6 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	pretouchJSON()
 
 	cfg, err := env.ParseAs[config]()
