@@ -6,19 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -35,7 +33,6 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)})))
 
 	ctx := context.Background()
 
@@ -50,20 +47,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind synchronously so a port conflict fails startup loudly rather than
-	// running blind — observability is the stall signal for this single-replica pump.
-	metricsServer := newMetricsServer()
-	ln, err := net.Listen("tcp", cfg.MetricsAddr)
+	// Bind synchronously so a port conflict fails startup loudly. Metrics are
+	// owned by the o11y SDK's Prometheus endpoint; this is health-only.
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("health server failed to start", "addr", cfg.HealthAddr, "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("metrics+health server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
 	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword, mongoutil.WithObservability(sdk))
 	if err != nil {
@@ -133,14 +123,14 @@ func main() {
 	slog.Info("oplog-transformer started",
 		"site", cfg.SiteID, "stream", streamName, "collection", cfg.SourceMessageCollection)
 
-	// Ordered, timeout-bounded cleanup:
-	// stop consume → metrics/health → observability → NATS drain → Mongo.
+	// Ordered, timeout-bounded cleanup: stop consume → health → NATS drain →
+	// Mongo → flush observability LAST so all teardown telemetry exports.
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { cc.Stop(); return nil },
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return obsShutdown(ctx) },
+		func(ctx context.Context) error { return healthStop(ctx) },
 		func(context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, client); return nil },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
 
@@ -231,23 +221,6 @@ func createConsumerWithRetry(ctx context.Context, js o11ynats.JetStream, streamN
 	}
 }
 
-// newMetricsServer builds the /metrics + /healthz HTTP server with timeouts that guard against hung scrapers tying up goroutines.
-func newMetricsServer() *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	return &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-}
-
 func readPreference(s string) (*readpref.ReadPref, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "primary":
@@ -262,18 +235,5 @@ func readPreference(s string) (*readpref.ReadPref, error) {
 		return readpref.Nearest(), nil
 	default:
 		return nil, fmt.Errorf("invalid SOURCE_READ_PREFERENCE: %s", s)
-	}
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
 	}
 }

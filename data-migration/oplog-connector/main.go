@@ -2,17 +2,13 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
@@ -21,6 +17,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 	"go.opentelemetry.io/otel/propagation"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,7 +31,6 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)})))
 
 	ctx := context.Background()
 
@@ -54,20 +50,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind synchronously so a port conflict fails startup loudly rather than
-	// running blind — observability is the stall signal for this single-replica pump.
-	metricsServer := newMetricsServer()
-	ln, err := net.Listen("tcp", cfg.MetricsAddr)
+	// Bind synchronously so a port conflict fails startup loudly. Metrics are
+	// owned by the o11y SDK's Prometheus endpoint; this is health-only.
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("health server failed to start", "addr", cfg.HealthAddr, "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("metrics+health server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
 	conn, err := start(ctx, &cfg, m, sdk, sdk.Propagator)
 	if err != nil {
@@ -99,33 +88,16 @@ func main() {
 		}
 	}()
 
-	// Ordered, timeout-bounded cleanup:
-	// stop readers → drain watchers → metrics/health → observability → NATS → Mongo.
+	// Ordered, timeout-bounded cleanup: stop readers → drain watchers → health →
+	// NATS → Mongo → flush observability LAST so all teardown telemetry exports.
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { conn.beginShutdown(); return nil },
 		func(ctx context.Context) error { return conn.awaitWatchers(ctx) },
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return obsShutdown(ctx) },
+		func(ctx context.Context) error { return healthStop(ctx) },
 		func(context.Context) error { return conn.nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, conn.client); return nil },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
-}
-
-// newMetricsServer builds the /metrics + /healthz HTTP server with timeouts that guard against hung scrapers tying up goroutines.
-func newMetricsServer() *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	return &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
 }
 
 // connector owns the running watchers and the connections they share. Close stops watchers (flushing final checkpoints), then drains NATS, then Mongo.
@@ -277,18 +249,5 @@ func readPreference(s string) (*readpref.ReadPref, error) {
 		return readpref.Nearest(), nil
 	default:
 		return nil, fmt.Errorf("invalid READ_PREFERENCE: %s", s)
-	}
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
 	}
 }

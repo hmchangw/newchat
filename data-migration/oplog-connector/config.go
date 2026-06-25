@@ -42,10 +42,9 @@ type config struct {
 
 	Bootstrap bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 
-	// MetricsAddr binds the Prometheus /metrics + /healthz listener (k8s probe target).
-	MetricsAddr string `env:"METRICS_ADDR" envDefault:":9090"`
-
-	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
+	// HealthAddr binds the /healthz listener (k8s probe target). Application and
+	// runtime metrics are exported by the o11y SDK on its own Prometheus endpoint.
+	HealthAddr string `env:"HEALTH_ADDR" envDefault:":9090"`
 }
 
 // parseConfig parses and validates the environment configuration.

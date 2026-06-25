@@ -100,7 +100,8 @@ and the matching `docs/superpowers/plans/2026-06-11-…` + `…2026-06-15-oplog-
 - **Checkpoints:** one doc per collection in `oplog_checkpoints` (in `CHECKPOINT_DB`
   on the source RS). The resume token is the real checkpoint; saved only after a
   pub-ack (lossless).
-- **Observability:** Prometheus `/metrics` + `/healthz` on `METRICS_ADDR` —
+- **Observability:** `/healthz` on `HEALTH_ADDR` for k8s probes; metrics are
+  exported by the o11y SDK on its own Prometheus endpoint —
   `oplog_events_published_total`, `oplog_publish_errors_total`,
   `oplog_events_skipped_total`, `oplog_replication_lag_ms` (all by `collection`).
   For a single-replica pump, **alert on lag and sustained publish errors** — that's
@@ -129,8 +130,7 @@ fail-fast at startup.
 | `START_AT_TIME` | | `""` | RFC3339 or unix-ms; used by `START_MODE=time` **and** as an override (see below) |
 | `START_RESUME_TOKEN` | | `""` | `_data` hex; one-off seed override (see below) |
 | `BOOTSTRAP_STREAMS` | | `false` | dev-only stream creation; **keep `false` in prod** (ops/IaC owns the stream) |
-| `METRICS_ADDR` | | `:9090` | bind addr for the Prometheus `/metrics` + `/healthz` listener |
-| `LOG_LEVEL` | | `info` | slog level (`debug`\|`info`\|`warn`\|`error`) |
+| `HEALTH_ADDR` | | `:9090` | bind addr for the `/healthz` probe listener (metrics are on the o11y SDK's own endpoint) |
 
 **Where the change stream starts (per collection, first match wins):**
 

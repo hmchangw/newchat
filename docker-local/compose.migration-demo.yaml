@@ -57,7 +57,7 @@ services:
       - WATCH_COLLECTIONS=rocketchat_message
       - READ_PREFERENCE=primaryPreferred
       - BOOTSTRAP_STREAMS=true # owns MIGRATION_OPLOG; creates it in dev
-      - METRICS_ADDR=:9090
+      - HEALTH_ADDR=:9090
       - LOG_LEVEL=info
     volumes:
       - ./backend.creds:/etc/nats/backend.creds:ro
@@ -84,7 +84,7 @@ services:
       - SOURCE_DB=rocketchat
       - SOURCE_MESSAGE_COLLECTION=rocketchat_message
       - SOURCE_READ_PREFERENCE=primaryPreferred
-      - METRICS_ADDR=:9090
+      - HEALTH_ADDR=:9090
       - LOG_LEVEL=info
     volumes:
       - ./backend.creds:/etc/nats/backend.creds:ro

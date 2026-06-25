@@ -44,7 +44,6 @@ services:
       - SOURCE_DB=rocketchat
       - NATS_URL=nats://nats:4222
       - SOURCE_READ_PREFERENCE=primaryPreferred
-      - LOG_LEVEL=info
     networks:
       - oplog-local
 

@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,21 +45,6 @@ func TestConnector_AwaitWatchers_TimesOut(t *testing.T) {
 	c.wg.Done() // release the waiting goroutine
 }
 
-func TestNewMetricsServer_Healthz(t *testing.T) {
-	srv := newMetricsServer()
-	rec := httptest.NewRecorder()
-	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "ok", rec.Body.String())
-}
-
-func TestNewMetricsServer_Metrics(t *testing.T) {
-	srv := newMetricsServer()
-	rec := httptest.NewRecorder()
-	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
 func TestReadPreference(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -88,12 +70,4 @@ func TestReadPreference_Invalid(t *testing.T) {
 	_, err := readPreference("quorum")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid READ_PREFERENCE")
-}
-
-func TestParseLevel(t *testing.T) {
-	assert.Equal(t, slog.LevelDebug, parseLevel("debug"))
-	assert.Equal(t, slog.LevelWarn, parseLevel("WARN"))
-	assert.Equal(t, slog.LevelError, parseLevel("error"))
-	assert.Equal(t, slog.LevelInfo, parseLevel("info"))
-	assert.Equal(t, slog.LevelInfo, parseLevel("bogus")) // default
 }
