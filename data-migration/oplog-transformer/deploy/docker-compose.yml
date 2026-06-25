@@ -37,6 +37,8 @@ services:
       nats:
         condition: service_started
     environment:
+      - OTEL_SERVICE_NAME=oplog-transformer
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - SITE_ID=site-local
       - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
       - SOURCE_DB=rocketchat
