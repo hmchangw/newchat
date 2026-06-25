@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
@@ -75,21 +74,6 @@ func accessLogMiddleware() gin.HandlerFunc {
 			"latency_ms", time.Since(start).Milliseconds(),
 			"client_ip", c.ClientIP(),
 		)
-	}
-}
-
-// otelMiddleware starts a span per request using the already-vendored otel API.
-func otelMiddleware() gin.HandlerFunc {
-	tracer := otel.Tracer("upload-service")
-	return func(c *gin.Context) {
-		name := c.FullPath()
-		if name == "" {
-			name = c.Request.URL.Path
-		}
-		ctx, span := tracer.Start(c.Request.Context(), name)
-		defer span.End()
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
 	}
 }
 

@@ -12,7 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nkeys"
 
+	o11ygin "github.com/flywindy/o11y/gin"
+
 	"github.com/hmchangw/chat/pkg/ginutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -67,6 +70,11 @@ func run() error {
 
 	ctx := context.Background()
 
+	sdk, obsShutdown, err := obs.Init(ctx)
+	if err != nil {
+		return fmt.Errorf("init observability: %w", err)
+	}
+
 	opts := []Option{WithJitter(cfg.NATSJWTExpiryJitter)}
 	if cfg.BotplatformURL != "" {
 		rc := restyutil.New("", restyutil.WithTimeout(5*time.Second))
@@ -100,10 +108,14 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// CORS handles preflight before tracing so OPTIONS noise does not pollute Tempo.
+	r.Use(ginutil.CORS())
+	// o11y server-span middleware wraps real requests so downstream slog/handlers
+	// are trace-correlated.
+	r.Use(o11ygin.Middleware("auth-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator)...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
-	r.Use(ginutil.CORS())
 	registerRoutes(r, handler)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
@@ -123,10 +135,13 @@ func run() error {
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		shutdown.Wait(ctx, 25*time.Second, func(ctx context.Context) error {
-			slog.Info("shutting down auth service")
-			return srv.Shutdown(ctx)
-		})
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error {
+				slog.Info("shutting down auth service")
+				return srv.Shutdown(ctx)
+			},
+			func(ctx context.Context) error { return obsShutdown(ctx) },
+		)
 	}()
 
 	err = <-srvErr
