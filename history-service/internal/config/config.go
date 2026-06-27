@@ -46,9 +46,18 @@ type Config struct {
 	MessageBucketHours      int             `env:"MESSAGE_BUCKET_HOURS"        envDefault:"72"`
 	MessageReadMaxBuckets   int             `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
 	MessageHistoryFloorDays int             `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"365"`
-	LargeRoomThreshold      int             `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
-	MaxPinnedPerRoom        int             `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
-	PinEnabled              bool            `env:"PIN_ENABLED"                 envDefault:"true"`
+
+	// Paginated-read bucket-walk concurrency. Concurrency=1 keeps reads strictly
+	// serial (one bucket per round-trip). Concurrency>1 lets a read probe that
+	// many buckets in parallel after EscalateAfter consecutive empty buckets,
+	// collapsing long empty-bucket walks (sparse rooms / deep lookback) into
+	// fewer round-trips. Keep concurrency below CASSANDRA_NUM_CONNS to avoid
+	// self-inflicted connection-pool exhaustion.
+	MessageReadBucketConcurrency int  `env:"MESSAGE_READ_BUCKET_CONCURRENCY" envDefault:"1"`
+	MessageReadEscalateAfter     int  `env:"MESSAGE_READ_ESCALATE_AFTER"     envDefault:"4"`
+	LargeRoomThreshold           int  `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
+	MaxPinnedPerRoom             int  `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
+	PinEnabled                   bool `env:"PIN_ENABLED"                 envDefault:"true"`
 
 	// Subscription access-check cache. Only positive subscriptions are cached,
 	// so the TTL bounds how long revoked access can stay readable. Set size or
@@ -97,6 +106,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.RoomCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_ROOM_CACHE_TTL must be >= 0, got %s", cfg.RoomCacheTTL)
+	}
+	if cfg.MessageReadBucketConcurrency < 1 {
+		return fmt.Errorf("MESSAGE_READ_BUCKET_CONCURRENCY must be >= 1, got %d", cfg.MessageReadBucketConcurrency)
+	}
+	if cfg.MessageReadEscalateAfter < 1 {
+		return fmt.Errorf("MESSAGE_READ_ESCALATE_AFTER must be >= 1, got %d", cfg.MessageReadEscalateAfter)
 	}
 	return nil
 }
