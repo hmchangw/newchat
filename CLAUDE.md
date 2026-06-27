@@ -16,7 +16,7 @@
 | HTTP Framework | Gin |
 | HTTP Client | Resty |
 | Config | Environment variables via `caarlos0/env` |
-| Observability | OpenTelemetry (tracing), Prometheus (metrics), `log/slog` (logging) |
+| Observability | `flywindy/o11y` SDK — OpenTelemetry traces, Prometheus metrics, `log/slog` JSON logs (all trace-correlated); each service wires it once via `pkg/obs.Init` |
 | Testing | `go.uber.org/mock` (mockgen), `stretchr/testify` (assertions), `testcontainers-go` (integration) |
 | Containers | Docker multi-stage builds, Docker Compose |
 

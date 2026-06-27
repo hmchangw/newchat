@@ -286,6 +286,30 @@ sequenceDiagram
 | Auth | NATS callout — OIDC → JWT + NKeys |
 | HTTP server / client | Gin / Resty |
 | Config | env vars via `caarlos0/env` |
-| Observability | OpenTelemetry, Prometheus, `log/slog` |
+| Observability | `flywindy/o11y` SDK (OpenTelemetry traces, Prometheus metrics, `log/slog` logs) |
 | Frontend | React 19 + `nats.ws` + `oidc-client-ts` |
 ```
+
+## 8. Observability
+
+All three signals come from the `flywindy/o11y` SDK. Each service initializes it
+once in `main` via `pkg/obs.Init`, which installs the SDK's providers as the
+OpenTelemetry globals and the SDK logger as the `slog` default.
+
+- **Traces** — context propagates across process hops: NATS via the
+  `o11y/nats` facade (publish injects W3C `traceparent`, consume extracts it)
+  and HTTP via the `o11y/gin` server middleware. Datastore spans
+  (Mongo / Cassandra / Valkey / MinIO / Elasticsearch) come from the `pkg/*`
+  connect helpers, wired with `WithObservability(sdk)`. A single message send is
+  one trace spanning `message-gatekeeper → message-worker → broadcast-worker`
+  with datastore spans as children.
+- **Metrics** — each service exposes a Prometheus endpoint on `:2112`
+  (`OTEL_EXPORTER_PROMETHEUS_PORT`) carrying SDK runtime + instrumentation
+  metrics. Services that keep app-level counters (e.g. `search-service`) expose
+  those on their own listener.
+- **Logs** — `log/slog` JSON through the SDK logger; lines emitted under an
+  active span carry `traceId` / `spanId` for correlation.
+- **Export & backend** — OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`) to the o11y
+  monitor stack (Alloy / OTel Collector → Tempo, Loki, Prometheus), viewed in
+  Grafana. `OTEL_SERVICE_NAME` is required per service (the SDK fails fast
+  without it).
