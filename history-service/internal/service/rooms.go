@@ -44,8 +44,10 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxRoomsGetConcurrency)
 	for _, roomID := range ids {
-		if c.Err() != nil {
-			break
+		// Context cancelled/timed out: the caller's gone, so propagate the error
+		// rather than return a partial OK that won't be read.
+		if err := c.Err(); err != nil {
+			return nil, err
 		}
 		wg.Add(1)
 		sem <- struct{}{}
