@@ -73,6 +73,16 @@ func MsgGetIDs(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.get.ids", account, roomID, siteID)
 }
 
+// RoomsGet returns the concrete subject for the rooms.get batch RPC (a client's
+// room last-message fetch). Room is absent from the subject because the request
+// batches roomIds in its body. Pair with RoomsGetPattern.
+func RoomsGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.history.%s.rooms.get", account, siteID)
+}
+
 func UserResponse(account, requestID string) string {
 	return fmt.Sprintf("chat.user.%s.response.%s", account, requestID)
 }
@@ -453,6 +463,12 @@ func MsgGetPattern(siteID string) string {
 // Pair with MsgGetIDs for the concrete-subject form callers publish on.
 func MsgGetIDsPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.msg.get.ids", siteID)
+}
+
+// RoomsGetPattern is the natsrouter pattern for the rooms.get batch handler.
+// Pair with RoomsGet for the concrete-subject form callers publish on.
+func RoomsGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.history.%s.rooms.get", siteID)
 }
 
 // MsgEditPattern is the natsrouter pattern for editing a message.

@@ -2987,6 +2987,72 @@ See [Error envelope](#6-error-envelope-reference).
 
 ---
 
+#### Get Rooms Last Message
+
+**Subject:** `chat.user.{account}.request.history.{siteID}.rooms.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Batch resolve — for each requested room the caller can access, returns its **latest message**, resolved at read time. Used by the room list / mobile to render the last-message snippet. One call per site: `{siteID}` is the rooms' origin site, and all `roomIds` must belong to that site.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `roomIds` | string[] | yes | Rooms whose last message to fetch. Non-empty; maximum 100. |
+
+```json
+{ "roomIds": ["01970a4f8c2d7c9aQ", "01970a4f8c2d7c9aR"] }
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `rooms` | map<roomId, [LastMessage](#lastmessage)> | Per-room latest message. A room with no message, that the caller can't access, or whose read degraded is **omitted** — best-effort, a single bad room never fails the batch. |
+
+###### LastMessage
+
+| Field | Type | Notes |
+|---|---|---|
+| `messageId` | string | |
+| `sender` | [Participant](#participant) | |
+| `content` | string | Preview-trimmed to 256 runes. |
+| `createdAt` | int64 | UTC milliseconds. |
+| `deleted` | boolean | Present and `true` when the latest message is soft-deleted — returned as-is, with no walk-back to an earlier surviving message. |
+
+```json
+{
+  "rooms": {
+    "01970a4f8c2d7c9aQ": {
+      "messageId": "01970a4f8c2d7c9aQRST",
+      "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+      "content": "morning team",
+      "createdAt": 1746518100000
+    }
+  }
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference).
+
+| Condition | `code` | `error` |
+|---|---|---|
+| Empty `roomIds` | `bad_request` | `roomIds must not be empty` |
+| `roomIds` length exceeds 100 | `bad_request` | `too many roomIds` |
+| Store failure | `internal` | `internal error` |
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 #### Edit Message
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.edit`
