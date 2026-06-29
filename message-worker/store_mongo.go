@@ -143,17 +143,24 @@ func (s *threadStoreMongo) MarkThreadSubscriptionMention(ctx context.Context, su
 }
 
 func (s *threadStoreMongo) UpdateThreadRoomLastMessage(ctx context.Context, threadRoomID, lastMsgID string, replyAccounts []string, lastMsgAt time.Time) error {
-	update := bson.M{
-		"$set": bson.M{
-			"lastMsgAt": lastMsgAt,
-			"lastMsgId": lastMsgID,
-			"updatedAt": lastMsgAt,
-		},
+	// Guard the last-message pointer with $cond so an out-of-order reply (a
+	// retry, or one processed concurrently ahead of an earlier sibling) whose
+	// lastMsgAt is older than the stored value cannot regress the pointer.
+	// replyAccounts is order-independent, so it is always merged via $setUnion.
+	// A single aggregation-pipeline update keeps this to one round-trip.
+	newer := bson.M{"$gt": bson.A{lastMsgAt, "$lastMsgAt"}}
+	set := bson.M{
+		"lastMsgAt": bson.M{"$cond": bson.A{newer, lastMsgAt, "$lastMsgAt"}},
+		"lastMsgId": bson.M{"$cond": bson.A{newer, lastMsgID, "$lastMsgId"}},
+		"updatedAt": bson.M{"$cond": bson.A{newer, lastMsgAt, "$updatedAt"}},
 	}
 	if len(replyAccounts) > 0 {
-		update["$addToSet"] = bson.M{"replyAccounts": bson.M{"$each": replyAccounts}}
+		set["replyAccounts"] = bson.M{
+			"$setUnion": bson.A{bson.M{"$ifNull": bson.A{"$replyAccounts", bson.A{}}}, replyAccounts},
+		}
 	}
-	if _, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, update); err != nil {
+	pipeline := mongo.Pipeline{bson.D{{Key: "$set", Value: set}}}
+	if _, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, pipeline); err != nil {
 		return fmt.Errorf("update thread room last message: %w", err)
 	}
 	return nil
