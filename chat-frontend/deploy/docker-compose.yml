@@ -13,6 +13,9 @@ services:
       DEV_MODE: ${DEV_MODE:-false}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-http://localhost:8180/realms/chatapp}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-nats-chat}
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_TRACES_URL: ${OTEL_EXPORTER_OTLP_TRACES_URL:-http://localhost:4318/v1/traces}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-chat-frontend}
     ports:
       - "3000:80"
     networks:
