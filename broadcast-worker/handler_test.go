@@ -1745,60 +1745,78 @@ func TestHandleUnpinned_DMRoom_FansOutToBothMembers(t *testing.T) {
 
 func TestThreadFanOutAccounts(t *testing.T) {
 	tests := []struct {
-		name          string
-		sender        string
-		parentSender  string
-		followers     map[string]struct{}
-		extraAccounts []string
-		want          []string
+		name           string
+		sender         string
+		followers      map[string]struct{}
+		mentions       []string
+		memberMentions map[string]struct{}
+		want           []string
 	}{
 		{
-			name:          "sender alone still notified (own devices, no other followers)",
-			sender:        "alice",
-			followers:     map[string]struct{}{},
-			extraAccounts: nil,
-			want:          []string{"alice"},
-		},
-		{
-			name:          "sender included even when not yet in replyAccounts (race-free)",
-			sender:        "alice",
-			followers:     map[string]struct{}{"bob": {}},
-			extraAccounts: nil,
-			want:          []string{"alice", "bob"},
-		},
-		{
-			name:      "sender included when also a follower (multi-device support)",
+			name:      "sender alone still notified (own devices, no other followers)",
 			sender:    "alice",
-			followers: map[string]struct{}{"alice": {}, "bob": {}},
+			followers: map[string]struct{}{},
+			want:      []string{"alice"},
+		},
+		{
+			name:      "sender included even when not yet in replyAccounts (race-free)",
+			sender:    "alice",
+			followers: map[string]struct{}{"bob": {}},
 			want:      []string{"alice", "bob"},
 		},
 		{
-			name:          "sender included when only in extra accounts",
-			sender:        "alice",
-			followers:     map[string]struct{}{"bob": {}},
-			extraAccounts: []string{"alice"},
-			want:          []string{"bob", "alice"},
+			name:      "follower delivered without a membership check (replyAccounts trusted, #308)",
+			sender:    "alice",
+			followers: map[string]struct{}{"bob": {}, "carol": {}},
+			want:      []string{"alice", "bob", "carol"},
 		},
 		{
-			name:          "extra accounts merged deduped",
-			sender:        "alice",
-			followers:     map[string]struct{}{"bob": {}},
-			extraAccounts: []string{"bob", "carol"},
-			want:          []string{"alice", "bob", "carol"},
+			name:           "member mention delivered",
+			sender:         "alice",
+			followers:      map[string]struct{}{},
+			mentions:       []string{"carol"},
+			memberMentions: map[string]struct{}{"carol": {}},
+			want:           []string{"alice", "carol"},
 		},
 		{
-			name:          "bot accounts skipped even if sender is bot",
-			sender:        "helper.bot",
-			followers:     map[string]struct{}{"helper.bot": {}, "bob": {}},
-			extraAccounts: []string{"other.bot"},
-			want:          []string{"bob"},
+			name:           "non-member mention filtered out (#309)",
+			sender:         "alice",
+			followers:      map[string]struct{}{},
+			mentions:       []string{"mallory"},
+			memberMentions: map[string]struct{}{}, // mallory is not a member → dropped
+			want:           []string{"alice"},
 		},
 		{
-			name:          "sender not duplicated when in both followers and extras",
-			sender:        "alice",
-			followers:     map[string]struct{}{"alice": {}, "bob": {}},
-			extraAccounts: []string{"alice", "carol"},
-			want:          []string{"alice", "bob", "carol"},
+			name:           "followers trusted, mentions gated, mix",
+			sender:         "alice",
+			followers:      map[string]struct{}{"bob": {}},
+			mentions:       []string{"carol", "mallory"},
+			memberMentions: map[string]struct{}{"carol": {}},
+			want:           []string{"alice", "bob", "carol"},
+		},
+		{
+			name:           "bot accounts skipped even if sender is bot",
+			sender:         "helper.bot",
+			followers:      map[string]struct{}{"helper.bot": {}, "bob": {}},
+			mentions:       []string{"other.bot"},
+			memberMentions: map[string]struct{}{"other.bot": {}},
+			want:           []string{"bob"},
+		},
+		{
+			name:           "sender not duplicated when also a follower and mention",
+			sender:         "alice",
+			followers:      map[string]struct{}{"alice": {}, "bob": {}},
+			mentions:       []string{"alice", "carol"},
+			memberMentions: map[string]struct{}{"alice": {}, "carol": {}},
+			want:           []string{"alice", "bob", "carol"},
+		},
+		{
+			name:           "mention that is also a follower is delivered via the trusted follower path",
+			sender:         "alice",
+			followers:      map[string]struct{}{"bob": {}},
+			mentions:       []string{"bob"},
+			memberMentions: map[string]struct{}{"bob": {}},
+			want:           []string{"alice", "bob"},
 		},
 		{
 			name:         "parent sender always included, even without a thread_rooms row yet",
@@ -1825,7 +1843,7 @@ func TestThreadFanOutAccounts(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := threadFanOutAccounts(tc.sender, tc.parentSender, tc.followers, tc.extraAccounts)
+			got := threadFanOutAccounts(tc.sender, tc.followers, tc.mentions, tc.memberMentions)
 			assert.ElementsMatch(t, tc.want, got)
 		})
 	}
@@ -2062,6 +2080,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	followers := map[string]struct{}{"bob": {}, "carol": {}}
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(metaOf(testChannelRoom), nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	// No @-mentions in the reply → no membership query; followers are trusted (#308).
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	evt := model.MessageEvent{
@@ -2100,6 +2119,60 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	assert.True(t, subjects[subject.UserRoomEvent("carol")])
 }
 
+func TestHandleThreadCreated_ChannelRoom_FiltersNonMemberMentions(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	parentMsgID := "parent-1"
+	siteID := "site-a"
+	roomID := "r1"
+
+	// Followers bob + carol are delivered without a membership check (#308); of
+	// the mentions, member dave is delivered but non-member mallory is not (#309).
+	followers := map[string]struct{}{"bob": {}, "carol": {}}
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	// Only the mentioned accounts are queried — never the followers.
+	store.EXPECT().FilterRoomMembers(gomock.Any(), "room-1", gomock.InAnyOrder([]string{"dave", "mallory"})).
+		Return(map[string]struct{}{"dave": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.InAnyOrder([]string{"alice", "dave", "mallory"})).Return([]model.User{testUsers[0]}, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    siteID,
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID:                    "reply-1",
+			RoomID:                roomID,
+			UserID:                "u-alice",
+			UserAccount:           "alice",
+			Content:               "a thread reply @dave @mallory",
+			CreatedAt:             msgTime,
+			ThreadParentMessageID: parentMsgID,
+			TShow:                 false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, false)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")], "sender must receive their own echo")
+	assert.True(t, subjects[subject.UserRoomEvent("bob")], "follower must receive the event")
+	assert.True(t, subjects[subject.UserRoomEvent("carol")], "follower must receive the event")
+	assert.True(t, subjects[subject.UserRoomEvent("dave")], "member mention must receive the event")
+	assert.False(t, subjects[subject.UserRoomEvent("mallory")], "non-member mention must NOT receive the live thread event (#309)")
+	require.Len(t, pub.records, 4)
+}
+
 func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -2111,6 +2184,7 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	// No followers and no mentions → no membership query at all.
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	evt := model.MessageEvent{
@@ -2443,6 +2517,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	followers := map[string]struct{}{"bob": {}, "carol": {}}
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	// No @-mentions → no membership query; followers are trusted (#308).
 
 	evt := model.MessageEvent{
 		Event:     model.EventUpdated,
@@ -2690,6 +2765,7 @@ func TestHandleThreadDeleted_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	followers := map[string]struct{}{"bob": {}, "carol": {}}
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	// No @-mentions → no membership query; followers are trusted (#308).
 	// No NewTCount → no badge update.
 
 	evt := model.MessageEvent{
@@ -2743,6 +2819,7 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	// No @-mentions → no membership query; follower bob is trusted (#308).
 
 	evt := model.MessageEvent{
 		Event:     model.EventDeleted,

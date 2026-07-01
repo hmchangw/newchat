@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/pipelines"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -69,6 +70,14 @@ func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]mo
 		return nil, fmt.Errorf("decode subscriptions: %w", err)
 	}
 	return subs, nil
+}
+
+// FilterRoomMembers returns the subset of accounts subscribed to roomID, via the shared pipelines.SubscribedAccounts read.
+func (m *mongoStore) FilterRoomMembers(ctx context.Context, roomID string, accounts []string) (map[string]struct{}, error) {
+	if len(accounts) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	return pipelines.SubscribedAccounts(ctx, m.subCol, roomID, accounts)
 }
 
 func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {

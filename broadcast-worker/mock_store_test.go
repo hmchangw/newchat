@@ -57,19 +57,19 @@ func (mr *MockStoreMockRecorder) AdvanceSubscriptionLastSeen(ctx, roomID, accoun
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AdvanceSubscriptionLastSeen", reflect.TypeOf((*MockStore)(nil).AdvanceSubscriptionLastSeen), ctx, roomID, account, at)
 }
 
-// GetHistorySharedSince mocks base method.
-func (m *MockStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
+// FilterRoomMembers mocks base method.
+func (m *MockStore) FilterRoomMembers(ctx context.Context, roomID string, accounts []string) (map[string]struct{}, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetHistorySharedSince", ctx, roomID, accounts)
-	ret0, _ := ret[0].(map[string]*time.Time)
+	ret := m.ctrl.Call(m, "FilterRoomMembers", ctx, roomID, accounts)
+	ret0, _ := ret[0].(map[string]struct{})
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// GetHistorySharedSince indicates an expected call of GetHistorySharedSince.
-func (mr *MockStoreMockRecorder) GetHistorySharedSince(ctx, roomID, accounts any) *gomock.Call {
+// FilterRoomMembers indicates an expected call of FilterRoomMembers.
+func (mr *MockStoreMockRecorder) FilterRoomMembers(ctx, roomID, accounts any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHistorySharedSince", reflect.TypeOf((*MockStore)(nil).GetHistorySharedSince), ctx, roomID, accounts)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FilterRoomMembers", reflect.TypeOf((*MockStore)(nil).FilterRoomMembers), ctx, roomID, accounts)
 }
 
 // GetRoom mocks base method.
