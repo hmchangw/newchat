@@ -64,6 +64,7 @@ func TestHandler_ProcessRemoveMember_FallsBackToNowOnInvalidTimestamp(t *testing
 func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	const (
 		roomID  = "room-1"
@@ -190,6 +191,76 @@ func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
 	assert.Empty(t, published, "expected no publishes for dual-membership self-leave")
 }
 
+// expectThreadCleanupAny registers loose expectations for the post-removal
+// thread-state cleanup (#308) for tests that exercise a removal path but don't
+// assert on the cleanup itself.
+func expectThreadCleanupAny(store *MockSubscriptionStore) {
+	store.EXPECT().PullThreadFollowers(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+}
+
+func TestHandler_ProcessRemoveIndividual_CleansThreadState(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	const (
+		roomID  = "room-1"
+		account = "alice"
+		siteID  = "site-a"
+	)
+
+	userResult := &UserWithMembership{
+		User:             model.User{ID: "u1", Account: account, SiteID: siteID, EngName: "Alice", ChineseName: "愛"},
+		HasOrgMembership: false,
+	}
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(userResult, nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil)
+	// The departed member must be scrubbed from thread followers + subs (#308).
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, []string{account}).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, []string{account}).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+}
+
+func TestHandler_ProcessRemoveOrg_CleansThreadStateForRemovedOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	const (
+		roomID    = "room-1"
+		orgID     = "org-1"
+		requester = "alice"
+		siteID    = "site-a"
+	)
+
+	// carol + dave truly leave; eve survives via individual membership (not scrubbed).
+	orgMembers := []OrgMemberStatus{
+		{Account: "carol", SiteID: siteID, Name: "Engineering", HasIndividualMembership: false},
+		{Account: "dave", SiteID: siteID, Name: "Engineering", HasIndividualMembership: false},
+		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
+	}
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), nil)
+	// Thread cleanup targets exactly the departed accounts — not eve.
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID, EngName: "Alice", ChineseName: "愛"}, nil)
+
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+}
+
 func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted(t *testing.T) {
 	// Dual-member who also holds the owner role must be demoted when their
 	// individual source is removed — org members cannot be owners.
@@ -248,6 +319,7 @@ func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted(t *testing.T) {
 func TestHandler_ProcessRemoveMember_OwnerRemovesIndividual(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	const (
 		roomID    = "room-1"
@@ -845,6 +917,7 @@ func TestHandler_ProcessAddMembers_MultipleSiteInbox(t *testing.T) {
 func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	const (
 		roomID    = "room-1"
@@ -915,6 +988,7 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 func TestHandler_ProcessRemoveMember_CrossSiteInbox(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	const (
 		roomID    = "room-1"
@@ -1073,6 +1147,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 	store.EXPECT().
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
@@ -1215,6 +1290,7 @@ func TestHandler_ProcessAddMembers_OrgToIndividualUpgrade(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_InboxFailurePropagates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	const (
 		roomID    = "room-1"
@@ -1260,6 +1336,7 @@ func TestHandler_ProcessRemoveIndividual_InboxFailurePropagates(t *testing.T) {
 func TestHandler_ProcessRemoveOrg_InboxFailurePropagates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	const (
 		roomID     = "room-1"
@@ -4448,6 +4525,7 @@ func TestHandler_PublishChannelSysMessages_EmptySkipsMembersAdded(t *testing.T) 
 func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	roomID := "r1"
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "bob").
@@ -4480,6 +4558,7 @@ func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
 
 	roomID := "r1"
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "bob").

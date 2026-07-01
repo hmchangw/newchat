@@ -112,6 +112,20 @@ func (mr *MockInboxStoreMockRecorder) DeleteSubscriptionsByAccounts(ctx, roomID,
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSubscriptionsByAccounts", reflect.TypeOf((*MockInboxStore)(nil).DeleteSubscriptionsByAccounts), ctx, roomID, accounts)
 }
 
+// DeleteThreadSubscriptions mocks base method.
+func (m *MockInboxStore) DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteThreadSubscriptions", ctx, roomID, accounts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteThreadSubscriptions indicates an expected call of DeleteThreadSubscriptions.
+func (mr *MockInboxStoreMockRecorder) DeleteThreadSubscriptions(ctx, roomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteThreadSubscriptions", reflect.TypeOf((*MockInboxStore)(nil).DeleteThreadSubscriptions), ctx, roomID, accounts)
+}
+
 // FindUsersByAccounts mocks base method.
 func (m *MockInboxStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
 	m.ctrl.T.Helper()

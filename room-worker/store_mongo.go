@@ -19,11 +19,13 @@ import (
 )
 
 type MongoStore struct {
-	subscriptions *mongo.Collection
-	rooms         *mongo.Collection
-	roomMembers   *mongo.Collection
-	users         *mongo.Collection
-	apps          *mongo.Collection
+	subscriptions       *mongo.Collection
+	rooms               *mongo.Collection
+	roomMembers         *mongo.Collection
+	users               *mongo.Collection
+	apps                *mongo.Collection
+	threadRooms         *mongo.Collection
+	threadSubscriptions *mongo.Collection
 	// userReader serves point lookups (GetUser, FindUsersByAccounts) and the
 	// direct-account candidate fast path. Defaults to an uncached read of the
 	// users collection; EnableUserCache wraps it in an LRU+TTL cache. The
@@ -38,12 +40,14 @@ type MongoStore struct {
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
 	return &MongoStore{
-		subscriptions: db.Collection("subscriptions"),
-		rooms:         db.Collection("rooms"),
-		roomMembers:   db.Collection("room_members"),
-		users:         db.Collection("users"),
-		apps:          db.Collection("apps"),
-		userReader:    userstore.NewMongoStore(db.Collection("users")),
+		subscriptions:       db.Collection("subscriptions"),
+		rooms:               db.Collection("rooms"),
+		roomMembers:         db.Collection("room_members"),
+		users:               db.Collection("users"),
+		apps:                db.Collection("apps"),
+		threadRooms:         db.Collection("thread_rooms"),
+		threadSubscriptions: db.Collection("thread_subscriptions"),
+		userReader:          userstore.NewMongoStore(db.Collection("users")),
 	}
 }
 
@@ -468,6 +472,35 @@ func (s *MongoStore) DeleteRoomMember(ctx context.Context, roomID string, member
 	_, err := s.roomMembers.DeleteOne(ctx, bson.M{"rid": roomID, "member.type": memberType, "member.id": memberID})
 	if err != nil {
 		return fmt.Errorf("delete room member: %w", err)
+	}
+	return nil
+}
+
+// PullThreadFollowers removes accounts from replyAccounts of every thread room in roomID, so departed members stop fanning out (#308).
+func (s *MongoStore) PullThreadFollowers(ctx context.Context, roomID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	_, err := s.threadRooms.UpdateMany(ctx,
+		bson.M{"roomId": roomID},
+		bson.M{"$pull": bson.M{"replyAccounts": bson.M{"$in": accounts}}},
+	)
+	if err != nil {
+		return fmt.Errorf("pull thread followers for room %q: %w", roomID, err)
+	}
+	return nil
+}
+
+// DeleteThreadSubscriptions deletes the accounts' per-thread read-state docs in roomID (#308).
+func (s *MongoStore) DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	_, err := s.threadSubscriptions.DeleteMany(ctx,
+		bson.M{"roomId": roomID, "userAccount": bson.M{"$in": accounts}},
+	)
+	if err != nil {
+		return fmt.Errorf("delete thread subscriptions for room %q: %w", roomID, err)
 	}
 	return nil
 }

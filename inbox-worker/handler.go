@@ -30,6 +30,10 @@ type InboxStore interface {
 	// redelivered until member_added lands (federation race).
 	UpdateSubscriptionRoles(ctx context.Context, account, roomID string, roles []model.Role, rolesUpdatedAt time.Time) error
 	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) error
+	// DeleteThreadSubscriptions removes the accounts' per-thread read-state docs
+	// in roomID on a federated removal (#308). This site holds no thread_rooms
+	// (replyAccounts lives only at the room's home site), so nothing else to clean.
+	DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 	// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
 	// keyed by (roomID, account). Idempotent and order-safe: the write
@@ -202,6 +206,10 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	}
 	if err := h.store.DeleteSubscriptionsByAccounts(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete subscriptions for room %s: %w", memberEvt.RoomID, err)
+	}
+	// Scrub the removed accounts' thread read-state on this site too (#308).
+	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
+		return fmt.Errorf("delete thread subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
 	return nil
 }
