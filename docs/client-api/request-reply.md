@@ -807,6 +807,7 @@ Optional; `roomId` field optional echo.
 | `chat.user.{account}.request.room.{roomID}.{siteID}.msg.surrounding` | [Load Surrounding Messages](#load-surrounding-messages) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.msg.get` | [Get Message By ID](#get-message-by-id) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.msg.get.ids` | [Get Messages By IDs](#get-messages-by-ids) |
+| `chat.user.{account}.request.history.{siteID}.rooms.get` | [Get Rooms Last Message](#get-rooms-last-message) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.msg.edit` | [Edit Message](#edit-message) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.msg.delete` | [Delete Message](#delete-message) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.msg.pin` | [Pin Message](#pin-message) |
@@ -1177,6 +1178,35 @@ on filter). Drives a "Threads" tab in the client.
 |---|---|---|
 | `parentMessages` | Message[] | Ordered by most-recent reply activity. |
 | `total` | number | Raw count before access filtering. |
+
+**Emits:** None — reply only.
+
+---
+
+### Get Rooms Last Message
+
+**Subject:** `chat.user.{account}.request.history.{siteID}.rooms.get`
+
+`{siteID}` is the rooms' origin site; all `roomIds` must belong to it. Batch-resolves
+each accessible room's latest message at read time. `subscription.list` calls this
+server-side to embed each room's `lastMessage`; it is also callable directly.
+
+#### Request body
+
+| Field | Type | Notes |
+|---|---|---|
+| `roomIds` | string[] | Required, non-empty, max 100. |
+
+#### Success response
+
+`{ "rooms": map<roomId, LastMessage> }` — see the full `LastMessage` schema and
+semantics in [../client-api.md §history-service](../client-api.md#get-rooms-last-message).
+A room with no message, no access, or a degraded read is **omitted** — a single bad
+room never fails the batch.
+
+#### Errors
+
+`bad_request` when `roomIds` is empty or exceeds 100.
 
 **Emits:** None — reply only.
 

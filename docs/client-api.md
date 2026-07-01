@@ -906,6 +906,7 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
+| `lastMessage` | [LastMessage](#lastmessage) | Optional. The room's latest message, resolved at read time via the [Get Rooms Last Message](#get-rooms-last-message) RPC (server-side, one call per site). Omitted when the room has no message or that site's enrichment degraded — best-effort, never fails the list. |
 
 #### AppSubscription
 
@@ -2992,7 +2993,7 @@ See [Error envelope](#6-error-envelope-reference).
 **Subject:** `chat.user.{account}.request.history.{siteID}.rooms.get`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Batch resolve — for each requested room the caller can access, returns its **latest message**, resolved at read time. Used by the room list / mobile to render the last-message snippet. One call per site: `{siteID}` is the rooms' origin site, and all `roomIds` must belong to that site.
+Batch resolve — for each requested room the caller can access, returns its **latest message**, resolved at read time. `subscription.list` calls this server-side (one batch per site, chunked at 100 roomIds) to embed each room's [`lastMessage`](#subscriptionroom) — clients render the room-list snippet from that field rather than calling this RPC directly. It remains available as a standalone RPC for callers that need it directly (e.g. a client refreshing one room's snippet without a full list re-fetch). One call per site: `{siteID}` is the rooms' origin site, and all `roomIds` must belong to that site.
 
 ##### Request body
 
@@ -4390,7 +4391,13 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
         "lastMentionAllAt": "2026-05-30T08:00:00Z",
         "minUserLastSeenAt": "2026-05-30T07:55:00Z",
         "privateKey": "bDM4dGZ5...base64...JjT0g9PQ==",
-        "keyVersion": 3
+        "keyVersion": 3,
+        "lastMessage": {
+          "messageId": "01970a4f8c2d7c9aBB",
+          "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+          "content": "morning team",
+          "createdAt": 1780308000000
+        }
       }
     },
     {

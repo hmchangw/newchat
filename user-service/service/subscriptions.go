@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,7 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	res.Data = s.enrichWithRoomInfo(c, res.Data, true)
+	s.enrichWithLastMessage(c, res.Data)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
@@ -317,6 +319,85 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 		}
 	}
 	return dropped
+}
+
+// maxRoomsGetChunk bounds each rooms.get RPC's roomIds — mirrors history-service's
+// own maxRoomsGetBatch cap, which rejects a batch over 100 outright.
+const maxRoomsGetChunk = 100
+
+// enrichWithLastMessage populates sub.Room.LastMessage (read-time A2 resolve, no
+// denormalized write path) for every subscription with a Room, fanning out one
+// rooms.get RPC per site — unlike enrichWithRoomInfo, LOCAL subs need this call
+// too (last-message isn't part of the $lookup baseline). A degraded/absent site,
+// or a room the RPC omits, just leaves LastMessage nil; it never fails the list.
+func (s *UserService) enrichWithLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription) {
+	account := c.Param("account")
+	idxBySite := map[string][]int{}
+	for i := range subs {
+		if subs[i].Room == nil {
+			continue // soft-deleted room — nothing to attach a last message to
+		}
+		idxBySite[subs[i].SiteID] = append(idxBySite[subs[i].SiteID], i)
+	}
+	if len(idxBySite) == 0 {
+		return
+	}
+	sites := make([]string, 0, len(idxBySite))
+	for site := range idxBySite {
+		sites = append(sites, site)
+	}
+	lastMsgBySite := make([]map[string]model.LastMessage, len(sites)) // nil ⇒ site degraded
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxSiteFanout)
+	for i, site := range sites {
+		if c.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if c.Err() != nil {
+				return
+			}
+			roomIDs := make([]string, 0, len(idxBySite[site]))
+			seen := make(map[string]struct{}, len(idxBySite[site]))
+			for _, j := range idxBySite[site] {
+				rid := subs[j].RoomID
+				if _, dup := seen[rid]; dup {
+					continue
+				}
+				seen[rid] = struct{}{}
+				roomIDs = append(roomIDs, rid)
+			}
+			merged := make(map[string]model.LastMessage, len(roomIDs))
+			for start := 0; start < len(roomIDs); start += maxRoomsGetChunk {
+				end := min(start+maxRoomsGetChunk, len(roomIDs))
+				chunk, err := s.history.RoomsGet(c, account, site, roomIDs[start:end])
+				if err != nil {
+					slog.WarnContext(c, "last-message enrichment degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+					continue
+				}
+				maps.Copy(merged, chunk)
+			}
+			lastMsgBySite[i] = merged
+		}()
+	}
+	wg.Wait()
+	for i, site := range sites {
+		m := lastMsgBySite[i]
+		if m == nil {
+			continue
+		}
+		for _, j := range idxBySite[site] {
+			lm, ok := m[subs[j].RoomID]
+			if !ok {
+				continue
+			}
+			subs[j].Room.LastMessage = &lm
+		}
+	}
 }
 
 // roomKeySecretLen is the AES-256-GCM key length. A baseline encKeyPriv of any
