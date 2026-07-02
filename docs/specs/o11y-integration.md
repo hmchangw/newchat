@@ -420,9 +420,11 @@ and k8s manifests. `docker-local/` compose should set
   span is recorded for a representative operation (e.g., a Mongo find, a Cassandra
   select) via an in-memory span recorder.
 - **Pipeline trace-continuity test:** Phase 2 gate (the phase that swaps NATS to
-  `o11y/nats`) — publish a message and assert a single trace ID propagates
-  gatekeeper → worker → broadcast through NATS headers, before any service
-  flips. Backed by the Phase 0 minimal header-propagation check (§7).
+  `o11y/nats`) — publish a message and assert each consumer span gets a valid
+  span context and carries a span link back to the upstream producer context
+  through NATS headers. This intentionally does **not** assert a single shared
+  trace ID across NATS hops, matching the OTel messaging semantic conventions.
+  Backed by the Phase 0 minimal header-propagation check (§7).
 - Coverage floor 80% on `pkg/obs` (CLAUDE.md §4). No real collectors in unit
   tests; assert against in-memory exporters/recorders only.
 
