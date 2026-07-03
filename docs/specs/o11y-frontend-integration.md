@@ -245,9 +245,10 @@ You do not have to configure these — but know they exist:
    - browser → backend over **NATS** = **span link** (new trace each hop).
    - browser → backend over **HTTP** (`auth`/`portal`/`upload` via `o11y/gin`)
      = **parent-child** (genuinely one trace).
-   - request/reply **reply** does *not* link back to the requester (ADR 0022);
-     the browser `nats request` span captures the RTT, but the handler trace and
-     the browser trace are joined only on the request leg.
+   - Go backend request/reply paths using `o11y/nats.Conn.Request` +
+     `Conn.Respond` also get a requester-side reply receive span. Browser NATS
+     request spans still capture the RTT locally; their backend correlation is
+     link-based on the request leg.
 
 ---
 
@@ -305,7 +306,7 @@ require a custom SDK.**
 | **F4** | Unload flush — `provider.forceFlush()` on `visibilitychange`/`pagehide` | avoid losing the last ~1s of spans when a user navigates away mid-flow. |
 | **F5** | Error capture — record exceptions on a span from `window.onerror` / `unhandledrejection` | closes the gap where the React `ErrorBoundary` can't catch async/handler errors (see `chat-frontend/CLAUDE.md`). |
 | **F6** | Sampling policy — a `Sampler` / parent-based ratio instead of the default always-on | control span volume/cost at scale. Config, not new code. |
-| **F7** | Receive-side backend gaps (context) — `search-sync-worker` native-Fetch consume is unlinked; request/reply reply is not linked back | **backend** items from `docs/specs/o11y-followups.md`; noted so frontend knows why some legs won't connect. |
+| **F7** | Backend request/reply limitation (context) — a bare `context.Background()` caller still needs an ambient caller span if you want send + reply receive in the same trace | SDK limitation to document/avoid at call sites; frontend NATS request spans already capture RTT. |
 
 ---
 

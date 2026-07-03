@@ -1,7 +1,8 @@
 # Local o11y Trace Verification
 
-This checklist verifies the trace shape that the chat repo can produce before
-the o11y SDK grows JetStream `Fetch()` and request/reply reply-link support.
+This checklist verifies the trace shape that the chat repo can produce with
+`github.com/flywindy/o11y` v0.8.0 JetStream `Fetch()` and request/reply
+reply-link support.
 It intentionally does not replace `docs/specs/o11y-trace-design.md`; use this
 as the repeatable local smoke procedure.
 
@@ -63,14 +64,12 @@ Expected visible constellation:
   span, plus room metadata lookup spans and room-event producer spans.
 - `notification-worker`: a consumer/process span linked to the gatekeeper
   producer span, plus notification lookup/publish spans.
+- `search-sync-worker`: a JetStream `Fetch()` consumer span linked to the
+  gatekeeper producer span, followed by `search-sync bulk flush` with links to
+  the source message spans and Elasticsearch bulk spans underneath it.
 - Recipient `chat-frontend`, when a subscribed browser receives the room event:
   `nats receive chat.room.<roomID>.event.*` with a link to the upstream NATS
   producer context.
-
-Known gap:
-
-- `search-sync-worker` consume is still absent from the constellation until the
-  o11y SDK/facade wraps JetStream pull `Fetch()`.
 
 ## Scenario B: Open Or Switch A Room
 
@@ -88,11 +87,12 @@ Expected visible constellation:
 - Read receipt/update path, if triggered: frontend publish/request span and a
   linked backend consumer span.
 
-Known gap:
+Expected:
 
-- The requester span captures user-perceived NATS request duration, but the
-  reply message itself is not linked back as its own span until request/reply
-  reply correlation is added.
+- The requester span captures user-perceived NATS request duration.
+- Backend Go request/reply clients using `o11y/nats.Conn.Request` should emit a
+  requester-side `receive <subject>` span when the responder replied through
+  `Conn.Respond`.
 
 ## Scenario C: Receive A Live Message
 
@@ -119,7 +119,8 @@ Pass:
 - Backend NATS consumers are correlated by span links rather than a single
   forced trace ID.
 
-Expected fail until SDK work lands:
+Still worth checking explicitly:
 
 - `search-sync-worker` consume appears as a linked consumer span.
-- Request/reply reply message has its own backward correlation to the requester.
+- Go service-to-service request/reply has a requester-side reply receive span
+  when both sides use the o11y NATS facade.

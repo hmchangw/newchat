@@ -2,7 +2,7 @@
 
 > **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
 > [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (pinned at
-> **v0.7.1**) as the single observability entry point across the chat platform.
+> **v0.8.0**) as the single observability entry point across the chat platform.
 > Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
 > **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.
 >
@@ -153,7 +153,7 @@ integration test (§9).
 > no longer imports `Marz32onE/instrumentation-go/otel-nats` **directly** — `grep`
 > over the tree is clean. It is NOT removed from the module graph: `o11y/nats`
 > wraps Marz's `otelnats`/`oteljetstream` internally (o11y has no native NATS
-> implementation in v0.7.x), so it remains a legitimate **indirect** dependency
+> implementation in the current SDK), so it remains a legitimate **indirect** dependency
 > in `go.mod`. o11y also gates NATS tracing behind
 > `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` + `OTEL_NATS_TRACING_ENABLED` (both
 > default off, no programmatic override), so `pkg/natsutil.Connect` sets them on
@@ -235,8 +235,8 @@ reachable from the chat services and that the services' `OTEL_EXPORTER_OTLP_ENDP
 monitor backend is an operator step, out of scope for this plan.
 
 ### Phase 0 — Dependency & baseline ✅ DONE
-- `go get github.com/flywindy/o11y@v0.7.1`; `go mod tidy`.
-- **Reconcile OTel versions** (§7): o11y v0.7.1 pins core OTel at the released
+- `go get github.com/flywindy/o11y@v0.8.0`; `go mod tidy`.
+- **Reconcile OTel versions** (§7): o11y v0.8.0 pins core OTel at the released
   `v1.44.0`, so our `go.opentelemetry.io/otel*` set bumped `v1.43.0 → v1.44.0`
   (clean single minor; no pseudo-version). `otelhttp` contrib `v0.60.0 → v0.68.0`.
 - No behavioural change: nothing imports o11y until Phase 1, so the dep is kept
@@ -281,6 +281,12 @@ and the helper degrades to a no-op tracer when observability is disabled.
 - `pkg/searchengine` → `o11y/elasticsearch`
 - `pkg/natsutil.Connect` + `pkg/natsrouter` → `o11y/nats` (+ JetStream),
   **removing** `Marz32onE/instrumentation-go/otel-nats` (D2).
+- `search-sync-worker` uses the o11y JetStream `Fetch(ctx, ...)` facade so pull
+  consumers emit linked spans; its ES bulk flush span links to every source
+  message in the batch before parenting Elasticsearch bulk spans.
+- `pkg/natsrouter` replies through `Conn.Respond`, so Go service-to-service
+  request/reply can emit the requester-side reply receive span added in o11y
+  v0.8.0.
 - Integration tests (testcontainers) assert spans/metrics are emitted, plus the
   end-to-end trace continuity test (§9) for the NATS pipeline.
 
@@ -355,17 +361,17 @@ and the helper degrades to a no-op tracer when observability is disabled.
 
 `o11y` pins its own OTel module versions and removes our only NATS-tracing
 fallback (D2 deletes Marz32onE with no transitional period). Compatibility was
-**proven in Phase 0** against `o11y@v0.7.1`:
-- **OTel:** v0.7.1 pins core OTel (`otel`, `metric`, `trace`, `sdk`,
+**proven in Phase 0** against `o11y@v0.8.0`:
+- **OTel:** v0.8.0 pins core OTel (`otel`, `metric`, `trace`, `sdk`,
   `sdk/metric`) at the **released `v1.44.0`** tag; we bumped `v1.43.0 → v1.44.0`
   (single minor) and `otelhttp` contrib `v0.60.0 → v0.68.0`. `go build ./...`
   is green. (v0.6.0/v0.7.0 had pinned core OTel to an *unreleased* pseudo-version
   `v1.43.1-0.2026…`; v0.7.1 fixed this — do **not** pin below v0.7.1.)
-- **Driver majors all align** with v0.7.1: `gocql v1.7.0`, `go-elasticsearch/v8
+- **Driver majors all align** with v0.8.0: `gocql v1.7.0`, `go-elasticsearch/v8
   v8.19.3`, `nats.go v1.50.0` are exact matches; `mongo-driver/v2` (→ v2.7.0)
   and `minio-go/v7` (→ v7.2.0) bump a minor; our `go-redis/v9 v9.18.0` already
   exceeds o11y's v9.9.0 (same major). The `cassandra` and `elasticsearch`
-  instrumentation sub-packages exist in v0.7.1 (absent in v0.6.0).
+  instrumentation sub-packages exist in v0.8.0 (absent in v0.6.0).
 - **Residual (non-blocking, production-gate note):** the `otelmongo` contrib is
   still pinned to a pseudo-version (`v0.0.0-2026…`) because the mongo-driver/v2
   variant has no released tag upstream yet. Single contrib module, mongo tracing

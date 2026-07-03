@@ -20,7 +20,7 @@ messaging semantic conventions.
 |---|---|---|
 | Within one service (handler → DB calls) | parent → child spans | **Yes** |
 | Across a NATS hop (publish → consume), JetStream **or** core | **span LINK** | **No — new trace** |
-| Reply of a request/reply back to the requester | *not correlated* | No (out of scope, ADR 0022) |
+| Reply of a Go request/reply back to the requester | requester-side receive span with a link to the responder reply | Yes, when caller ctx already has an active span |
 
 What `otelnats` does at each hop:
 
@@ -28,11 +28,17 @@ What `otelnats` does at each hop:
   span (`PRODUCER`) **as a child of the active span** (so within the producing
   service it stays in the same trace), then injects W3C `traceparent` into the
   message headers.
-- **Consumer** (`Subscribe` / `QueueSubscribe` / JetStream `Consume`): extracts
+- **Consumer** (`Subscribe` / `QueueSubscribe` / JetStream `Consume` / `Fetch`): extracts
   the producer's span context, then starts a **detached** `<subject> deliver`
   span (new root, empty parent) carrying a **LINK** to the producer span, and a
   `process <subject>` span (`CONSUMER`) under it (also linked). Handler work and
   DB spans hang off `process`.
+- **Go request/reply response** (`Conn.Request` + responder `Conn.Respond`):
+  the responder reply is sent through the traced publish path, and the requester
+  creates a short `receive <subject>` consumer span with a link to that reply.
+  If the requester calls `Conn.Request(context.Background(), ...)` without an
+  active caller span, the send and reply-receive spans are still discoverable
+  by links but may not land in the same trace.
 
 Net effect: **one logical flow = a constellation of per-service traces**, each
 rooted at a `deliver`/`process` pair and stitched to its upstream by a span
@@ -119,13 +125,13 @@ flowchart TB
       NWp --> NWdb --> NWpush
     end
 
-    SS["search-sync-worker\nconsumes via NATIVE jetstream Fetch\n⇒ NO span, NO link (GAP, §8.1)"]
+    SS["search-sync-worker\nJetStream Fetch consume (linked)\n→ search-sync bulk flush\n→ elasticsearch bulk"]
 
     Client -. "span link (browser → first hop)" .-> GKp
     GKsend -. "span link" .-> MWp
     GKsend -. "span link" .-> BWp
     GKsend -. "span link" .-> NWp
-    GKsend -. "span link (but unrecorded)" .-> SS
+    GKsend -. "span link" .-> SS
     NWpush -. "span link" .-> PushSvc["〔Trace: push service〕"]
     BWout -. "span link via traceparent" .-> Members["〔Trace: recipient browser〕 CONSUMER 'nats receive <room event subject>'"]
 ```
@@ -141,14 +147,14 @@ flowchart TB
   meta+members (+ `mongo roomkeys` if E2E) → N× `send chat.room.{r}.event.*`.
 - **notification-worker** (1 trace, linked): `process` → `mongo`/`valkey` →
   `send push.{s}.send` → links into the push service's trace.
-- **search-sync-worker**: **no trace today** (native Fetch path, §8.1).
+- **search-sync-worker** (linked): JetStream `Fetch` consumer span → `search-sync bulk flush` (links to every source message in the batch) → Elasticsearch bulk spans.
 
-**Total for one message ≈ 5 traces** — the **browser** publish span is its own
+**Total for one message ≈ 6 traces** — the **browser** publish span is its own
 trace (linked, not parent, into the gatekeeper), plus gatekeeper +
-message-worker + broadcast-worker + notification-worker; the push service adds a
-6th linked off notification, and search-sync is **absent** (§8.1). They are
+message-worker + broadcast-worker + notification-worker + search-sync; the push
+service adds a 7th linked off notification. They are
 stitched by links, not a shared trace ID: browser → gatekeeper (link), and
-gatekeeper's `send …canonical.created` → each of the 3 canonical consumers
+gatekeeper's `send …canonical.created` → each of the 4 canonical consumers
 (link).
 
 ---
@@ -168,7 +174,7 @@ flowchart TB
       HSp["process chat.user.{a}.request.room.{r}.{s}.msg.get (CONSUMER)"]
       HSacc["mongo subscriptions/rooms.find (access + accessSince)"]
       HScass["cassandra messages_by_room SELECT (bucket walk)"]
-      HSreply["send {reply} → client (PRODUCER, not linked back)"]
+      HSreply["send {reply} → client (PRODUCER, reply carries trace context)"]
       HSp --> HSacc --> HScass --> HSreply
     end
 
@@ -191,10 +197,11 @@ flowchart TB
   → optional `send subscription.update` (links to a broadcast-worker trace that
   delivers the read badge).
 - Client-perceived RTT **is** captured — on the browser's `nats request`
-  CLIENT span (it wraps `await nc.request`). What is missing is the **reply
-  message not linking back** into the `history-service` trace (ADR 0022): the
-  browser span and the handler trace are joined only on the request leg, not the
-  response leg.
+  CLIENT span (it wraps `await nc.request`). Go service-to-service
+  request/reply also emits a requester-side `receive <subject>` span when the
+  responder replied through `Conn.Respond`. Browser NATS request correlation
+  remains link-based on the request leg; the browser span itself still owns the
+  user-perceived RTT.
 
 ---
 
@@ -337,20 +344,21 @@ Client → `history-service` (`…request.room.{r}.{s}.msg.edit` / `…msg.delet
   …canonical.edited` (PRODUCER, link target) + reply.
 - `〔Trace: broadcast-worker〕` `…canonical.edited deliver → process` (linked) →
   `mongo`/`valkey` → `send chat.room.{r}.event.*` (edit).
-- `search-sync-worker` reindex: native Fetch → **unlinked** (gap §8.1).
+- `search-sync-worker` reindex: JetStream `Fetch` consume is linked to the
+  canonical producer; `search-sync bulk flush` links to the source message spans
+  and parents the Elasticsearch bulk spans.
 
 ---
 
 ## 8. Known gaps (design-level, expected to be visible/absent)
 
-1. **search-sync-worker consume is unlinked.** It uses native
-   `jetstream.New(nc.NatsConn())` (the o11y facade doesn't wrap `Fetch`), so its
-   consume produces **no span and no link** — ES indexing won't appear in the
-   constellation. ES *writes* are still spanned (searchengine `WithObservability`)
-   but rooted in a standalone trace with no upstream link.
-2. **Reply not linked to requester.** Request/reply correlates requester→handler
-   via a link, but the reply does not link back (ADR 0022).
-3. **Each NATS hop is a separate trace.** Expected, not a bug — navigate via
+1. **Bare-context Go request/reply callers can still look split.** `Conn.Request`
+   creates the requester-side reply receive span as a child of the caller ctx.
+   If that ctx has no active span, the send and reply-receive spans may be two
+   root traces connected only by links. Start an ambient caller span around
+   background-worker `Conn.Request(context.Background(), ...)` calls when the
+   full round trip must read as one trace.
+2. **Each NATS hop is a separate trace.** Expected, not a bug — navigate via
    span links in Tempo, not a single trace ID.
 
 ---
@@ -364,12 +372,13 @@ Prometheus) with NATS tracing enabled, then in Tempo assert:
   (`mongodb.*`, `cassandra.*`, `redis.*`, `elasticsearch.*`),
 - each downstream `process` span carries a **link** to the upstream `send` span,
 - log lines for a span (Loki) share its `traceId`/`spanId`,
-- the §8 gaps are present (search-sync absent; reply not linked back).
+- the §8 limitations are understood (especially bare-context request/reply
+  callers), not mistaken for missing telemetry.
 
 The `pkg/natsutil` continuity integration test asserts the correct **link-based**
 contract across a publish→consume hop — the consumer handler gets a *valid* span
 context whose span carries a **link** back to the producer, **not** a shared
-trace ID (ground truth: `o11y` v0.7.1 / `otel-nats` v0.2.11 add
+trace ID (ground truth: `o11y` v0.8.0 / `otel-nats` v0.2.11 add
 `trace.WithLinks(originSpanCtx)` on the consumer span per the OTel messaging
 semconv). Asserting `traceId` equality across a hop would be *wrong*. These
 scenarios extend that single-hop gate to the real multi-service pipelines.
