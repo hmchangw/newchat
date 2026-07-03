@@ -176,7 +176,7 @@ order, not for risk gating.
 
 Env var names follow **OTel standard conventions** where they exist (decision in
 §8), so operators and tooling recognize them and there is no collision with the
-existing `METRICS_ADDR` listeners in `search-service`/`oplog-connector`.
+remaining `search-service` app-metrics listener on `METRICS_ADDR`.
 
 ```go
 // Package obs wires the platform's observability stack on top of flywindy/o11y.
@@ -211,11 +211,12 @@ Notes:
   Verify both appear together in one log line in Phase 1 (package acceptance).
 - **Metrics endpoint reconciliation:** `pkg/health` only serves `/healthz` +
   `/readyz` (never `/metrics`), so there is no collision with it. The SDK owns
-  `/metrics` on `OTEL_EXPORTER_PROMETHEUS_HOST:PORT` (default `:2112`). The two
-  services that already run their own `promhttp` `metricsMux` on `METRICS_ADDR`
-  (`search-service`, `oplog-connector`) retire that listener in Phase 3 in favour
-  of the SDK's — `METRICS_ADDR` stays their own var until then and is removed when
-  they migrate.
+  `/metrics` on `OTEL_EXPORTER_PROMETHEUS_HOST:PORT` (default `:2112`).
+  `oplog-connector` / `oplog-transformer` now emit their app metrics through the
+  OTel meter and expose them via the SDK endpoint. `search-service` intentionally
+  keeps its existing `promhttp` app-metrics listener on `METRICS_ADDR` (`:9090`)
+  until its dashboards and alerts are deliberately migrated; see
+  `docs/specs/o11y-followups.md`.
 
 ---
 
@@ -287,11 +288,14 @@ and the helper degrades to a no-op tracer when observability is disabled.
   - [ ] Per-helper integration test records a span for a representative op
         (Mongo find, Cassandra select, Valkey get, MinIO put, ES search) via an
         in-memory recorder.
-  - [ ] **NATS pipeline continuity test passes:** publishing a message yields a
-        **single `traceId`** propagated through NATS headers across
+  - [ ] **NATS pipeline continuity test passes:** publishing a message yields
+        valid consumer span contexts and span links from each NATS consume hop
+        back to its upstream producer across
         `message-gatekeeper → message-worker → broadcast-worker`.
-  - [ ] In **Tempo/Grafana**, that message send appears as one trace with child
-        spans for each NATS publish/consume and each datastore call.
+  - [ ] In **Tempo/Grafana**, that message send appears as a link-stitched trace
+        constellation: each NATS consume hop starts its own trace with a span link
+        back to the upstream producer, while datastore calls remain child spans
+        inside the service handling that hop.
   - [ ] In **Loki**, clicking a span jumps to its correlated logs via
         `traceId`/`spanId`, and those logs still carry `request_id`.
   - [ ] `curl <service>:2112/metrics` (default `OTEL_EXPORTER_PROMETHEUS_PORT`)
@@ -304,9 +308,9 @@ and the helper degrades to a no-op tracer when observability is disabled.
 - Every `main.go`: `otelutil.Init*` → `obs.Init`; delete the manual
   `slog.SetDefault` block; pass the SDK into the now-instrumented `pkg/*` helpers.
   `auth-service` and `portal-service` (no `otelutil` today) gain `obs.Init` for
-  the first time. `search-service` and `oplog-connector` retire their own
-  `promhttp` `metricsMux`/`METRICS_ADDR` listener in favour of the SDK's
-  `/metrics`.
+  the first time. `oplog-connector` / `oplog-transformer` expose OTel-meter app
+  metrics through the SDK's `/metrics`; `search-service` keeps its separate
+  `:9090` app-metrics endpoint pending dashboard/alert migration.
 - HTTP services additionally adopt `o11y/gin` middleware and `o11y/resty`.
 - Suggested edit order (mechanical, not gated): workers (`message`, `broadcast`,
   `notification`, `room`, `inbox`, `search-sync`, `gatekeeper`, oplog-connector)
@@ -319,8 +323,9 @@ and the helper degrades to a no-op tracer when observability is disabled.
   - [ ] **HTTP services** (`auth`, `portal`, `upload`) emit server spans
         (`o11y/gin`) and outbound client spans (`o11y/resty`); a login →
         first message flow is traceable end-to-end.
-  - [ ] Each service exposes `/metrics` on `:2112` (per-container) and is
-        scrapeable by Prometheus.
+  - [ ] Each service exposes SDK/runtime `/metrics` on `:2112` (per-container)
+        and is scrapeable by Prometheus; `search-service` additionally keeps its
+        app metrics on `:9090`.
   - [ ] No service logs to stdout via the old hand-built handler — grep confirms
         every `slog.SetDefault(NewJSONHandler(...))` block is removed.
   - [ ] Reconnect / history / search / presence flows each show a coherent trace
@@ -401,8 +406,10 @@ New env vars (defaults chosen so local dev "just works"):
 | `SERVICE_NAMESPACE` | `chat` | resource attr |
 | `O11Y_TRACE_ENABLED` / `_METRICS_` / `_LOG_` / `_PROFILING_` | per SDK | SDK-owned runtime toggles |
 
-Removed: the old gRPC OTLP endpoint env consumed by `otelutil`, and — as each of
-the two services migrates (Phase 3) — their own `METRICS_ADDR` listener var.
+Removed: the old gRPC OTLP endpoint env consumed by `otelutil`, and the retired
+data-migration `METRICS_ADDR` listener vars. `search-service` keeps
+`METRICS_ADDR` for its existing `:9090` app metrics until the follow-up migration
+in `docs/specs/o11y-followups.md` is explicitly chosen.
 Update every service's `deploy/docker-compose.yml`, `deploy/azure-pipelines.yml`,
 and k8s manifests. `docker-local/` compose should set
 `OTEL_EXPORTER_OTLP_ENDPOINT` to the local collector (or leave tracing off via
@@ -437,7 +444,7 @@ and k8s manifests. `docker-local/` compose should set
 | OTel version skew breaks build | Resolved in Phase 0 before any service change; isolated PR |
 | Trace context not propagated across NATS after the `o11y/nats` swap | Phase 2 ships a dedicated end-to-end continuity integration test on the message pipeline before any service flips |
 | Log line loses `request_id` when switching to SDK handler | Phase 1 package acceptance explicitly checks `request_id` + `traceId` coexist |
-| Prometheus port/exposition reconciliation | No collision with `pkg/health` (it serves only `/healthz` + `/readyz`); SDK owns `/metrics` on `:2112`. The two services with their own `metricsMux`/`METRICS_ADDR` (`search-service`, `oplog-connector`) retire it in Phase 3 (§5) |
+| Prometheus port/exposition reconciliation | No collision with `pkg/health` (it serves only `/healthz` + `/readyz`); SDK owns `/metrics` on `:2112`. Data-migration app metrics now use the OTel meter; `search-service` keeps its `:9090` app-metrics endpoint until its dashboards/alerts are intentionally migrated (§5, `o11y-followups.md`) |
 | OTLP/HTTP collector not available in an env | `O11Y_*_ENABLED=false` toggles degrade gracefully to stdout JSON |
 
 Rollback: phases are split into independent PRs in build order; reverting a PR
