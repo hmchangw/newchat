@@ -9,7 +9,7 @@ require (
 	github.com/docker/docker v27.1.1+incompatible
 	github.com/elastic/elastic-transport-go/v8 v8.8.0
 	github.com/elastic/go-elasticsearch/v8 v8.19.3
-	github.com/flywindy/o11y v0.7.1
+	github.com/flywindy/o11y v0.8.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gocql/gocql v1.7.0
