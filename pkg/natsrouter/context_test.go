@@ -84,7 +84,7 @@ func TestContext_ConcurrentKeysAccess_NoRace(t *testing.T) {
 // reuse. Run with -race.
 func TestContext_StableCtxAcrossPoolReuse(t *testing.T) {
 	reqCtx := context.Background()
-	c1 := acquireContext(reqCtx, nil, NewParams(map[string]string{"req": "1"}), nil)
+	c1 := acquireContext(reqCtx, nil, NewParams(map[string]string{"req": "1"}), nil, nil)
 	c1.Set("id", "alice")
 
 	stop := make(chan struct{})
@@ -114,6 +114,7 @@ func TestContext_StableCtxAcrossPoolReuse(t *testing.T) {
 			nil,
 			NewParams(map[string]string{"req": strconv.Itoa(i + 2)}),
 			nil,
+			nil,
 		)
 		c2.Set("id", "bob")
 		releaseContext(c2)
@@ -128,11 +129,11 @@ func TestContext_StableCtxAcrossPoolReuse(t *testing.T) {
 // fast if someone ever reintroduces pooling of the Context header itself —
 // the likely accident given how much of the rest of the struct looks poolable.
 func TestContext_KeysIndependentPerRequest(t *testing.T) {
-	c1 := acquireContext(context.Background(), nil, Params{}, nil)
+	c1 := acquireContext(context.Background(), nil, Params{}, nil, nil)
 	c1.Set("leak", "bad")
 	releaseContext(c1)
 
-	c2 := acquireContext(context.Background(), nil, Params{}, nil)
+	c2 := acquireContext(context.Background(), nil, Params{}, nil, nil)
 	_, ok := c2.Get("leak")
 	assert.False(t, ok, "keys set on a released context must not be visible on the next acquire")
 	releaseContext(c2)
@@ -184,15 +185,41 @@ func TestContext_GetHeader(t *testing.T) {
 	})
 }
 
+func TestContext_ReplyJSONUsesResponder(t *testing.T) {
+	reply := &capturingResponder{}
+	msg := &nats.Msg{Subject: "chat.test", Reply: "_INBOX.reply"}
+	c := acquireContext(context.Background(), msg, Params{}, nil, reply)
+	defer releaseContext(c)
+
+	c.ReplyJSON(map[string]string{"ok": "true"})
+
+	assert.True(t, reply.called)
+	assert.Same(t, msg, reply.msg)
+	assert.JSONEq(t, `{"ok":"true"}`, string(reply.data))
+}
+
 // Use-after-release safety: chainState is pooled, so a post-handler goroutine
 // calling Next/Abort/IsAborted on a released *Context would silently read the
 // next request's chain state. The nil-out + nil-check converts the silent
 // corruption into a loud panic.
 func TestContext_ChainMethodsPanicAfterRelease(t *testing.T) {
-	c := acquireContext(context.Background(), nil, Params{}, []HandlerFunc{func(*Context) {}})
+	c := acquireContext(context.Background(), nil, Params{}, []HandlerFunc{func(*Context) {}}, nil)
 	releaseContext(c)
 
 	assert.PanicsWithValue(t, chainAfterReleasePanic, func() { c.Next() })
 	assert.PanicsWithValue(t, chainAfterReleasePanic, func() { c.Abort() })
 	assert.PanicsWithValue(t, chainAfterReleasePanic, func() { c.IsAborted() })
+}
+
+type capturingResponder struct {
+	called bool
+	msg    *nats.Msg
+	data   []byte
+}
+
+func (r *capturingResponder) Respond(_ context.Context, msg *nats.Msg, data []byte) error {
+	r.called = true
+	r.msg = msg
+	r.data = append([]byte(nil), data...)
+	return nil
 }

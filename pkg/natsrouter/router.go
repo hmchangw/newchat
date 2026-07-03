@@ -114,14 +114,16 @@ func Default(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 // RegisterVoid routes) the message is silently dropped at this point;
 // we emit a Warn log so operators can correlate drops with the
 // busy-reply rate.
-func (r *Router) replyBusy(msg *nats.Msg) {
+func (r *Router) replyBusy(ctx context.Context, msg *nats.Msg) {
 	if msg.Reply == "" {
 		slog.Warn("natsrouter: dropped fire-and-forget message under saturation",
 			"subject", msg.Subject)
 		return
 	}
 	// Admission rejection is operational, not a request failure; ReplyQuiet skips Classify.
-	errnats.ReplyQuiet(msg, errcode.Unavailable("service busy"))
+	if err := r.nc.Respond(ctx, msg, errnats.MarshalQuiet(errcode.Unavailable("service busy"))); err != nil {
+		slog.ErrorContext(ctx, "error reply failed", "error", err, "subject", msg.Subject)
+	}
 }
 
 // admit attempts to acquire an admission slot. The returned release
@@ -171,12 +173,12 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
-			r.replyBusy(m)
+			r.replyBusy(msgCtx, m)
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
-			r.replyBusy(m)
+			r.replyBusy(msgCtx, m)
 			return
 		}
 		r.wg.Add(1)
@@ -204,11 +206,13 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 						"stack", string(debug.Stack()))
 					if m.Reply != "" {
 						// Already logged via the Warn above; ReplyQuiet avoids a second line.
-						errnats.ReplyQuiet(m, errcode.Internal("internal error"))
+						if err := r.nc.Respond(msgCtx, m, errnats.MarshalQuiet(errcode.Internal("internal error"))); err != nil {
+							slog.ErrorContext(msgCtx, "error reply failed", "error", err, "subject", m.Subject)
+						}
 					}
 				}
 			}()
-			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all)
+			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.nc)
 			defer releaseContext(c)
 			c.Next()
 		}()

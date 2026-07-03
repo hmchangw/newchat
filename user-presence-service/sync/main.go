@@ -12,7 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
@@ -78,13 +78,13 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
 	defer cancel()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "user-presence-sync")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		return fmt.Errorf("init tracer: %w", err)
+		return fmt.Errorf("init observability: %w", err)
 	}
 	defer func() {
-		if err := tracerShutdown(context.Background()); err != nil {
-			slog.Warn("tracer shutdown", "error", err)
+		if err := obsShutdown(context.Background()); err != nil {
+			slog.Warn("observability shutdown", "error", err)
 		}
 	}()
 
@@ -98,7 +98,7 @@ func run() error {
 	}()
 	store := presencestore.NewValkeyStoreFromClient(clusterClient, cfg.StaleThreshold, cfg.ConnsTTL)
 
-	nc, err := natsutil.Connect(cfg.NATSURL, cfg.NATSCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NATSURL, cfg.NATSCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}

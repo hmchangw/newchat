@@ -238,7 +238,6 @@ func main() {
 			flushCancel()
 			return nil
 		},
-		func(_ context.Context) error { stopStats(); return nil },
 		func(ctx context.Context) error { return nc.Drain() },
 	}
 	if keyStore != nil {

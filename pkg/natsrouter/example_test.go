@@ -12,7 +12,6 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
@@ -134,10 +133,10 @@ func Example_customMiddleware() {
 
 	// Custom middleware that rejects requests with empty payloads. Middleware
 	// can't return an error like a handler, so it replies with a typed errcode
-	// envelope directly via errnats.Reply.
+	// envelope directly through the router context.
 	requireBody := natsrouter.HandlerFunc(func(c *natsrouter.Context) {
 		if len(c.Msg.Data) == 0 {
-			errnats.Reply(c, c.Msg, errcode.BadRequest("request body required"))
+			c.ReplyError(errcode.BadRequest("request body required"))
 			return
 		}
 		c.Next()

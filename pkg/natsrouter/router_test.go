@@ -633,7 +633,7 @@ func TestRouter_WithMaxConcurrency_IgnoresNonPositive(t *testing.T) {
 func TestRouter_replyBusy_NoReplySubject(t *testing.T) {
 	r := New(nil, "test")
 	msg := &nats.Msg{Subject: "void.subject", Reply: ""}
-	r.replyBusy(msg)
+	r.replyBusy(context.Background(), msg)
 }
 
 func TestDefault_PreInstallsMiddleware(t *testing.T) {

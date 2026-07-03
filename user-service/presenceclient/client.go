@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -20,11 +20,11 @@ const presenceRPCTimeout = time.Second * 5
 // Client implements service.PresenceClient via NATS request/reply over the
 // server-to-server lane; the passed siteID must be the accounts' home site.
 type Client struct {
-	nc *otelnats.Conn
+	nc *o11ynats.Conn
 }
 
 // New returns a Client wired to nc.
-func New(nc *otelnats.Conn) *Client { return &Client{nc: nc} }
+func New(nc *o11ynats.Conn) *Client { return &Client{nc: nc} }
 
 // QueryPresence runs the batch presence query at siteID; non-OK envelopes relay via errcode.Parse.
 func (c *Client) QueryPresence(ctx context.Context, siteID string, accounts []string) ([]model.PresenceState, error) {

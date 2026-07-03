@@ -5,7 +5,6 @@ import (
 	"log/slog"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/errcode/errnats"
 )
 
 // Register subscribes a typed handler to a subject pattern.
@@ -80,5 +79,5 @@ func RegisterVoid[Req any](
 
 // replyErr classifies err and sends the errcode envelope on the reply subject.
 func replyErr(c *Context, err error) {
-	errnats.Reply(c, c.Msg, err)
+	c.ReplyError(err)
 }

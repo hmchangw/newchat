@@ -6,19 +6,20 @@ import (
 	"io"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/minio/minio-go/v7"
 )
 
 // minioObjectStore streams objects out of a single MinIO/S3 bucket.
 type minioObjectStore struct {
-	client          *minio.Client
+	client          minioutil.ObjectStore
 	bucket          string
 	downloadTimeout time.Duration
 }
 
 // newMinioObjectStore binds a minio client to a bucket. downloadTimeout bounds a
 // single download (Stat probe + streamed body) so a hung backend can't hang the request.
-func newMinioObjectStore(client *minio.Client, bucket string, downloadTimeout time.Duration) *minioObjectStore {
+func newMinioObjectStore(client minioutil.ObjectStore, bucket string, downloadTimeout time.Duration) *minioObjectStore {
 	return &minioObjectStore{client: client, bucket: bucket, downloadTimeout: downloadTimeout}
 }
 

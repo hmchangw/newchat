@@ -10,8 +10,6 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -219,10 +217,10 @@ func main() {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
-	// Local JetStream consumers use oteljetstream so Fetch deliveries carry
-	// consumer spans. The HR domain path below stays raw because oteljetstream
-	// has no domain-scoped constructor.
-	js, err := oteljetstream.New(nc.NatsConn())
+	// Local JetStream consumers use the o11y facade so Fetch deliveries carry
+	// consumer spans. The HR domain path below stays raw because the facade has
+	// no domain-scoped constructor.
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
@@ -309,7 +307,7 @@ func main() {
 				)
 				os.Exit(1)
 			}
-			fetcher = otelConsumerAdapter{cons}
+			fetcher = o11yConsumerAdapter{cons}
 		}
 
 		handler := NewHandler(&engineAdapter{engine: engine}, coll, cfg.BulkBatchSize)
@@ -412,8 +410,8 @@ func runConsumer(
 	// consumer goroutine for good. On a recovered panic the in-flight messages
 	// are left un-acked and JetStream redelivers them after AckWait.
 	flush := func() { jobguard.Guard("search-sync flush", func() { handler.Flush(ctx) }) }
-	add := func(m jetstream.Msg) {
-		jobguard.Guard("search-sync add: "+m.Subject(), func() { handler.Add(m) })
+	add := func(msgCtx context.Context, m jetstream.Msg) {
+		jobguard.Guard("search-sync add: "+m.Subject(), func() { handler.AddWithContext(msgCtx, m) })
 	}
 
 	for {
@@ -438,7 +436,7 @@ func runConsumer(
 			fetchCount = remaining
 		}
 
-		batch, err := cons.Fetch(fetchCount, jetstream.FetchMaxWait(time.Second))
+		batch, err := cons.Fetch(ctx, fetchCount, jetstream.FetchMaxWait(time.Second))
 		if err != nil {
 			select {
 			case <-stopCh:
@@ -453,13 +451,13 @@ func runConsumer(
 			continue
 		}
 
-		// Always drain batch.Messages() to completion. The otelBatch adapter
+		// Always drain batch.Messages() to completion. The raw domain adapter
 		// (consumer_source.go) re-channels via a goroutine that blocks on an
 		// unbuffered send until the channel is drained; an early break here
 		// would leak that goroutine and stall shutdown. Bound work via
 		// fetchCount above, not by abandoning a batch mid-range.
 		for msg := range batch.Messages() {
-			add(msg)
+			add(msg.Ctx, msg.Msg)
 			// Mid-batch flush: if a single fan-out message just pushed the
 			// buffer over the bulk cap, flush immediately instead of waiting
 			// for the outer loop — otherwise the next message's actions

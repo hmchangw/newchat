@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
-
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 )
 
 // fakeMsg is a sentinel jetstream.Msg used only for identity comparison. It
@@ -18,13 +18,13 @@ type fakeMsg struct {
 	id string
 }
 
-// fakeOtelBatch is a stand-in oteljetstream.MessageBatch yielding a fixed slice.
-type fakeOtelBatch struct {
-	msgs []oteljetstream.Msg
+// fakeO11yBatch is a stand-in o11ynats.MessageBatch yielding a fixed slice.
+type fakeO11yBatch struct {
+	msgs []o11ynats.FetchedMessage
 }
 
-func (f fakeOtelBatch) Messages() <-chan oteljetstream.Msg {
-	ch := make(chan oteljetstream.Msg, len(f.msgs))
+func (f fakeO11yBatch) Messages() <-chan o11ynats.FetchedMessage {
+	ch := make(chan o11ynats.FetchedMessage, len(f.msgs))
 	for _, m := range f.msgs {
 		ch <- m
 	}
@@ -32,16 +32,16 @@ func (f fakeOtelBatch) Messages() <-chan oteljetstream.Msg {
 	return ch
 }
 
-func (f fakeOtelBatch) Error() error { return nil }
+func (f fakeO11yBatch) Error() error { return nil }
 
-// fakeOtelConsumer embeds oteljetstream.Consumer (nil) and overrides Fetch.
-type fakeOtelConsumer struct {
-	oteljetstream.Consumer
-	batch oteljetstream.MessageBatch
+// fakeO11yConsumer embeds o11ynats.Consumer (nil) and overrides Fetch.
+type fakeO11yConsumer struct {
+	o11ynats.Consumer
+	batch o11ynats.MessageBatch
 	err   error
 }
 
-func (f fakeOtelConsumer) Fetch(int, ...jetstream.FetchOpt) (oteljetstream.MessageBatch, error) {
+func (f fakeO11yConsumer) Fetch(context.Context, int, ...jetstream.FetchOpt) (o11ynats.MessageBatch, error) {
 	return f.batch, f.err
 }
 
@@ -72,51 +72,60 @@ func (f fakeRawConsumer) Fetch(int, ...jetstream.FetchOpt) (jetstream.MessageBat
 	return f.batch, f.err
 }
 
-func TestOtelConsumerAdapter_Fetch_UnwrapsRawMsgInOrder(t *testing.T) {
+func TestO11yConsumerAdapter_Fetch_PassesThroughFetchedMessagesInOrder(t *testing.T) {
+	ctx1 := context.WithValue(context.Background(), testContextKey("id"), "ctx1")
+	ctx2 := context.WithValue(context.Background(), testContextKey("id"), "ctx2")
 	m1 := &fakeMsg{id: "1"}
 	m2 := &fakeMsg{id: "2"}
 	m3 := &fakeMsg{id: "3"}
-	adapter := otelConsumerAdapter{c: fakeOtelConsumer{batch: fakeOtelBatch{msgs: []oteljetstream.Msg{
-		{Msg: m1}, {Msg: m2}, {Msg: m3},
+	adapter := o11yConsumerAdapter{c: fakeO11yConsumer{batch: fakeO11yBatch{msgs: []o11ynats.FetchedMessage{
+		{Ctx: ctx1, Msg: m1}, {Ctx: ctx2, Msg: m2}, {Ctx: ctx1, Msg: m3},
 	}}}}
 
-	batch, err := adapter.Fetch(10)
+	batch, err := adapter.Fetch(context.Background(), 10)
 	require.NoError(t, err)
 
-	var got []jetstream.Msg
+	var got []o11ynats.FetchedMessage
 	for m := range batch.Messages() {
 		got = append(got, m)
 	}
-	require.Equal(t, []jetstream.Msg{m1, m2, m3}, got)
+	require.Equal(t, []o11ynats.FetchedMessage{
+		{Ctx: ctx1, Msg: m1}, {Ctx: ctx2, Msg: m2}, {Ctx: ctx1, Msg: m3},
+	}, got)
 }
 
-func TestOtelConsumerAdapter_Fetch_ReturnsError(t *testing.T) {
+func TestO11yConsumerAdapter_Fetch_ReturnsError(t *testing.T) {
 	wantErr := errors.New("fetch failed")
-	adapter := otelConsumerAdapter{c: fakeOtelConsumer{err: wantErr}}
+	adapter := o11yConsumerAdapter{c: fakeO11yConsumer{err: wantErr}}
 
-	_, err := adapter.Fetch(10)
+	_, err := adapter.Fetch(context.Background(), 10)
 	require.ErrorIs(t, err, wantErr)
 }
 
 func TestRawConsumerAdapter_Fetch_PassesThroughRawMsg(t *testing.T) {
+	ctx := context.WithValue(context.Background(), testContextKey("id"), "raw")
 	m1 := &fakeMsg{id: "1"}
 	m2 := &fakeMsg{id: "2"}
 	adapter := rawConsumerAdapter{c: fakeRawConsumer{batch: fakeRawBatch{msgs: []jetstream.Msg{m1, m2}}}}
 
-	batch, err := adapter.Fetch(10)
+	batch, err := adapter.Fetch(ctx, 10)
 	require.NoError(t, err)
 
-	var got []jetstream.Msg
+	var got []o11ynats.FetchedMessage
 	for m := range batch.Messages() {
 		got = append(got, m)
 	}
-	require.Equal(t, []jetstream.Msg{m1, m2}, got)
+	require.Equal(t, []o11ynats.FetchedMessage{
+		{Ctx: ctx, Msg: m1}, {Ctx: ctx, Msg: m2},
+	}, got)
 }
 
 func TestRawConsumerAdapter_Fetch_ReturnsError(t *testing.T) {
 	wantErr := errors.New("fetch failed")
 	adapter := rawConsumerAdapter{c: fakeRawConsumer{err: wantErr}}
 
-	_, err := adapter.Fetch(10)
+	_, err := adapter.Fetch(context.Background(), 10)
 	require.ErrorIs(t, err, wantErr)
 }
+
+type testContextKey string

@@ -94,9 +94,9 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 			Msg:                "has an attachment",
 			DecodedAttachments: []cassandra.Attachment{{ID: "f1", Title: "a.png", Type: "file"}},
 		}
-		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(parent)
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 
