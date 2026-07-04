@@ -11,6 +11,9 @@ import (
 	vault "github.com/hashicorp/vault/api"
 	authapprole "github.com/hashicorp/vault/api/auth/approle"
 	authk8s "github.com/hashicorp/vault/api/auth/kubernetes"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // tokenLease is one authenticated token plus the means to observe and
@@ -320,6 +323,9 @@ func NewVaultKeyWrapper(ctx context.Context, cfg VaultConfig) (*vaultKeyWrapper,
 // datakey/wrapped + decrypt, the same decrypt that Unwrap already requires.
 func (w *vaultKeyWrapper) GenerateDataKey(ctx context.Context) (plaintext, wrapped []byte, err error) {
 	defer func() { kekWrapCounter.WithLabelValues(resultLabel(err)).Inc() }()
+	ctx, span := w.startTransitSpan(ctx, "vault.transit.datakey")
+	defer func() { finishVaultSpan(span, err) }()
+
 	resp, err := w.client.Logical().WriteWithContext(ctx,
 		fmt.Sprintf("%s/datakey/wrapped/%s", w.transitMount, w.transitKey),
 		map[string]any{"bits": 256},
@@ -346,6 +352,9 @@ func (w *vaultKeyWrapper) GenerateDataKey(ctx context.Context) (plaintext, wrapp
 // "vault:vN:..." ciphertext bytes.
 func (w *vaultKeyWrapper) Wrap(ctx context.Context, dek []byte) (out []byte, err error) {
 	defer func() { kekWrapCounter.WithLabelValues(resultLabel(err)).Inc() }()
+	ctx, span := w.startTransitSpan(ctx, "vault.transit.encrypt")
+	defer func() { finishVaultSpan(span, err) }()
+
 	resp, err := w.client.Logical().WriteWithContext(ctx,
 		fmt.Sprintf("%s/encrypt/%s", w.transitMount, w.transitKey),
 		map[string]any{
@@ -373,10 +382,14 @@ func (w *vaultKeyWrapper) Unwrap(ctx context.Context, ciphertext []byte) (out []
 }
 
 // decryptDEK decrypts a "vault:vN:..." transit ciphertext back to the
-// plaintext DEK. It carries no metric of its own; the public callers
-// (Unwrap, and the wrapped-datakey path in GenerateDataKey) each record
-// exactly one operation around it.
-func (w *vaultKeyWrapper) decryptDEK(ctx context.Context, ciphertext []byte) ([]byte, error) {
+// plaintext DEK. It carries no metric of its own; the public callers (Unwrap,
+// and the wrapped-datakey path in GenerateDataKey) each record exactly one
+// operation around it. It does create its own child span so Vault failures show
+// the exact transit operation that failed.
+func (w *vaultKeyWrapper) decryptDEK(ctx context.Context, ciphertext []byte) (out []byte, err error) {
+	ctx, span := w.startTransitSpan(ctx, "vault.transit.decrypt")
+	defer func() { finishVaultSpan(span, err) }()
+
 	resp, err := w.client.Logical().WriteWithContext(ctx,
 		fmt.Sprintf("%s/decrypt/%s", w.transitMount, w.transitKey),
 		map[string]any{
@@ -398,4 +411,23 @@ func (w *vaultKeyWrapper) decryptDEK(ctx context.Context, ciphertext []byte) ([]
 		return nil, fmt.Errorf("vault transit decrypt: base64 decode: %w", err)
 	}
 	return dek, nil
+}
+
+func (w *vaultKeyWrapper) startTransitSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("vault.transit.mount", w.transitMount),
+			attribute.String("vault.transit.key", w.transitKey),
+		),
+	)
+}
+
+func finishVaultSpan(span trace.Span, err error) {
+	defer span.End()
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }
