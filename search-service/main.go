@@ -129,7 +129,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password, valkeyutil.WithObservability(sdk))
+	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password,
+		valkeyutil.WithObservability(sdk),
+		valkeyutil.WithRequireParentSpan(true),
+	)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)

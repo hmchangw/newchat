@@ -70,7 +70,7 @@ func instrumentCluster(c *redis.ClusterClient, cc connectConfig) error {
 	if cc.obs == nil {
 		return nil
 	}
-	if _, err := o11yredis.Wrap(c, cc.obs.TracerProvider(), cc.obs.MeterProvider()); err != nil {
+	if _, err := o11yredis.Wrap(c, cc.obs.TracerProvider(), cc.obs.MeterProvider(), cc.redisOpts...); err != nil {
 		return fmt.Errorf("instrument valkey client: %w", err)
 	}
 	return nil

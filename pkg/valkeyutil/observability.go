@@ -1,6 +1,7 @@
 package valkeyutil
 
 import (
+	o11yredis "github.com/flywindy/o11y/redis"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -16,7 +17,8 @@ type Observability interface {
 }
 
 type connectConfig struct {
-	obs Observability
+	obs       Observability
+	redisOpts []o11yredis.Option
 }
 
 // Option configures ConnectCluster. The zero config attaches no instrumentation
@@ -27,6 +29,30 @@ type Option func(*connectConfig)
 // providers. When omitted, ConnectCluster attaches no instrumentation.
 func WithObservability(o Observability) Option {
 	return func(c *connectConfig) { c.obs = o }
+}
+
+// WithRedisOptions passes low-level o11y/redis options through to the wrapped
+// client. It is intended for instrumentation behavior only, such as suppressing
+// startup/background noise; callers should keep command text disabled unless a
+// debugging session explicitly needs it.
+func WithRedisOptions(opts ...o11yredis.Option) Option {
+	return func(c *connectConfig) {
+		c.redisOpts = append(c.redisOpts, opts...)
+	}
+}
+
+// WithRequireParentSpan keeps Redis command spans only when the command context
+// is already part of a traced request/consumer flow. This drops startup probes
+// and background client noise while preserving in-request cache spans.
+func WithRequireParentSpan(enabled bool) Option {
+	return WithRedisOptions(o11yredis.WithRequireParentSpan(enabled))
+}
+
+// WithIgnoredCommands suppresses spans and operation-duration samples for the
+// named Redis commands. Prefer WithRequireParentSpan when the noisy commands are
+// only background probes, because command-name filtering affects all callers.
+func WithIgnoredCommands(names ...string) Option {
+	return WithRedisOptions(o11yredis.WithIgnoredCommands(names...))
 }
 
 func newConnectConfig(opts ...Option) connectConfig {

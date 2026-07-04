@@ -90,7 +90,10 @@ func main() {
 	db := mongoClient.Database(cfg.MongoDB)
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword, valkeyutil.WithObservability(sdk))
+		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
 		if err != nil {
 			slog.Error("valkey connect (room-meta L2) failed", "error", err)
 			os.Exit(1)

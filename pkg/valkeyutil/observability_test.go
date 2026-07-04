@@ -31,6 +31,11 @@ func TestNewConnectConfig_WithObservability(t *testing.T) {
 	assert.Equal(t, obs, cfg.obs)
 }
 
+func TestNewConnectConfig_WithRedisOptions(t *testing.T) {
+	cfg := newConnectConfig(WithRequireParentSpan(true), WithIgnoredCommands("ping", "info"))
+	assert.Len(t, cfg.redisOpts, 2)
+}
+
 func TestNewConnectConfig_NilOptionIgnored(t *testing.T) {
 	cfg := newConnectConfig(nil, WithObservability(fakeObs{}))
 	assert.NotNil(t, cfg.obs, "nil options must be skipped without panicking")

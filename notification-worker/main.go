@@ -145,7 +145,10 @@ func main() {
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
 
-	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword, valkeyutil.WithObservability(sdk))
+	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyutil.WithObservability(sdk),
+		valkeyutil.WithRequireParentSpan(true),
+	)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)

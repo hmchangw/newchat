@@ -61,6 +61,34 @@ func TestInstrumentCluster_RecordsCommandSpan(t *testing.T) {
 	assert.True(t, sawGet, "expected a GET command span, got %v", spanNames(spans))
 }
 
+func TestInstrumentCluster_RequireParentSpan(t *testing.T) {
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	c := testutil.SharedValkeyCluster(t)
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := trace.NewTracerProvider(trace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	require.NoError(t, instrumentCluster(c, newConnectConfig(
+		WithObservability(recorderObs{tp: tp}),
+		WithRequireParentSpan(true),
+	)))
+	client := &clusterClient{c: c}
+
+	require.NoError(t, client.Set(context.Background(), "obs-no-parent", "v", time.Hour))
+	assert.Empty(t, exporter.GetSpans(), "unparented Valkey command should be suppressed")
+
+	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
+	got, err := client.Get(ctx, "obs-no-parent")
+	require.NoError(t, err)
+	require.Equal(t, "v", got)
+	span.End()
+
+	names := spanNames(exporter.GetSpans())
+	assert.Contains(t, names, "parent")
+	assert.Contains(t, names, "redis.GET")
+}
+
 func spanNames(spans tracetest.SpanStubs) []string {
 	names := make([]string, len(spans))
 	for i := range spans {
