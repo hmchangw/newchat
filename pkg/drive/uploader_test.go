@@ -110,6 +110,62 @@ func TestClient_GetGroupImage_Success(t *testing.T) {
 	if string(body) != "PNGDATA" {
 		t.Fatalf("body = %q", string(body))
 	}
+	if img.Filename != "" {
+		t.Fatalf("filename = %q, want empty", img.Filename)
+	}
+}
+
+func TestClient_GetGroupImage_ForwardsFilename(t *testing.T) {
+	mux := http.NewServeMux()
+	var base string
+	mux.HandleFunc("/api/v1/groups/r1/files/f1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"url":"`+base+`/img"}`)
+	})
+	mux.HandleFunc("/img", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Disposition", `attachment; filename="report.png"`)
+		_, _ = w.Write([]byte("PNGDATA"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+
+	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+	img, err := c.GetGroupImage(srv.URL, "r1", "f1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer img.Reader.Close()
+	if img.Filename != "report.png" {
+		t.Fatalf("filename = %q, want %q", img.Filename, "report.png")
+	}
+}
+
+func TestClient_GetGroupImage_NoDisposition(t *testing.T) {
+	mux := http.NewServeMux()
+	var base string
+	mux.HandleFunc("/api/v1/groups/r1/files/f1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"url":"`+base+`/img"}`)
+	})
+	mux.HandleFunc("/img", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("PNGDATA"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+
+	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+	img, err := c.GetGroupImage(srv.URL, "r1", "f1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer img.Reader.Close()
+	if img.Filename != "" {
+		t.Fatalf("filename = %q, want empty", img.Filename)
+	}
 }
 
 func TestClient_GetGroupImage_EmptyURL(t *testing.T) {
