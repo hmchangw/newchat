@@ -789,6 +789,7 @@ func TestDownload_Success_StreamsBinary(t *testing.T) {
 		Reader:        readCloser{strings.NewReader("PNGDATA")},
 		ContentType:   "image/png",
 		ContentLength: 7,
+		Filename:      "réport space.png",
 	}}
 	h := newHandler(store, fd)
 	c, w := newDownloadCtx(t, "r1", "f1", "https://d.example.com", okUser())
@@ -800,6 +801,28 @@ func TestDownload_Success_StreamsBinary(t *testing.T) {
 	assert.Equal(t, "https://d.example.com", fd.getGot.host)
 	assert.Equal(t, "r1", fd.getGot.groupID)
 	assert.Equal(t, "f1", fd.getGot.fileID)
+	assert.Equal(t, "default-src 'none'", w.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "private, max-age=604800", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "attachment; filename*=UTF-8''r%C3%A9port%20space.png", w.Header().Get("Content-Disposition"))
+}
+
+func TestDownload_Success_NoFilename(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	fd := &fakeDrive{getResp: &drive.GetGroupImageResponse{
+		Reader:        readCloser{strings.NewReader("PNGDATA")},
+		ContentType:   "image/png",
+		ContentLength: 7,
+	}}
+	h := newHandler(store, fd)
+	c, w := newDownloadCtx(t, "r1", "f1", "https://d.example.com", okUser())
+	h.HandleDownloadFile(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "attachment", w.Header().Get("Content-Disposition"))
+	assert.Equal(t, "default-src 'none'", w.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "private, max-age=604800", w.Header().Get("Cache-Control"))
 }
 
 // multipartTyped builds a one-file multipart body with an explicit part

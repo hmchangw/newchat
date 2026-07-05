@@ -355,9 +355,14 @@ func (h *Handler) HandleDownloadFile(c *gin.Context) {
 	}
 	defer img.Reader.Close()
 
-	// GetGroupImage already defaults ContentType to application/octet-stream, so
-	// stream the body straight through with no intermediate buffering.
-	c.DataFromReader(http.StatusOK, img.ContentLength, img.ContentType, img.Reader, map[string]string{})
+	// Download headers mirror the MinIO/S3 path: force-download, lock down
+	// execution, and allow private (per-user) caching only — auth + membership gated.
+	extraHeaders := map[string]string{
+		"Content-Disposition":     contentDisposition(img.Filename),
+		"Content-Security-Policy": "default-src 'none'",
+		"Cache-Control":           fmt.Sprintf("private, max-age=%d", h.cacheMaxAge),
+	}
+	c.DataFromReader(http.StatusOK, img.ContentLength, img.ContentType, img.Reader, extraHeaders)
 }
 
 // HandleDownloadMinioS3File streams a legacy-uploaded file out of MinIO/S3. It
