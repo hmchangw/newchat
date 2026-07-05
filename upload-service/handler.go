@@ -405,10 +405,8 @@ func (h *Handler) HandleDownloadMinioS3File(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	// RFC 5987 filename*: percent-encode UTF-8 like encodeURIComponent (space -> %20, not +).
-	encodedName := strings.ReplaceAll(url.QueryEscape(up.Name), "+", "%20")
 	extraHeaders := map[string]string{
-		"Content-Disposition":     fmt.Sprintf("attachment; filename*=UTF-8''%s", encodedName),
+		"Content-Disposition":     contentDisposition(up.Name),
 		"Content-Security-Policy": "default-src 'none'",
 		// private: this response is authorization-gated (auth + room membership),
 		// so only the user agent may cache it — never a shared/intermediary cache.
@@ -483,6 +481,16 @@ func uniqueName(name string, milli int64, i int) string {
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
 	return fmt.Sprintf("%s_%d_%d%s", base, milli, i, ext)
+}
+
+// contentDisposition builds an attachment Content-Disposition value. A non-empty
+// name is appended as an RFC 5987 filename* (percent-encoded, space -> %20, not +).
+func contentDisposition(name string) string {
+	if name == "" {
+		return "attachment"
+	}
+	encodedName := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
+	return fmt.Sprintf("attachment; filename*=UTF-8''%s", encodedName)
 }
 
 // bytesFile adapts a *bytes.Reader (Read/ReadAt/Seek) to multipart.File by adding

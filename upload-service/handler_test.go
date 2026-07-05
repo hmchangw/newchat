@@ -657,6 +657,23 @@ func newS3DownloadCtx(t *testing.T, fileID, fileName string, user *Authenticated
 	return c, w
 }
 
+func TestContentDisposition(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "utf8 and space", in: "réport space.pdf", want: "attachment; filename*=UTF-8''r%C3%A9port%20space.pdf"},
+		{name: "simple", in: "x.pdf", want: "attachment; filename*=UTF-8''x.pdf"},
+		{name: "empty", in: "", want: "attachment"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, contentDisposition(tc.in))
+		})
+	}
+}
+
 func sampleUpload() *upload {
 	up := &upload{ID: "f1", UserID: "u1", RID: "r1", Name: "réport space.pdf", Type: "application/pdf", Size: 7}
 	up.AmazonS3.Path = "app-001/uploads/r1/u1/f1"
