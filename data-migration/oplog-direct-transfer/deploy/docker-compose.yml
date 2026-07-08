@@ -42,7 +42,6 @@ services:
       - DIRECT_COLLECTIONS=rocketchat_avatar,company_apps_v,company_bot_cmd_men,company_tsso_tokens,rocketchat_uploads,company_bot_authorization,ufsTokens,user_devices
       - SOURCE_READ_PREFERENCE=primaryPreferred
       - BOOTSTRAP_STREAMS=true
-      - LOG_LEVEL=info
     networks:
       - oplog-direct-local
 

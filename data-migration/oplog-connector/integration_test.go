@@ -64,7 +64,7 @@ func createSourceCollection(t *testing.T, db *mongo.Database, coll string) *mong
 }
 
 // TestConnector_RealPublishEndToEnd runs the full connector (start → real NATS publish) and reads
-// the envelope back off MIGRATION_OPLOG — covering main.go wiring and the real oteljetstream path.
+// the envelope back off MIGRATION_OPLOG — covering main.go wiring and the real o11y/nats JetStream path.
 func TestConnector_RealPublishEndToEnd(t *testing.T) {
 	const coll = "rocketchat_message"
 	client, uri := startReplicaSet(t)

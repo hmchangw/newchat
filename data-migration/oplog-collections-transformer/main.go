@@ -6,23 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -35,7 +33,13 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)})))
+	ctx := context.Background()
+
+	sdk, obsShutdown, err := obs.Init(ctx)
+	if err != nil {
+		slog.Error("init observability failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Surface an empty ALL_SITE_IDS once at startup: user statusText changes won't propagate
 	// (publishUserStatus skips with a per-event metric). Legitimate for a rooms/subs-only partial
@@ -44,41 +48,22 @@ func main() {
 		slog.Warn("ALL_SITE_IDS is empty — user status fan-out is disabled (intentional only for a partial deployment)")
 	}
 
-	ctx := context.Background()
-
-	tracerShutdown, err := otelutil.InitTracer(ctx, "oplog-collections-transformer")
-	if err != nil {
-		slog.Error("init tracer failed", "error", err)
-		os.Exit(1)
-	}
-	meterShutdown, err := otelutil.InitMeter("oplog-collections-transformer")
-	if err != nil {
-		slog.Error("init meter failed", "error", err)
-		os.Exit(1)
-	}
 	m, err := newMetrics()
 	if err != nil {
 		slog.Error("init metrics failed", "error", err)
 		os.Exit(1)
 	}
 
-	// Bind synchronously so a port conflict fails startup loudly rather than
-	// running blind — observability is the stall signal for this single-replica pump.
-	metricsServer := newMetricsServer()
-	ln, err := net.Listen("tcp", cfg.MetricsAddr)
+	// Bind synchronously so a port conflict fails startup loudly. Metrics are
+	// owned by the o11y SDK's Prometheus endpoint; this is health-only.
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("health server failed to start", "addr", cfg.HealthAddr, "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("metrics+health server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
 	// Source legacy Mongo: re-read full current docs by _id on update events.
-	source, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword)
+	source, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("source mongo connect failed", "error", err)
 		os.Exit(1)
@@ -98,9 +83,8 @@ func main() {
 		cfg.RoomMembersCollection:   migration.NewMongoSourceLookup(sourceDB.Collection(cfg.RoomMembersCollection, options.Collection().SetReadPreference(rp))),
 	}
 
-	// Target new-stack per-site Mongo: user insert-if-absent, thread_room/user FK resolution, and
-	// room-member direct writes.
-	targetClient, err := mongoutil.Connect(ctx, cfg.TargetMongoURI, cfg.TargetUsername, cfg.TargetPassword)
+	// Target new-stack per-site Mongo: user insert-if-absent + thread_room/user FK resolution.
+	targetClient, err := mongoutil.Connect(ctx, cfg.TargetMongoURI, cfg.TargetUsername, cfg.TargetPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("target mongo connect failed", "error", err)
 		mongoutil.Disconnect(ctx, source)
@@ -114,14 +98,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, targetClient)
 		mongoutil.Disconnect(ctx, source)
 		os.Exit(1)
 	}
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		_ = nc.Drain()
@@ -177,8 +161,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	cc, err := cons.Consume(func(msg oteljetstream.Msg) {
-		processOne(msg.Context(), h, msg, m, cfg.MaxDeliver, cfg.DeleteMaxDeliver)
+	cc, err := cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+		processOne(msgCtx, h, msg, m, cfg.MaxDeliver, cfg.DeleteMaxDeliver)
 	})
 	if err != nil {
 		slog.Error("consume failed", "stream", streamName, "error", err)
@@ -190,16 +174,16 @@ func main() {
 
 	slog.Info("oplog-collections-transformer started", "site", cfg.SiteID, "stream", streamName)
 
-	// Ordered, timeout-bounded cleanup:
-	// stop consume → metrics/health → observability → NATS drain → Mongo (target then source).
+	// Ordered, timeout-bounded cleanup: stop consume → health → NATS drain →
+	// Mongo (target then source) → flush observability LAST so all teardown
+	// telemetry exports.
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { cc.Stop(); return nil },
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
-		func(ctx context.Context) error { return meterShutdown(ctx) },
+		func(ctx context.Context) error { return healthStop(ctx) },
 		func(context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, targetClient); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, source); return nil },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
 
@@ -284,7 +268,7 @@ const streamWaitTimeout = 60 * time.Second
 // (the connector creates it independently); other errors and streamWaitTimeout are returned.
 //
 //nolint:gocritic // hugeParam: cfg is passed by value to match jetstream.CreateOrUpdateConsumer's signature.
-func createConsumerWithRetry(ctx context.Context, js oteljetstream.JetStream, streamName string, cfg jetstream.ConsumerConfig) (oteljetstream.Consumer, error) {
+func createConsumerWithRetry(ctx context.Context, js o11ynats.JetStream, streamName string, cfg jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
 	deadline := time.Now().Add(streamWaitTimeout)
 	for {
 		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, cfg)
@@ -303,23 +287,6 @@ func createConsumerWithRetry(ctx context.Context, js oteljetstream.JetStream, st
 	}
 }
 
-// newMetricsServer builds the /metrics + /healthz HTTP server with timeouts that guard against hung scrapers tying up goroutines.
-func newMetricsServer() *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	return &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-}
-
 func readPreference(s string) (*readpref.ReadPref, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "primary":
@@ -334,18 +301,5 @@ func readPreference(s string) (*readpref.ReadPref, error) {
 		return readpref.Nearest(), nil
 	default:
 		return nil, fmt.Errorf("invalid SOURCE_READ_PREFERENCE: %s", s)
-	}
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
 	}
 }

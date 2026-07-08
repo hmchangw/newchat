@@ -128,11 +128,11 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 	t.Run("happy path", func(t *testing.T) {
 		nc := dial(t)
-		sub, err := nc.Subscribe(subject.ThreadRoomInfoBatch("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.ThreadRoomInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.ThreadRoomInfoBatchResponse{
 				Threads: []model.ThreadRoomInfo{{ThreadRoomID: "tr1", Found: true, LastMsgAt: 42}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -145,9 +145,9 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 
 	t.Run("errcode reply relayed", func(t *testing.T) {
 		nc := dial(t)
-		sub, err := nc.Subscribe(subject.ThreadRoomInfoBatch("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.ThreadRoomInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(errcode.BadRequest("bad"))
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -174,11 +174,11 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 		nc := dial(t)
 
 		// Responder on "site-b" subject proves the method routes on siteID param, not c.siteID.
-		sub, err := nc.Subscribe(subject.ThreadRoomInfoBatch("site-b"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.ThreadRoomInfoBatch("site-b"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.ThreadRoomInfoBatchResponse{
 				Threads: []model.ThreadRoomInfo{{ThreadRoomID: "tr2", Found: true, LastMsgAt: 99}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })

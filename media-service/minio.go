@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/minio/minio-go/v7"
+
+	"github.com/hmchangw/chat/pkg/minioutil"
 )
 
 // errBlobNotFound is returned by blobStore.Get when the object does not exist.

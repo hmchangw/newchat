@@ -6,8 +6,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/minio/minio-go/v7"
+
+	"github.com/hmchangw/chat/pkg/minioutil"
 )
 
 // minioObjectStore streams objects out of a single MinIO/S3 bucket.
