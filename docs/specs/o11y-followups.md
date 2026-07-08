@@ -42,8 +42,22 @@ Unlike `oplog-connector`/`oplog-transformer` (whose metrics are already
 
 ### Decision
 
-**Default: (A)** — the two endpoints serve *different* metrics (app vs
-SDK/runtime), so they are complementary, not duplicate; the only cost is one
-extra endpoint + inconsistency with other services. (B) buys single-endpoint
-consistency at the price of dashboard breakage + cross-repo coordination — do
-it only when the `search-service` Grafana is being reworked anyway.
+**Chosen: (B)** — `search-service` should expose a **single metrics port**
+(the SDK's `:2112`), consistent with every other service. Retire the bespoke
+`:9090`/promauto endpoint and re-emit the three app metrics through the OTel
+meter.
+
+**Implementation (pending):**
+1. Rewrite `metrics.go` onto `otel.Meter("search-service")`:
+   `search_service_requests_total` (Int64Counter), `…request_duration_seconds`
+   and `…es_duration_seconds` (Float64Histogram); thread `ctx` through
+   `observeRequest`/`observeES` and their call sites.
+2. Pin histogram boundaries with an explicit meter **View** (OTel's default
+   buckets differ from `prometheus.DefBuckets`, or `histogram_quantile` breaks).
+3. Account for otelprom's naming: it double-suffixes `_total`/`_seconds` and adds
+   `otel_scope_*`/`target_info` labels — set instrument names so the emitted
+   series match, or update the dashboard/alert queries to the new names.
+4. Drop the `:9090` listener + `METRICS_ADDR`; TDD the new meter path.
+5. **Cross-repo:** realign the `search-service` Grafana panels/alerts to the
+   `:2112` target (`job`/`instance` change) — coordinate with the o11y/k8s
+   monitor-stack owner. This is the risky part flagged in the table above.
