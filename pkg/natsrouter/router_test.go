@@ -544,7 +544,7 @@ func TestRequestIDMiddleware_StoresIDOnUnderlyingContext(t *testing.T) {
 			assert.Equal(t, testID, fromCtx)
 		},
 	}
-	runChain(c, chain)
+	runHandlerChain(c, chain)
 	assert.True(t, called, "downstream handler must run")
 }
 
@@ -562,7 +562,7 @@ func TestRequestIDMiddleware_GeneratesAndStoresOnContext_WhenHeaderMissing(t *te
 			fromKeys = fromKeysAny.(string)
 		},
 	}
-	runChain(c, chain)
+	runHandlerChain(c, chain)
 	assert.NotEmpty(t, fromCtx, "RequestID middleware must mint and propagate to ctx when header is absent")
 	assert.Equal(t, fromCtx, fromKeys, "minted ID must be identical in ctx and keys map")
 }
@@ -579,7 +579,7 @@ func TestRequestIDMiddleware_RegeneratesOnMalformedHeader(t *testing.T) {
 			fromCtx = natsutil.RequestIDFromContext(c)
 		},
 	}
-	runChain(c, chain)
+	runHandlerChain(c, chain)
 
 	assert.NotEqual(t, "not-a-uuidv7", fromCtx, "malformed inbound ID must be replaced")
 	assert.True(t, idgen.IsValidUUID(fromCtx), "regenerated ID must be a valid hyphenated UUID")
@@ -606,7 +606,7 @@ func TestRequestIDMiddleware_OtherCtxKeysStillReadable(t *testing.T) {
 			assert.Equal(t, "parent-value", got, "non-requestIDKey lookup must still find values from the original parent ctx")
 		},
 	}
-	runChain(c, chain)
+	runHandlerChain(c, chain)
 	assert.True(t, called, "downstream handler must run")
 }
 

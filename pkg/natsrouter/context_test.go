@@ -84,7 +84,7 @@ func TestContext_ConcurrentKeysAccess_NoRace(t *testing.T) {
 // reuse. Run with -race.
 func TestContext_StableCtxAcrossPoolReuse(t *testing.T) {
 	reqCtx := context.Background()
-	c1 := acquireContext(reqCtx, nil, NewParams(map[string]string{"req": "1"}), nil)
+	c1 := acquireContext(reqCtx, nil, NewParams(map[string]string{"req": "1"}), nil, "")
 	c1.Set("id", "alice")
 
 	stop := make(chan struct{})
@@ -114,6 +114,7 @@ func TestContext_StableCtxAcrossPoolReuse(t *testing.T) {
 			nil,
 			NewParams(map[string]string{"req": strconv.Itoa(i + 2)}),
 			nil,
+			"",
 		)
 		c2.Set("id", "bob")
 		releaseContext(c2)
@@ -128,11 +129,11 @@ func TestContext_StableCtxAcrossPoolReuse(t *testing.T) {
 // fast if someone ever reintroduces pooling of the Context header itself —
 // the likely accident given how much of the rest of the struct looks poolable.
 func TestContext_KeysIndependentPerRequest(t *testing.T) {
-	c1 := acquireContext(context.Background(), nil, Params{}, nil)
+	c1 := acquireContext(context.Background(), nil, Params{}, nil, "")
 	c1.Set("leak", "bad")
 	releaseContext(c1)
 
-	c2 := acquireContext(context.Background(), nil, Params{}, nil)
+	c2 := acquireContext(context.Background(), nil, Params{}, nil, "")
 	_, ok := c2.Get("leak")
 	assert.False(t, ok, "keys set on a released context must not be visible on the next acquire")
 	releaseContext(c2)
@@ -189,7 +190,7 @@ func TestContext_GetHeader(t *testing.T) {
 // next request's chain state. The nil-out + nil-check converts the silent
 // corruption into a loud panic.
 func TestContext_ChainMethodsPanicAfterRelease(t *testing.T) {
-	c := acquireContext(context.Background(), nil, Params{}, []HandlerFunc{func(*Context) {}})
+	c := acquireContext(context.Background(), nil, Params{}, []HandlerFunc{func(*Context) {}}, "")
 	releaseContext(c)
 
 	assert.PanicsWithValue(t, chainAfterReleasePanic, func() { c.Next() })

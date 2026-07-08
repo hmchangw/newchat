@@ -33,6 +33,14 @@ type Context struct {
 	keys   map[string]any
 	mu     sync.RWMutex
 
+	// route is the matched route pattern (with {name} placeholders); set once
+	// at acquire, read by the Metrics middleware. Stable for the request's life.
+	route string
+	// status is the terminal RPC status label. Set by the Register* wrappers
+	// synchronously within the chain, before the reply; read by the Metrics
+	// middleware after c.Next(). Single-goroutine, sequential — no lock needed.
+	status string
+
 	chain *chainState
 }
 
@@ -49,7 +57,7 @@ var chainPool = sync.Pool{
 	New: func() any { return &chainState{} },
 }
 
-func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers []HandlerFunc) *Context {
+func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers []HandlerFunc, route string) *Context {
 	cs := chainPool.Get().(*chainState)
 	cs.handlers = handlers
 	cs.index = -1
@@ -57,6 +65,7 @@ func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers 
 		ctx:    ctx,
 		Msg:    msg,
 		Params: params,
+		route:  route,
 		chain:  cs,
 	}
 }
@@ -90,6 +99,22 @@ func (c *Context) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
 func (c *Context) Done() <-chan struct{}       { return c.ctx.Done() }
 func (c *Context) Err() error                  { return c.ctx.Err() }
 func (c *Context) Value(key any) any           { return c.ctx.Value(key) }
+
+// Route returns the matched route pattern (with {name} placeholders), the
+// low-cardinality label the Metrics middleware uses. Empty for test contexts.
+func (c *Context) Route() string { return c.route }
+
+// SetStatus records the terminal RPC status label for the Metrics middleware.
+func (c *Context) SetStatus(s string) { c.status = s }
+
+// Status returns the terminal status label, defaulting to "ok" when a handler
+// completed without setting one (e.g. a fire-and-forget void success).
+func (c *Context) Status() string {
+	if c.status == "" {
+		return "ok"
+	}
+	return c.status
+}
 
 // Chain methods are handler-internal. Calling them from a post-handler
 // goroutine panics — chainState is pooled and would otherwise silently read

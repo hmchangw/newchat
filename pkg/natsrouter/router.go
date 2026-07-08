@@ -208,7 +208,7 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 					}
 				}
 			}()
-			c := acquireContext(m.Context(), m.Msg, rt.extractParams(m.Msg.Subject), all)
+			c := acquireContext(m.Context(), m.Msg, rt.extractParams(m.Msg.Subject), all, rt.pattern)
 			defer releaseContext(c)
 			c.Next()
 		}()
