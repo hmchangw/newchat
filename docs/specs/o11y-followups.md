@@ -121,3 +121,14 @@ pivot is one-directional. Add a one-line span attribute in the `natsrouter` and
 - Gin service-name string literals (`"auth-service"`, …) duplicate
   `OTEL_SERVICE_NAME`; read from the obs config so span scope and resource
   attribute can't drift.
+
+### F9 — Metrics gaps (see `o11y-metrics-inventory.md`)
+Full per-service inventory in `docs/specs/o11y-metrics-inventory.md`. Priority:
+1. **NATS/JetStream exporter** (infra) — consumer lag is invisible today; the app
+   SDK cannot emit it. Highest-value metrics gap on the platform.
+2. **Hot-path domain counters** (app) — gatekeeper validated/rejected, broadcast
+   fan-out size, notification sent/suppressed, search-sync bulk outcomes. The
+   data-migration services already model this well; copy the pattern.
+3. NATS & ES **client** metrics are absent (otelnats/searchengine emit spans
+   only) — decide whether to add app-side latency histograms.
+4. Server exporters for Mongo/Cassandra/Valkey/ES (infra, lower urgency).
