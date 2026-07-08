@@ -42,6 +42,10 @@ services:
   prometheus:
     image: prom/prometheus:v3.0.1
     container_name: chat-local-prometheus
+    # Local-dev only: Docker SD reads /var/run/docker.sock, which is root-owned
+    # on Docker Desktop/WSL. Run as root so Prometheus can discover service
+    # containers without chmod'ing the host socket.
+    user: "0:0"
     command: ["--config.file=/etc/prometheus/prometheus.yaml"]
     volumes:
       - ./o11y/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro

@@ -30,3 +30,5 @@ service:
   telemetry:
     logs:
       level: warn
+    metrics:
+      address: 0.0.0.0:8888

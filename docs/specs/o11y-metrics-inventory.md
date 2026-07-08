@@ -48,33 +48,47 @@ Enabled wherever the matching `WithObservability` / middleware is wired.
 
 ## 2. Layer B — per-service view (auto + app), and what's missing
 
-`R` = Go runtime (always). Auto DB/HTTP columns show what's instrumented. The
-last column is the **domain** metrics that would need an explicit `sdk.Meter()`
-and are **not present today**.
+`R` = Go runtime (always). Auto DB/HTTP columns show what's instrumented. "App
+metrics today" means explicit repo-owned OTel instruments visible on the SDK
+`:2112` endpoint. The last column is the **business/domain** coverage still
+missing beyond shared cache/key counters.
 
 | Service | HTTP | Mongo | Valkey | Cassandra | NATS | ES | App metrics today | Missing domain metrics (suggested) |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|---|---|
 | auth-service | ✅ | — | — | — | — | — | — | login success/fail, JWKS refresh (see F5) |
 | portal-service | ✅ | ✅ | — | — | — | — | — | account-lookup outcomes |
 | upload-service | ✅ | ✅ | — | — | — | — | — | upload count/bytes, MinIO put/get outcomes |
-| message-gatekeeper | — | ✅ | ✅ | — | spans | — | — | **validated / rejected counter** (by reason), canonical published |
-| message-worker | — | ✅ | — | ✅ | spans | — | — | rows written, thread-sub upserts |
-| broadcast-worker | — | ✅ | ✅ | — | spans | — | — | **fan-out size** histogram, deliveries, E2E-key hits |
-| notification-worker | — | ✅ | ✅ | — | spans | — | — | notifications/pushes sent, suppressed |
+| message-gatekeeper | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | **validated / rejected counter** (by reason), canonical published |
+| message-worker | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | rows written, thread-sub upserts |
+| broadcast-worker | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | **fan-out size** histogram, deliveries, E2E-key hits |
+| notification-worker | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | notifications/pushes sent, suppressed |
 | search-sync-worker | — | — | — | — | spans (Fetch) | spans | — | bulk actions/flush, index vs delete, ES failures |
-| search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `…request_duration_seconds`, `…es_duration_seconds`** | (well covered) |
+| search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `search_service_request_duration_seconds`, `search_service_es_duration_seconds`** | (well covered after request traffic) |
 | room-service | — | ✅ | ✅ | ✅ | spans | — | — | room create/join/leave outcomes |
-| room-worker | — | ✅ | ✅ | ✅ | spans | — | — | member-add results, roomkey distributions, vault ops |
+| room-worker | — | ✅ | ✅ | ✅ | spans | — | shared `cache_*_total`, `room_key_*_total` | member-add results, roomkey distributions, vault ops |
 | inbox-worker | — | ✅ | — | — | spans | — | — | cross-site events applied/dropped by type |
 | user-service | — | ✅ | ✅ | — | spans | — | — | subscription/room RPC outcomes |
 | user-presence-service | — | ✅ | ✅? | — | spans | — | — | presence queries, cache hit rate |
-| history-service | — | ✅ | — | ✅ | spans | — | — | history reads, bucket-walk depth |
+| history-service | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | history reads, bucket-walk depth |
 | data-migration/oplog-* | — | ✅ | — | — | spans | — | **rich counters** (`oplog_*_events_processed_total`, `_naks_total`, `_terms_total`, `_skipped_total`, `_exhausted_total`, …) | (good exemplar — copy this pattern) |
 
-**Observation:** the **data-migration services already model domain metrics well**
+**Observation:** shared cache/room-key counters are already present on some
+hot-path services, but they do not answer the core product questions (accepted
+vs rejected messages, fan-out size, delivered/suppressed notifications, ES bulk
+outcomes). The **data-migration services already model domain metrics well**
 (processed / nak / term / skip / exhausted counters) — that is the pattern the
-**hot-path workers are missing**. The review deferred these by design; F-items
-below track them.
+hot-path workers should copy. The review deferred these by design; F-items below
+track them.
+
+Live verification from the local stack:
+
+```promql
+count by (service) (up{job="chat-services"})
+count by (service_name) (go_goroutine_count)
+count by (service_name, db_system_name) (db_client_operation_duration_seconds_count)
+sum by (service_name, cache, tier) (cache_hits_total)
+sum by (service_name, cache, tier) (cache_misses_total)
+```
 
 ---
 

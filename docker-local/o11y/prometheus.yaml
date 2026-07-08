@@ -1,10 +1,7 @@
-# Prometheus — scrapes the SDK metrics endpoint (:2112) off every chat container
-# on the chat-local network via Docker service discovery, so any service that
-# comes up is picked up automatically (no static target list to maintain).
-#
-# Non-service containers (mongo, nats, …) that don't expose :2112 show up as
-# `down` targets — harmless local noise. To limit scraping to real services,
-# give them a `chat.metrics=true` compose label and tighten the keep rule below.
+# Prometheus — scrapes the SDK metrics endpoint (:2112) off every service
+# container in the chat-local-services compose project via Docker service
+# discovery, so the service list is picked up automatically without scraping
+# third-party deps that don't expose SDK metrics.
 global:
   scrape_interval: 15s
 
@@ -18,6 +15,22 @@ scrape_configs:
       - source_labels: [__meta_docker_network_name]
         regex: chat-local
         action: keep
+      # Only the microservice aggregate stack; deps/o11y containers either do
+      # not expose :2112 or have their own explicit scrape jobs.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        regex: chat-local-services
+        action: keep
+      # Ignore stale/orphan one-off containers if they are still present from an
+      # older local stack.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: vault|portal-seed
+        action: drop
+      # docker_sd emits each container's exposed app port when one is present;
+      # force every service target to the SDK Prometheus endpoint instead.
+      - source_labels: [__meta_docker_network_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: ${1}:2112
       # Use the container name as the Prometheus `instance`.
       - source_labels: [__meta_docker_container_name]
         regex: /?(.*)
