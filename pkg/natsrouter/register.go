@@ -29,14 +29,7 @@ func Register[Req, Resp any](
 		}
 
 		resp, err := fn(c, req)
-		if err != nil {
-			c.SetStatus(rpcmetrics.StatusLabel(err))
-			replyErr(c, err)
-			return
-		}
-
-		c.SetStatus("ok")
-		c.ReplyJSON(resp)
+		replyResult(c, resp, err)
 	})
 
 	r.addRoute(pattern, []HandlerFunc{handler})
@@ -50,14 +43,7 @@ func RegisterNoBody[Resp any](
 ) {
 	handler := HandlerFunc(func(c *Context) {
 		resp, err := fn(c)
-		if err != nil {
-			c.SetStatus(rpcmetrics.StatusLabel(err))
-			replyErr(c, err)
-			return
-		}
-
-		c.SetStatus("ok")
-		c.ReplyJSON(resp)
+		replyResult(c, resp, err)
 	})
 
 	r.addRoute(pattern, []HandlerFunc{handler})
@@ -92,4 +78,16 @@ func RegisterVoid[Req any](
 // replyErr classifies err and sends the errcode envelope on the reply subject.
 func replyErr(c *Context, err error) {
 	errnats.Reply(c, c.Msg, err)
+}
+
+// replyResult stamps the terminal metrics status and sends the reply: the
+// classified status + error envelope on failure, "ok" + JSON body on success.
+func replyResult[Resp any](c *Context, resp *Resp, err error) {
+	if err != nil {
+		c.SetStatus(rpcmetrics.StatusLabel(err))
+		replyErr(c, err)
+		return
+	}
+	c.SetStatus("ok")
+	c.ReplyJSON(resp)
 }

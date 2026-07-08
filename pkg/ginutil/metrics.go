@@ -5,12 +5,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	"github.com/hmchangw/chat/pkg/rpcmetrics"
 )
-
-// errCodeKey mirrors errhttp.ErrCodeKey by value to avoid an import edge from
-// ginutil to errhttp. errhttp.Write stores the classified Code here.
-const errCodeKey = "errcode"
 
 // Metrics returns middleware that records rpc_server_requests_total and
 // rpc_server_request_duration_seconds for each matched HTTP route. The `route`
@@ -35,7 +32,7 @@ func Metrics(service string) gin.HandlerFunc {
 // derives a coarse class from the HTTP status code so plain responses still map
 // onto the shared status taxonomy.
 func statusForHTTP(c *gin.Context) string {
-	if v, ok := c.Get(errCodeKey); ok {
+	if v, ok := c.Get(errhttp.ErrCodeKey); ok {
 		if code, ok := v.(string); ok && code != "" {
 			return rpcmetrics.NormalizeStatus(code)
 		}

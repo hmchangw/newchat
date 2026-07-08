@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"time"
@@ -220,26 +217,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind synchronously so a port conflict fails startup loudly rather than
-	// running blind — /metrics exposes rpc_server_* RPC metrics.
-	metricsServer := otelutil.MetricsServer()
-	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("metrics server setup failed", "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
 	slog.Info("room-service running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
+		func(ctx context.Context) error { return stopMetrics(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error {

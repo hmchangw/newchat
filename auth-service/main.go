@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"time"
@@ -111,17 +109,10 @@ func run() error {
 	registerRoutes(r, handler)
 
 	// /metrics on a separate port so scrapes don't hit the public API listener.
-	metricsServer := otelutil.MetricsServer()
-	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
 	if err != nil {
-		return fmt.Errorf("metrics listen: %w", err)
+		return err
 	}
-	go func() {
-		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -145,7 +136,7 @@ func run() error {
 				slog.Info("shutting down auth service")
 				return srv.Shutdown(ctx)
 			},
-			func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
+			func(ctx context.Context) error { return stopMetrics(ctx) },
 		)
 	}()
 

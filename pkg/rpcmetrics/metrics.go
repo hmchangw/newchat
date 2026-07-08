@@ -53,31 +53,16 @@ func StatusLabel(err error) string {
 	return string(errcode.CodeInternal)
 }
 
-// NormalizeStatus collapses any status label outside the pinned allowlist to
-// "internal", bounding cardinality. Both transports (NATS StatusLabel and the
+// NormalizeStatus admits "ok" plus the canonical errcode Codes (via
+// Code.Valid()), collapsing anything else to "internal". This bounds
+// cardinality on the status label. Both transports (NATS StatusLabel and the
 // HTTP middleware fallback) funnel through this so the status taxonomy is
 // identical on each.
 func NormalizeStatus(code string) string {
-	if _, ok := allowedStatusLabels[code]; ok {
+	if code == "ok" || errcode.Code(code).Valid() {
 		return code
 	}
 	return string(errcode.CodeInternal)
-}
-
-// allowedStatusLabels pins the cardinality of the status label to the 8
-// canonical errcode Codes + "ok". Any label outside this set collapses to
-// "internal" via StatusLabel, so a future Code added without updating this
-// allowlist cannot mint a fresh time series.
-var allowedStatusLabels = map[string]struct{}{
-	"ok":                                {},
-	string(errcode.CodeBadRequest):      {},
-	string(errcode.CodeUnauthenticated): {},
-	string(errcode.CodeForbidden):       {},
-	string(errcode.CodeNotFound):        {},
-	string(errcode.CodeConflict):        {},
-	string(errcode.CodeTooManyRequests): {},
-	string(errcode.CodeUnavailable):     {},
-	string(errcode.CodeInternal):        {},
 }
 
 // CounterValue returns the current rpc_server_requests_total value for the

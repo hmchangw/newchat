@@ -70,7 +70,7 @@ func (h *handler) withRequestTimeout(parent context.Context) (context.Context, c
 	return context.WithTimeout(parent, h.cfg.RequestTimeout)
 }
 
-func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessagesRequest) (resp *model.SearchMessagesResponse, err error) {
+func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessagesRequest) (*model.SearchMessagesResponse, error) {
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
@@ -123,7 +123,7 @@ func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessages
 	return &model.SearchMessagesResponse{Messages: messages, Total: total}, nil
 }
 
-func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsRequest) (resp *model.SearchRoomsResponse, err error) {
+func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsRequest) (*model.SearchRoomsResponse, error) {
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
@@ -210,7 +210,7 @@ func (h *handler) loadRestricted(ctx context.Context, account string) (map[strin
 	return restricted, nil
 }
 
-func (h *handler) searchApps(c *natsrouter.Context, req model.SearchAppsRequest) (resp *model.SearchAppsResponse, err error) {
+func (h *handler) searchApps(c *natsrouter.Context, req model.SearchAppsRequest) (*model.SearchAppsResponse, error) {
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
@@ -244,7 +244,7 @@ func (h *handler) searchApps(c *natsrouter.Context, req model.SearchAppsRequest)
 // SearchUsersClient and returns a raw []model.SearchUser. The account
 // from the subject is used for logging and metrics only; scoping is
 // enforced entirely by the third-party endpoint.
-func (h *handler) searchUsers(c *natsrouter.Context, req model.SearchUsersRequest) (resp *[]model.SearchUser, err error) {
+func (h *handler) searchUsers(c *natsrouter.Context, req model.SearchUsersRequest) (*[]model.SearchUser, error) {
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
