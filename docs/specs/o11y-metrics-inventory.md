@@ -5,8 +5,9 @@ What Prometheus metrics each service exposes today (on the SDK's `:2112`), what
 come from **dedicated exporters** (infra, not the app SDK). Companion to
 `o11y-trace-design.md` (traces) — this is the metrics view.
 
-> Status: inventory / design. Live values to be confirmed against a running
-> stack (`docker-local/compose.o11y.yaml` → Prometheus `:9090`).
+> Status: inventory / design. Live values were verified locally on 2026-07-08
+> against the Docker Compose o11y stack (`docker-local/compose.o11y.yaml` ->
+> Prometheus `:9090`).
 
 ---
 
@@ -89,6 +90,64 @@ count by (service_name, db_system_name) (db_client_operation_duration_seconds_co
 sum by (service_name, cache, tier) (cache_hits_total)
 sum by (service_name, cache, tier) (cache_misses_total)
 ```
+
+### Local verification result (2026-07-08)
+
+Environment: Docker Compose local stack with `compose.deps.yaml`,
+`compose.o11y.yaml`, and `compose.services.yaml`.
+
+Configuration checks:
+
+```bash
+docker compose -f docker-local/compose.o11y.yaml config --quiet
+docker compose -f docker-local/compose.services.yaml config --quiet
+docker run --rm -v "$PWD/docker-local/o11y/otel-collector.yaml:/config.yaml:ro" otel/opentelemetry-collector:0.115.1 validate --config=/config.yaml
+```
+
+Prometheus scrape status:
+
+| Job | Result |
+|---|---|
+| `chat-services` | 15 active targets up |
+| `otel-collector` | 1 active target up |
+
+Active `chat-services` targets scraped `:2112/metrics` for:
+
+`auth-service`, `broadcast-worker`, `history-service`, `inbox-worker`,
+`message-gatekeeper`, `message-worker`, `notification-worker`,
+`portal-service`, `room-service`, `room-worker`, `search-service`,
+`search-sync-worker`, `upload-service`, `user-presence-service`,
+`user-service`.
+
+Direct endpoint checks confirmed that SDK metrics are on `:2112`; old app
+ports such as `:9090/metrics` are not the metrics endpoint for these services.
+The local Prometheus config rewrites Docker service targets to `:2112` and drops
+stale/orphan services such as an old `vault` container.
+
+PromQL evidence:
+
+| Query | Result |
+|---|---|
+| `count by (service) (up{job="chat-services"})` | one live target for each of the 15 services above |
+| `count by (service_name) (go_goroutine_count)` | runtime metrics present for all 15 services |
+| `count by (service_name, db_system_name) (db_client_operation_duration_seconds_count)` | Mongo, Valkey/Redis, and Cassandra client metrics present on the expected services |
+| `sum by (service_name, cache, tier) (cache_hits_total)` | cache hit counters present for `message-worker`, `history-service`, `broadcast-worker`, and `message-gatekeeper` |
+| `sum by (service_name, cache, tier) (cache_misses_total)` | cache miss counters present for `message-worker`, `notification-worker`, `history-service`, `room-worker`, `broadcast-worker`, and `message-gatekeeper` |
+| `cache_errors_total` | empty in this run; expected when no cache errors occurred |
+| `search_service_*` | empty in this Prometheus window because no search request traffic was generated after Prometheus was recreated |
+| NATS/JetStream client metric queries | empty; expected, because NATS currently emits spans but no SDK client metrics |
+
+Sample cache counter values observed in this run:
+
+| Metric | Observed series |
+|---|---|
+| `cache_hits_total` | `message-worker/user/l1=3`, `history-service/history_sub/l1=2`, `broadcast-worker/roommeta/l2=1`, `broadcast-worker/user/l1=3`, `message-gatekeeper/roommeta/l2=2`, `message-gatekeeper/user/l1=4` |
+| `cache_misses_total` | `message-worker/user/l1=1`, `notification-worker/roommeta/l1=1`, `notification-worker/roommeta/l2=1`, `notification-worker/roomsub/l2=4`, `history-service/history_sub/l1=1`, `room-worker/roommeta/l1=1`, `room-worker/user/l1=4`, `broadcast-worker/roommeta/l1=4`, `broadcast-worker/roommeta/l2=2`, `broadcast-worker/user/l1=1`, `message-gatekeeper/gatekeeper_sub/l1=6`, `message-gatekeeper/roommeta/l1=3`, `message-gatekeeper/roommeta/l2=1`, `message-gatekeeper/user/l1=2` |
+
+Conclusion: Layer A runtime and client DB metrics are wired and scrapeable from
+the local stack, and the shared Layer B cache counters are visible where
+implemented. The remaining gaps are domain counters on hot-path services and
+Layer C infra exporters, especially NATS/JetStream lag.
 
 ---
 
