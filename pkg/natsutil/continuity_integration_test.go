@@ -98,9 +98,16 @@ func TestPipelineTraceContinuity(t *testing.T) {
 	got2 := receiveSpanContext(t, hop2, "hop2 (worker/broadcast) consumer")
 	require.True(t, got2.IsValid(), "hop2 must have a valid active consumer span context")
 
-	spans := recorder.Ended()
-	requireLinkedToTrace(t, spans, wantTID, "first NATS consume hop must link to the original producer trace")
-	requireLinkedToTrace(t, spans, got1.TraceID(), "second NATS consume hop must link to the first hop's producer trace")
+	// otelnats ends each consumer span AFTER its handler returns, on the consumer
+	// goroutine — which races the channel sends above. Poll the recorder until
+	// both hops' links are visible rather than reading it once (a single read can
+	// miss the second hop's span before it is ended/recorded).
+	require.Eventuallyf(t, func() bool {
+		spans := recorder.Ended()
+		return hasLinkToTrace(spans, wantTID) && hasLinkToTrace(spans, got1.TraceID())
+	}, 5*time.Second, 20*time.Millisecond,
+		"both consume hops must link to their upstream producer trace (hop1→%s, hop2→%s)",
+		wantTID, got1.TraceID())
 }
 
 func receiveSpanContext(t *testing.T, ch <-chan oteltrace.SpanContext, who string) oteltrace.SpanContext {
@@ -115,14 +122,13 @@ func receiveSpanContext(t *testing.T, ch <-chan oteltrace.SpanContext, who strin
 	}
 }
 
-func requireLinkedToTrace(t *testing.T, spans []sdktrace.ReadOnlySpan, traceID oteltrace.TraceID, msg string) {
-	t.Helper()
+func hasLinkToTrace(spans []sdktrace.ReadOnlySpan, traceID oteltrace.TraceID) bool {
 	for _, span := range spans {
 		for _, link := range span.Links() {
 			if link.SpanContext.TraceID() == traceID {
-				return
+				return true
 			}
 		}
 	}
-	t.Fatalf("%s: no ended span linked to trace ID %s", msg, traceID.String())
+	return false
 }
