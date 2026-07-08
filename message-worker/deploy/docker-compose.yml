@@ -1,69 +1,11 @@
 name: message-worker
 
 services:
-  vault:
-    image: hashicorp/vault:1.18
-    cap_add:
-      - IPC_LOCK
-    environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=dev-only-token
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
-    networks:
-      - chat-local
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8200/v1/sys/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  vault-bootstrap:
-    image: hashicorp/vault:1.18
-    depends_on:
-      vault:
-        condition: service_healthy
-    environment:
-      - VAULT_ADDR=http://vault:8200
-      - VAULT_TOKEN=dev-only-token
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        vault secrets enable -path=transit transit || true
-        vault write -f transit/keys/chat-kek
-    networks:
-      - chat-local
-
-  # Local-dev only: Vault dev mode is in-memory, while MongoDB persists across
-  # Docker Desktop restarts. When Vault recreates the transit key, previously
-  # wrapped room DEKs can no longer be unwrapped, so reset the derivative DEK
-  # cache and let services lazily recreate entries under the fresh key.
-  vault-dek-reset:
-    # DESTRUCTIVE: wipes every room_data_keys doc so services re-provision DEKs
-    # after a Vault reset. Opt-in only — never runs on a plain `up`; enable with
-    # `docker compose --profile dek-reset up`. Gated so a copied compose file
-    # can't silently wipe DEKs in a shared environment.
-    profiles: ["dek-reset"]
-    image: mongo:8.2.9
-    depends_on:
-      vault-bootstrap:
-        condition: service_completed_successfully
-    entrypoint: ["mongosh", "mongodb://mongodb:27017/chat", "--quiet", "--eval"]
-    command:
-      - |
-        const result = db.getCollection('room_data_keys').deleteMany({});
-        printjson({ roomDataKeysDeleted: result.deletedCount });
-    networks:
-      - chat-local
-
   message-worker:
     build:
       context: ../..
       dockerfile: message-worker/deploy/Dockerfile
     pull_policy: build
-    depends_on:
-      vault-bootstrap:
-        condition: service_completed_successfully
     environment:
       - OTEL_SERVICE_NAME=message-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}

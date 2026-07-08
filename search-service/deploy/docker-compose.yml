@@ -37,7 +37,7 @@ services:
     ports:
       # Expose /healthz + /readyz so the host can probe liveness during local
       # dev. The listener is bound on 0.0.0.0:9090 inside the container.
-      - "9090:9090"
+      - "19090:9090"
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:
