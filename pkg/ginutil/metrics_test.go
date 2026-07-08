@@ -60,7 +60,13 @@ func TestGinMetrics_SkipsHealthzAndUnmatched(t *testing.T) {
 	assert.Equal(t, beforeHealth, rpcmetrics.CounterValue("auth-service", "/healthz", "ok"))
 
 	// Unmatched route (empty FullPath) is skipped: assert the "" route stays absent.
-	beforeEmpty := rpcmetrics.CounterValue("auth-service", "", "not_found")
+	// A broken skip would still leave errCodeKey unset (no handler ran), so
+	// statusForHTTP falls back to the HTTP-status class: 404 -> "bad_request",
+	// not "not_found". Assert on "bad_request" so this test actually detects a
+	// broken skip instead of trivially passing on an unrelated label.
+	beforeEmptyBadRequest := rpcmetrics.CounterValue("auth-service", "", "bad_request")
+	beforeEmptyNotFound := rpcmetrics.CounterValue("auth-service", "", "not_found")
 	do(r, http.MethodGet, "/does-not-exist")
-	assert.Equal(t, beforeEmpty, rpcmetrics.CounterValue("auth-service", "", "not_found"))
+	assert.Equal(t, beforeEmptyBadRequest, rpcmetrics.CounterValue("auth-service", "", "bad_request"))
+	assert.Equal(t, beforeEmptyNotFound, rpcmetrics.CounterValue("auth-service", "", "not_found"))
 }
