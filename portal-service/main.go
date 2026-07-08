@@ -127,7 +127,7 @@ func run() error {
 	r.Use(ginutil.CORS())
 	// o11y server-span middleware wraps real requests so downstream slog/handlers
 	// are trace-correlated.
-	r.Use(o11ygin.Middleware("portal-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator)...)
+	r.Use(o11ygin.Middleware("portal-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())

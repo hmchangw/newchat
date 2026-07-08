@@ -46,11 +46,14 @@ func TestParseConfig_Defaults(t *testing.T) {
 	assert.Empty(t, cfg.OTLPHeaders)
 }
 
-func TestParseConfig_RequiredServiceName(t *testing.T) {
+func TestParseConfig_DefaultsServiceName(t *testing.T) {
 	clearEnv(t)
 
-	_, err := parseConfig()
-	require.Error(t, err)
+	// OTEL_SERVICE_NAME is no longer required: a missing env degrades to a
+	// visible placeholder rather than a startup crash-loop.
+	cfg, err := parseConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "unknown-service", cfg.ServiceName)
 }
 
 func TestParseConfig_Overrides(t *testing.T) {
@@ -148,13 +151,16 @@ func TestInit_InstallsGlobals(t *testing.T) {
 		"obs.Init must set the SDK logger as the slog default")
 }
 
-func TestInit_MissingServiceName(t *testing.T) {
+func TestInit_DefaultsMissingServiceName(t *testing.T) {
 	clearEnv(t)
 
+	// A missing OTEL_SERVICE_NAME must NOT crash startup — Init succeeds with the
+	// placeholder service name (production is expected to set it explicitly).
 	sdk, shutdown, err := Init(context.Background())
-	require.Error(t, err)
-	assert.Nil(t, sdk)
-	assert.Nil(t, shutdown)
+	require.NoError(t, err)
+	require.NotNil(t, sdk)
+	require.NotNil(t, shutdown)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
 }
 
 func TestInit_InvalidEnvironment(t *testing.T) {

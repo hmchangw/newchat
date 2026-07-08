@@ -27,7 +27,11 @@ import (
 // (OTEL_TRACES_SAMPLER[_ARG]) are read by the SDK directly and are not
 // duplicated here.
 type Config struct {
-	ServiceName    string            `env:"OTEL_SERVICE_NAME,required"`
+	// ServiceName drives service.name on every span/metric/log. It defaults to a
+	// visible placeholder rather than being required so a missing env degrades to
+	// mislabeled telemetry, not a startup crash-loop; production deploys MUST set
+	// OTEL_SERVICE_NAME (a "unknown-service" service map entry is the signal it wasn't).
+	ServiceName    string            `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
 	ServiceVersion string            `env:"SERVICE_VERSION" envDefault:"dev"`
 	Environment    string            `env:"DEPLOY_ENV" envDefault:"development"`
 	Namespace      string            `env:"SERVICE_NAMESPACE" envDefault:"chat"`

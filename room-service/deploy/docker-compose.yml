@@ -39,6 +39,11 @@ services:
   # wrapped room DEKs can no longer be unwrapped, so reset the derivative DEK
   # cache and let services lazily recreate entries under the fresh key.
   vault-dek-reset:
+    # DESTRUCTIVE: wipes every room_data_keys doc so services re-provision DEKs
+    # after a Vault reset. Opt-in only — never runs on a plain `up`; enable with
+    # `docker compose --profile dek-reset up`. Gated so a copied compose file
+    # can't silently wipe DEKs in a shared environment.
+    profiles: ["dek-reset"]
     image: mongo:8.2.9
     depends_on:
       vault-bootstrap:
@@ -58,8 +63,6 @@ services:
     pull_policy: build
     depends_on:
       vault-bootstrap:
-        condition: service_completed_successfully
-      vault-dek-reset:
         condition: service_completed_successfully
     environment:
       - OTEL_SERVICE_NAME=room-service

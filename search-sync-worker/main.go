@@ -359,9 +359,10 @@ func main() {
 			}
 			return nil
 		},
-		func(ctx context.Context) error { return obsShutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return healthStop(ctx) },
+		// obsShutdown LAST so drain-window flush spans/logs are exported.
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
 

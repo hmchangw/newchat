@@ -273,10 +273,13 @@ func main() {
 			}
 			return nil
 		},
-		func(ctx context.Context) error { return obsShutdown(ctx) },
 	}
 
-	hooks = append(hooks, func(ctx context.Context) error { return healthStop(ctx) })
+	// healthStop then obsShutdown LAST so all prior teardown telemetry is exported.
+	hooks = append(hooks,
+		func(ctx context.Context) error { return healthStop(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
+	)
 
 	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }

@@ -130,7 +130,7 @@ func run() error {
 	r.Use(corsMiddleware(cfg.CORSAllowedOrigins))
 	// o11y server-span middleware wraps real requests so downstream slog/handlers
 	// are trace-correlated.
-	r.Use(o11ygin.Middleware("upload-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator)...)
+	r.Use(o11ygin.Middleware("upload-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
@@ -155,8 +155,9 @@ func run() error {
 		defer close(shutdownDone)
 		shutdown.Wait(ctx, 25*time.Second,
 			func(ctx context.Context) error { return srv.Shutdown(ctx) },
-			func(ctx context.Context) error { return obsShutdown(ctx) },
 			func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+			// obsShutdown LAST so all prior teardown telemetry is exported.
+			func(ctx context.Context) error { return obsShutdown(ctx) },
 		)
 	}()
 
