@@ -135,6 +135,10 @@ func main() {
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
 	router := natsrouter.Default(nc, "user-presence-service")
+	// Installed after natsrouter.Default's chain, so this Metrics window excludes
+	// Default's RequestID/Recovery/Logging — its latency series is marginally
+	// narrower than peers that install Metrics before Logging. Status stamping is
+	// unaffected (the Register wrapper runs inside this Metrics c.Next()).
 	router.Use(natsrouter.Metrics("user-presence-service"))
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)

@@ -9,7 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 )
@@ -47,10 +47,19 @@ func StatusLabel(err error) string {
 		return "ok"
 	}
 	var ee *errcode.Error
-	if errors.As(err, &ee) && ee.Code != "" {
-		if _, ok := allowedStatusLabels[string(ee.Code)]; ok {
-			return string(ee.Code)
-		}
+	if errors.As(err, &ee) {
+		return NormalizeStatus(string(ee.Code))
+	}
+	return string(errcode.CodeInternal)
+}
+
+// NormalizeStatus collapses any status label outside the pinned allowlist to
+// "internal", bounding cardinality. Both transports (NATS StatusLabel and the
+// HTTP middleware fallback) funnel through this so the status taxonomy is
+// identical on each.
+func NormalizeStatus(code string) string {
+	if _, ok := allowedStatusLabels[code]; ok {
+		return code
 	}
 	return string(errcode.CodeInternal)
 }
@@ -72,8 +81,13 @@ var allowedStatusLabels = map[string]struct{}{
 }
 
 // CounterValue returns the current rpc_server_requests_total value for the
-// given label tuple. It is a test seam for consumer packages (natsrouter,
-// ginutil) that cannot reach the unexported collector; side-effect-free.
+// given label tuple. Test seam for consumer packages (natsrouter, ginutil);
+// side-effect-free. Implemented via client_model to avoid importing test-only
+// prometheus/testutil into production binaries.
 func CounterValue(service, route, status string) float64 {
-	return testutil.ToFloat64(requestsTotal.WithLabelValues(service, route, status))
+	var m dto.Metric
+	if err := requestsTotal.WithLabelValues(service, route, status).Write(&m); err != nil {
+		return 0
+	}
+	return m.GetCounter().GetValue()
 }

@@ -37,6 +37,25 @@ func TestStatusLabel(t *testing.T) {
 	}
 }
 
+func TestNormalizeStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want string
+	}{
+		{"ok passes through", "ok", "ok"},
+		{"not_found passes through", "not_found", "not_found"},
+		{"internal passes through", "internal", "internal"},
+		{"non-canonical collapses to internal", "weird_code", "internal"},
+		{"empty collapses to internal", "", "internal"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, NormalizeStatus(tt.code))
+		})
+	}
+}
+
 func TestObserve(t *testing.T) {
 	Observe("svc-test", "chat.route.{id}.get", "ok", 12*time.Millisecond)
 

@@ -141,8 +141,7 @@ func run() error {
 	metricsServer := otelutil.MetricsServer()
 	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
-		os.Exit(1)
+		return fmt.Errorf("metrics listen: %w", err)
 	}
 	go func() {
 		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)

@@ -37,7 +37,7 @@ func Metrics(service string) gin.HandlerFunc {
 func statusForHTTP(c *gin.Context) string {
 	if v, ok := c.Get(errCodeKey); ok {
 		if code, ok := v.(string); ok && code != "" {
-			return code
+			return rpcmetrics.NormalizeStatus(code)
 		}
 	}
 	switch code := c.Writer.Status(); {

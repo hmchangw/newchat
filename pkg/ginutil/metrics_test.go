@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
@@ -48,6 +50,25 @@ func TestGinMetrics_HTTPClassFallback(t *testing.T) {
 
 	after := rpcmetrics.CounterValue("auth-service", "/api/ping", "ok")
 	assert.Equal(t, before+1, after)
+}
+
+func TestGinMetrics_NonCanonicalErrcodeNormalizesToInternal(t *testing.T) {
+	r := newEngine()
+	r.GET("/api/normalize", func(c *gin.Context) {
+		c.Set("errcode", "weird_code")
+		c.Status(http.StatusOK)
+	})
+
+	before := rpcmetrics.CounterValue("auth-service", "/api/normalize", "internal")
+	beforeWeird := rpcmetrics.CounterValue("auth-service", "/api/normalize", "weird_code")
+
+	do(r, http.MethodGet, "/api/normalize")
+
+	require.Eventually(t, func() bool {
+		return rpcmetrics.CounterValue("auth-service", "/api/normalize", "internal") == before+1
+	}, time.Second, 10*time.Millisecond, "non-canonical errcode status should normalize to internal")
+	assert.Equal(t, beforeWeird, rpcmetrics.CounterValue("auth-service", "/api/normalize", "weird_code"),
+		"raw non-canonical status label must never be recorded")
 }
 
 func TestGinMetrics_SkipsHealthzAndUnmatched(t *testing.T) {
