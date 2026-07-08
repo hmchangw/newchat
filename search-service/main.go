@@ -72,7 +72,7 @@ type SearchConfig struct {
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
 	UserRoomIndex           string        `env:"USER_ROOM_INDEX,required"`
 	SpotlightIndex          string        `env:"SPOTLIGHT_INDEX,required"`
-	MetricsAddr             string        `env:"METRICS_ADDR"               envDefault:":9090"`
+	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
 }
 
 // Config is the root service config. Note that ES and Search share the
@@ -114,6 +114,12 @@ func main() {
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
 		slog.Error("init observability failed", "error", err)
+		os.Exit(1)
+	}
+	// App metrics are emitted through the SDK meter (exposed on the SDK's
+	// Prometheus endpoint alongside runtime/SDK metrics) — no separate listener.
+	if err := initMetrics(sdk.Meter("search-service")); err != nil {
+		slog.Error("init metrics failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -185,36 +191,35 @@ func main() {
 	router.Use(natsrouter.Logging())
 	handler.Register(router)
 
-	// /metrics-only listener. All four timeouts guard against hung
-	// scrapers tying up a goroutine indefinitely on an operator-exposed
-	// port.
+	// Health-only listener. All four timeouts guard against hung probes tying
+	// up a goroutine indefinitely on an operator-exposed port. App metrics moved
+	// to the SDK meter (SDK Prometheus endpoint), so this port serves only
+	// /healthz + /readyz now.
 	//
-	// Bind synchronously so a port conflict fails startup loudly —
-	// otherwise ListenAndServe's error would surface in a goroutine and
-	// the service would run happily with no /metrics, silently losing
-	// observability. Serve(listener) takes ownership of the listener
-	// from here on; Shutdown() closes it.
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", metricsHandler())
-	health.Register(metricsMux, 5*time.Second,
+	// Bind synchronously so a port conflict fails startup loudly — otherwise
+	// ListenAndServe's error would surface in a goroutine and the service would
+	// run happily with no health endpoint. Serve(listener) takes ownership of
+	// the listener from here on; Shutdown() closes it.
+	healthMux := http.NewServeMux()
+	health.Register(healthMux, 5*time.Second,
 		natsutil.HealthCheck(nc),
 	)
-	metricsServer := &http.Server{
-		Handler:           metricsMux,
+	healthServer := &http.Server{
+		Handler:           healthMux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	metricsListener, err := net.Listen("tcp", cfg.Search.MetricsAddr)
+	healthListener, err := net.Listen("tcp", cfg.Search.HealthAddr)
 	if err != nil {
-		slog.Error("metrics server listen failed", "addr", cfg.Search.MetricsAddr, "error", err)
+		slog.Error("health server listen failed", "addr", cfg.Search.HealthAddr, "error", err)
 		os.Exit(1)
 	}
 	go func() {
-		slog.Info("metrics server listening", "addr", cfg.Search.MetricsAddr)
-		if err := metricsServer.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
+		slog.Info("health server listening", "addr", cfg.Search.HealthAddr)
+		if err := healthServer.Serve(healthListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("health server failed", "error", err)
 		}
 	}()
 
@@ -230,8 +235,9 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkey); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
-		// /metrics last so Prometheus can scrape the final drain-window observations.
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
+		func(ctx context.Context) error { return healthServer.Shutdown(ctx) },
+		// obsShutdown last so the SDK Prometheus endpoint can serve the final
+		// drain-window observations (incl. app metrics) before it closes.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

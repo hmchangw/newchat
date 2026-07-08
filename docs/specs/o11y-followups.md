@@ -4,11 +4,11 @@ Deferred items from the `flywindy/o11y` integration (branch
 `feat/integrate-o11y-sdk`). These are intentionally out of scope of the
 integration PR and tracked here.
 
-## F1 — Migrate `search-service` app metrics to OTel meter (or keep as-is)
+## F1 — Migrate `search-service` app metrics to OTel meter (DONE — see Status)
 
-`search-service` exports three **app** metrics via `client_golang`/`promauto`
-on the default registry, served by `promhttp.Handler()` on `:9090`
-(`METRICS_ADDR`):
+Before this PR, `search-service` exported three **app** metrics via
+`client_golang`/`promauto` on the default registry, served by
+`promhttp.Handler()` on `:9090` (`METRICS_ADDR`):
 
 | Metric | Type | labels | buckets |
 |---|---|---|---|
@@ -16,10 +16,11 @@ on the default registry, served by `promhttp.Handler()` on `:9090`
 | `search_service_request_duration_seconds` | HistogramVec | `kind` | `prometheus.DefBuckets` |
 | `search_service_es_duration_seconds` | Histogram | — | `prometheus.DefBuckets` |
 
-The o11y SDK's Prometheus endpoint (`:2112`, otelprom + its own registry) does
-**not** serve these, so retiring `:9090` without migrating would drop them.
-Unlike `oplog-connector`/`oplog-transformer` (whose metrics are already
-`otel.Meter`), this is a real migration, not a deletion.
+The o11y SDK's Prometheus endpoint (`:2112`, otelprom + its own registry) did
+**not** serve these, so retiring `:9090` required a real migration (not a
+deletion) — unlike `oplog-connector`/`oplog-transformer` whose metrics were
+already `otel.Meter`. The table below weighed keep-as-is (A) vs migrate (B); (B)
+was chosen and implemented (see Status).
 
 ### Options
 
@@ -42,22 +43,27 @@ Unlike `oplog-connector`/`oplog-transformer` (whose metrics are already
 
 ### Decision
 
-**Chosen: (B)** — `search-service` should expose a **single metrics port**
-(the SDK's `:2112`), consistent with every other service. Retire the bespoke
-`:9090`/promauto endpoint and re-emit the three app metrics through the OTel
-meter.
+**Chosen: (B)** — `search-service` exposes a **single metrics port** (the SDK's
+`:2112`), consistent with every other service.
 
-**Implementation (pending):**
-1. Rewrite `metrics.go` onto `otel.Meter("search-service")`:
-   `search_service_requests_total` (Int64Counter), `…request_duration_seconds`
-   and `…es_duration_seconds` (Float64Histogram); thread `ctx` through
-   `observeRequest`/`observeES` and their call sites.
-2. Pin histogram boundaries with an explicit meter **View** (OTel's default
-   buckets differ from `prometheus.DefBuckets`, or `histogram_quantile` breaks).
-3. Account for otelprom's naming: it double-suffixes `_total`/`_seconds` and adds
-   `otel_scope_*`/`target_info` labels — set instrument names so the emitted
-   series match, or update the dashboard/alert queries to the new names.
-4. Drop the `:9090` listener + `METRICS_ADDR`; TDD the new meter path.
-5. **Cross-repo:** realign the `search-service` Grafana panels/alerts to the
-   `:2112` target (`job`/`instance` change) — coordinate with the o11y/k8s
-   monitor-stack owner. This is the risky part flagged in the table above.
+### Status: code done ✅ — dashboard realignment pending (ops)
+
+Done in this PR (`search-service/metrics.go`, `handler.go`, `main.go`):
+- Three app metrics re-emitted through the SDK meter (`sdk.Meter("search-service")`),
+  so otelprom serves them on `:2112` alongside runtime/SDK metrics. Instrument
+  names omit the suffix (`search_service_requests`, `…_request_duration`,
+  `…_es_duration`); otelprom re-adds `_total` (counter) and `_seconds` (from the
+  `s` unit) to reproduce the original series names.
+- Histogram boundaries pinned to `prometheus.DefBuckets` via the
+  `WithExplicitBucketBoundaries` advisory (OTel's default buckets differ).
+- `ctx` threaded through `observeRequest`/`observeES`; TDD via an in-memory
+  manual-reader test (`metrics_test.go`).
+- The bespoke `:9090`/promauto `/metrics` listener is gone; that port now serves
+  **health only** — `METRICS_ADDR` → `HEALTH_ADDR` (`SEARCH_HEALTH_ADDR`).
+
+**Remaining (ops / cross-repo, not in this repo):** realign the `search-service`
+Grafana panels/alerts to scrape `:2112` instead of `:9090` (`job`/`instance`
+change), and account for otelprom's extra constant labels
+(`otel_scope_name`/`otel_scope_version` + the resource labels). Name-based
+PromQL keeps working; only exact-label matchers need review. Coordinate with the
+o11y/k8s monitor-stack owner.

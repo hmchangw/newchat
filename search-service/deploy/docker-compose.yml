@@ -24,7 +24,9 @@ services:
       - SEARCH_RESTRICTED_ROOMS_CACHE_TTL=5m
       - SEARCH_RECENT_WINDOW=8760h
       - SEARCH_REQUEST_TIMEOUT=10s
-      - SEARCH_METRICS_ADDR=:9090
+      # Health-only listener. App metrics are on the SDK Prometheus endpoint
+      # (OTEL_EXPORTER_PROMETHEUS_PORT, default :2112), not here.
+      - SEARCH_HEALTH_ADDR=:9090
       # Local dev pins to site-suffixed indices; prod uses aliases owned by ops/IaC.
       - SEARCH_USER_ROOM_INDEX=user-room-mv-site-local
       - SEARCH_SPOTLIGHT_INDEX=spotlight-site-local-v1
@@ -33,9 +35,8 @@ services:
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
       - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
     ports:
-      # Expose /metrics so Prometheus / curl can scrape from the host
-      # during local dev. The listener is bound on 0.0.0.0:9090 inside
-      # the container.
+      # Expose /healthz + /readyz so the host can probe liveness during local
+      # dev. The listener is bound on 0.0.0.0:9090 inside the container.
       - "9090:9090"
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro

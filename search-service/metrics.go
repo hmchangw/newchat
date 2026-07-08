@@ -1,41 +1,85 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"net/http"
+	"fmt"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 )
 
-// All collectors register with the default Prometheus registry via
-// promauto so a plain promhttp.Handler() exposes them on /metrics.
-var (
-	metricRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "search_service_requests_total",
-		Help: "Total NATS request/reply invocations handled, partitioned by endpoint and terminal status.",
-	}, []string{"kind", "status"})
+// defBuckets mirrors prometheus.DefBuckets so the histograms keep the same
+// boundaries after the move from client_golang to the OTel meter — a Grafana
+// `histogram_quantile` over the old series stays valid. Set as the instrument's
+// advisory boundaries (WithExplicitBucketBoundaries) since OTel's default
+// aggregation buckets differ.
+var defBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
 
-	metricRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "search_service_request_duration_seconds",
-		Help:    "End-to-end handler latency in seconds, from NATS request receipt to response emission.",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"kind"})
+// metrics holds the search-service app instruments. They are emitted through
+// the o11y SDK's meter, so otelprom exposes them on the SDK's :2112 endpoint
+// alongside the runtime/SDK metrics — no separate promhttp listener. otelprom
+// reconstructs the original Prometheus names by appending `_total` to the
+// counter and the `_seconds` unit suffix to the histograms.
+type metrics struct {
+	requests        metric.Int64Counter     // → search_service_requests_total
+	requestDuration metric.Float64Histogram // → search_service_request_duration_seconds
+	esDuration      metric.Float64Histogram // → search_service_es_duration_seconds
+}
 
-	metricESDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "search_service_es_duration_seconds",
-		Help:    "Elasticsearch _search call latency in seconds.",
-		Buckets: prometheus.DefBuckets,
-	})
-)
+// appMetrics is set once by initMetrics after obs.Init has installed the global
+// meter provider. It stays nil in unit tests (and any path that skips
+// initMetrics), where the observe helpers degrade to no-ops.
+var appMetrics *metrics
 
-// Per-kind handles for the request-path metrics. The `status` label on
-// requests_total is resolved lazily (9 values × 4 kinds = 36 perms would
-// clutter here); the duration handles are fully bound.
+// newMetrics builds the app instruments from the given meter. It is separate
+// from initMetrics so tests can attach a manual-reader meter.
+func newMetrics(meter metric.Meter) (*metrics, error) {
+	requests, err := meter.Int64Counter(
+		"search_service_requests",
+		metric.WithDescription("Total NATS request/reply invocations handled, partitioned by endpoint and terminal status."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create requests counter: %w", err)
+	}
+	requestDuration, err := meter.Float64Histogram(
+		"search_service_request_duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("End-to-end handler latency in seconds, from NATS request receipt to response emission."),
+		metric.WithExplicitBucketBoundaries(defBuckets...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create request-duration histogram: %w", err)
+	}
+	esDuration, err := meter.Float64Histogram(
+		"search_service_es_duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Elasticsearch _search call latency in seconds."),
+		metric.WithExplicitBucketBoundaries(defBuckets...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create es-duration histogram: %w", err)
+	}
+	return &metrics{requests: requests, requestDuration: requestDuration, esDuration: esDuration}, nil
+}
+
+// initMetrics builds the app instruments from meter and installs them as the
+// process-wide appMetrics. Call once, after obs.Init.
+func initMetrics(meter metric.Meter) error {
+	m, err := newMetrics(meter)
+	if err != nil {
+		return err
+	}
+	appMetrics = m
+	return nil
+}
+
+// Per-kind request labels. The `status` label on the counter is resolved lazily
+// from the handler's returned error (statusLabel); the pinned label set keeps
+// cardinality bounded.
 const (
 	metricKindMessages = "messages"
 	metricKindRooms    = "subscriptions"
@@ -43,60 +87,48 @@ const (
 	metricKindUsers    = "users"
 )
 
-var (
-	durMessages = metricRequestDuration.WithLabelValues(metricKindMessages)
-	durRooms    = metricRequestDuration.WithLabelValues(metricKindRooms)
-	durApps     = metricRequestDuration.WithLabelValues(metricKindApps)
-	durUsers    = metricRequestDuration.WithLabelValues(metricKindUsers)
-)
-
-// observeRequest captures a handler's total latency and terminal status.
-// The status is classified at fire-time from the named `err` return, so
-// late-bound error classification (wrapping, defer-assigned) is counted
-// correctly. Usage:
+// observeRequest captures a handler's total latency and terminal status. The
+// status is classified at fire-time from the named `err` return, so late-bound
+// error classification (wrapping, defer-assigned) is counted correctly. Usage:
 //
-//	func (h *handler) search(...) (resp *R, err error) {
-//	    defer observeRequest(metricKindMessages, &err)()
+//	func (h *handler) search(c *natsrouter.Context, ...) (resp *R, err error) {
+//	    defer observeRequest(c, metricKindMessages, &err)()
 //	    ...
 //	}
-func observeRequest(kind string, errPtr *error) func() {
+func observeRequest(ctx context.Context, kind string, errPtr *error) func() {
+	if appMetrics == nil {
+		return func() {}
+	}
 	start := time.Now()
-	dur := durFor(kind)
 	return func() {
-		dur.Observe(time.Since(start).Seconds())
-		metricRequestsTotal.WithLabelValues(kind, statusLabel(*errPtr)).Inc()
+		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(),
+			metric.WithAttributes(attribute.String("kind", kind)))
+		appMetrics.requests.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("kind", kind),
+			attribute.String("status", statusLabel(*errPtr)),
+		))
 	}
 }
 
-func observeES() func() {
+// observeES records the latency of a single Elasticsearch _search call.
+func observeES(ctx context.Context) func() {
+	if appMetrics == nil {
+		return func() {}
+	}
 	start := time.Now()
-	return func() { metricESDuration.Observe(time.Since(start).Seconds()) }
-}
-
-// durFor falls back to the messages variant on an unknown label so a
-// caller typo surfaces as misattributed metrics rather than a
-// nil-observer panic at fire time.
-func durFor(kind string) prometheus.Observer {
-	switch kind {
-	case metricKindRooms:
-		return durRooms
-	case metricKindApps:
-		return durApps
-	case metricKindUsers:
-		return durUsers
-	default:
-		return durMessages
+	return func() {
+		appMetrics.esDuration.Record(ctx, time.Since(start).Seconds())
 	}
 }
 
-// statusLabel maps a handler's returned error onto the requests_total
-// `status` label. nil → "ok"; a non-empty *errcode.Error in the chain → its
-// Code (one of the 8 canonical Codes below); everything else → "internal".
+// statusLabel maps a handler's returned error onto the requests `status` label.
+// nil → "ok"; a non-empty *errcode.Error in the chain → its Code (one of the 8
+// canonical Codes below); everything else → "internal".
 //
-// The label set is pinned to keep Prometheus cardinality bounded — at most
-// 9 × len(kinds) series. A non-canonical Code (e.g. a future Code constant
-// added without updating this allowlist, or a foreign envelope on a federation
-// path) collapses to "internal" rather than minting a fresh time series.
+// The label set is pinned to keep cardinality bounded. A non-canonical Code
+// (e.g. a future Code constant added without updating this allowlist, or a
+// foreign envelope on a federation path) collapses to "internal" rather than
+// minting a fresh time series.
 func statusLabel(err error) string {
 	if err == nil {
 		return "ok"
@@ -110,9 +142,9 @@ func statusLabel(err error) string {
 	return string(errcode.CodeInternal)
 }
 
-// allowedStatusLabels pins the cardinality of the requests_total status label
-// to the 8 canonical errcode Codes + "ok". Any label outside this set
-// collapses to "internal" via statusLabel.
+// allowedStatusLabels pins the cardinality of the requests `status` label to the
+// 8 canonical errcode Codes + "ok". Any label outside this set collapses to
+// "internal" via statusLabel.
 var allowedStatusLabels = map[string]struct{}{
 	"ok":                                {},
 	string(errcode.CodeBadRequest):      {},
@@ -124,5 +156,3 @@ var allowedStatusLabels = map[string]struct{}{
 	string(errcode.CodeUnavailable):     {},
 	string(errcode.CodeInternal):        {},
 }
-
-func metricsHandler() http.Handler { return promhttp.Handler() }
