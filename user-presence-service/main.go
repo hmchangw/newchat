@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -49,6 +52,7 @@ type Config struct {
 	SiteID        string         `env:"SITE_ID,required"`
 	UserCacheSize int            `env:"USER_CACHE_SIZE" envDefault:"10000"`
 	UserCacheTTL  time.Duration  `env:"USER_CACHE_TTL"  envDefault:"5m"`
+	MetricsAddr   string         `env:"METRICS_ADDR" envDefault:":9090"`
 	NATS          NATSConfig     `envPrefix:"NATS_"`
 	Valkey        ValkeyConfig   `envPrefix:"VALKEY_"`
 	Mongo         MongoConfig    `envPrefix:"MONGO_"`
@@ -131,6 +135,7 @@ func main() {
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
 	router := natsrouter.Default(nc, "user-presence-service")
+	router.Use(natsrouter.Metrics("user-presence-service"))
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
 	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
@@ -145,6 +150,21 @@ func main() {
 	go func() {
 		defer close(sweepDone)
 		sweeper.Run(sweepCtx)
+	}()
+
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes rpc_server_* RPC metrics.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
 	}()
 
 	slog.Info("user-presence-service running", "site", cfg.SiteID, "valkey", cfg.Valkey.Addrs)
@@ -162,6 +182,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(_ context.Context) error { return store.Close() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

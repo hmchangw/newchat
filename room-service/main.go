@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"time"
@@ -40,6 +43,7 @@ type config struct {
 	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr              string          `env:"METRICS_ADDR" envDefault:":9090"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
@@ -205,7 +209,7 @@ func main() {
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
 	router := natsrouter.New(nc, "room-service")
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Metrics("room-service"), natsrouter.Logging())
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -216,10 +220,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes rpc_server_* RPC metrics.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	slog.Info("room-service running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error {

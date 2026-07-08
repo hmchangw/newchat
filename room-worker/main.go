@@ -202,7 +202,7 @@ func main() {
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
 	router := natsrouter.New(nc, "room-worker")
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Metrics("room-worker"), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer))

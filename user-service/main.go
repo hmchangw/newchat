@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -98,6 +101,7 @@ func main() {
 	// RequestID must precede any handler that reads request_id from ctx —
 	// otherwise Classify's log line records an empty value.
 	router.Use(natsrouter.RequestID())
+	router.Use(natsrouter.Metrics("user-service"))
 	router.Use(natsrouter.Logging())
 	// After Logging so the timeout wraps the handler chain; bounds the Mongo
 	// aggregations from hanging past the configured deadline.
@@ -105,10 +109,26 @@ func main() {
 
 	svc.RegisterHandlers(router)
 
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes rpc_server_* RPC metrics.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	slog.Info("user-service running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
