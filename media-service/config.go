@@ -83,6 +83,8 @@ type config struct {
 	// sized to the employee population so the cache does not evict.
 	EIDCacheTTL      time.Duration `env:"EID_CACHE_TTL" envDefault:"24h"`
 	EIDCacheCapacity int           `env:"EID_CACHE_CAPACITY" envDefault:"120000"`
+
+	MetricsAddr string `env:"METRICS_ADDR" envDefault:":9090"`
 }
 
 // clusterBaseURL returns the configured base URL for a site, or "" if unknown.

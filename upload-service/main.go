@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/hmchangw/chat/pkg/drive"
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
@@ -62,6 +65,8 @@ type config struct {
 	MinioDownloadTimeout time.Duration `env:"MINIO_DOWNLOAD_TIMEOUT" envDefault:"5m"`
 
 	Drive drive.Config `envPrefix:"DRIVE_"`
+
+	MetricsAddr string `env:"METRICS_ADDR" envDefault:":9090"`
 }
 
 func main() {
@@ -127,9 +132,24 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
+	r.Use(ginutil.Metrics("upload-service"))
 	r.Use(accessLogMiddleware())
 	r.Use(corsMiddleware(cfg.CORSAllowedOrigins))
 	registerRoutes(r, handler, validator, cfg.DevMode)
+
+	// /metrics on a separate port so scrapes don't hit the public API listener.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -150,6 +170,7 @@ func run() error {
 		defer close(shutdownDone)
 		shutdown.Wait(ctx, 25*time.Second,
 			func(ctx context.Context) error { return srv.Shutdown(ctx) },
+			func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 			func(ctx context.Context) error { return tracerShutdown(ctx) },
 			func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		)

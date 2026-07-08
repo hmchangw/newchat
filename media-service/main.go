@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -12,10 +13,10 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/pkg/natsrouter"
-	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -73,9 +74,23 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
+	r.Use(ginutil.Metrics("media-service"))
 	r.Use(accessLogMiddleware())
 	r.Use(corsMiddleware())
 	registerRoutes(r, h)
+
+	// /metrics on a separate port so scrapes don't hit the public API listener.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		return fmt.Errorf("metrics listen: %w", err)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
@@ -85,12 +100,11 @@ func run() error {
 	}
 
 	go shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(_ context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error {
 			slog.Info("shutting down media-service")
 			return srv.Shutdown(ctx)
 		},
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 	)
 
 	slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -14,7 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -54,6 +56,8 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+
+	MetricsAddr string `env:"METRICS_ADDR" envDefault:":9090"`
 }
 
 func main() {
@@ -119,9 +123,23 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
+	r.Use(ginutil.Metrics("portal-service"))
 	r.Use(ginutil.AccessLog())
 	r.Use(ginutil.CORS())
 	registerRoutes(r, handler)
+
+	// /metrics on a separate port so scrapes don't hit the public API listener.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		return fmt.Errorf("metrics listen: %w", err)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -140,14 +158,17 @@ func run() error {
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		shutdown.Wait(ctx, 25*time.Second, func(ctx context.Context) error {
-			slog.Info("shutting down portal service")
-			err := srv.Shutdown(ctx)
-			refreshCancel()
-			refreshWG.Wait()
-			mongoutil.Disconnect(ctx, mongoClient)
-			return err
-		})
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error {
+				slog.Info("shutting down portal service")
+				err := srv.Shutdown(ctx)
+				refreshCancel()
+				refreshWG.Wait()
+				mongoutil.Disconnect(ctx, mongoClient)
+				return err
+			},
+			func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
+		)
 	}()
 
 	err = <-srvErr
