@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -41,6 +42,11 @@ func run() error {
 		return fmt.Errorf("EID_CACHE_TTL must be positive, got %s", cfg.EIDCacheTTL)
 	}
 
+	sdk, obsShutdown, err := obs.Init(ctx)
+	if err != nil {
+		return fmt.Errorf("init observability: %w", err)
+	}
+
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
@@ -58,7 +64,7 @@ func run() error {
 	}
 	blobs := newMinioBlobStore(minioClient, cfg.MinioBucket)
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
@@ -91,6 +97,8 @@ func run() error {
 			slog.Info("shutting down media-service")
 			return srv.Shutdown(ctx)
 		},
+		// obsShutdown LAST so all prior teardown telemetry is exported.
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 
 	slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)
