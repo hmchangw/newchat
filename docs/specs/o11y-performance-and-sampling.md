@@ -73,13 +73,17 @@ to turn before scale.
 
 ## 3. Sampling design
 
-### 3.1 What to set (deploy env, not code)
+### 3.1 What to set (deploy env)
 ```bash
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.1          # 10% — tune per environment
 ```
-`pkg/obs` already forwards these to the SDK; **no code change** is required.
-Recommended starting points:
+`pkg/obs` reads these and maps them to the SDK sampler (`samplerOptions`):
+`always_on`/unset → 100%; `always_off` → drop all; `traceidratio` → raw ratio;
+`parentbased_traceidratio` → `ParentBased(TraceIDRatioBased)` (recommended).
+The **o11y SDK does not read `OTEL_TRACES_SAMPLER` itself** — before this wiring,
+setting the env silently had no effect (SDK default 100%). Recommended starting
+points:
 
 | Environment | Ratio | Rationale |
 |---|---|---|
@@ -100,16 +104,35 @@ so with detached roots **each hop is sampled independently**. Consequences:
   its DB spans share one decision); it does **not** stitch across the link
   boundary because the link doesn't carry the parent's sampled flag as a parent.
 
-To keep whole flows at low ratios, prefer one of (future, tracked in
-`o11y-followups.md`):
-1. **Tail sampling at the collector** (decide per-traceID-group after the fact) —
-   the cleanest fix, keeps complete flows, zero app change.
-2. A higher head ratio (accept the cost) until tail sampling exists.
-3. Consistent head sampling by seeding each detached root's trace ID from the
-   upstream (requires an o11y/nats option — not available today).
+**Why standard fixes don't fully solve it.** Ground truth from
+`otelnats` (`ConsumerContextWithDeliver`): the consumer `deliver` span is started
+with an **empty parent** (a fresh root) and only a *link* to the origin — so it
+gets a **new trace ID** and is sampled **independently** by the ratio; the
+origin's sampled flag is **not** inherited across the link.
 
-For pre-production, head `traceidratio` is fine; **record tail-sampling as the
-production follow-up** rather than chasing consistent head sampling now.
+- **Head `traceidratio`, same rate everywhere → fragments.** Each hop is an
+  independent coin flip; a 5-hop flow at 10% rarely survives whole.
+- **Tail sampling at the collector does NOT fix this either.** The OTel
+  `tail_sampling` processor groups by **trace ID**, but here each hop is a
+  *different* trace ID joined only by span **links** — there is no standard
+  policy that keeps a link-connected constellation together. (Tail sampling is
+  still useful for *other* policies — keep-on-error, keep-slow — just not for
+  "keep whole flows".)
+
+**The real fix — consistent head sampling driven by the entry decision:** make
+the detached `deliver` span **inherit the origin's sampled flag** (from the
+incoming `traceparent`) instead of rolling the ratio afresh. Then one decision at
+the true entry (browser / first backend hop) cascades through every hop's
+`traceparent` → every detached root honors it → the **whole flow is kept or
+dropped as a unit**, while each hop keeps its own clean trace ID. This requires
+an **upstream change to `flywindy/o11y` / `otelnats`** — spec'd in
+`docs/specs/o11y-upstream-sampling-requirement.md` and tracked in
+`o11y-followups.md` (F2).
+
+**Interim stance:** run **100%** at current pre-production volume; when volume
+forces sampling before the upstream fix lands, accept fragmented flows at a
+head ratio (navigate by links between the traces that *were* sampled) rather than
+pretending tail sampling stitches them.
 
 ### 3.3 Kill switch
 Per-pillar toggles make any telemetry-suspected regression an **env-only
@@ -171,7 +194,8 @@ Not runnable in CI/sandbox (no Docker/registry). On a real stack:
 2. Run `tools/loadgen` `maxrps_messages` against **message-gatekeeper** twice,
    identical except the pillar toggle:
    - **off:** `O11Y_TRACES_ENABLED=false`
-   - **on:** default (then repeat with `OTEL_TRACES_SAMPLER_ARG=0.1`)
+   - **on:** default (100%), then repeat with
+     `OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1`
 3. Compare **max RPS** and **p99**; watch the BatchSpanProcessor dropped-span
    counter and collector CPU.
 4. Expected from the mechanism analysis + §4: **max RPS and p99 within noise**;
@@ -193,13 +217,15 @@ Fill in when run:
 
 | # | Action | Where | Status |
 |---|---|---|---|
-| 1 | `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + arg | deploy env | **design (this doc)** — set before prod |
-| 2 | Filter probe spans (`WithSkipPaths`) | auth/portal/upload | ✅ done |
-| 3 | `WithRequireParentSpan(true)` for Valkey | all workers | ✅ done (pre-existing) |
-| 4 | Dashboard the dropped-span counter | monitor stack | follow-up |
-| 5 | Tail sampling at the collector (keep whole flows) | collector config | follow-up (`o11y-followups.md`) |
-| 6 | Full-stack loadgen A/B (§5) | real env | Phase-4 acceptance |
+| 1 | Read `OTEL_TRACES_SAMPLER[_ARG]` → SDK sampler | `pkg/obs` | ✅ done (`samplerOptions`) |
+| 2 | Set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + arg | deploy env | before prod scale |
+| 3 | Filter probe spans (`WithSkipPaths`) | auth/portal/upload | ✅ done |
+| 4 | `WithRequireParentSpan(true)` for Valkey | all workers | ✅ done (pre-existing) |
+| 5 | Dashboard the dropped-span counter | monitor stack | follow-up |
+| 6 | **Inherit sampled flag across the NATS link** (keep whole flows) | upstream `o11y`/`otelnats` | follow-up — `o11y-upstream-sampling-requirement.md` |
+| 7 | Full-stack loadgen A/B (§5) | real env | Phase-4 acceptance |
 
 See also: `docs/specs/o11y-trace-design.md` (§0 propagation model — why hops are
-detached roots), `docs/specs/o11y-followups.md`,
+detached roots), `docs/specs/o11y-upstream-sampling-requirement.md` (the upstream
+fix for whole-flow sampling), `docs/specs/o11y-followups.md`,
 `docs/specs/o11y-local-trace-verification.md`.

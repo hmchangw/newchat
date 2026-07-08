@@ -22,11 +22,70 @@ func clearEnv(t *testing.T) {
 		"OTEL_SERVICE_NAME", "SERVICE_VERSION", "DEPLOY_ENV", "SERVICE_NAMESPACE",
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_EXPORTER_PROMETHEUS_HOST", "OTEL_EXPORTER_PROMETHEUS_PORT",
+		"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
 		"O11Y_TRACE_ENABLED", "O11Y_METRICS_ENABLED", "O11Y_LOG_ENABLED", "O11Y_PROFILING_ENABLED",
 	} {
 		t.Setenv(k, "")
 		require.NoError(t, os.Unsetenv(k))
 	}
+}
+
+func TestParseConfig_Sampler(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "svc")
+	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0.25")
+
+	cfg, err := parseConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "parentbased_traceidratio", cfg.TracesSampler)
+	assert.InDelta(t, 0.25, cfg.TracesSamplerArg, 1e-9)
+}
+
+// Default (no OTEL_TRACES_SAMPLER) samples every root span (100%).
+func TestInit_SamplerDefaultSamples(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "sampler-default-svc")
+
+	sdk, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	_, span := sdk.Tracer("t").Start(context.Background(), "root")
+	defer span.End()
+	assert.True(t, span.SpanContext().IsSampled(), "default sampler must sample")
+}
+
+// OTEL_TRACES_SAMPLER=always_off drops every span (the env now actually wires
+// the SDK sampler through pkg/obs).
+func TestInit_SamplerAlwaysOff(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "sampler-off-svc")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+
+	sdk, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	_, span := sdk.Tracer("t").Start(context.Background(), "root")
+	defer span.End()
+	assert.False(t, span.SpanContext().IsSampled(), "always_off must not sample")
+}
+
+// A parentbased_traceidratio of 0 drops every root span.
+func TestInit_SamplerRatioZero(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "sampler-ratio0-svc")
+	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
+
+	sdk, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	_, span := sdk.Tracer("t").Start(context.Background(), "root")
+	defer span.End()
+	assert.False(t, span.SpanContext().IsSampled(), "ratio 0 must not sample")
 }
 
 func TestParseConfig_Defaults(t *testing.T) {

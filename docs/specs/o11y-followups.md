@@ -74,13 +74,17 @@ o11y/k8s monitor-stack owner.
 
 Recorded here so nothing is lost; none blocks the integration PR.
 
-### F2 — Trace sampling for production (deploy + collector)
-No sampler is set, so every message is 100% sampled (~10–20 spans/message). Set
-`OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG` in
-deploy before production scale (`pkg/obs` already forwards them — no code).
-**Tail sampling at the collector** is the real fix to keep *whole* flows at low
-ratios (each NATS hop is a detached root, so head `traceidratio` samples hops
-independently). Full design + benchmark: `docs/specs/o11y-performance-and-sampling.md`.
+### F2 — Trace sampling for production
+No sampler is set, so every message is 100% sampled (~10–20 spans/message).
+`pkg/obs` now reads `OTEL_TRACES_SAMPLER[_ARG]` and wires the SDK sampler
+(`samplerOptions`), so **set them in deploy** before production scale.
+**Caveat (important):** each NATS hop is a detached root, so a head ratio samples
+hops *independently* → whole flows fragment, and **collector tail sampling does
+not fix it** (different trace IDs joined only by links). The real fix is an
+**upstream `o11y`/`otelnats` change** so the consumer span inherits the origin's
+sampled flag — spec'd in `docs/specs/o11y-upstream-sampling-requirement.md`.
+Until then, run 100% in pre-production. Full design + benchmark:
+`docs/specs/o11y-performance-and-sampling.md`.
 
 ### F3 — `OTEL_SERVICE_NAME` rollout note
 Now defaults to `unknown-service` (no longer a crash-loop), but production

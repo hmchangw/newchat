@@ -15,17 +15,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/flywindy/o11y"
 	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // Config is parsed from the environment. Variable names follow OpenTelemetry
 // standard conventions where one exists so operators and tooling recognize
-// them; pillar toggles (O11Y_*_ENABLED) and the trace sampler
-// (OTEL_TRACES_SAMPLER[_ARG]) are read by the SDK directly and are not
-// duplicated here.
+// them; pillar toggles (O11Y_*_ENABLED) are read by the SDK directly. The trace
+// sampler IS read here (OTEL_TRACES_SAMPLER[_ARG]) and mapped to an o11y option,
+// because the SDK does not read those env vars itself — see samplerOptions.
 type Config struct {
 	// ServiceName drives service.name on every span/metric/log. It defaults to a
 	// visible placeholder rather than being required so a missing env degrades to
@@ -39,6 +41,14 @@ type Config struct {
 	OTLPHeaders    map[string]string `env:"OTEL_EXPORTER_OTLP_HEADERS" envKeyValSeparator:"="`
 	PrometheusHost string            `env:"OTEL_EXPORTER_PROMETHEUS_HOST" envDefault:""`
 	PrometheusPort string            `env:"OTEL_EXPORTER_PROMETHEUS_PORT" envDefault:"2112"`
+
+	// Head sampling. Standard OTel env vars, but the o11y SDK does NOT read them
+	// itself (it only honors WithSamplingRatio/WithTraceSampler options), so
+	// samplerOptions maps them to the right option. Empty/always_on = 100%.
+	// NOTE: each NATS hop is a detached root, so a ratio samples hops
+	// independently — see docs/specs/o11y-performance-and-sampling.md.
+	TracesSampler    string  `env:"OTEL_TRACES_SAMPLER" envDefault:""`
+	TracesSamplerArg float64 `env:"OTEL_TRACES_SAMPLER_ARG" envDefault:"1"`
 }
 
 func parseConfig() (Config, error) {
@@ -69,7 +79,30 @@ func (c *Config) options() []o11y.Option {
 	if len(c.OTLPHeaders) > 0 {
 		opts = append(opts, o11y.WithOTLPHeaders(c.OTLPHeaders))
 	}
+	opts = append(opts, c.samplerOptions()...)
 	return opts
+}
+
+// samplerOptions maps the standard OTEL_TRACES_SAMPLER[_ARG] env vars onto o11y
+// sampler options. The SDK does not read these env vars, so without this an
+// operator setting OTEL_TRACES_SAMPLER would silently get the SDK default (100%).
+// Recognized values follow the OTel spec; an unknown value logs a warning and
+// falls back to the 100% default rather than failing startup.
+func (c *Config) samplerOptions() []o11y.Option {
+	switch strings.ToLower(strings.TrimSpace(c.TracesSampler)) {
+	case "", "always_on", "parentbased_always_on":
+		return nil // SDK default is ParentBased(AlwaysSample) = 100%
+	case "always_off", "parentbased_always_off":
+		return []o11y.Option{o11y.WithTraceSampler(sdktrace.NeverSample())}
+	case "traceidratio":
+		return []o11y.Option{o11y.WithTraceSampler(sdktrace.TraceIDRatioBased(c.TracesSamplerArg))}
+	case "parentbased_traceidratio":
+		return []o11y.Option{o11y.WithSamplingRatio(c.TracesSamplerArg)}
+	default:
+		slog.Warn("unknown OTEL_TRACES_SAMPLER; falling back to default (100%)",
+			"value", c.TracesSampler)
+		return nil
+	}
 }
 
 // Init parses Config from the environment, starts the o11y SDK, installs the
