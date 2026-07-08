@@ -179,6 +179,7 @@ func main() {
 	router := natsrouter.New(nc, "search-service")
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
+	router.Use(natsrouter.Metrics("search-service"))
 	router.Use(natsrouter.Logging())
 	handler.Register(router)
 

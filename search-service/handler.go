@@ -71,8 +71,6 @@ func (h *handler) withRequestTimeout(parent context.Context) (context.Context, c
 }
 
 func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessagesRequest) (resp *model.SearchMessagesResponse, err error) {
-	defer observeRequest(metricKindMessages, &err)()
-
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
@@ -126,8 +124,6 @@ func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessages
 }
 
 func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsRequest) (resp *model.SearchRoomsResponse, err error) {
-	defer observeRequest(metricKindRooms, &err)()
-
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
@@ -215,8 +211,6 @@ func (h *handler) loadRestricted(ctx context.Context, account string) (map[strin
 }
 
 func (h *handler) searchApps(c *natsrouter.Context, req model.SearchAppsRequest) (resp *model.SearchAppsResponse, err error) {
-	defer observeRequest(metricKindApps, &err)()
-
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
@@ -251,8 +245,6 @@ func (h *handler) searchApps(c *natsrouter.Context, req model.SearchAppsRequest)
 // from the subject is used for logging and metrics only; scoping is
 // enforced entirely by the third-party endpoint.
 func (h *handler) searchUsers(c *natsrouter.Context, req model.SearchUsersRequest) (resp *[]model.SearchUser, err error) {
-	defer observeRequest(metricKindUsers, &err)()
-
 	account, rerr := c.Params.Require("account")
 	if rerr != nil {
 		return nil, rerr
