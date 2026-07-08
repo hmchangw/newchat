@@ -1,0 +1,101 @@
+# Local o11y backend for the three SDK pillars — bring up alongside the deps
+# stack to make traces/metrics/logs observable end-to-end from a fresh clone:
+#
+#   docker compose -f docker-local/compose.deps.yaml up -d      # creates chat-local
+#   docker compose -f docker-local/compose.o11y.yaml  up -d
+#
+#   Traces  : services → OTLP → otel-collector → Tempo
+#   Metrics : Prometheus scrapes each service's :2112 (Docker SD)
+#   Logs    : promtail tails container stdout → Loki
+#   UI      : Grafana (http://localhost:3001, anonymous admin) with all three
+#             datasources + trace↔log correlation pre-provisioned.
+#
+# Services default OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, so no
+# per-service change is needed — just have this stack up. Joins the external
+# chat-local network owned by compose.deps.yaml.
+name: chat-local-o11y
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector:0.115.1
+    container_name: chat-local-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./o11y/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP (also reachable from the host, e.g. `make dev`)
+    networks:
+      - chat-local
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: chat-local-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./o11y/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200" # Tempo API (Grafana datasource + direct TraceQL)
+    networks:
+      - chat-local
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: chat-local-prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yaml"]
+    volumes:
+      - ./o11y/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Docker SD for :2112 targets
+    ports:
+      - "9090:9090"
+    networks:
+      - chat-local
+
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: chat-local-loki
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./o11y/loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    networks:
+      - chat-local
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    container_name: chat-local-promtail
+    command: ["-config.file=/etc/promtail/config.yaml"]
+    volumes:
+      - ./o11y/promtail.yaml:/etc/promtail/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro # tails container stdout
+    depends_on:
+      - loki
+    networks:
+      - chat-local
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: chat-local-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./o11y/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - tempo
+      - prometheus
+      - loki
+    networks:
+      - chat-local
+
+volumes:
+  tempo-data:
+  loki-data:
+
+networks:
+  chat-local:
+    external: true
+    name: chat-local

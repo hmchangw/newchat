@@ -8,7 +8,13 @@ as the repeatable local smoke procedure.
 
 ## Preconditions
 
-- Local stack is running with Tempo and Grafana.
+- The local o11y backend is up (Tempo + Prometheus + Loki + Grafana):
+  ```bash
+  docker compose -f docker-local/compose.deps.yaml up -d   # creates chat-local
+  docker compose -f docker-local/compose.o11y.yaml  up -d
+  ```
+  (see `docker-local/compose.o11y.yaml` — collector on `:4318`, so services'
+  default `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` just works).
 - `OTEL_ENABLED=true` for `chat-frontend`.
 - Backend services use `pkg/obs.Init` and `pkg/natsutil.Connect`.
 - NATS tracing gates are enabled by `pkg/natsutil.Connect`.
@@ -16,8 +22,9 @@ as the repeatable local smoke procedure.
 Useful local endpoints:
 
 - Frontend: `http://localhost:3000`
-- Grafana: `http://localhost:3001`
+- Grafana: `http://localhost:3001` (anonymous admin; Tempo/Prometheus/Loki pre-wired)
 - Tempo API: `http://localhost:3200`
+- Prometheus: `http://localhost:9090`
 
 ## Query Hints
 
