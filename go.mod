@@ -1,6 +1,6 @@
 module github.com/hmchangw/chat
 
-go 1.25.12
+go 1.26.5
 
 require (
 	github.com/Marz32onE/instrumentation-go/otel-nats v0.2.0

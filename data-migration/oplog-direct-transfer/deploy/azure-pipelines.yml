@@ -18,7 +18,7 @@ pr:
       - pkg/
 
 variables:
-  GO_VERSION: '1.25.12'
+  GO_VERSION: '1.26.5'
   SERVICE_PATH: data-migration/oplog-direct-transfer
   IMAGE_NAME: oplog-direct-transfer
   REGISTRY: '$(containerRegistry)'

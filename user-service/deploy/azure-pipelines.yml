@@ -18,7 +18,7 @@ pr:
       - pkg/
 
 variables:
-  GO_VERSION: '1.25.12'
+  GO_VERSION: '1.26.5'
   SERVICE_NAME: user-service
   REGISTRY: '$(containerRegistry)'
 

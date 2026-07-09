@@ -24,8 +24,8 @@ OBS_COMPOSE      := tools/observability/docker-compose.yml
 # Go 1.25. Tracks the repo-wide Go (go.mod / ci.yml); Go fetches the
 # pinned toolchain on demand.
 GOBIN_DIR             := $(shell go env GOPATH)/bin
-TOOLS_GO_TOOLCHAIN    := go1.25.12
-GOLANGCI_LINT_VERSION := v2.11.4
+TOOLS_GO_TOOLCHAIN    := go1.26.5
+GOLANGCI_LINT_VERSION := v2.12.2
 GOSEC_VERSION         := v2.26.1
 GOVULNCHECK_VERSION   := v1.3.0
 SEMGREP_VERSION       := 1.163.0
