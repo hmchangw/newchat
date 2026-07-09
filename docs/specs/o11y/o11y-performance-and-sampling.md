@@ -66,7 +66,7 @@ to turn before scale.
 - `/healthz`+`/readyz` probe spans on the Gin services → **fixed**:
   `o11ygin.WithSkipPaths()` added to auth/portal/upload.
 - OTLP retry/error log noise when no collector exists locally → addressed by the
-  local o11y stack (`docs/specs/o11y-local-trace-verification.md` /
+  local o11y stack (`docs/specs/o11y/o11y-local-trace-verification.md` /
   `docker-local` collector compose).
 
 ---
@@ -126,7 +126,7 @@ the true entry (browser / first backend hop) cascades through every hop's
 `traceparent` → every detached root honors it → the **whole flow is kept or
 dropped as a unit**, while each hop keeps its own clean trace ID. This requires
 an **upstream change to `flywindy/o11y` / `otelnats`** — spec'd in
-`docs/specs/o11y-upstream-sampling-requirement.md` and tracked in
+`docs/specs/o11y/o11y-upstream-sampling-requirement.md` and tracked in
 `o11y-followups.md` (F2).
 
 **Interim stance:** run **100%** at current pre-production volume; when volume
@@ -225,7 +225,7 @@ Fill in when run:
 | 6 | **Inherit sampled flag across the NATS link** (keep whole flows) | upstream `o11y`/`otelnats` | follow-up — `o11y-upstream-sampling-requirement.md` |
 | 7 | Full-stack loadgen A/B (§5) | real env | Phase-4 acceptance |
 
-See also: `docs/specs/o11y-trace-design.md` (§0 propagation model — why hops are
-detached roots), `docs/specs/o11y-upstream-sampling-requirement.md` (the upstream
-fix for whole-flow sampling), `docs/specs/o11y-followups.md`,
-`docs/specs/o11y-local-trace-verification.md`.
+See also: `docs/specs/o11y/o11y-trace-design.md` (§0 propagation model — why hops are
+detached roots), `docs/specs/o11y/o11y-upstream-sampling-requirement.md` (the upstream
+fix for whole-flow sampling), `docs/specs/o11y/o11y-followups.md`,
+`docs/specs/o11y/o11y-local-trace-verification.md`.

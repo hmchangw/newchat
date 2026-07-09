@@ -232,24 +232,32 @@ browser consumer trace.
 
 ## 4. Scenario D — Cross-site delivery (member on a remote site)
 
-Federation is **direct INBOX publish**: an origin-site service JetStream-
-publishes to `chat.inbox.{destSite}.external.{event}`, routed by the NATS
-supercluster; `inbox-worker` at the destination consumes. Same link model — the
-cross-site hop is a span **link**, so the destination trace is separate.
+Federation is **OUTBOX-relayed**: an origin-site service publishes an outbox
+event on `chat.outbox.{originSite}.{destSite}.{eventType}`; `outbox-worker`
+consumes the local OUTBOX stream and forwards to
+`chat.inbox.{destSite}.external.{event}`, routed by the NATS supercluster;
+`inbox-worker` at the destination consumes. Same link model — each NATS hop is a
+span **link**, so the destination trace is separate.
 
 ```mermaid
 flowchart LR
     subgraph TOrigin["〔Trace: origin worker (broadcast/room/message)〕"]
       Op["process … (CONSUMER)"]
-      Osend["send chat.inbox.{dest}.external.{event} (PRODUCER)"]
+      Osend["send chat.outbox.{origin}.{dest}.{eventType} (PRODUCER)"]
       Op --> Osend
+    end
+    subgraph TRelay["〔Trace: outbox-worker @ origin site〕"]
+      Rp["outbox deliver → process (CONSUMER)"]
+      Rsend["send chat.inbox.{dest}.external.{event} (PRODUCER)"]
+      Rp --> Rsend
     end
     subgraph TDest["〔Trace: inbox-worker @ dest site〕"]
       Dp["external.{event} deliver → process (CONSUMER)"]
       Dmongo["mongo subscriptions/rooms upsert"]
       Dp --> Dmongo
     end
-    Osend -. "span link (cross-supercluster)" .-> Dp
+    Osend -. "span link" .-> Rp
+    Rsend -. "span link (cross-supercluster)" .-> Dp
 ```
 
 ---

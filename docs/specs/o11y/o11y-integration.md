@@ -80,9 +80,10 @@ Concretely, after this work:
 Existing OTel deps are pinned at **v1.43.0** (`go.opentelemetry.io/otel`,
 `.../sdk`, `.../exporters/...`, `otelhttp` contrib `v0.60.0`).
 
-**Conversion target is 16 services, not 14.** The `otelutil` footprint above is
+**Conversion target is 17 Go services, not 14.** The `otelutil` footprint above is
 14, but `auth-service` and `portal-service` use `slog.SetDefault` without
-`otelutil` (no tracing today) and still need `obs.Init`. All 16 deployable
+`otelutil` (no tracing today) and still need `obs.Init`; `media-service` and
+the upstream `outbox-worker` also need the same wiring. All 17 deployable Go
 services are converted (see §6 Phase 3 enumeration); the 14/13 counts describe
 the *current* footprint of the things being removed, not the target.
 
@@ -140,7 +141,7 @@ All four are decided; recorded here with rationale.
 **D1 — Wrapper vs. direct `o11y.Init`. → Thin `pkg/obs` wrapper.**
 Centralizes env parsing (via `caarlos0/env`, per CLAUDE.md), the four required
 identity options, default endpoints, and the global-provider install + shutdown
-ordering, so the 16 services do not copy that boilerplate. Cost: one small
+ordering, so the services do not copy that boilerplate. Cost: one small
 shared package.
 
 **D2 — NATS instrumentation. → Fully replace Marz32onE with `o11y/nats`.**
@@ -166,7 +167,7 @@ target collector exposes an OTLP/HTTP receiver.
 
 **D4 — Rollout shape. → Convert all services in one sweep (no pilot).**
 Because the platform is pre-production, there is no need to prove the wrapper on
-a single canary first. All 16 services migrate together, still ordered by layer
+a single canary first. All services migrate together, still ordered by layer
 (wrapper → shared helpers → services → NATS → cleanup) for reviewable build
 order, not for risk gating.
 
@@ -216,7 +217,7 @@ Notes:
   OTel meter and expose them via the SDK endpoint. `search-service` intentionally
   keeps its existing `promhttp` app-metrics listener on `METRICS_ADDR` (`:9090`)
   until its dashboards and alerts are deliberately migrated; see
-  `docs/specs/o11y-followups.md`.
+  `docs/specs/o11y/o11y-followups.md`.
 
 ---
 
@@ -310,7 +311,7 @@ and the helper degrades to a no-op tracer when observability is disabled.
         `service_version`, `deployment_environment_name`.
   - [ ] Confirm **no** Marz32onE spans remain (old instrumentation fully gone).
 
-### Phase 3 — Convert all 16 services
+### Phase 3 — Convert all 17 Go services
 - Every `main.go`: `otelutil.Init*` → `obs.Init`; delete the manual
   `slog.SetDefault` block; pass the SDK into the now-instrumented `pkg/*` helpers.
   `auth-service` and `portal-service` (no `otelutil` today) gain `obs.Init` for
@@ -319,12 +320,12 @@ and the helper degrades to a no-op tracer when observability is disabled.
   `:9090` app-metrics endpoint pending dashboard/alert migration.
 - HTTP services additionally adopt `o11y/gin` middleware and `o11y/resty`.
 - Suggested edit order (mechanical, not gated): workers (`message`, `broadcast`,
-  `notification`, `room`, `inbox`, `search-sync`, `gatekeeper`, oplog-connector)
+  `notification`, `room`, `inbox`, `outbox`, `search-sync`, `gatekeeper`, oplog-connector)
   → req/reply (`room`, `user`, `history`, `presence`, `search`) → HTTP (`auth`,
-  `portal`, `upload`). That enumeration is the full set of **16**.
+  `portal`, `upload`, `media`). That enumeration is the full set of **17**.
 
   **Integration-test checklist (expect: full coverage; complete end-to-end traces):**
-  - [ ] All **16 `service.name`s appear** in Tempo/Grafana's service map after
+  - [ ] All **17 `service.name`s appear** in Tempo/Grafana's service map after
         exercising the stack.
   - [ ] **HTTP services** (`auth`, `portal`, `upload`) emit server spans
         (`o11y/gin`) and outbound client spans (`o11y/resty`); a login →
@@ -415,7 +416,7 @@ New env vars (defaults chosen so local dev "just works"):
 Removed: the old gRPC OTLP endpoint env consumed by `otelutil`, and the retired
 data-migration `METRICS_ADDR` listener vars. `search-service` keeps
 `METRICS_ADDR` for its existing `:9090` app metrics until the follow-up migration
-in `docs/specs/o11y-followups.md` is explicitly chosen.
+in `docs/specs/o11y/o11y-followups.md` is explicitly chosen.
 Update every service's `deploy/docker-compose.yml`, `deploy/azure-pipelines.yml`,
 and k8s manifests. `docker-local/` compose should set
 `OTEL_EXPORTER_OTLP_ENDPOINT` to the local collector (or leave tracing off via

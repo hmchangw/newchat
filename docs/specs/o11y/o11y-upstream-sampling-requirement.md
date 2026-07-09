@@ -118,4 +118,4 @@ trace ID.
 `flywindy/chat` already reads `OTEL_TRACES_SAMPLER[_ARG]` in `pkg/obs` and maps
 them to o11y sampler options, so once this feature exists we would enable it via
 one option/env and set the ratio in deploy — no per-service change. Until then we
-run 100% in pre-production (see `docs/specs/o11y-performance-and-sampling.md`).
+run 100% in pre-production (see `docs/specs/o11y/o11y-performance-and-sampling.md`).

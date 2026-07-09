@@ -82,9 +82,9 @@ No sampler is set, so every message is 100% sampled (~10–20 spans/message).
 hops *independently* → whole flows fragment, and **collector tail sampling does
 not fix it** (different trace IDs joined only by links). The real fix is an
 **upstream `o11y`/`otelnats` change** so the consumer span inherits the origin's
-sampled flag — spec'd in `docs/specs/o11y-upstream-sampling-requirement.md`.
+sampled flag — spec'd in `docs/specs/o11y/o11y-upstream-sampling-requirement.md`.
 Until then, run 100% in pre-production. Full design + benchmark:
-`docs/specs/o11y-performance-and-sampling.md`.
+`docs/specs/o11y/o11y-performance-and-sampling.md`.
 
 ### F3 — `OTEL_SERVICE_NAME` rollout note
 Now defaults to `unknown-service` (no longer a crash-loop), but production
@@ -123,7 +123,7 @@ pivot is one-directional. Add a one-line span attribute in the `natsrouter` and
   attribute can't drift.
 
 ### F9 — Metrics gaps (see `o11y-metrics-inventory.md`)
-Full per-service inventory in `docs/specs/o11y-metrics-inventory.md`. Priority:
+Full per-service inventory in `docs/specs/o11y/o11y-metrics-inventory.md`. Priority:
 1. **NATS/JetStream exporter** (infra) — consumer lag is invisible today; the app
    SDK cannot emit it. Highest-value metrics gap on the platform.
 2. **Hot-path domain counters** (app) — gatekeeper validated/rejected, broadcast

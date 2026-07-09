@@ -8,7 +8,7 @@ NATS/HTTP calls join the same trace constellation as the backend services.
 > `src/lib/telemetry.ts` + call-sites is exactly the shape described here; treat
 > those files as the canonical example to copy or adapt.
 >
-> **Read first:** `docs/specs/o11y-trace-design.md` §0 (the propagation model —
+> **Read first:** `docs/specs/o11y/o11y-trace-design.md` §0 (the propagation model —
 > why traces are link-based, not one shared trace ID). This guide is the
 > *how-to*; that doc is the *what-it-should-look-like*.
 
@@ -27,7 +27,7 @@ packages.
 |---|---|---|
 | Signals | traces + metrics + logs (+ slog correlation) | **traces only** |
 | Drivers wrapped | mongo/cassandra/redis/minio/ES/nats | none (NATS-WS + fetch) |
-| Reuse scope | 16 services → worth an SDK | one app |
+| Reuse scope | 17 Go services → worth an SDK | one app |
 | Off-the-shelf | Go ecosystem fragmented → must package | **`@opentelemetry/sdk-trace-web` already packages it** |
 
 The adapter's whole job: on **send** start a `CLIENT` span + inject `traceparent`
@@ -255,7 +255,7 @@ You do not have to configure these — but know they exist:
 ## 7. Verify
 
 With the local o11y stack up (Tempo + Grafana), open Grafana Explore → Tempo and
-run (full checklist in `docs/specs/o11y-local-trace-verification.md`):
+run (full checklist in `docs/specs/o11y/o11y-local-trace-verification.md`):
 
 ```traceql
 { resource.service.name = "chat-frontend" }
@@ -264,7 +264,7 @@ run (full checklist in `docs/specs/o11y-local-trace-verification.md`):
 { span.messaging.destination.name =~ "chat.*" }
 ```
 
-Then confirm the scenario shapes in `docs/specs/o11y-trace-design.md` §1–§7: a
+Then confirm the scenario shapes in `docs/specs/o11y/o11y-trace-design.md` §1–§7: a
 browser `nats publish/request` span at the head, each backend `process` span
 carrying a **link** back to it, and (for delivery) a browser `nats receive` span
 linked to the broadcast-worker producer.
@@ -321,6 +321,6 @@ require a custom SDK.**
 | Request / two-phase async wiring | `chat-frontend/src/api/_transport/asyncJob.ts` |
 | Tests (span-name + linked-receive assertions) | `…/NatsContext.test.jsx`, `…/asyncJob.test.js` |
 
-See also: `docs/specs/o11y-trace-design.md` (expected traces),
-`docs/specs/o11y-local-trace-verification.md` (verification),
-`docs/specs/o11y-followups.md` (backend follow-ups).
+See also: `docs/specs/o11y/o11y-trace-design.md` (expected traces),
+`docs/specs/o11y/o11y-local-trace-verification.md` (verification),
+`docs/specs/o11y/o11y-followups.md` (backend follow-ups).

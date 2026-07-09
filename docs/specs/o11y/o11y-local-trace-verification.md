@@ -3,7 +3,7 @@
 This checklist verifies the trace shape that the chat repo can produce with
 `github.com/flywindy/o11y` v0.8.0 JetStream `Fetch()` and request/reply
 reply-link support.
-It intentionally does not replace `docs/specs/o11y-trace-design.md`; use this
+It intentionally does not replace `docs/specs/o11y/o11y-trace-design.md`; use this
 as the repeatable local smoke procedure.
 
 ## Preconditions

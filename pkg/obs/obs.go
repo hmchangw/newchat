@@ -46,7 +46,7 @@ type Config struct {
 	// itself (it only honors WithSamplingRatio/WithTraceSampler options), so
 	// samplerOptions maps them to the right option. Empty/always_on = 100%.
 	// NOTE: each NATS hop is a detached root, so a ratio samples hops
-	// independently — see docs/specs/o11y-performance-and-sampling.md.
+	// independently — see docs/specs/o11y/o11y-performance-and-sampling.md.
 	TracesSampler    string  `env:"OTEL_TRACES_SAMPLER" envDefault:""`
 	TracesSamplerArg float64 `env:"OTEL_TRACES_SAMPLER_ARG" envDefault:"1"`
 }

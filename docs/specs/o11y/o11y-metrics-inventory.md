@@ -59,10 +59,12 @@ missing beyond shared cache/key counters.
 | auth-service | ✅ | — | — | — | — | — | — | login success/fail, JWKS refresh (see F5) |
 | portal-service | ✅ | ✅ | — | — | — | — | — | account-lookup outcomes |
 | upload-service | ✅ | ✅ | — | — | — | — | — | upload count/bytes, MinIO put/get outcomes |
+| media-service | ✅ | ✅ | — | — | spans | — | — | avatar/emoji upload count/bytes, MinIO put/get outcomes |
 | message-gatekeeper | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | **validated / rejected counter** (by reason), canonical published |
 | message-worker | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | rows written, thread-sub upserts |
 | broadcast-worker | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | **fan-out size** histogram, deliveries, E2E-key hits |
 | notification-worker | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | notifications/pushes sent, suppressed |
+| outbox-worker | — | — | — | — | spans | — | — | forwarded/dropped/retried events by destination and type |
 | search-sync-worker | — | — | — | — | spans (Fetch) | spans | — | bulk actions/flush, index vs delete, ES failures |
 | search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `search_service_request_duration_seconds`, `search_service_es_duration_seconds`** | (well covered after request traffic) |
 | room-service | — | ✅ | ✅ | ✅ | spans | — | — | room create/join/leave outcomes |
@@ -110,6 +112,11 @@ Prometheus scrape status:
 |---|---|
 | `chat-services` | 15 active targets up |
 | `otel-collector` | 1 active target up |
+
+The 2026-07-08 live run predated the upstream `outbox-worker` merge and did not
+include `media-service` in `docker-local/compose.services.yaml`; after rebasing
+this PR, local compose should scrape 16 `chat-services` targets (`outbox-worker`
+included, `media-service` still separate).
 
 Active `chat-services` targets scraped `:2112/metrics` for:
 
@@ -191,7 +198,7 @@ these exporters there (and to prod IaC) to cover Layer C.
 5. **Histogram buckets.** SDK HTTP/DB histograms use `DefaultLatencyBuckets`
    (`WithHistogramBuckets` can override); confirm they match dashboard needs.
 
-Tracked as follow-ups in `docs/specs/o11y-followups.md`.
+Tracked as follow-ups in `docs/specs/o11y/o11y-followups.md`.
 
 See also: `o11y-trace-design.md` (traces), `o11y-performance-and-sampling.md`
 (cost of the above), `o11y-local-trace-verification.md` (how to view them).
