@@ -32,8 +32,9 @@ func (r recorderObs) MeterProvider() metric.MeterProvider      { return metricno
 
 func TestConnect_WithObservability_RecordsQuerySpan(t *testing.T) {
 	keyspace, admin, host := testutil.CassandraKeyspace(t, "cassutil_obs")
+	// The admin session has no default keyspace, so the DDL must qualify the table.
 	require.NoError(t, admin.Query(
-		`CREATE TABLE IF NOT EXISTS items (id text PRIMARY KEY, name text)`,
+		`CREATE TABLE IF NOT EXISTS `+keyspace+`.items (id text PRIMARY KEY, name text)`,
 	).Exec())
 
 	exporter := tracetest.NewInMemoryExporter()
