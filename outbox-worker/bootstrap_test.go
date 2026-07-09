@@ -5,11 +5,10 @@ import (
 	"errors"
 	"testing"
 
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 )
 
 type fakeStreamManager struct {
@@ -20,7 +19,7 @@ type fakeStreamManager struct {
 }
 
 // Returns nil for the Stream value because bootstrapStreams discards it.
-func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy the streamManager interface
+func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstream.StreamConfig) (o11ynats.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy the streamManager interface
 	if f.failOn != "" && cfg.Name == f.failOn {
 		return nil, f.failErr
 	}
@@ -28,7 +27,7 @@ func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstrea
 	return nil, nil
 }
 
-func (f *fakeStreamManager) Stream(_ context.Context, name string) (oteljetstream.Stream, error) {
+func (f *fakeStreamManager) Stream(_ context.Context, name string) (o11ynats.Stream, error) {
 	if f.existing[name] {
 		return nil, nil
 	}
