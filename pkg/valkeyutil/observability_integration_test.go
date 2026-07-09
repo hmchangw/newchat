@@ -29,14 +29,16 @@ func (r recorderObs) TracerProvider() oteltrace.TracerProvider { return r.tp }
 func (r recorderObs) MeterProvider() metric.MeterProvider      { return metricnoop.NewMeterProvider() }
 
 func TestInstrumentCluster_RecordsCommandSpan(t *testing.T) {
-	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := testutil.SharedValkeyCluster(t)
+	// Per-test cluster: instrumentCluster mutates the client's hook chain, and
+	// hooks stacked on the shared client would leak into sibling tests (node
+	// connections created under one test's hooks keep serving later tests).
+	c := testutil.StartValkeyCluster(t)
 
 	exporter := tracetest.NewInMemoryExporter()
 	tp := trace.NewTracerProvider(trace.WithSyncer(exporter))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	// Exercise the exact instrumentation path ConnectCluster uses. The shared
+	// Exercise the exact instrumentation path ConnectCluster uses. The
 	// container client is built with a ClusterSlots override (ConnectCluster's
 	// auto-discovery can't reach it), so wrap it directly here.
 	require.NoError(t, instrumentCluster(c, newConnectConfig(WithObservability(recorderObs{tp: tp}))))
@@ -62,8 +64,8 @@ func TestInstrumentCluster_RecordsCommandSpan(t *testing.T) {
 }
 
 func TestInstrumentCluster_RequireParentSpan(t *testing.T) {
-	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := testutil.SharedValkeyCluster(t)
+	// Per-test cluster for the same hook-isolation reason as above.
+	c := testutil.StartValkeyCluster(t)
 
 	exporter := tracetest.NewInMemoryExporter()
 	tp := trace.NewTracerProvider(trace.WithSyncer(exporter))
