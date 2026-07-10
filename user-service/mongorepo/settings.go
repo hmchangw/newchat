@@ -116,6 +116,8 @@ func (r *SettingsRepo) SetUserSettings(ctx context.Context, account, siteID stri
 		return &settings, nil
 	}
 
+	// Unreachable: the loop body always returns or continues.
+	// Kept to satisfy the compiler's return-path analysis.
 	return nil, fmt.Errorf("update user settings: duplicate-key retry exhausted")
 }
 

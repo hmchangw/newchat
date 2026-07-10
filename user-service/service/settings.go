@@ -16,6 +16,9 @@ const defaultMaxSettingsBytes = 64 * 1024
 // GetUserSettings returns the caller's settings for this service's site.
 func (s *UserService) GetUserSettings(c *natsrouter.Context) (*models.UserSettingsView, error) {
 	account := c.Param("account")
+	if account == "" {
+		return nil, errcode.Forbidden("invalid account")
+	}
 	c.WithLogValues("account", account)
 
 	settings, err := s.settings.GetUserSettings(c, account, s.siteID)
@@ -31,9 +34,12 @@ func (s *UserService) GetUserSettings(c *natsrouter.Context) (*models.UserSettin
 // SetUserSettings validates and persists the caller's opaque JSON settings.
 func (s *UserService) SetUserSettings(c *natsrouter.Context, req models.SetUserSettingsRequest) (*models.UserSettingsView, error) {
 	account := c.Param("account")
+	if account == "" {
+		return nil, errcode.Forbidden("invalid account")
+	}
 	c.WithLogValues("account", account)
 
-	if len(req.Data) > s.settingsLimit() {
+	if len(req.Data) > s.maxSettingsBytes {
 		return nil, errcode.BadRequest("data too large")
 	}
 	if !isJSONObject(req.Data) {
@@ -48,13 +54,6 @@ func (s *UserService) SetUserSettings(c *natsrouter.Context, req models.SetUserS
 		return nil, fmt.Errorf("set user settings: repository returned nil settings")
 	}
 	return userSettingsView(settings), nil
-}
-
-func (s *UserService) settingsLimit() int {
-	if s.maxSettingsBytes > 0 {
-		return s.maxSettingsBytes
-	}
-	return defaultMaxSettingsBytes
 }
 
 func isJSONObject(data json.RawMessage) bool {
@@ -72,10 +71,10 @@ func userSettingsView(settings *model.UserSettings) *models.UserSettingsView {
 	}
 }
 
-func wrapSettingsError(operation string, err error) error {
+func wrapSettingsError(_ string, err error) error {
 	var coded *errcode.Error
 	if errors.As(err, &coded) {
 		return err
 	}
-	return fmt.Errorf("%s: %w", operation, err)
+	return err
 }

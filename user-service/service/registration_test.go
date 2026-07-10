@@ -39,7 +39,7 @@ func TestRegisterHandlers_AC_4_1_SettingsGet(t *testing.T) {
 		Data:    json.RawMessage(`{"theme":"dark"}`),
 		Version: 3,
 	}}
-	svc := &UserService{settings: repo, siteID: "site-a"}
+	svc := &UserService{settings: repo, siteID: "site-a", maxSettingsBytes: defaultMaxSettingsBytes}
 	router := natsrouter.New(nc, "user-service-test")
 	svc.RegisterHandlers(router)
 	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.Background())) })
@@ -64,7 +64,7 @@ func TestRegisterHandlers_AC_4_2_SettingsSet(t *testing.T) {
 		Data:    data,
 		Version: 4,
 	}}
-	svc := &UserService{settings: repo, siteID: "site-a"}
+	svc := &UserService{settings: repo, siteID: "site-a", maxSettingsBytes: defaultMaxSettingsBytes}
 	router := natsrouter.New(nc, "user-service-test")
 	svc.RegisterHandlers(router)
 	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.Background())) })

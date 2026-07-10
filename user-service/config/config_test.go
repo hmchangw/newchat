@@ -158,6 +158,19 @@ func TestLoad_InvalidDefaultAppsLimit(t *testing.T) {
 	}
 }
 
+func TestLoad_InvalidMaxSettingsBytes(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run("limit="+v, func(t *testing.T) {
+			t.Setenv("MONGO_URI", "mongodb://x")
+			t.Setenv("NATS_URL", "nats://x")
+			t.Setenv("SITE_ID", "site-a")
+			t.Setenv("USER_SERVICE_MAX_SETTINGS_BYTES", v)
+			_, err := Load()
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestLoad_AppsDefaultExceedsAppsMax(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")

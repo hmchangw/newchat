@@ -47,7 +47,7 @@ func (f *settingsRepositoryFake) SetUserSettings(_ context.Context, account, sit
 }
 
 func newSettingsService(repo SettingsRepository) *UserService {
-	return &UserService{settings: repo, siteID: "site-a"}
+	return &UserService{settings: repo, siteID: "site-a", maxSettingsBytes: defaultMaxSettingsBytes}
 }
 
 // AC-3.1: a valid caller receives the stored settings view.
@@ -135,6 +135,7 @@ func TestSetUserSettings_AC_3_4_RejectsMissingOrNonObjectDataBeforeRepository(t 
 		{name: "string", data: json.RawMessage(`"dark"`)},
 		{name: "number", data: json.RawMessage("1")},
 		{name: "boolean", data: json.RawMessage("true")},
+		{name: "empty string", data: json.RawMessage("")},
 	}
 
 	for _, tt := range tests {
@@ -148,10 +149,21 @@ func TestSetUserSettings_AC_3_4_RejectsMissingOrNonObjectDataBeforeRepository(t 
 	}
 }
 
+// AC-3.4: empty JSON objects are accepted as valid data and reach the repository.
+func TestSetUserSettings_EmptyObjectAccepts(t *testing.T) {
+	repo := &settingsRepositoryFake{setResult: &model.UserSettings{Account: "alice", SiteID: "site-a", Data: json.RawMessage("{}"), Version: 1}}
+
+	_, err := newSettingsService(repo).SetUserSettings(ctx("alice", "site-a"), models.SetUserSettingsRequest{Data: json.RawMessage("{}")})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, repo.setCalls)
+	assert.Equal(t, json.RawMessage("{}"), repo.data)
+}
+
 // AC-3.5: serialized data over 64 KiB returns bad_request before repository access.
 func TestSetUserSettings_AC_3_5_RejectsOversizedDataBeforeRepository(t *testing.T) {
 	data := json.RawMessage(`{"value":"` + string(make([]byte, 64*1024)) + `"}`)
-	require.Greater(t, len(data), defaultMaxSettingsBytes)
+	require.Greater(t, len(data), 64*1024)
 	repo := &settingsRepositoryFake{}
 
 	_, err := newSettingsService(repo).SetUserSettings(ctx("alice", "site-a"), models.SetUserSettingsRequest{Data: data})
@@ -196,7 +208,7 @@ func TestSetUserSettings_AC_3_6_StaleIfVersionReturnsConflict(t *testing.T) {
 func TestSetUserSettings_AC_4_3_UsesConfiguredLimit(t *testing.T) {
 	data := json.RawMessage(`{"value":"` + strings.Repeat("a", 32*1024) + `"}`)
 	require.Greater(t, len(data), 32*1024)
-	require.Less(t, len(data), defaultMaxSettingsBytes)
+	require.Less(t, len(data), 64*1024)
 	repo := &settingsRepositoryFake{}
 	svc := &UserService{settings: repo, siteID: "site-a", maxSettingsBytes: 32 * 1024}
 
@@ -222,8 +234,8 @@ func TestSetUserSettings_RepositoryErrorIsWrapped(t *testing.T) {
 	assert.Equal(t, errcode.CodeInternal, errcode.Classify(context.Background(), err).Code)
 }
 
-// AC-3.7: the subject account is the caller identity used for repository access.
-func TestUserSettings_AC_3_7_UsesSubjectAccountAsCallerIdentity(t *testing.T) {
+// AC-3.7: the subject account is the caller identity used for SET.
+func TestUserSettings_AC_3_7_SetUsesSubjectAccountAsCallerIdentity(t *testing.T) {
 	data := json.RawMessage(`{"theme":"dark"}`)
 	repo := &settingsRepositoryFake{setResult: &model.UserSettings{Account: "alice", SiteID: "site-a", Data: data, Version: 1}}
 
@@ -232,4 +244,45 @@ func TestUserSettings_AC_3_7_UsesSubjectAccountAsCallerIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "alice", repo.account, "the router's account subject parameter is the only caller identity available to this handler")
 	assert.NotEqual(t, "bob", repo.account)
+}
+
+// AC-3.7: the subject account is the caller identity used for GET.
+func TestUserSettings_AC_3_7_GetUsesSubjectAccountAsCallerIdentity(t *testing.T) {
+	repo := &settingsRepositoryFake{getResult: &model.UserSettings{Account: "alice", SiteID: "site-a", Data: json.RawMessage("{}"), Version: 1}}
+
+	_, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"))
+
+	require.NoError(t, err)
+	assert.Equal(t, "alice", repo.account)
+	assert.Equal(t, "site-a", repo.siteID)
+}
+
+// AC (nil-repo): SetUserSettings returns internal error when repo returns nil,nil.
+func TestSetUserSettings_RepoReturnsNil_YieldsInternalError(t *testing.T) {
+	repo := &settingsRepositoryFake{}
+
+	_, err := newSettingsService(repo).SetUserSettings(ctx("alice", "site-a"), models.SetUserSettingsRequest{Data: json.RawMessage(`{"k":"v"}`)})
+
+	require.Error(t, err)
+	// A raw fmt.Errorf (no *errcode.Error) classifies as CodeInternal.
+	assert.Equal(t, errcode.CodeInternal, errcode.Classify(context.Background(), err).Code)
+}
+
+// AC (empty account): handlers reject empty account with Forbidden.
+func TestGetUserSettings_EmptyAccountForbidden(t *testing.T) {
+	repo := &settingsRepositoryFake{}
+
+	_, err := newSettingsService(repo).GetUserSettings(ctx("", "site-a"))
+
+	requireCode(t, err, errcode.CodeForbidden)
+	assert.Equal(t, 0, repo.getCalls)
+}
+
+func TestSetUserSettings_EmptyAccountForbidden(t *testing.T) {
+	repo := &settingsRepositoryFake{}
+
+	_, err := newSettingsService(repo).SetUserSettings(ctx("", "site-a"), models.SetUserSettingsRequest{Data: json.RawMessage(`{"k":"v"}`)})
+
+	requireCode(t, err, errcode.CodeForbidden)
+	assert.Equal(t, 0, repo.setCalls)
 }
