@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // This file anchors acceptance criteria for presence-mode documentation.
 // It exists so the typed constants are the single source of truth for the
@@ -8,10 +12,6 @@ import "testing"
 
 // AC-5.1: documented manual-only modes have stable typed wire values.
 func TestPresenceDocs_WireValues(t *testing.T) {
-	if StatusDND != "dnd" {
-		t.Errorf("StatusDND = %q, want %q", StatusDND, "dnd")
-	}
-	if StatusBRB != "brb" {
-		t.Errorf("StatusBRB = %q, want %q", StatusBRB, "brb")
-	}
+	assert.Equal(t, PresenceStatus("dnd"), StatusDND)
+	assert.Equal(t, PresenceStatus("brb"), StatusBRB)
 }
