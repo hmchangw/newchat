@@ -17,7 +17,7 @@ const defaultMaxSettingsBytes = 64 * 1024
 func (s *UserService) GetUserSettings(c *natsrouter.Context) (*models.UserSettingsView, error) {
 	account := c.Param("account")
 	if account == "" {
-		return nil, errcode.Forbidden("invalid account")
+		return nil, errcode.BadRequest("missing account")
 	}
 	c.WithLogValues("account", account)
 
@@ -35,7 +35,7 @@ func (s *UserService) GetUserSettings(c *natsrouter.Context) (*models.UserSettin
 func (s *UserService) SetUserSettings(c *natsrouter.Context, req models.SetUserSettingsRequest) (*models.UserSettingsView, error) {
 	account := c.Param("account")
 	if account == "" {
-		return nil, errcode.Forbidden("invalid account")
+		return nil, errcode.BadRequest("missing account")
 	}
 	c.WithLogValues("account", account)
 
@@ -71,10 +71,10 @@ func userSettingsView(settings *model.UserSettings) *models.UserSettingsView {
 	}
 }
 
-func wrapSettingsError(_ string, err error) error {
+func wrapSettingsError(op string, err error) error {
 	var coded *errcode.Error
 	if errors.As(err, &coded) {
 		return err
 	}
-	return err
+	return fmt.Errorf("%s: %w", op, err)
 }

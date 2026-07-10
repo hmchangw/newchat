@@ -268,21 +268,21 @@ func TestSetUserSettings_RepoReturnsNil_YieldsInternalError(t *testing.T) {
 	assert.Equal(t, errcode.CodeInternal, errcode.Classify(context.Background(), err).Code)
 }
 
-// AC (empty account): handlers reject empty account with Forbidden.
-func TestGetUserSettings_EmptyAccountForbidden(t *testing.T) {
+// AC (empty account): handlers reject empty account with BadRequest.
+func TestGetUserSettings_EmptyAccountBadRequest(t *testing.T) {
 	repo := &settingsRepositoryFake{}
 
 	_, err := newSettingsService(repo).GetUserSettings(ctx("", "site-a"))
 
-	requireCode(t, err, errcode.CodeForbidden)
+	requireCode(t, err, errcode.CodeBadRequest)
 	assert.Equal(t, 0, repo.getCalls)
 }
 
-func TestSetUserSettings_EmptyAccountForbidden(t *testing.T) {
+func TestSetUserSettings_EmptyAccountBadRequest(t *testing.T) {
 	repo := &settingsRepositoryFake{}
 
 	_, err := newSettingsService(repo).SetUserSettings(ctx("", "site-a"), models.SetUserSettingsRequest{Data: json.RawMessage(`{"k":"v"}`)})
 
-	requireCode(t, err, errcode.CodeForbidden)
+	requireCode(t, err, errcode.CodeBadRequest)
 	assert.Equal(t, 0, repo.setCalls)
 }
