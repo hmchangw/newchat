@@ -340,6 +340,38 @@ func TestHandle_PresenceBusyDropsPush(t *testing.T) {
 	assert.ElementsMatch(t, []string{"carol"}, emit.accounts())
 }
 
+func TestHandle_PresenceMixedStatuses(t *testing.T) {
+	// AC-4.2: mixed recipients — dnd/busy/in-call drop, brb/away/online/offline/unknown pass.
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+			{ID: "dave", Account: "dave"},
+			{ID: "erin", Account: "erin"},
+			{ID: "frank", Account: "frank"},
+			{ID: "grace", Account: "grace"},
+			{ID: "henry", Account: "henry"},
+		},
+	}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob":   {AggregatedStatus: "busy"},
+		"carol": {AggregatedStatus: "online"},
+		"dave":  {AggregatedStatus: "dnd"},
+		"erin":  {AggregatedStatus: "brb"},
+		"frank": {AggregatedStatus: "in-call"},
+		"grace": {AggregatedStatus: "away"},
+		"henry": {AggregatedStatus: "offline"},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, presence, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+	assert.ElementsMatch(t, []string{"carol", "erin", "grace", "henry"}, emit.accounts())
+}
+
 func TestHandle_TwoMemberChannel_RoutesAsChannel(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
