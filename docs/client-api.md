@@ -4229,6 +4229,22 @@ compare-and-set: it succeeds only when the stored version matches.
 
 Same shape as [`settings.get`](#settingsget), with `version` incremented by one.
 
+```json
+{
+  "account": "alice",
+  "siteId": "site-a",
+  "data": {
+    "channelSections": {
+      "order": ["favorites"],
+      "collapsed": [],
+      "sections": {}
+    }
+  },
+  "version": 8,
+  "updatedAt": "2026-07-10T12:05:00Z"
+}
+```
+
 ##### Error response
 
 | Condition | `code` | Notes |

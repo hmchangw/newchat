@@ -1451,6 +1451,22 @@ compare-and-set against the version returned by `settings.get`.
 
 Same shape as `settings.get`, with `version` incremented.
 
+```json
+{
+  "account": "alice",
+  "siteId": "site-a",
+  "data": {
+    "channelSections": {
+      "order": ["favorites"],
+      "collapsed": [],
+      "sections": {}
+    }
+  },
+  "version": 8,
+  "updatedAt": "2026-07-10T12:05:00Z"
+}
+```
+
 #### Errors
 
 `bad_request` (missing/non-object/oversized `data`), `conflict` (stale
