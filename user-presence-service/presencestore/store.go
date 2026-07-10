@@ -62,8 +62,15 @@ local stale = tonumber(ARGV[2])
 // manual override and external (Teams) status per the precedence in the project
 // spec, CAS-writes the materialized status, and returns
 // {changed(0/1), effective, nextDeadlineMs(-1 if none)}.
-// Precedence (only while live): appear_offline -> offline; away -> away;
-// azure in-call -> in-call; manual online/busy -> manual; else connection-derived.
+// Precedence (only while live):
+//  1. no live connection            -> offline
+//  2. appear_offline                -> offline
+//  3. manual away / brb             -> away
+//  4. external in-call              -> in-call
+//  5. manual online / busy / dnd    -> manual
+//  6. all inactive                  -> away
+//  7. otherwise                     -> online
+//
 // KEYS[1]=conns hash  KEYS[2]=manual  KEYS[3]=status  KEYS[4]=azure
 const computeLua = `
 local conns = redis.call('HGETALL', KEYS[1])
@@ -96,11 +103,11 @@ if not anyLive then
   effective = 'offline'
 elseif m == 'appear_offline' then
   effective = 'offline'
-elseif m == 'away' then
+elseif m == 'away' or m == 'brb' then
   effective = 'away'
 elseif a == 'in-call' then
   effective = 'in-call'
-elseif m == 'online' or m == 'busy' then
+elseif m == 'online' or m == 'busy' or m == 'dnd' then
   effective = m
 elseif anyActive then
   effective = 'online'
