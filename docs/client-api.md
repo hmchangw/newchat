@@ -58,7 +58,7 @@ paths.
    - [3.3 search-service](#33-search-service)
      - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users)
    - [3.4 user-service](#34-user-service)
-     - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
+     - [`me`](#me) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
@@ -4040,13 +4040,15 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 
 ### 3.4 user-service
 
-`user-service` exposes 14 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
+`user-service` exposes 16 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
 > **Events:** these endpoints emit no client-facing events. (`status.set` triggers a server-side cross-site federation update, which is internal and not delivered to clients.)
 
 | RPC subject | Method |
 |---|---|
 | `chat.user.{account}.request.user.{siteID}.me` | [`me`](#me) |
+| `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
 | `chat.user.{account}.request.user.{siteID}.status.getByName` | [`status.getByName`](#statusgetbyname) |
 | `chat.user.{account}.request.user.{siteID}.profile.getByName` | [`profile.getByName`](#profilegetbyname) |
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
@@ -4104,6 +4106,143 @@ None. Any payload is ignored.
 |-----------|--------|----------|-------|
 | User not found | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
 | Internal failure | `internal` | — | The user-status read failed — the **only** source of `internal` on this endpoint. A failed presence lookup never errors; it degrades to `presence: "offline"` in a success response. |
+
+---
+
+<!-- AC-5.1: documents the complete get contract. -->
+#### settings.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns the calling user's settings document for `{siteID}`. The server stores
+settings data as opaque JSON and does not validate or migrate its inner fields.
+
+##### Request body
+
+None. Any payload is ignored.
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `account` | string | The calling user's account. |
+| `siteId` | string | The requested home site. |
+| `data` | [UserSettingsData](#usersettingsdata) | Client-owned settings data. |
+| `version` | integer | Monotonically increasing document version. |
+| `updatedAt` | string (RFC 3339) | Server-set timestamp of the latest successful write. |
+
+```json
+{
+  "account": "alice",
+  "siteId": "site-a",
+  "data": {
+    "channelSections": {
+      "order": ["favorites", "direct-messages", "teams"],
+      "collapsed": ["teams"],
+      "sections": {
+        "favorites": {
+          "name": "Favorites",
+          "channelIds": ["room_abc123", "room_def456"],
+          "order": ["room_abc123", "room_def456"]
+        }
+      }
+    }
+  },
+  "version": 7,
+  "updatedAt": "2026-07-10T12:00:00Z"
+}
+```
+
+##### UserSettingsData
+
+A client-defined JSON object. The backend preserves this value but does not
+interpret its keys or validate its nested structure.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `<client-defined key>` | JSON value | no | Any client-owned setting. `channelSections` is the current example. |
+| `channelSections` | [ChannelSectionSettings](#channelsectionsettings) | no | Sidebar channel grouping example. |
+
+##### ChannelSectionSettings
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `order` | string[] | Ordered section IDs. |
+| `collapsed` | string[] | Section IDs currently collapsed in the client. |
+| `sections` | map<string, [ChannelSection]> | Sections keyed by their client-defined ID. |
+
+##### ChannelSection
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `name` | string | Client-visible section label. |
+| `channelIds` | string[] | Channels assigned to the section. |
+| `order` | string[] | Channel IDs in display order. |
+
+##### Error response
+
+| Condition | `code` | Notes |
+|-----------|--------|-------|
+| Settings do not exist | `not_found` | `{ "code": "not_found", "error": "user settings not found" }` |
+| Storage failure | `internal` | Raw storage details are not exposed. |
+
+---
+
+<!-- AC-5.2 and AC-5.3: documents the set contract and optimistic-lock retry. -->
+#### settings.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.set`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Writes the calling user's complete settings document for `{siteID}`. A write
+without `ifVersion` is unconditional. A write with `ifVersion` is an atomic
+compare-and-set: it succeeds only when the stored version matches.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `data` | [UserSettingsData](#usersettingsdata) | yes | Complete client-owned document; default maximum is 65,536 serialized bytes (`USER_SERVICE_MAX_SETTINGS_BYTES`). |
+| `ifVersion` | integer | no | Version returned by the latest `settings.get`; enables atomic compare-and-set. |
+
+```json
+{
+  "data": {
+    "channelSections": {
+      "order": ["favorites", "direct-messages"],
+      "collapsed": [],
+      "sections": {
+        "favorites": {
+          "name": "Favorites",
+          "channelIds": ["room_abc123"],
+          "order": ["room_abc123"]
+        }
+      }
+    }
+  },
+  "ifVersion": 7
+}
+```
+
+##### Success response
+
+Same shape as [`settings.get`](#settingsget), with `version` incremented by one.
+
+##### Error response
+
+| Condition | `code` | Notes |
+|-----------|--------|-------|
+| `data` missing, not a JSON object, or exceeds the configured byte limit | `bad_request` | Rejected before storage. |
+| `ifVersion` is stale | `conflict` | The document was changed after the client read it. |
+| Storage failure | `internal` | Raw storage details are not exposed. |
+
+##### Optimistic-lock retry
+
+1. Call `settings.get` and retain `data` plus `version`.
+2. Submit the changed complete document with that `version` as `ifVersion`.
+3. On `conflict`, call `settings.get` again, merge or reapply the client-owned
+   change, then retry with the returned `version`.
 
 ---
 
