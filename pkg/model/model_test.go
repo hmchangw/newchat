@@ -2647,25 +2647,29 @@ func TestSubscriptionReadEventJSON(t *testing.T) {
 }
 
 func TestPresenceStatusValues(t *testing.T) {
+	// AC-1.1: fixed presence status values preserve their typed wire representation.
 	assert.Equal(t, model.PresenceStatus("online"), model.StatusOnline)
 	assert.Equal(t, model.PresenceStatus("away"), model.StatusAway)
 	assert.Equal(t, model.PresenceStatus("busy"), model.StatusBusy)
 	assert.Equal(t, model.PresenceStatus("offline"), model.StatusOffline)
 	assert.Equal(t, model.PresenceStatus("appear_offline"), model.StatusAppearOffline)
+	assert.Equal(t, model.PresenceStatus("dnd"), model.StatusDND)
+	assert.Equal(t, model.PresenceStatus("brb"), model.StatusBRB)
 	assert.Equal(t, model.PresenceStatus(""), model.StatusNone)
 }
 
 func TestPresenceTypesJSON(t *testing.T) {
+	// AC-1.2: dnd and brb presence values round-trip through client-facing payloads.
 	roundTrip(t, &model.Hello{ConnID: "c1", Timestamp: 1735689600000}, &model.Hello{})
 	roundTrip(t, &model.Ping{ConnID: "c1", Timestamp: 1735689600000}, &model.Ping{})
 	roundTrip(t, &model.Activity{ConnID: "c1", Away: true, Timestamp: 1735689600000}, &model.Activity{})
 	roundTrip(t, &model.ByeRequest{ConnID: "c1", Timestamp: 1735689600000}, &model.ByeRequest{})
-	roundTrip(t, &model.ManualStatusRequest{Status: model.StatusBusy, Timestamp: 1735689600000}, &model.ManualStatusRequest{})
-	roundTrip(t, &model.ManualStatusResponse{Account: "alice", Status: model.StatusBusy, SetAt: 1735689600000, Effective: model.StatusBusy}, &model.ManualStatusResponse{})
+	roundTrip(t, &model.ManualStatusRequest{Status: model.StatusDND, Timestamp: 1735689600000}, &model.ManualStatusRequest{})
+	roundTrip(t, &model.ManualStatusResponse{Account: "alice", Status: model.StatusBRB, SetAt: 1735689600000, Effective: model.StatusDND}, &model.ManualStatusResponse{})
 	roundTrip(t, &model.PresenceQuery{Accounts: []string{"alice", "bob"}}, &model.PresenceQuery{})
-	roundTrip(t, &model.PresenceState{Account: "alice", SiteID: "site-a", Status: model.StatusOnline, Timestamp: 1735689600000}, &model.PresenceState{})
+	roundTrip(t, &model.PresenceState{Account: "alice", SiteID: "site-a", Status: model.StatusDND, Timestamp: 1735689600000}, &model.PresenceState{})
 	roundTrip(t, &model.PresenceQueryResponse{
-		States:    []model.PresenceState{{Account: "alice", SiteID: "site-a", Status: model.StatusOnline, Timestamp: 1735689600000}},
+		States:    []model.PresenceState{{Account: "alice", SiteID: "site-a", Status: model.StatusBRB, Timestamp: 1735689600000}},
 		Timestamp: 1735689600000,
 	}, &model.PresenceQueryResponse{})
 }
