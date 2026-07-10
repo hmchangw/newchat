@@ -51,7 +51,8 @@ func (s *UserService) SetUserSettings(c *natsrouter.Context, req models.SetUserS
 		return nil, wrapSettingsError("set user settings", err)
 	}
 	if settings == nil {
-		return nil, fmt.Errorf("set user settings: repository returned nil settings")
+		// Defensive: repository must return a document on success. Classify as internal.
+		return nil, errcode.Internal("set user settings: repository returned nil settings")
 	}
 	return userSettingsView(settings), nil
 }
