@@ -25,6 +25,7 @@ func TestNoopPresence_EmptySnapshot(t *testing.T) {
 }
 
 func TestShouldPush(t *testing.T) {
+	// AC-4.1: dnd suppresses push notifications; brb remains push-eligible.
 	tests := []struct {
 		status string
 		want   bool
@@ -34,6 +35,8 @@ func TestShouldPush(t *testing.T) {
 		{"away", true},
 		{"busy", false},
 		{"in-call", false},
+		{"dnd", false},
+		{"brb", true},
 		{"", true},        // missing → fail-open
 		{"unknown", true}, // unknown → fail-open
 	}
