@@ -89,6 +89,7 @@ type UserService struct {
 	history         HistoryClient
 	presence        PresenceClient
 	pub             EventPublisher
+	settings        SettingsRepository
 	siteID          string
 	allSiteIDs      []string
 	maxSubs         int
