@@ -7,16 +7,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func readClientAPIDoc(t *testing.T, path string) string {
+func readCanonicalClientAPI(t *testing.T) string {
 	t.Helper()
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile("client-api.md")
+	require.NoError(t, err)
+	return string(content)
+}
+
+func readRequestReplyClientAPI(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile("client-api/request-reply.md")
 	require.NoError(t, err)
 	return string(content)
 }
 
 // AC-5.1: the canonical client API documents the complete settings.get contract.
 func TestClientAPI_AC_5_1_DocumentsSettingsGet(t *testing.T) {
-	canonical := readClientAPIDoc(t, "client-api.md")
+	canonical := readCanonicalClientAPI(t)
 
 	require.Contains(t, canonical, "#### settings.get")
 	require.Contains(t, canonical, "chat.user.{account}.request.user.{siteID}.settings.get")
@@ -26,8 +33,8 @@ func TestClientAPI_AC_5_1_DocumentsSettingsGet(t *testing.T) {
 
 // AC-5.2: canonical and derived views both document settings.set with a success example.
 func TestClientAPI_AC_5_2_DocumentsSettingsSet(t *testing.T) {
-	canonical := readClientAPIDoc(t, "client-api.md")
-	derived := readClientAPIDoc(t, "client-api/request-reply.md")
+	canonical := readCanonicalClientAPI(t)
+	derived := readRequestReplyClientAPI(t)
 
 	require.Contains(t, canonical, "#### settings.set")
 	require.Contains(t, canonical, "chat.user.{account}.request.user.{siteID}.settings.set")
@@ -38,8 +45,8 @@ func TestClientAPI_AC_5_2_DocumentsSettingsSet(t *testing.T) {
 
 // AC-5.3: documentation defines the compare-and-set conflict retry flow.
 func TestClientAPI_AC_5_3_DocumentsOptimisticLockRetry(t *testing.T) {
-	canonical := readClientAPIDoc(t, "client-api.md")
-	derived := readClientAPIDoc(t, "client-api/request-reply.md")
+	canonical := readCanonicalClientAPI(t)
+	derived := readRequestReplyClientAPI(t)
 
 	require.Contains(t, canonical, "##### Optimistic-lock retry")
 	require.Contains(t, canonical, "On `conflict`, call `settings.get` again")
