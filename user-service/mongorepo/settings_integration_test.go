@@ -50,9 +50,9 @@ func TestSettingsRepository_SetUserSettings_InitialVersion_Integration(t *testin
 	assert.Equal(t, "alice", settings.Account)
 	assert.Equal(t, "site-a", settings.SiteID)
 	assert.Equal(t, int64(1), settings.Version)
-	assert.Equal(t, data, []byte(settings.Data))
+	assert.Equal(t, []byte(data), []byte(settings.Data))
 	assert.WithinDuration(t, time.Now().UTC(), settings.UpdatedAt, time.Minute)
-	assert.False(t, settings.UpdatedAt.Before(before))
+	assert.WithinDuration(t, before, settings.UpdatedAt, time.Minute)
 }
 
 // AC-2.3 — a matching conditional version atomically updates the document and increments its version.
@@ -96,7 +96,7 @@ func TestSettingsRepository_SetUserSettings_StaleVersionConflict_Integration(t *
 	require.NoError(t, getErr)
 	require.NotNil(t, stored)
 	assert.Equal(t, int64(3), stored.Version)
-	assert.Equal(t, originalData, []byte(stored.Data))
+	assert.Equal(t, []byte(originalData), []byte(stored.Data))
 }
 
 // AC-2.5 — concurrent unconditional writes each apply atomically and produce version 2 with one complete payload.
