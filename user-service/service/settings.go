@@ -11,10 +11,10 @@ import (
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-const maxSettingsBytes = 64 * 1024
+const defaultMaxSettingsBytes = 64 * 1024
 
 // GetUserSettings returns the caller's settings for this service's site.
-func (s *UserService) GetUserSettings(c *natsrouter.Context, _ models.GetUserSettingsRequest) (*models.UserSettingsView, error) {
+func (s *UserService) GetUserSettings(c *natsrouter.Context) (*models.UserSettingsView, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
 
@@ -33,7 +33,7 @@ func (s *UserService) SetUserSettings(c *natsrouter.Context, req models.SetUserS
 	account := c.Param("account")
 	c.WithLogValues("account", account)
 
-	if len(req.Data) > maxSettingsBytes {
+	if len(req.Data) > s.settingsLimit() {
 		return nil, errcode.BadRequest("data too large")
 	}
 	if !isJSONObject(req.Data) {
@@ -48,6 +48,13 @@ func (s *UserService) SetUserSettings(c *natsrouter.Context, req models.SetUserS
 		return nil, fmt.Errorf("set user settings: repository returned nil settings")
 	}
 	return userSettingsView(settings), nil
+}
+
+func (s *UserService) settingsLimit() int {
+	if s.maxSettingsBytes > 0 {
+		return s.maxSettingsBytes
+	}
+	return defaultMaxSettingsBytes
 }
 
 func isJSONObject(data json.RawMessage) bool {

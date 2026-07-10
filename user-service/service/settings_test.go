@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func TestGetUserSettings_AC_3_1_ReturnsStoredView(t *testing.T) {
 	}
 	repo := &settingsRepositoryFake{getResult: stored}
 
-	got, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"), models.GetUserSettingsRequest{})
+	got, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"))
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -81,7 +82,7 @@ func TestGetUserSettings_AC_3_1_ReturnsStoredView(t *testing.T) {
 func TestGetUserSettings_AC_3_2_MissingReturnsNotFound(t *testing.T) {
 	repo := &settingsRepositoryFake{}
 
-	_, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"), models.GetUserSettingsRequest{})
+	_, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"))
 
 	requireCode(t, err, errcode.CodeNotFound)
 	assert.Equal(t, 1, repo.getCalls)
@@ -91,7 +92,7 @@ func TestGetUserSettings_RepositoryErrorIsWrapped(t *testing.T) {
 	repoErr := errors.New("database unavailable")
 	repo := &settingsRepositoryFake{getErr: repoErr}
 
-	_, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"), models.GetUserSettingsRequest{})
+	_, err := newSettingsService(repo).GetUserSettings(ctx("alice", "site-a"))
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, repoErr)
@@ -150,7 +151,7 @@ func TestSetUserSettings_AC_3_4_RejectsMissingOrNonObjectDataBeforeRepository(t 
 // AC-3.5: serialized data over 64 KiB returns bad_request before repository access.
 func TestSetUserSettings_AC_3_5_RejectsOversizedDataBeforeRepository(t *testing.T) {
 	data := json.RawMessage(`{"value":"` + string(make([]byte, 64*1024)) + `"}`)
-	require.Greater(t, len(data), maxSettingsBytes)
+	require.Greater(t, len(data), defaultMaxSettingsBytes)
 	repo := &settingsRepositoryFake{}
 
 	_, err := newSettingsService(repo).SetUserSettings(ctx("alice", "site-a"), models.SetUserSettingsRequest{Data: data})
@@ -189,6 +190,23 @@ func TestSetUserSettings_AC_3_6_StaleIfVersionReturnsConflict(t *testing.T) {
 
 	requireCode(t, err, errcode.CodeConflict)
 	assert.Equal(t, 1, repo.setCalls)
+}
+
+// AC-4.3: a configured 32 KiB limit rejects payloads above 32 KiB before persistence.
+func TestSetUserSettings_AC_4_3_UsesConfiguredLimit(t *testing.T) {
+	data := json.RawMessage(`{"value":"` + strings.Repeat("a", 32*1024) + `"}`)
+	require.Greater(t, len(data), 32*1024)
+	require.Less(t, len(data), defaultMaxSettingsBytes)
+	repo := &settingsRepositoryFake{}
+	svc := &UserService{settings: repo, siteID: "site-a", maxSettingsBytes: 32 * 1024}
+
+	_, err := svc.SetUserSettings(ctx("alice", "site-a"), models.SetUserSettingsRequest{Data: data})
+
+	requireCode(t, err, errcode.CodeBadRequest)
+	var coded *errcode.Error
+	require.ErrorAs(t, err, &coded)
+	assert.Equal(t, "data too large", coded.Message)
+	assert.Equal(t, 0, repo.setCalls)
 }
 
 func TestSetUserSettings_RepositoryErrorIsWrapped(t *testing.T) {

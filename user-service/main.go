@@ -28,6 +28,7 @@ var (
 	_ service.UserRepository               = (*mongorepo.UserRepo)(nil)
 	_ service.AppRepository                = (*mongorepo.AppRepo)(nil)
 	_ service.ThreadSubscriptionRepository = (*mongorepo.ThreadSubscriptionRepo)(nil)
+	_ service.SettingsRepository           = (*mongorepo.SettingsRepo)(nil)
 	_ service.RoomClient                   = (*roomclient.Client)(nil)
 	_ service.HistoryClient                = (*historyclient.Client)(nil)
 	_ service.PresenceClient               = (*presenceclient.Client)(nil)
@@ -74,6 +75,7 @@ func main() {
 	userRepo := mongorepo.NewUserRepo(db)
 	appRepo := mongorepo.NewAppRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
+	settingsRepo := mongorepo.NewSettingsRepo(db)
 	if err := subRepo.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
@@ -90,8 +92,12 @@ func main() {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}
+	if err := settingsRepo.EnsureIndexes(ctx); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), &cfg)
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, settingsRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), &cfg)
 
 	router := natsrouter.New(nc, "user-service")
 	router.Use(natsrouter.Recovery())

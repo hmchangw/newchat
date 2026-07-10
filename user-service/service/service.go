@@ -81,42 +81,49 @@ type EventPublisher interface {
 
 // UserService handles all user-related NATS request/reply endpoints.
 type UserService struct {
-	subs            SubscriptionRepository
-	users           UserRepository
-	apps            AppRepository
-	threadSubs      ThreadSubscriptionRepository
-	rooms           RoomClient
-	history         HistoryClient
-	presence        PresenceClient
-	pub             EventPublisher
-	settings        SettingsRepository
-	siteID          string
-	allSiteIDs      []string
-	maxSubs         int
-	defaultLimit    int
-	maxApps         int
-	defaultApps     int
-	maxAccountNames int
+	subs             SubscriptionRepository
+	users            UserRepository
+	apps             AppRepository
+	threadSubs       ThreadSubscriptionRepository
+	rooms            RoomClient
+	history          HistoryClient
+	presence         PresenceClient
+	pub              EventPublisher
+	settings         SettingsRepository
+	siteID           string
+	allSiteIDs       []string
+	maxSubs          int
+	defaultLimit     int
+	maxApps          int
+	defaultApps      int
+	maxAccountNames  int
+	maxSettingsBytes int
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub EventPublisher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, settings SettingsRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub EventPublisher, cfg *config.Config) *UserService {
+	maxSettingsBytes := cfg.MaxSettingsBytes
+	if maxSettingsBytes < 1 {
+		maxSettingsBytes = defaultMaxSettingsBytes
+	}
 	return &UserService{
-		subs:            subs,
-		users:           users,
-		apps:            apps,
-		threadSubs:      threadSubs,
-		rooms:           rooms,
-		history:         history,
-		presence:        presence,
-		pub:             pub,
-		siteID:          cfg.SiteID,
-		allSiteIDs:      cfg.AllSiteIDs,
-		maxSubs:         cfg.MaxSubscriptionLimit,
-		defaultLimit:    cfg.DefaultSubscriptionLimit,
-		maxApps:         cfg.MaxAppsLimit,
-		defaultApps:     cfg.DefaultAppsLimit,
-		maxAccountNames: cfg.MaxAccountNames,
+		subs:             subs,
+		users:            users,
+		apps:             apps,
+		threadSubs:       threadSubs,
+		settings:         settings,
+		rooms:            rooms,
+		history:          history,
+		presence:         presence,
+		pub:              pub,
+		siteID:           cfg.SiteID,
+		allSiteIDs:       cfg.AllSiteIDs,
+		maxSubs:          cfg.MaxSubscriptionLimit,
+		defaultLimit:     cfg.DefaultSubscriptionLimit,
+		maxApps:          cfg.MaxAppsLimit,
+		defaultApps:      cfg.DefaultAppsLimit,
+		maxAccountNames:  cfg.MaxAccountNames,
+		maxSettingsBytes: maxSettingsBytes,
 	}
 }
 
@@ -124,6 +131,8 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 // siteID is a literal token in each pattern — this instance only subscribes to its own siteID subjects.
 func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.UserMePattern(s.siteID), s.Me)
+	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), s.GetUserSettings)
+	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), s.SetUserSettings)
 	natsrouter.Register(r, subject.UserStatusGetByNamePattern(s.siteID), s.GetStatusByName)
 	natsrouter.Register(r, subject.UserProfileGetByNamePattern(s.siteID), s.GetProfileByName)
 	natsrouter.Register(r, subject.UserStatusSetPattern(s.siteID), s.SetStatus)

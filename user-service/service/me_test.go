@@ -25,6 +25,7 @@ func newMeSvc(t *testing.T) (*UserService, *mocks.MockUserRepository, *mocks.Moc
 		users,
 		mocks.NewMockAppRepository(ctrl),
 		mocks.NewMockThreadSubscriptionRepository(ctrl),
+		&settingsRepositoryFake{},
 		mocks.NewMockRoomClient(ctrl),
 		mocks.NewMockHistoryClient(ctrl),
 		presence,
