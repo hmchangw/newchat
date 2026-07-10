@@ -71,7 +71,7 @@ func main() {
 
 	ctx := context.Background()
 
-	sdk, obsShutdown, err := obs.Init(ctx)
+	sdk, obsShutdown, err := obs.InitWithLoggerHandler(ctx, logctx.LevelTrace, logctx.NewHandler)
 	if err != nil {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)

@@ -6,7 +6,7 @@
 #
 #   Traces  : services → OTLP → otel-collector → Tempo
 #   Metrics : Prometheus scrapes each service's :2112 (Docker SD)
-#   Logs    : promtail tails container stdout → Loki
+#   Logs    : services → OTLP → otel-collector → Loki
 #   UI      : Grafana (http://localhost:3001, anonymous admin) with all three
 #             datasources + trace↔log correlation pre-provisioned.
 #
@@ -17,7 +17,7 @@ name: chat-local-o11y
 
 services:
   otel-collector:
-    image: otel/opentelemetry-collector:0.115.1
+    image: otel/opentelemetry-collector-contrib:0.115.1
     container_name: chat-local-otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
@@ -62,18 +62,6 @@ services:
     volumes:
       - ./o11y/loki.yaml:/etc/loki/config.yaml:ro
       - loki-data:/loki
-    networks:
-      - chat-local
-
-  promtail:
-    image: grafana/promtail:3.3.2
-    container_name: chat-local-promtail
-    command: ["-config.file=/etc/promtail/config.yaml"]
-    volumes:
-      - ./o11y/promtail.yaml:/etc/promtail/config.yaml:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro # tails container stdout
-    depends_on:
-      - loki
     networks:
       - chat-local
 

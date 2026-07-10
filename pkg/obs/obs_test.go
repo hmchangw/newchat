@@ -210,6 +210,24 @@ func TestInit_InstallsGlobals(t *testing.T) {
 		"obs.Init must set the SDK logger as the slog default")
 }
 
+type markerHandler struct{ slog.Handler }
+
+func TestInitWithLoggerHandler_WrapsSDKLogger(t *testing.T) {
+	testEnv(t, "wrapped-logger-svc")
+
+	var wrappedBase slog.Handler
+	sdk, shutdown, err := InitWithLoggerHandler(context.Background(), slog.LevelDebug, func(h slog.Handler) slog.Handler {
+		wrappedBase = h
+		return &markerHandler{Handler: h}
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	assert.Same(t, sdk.Logger.Handler(), wrappedBase)
+	assert.True(t, wrappedBase.Enabled(context.Background(), slog.LevelDebug))
+	assert.IsType(t, &markerHandler{}, slog.Default().Handler())
+}
+
 func TestInit_DefaultsMissingServiceName(t *testing.T) {
 	clearEnv(t)
 

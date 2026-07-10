@@ -8,11 +8,13 @@ datasources:
     access: proxy
     url: http://tempo:3200
     jsonData:
-      # Tempo → Loki: jump from a span to the logs that share its trace_id.
+      # Tempo → Loki: jump from a span to the OTLP logs that share its trace ID.
       tracesToLogsV2:
         datasourceUid: loki
+        spanStartTimeShift: "-2s"
+        spanEndTimeShift: "2s"
         filterByTraceID: true
-        tags: [{ key: "service.name", value: "service" }]
+        tags: [{ key: "service.name", value: "service_name" }]
 
   - name: Prometheus
     type: prometheus
@@ -27,9 +29,11 @@ datasources:
     access: proxy
     url: http://loki:3100
     jsonData:
-      # Loki → Tempo: turn a log line's trace_id into a link to its trace.
+      # Loki → Tempo: trace_id is OTLP structured metadata, not log body text.
       derivedFields:
         - name: TraceID
-          matcherRegex: '"trace_id":"(\w+)"'
+          matcherType: label
+          matcherRegex: trace_id
           url: "$${__value.raw}"
+          urlDisplayLabel: "View trace"
           datasourceUid: tempo

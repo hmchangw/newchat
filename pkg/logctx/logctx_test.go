@@ -235,7 +235,7 @@ func TestHandler_UnadmittedContextSuppressesSubInfo(t *testing.T) {
 func TestHandler_WithAttrsAndGroupPreserveGating(t *testing.T) {
 	setLimiter(t, allowAll{})
 	base := &capture{}
-	var h slog.Handler = NewHandler(base)
+	h := NewHandler(base)
 	h = h.WithAttrs([]slog.Attr{slog.String("svc", "x")})
 	h = h.WithGroup("g")
 	_, ok := h.(*Handler)

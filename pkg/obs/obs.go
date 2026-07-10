@@ -112,12 +112,29 @@ func (c *Config) samplerOptions() []o11y.Option {
 // slog.Info calls gain trace correlation for free), and returns the SDK plus a
 // shutdown func to defer.
 func Init(ctx context.Context) (*o11y.SDK, func(context.Context) error, error) {
+	return initSDK(ctx, nil, nil)
+}
+
+// InitWithLoggerHandler is Init with an optional wrapper around the SDK slog
+// handler. Services that support per-request verbose logging use this to keep
+// their admission handler while still exporting every admitted record through
+// the SDK's OTLP logger. minLevel configures the SDK's inner handlers; the
+// wrapper remains responsible for per-record admission above that floor.
+func InitWithLoggerHandler(ctx context.Context, minLevel slog.Level, wrap func(slog.Handler) slog.Handler) (*o11y.SDK, func(context.Context) error, error) {
+	return initSDK(ctx, &minLevel, wrap)
+}
+
+func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) slog.Handler) (*o11y.SDK, func(context.Context) error, error) {
 	cfg, err := parseConfig()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	sdk, err := o11y.Init(ctx, cfg.options()...)
+	opts := cfg.options()
+	if minLevel != nil {
+		opts = append(opts, o11y.WithLogLevel(*minLevel))
+	}
+	sdk, err := o11y.Init(ctx, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("init o11y sdk: %w", err)
 	}
@@ -125,7 +142,11 @@ func Init(ctx context.Context) (*o11y.SDK, func(context.Context) error, error) {
 	otel.SetTracerProvider(sdk.TracerProvider())
 	otel.SetMeterProvider(sdk.MeterProvider())
 	otel.SetTextMapPropagator(sdk.Propagator)
-	slog.SetDefault(sdk.Logger)
+	logger := sdk.Logger
+	if wrap != nil {
+		logger = slog.New(wrap(sdk.Logger.Handler()))
+	}
+	slog.SetDefault(logger)
 
 	return sdk, sdk.Shutdown, nil
 }
