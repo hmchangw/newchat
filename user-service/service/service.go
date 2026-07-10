@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -11,7 +12,7 @@ import (
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository,SettingsRepository
 
 // SubscriptionRepository is the consumer-defined interface for subscription persistence (botDM app-subscription rows included).
 type SubscriptionRepository interface {
@@ -23,6 +24,12 @@ type SubscriptionRepository interface {
 	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error
+}
+
+// SettingsRepository is the consumer-defined interface for opaque user-settings persistence.
+type SettingsRepository interface {
+	GetUserSettings(ctx context.Context, account, siteID string) (*model.UserSettings, error)
+	SetUserSettings(ctx context.Context, account, siteID string, data json.RawMessage, ifVersion *int64) (*model.UserSettings, error)
 }
 
 // UserRepository is the consumer-defined interface for user status persistence.
