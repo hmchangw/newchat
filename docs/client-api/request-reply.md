@@ -1353,7 +1353,7 @@ None. Any payload is ignored.
 
 `chineseName`/`engName` are **omitted** when the user record has no value (never
 empty strings). `presence` is one of `online` / `away` / `busy` / `offline` /
-`in-call`; `offline` when unknown or degraded.
+`in-call`, `dnd`, `brb`; `offline` when unknown or degraded.
 
 #### Errors
 

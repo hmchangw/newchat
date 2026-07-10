@@ -749,7 +749,7 @@ before the §7.6 batch query to avoid missing a transition.
 |---|---|---|
 | `account` | string | The user. |
 | `siteId` | string | The user's home site. |
-| `status` | string | Effective status: `"online"` / `"away"` / `"busy"` / `"offline"` / `"in-call"`. `in-call` is set by an external Teams presence-sync signal (suppresses notifications; not settable as a manual status). |
+| `status` | string | Effective status: `"online"` / `"away"` / `"busy"` / `"dnd"` / `"brb"` / `"offline"` / `"in-call"`. `in-call` is set by an external Teams presence-sync signal (suppresses notifications; not settable as a manual status). `dnd` and `brb` are manual-only; `dnd` suppresses push notifications, `brb` resolves to `away` for display and remains push-eligible. |
 | `timestamp` | number | Millis since Unix epoch (UTC) of the change. |
 
 ```json
