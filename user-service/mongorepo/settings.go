@@ -16,7 +16,10 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-const settingsCollection = "user_settings"
+const (
+	settingsCollection     = "user_settings"
+	maxDuplicateKeyRetries = 1
+)
 
 var settingsProjection = bson.M{
 	"_id":       0,
@@ -91,12 +94,29 @@ func (r *SettingsRepo) SetUserSettings(ctx context.Context, account, siteID stri
 		}}}},
 		{Key: "updatedAt", Value: now},
 	}}}}
-	res := r.settings.Raw().FindOneAndUpdate(ctx,
-		bson.M{"account": account, "siteId": siteID},
-		update,
-		opts.SetUpsert(true),
-	)
-	return decodeSettingsResult(res, false)
+	// Two first writes can race to upsert the same unique account/site key. The
+	// loser retries once after the winner has created the document; that retry
+	// follows the matched-document branch and atomically increments its version.
+	for attempt := 0; attempt <= maxDuplicateKeyRetries; attempt++ {
+		res := r.settings.Raw().FindOneAndUpdate(ctx,
+			bson.M{"account": account, "siteId": siteID},
+			update,
+			opts.SetUpsert(true),
+		)
+		if err := res.Err(); err != nil {
+			if mongo.IsDuplicateKeyError(err) && attempt < maxDuplicateKeyRetries {
+				continue
+			}
+			return nil, fmt.Errorf("update user settings: %w", err)
+		}
+		var settings model.UserSettings
+		if err := res.Decode(&settings); err != nil {
+			return nil, fmt.Errorf("decode updated user settings: %w", err)
+		}
+		return &settings, nil
+	}
+
+	return nil, fmt.Errorf("update user settings: duplicate-key retry exhausted")
 }
 
 func decodeSettingsResult(res *mongo.SingleResult, conditional bool) (*model.UserSettings, error) {

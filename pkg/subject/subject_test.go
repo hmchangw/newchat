@@ -809,10 +809,10 @@ func TestMentionableSubscriptions_ParseUserRoomSubject(t *testing.T) {
 	assert.Equal(t, "r1", roomID)
 }
 
-// AC-1.2: settings request patterns render the site-specific get and set subjects.
+// AC-1.2: settings request patterns bind the caller account and service site.
 func TestUserSettingsPatterns(t *testing.T) {
-	assert.Equal(t, "chat.user.*.request.site-a.settings.get", subject.UserSettingsGetPattern("site-a"))
-	assert.Equal(t, "chat.user.*.request.site-a.settings.set", subject.UserSettingsSetPattern("site-a"))
+	assert.Equal(t, "chat.user.{account}.request.user.site-a.settings.get", subject.UserSettingsGetPattern("site-a"))
+	assert.Equal(t, "chat.user.{account}.request.user.site-a.settings.set", subject.UserSettingsSetPattern("site-a"))
 }
 
 func TestUserServicePatternBuilders(t *testing.T) {
