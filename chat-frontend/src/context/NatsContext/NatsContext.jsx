@@ -153,9 +153,9 @@ export function NatsProvider({ children }) {
       portal = await lookupResp.json()
     }
     // baseUrl is the site's unified API gateway; auth lives at /api/v1/auth
-    // behind it (the fetch below appends `/auth`). This backend consolidated
-    // the former separate authServiceUrl into that single baseUrl endpoint.
-    const nextAuthUrl = `${portal.baseUrl}/api/v1`
+    // behind it. This backend consolidated the former separate authServiceUrl
+    // into that single baseUrl endpoint.
+    const nextAuthUrl = portal.baseUrl
 
     // 2) Mint the NATS JWT at the resolved site's auth-service.
     const nkey = createUser()
@@ -168,7 +168,7 @@ export function NatsProvider({ children }) {
           ? { authToken: bundle.authToken, natsPublicKey }
           : { account, natsPublicKey }
 
-    const authResp = await tracedFetch('POST', `${nextAuthUrl}/auth`, {
+    const authResp = await tracedFetch('POST', `${nextAuthUrl}/api/v1/auth`, {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })

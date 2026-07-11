@@ -20,7 +20,7 @@ describe('SearchResultsPane', () => {
       ],
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -38,19 +38,19 @@ describe('SearchResultsPane', () => {
     })
 
     expect(request).toHaveBeenCalledWith(
-      'chat.user.alice.request.search.rooms',
+      'chat.user.alice.request.search.site-A.rooms',
       { query: 'gen', roomType: 'all', size: 50 }
     )
   })
 
   it('Rooms tab shows results, Messages tab fetches on click', async () => {
     const request = vi.fn().mockImplementation((subject) => {
-      if (subject.includes('.search.rooms')) {
+      if (subject.includes('.search.site-A.rooms')) {
         return Promise.resolve({
           rooms: [{ roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' }],
         })
       }
-      if (subject.includes('.search.messages')) {
+      if (subject.includes('.search.site-A.messages')) {
         return Promise.resolve({
           messages: [
             { messageId: 'm1', roomId: 'r1', content: 'hello', createdAt: '2026-04-17T10:00:00Z', userAccount: 'bob' },
@@ -60,7 +60,7 @@ describe('SearchResultsPane', () => {
       }
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -96,7 +96,7 @@ describe('SearchResultsPane', () => {
       ],
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -126,10 +126,10 @@ describe('SearchResultsPane', () => {
     const onJumpToMessage = vi.fn()
     const onClose = vi.fn()
     const request = vi.fn().mockImplementation((subject) => {
-      if (subject.includes('.search.rooms')) {
+      if (subject.includes('.search.site-A.rooms')) {
         return Promise.resolve({ rooms: [] })
       }
-      if (subject.includes('.search.messages')) {
+      if (subject.includes('.search.site-A.messages')) {
         return Promise.resolve({
           messages: [
             { messageId: 'm1', roomId: 'r1', content: 'hello world', createdAt: '2026-04-17T10:00:00Z', userAccount: 'bob' },
@@ -139,7 +139,7 @@ describe('SearchResultsPane', () => {
       }
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 

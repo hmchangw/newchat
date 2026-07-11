@@ -10,7 +10,9 @@ services:
       # OIDC values are only consumed when DEV_MODE=false. The Keycloak
       # realm at OIDC_ISSUER_URL must serve OIDC_CLIENT_ID with a redirect
       # URI matching this frontend's /oidc-callback.
-      DEV_MODE: ${DEV_MODE:-false}
+      # Keep the local frontend aligned with auth-service's default. Set
+      # DEV_MODE=false for both stacks when exercising the full OIDC flow.
+      DEV_MODE: ${DEV_MODE:-true}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-http://localhost:8180/realms/chatapp}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-nats-chat}
       OTEL_ENABLED: ${OTEL_ENABLED:-true}

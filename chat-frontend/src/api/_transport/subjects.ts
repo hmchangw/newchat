@@ -93,12 +93,12 @@ export function userResponse(account: string, requestId: string): string {
   return `chat.user.${account}.response.${requestId}`
 }
 
-export function searchRooms(account: string): string {
-  return `chat.user.${account}.request.search.rooms`
+export function searchRooms(account: string, siteId: string): string {
+  return `chat.user.${account}.request.search.${siteId}.rooms`
 }
 
-export function searchMessages(account: string): string {
-  return `chat.user.${account}.request.search.messages`
+export function searchMessages(account: string, siteId: string): string {
+  return `chat.user.${account}.request.search.${siteId}.messages`
 }
 
 // orgMembers requests the enriched member list of a single org (sect).

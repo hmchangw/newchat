@@ -134,7 +134,7 @@ describe('NatsProvider connect wiring', () => {
       expect.objectContaining({ servers: 'ws://nats.site-a', authenticator: fakeAuthenticator }))
     await waitFor(() => expect(result.current.connected).toBe(true))
     expect(result.current.user.siteId).toBe('site-a')
-    expect(lastGetAuthUrl()()).toBe('http://site-a/api/v1')
+    expect(lastGetAuthUrl()()).toBe('http://site-a')
   })
 
   it('drops a stale nc.closed() callback from a superseded connection (generation guard)', async () => {
