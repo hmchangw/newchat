@@ -50,6 +50,82 @@ registered before `o11y/gin`.
 
 ## Last Local Verification Result
 
+### 2026-07-11 full Compose verification
+
+Environment: the local frontend plus `compose.deps.yaml`, `compose.o11y.yaml`,
+and `compose.services.yaml`, with all affected images rebuilt. The sample-data
+seed populated 10 users, 6 rooms, 23 subscriptions, 6 room keys, and 4 Valkey
+restricted-room entries. Browser telemetry used `X-Debug=trace`.
+
+Result: **A, B, C, E, and F passed; G passed for the backend fan-out and browser
+receive legs; D was not executable with the one-site local topology.** Each
+NATS hop remains a separate trace connected by links, as designed.
+
+Representative trace IDs:
+
+| Scenario | Leg | Trace ID |
+|---|---|---|
+| A/C group send | browser publish | `af6c213b496c6826bde76768a022c4bf` |
+| A/C group send | gatekeeper | `0cd1848dfb3c0b2dfa935152f18f9cc9` |
+| A/C group send | message-worker | `aabbfcababe0c9d3f687f253a2937f1f` |
+| A/C group send | broadcast-worker | `d062dc9e4a02d7814b8145c6a1ee16c3` |
+| A/C group send | notification-worker | `36c488d1053678ba2b32f21466163d7b` |
+| A/C group send | search consume / bulk | `545745a7eac3cb16cf3275dec7ad07a9` / `40fb1d555f1ce4dda046270891122126` |
+| A/C group send | browser receive/render | `7a6a1b5d1fb592a1c474fd15607e6fd6` |
+| B room switch | browser history / backend history | `4a47d4cf9e1c6478e85748080fde745` / `3d17646f6d267a464e45decb6583fe06` |
+| B room switch | browser read / backend read | `550e041872d947e9987ca21dc25189bd` / `af3b71651a806ada6ee4957f0d143e15` |
+| E first DM create | browser / room-service / room-worker | `db6e4f06a9b7e93f92434e32c56800a0` / `5518e1441c7810802ceedfee2967b941` / `b427e9857967b0ed34d5142a7b8057ea` |
+| E DM send | browser / gatekeeper / message-worker | `b9244fbe0ba626fbb6fca2cdbe8f1671` / `211709ca2b062944ff34c7dc4df29efb` / `bfe6eefd17ce201f82c18a8450579a01` |
+| E DM send | broadcast / notification / search bulk / browser receive | `19e1fdb019cc9559a4663463eea6a335` / `ebacc68d569abdd14aa045d5ff129a81` / `9514d29db11ce15b0179257fe7c0679c` / `a7ec215737ad3b3efc90420be5ae017` |
+| F create channel | browser / room-service / room-worker | `42deecabb8f7227116a913f0771904bc` / `d03571daee6f2b2543fd6a9d665425b1` / `9ab533a8c399801f8ae7fd95c81167de` |
+| F add Carol | browser / room-service / room-worker / async receive | `c038e2a4bd672d27dfe2c16e9af61f2e` / `fee56b4389c93786429667f7aa321ba` / `65c8f2a8561c77b4d30d1b2901243e5a` / `3e059b13ba6347a7014deb331b4f497b` |
+| G edit | history / broadcast / search consume / bulk / browser receive | `1cd5a144f820ab183e36fe6b58c1f1f5` / `de08643f4a0f00c2c760427a2a404e7f` / `2d29ae9cbd931f6ad85c7a84d80a9e10` / `1c28d31b46b29bdb495eee5a7ef48aec` / `55b343fd350c72cf4fd6a7c36965da46` |
+| G delete | history / broadcast / search consume / bulk / browser receive | `7406f4dfee6ceb945fdc677544c7ea71` / `d9ecae042aaaec16c827a3f03a6cb0fc` / `3d07a1456191292321f58f69fbd4591c` / `53f8fbd6947fe553de99c60348bae49d` / `7d930bc1761835395c1ffc393a4bab10` |
+
+Log correlation evidence for request
+`779886d5-96c6-4f5d-ae74-dd844b03d539`:
+
+- gatekeeper trace `0cd1848dfb3c0b2dfa935152f18f9cc9`: four admitted
+  FLOW/DEBUG records in Loki (`received`, subscription decision, large-room
+  decision, canonical publish), all with the same `trace_id` and `span_id`;
+- message-worker trace `aabbfcababe0c9d3f687f253a2937f1f`: four admitted
+  records; broadcast trace `d062dc9e4a02d7814b8145c6a1ee16c3`: three;
+- Grafana Tempo -> Loki returned the four gatekeeper records in the configured
+  `-2s/+2s` range, and expanding a Loki row exposed `View trace`, which opened
+  the same Tempo trace. This verifies both jump directions against OTLP
+  structured metadata, not a regex over the log body.
+
+Known limits and findings from this run:
+
+- Scenario D needs a second site/supercluster. No `outbox-worker` or
+  `inbox-worker` trace was generated in the one-site stack, so cross-site links
+  are **not verified**, rather than treated as passed.
+- Scenario G was triggered through the repo's NATS debug client because the
+  hover-only edit/delete controls were not automatable in the in-app browser.
+  Backend Cassandra/canonical/search fan-out and browser receive/render passed;
+  the browser requester span was therefore not part of this G run.
+- A channel name alone is insufficient: room-service requires at least one
+  non-owner member. The reused `empty request` error text can be misleading,
+  but a channel with Alice and a later Carol add completed successfully.
+- Frontend search originally omitted `siteId` from search subjects and returned
+  503. The corrected `search.<siteId>.rooms/messages` subjects passed in the UI
+  and generated search-service metrics.
+
+Code and configuration gates from the same checkout:
+
+- frontend Vitest suite: 65 files and 677 tests passed;
+- frontend typecheck and production build passed (the build retained the
+  existing chunk-size and non-module `config.js` warnings);
+- focused Go tests for the changed observability packages and services passed;
+- `go vet ./...` and all four local Compose `config --quiet` checks passed;
+- `go test ./...` had one remaining failure in
+  `tools/loadgen/TestPresenceSustained_EmbeddedEndToEnd`: the 2.34-second run
+  collected no latency sample (`P95Ms=0`). The same failure reproduced in
+  isolation; it is outside the o11y integration paths and remains a repository
+  test-harness risk rather than being reported as a passing gate.
+
+### 2026-07-08 historical verification
+
 Verified locally on 2026-07-08 with the Docker Compose local stack
 (`compose.deps.yaml`, `compose.o11y.yaml`, `compose.services.yaml`) and
 `github.com/flywindy/o11y` v0.8.0.

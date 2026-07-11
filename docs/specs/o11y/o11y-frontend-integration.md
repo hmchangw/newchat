@@ -94,8 +94,8 @@ export function initTelemetry(): void {
     resource: resourceFromAttributes({
       'service.name': OTEL_SERVICE_NAME,
       'service.namespace': 'chat',
-      'service.version': '0.0.1',            // TODO: inject at build time (follow-up F3)
-      'deployment.environment': 'local',     // TODO: from env (follow-up F3)
+      'service.version': OTEL_SERVICE_VERSION,
+      'deployment.environment.name': OTEL_DEPLOYMENT_ENVIRONMENT,
     }),
     spanProcessors: [
       new BatchSpanProcessor(exporter, { scheduledDelayMillis: 1000, exportTimeoutMillis: 5000 }),
@@ -283,8 +283,8 @@ traces (CORS runs before tracing).
   call it within the `withSpan` callback, after the span starts.
 - **Detached receive is correct.** `withLinkedSpan` uses `ROOT_CONTEXT` on
   purpose — a linked new trace, not a child. Do not "fix" it into a child.
-- **`headerGetter.keys()` returns `[]`.** Fine for W3C `TraceContext` (extract
-  only calls `get`). Only matters if you later add baggage/other propagators.
+- **`headerGetter.keys()` delegates when available.** The NATS header adapter
+  exposes the carrier's keys when supported and safely falls back to `[]`.
 - **`OTEL_ENABLED=false` is a hard off switch.** Everything must degrade to a
   no-op (the reference `withSpan`/`withLinkedSpan` still run `fn`, just without a
   real provider) — never let a disabled SDK break a publish/subscribe.
@@ -302,7 +302,7 @@ require a custom SDK.**
 |---|---|---|
 | **F1** | Auto HTTP instrumentation — `@opentelemetry/instrumentation-fetch` / `-xml-http-request` | replaces the manual `http.client` span; automatic fetch/XHR spans for auth/portal/upload. Manual is lighter; adopt if HTTP surface grows. |
 | **F2** | RUM / page observability — `instrumentation-document-load`, `-user-interaction` (or `auto-instrumentations-web`) | page-load + click spans. A product decision (real-user monitoring), unrelated to NATS tracing. |
-| **F3** | Real resource attrs — inject `service.version` (git SHA) + `deployment.environment` at build/runtime instead of the hardcoded `0.0.1`/`local` | correct release/env attribution in Tempo/Grafana. Small, worth doing before prod. |
+| **F3 (done)** | Runtime `service.version` + `deployment.environment.name` config | `config.js` supplies deployment-specific values, with local defaults for development. |
 | **F4** | Unload flush — `provider.forceFlush()` on `visibilitychange`/`pagehide` | avoid losing the last ~1s of spans when a user navigates away mid-flow. |
 | **F5** | Error capture — record exceptions on a span from `window.onerror` / `unhandledrejection` | closes the gap where the React `ErrorBoundary` can't catch async/handler errors (see `chat-frontend/CLAUDE.md`). |
 | **F6** | Sampling policy — a `Sampler` / parent-based ratio instead of the default always-on | control span volume/cost at scale. Config, not new code. |

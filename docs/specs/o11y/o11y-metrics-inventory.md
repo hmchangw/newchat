@@ -9,6 +9,31 @@ come from **dedicated exporters** (infra, not the app SDK). Companion to
 > against the Docker Compose o11y stack (`docker-local/compose.o11y.yaml` ->
 > Prometheus `:9090`).
 
+### Local verification update (2026-07-11)
+
+After rebuilding the full local stack and driving browser send, room-create,
+member-add, DM, edit/delete, and search traffic:
+
+| Query / check | Result |
+|---|---|
+| `sum(up{job="chat-services"})` | `16` |
+| `count(count by(service_name)(go_goroutine_count))` | `16` |
+| `search_service_requests_total` | `subscriptions,status=ok: 2`; `messages,status=ok: 1` |
+| `search_service_request_duration_seconds_count` | present for the same three requests |
+| `search_service_es_duration_seconds_count` | `3` |
+| cache metric series after workload | hits and misses present across gatekeeper, message-worker, broadcast, notification, room-worker, and history-service |
+
+The search series were generated from the real frontend after correcting its
+subjects to `chat.user.{account}.request.search.{siteId}.rooms/messages`; the
+previous no-site subjects returned NATS 503 and could not exercise the service.
+
+One instrumentation nuance was also confirmed: message-worker emits Cassandra
+connection-create metrics and Cassandra spans, but its batch writes did not
+produce `db_client_operation_duration_seconds_count` in this run. History's
+query/update path did produce Cassandra operation-duration series. Treat
+Cassandra batch-operation metrics as a remaining SDK/instrumentation gap; do
+not infer that message-worker is idle from the missing operation histogram.
+
 ---
 
 ## 0. Three layers of metrics
