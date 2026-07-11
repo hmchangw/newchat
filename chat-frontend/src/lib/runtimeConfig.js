@@ -32,3 +32,11 @@ export const OTEL_EXPORTER_OTLP_TRACES_URL =
 
 export const OTEL_SERVICE_NAME =
   runtime.OTEL_SERVICE_NAME || import.meta.env.VITE_OTEL_SERVICE_NAME || 'chat-frontend'
+
+export const OTEL_SERVICE_VERSION =
+  runtime.OTEL_SERVICE_VERSION || import.meta.env.VITE_OTEL_SERVICE_VERSION || '0.0.1'
+
+export const OTEL_DEPLOYMENT_ENVIRONMENT =
+  runtime.OTEL_DEPLOYMENT_ENVIRONMENT ||
+  import.meta.env.VITE_OTEL_DEPLOYMENT_ENVIRONMENT ||
+  'local'

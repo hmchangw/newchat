@@ -94,7 +94,7 @@ func run() error {
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
 	driveClient := drive.NewClient(&cfg.Drive)
 
-	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey)
+	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("minio connect: %w", err)
 	}

@@ -57,7 +57,6 @@ type config struct {
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr            string                  `env:"METRICS_ADDR" envDefault:":9090"`
 }
 
 type mongoMemberLoader struct {

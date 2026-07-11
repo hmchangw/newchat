@@ -16,6 +16,8 @@ services:
       OTEL_ENABLED: ${OTEL_ENABLED:-true}
       OTEL_EXPORTER_OTLP_TRACES_URL: ${OTEL_EXPORTER_OTLP_TRACES_URL:-http://localhost:4318/v1/traces}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-chat-frontend}
+      OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-0.0.1}
+      OTEL_DEPLOYMENT_ENVIRONMENT: ${OTEL_DEPLOYMENT_ENVIRONMENT:-local}
     ports:
       - "3000:80"
     networks:

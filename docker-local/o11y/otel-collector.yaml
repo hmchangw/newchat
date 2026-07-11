@@ -8,6 +8,13 @@ receivers:
     protocols:
       http:
         endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://localhost:3000
+            - http://127.0.0.1:3000
+          allowed_headers:
+            - Content-Type
+          max_age: 7200
       grpc:
         endpoint: 0.0.0.0:4317
 

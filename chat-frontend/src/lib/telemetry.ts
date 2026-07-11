@@ -15,22 +15,27 @@ import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base'
 import { WebTracerProvider } from '@opentelemetry/sdk-trace-web'
 import {
   OTEL_ENABLED,
+  OTEL_DEPLOYMENT_ENVIRONMENT,
   OTEL_EXPORTER_OTLP_TRACES_URL,
   OTEL_SERVICE_NAME,
+  OTEL_SERVICE_VERSION,
 } from './runtimeConfig'
 
 let initialized = false
 let tracer = trace.getTracer(OTEL_SERVICE_NAME)
 
-type HeaderCarrier = { get: (key: string) => string | string[] | undefined | null }
+type HeaderCarrier = {
+  get: (key: string) => string | string[] | undefined | null
+  keys?: () => string[]
+}
 
 const headerGetter: TextMapGetter<HeaderCarrier> = {
   get(carrier, key) {
     const value = carrier.get(key)
     return value === null || value === '' ? undefined : value
   },
-  keys() {
-    return []
+  keys(carrier) {
+    return carrier.keys?.() ?? []
   },
 }
 
@@ -49,8 +54,8 @@ export function initTelemetry(): void {
     resource: resourceFromAttributes({
       'service.name': OTEL_SERVICE_NAME,
       'service.namespace': 'chat',
-      'service.version': '0.0.1',
-      'deployment.environment': 'local',
+      'service.version': OTEL_SERVICE_VERSION,
+      'deployment.environment.name': OTEL_DEPLOYMENT_ENVIRONMENT,
     }),
     spanProcessors: [
       new BatchSpanProcessor(exporter, {
