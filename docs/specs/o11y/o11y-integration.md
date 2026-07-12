@@ -80,10 +80,11 @@ Concretely, after this work:
 Existing OTel deps are pinned at **v1.43.0** (`go.opentelemetry.io/otel`,
 `.../sdk`, `.../exporters/...`, `otelhttp` contrib `v0.60.0`).
 
-**Conversion target is 17 Go services, not 14.** The `otelutil` footprint above is
+**Conversion target is 19 Go services, not 14.** The `otelutil` footprint above is
 14, but `auth-service` and `portal-service` use `slog.SetDefault` without
 `otelutil` (no tracing today) and still need `obs.Init`; `media-service` and
-the upstream `outbox-worker` also need the same wiring. All 17 deployable Go
+the upstream `outbox-worker` also need the same wiring. The unified gateway
+change later added `admin-service` and `botplatform-service`. All 19 deployable Go
 services are converted (see §6 Phase 3 enumeration); the 14/13 counts describe
 the *current* footprint of the things being removed, not the target.
 
@@ -311,7 +312,7 @@ and the helper degrades to a no-op tracer when observability is disabled.
         `service_version`, `deployment_environment_name`.
   - [ ] Confirm **no** Marz32onE spans remain (old instrumentation fully gone).
 
-### Phase 3 — Convert all 17 Go services
+### Phase 3 — Convert all 19 Go services
 - Every `main.go`: `otelutil.Init*` → `obs.Init`; delete the manual
   `slog.SetDefault` block; pass the SDK into the now-instrumented `pkg/*` helpers.
   `auth-service` and `portal-service` (no `otelutil` today) gain `obs.Init` for
@@ -322,7 +323,8 @@ and the helper degrades to a no-op tracer when observability is disabled.
 - Suggested edit order (mechanical, not gated): workers (`message`, `broadcast`,
   `notification`, `room`, `inbox`, `outbox`, `search-sync`, `gatekeeper`, oplog-connector)
   → req/reply (`room`, `user`, `history`, `presence`, `search`) → HTTP (`auth`,
-  `portal`, `upload`, `media`). That enumeration is the full set of **17**.
+  `portal`, `upload`, `media`, `admin`, `botplatform`). That enumeration is the
+  full set of **19**.
 
   **Integration-test checklist (expect: full coverage; complete end-to-end traces):**
   - [ ] All **17 `service.name`s appear** in Tempo/Grafana's service map after

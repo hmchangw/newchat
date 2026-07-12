@@ -5,9 +5,30 @@ What Prometheus metrics each service exposes today (on the SDK's `:2112`), what
 come from **dedicated exporters** (infra, not the app SDK). Companion to
 `o11y-trace-design.md` (traces) — this is the metrics view.
 
-> Status: inventory / design. Live values were verified locally on 2026-07-08
+> Status: inventory / design. Live values were verified locally on 2026-07-12
 > against the Docker Compose o11y stack (`docker-local/compose.o11y.yaml` ->
 > Prometheus `:9090`).
+
+### Local verification update (2026-07-12)
+
+After rebasing onto the unified gateway/admin/botplatform upstream change, all
+19 Go services in `compose.services.yaml` were rebuilt without cache and
+scraped successfully:
+
+| Query / check | Result |
+|---|---|
+| active targets with `job="chat-services"` | `19` |
+| healthy targets | `19/19 up` |
+| `count by (service_name) (go_goroutine_count)` | one series for each of the 19 services |
+| new upstream services | `admin-service`, `botplatform-service`, and `media-service` expose SDK metrics on `:2112` |
+| infrastructure filtering | Traefik is excluded from this SDK scrape job; it no longer creates a false-down `:2112` target |
+
+The complete target set is: `admin-service`, `auth-service`,
+`botplatform-service`, `broadcast-worker`, `history-service`, `inbox-worker`,
+`media-service`, `message-gatekeeper`, `message-worker`,
+`notification-worker`, `outbox-worker`, `portal-service`, `room-service`,
+`room-worker`, `search-service`, `search-sync-worker`, `upload-service`,
+`user-presence-service`, and `user-service`.
 
 ### Local verification update (2026-07-11)
 
@@ -81,7 +102,9 @@ missing beyond shared cache/key counters.
 
 | Service | HTTP | Mongo | Valkey | Cassandra | NATS | ES | App metrics today | Missing domain metrics (suggested) |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|---|---|
+| admin-service | ✅ | ✅ | — | — | — | — | — | admin operations and audit outcomes |
 | auth-service | ✅ | — | — | — | — | — | — | login success/fail, JWKS refresh (see F5) |
+| botplatform-service | ✅ | ✅ | — | — | — | — | — | login/session/password-change outcomes |
 | portal-service | ✅ | ✅ | — | — | — | — | — | account-lookup outcomes |
 | upload-service | ✅ | ✅ | — | — | — | — | — | upload count/bytes, MinIO put/get outcomes |
 | media-service | ✅ | ✅ | — | — | spans | — | — | avatar/emoji upload count/bytes, MinIO put/get outcomes |
@@ -138,10 +161,10 @@ Prometheus scrape status:
 | `chat-services` | 15 active targets up |
 | `otel-collector` | 1 active target up |
 
-The 2026-07-08 live run predated the upstream `outbox-worker` merge and did not
-include `media-service` in `docker-local/compose.services.yaml`; after rebasing
-this PR, local compose should scrape 16 `chat-services` targets (`outbox-worker`
-included, `media-service` still separate).
+The 2026-07-08 live run predated the upstream `outbox-worker`, admin, and
+botplatform changes and did not include `media-service` in
+`docker-local/compose.services.yaml`. The 2026-07-12 result above supersedes
+that prediction: the aggregate stack now scrapes 19 Go-service targets.
 
 Active `chat-services` targets scraped `:2112/metrics` for:
 

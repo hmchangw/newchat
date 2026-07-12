@@ -6,8 +6,36 @@ so we can then test reality against it. Grounded in the actual code
 `notification-worker`, `search-sync-worker`, `history-service`) and the
 `o11y/nats` (Marz `otelnats`/`oteljetstream`) propagation model.
 
-> Status: DESIGN. Not yet verified end-to-end (integration tests run in CI;
-> live verification pending). See §9.
+> Status: DESIGN + local verification. Core browser/HTTP/NATS flows were
+> verified against Docker Compose Tempo/Loki/Prometheus on 2026-07-12.
+
+### Local verification update (2026-07-12)
+
+The stack was rebuilt after rebasing onto the unified `/api/v1` gateway change.
+Representative trace IDs from the live browser run:
+
+| Flow | Trace ID | Evidence |
+|---|---|---|
+| portal HTTP | `fb05c565e9848f5946cb6b9ab37c864a` | browser `http.client` -> portal `GET /api/userInfo`, same trace |
+| auth HTTP | `f20a578efeb2f8e38f77fdb5bff90fcf` | browser `http.client` -> auth `POST /api/v1/auth`, same trace |
+| Scenario A browser publish | `c47dece0aa778bd98aeba845c6988945` | `nats publish ...msg.send` |
+| Scenario A gatekeeper | `5ed358b955881af0bb0a05eb45daf1bd` | linked consumer, Mongo child, canonical producer |
+| Scenario A message persistence | `c927f3316ee8a9cec53109c0e0ea5a80` | linked message-worker consumer |
+| Scenario A broadcast | `9c6bebb242259a2ebf0173f3dd0f6776` | linked consumer, Mongo update, room-event producer |
+| Scenario A notification | `87876eda6456f908ad5ec4ad14630c23` | linked consumer with Redis and Mongo children |
+| Scenario A search consume / flush | `74d1ef6c1ec4ffc9fd5c65881a4ffc97` / `91899cea5679484283c4c479c2092842` | linked consume; flush links to source and parents `elasticsearch.bulk` |
+| Scenario C browser receive | `6e292ea6066b549a90f17778ad7913ce` | `nats receive chat.room.<room>.event`; message rendered |
+| Scenario D browser / search service | `a87d3222333fea342855e99c7c3c3feb` / `5c5e235fdf4e1c0f8cb612b68fe99574` | linked request with Redis and Elasticsearch children |
+| Scenario E DM create | `95a526be592b3d522c2ed5ece5161f95` / `aaba0335bcd0f6c91d6abd75e7d13f63` / `65674c64623170e81f90e1874b2b54f4` | browser async request -> room-service -> room-worker constellation |
+| Scenario F channel + member | `c07a386a6366b15feac7def700e443a0` / `a25ae9d1c77512d667030634eeefb49e` / `f3b8d82f9f1eb3d5c54bf5f1d0cae443` | browser async request -> room-service -> room-worker constellation |
+
+Loki returned four gatekeeper records carrying structured `trace_id`,
+`span_id`, and `request_id` for trace `5ed358b955881af0bb0a05eb45daf1bd`.
+Grafana rendered the derived `View trace` link from the `trace_id` label and
+opened the matching Tempo trace. Scenarios B and G were not rerun in this
+specific pass because the action toolbar depends on hover interaction not
+available through the browser automation surface; their earlier 2026-07-11
+verification remains historical evidence, not part of this rerun.
 
 ---
 

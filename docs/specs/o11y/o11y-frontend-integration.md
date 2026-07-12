@@ -27,7 +27,7 @@ packages.
 |---|---|---|
 | Signals | traces + metrics + logs (+ slog correlation) | **traces only** |
 | Drivers wrapped | mongo/cassandra/redis/minio/ES/nats | none (NATS-WS + fetch) |
-| Reuse scope | 17 Go services → worth an SDK | one app |
+| Reuse scope | 19 Go services → worth an SDK | one app |
 | Off-the-shelf | Go ecosystem fragmented → must package | **`@opentelemetry/sdk-trace-web` already packages it** |
 
 The adapter's whole job: on **send** start a `CLIENT` span + inject `traceparent`
