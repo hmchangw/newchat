@@ -8,10 +8,13 @@ name: chat-local-services
 # Stop:   make down
 
 include:
+  - ../admin-service/deploy/docker-compose.yml
   - ../auth-service/deploy/docker-compose.yml
+  - ../botplatform-service/deploy/docker-compose.yml
   - ../broadcast-worker/deploy/docker-compose.yml
   - ../history-service/deploy/docker-compose.yml
   - ../inbox-worker/deploy/docker-compose.yml
+  - ../media-service/deploy/docker-compose.yml
   - ../message-gatekeeper/deploy/docker-compose.yml
   - ../message-worker/deploy/docker-compose.yml
   - ../notification-worker/deploy/docker-compose.yml

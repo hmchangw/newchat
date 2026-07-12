@@ -30,9 +30,12 @@ services:
       - EID_CACHE_TTL=24h
       - EID_CACHE_CAPACITY=120000
       - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
       - EMOJI_MAX_UPLOAD_BYTES=262144
       - EMOJI_MAX_DIMENSION=512
       - EMOJI_DELETE_ENABLED=true
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:
       - chat-local
 

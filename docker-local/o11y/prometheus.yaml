@@ -23,7 +23,7 @@ scrape_configs:
       # Ignore stale/orphan one-off containers if they are still present from an
       # older local stack.
       - source_labels: [__meta_docker_container_label_com_docker_compose_service]
-        regex: vault|portal-seed
+        regex: traefik|vault|portal-seed
         action: drop
       # docker_sd emits each container's exposed app port when one is present;
       # force every service target to the SDK Prometheus endpoint instead.
