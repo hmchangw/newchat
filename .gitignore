@@ -77,3 +77,8 @@ tmp/
 
 # Captured pprof profiles from `make profile`.
 profiles/
+
+# tGD scan artifacts — local symlinks into $TGD_DIR (CodeGraph index,
+# Understand-Anything knowledge graph); machine-local, never versioned.
+.codegraph
+.understand-anything
