@@ -18,7 +18,7 @@ pr:
       - pkg/
 
 variables:
-  GO_VERSION: '1.25.11'
+  GO_VERSION: '1.25.12'
   SERVICE_NAME: botplatform-service
   REGISTRY: '$(containerRegistry)'
 
