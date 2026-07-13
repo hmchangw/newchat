@@ -15,11 +15,13 @@ batch-writes the merged records.
 The resulting `teams_user` document is:
 
 ```json
-{ "_id": "<teams user object id>", "upn": "<userPrincipalName>", "siteId": "<hr siteID>" }
+{ "_id": "<teams user object id>", "upn": "<userPrincipalName>", "account": "<upn local part>", "siteId": "<hr siteID>" }
 ```
 
 - `_id` — Teams (Azure AD) user object id, from Graph.
 - `upn` — the user's `userPrincipalName`, from Graph.
+- `account` — the lowercased UPN local part (text before `@`); the same value
+  used for the `hr.accountName` lookup.
 - `siteId` — the HR system's site id, from the `hr` collection.
 
 ## 2. Decisions (settled during brainstorming)
@@ -107,7 +109,7 @@ For each Graph page (≤ `GRAPH_PAGE_SIZE` users):
    `find({accountName: {$in: accounts}}, {projection: {accountName: 1, siteID: 1}})`
    → `account → siteID` map. Accounts with no match are skipped and counted.
 4. **Merge + write:** for each user with an HR match, build
-   `TeamsUser{ID, UPN, SiteID}` and bulk-**upsert** via the **write** client
+   `TeamsUser{ID, UPN, Account, SiteID}` and bulk-**upsert** via the **write** client
    (`mongoutil.UpsertModel` batch keyed on `_id`). Upsert (not insert) keeps
    reruns and read-replica lag harmless — no duplicate-key failures.
 
@@ -122,9 +124,10 @@ other service consumes it.
 
 ```go
 type TeamsUser struct {
-    ID     string `json:"id" bson:"_id"`
-    UPN    string `json:"upn" bson:"upn"`
-    SiteID string `json:"siteId" bson:"siteId"`
+    ID      string `json:"id" bson:"_id"`
+    UPN     string `json:"upn" bson:"upn"`
+    Account string `json:"account" bson:"account"`
+    SiteID  string `json:"siteId" bson:"siteId"`
 }
 ```
 
