@@ -12,9 +12,6 @@ type config struct {
 	TeamsTenantID     string `env:"TEAMS_TENANT_ID,required,notEmpty"`
 	TeamsClientID     string `env:"TEAMS_CLIENT_ID,required,notEmpty"`
 	TeamsClientSecret string `env:"TEAMS_CLIENT_SECRET,required,notEmpty"`
-	// TeamsEmailDomain filters Graph users: only UPNs under this domain are
-	// synced, and the local part is the hr.accountName lookup key.
-	TeamsEmailDomain string `env:"TEAMS_EMAIL_DOMAIN,required,notEmpty"`
 	// GraphPageSize is Graph's $top per page (max 999).
 	GraphPageSize int `env:"GRAPH_PAGE_SIZE" envDefault:"500"`
 

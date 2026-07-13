@@ -103,9 +103,10 @@ For each Graph page (≤ `GRAPH_PAGE_SIZE` users):
    `find({_id: {$in: pageIDs}}, {projection: {_id: 1}})` → set of existing
    ids. Users already present are skipped.
 2. **Account derivation:** for each missing user, `account` = lowercased
-   local part of `userPrincipalName` (text before `@`). Users whose UPN
-   domain does not equal `TEAMS_EMAIL_DOMAIN` (case-insensitive) — guests,
-   `#EXT#` accounts, service principals — are skipped and counted.
+   local part of `userPrincipalName` (text before `@`). No domain filtering
+   (revised during implementation review): a malformed UPN (no local part
+   and domain) is skipped and counted; any other UPN proceeds to the HR
+   lookup, where guests/service accounts naturally fall out as unmatched.
 3. **HR lookup:** query `hr` via the **read** client:
    `find({accountName: {$in: accounts}}, {projection: {accountName: 1, siteID: 1}})`
    → `account → siteID` map. Accounts with no match are skipped and counted.
@@ -189,7 +190,6 @@ indexing.
 | `TEAMS_TENANT_ID` | yes | — | Azure AD tenant |
 | `TEAMS_CLIENT_ID` | yes | — | App registration client id |
 | `TEAMS_CLIENT_SECRET` | yes | — | App registration secret |
-| `TEAMS_EMAIL_DOMAIN` | yes | — | UPN domain filter + account derivation |
 | `GRAPH_PAGE_SIZE` | no | `500` | Graph `$top` per page |
 | `MONGO_READ_URI` | yes | — | Read cluster URI (`teams_user` diff, `hr` lookup) |
 | `MONGO_READ_USERNAME` / `MONGO_READ_PASSWORD` | no | empty | Read credentials |
@@ -207,7 +207,7 @@ required vars. Secrets are `required` with no defaults.
 - slog JSON. Each run generates a request id via `idgen.GenerateRequestID()`,
   carried in `context.Context` and attached to every log line of the run.
 - End-of-run summary log: pages walked, users seen, already present,
-  domain-skipped, HR-unmatched, upserted, duration.
+  invalid-UPN-skipped, HR-unmatched, upserted, duration.
 - `pkg/health` probes on `HEALTH_ADDR` (repo convention): liveness always OK,
   readiness pings the read and write Mongo clients.
 - No Prometheus endpoint in v1.
@@ -223,7 +223,7 @@ once at the run boundary. Never log tokens or Graph response bodies.
 - **`handler_test.go`** — table-driven unit tests of the per-page flow with a
   mocked `Store` (mockgen) and a fake `UserLister` (function-backed): happy
   path (multi-page), all-users-existing (no HR call, no write), HR miss
-  skipped + counted, wrong-domain UPN skipped, malformed UPN (no `@`)
+  skipped + counted, malformed UPN (no `@`)
   skipped, store error aborts run, Graph error aborts run, empty tenant.
 - **`config_test.go`** — required-var failure, defaults.
 - **`pkg/mongoutil` integration test** — `ConnectRead` connects, pings, and

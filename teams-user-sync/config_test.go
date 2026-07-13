@@ -14,7 +14,6 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("TEAMS_TENANT_ID", "tenant")
 	t.Setenv("TEAMS_CLIENT_ID", "client")
 	t.Setenv("TEAMS_CLIENT_SECRET", "secret")
-	t.Setenv("TEAMS_EMAIL_DOMAIN", "corp.example")
 	t.Setenv("MONGO_READ_URI", "mongodb://read:27017")
 	t.Setenv("MONGO_WRITE_URI", "mongodb://write:27017")
 }
@@ -32,7 +31,6 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "chat", cfg.MongoWriteDB)
 	assert.Equal(t, ":8081", cfg.HealthAddr)
 	assert.Equal(t, "tenant", cfg.TeamsTenantID)
-	assert.Equal(t, "corp.example", cfg.TeamsEmailDomain)
 	assert.Equal(t, "mongodb://read:27017", cfg.MongoReadURI)
 	assert.Equal(t, "mongodb://write:27017", cfg.MongoWriteURI)
 }

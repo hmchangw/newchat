@@ -56,14 +56,14 @@ func TestRunSync_LogsAndSwallowsOutcome(t *testing.T) {
 		}}
 
 		// must not panic; outcome is logged, not returned
-		runSync(NewSyncer(store, lister, "corp.example", 500))
+		runSync(NewSyncer(store, lister, 500))
 	})
 	t.Run("error path", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
 		lister := &fakeLister{err: errors.New("graph down")}
 
-		runSync(NewSyncer(store, lister, "corp.example", 500))
+		runSync(NewSyncer(store, lister, 500))
 	})
 }
 

@@ -53,7 +53,7 @@ func run() error {
 		ClientID:     cfg.TeamsClientID,
 		ClientSecret: cfg.TeamsClientSecret,
 	})
-	syncer := NewSyncer(store, lister, cfg.TeamsEmailDomain, cfg.GraphPageSize)
+	syncer := NewSyncer(store, lister, cfg.GraphPageSize)
 
 	// One guarded job shared by the schedule and the optional on-start run,
 	// so "skip if the previous job is not yet finished" holds across both.

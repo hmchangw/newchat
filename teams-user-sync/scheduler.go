@@ -30,7 +30,7 @@ func runSync(syncer *Syncer) {
 		"pages", stats.Pages,
 		"seen", stats.Seen,
 		"existing", stats.Existing,
-		"domainSkipped", stats.DomainSkipped,
+		"invalidUpn", stats.InvalidUPN,
 		"hrUnmatched", stats.HRUnmatched,
 		"upserted", stats.Upserted,
 		"durationMs", time.Since(start).Milliseconds(),

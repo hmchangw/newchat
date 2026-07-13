@@ -14,24 +14,22 @@ import (
 type Syncer struct {
 	store    Store
 	graph    msgraph.UserLister
-	domain   string
 	pageSize int
 }
 
-// NewSyncer builds a Syncer. emailDomain scopes which UPNs are synced;
-// pageSize is Graph's $top.
-func NewSyncer(store Store, graph msgraph.UserLister, emailDomain string, pageSize int) *Syncer {
-	return &Syncer{store: store, graph: graph, domain: emailDomain, pageSize: pageSize}
+// NewSyncer builds a Syncer. pageSize is Graph's $top.
+func NewSyncer(store Store, graph msgraph.UserLister, pageSize int) *Syncer {
+	return &Syncer{store: store, graph: graph, pageSize: pageSize}
 }
 
 // RunStats summarizes one UpdateUsers run for the end-of-run log line.
 type RunStats struct {
-	Pages         int // Graph pages walked
-	Seen          int // users returned by Graph
-	Existing      int // already present in teams_user, untouched
-	DomainSkipped int // UPN outside the configured domain (or malformed)
-	HRUnmatched   int // no hr.accountName match; retried next run
-	Upserted      int // written to teams_user
+	Pages       int // Graph pages walked
+	Seen        int // users returned by Graph
+	Existing    int // already present in teams_user, untouched
+	InvalidUPN  int // UPN without a local part and domain; never syncable
+	HRUnmatched int // no hr.accountName match; retried next run
+	Upserted    int // written to teams_user
 }
 
 // UpdateUsers performs one full sync run. Any Graph or store error aborts the
@@ -69,9 +67,9 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 		if _, ok := existing[u.ID]; ok {
 			continue
 		}
-		account, domain, ok := splitUPN(u.UserPrincipalName)
-		if !ok || !strings.EqualFold(domain, s.domain) {
-			stats.DomainSkipped++
+		account, ok := splitUPN(u.UserPrincipalName)
+		if !ok {
+			stats.InvalidUPN++
 			continue
 		}
 		candidates = append(candidates, model.TeamsUser{ID: u.ID, UPN: u.UserPrincipalName, Account: account})
@@ -109,12 +107,12 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	return nil
 }
 
-// splitUPN splits a userPrincipalName into its lowercased local part and its
-// domain. ok is false when there is no non-empty local part and domain.
-func splitUPN(upn string) (account, domain string, ok bool) {
+// splitUPN extracts a userPrincipalName's lowercased local part (the account).
+// ok is false when there is no non-empty local part and domain.
+func splitUPN(upn string) (account string, ok bool) {
 	at := strings.Index(upn, "@")
 	if at <= 0 || at == len(upn)-1 {
-		return "", "", false
+		return "", false
 	}
-	return strings.ToLower(upn[:at]), upn[at+1:], true
+	return strings.ToLower(upn[:at]), true
 }

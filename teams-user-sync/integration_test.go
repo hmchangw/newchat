@@ -44,7 +44,7 @@ func TestUpdateUsers_EndToEnd(t *testing.T) {
 		if r.URL.Query().Get("page") == "2" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"value": []map[string]string{
 				{"id": "id-existing", "userPrincipalName": "old@corp.example"},
-				{"id": "id-guest", "userPrincipalName": "guest#EXT#@other.example"},
+				{"id": "id-guest", "userPrincipalName": "guest#EXT#@other.example"}, // no hr row -> skipped
 			}})
 			return
 		}
@@ -62,12 +62,12 @@ func TestUpdateUsers_EndToEnd(t *testing.T) {
 		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		msgraph.WithBaseURL(graphSrv.URL), msgraph.WithTokenURL(tokenSrv.URL),
 	)
-	syncer := NewSyncer(newMongoStore(db, db), lister, "corp.example", 500)
+	syncer := NewSyncer(newMongoStore(db, db), lister, 500)
 
 	stats, err := syncer.UpdateUsers(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, RunStats{
-		Pages: 2, Seen: 4, Existing: 1, DomainSkipped: 1, HRUnmatched: 1, Upserted: 1,
+		Pages: 2, Seen: 4, Existing: 1, HRUnmatched: 2, Upserted: 1,
 	}, stats)
 
 	var doc model.TeamsUser
@@ -76,11 +76,11 @@ func TestUpdateUsers_EndToEnd(t *testing.T) {
 		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a",
 	}, doc)
 
-	// rerun: everything either exists, is domain-skipped, or is still HR-unmatched
+	// rerun: everything either exists or is still HR-unmatched (carol + guest)
 	stats2, err := syncer.UpdateUsers(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, RunStats{
-		Pages: 2, Seen: 4, Existing: 2, DomainSkipped: 1, HRUnmatched: 1, Upserted: 0,
+		Pages: 2, Seen: 4, Existing: 2, HRUnmatched: 2, Upserted: 0,
 	}, stats2)
 
 	n, err := db.Collection("teams_user").CountDocuments(ctx, bson.M{})
