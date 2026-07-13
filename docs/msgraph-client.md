@@ -51,6 +51,14 @@ otherwise creates one. `room-service` sets `externalId` to a stable per-room key
 room return the same meeting. `externalId` is required — the client rejects an
 empty value.
 
+## Listing users (paginated)
+
+`UserLister.ListUsers(ctx, pageSize, fn)` walks `GET /users` with
+`$select=id,userPrincipalName&$top={pageSize}`, following `@odata.nextLink`
+and invoking `fn` once per page. Used by `teams-user-sync` to enumerate the
+tenant. Requires the **`User.Read.All`** application permission. Construct
+via `NewUserListerClient(cfg)`.
+
 ## Production requirement (the live gate)
 
 App-only `onlineMeetings` access is **not** granted by the application
