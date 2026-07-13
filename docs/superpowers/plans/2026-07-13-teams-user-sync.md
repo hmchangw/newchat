@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Revision note (2026-07-13, post-implementation):** the shipped code diverges
+> from this plan in two reviewed ways — (1) the UPN **domain filter was removed**:
+> `splitUPN` returns only `(account, ok)`, `NewSyncer(store, graph, pageSize)` has
+> no `emailDomain` parameter, `TEAMS_EMAIL_DOMAIN` config is gone, and the
+> `DomainSkipped` stat is now `InvalidUPN` (malformed UPNs only; guests fall out
+> as HR-unmatched); (2) msgraph constructors take `*Config` (gocritic hugeParam).
+> Affected snippets below have been corrected where reviewers flagged them; the
+> repository code is authoritative.
+
 **Goal:** A cron-scheduled batch service that populates the MongoDB `teams_user` collection from Microsoft Graph `/users` pages joined with the `hr` collection's `siteID`, using separate Mongo read/write clients.
 
 **Architecture:** Page-streaming sync: each Graph page (≤500 users) is immediately diffed against `teams_user` by `_id` (read client), missing users are resolved to a `siteID` via the `hr` collection (read client), and the merged records are bulk-upserted (write client). robfig/cron/v3 schedules runs; `cron.SkipIfStillRunning` drops overlapping fires. Spec: `docs/superpowers/specs/2026-07-13-teams-user-sync-design.md`.
@@ -1384,8 +1393,10 @@ func TestGuardedJob_SkipsWhileRunning(t *testing.T) {
 
 	job := guardedJob(func() {
 		runs.Add(1)
-		close(started)
-		<-release
+		if runs.Load() == 1 {
+			close(started) // signal startup once; later runs must not re-close
+			<-release
+		}
 	})
 
 	var wg sync.WaitGroup
@@ -1404,8 +1415,6 @@ func TestGuardedJob_SkipsWhileRunning(t *testing.T) {
 	wg.Wait()
 
 	// after the first run finishes, the next fire executes again
-	release = make(chan struct{})
-	close(release)
 	job.Run()
 	assert.Equal(t, int32(2), runs.Load(), "guard must release after completion")
 }
@@ -1859,15 +1868,15 @@ func TestUpdateUsers_EndToEnd(t *testing.T) {
 	t.Cleanup(graphSrv.Close)
 
 	lister := msgraph.NewUserListerClient(
-		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		&msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		msgraph.WithBaseURL(graphSrv.URL), msgraph.WithTokenURL(tokenSrv.URL),
 	)
-	syncer := NewSyncer(newMongoStore(db, db), lister, "corp.example", 500)
+	syncer := NewSyncer(newMongoStore(db, db), lister, 500)
 
 	stats, err := syncer.UpdateUsers(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, RunStats{
-		Pages: 2, Seen: 4, Existing: 1, DomainSkipped: 1, HRUnmatched: 1, Upserted: 1,
+		Pages: 2, Seen: 4, Existing: 1, HRUnmatched: 2, Upserted: 1,
 	}, stats)
 
 	var doc model.TeamsUser
@@ -1876,11 +1885,11 @@ func TestUpdateUsers_EndToEnd(t *testing.T) {
 		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a",
 	}, doc)
 
-	// rerun: everything either exists, is domain-skipped, or is still HR-unmatched
+	// rerun: everything either exists or is still HR-unmatched (carol + guest)
 	stats2, err := syncer.UpdateUsers(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, RunStats{
-		Pages: 2, Seen: 4, Existing: 2, DomainSkipped: 1, HRUnmatched: 1, Upserted: 0,
+		Pages: 2, Seen: 4, Existing: 2, HRUnmatched: 2, Upserted: 0,
 	}, stats2)
 
 	n, err := db.Collection("teams_user").CountDocuments(ctx, bson.M{})
