@@ -296,6 +296,21 @@ func (mr *MockSubscriptionStoreMockRecorder) GetUserWithMembership(ctx, roomID, 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserWithMembership", reflect.TypeOf((*MockSubscriptionStore)(nil).GetUserWithMembership), ctx, roomID, account)
 }
 
+// HasAnyRoomMembers mocks base method.
+func (m *MockSubscriptionStore) HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HasAnyRoomMembers", ctx, roomID)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// HasAnyRoomMembers indicates an expected call of HasAnyRoomMembers.
+func (mr *MockSubscriptionStoreMockRecorder) HasAnyRoomMembers(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasAnyRoomMembers", reflect.TypeOf((*MockSubscriptionStore)(nil).HasAnyRoomMembers), ctx, roomID)
+}
+
 // HasOrgRoomMembers mocks base method.
 func (m *MockSubscriptionStore) HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error) {
 	m.ctrl.T.Helper()

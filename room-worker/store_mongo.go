@@ -523,6 +523,15 @@ func (s *MongoStore) HasOrgRoomMembers(ctx context.Context, roomID string) (bool
 	return count > 0, nil
 }
 
+func (s *MongoStore) HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error) {
+	// Existence check only — cap at 1 so it short-circuits instead of counting every member row.
+	count, err := s.roomMembers.CountDocuments(ctx, bson.M{"rid": roomID}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, fmt.Errorf("count room members for %q: %w", roomID, err)
+	}
+	return count > 0, nil
+}
+
 func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]AddMemberCandidate, error) {
 	if len(orgIDs) == 0 && len(directAccounts) == 0 {
 		return nil, nil
