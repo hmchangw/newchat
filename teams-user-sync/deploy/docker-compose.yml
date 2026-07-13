@@ -1,0 +1,26 @@
+name: teams-user-sync
+
+services:
+  teams-user-sync:
+    build:
+      context: ../..
+      dockerfile: teams-user-sync/deploy/Dockerfile
+    environment:
+      - SYNC_CRON=0 2 * * *
+      - RUN_ON_START=true
+      - TEAMS_TENANT_ID=${TEAMS_TENANT_ID}
+      - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
+      - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
+      - TEAMS_EMAIL_DOMAIN=${TEAMS_EMAIL_DOMAIN:-dev.local}
+      - GRAPH_PAGE_SIZE=500
+      - MONGO_READ_URI=mongodb://mongodb:27017
+      - MONGO_WRITE_URI=mongodb://mongodb:27017
+      - MONGO_READ_DB=chat
+      - MONGO_WRITE_DB=chat
+      - HEALTH_ADDR=:8081
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true
