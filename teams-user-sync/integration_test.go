@@ -18,10 +18,10 @@ import (
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-// TestUpdateUsers_EndToEnd drives the full pipeline: a fake two-page Graph
+// TestSyncer_UpdateUsers_EndToEnd drives the full pipeline: a fake two-page Graph
 // tenant against a real Mongo (one database standing in for both the read
 // and write clients), asserting the merged writes and idempotent rerun.
-func TestUpdateUsers_EndToEnd(t *testing.T) {
+func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync_e2e")
 	ctx := context.Background()
 

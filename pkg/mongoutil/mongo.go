@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -30,8 +31,20 @@ func connect(ctx context.Context, opts *options.ClientOptions, uri string) (*mon
 	if err := client.Ping(ctx, nil); err != nil {
 		return nil, fmt.Errorf("mongo ping: %w", err)
 	}
-	slog.Info("connected to MongoDB", "uri", uri)
+	slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
 	return client, nil
+}
+
+// sanitizeURI strips any userinfo (user:pass@) from a connection string so it
+// is safe to log — URIs may embed credentials instead of using the separate
+// username/password parameters.
+func sanitizeURI(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return "invalid-uri"
+	}
+	u.User = nil
+	return u.Redacted()
 }
 
 func Disconnect(ctx context.Context, client *mongo.Client) {

@@ -79,3 +79,22 @@ func TestBuildReadClientOptions_NoAuthWhenEmpty(t *testing.T) {
 	assert.Equal(t, readpref.SecondaryPreferredMode, opts.ReadPreference.Mode())
 	assert.Nil(t, opts.Auth)
 }
+
+func TestSanitizeURI(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{"credentials stripped", "mongodb://user:secret@host:27017/db", "mongodb://host:27017/db"},
+		{"username-only stripped", "mongodb://user@host:27017", "mongodb://host:27017"},
+		{"no credentials unchanged", "mongodb://host:27017", "mongodb://host:27017"},
+		{"srv scheme", "mongodb+srv://user:secret@cluster.example.net/db", "mongodb+srv://cluster.example.net/db"},
+		{"unparseable", "mongodb://user:sec ret@%zz", "invalid-uri"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, sanitizeURI(tc.uri))
+		})
+	}
+}
