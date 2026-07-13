@@ -7,10 +7,23 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 func Connect(ctx context.Context, uri, username, password string) (*mongo.Client, error) {
-	client, err := mongo.Connect(buildClientOptions(uri, username, password))
+	return connect(ctx, buildClientOptions(uri, username, password), uri)
+}
+
+// ConnectRead connects a read-oriented client: the same connect/ping flow as
+// Connect with ReadPreference=secondaryPreferred, so reads can be served by
+// secondaries. For services that split Mongo traffic into separate read and
+// write clients (e.g. teams-user-sync).
+func ConnectRead(ctx context.Context, uri, username, password string) (*mongo.Client, error) {
+	return connect(ctx, buildReadClientOptions(uri, username, password), uri)
+}
+
+func connect(ctx context.Context, opts *options.ClientOptions, uri string) (*mongo.Client, error) {
+	client, err := mongo.Connect(opts)
 	if err != nil {
 		return nil, fmt.Errorf("mongo connect: %w", err)
 	}
@@ -36,4 +49,8 @@ func buildClientOptions(uri, username, password string) *options.ClientOptions {
 		})
 	}
 	return opts
+}
+
+func buildReadClientOptions(uri, username, password string) *options.ClientOptions {
+	return buildClientOptions(uri, username, password).SetReadPreference(readpref.SecondaryPreferred())
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 func TestBuildClientOptions(t *testing.T) {
@@ -61,4 +62,20 @@ func TestBuildClientOptions(t *testing.T) {
 			assert.Equal(t, tc.expectedPass, opts.Auth.Password)
 		})
 	}
+}
+
+func TestBuildReadClientOptions_SecondaryPreferred(t *testing.T) {
+	opts := buildReadClientOptions("mongodb://localhost:27017", "user", "pass")
+	require.NotNil(t, opts.ReadPreference)
+	assert.Equal(t, readpref.SecondaryPreferredMode, opts.ReadPreference.Mode())
+	// auth wiring is inherited from buildClientOptions
+	require.NotNil(t, opts.Auth)
+	assert.Equal(t, "user", opts.Auth.Username)
+}
+
+func TestBuildReadClientOptions_NoAuthWhenEmpty(t *testing.T) {
+	opts := buildReadClientOptions("mongodb://localhost:27017", "", "")
+	require.NotNil(t, opts.ReadPreference)
+	assert.Equal(t, readpref.SecondaryPreferredMode, opts.ReadPreference.Mode())
+	assert.Nil(t, opts.Auth)
 }
