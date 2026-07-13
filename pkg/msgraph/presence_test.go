@@ -42,8 +42,8 @@ func TestGetPresencesByUserId_ROPC(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	pc, err := NewPresenceClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+	pc := NewPresenceClient(
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
@@ -85,8 +85,7 @@ func TestGetPresencesByUserId_UserAgentOverride(t *testing.T) {
 }
 
 func TestGetPresencesByUserId_Empty(t *testing.T) {
-	pc, err := NewPresenceClient(Config{TenantID: "t"}, ROPCCredentials{})
-	require.NoError(t, err)
+	pc := NewPresenceClient(&Config{TenantID: "t"}, ROPCCredentials{})
 	res, err := pc.GetPresencesByUserId(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, res)

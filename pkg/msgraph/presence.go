@@ -58,33 +58,11 @@ type presenceClient struct {
 
 // NewPresenceClient builds an ROPC-backed presence reader. It reuses the
 // app-only client's options (WithHTTPClient/WithBaseURL/WithTokenURL) by
-// constructing a throwaway graphClient to resolve them. When cfg.ProxyURL is
-// set, the presence client's transport is pointed at that proxy (overriding
-// HTTPS_PROXY); an invalid ProxyURL is reported at construction so it fails
-// fast rather than surfacing as an opaque per-request error.
-//
-//nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewPresenceClient(cfg Config, creds ROPCCredentials, opts ...Option) (PresenceReader, error) {
+// constructing a throwaway graphClient to resolve them.
+func NewPresenceClient(cfg *Config, creds ROPCCredentials, opts ...Option) PresenceReader {
 	g := New(cfg, opts...).(*graphClient)
-	hc := g.httpClient
-	if cfg.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("parse graph proxy url: %w", err)
-		}
-		if proxyURL.Scheme == "" || proxyURL.Host == "" {
-			// Redacted() masks any embedded proxy credentials before it reaches logs.
-			return nil, fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
-		}
-		// Reuse the throwaway client's transport when it is already a concrete
-		// *http.Transport (preserving TLSInsecureSkipVerify settings); otherwise
-		// clone the default transport so proxy/dial defaults survive.
-		tr, ok := hc.Transport.(*http.Transport)
-		if !ok || tr == nil {
-			tr = http.DefaultTransport.(*http.Transport).Clone()
-		}
-		tr.Proxy = http.ProxyURL(proxyURL)
-		hc.Transport = tr
+	return &presenceClient{
+		cfg: *cfg, creds: creds, hc: g.httpClient, baseURL: g.baseURL, tokenURL: g.tokenURL,
 	}
 	ua := cfg.UserAgent
 	if ua == "" {

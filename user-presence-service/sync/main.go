@@ -119,11 +119,8 @@ func run() error {
 		ProxyURL:              cfg.GraphProxyURL,
 		UserAgent:             cfg.GraphUserAgent,
 	}
-	users := msgraph.NewDirectoryClient(graphCfg)
-	pres, err := msgraph.NewPresenceClient(graphCfg, msgraph.ROPCCredentials{Username: cfg.GraphROPCUser, Password: cfg.GraphROPCPassword})
-	if err != nil {
-		return fmt.Errorf("build presence client: %w", err)
-	}
+	users := msgraph.NewDirectoryClient(&graphCfg)
+	pres := msgraph.NewPresenceClient(&graphCfg, msgraph.ROPCCredentials{Username: cfg.GraphROPCUser, Password: cfg.GraphROPCPassword})
 
 	r := newReconciler(
 		store, users, pres, store,

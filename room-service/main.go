@@ -150,7 +150,7 @@ func main() {
 		if cfg.TeamsTLSInsecure {
 			slog.Warn("Graph TLS verification disabled — dev/on-prem only, never production", "TEAMS_TLS_INSECURE", true)
 		}
-		graphClient = msgraph.New(msgraph.Config{
+		graphClient = msgraph.New(&msgraph.Config{
 			TenantID:              cfg.TeamsTenantID,
 			ClientID:              cfg.TeamsClientID,
 			ClientSecret:          cfg.TeamsClientSecret,

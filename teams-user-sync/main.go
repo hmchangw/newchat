@@ -48,7 +48,7 @@ func run() error {
 	}
 
 	store := newMongoStore(readClient.Database(cfg.MongoReadDB), writeClient.Database(cfg.MongoWriteDB))
-	lister := msgraph.NewUserListerClient(msgraph.Config{
+	lister := msgraph.NewUserListerClient(&msgraph.Config{
 		TenantID:     cfg.TeamsTenantID,
 		ClientID:     cfg.TeamsClientID,
 		ClientSecret: cfg.TeamsClientSecret,

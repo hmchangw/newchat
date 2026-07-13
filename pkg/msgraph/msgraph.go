@@ -44,9 +44,7 @@ type DirectoryReader interface {
 
 // NewDirectoryClient returns an app-only directory reader (shares the graph
 // client used for meetings; New always returns a *graphClient).
-//
-//nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewDirectoryClient(cfg Config, opts ...Option) DirectoryReader {
+func NewDirectoryClient(cfg *Config, opts ...Option) DirectoryReader {
 	return New(cfg, opts...).(*graphClient)
 }
 
@@ -63,7 +61,7 @@ type UserLister interface {
 
 // NewUserListerClient returns an app-only user lister (shares the graph
 // client used for meetings; New always returns a *graphClient).
-func NewUserListerClient(cfg Config, opts ...Option) UserLister {
+func NewUserListerClient(cfg *Config, opts ...Option) UserLister {
 	return New(cfg, opts...).(*graphClient)
 }
 
@@ -156,9 +154,7 @@ func WithTokenURL(u string) Option {
 }
 
 // New constructs a live Graph client for the given config.
-//
-//nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func New(cfg Config, opts ...Option) Client {
+func New(cfg *Config, opts ...Option) Client {
 	hc := &http.Client{Timeout: 30 * time.Second}
 	if cfg.TLSInsecureSkipVerify {
 		// Clone the default transport so proxy (ProxyFromEnvironment) and dial
@@ -170,7 +166,7 @@ func New(cfg Config, opts ...Option) Client {
 		hc.Transport = tr
 	}
 	g := &graphClient{
-		cfg:        cfg,
+		cfg:        *cfg,
 		httpClient: hc,
 		baseURL:    defaultGraphBaseURL,
 		tokenURL: fmt.Sprintf(

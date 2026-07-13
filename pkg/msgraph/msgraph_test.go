@@ -18,7 +18,7 @@ import (
 // newTestClient wires a graphClient at the given token + graph servers.
 func newTestClient(tokenURL, baseURL string) Client {
 	return New(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
@@ -27,7 +27,7 @@ func newTestClient(tokenURL, baseURL string) Client {
 // newTestDirectory wires a DirectoryReader at the given token + graph servers.
 func newTestDirectory(tokenURL, baseURL string) DirectoryReader {
 	return NewDirectoryClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
@@ -137,7 +137,7 @@ func TestCreateOnlineMeeting_TokenError(t *testing.T) {
 	defer tokenSrv.Close()
 
 	c := New(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "super-secret-value"},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "super-secret-value"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL("http://unused"),
 	)
 	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
@@ -186,11 +186,11 @@ func TestCreateOnlineMeeting_MissingJoinURL(t *testing.T) {
 
 func TestNew_TLSInsecureSkipVerify(t *testing.T) {
 	// Default: no custom transport, so the stdlib default (verifying) is used.
-	def := New(Config{TenantID: "t"}).(*graphClient)
+	def := New(&Config{TenantID: "t"}).(*graphClient)
 	assert.Nil(t, def.httpClient.Transport, "default client must keep TLS verification")
 
 	// Enabled: transport carries InsecureSkipVerify.
-	ins := New(Config{TenantID: "t", TLSInsecureSkipVerify: true}).(*graphClient)
+	ins := New(&Config{TenantID: "t", TLSInsecureSkipVerify: true}).(*graphClient)
 	tr, ok := ins.httpClient.Transport.(*http.Transport)
 	require.True(t, ok)
 	require.NotNil(t, tr.TLSClientConfig)
@@ -277,7 +277,7 @@ func TestResolveAccountIDs_ChunksLargeInput(t *testing.T) {
 }
 
 func TestResolveAccountIDs_Empty(t *testing.T) {
-	c := NewDirectoryClient(Config{TenantID: "t"})
+	c := NewDirectoryClient(&Config{TenantID: "t"})
 	got, err := c.ResolveAccountIDs(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -334,7 +334,7 @@ func TestListUsers_MultiPageFollowsNextLink(t *testing.T) {
 	defer graphSrv.Close()
 
 	lister := NewUserListerClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
 
@@ -376,7 +376,7 @@ func TestListUsers_CallbackErrorAbortsWalk(t *testing.T) {
 	defer graphSrv.Close()
 
 	lister := NewUserListerClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
 
@@ -399,7 +399,7 @@ func TestListUsers_Non200IsError(t *testing.T) {
 	defer graphSrv.Close()
 
 	lister := NewUserListerClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
 
