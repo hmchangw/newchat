@@ -4330,3 +4330,14 @@ func TestOutboxEvent_RoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &got))
 	require.Equal(t, evt, got)
 }
+
+func TestTeamsUserJSON(t *testing.T) {
+	src := model.TeamsUser{
+		ID:      "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
+		UPN:     "Alice@corp.example",
+		Account: "alice",
+		SiteID:  "site-a",
+	}
+	var dst model.TeamsUser
+	roundTrip(t, &src, &dst)
+}
