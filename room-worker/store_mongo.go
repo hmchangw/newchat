@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/pipelines"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -513,6 +514,29 @@ func (s *MongoStore) BulkCreateRoomMembers(ctx context.Context, members []*model
 
 func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
 	return s.userReader.FindUsersByAccounts(ctx, accounts)
+}
+
+func (s *MongoStore) FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error) {
+	return pipelines.OrgDisplayUsers(ctx, s.users, orgIDs)
+}
+
+func (s *MongoStore) ListOrgRoomMembers(ctx context.Context, roomID string, orgIDs []string) ([]model.RoomMember, error) {
+	if len(orgIDs) == 0 {
+		return nil, nil
+	}
+	cursor, err := s.roomMembers.Find(ctx,
+		bson.M{"rid": roomID, "member.type": model.RoomMemberOrg, "member.id": bson.M{"$in": orgIDs}},
+		options.Find().SetProjection(bson.M{"_id": 1, "rid": 1, "ts": 1, "member": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("find org room members for %q: %w", roomID, err)
+	}
+	defer cursor.Close(ctx)
+
+	var docs []model.RoomMember
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("decode org room members for %q: %w", roomID, err)
+	}
+	return docs, nil
 }
 
 func (s *MongoStore) HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error) {

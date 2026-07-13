@@ -1465,6 +1465,83 @@ func TestMemberAddEventJSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal(data, &dst))
 		assert.Nil(t, dst.HistorySharedSince)
 	})
+
+	t.Run("members round-trips enriched member.list-shaped entries", func(t *testing.T) {
+		src := model.MemberAddEvent{
+			Type:     "member_added",
+			RoomID:   "r1",
+			Accounts: []string{"bob", "carol"},
+			SiteID:   "site-a",
+			JoinedAt: 1735689600000,
+			Members: []model.RoomMember{
+				{
+					ID:     "rm-org",
+					RoomID: "r1",
+					Ts:     time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC),
+					Member: model.RoomMemberEntry{
+						ID:             "DEPT-100",
+						Type:           model.RoomMemberOrg,
+						OrgName:        "Cardiology Department",
+						OrgDescription: "Inpatient cardiac care",
+						MemberCount:    42,
+					},
+				},
+				{
+					ID:     "rm-bob",
+					RoomID: "r1",
+					Ts:     time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC),
+					Member: model.RoomMemberEntry{
+						ID:          "u-bob",
+						Type:        model.RoomMemberIndividual,
+						Account:     "bob",
+						EngName:     "Bob",
+						ChineseName: "鮑",
+						SectName:    "Cardiology",
+						EmployeeID:  "E10293",
+					},
+				},
+			},
+			Timestamp: 1735689600000,
+		}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+
+		// Wire key "members" with member.list field names (rid/ts/member) so clients splice verbatim.
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		entries, ok := raw["members"].([]any)
+		require.True(t, ok, "members must marshal as an array")
+		require.Len(t, entries, 2)
+		orgEntry, ok := entries[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "r1", orgEntry["rid"])
+		orgMember, ok := orgEntry["member"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "Cardiology Department", orgMember["orgName"])
+		assert.Equal(t, "Inpatient cardiac care", orgMember["orgDescription"])
+		assert.EqualValues(t, 42, orgMember["memberCount"])
+
+		var dst model.MemberAddEvent
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, src.Members, dst.Members)
+	})
+
+	t.Run("nil members is omitted on the wire", func(t *testing.T) {
+		src := model.MemberAddEvent{
+			Type:      "member_added",
+			RoomID:    "r1",
+			Accounts:  []string{"alice"},
+			SiteID:    "site-a",
+			Timestamp: 1735689600000,
+		}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, hasMembers := raw["members"]
+		assert.False(t, hasMembers, "members must be omitted when nil so INBOX copies stay lean")
+	})
 }
 
 func TestMemberAddEventCarriesRoomName(t *testing.T) {
