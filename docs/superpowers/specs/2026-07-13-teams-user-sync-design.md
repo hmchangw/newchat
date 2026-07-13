@@ -38,8 +38,10 @@ The resulting `teams_user` document is:
 
 New flat service directory `teams-user-sync` at the repo root
 (`package main`), standard per-service layout. The service uses **no NATS and
-no HTTP server** — it is a pure scheduled batch job. Graceful shutdown via
-`pkg/shutdown.Wait`.
+no request-serving HTTP** — it is a pure scheduled batch job. Like every other
+long-running service in the repo it serves `pkg/health` liveness/readiness
+probes on `HEALTH_ADDR` (readiness pings both Mongo clients). Graceful
+shutdown via `pkg/shutdown.Wait`.
 
 ```
 teams-user-sync/
@@ -195,7 +197,7 @@ indexing.
 | `MONGO_WRITE_URI` | yes | — | Write cluster URI (`teams_user` upserts) |
 | `MONGO_WRITE_USERNAME` / `MONGO_WRITE_PASSWORD` | no | empty | Write credentials |
 | `MONGO_WRITE_DB` | no | `chat` | Write database name |
-| `LOG_LEVEL` | no | `info` | slog level |
+| `HEALTH_ADDR` | no | `:8081` | `pkg/health` probe listener address |
 
 Parsed with `caarlos0/env` into a typed `Config`; fail fast on missing
 required vars. Secrets are `required` with no defaults.
@@ -206,7 +208,9 @@ required vars. Secrets are `required` with no defaults.
   carried in `context.Context` and attached to every log line of the run.
 - End-of-run summary log: pages walked, users seen, already present,
   domain-skipped, HR-unmatched, upserted, duration.
-- No Prometheus endpoint in v1 (no HTTP server at all).
+- `pkg/health` probes on `HEALTH_ADDR` (repo convention): liveness always OK,
+  readiness pings the read and write Mongo clients.
+- No Prometheus endpoint in v1.
 
 ## 4. Error handling
 
@@ -251,5 +255,5 @@ once at the run boundary. Never log tokens or Graph response bodies.
 - Deleting/disabling `teams_user` docs for users removed from the tenant.
 - Refreshing existing docs on UPN or siteID change.
 - Graph delta queries (`/users/delta`) for incremental sync.
-- Prometheus metrics / healthz endpoint.
+- Prometheus metrics.
 - Multi-tenant support.
