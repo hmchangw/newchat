@@ -32,7 +32,7 @@ The resulting `teams_user` document is:
 | Sync strategy | **Page-streaming** (Approach A): process each Graph page immediately — memory bounded at one page, partial progress survives a mid-run failure. |
 | HR miss | A Teams user with no matching `hr.accountName` is **skipped** (no write) and counted; the per-run summary logs the total. Retried naturally next run. |
 | Write scope | **Insert missing only** — users already present in `teams_user` (by `_id`) are left untouched; no UPN-change refresh in v1. The write itself is an idempotent upsert (mechanism, not scope — see §3.3 step 4). |
-| Mongo separation | **Two URIs, two clients** (`MONGO_READ_URI` / `MONGO_WRITE_URI`, each with its own credentials and db name). Reads (`teams_user` diff, `hr` lookup) use the read client; the batch write uses the write client. URIs may be identical in dev. |
+| Mongo separation | **Two URIs, two clients** (`MONGO_READ_URI` / `MONGO_WRITE_URI`, each with its own credentials and db name). Reads (`teams_user` diff, `hr` lookup) use the read client; the batch write uses the write client. URIs may be identical in dev. The write client is the existing `mongoutil.Connect`; the read client is a new reusable `mongoutil.ConnectRead` helper other services can adopt. |
 
 ## 3. Architecture
 
@@ -46,7 +46,6 @@ teams-user-sync/
 ├── main.go              # config parse, wiring, cron start, graceful shutdown
 ├── config.go            # Config struct (caarlos0/env)
 ├── handler.go           # Syncer: updateUsers run + per-page flow
-├── model.go             # service-local TeamsUser struct
 ├── store.go             # Store interface + //go:generate mockgen
 ├── store_mongo.go       # two-client Mongo implementation
 ├── handler_test.go      # unit tests (mocked Store + fake UserLister)
@@ -119,10 +118,12 @@ make that safe.
 
 ### 3.4 Model
 
-Service-local (`model.go`) — not `pkg/model`: it is not a NATS payload and no
-other service consumes it.
+Shared — `pkg/model/teamsuser.go`, so other services can consume the
+`teams_user` collection's document shape:
 
 ```go
+// TeamsUser is the persisted teams_user collection document: a Teams (Azure
+// AD) user joined with the HR system's site assignment by teams-user-sync.
 type TeamsUser struct {
     ID      string `json:"id" bson:"_id"`
     UPN     string `json:"upn" bson:"upn"`
@@ -132,7 +133,10 @@ type TeamsUser struct {
 ```
 
 `siteId` follows the repo's camelCase bson/json tag convention (matching
-`pkg/model/teams.go`), even though the HR source field is `siteID`.
+`pkg/model/teams.go`), even though the HR source field is `siteID`. TeamsUser
+is a persistence model, not a client-facing request/reply or event struct, so
+no `docs/client-api.md` update is required. It gets a `roundTrip` case in
+`pkg/model/model_test.go` like every other domain type.
 
 ### 3.5 Store
 
@@ -145,13 +149,23 @@ type Store interface {
     // HRSiteIDs resolves accounts to siteIDs from the hr collection (read client).
     HRSiteIDs(ctx context.Context, accounts []string) (map[string]string, error)
     // UpsertTeamsUsers bulk-upserts merged records into teams_user (write client).
-    UpsertTeamsUsers(ctx context.Context, users []TeamsUser) error
+    UpsertTeamsUsers(ctx context.Context, users []model.TeamsUser) error
 }
 ```
 
-`store_mongo.go` holds two `*mongo.Database` handles (read, write) built from
-two `mongoutil.Connect` clients. Both queries project precisely (per
-CLAUDE.md). Collection names are constants: `teams_user`, `hr`.
+`store_mongo.go` holds two `*mongo.Database` handles: the **write** handle
+from the existing `mongoutil.Connect`, the **read** handle from a new
+reusable helper added to `pkg/mongoutil`:
+
+```go
+// ConnectRead connects a read-oriented client: same connect/ping/auth flow as
+// Connect, plus ReadPreference=secondaryPreferred so reads can be served by
+// secondaries. For other services adopting the read/write client split too.
+func ConnectRead(ctx context.Context, uri, username, password string) (*mongo.Client, error)
+```
+
+Both queries project precisely (per CLAUDE.md). Collection names are
+constants: `teams_user`, `hr`.
 
 The `hr` document shape this service depends on (read-only, owned by the
 external HR pipeline): `{ accountName: string, siteID: string }`. Matching is
@@ -208,6 +222,10 @@ once at the run boundary. Never log tokens or Graph response bodies.
   skipped + counted, wrong-domain UPN skipped, malformed UPN (no `@`)
   skipped, store error aborts run, Graph error aborts run, empty tenant.
 - **`config_test.go`** — required-var failure, defaults.
+- **`pkg/mongoutil` integration test** — `ConnectRead` connects, pings, and
+  carries the secondaryPreferred read preference.
+- **`pkg/model`** — `TeamsUser` roundTrip marshal/unmarshal case in
+  `model_test.go`.
 - **`pkg/msgraph` unit tests** — `ListUsers` pagination against `httptest`:
   single page, multi-page via `@odata.nextLink`, `$top`/`$select` query
   assertions, non-200 error, fn-error aborts walk.
