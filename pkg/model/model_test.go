@@ -4371,3 +4371,93 @@ func TestTeamsChatJSON(t *testing.T) {
 	}
 	roundTrip(t, &c, &model.TeamsChat{})
 }
+
+func TestTeamsUserBSON(t *testing.T) {
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	u := model.TeamsUser{ID: "aad-user-1", SiteID: "site-a", Account: "alice", From: &from}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+
+	// Check raw BSON keys
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
+	assert.Contains(t, rawDoc, "siteID", "BSON doc must have siteID key")
+	assert.Contains(t, rawDoc, "account", "BSON doc must have account key")
+	assert.Contains(t, rawDoc, "from", "BSON doc must have from key when From is non-nil")
+	assert.Equal(t, "aad-user-1", rawDoc["_id"])
+	assert.Equal(t, "site-a", rawDoc["siteID"])
+	assert.Equal(t, "alice", rawDoc["account"])
+
+	// Round-trip to struct and verify equality
+	var dst model.TeamsUser
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, u.ID, dst.ID)
+	assert.Equal(t, u.SiteID, dst.SiteID)
+	assert.Equal(t, u.Account, dst.Account)
+	require.NotNil(t, dst.From)
+	assert.True(t, dst.From.UTC().Equal(from.UTC()), "From time must match")
+}
+
+func TestTeamsUserBSON_NoFrom(t *testing.T) {
+	u := model.TeamsUser{ID: "aad-user-2", SiteID: "site-b", Account: "bob"}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+
+	// Check that 'from' key is absent when From is nil
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	_, has := rawDoc["from"]
+	assert.False(t, has, "BSON doc must not have from key when From is nil (omitempty)")
+	assert.Equal(t, "aad-user-2", rawDoc["_id"])
+	assert.Equal(t, "site-b", rawDoc["siteID"])
+	assert.Equal(t, "bob", rawDoc["account"])
+}
+
+func TestTeamsChatBSON(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:meeting_abc@thread.v2",
+		Name:                "Project X",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
+		Members: []model.TeamsChatMember{
+			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		SiteID:       "site-a",
+		UpdatedAt:    time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedUserSync: true,
+	}
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+
+	// Check raw BSON keys
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
+	assert.Contains(t, rawDoc, "siteID", "BSON doc must have siteID key")
+	assert.Contains(t, rawDoc, "needUserSync", "BSON doc must have needUserSync key")
+	assert.Contains(t, rawDoc, "members", "BSON doc must have members key")
+	assert.Equal(t, "19:meeting_abc@thread.v2", rawDoc["_id"])
+	assert.Equal(t, "site-a", rawDoc["siteID"])
+	assert.Equal(t, true, rawDoc["needUserSync"])
+
+	// Round-trip to struct and verify equality
+	var dst model.TeamsChat
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, c.ID, dst.ID)
+	assert.Equal(t, c.Name, dst.Name)
+	assert.Equal(t, c.ChatType, dst.ChatType)
+	assert.True(t, c.CreatedDateTime.UTC().Equal(dst.CreatedDateTime.UTC()), "CreatedDateTime must match")
+	assert.True(t, c.LastUpdatedDateTime.UTC().Equal(dst.LastUpdatedDateTime.UTC()), "LastUpdatedDateTime must match")
+	assert.Equal(t, c.SiteID, dst.SiteID)
+	assert.True(t, c.UpdatedAt.UTC().Equal(dst.UpdatedAt.UTC()), "UpdatedAt must match")
+	assert.Equal(t, c.NeedUserSync, dst.NeedUserSync)
+	require.Equal(t, len(c.Members), len(dst.Members), "Members count must match")
+	for i, member := range c.Members {
+		assert.Equal(t, member.ID, dst.Members[i].ID)
+		assert.Equal(t, member.Account, dst.Members[i].Account)
+		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
+	}
+}
