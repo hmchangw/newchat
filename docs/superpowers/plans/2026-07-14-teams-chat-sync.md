@@ -151,10 +151,20 @@ git commit -m "feat(model): add TeamsUser/TeamsChat sync models"
 
 ---
 
-### Task 2: pkg/msgraph ChatsReader (list user chats, pagination, throttle retry)
+### Task 2: pkg/msgraph ChatsReader (list user chats, pagination, throttle handling)
+
+Throttle handling is two-level because Graph throttles **per app+tenant**:
+1. **Per-request retry** — up to `chatsMaxAttempts` attempts honoring `Retry-After`.
+2. **Tenant-wide gate** — any 429/503 arms a shared `throttleUntil` on the
+   `graphClient`; every subsequent request (from any worker goroutine sharing
+   the client) waits out the gate before sending. One throttled worker pauses
+   the whole pool instead of the pool hammering a throttled tenant. The gate
+   extends monotonically (a shorter later Retry-After never shrinks it) and is
+   capped so a hostile header can't stall the run.
 
 **Files:**
 - Create: `pkg/msgraph/chats.go`
+- Modify: `pkg/msgraph/msgraph.go` (add two fields to `graphClient`)
 - Test: `pkg/msgraph/chats_test.go`
 
 **Interfaces:**
@@ -360,6 +370,93 @@ func TestListUserChats_EmptyUserID(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "userID is required")
 }
+
+// --- tenant-wide throttle gate ---
+
+func newGateClient(t *testing.T) *graphClient {
+	t.Helper()
+	return New(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"}).(*graphClient)
+}
+
+func TestThrottleGate_NoGateReturnsImmediately(t *testing.T) {
+	g := newGateClient(t)
+	start := time.Now()
+	require.NoError(t, g.waitThrottle(context.Background()))
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+}
+
+func TestThrottleGate_ArmedGateBlocks(t *testing.T) {
+	g := newGateClient(t)
+	g.noteThrottle("1")
+	start := time.Now()
+	require.NoError(t, g.waitThrottle(context.Background()))
+	assert.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
+		"waitThrottle must wait out the armed gate")
+}
+
+func TestThrottleGate_ExtendsMonotonically(t *testing.T) {
+	g := newGateClient(t)
+	g.noteThrottle("2")
+	until := g.throttleDeadline()
+	g.noteThrottle("0") // a later, shorter Retry-After must not shrink the gate
+	assert.True(t, g.throttleDeadline().Equal(until), "gate must never shrink")
+	g.noteThrottle("3")
+	assert.True(t, g.throttleDeadline().After(until), "longer Retry-After extends the gate")
+}
+
+func TestThrottleGate_CapsHostileHeader(t *testing.T) {
+	g := newGateClient(t)
+	g.noteThrottle("86400") // 24h — must be capped to chatsMaxThrottleWait
+	remaining := time.Until(g.throttleDeadline())
+	assert.LessOrEqual(t, remaining, chatsMaxThrottleWait)
+	assert.Greater(t, remaining, chatsMaxThrottleWait-time.Minute)
+}
+
+func TestThrottleGate_CtxCancelAborts(t *testing.T) {
+	g := newGateClient(t)
+	g.noteThrottle("30")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := g.waitThrottle(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 5*time.Second, "cancel must abort the wait early")
+}
+
+func TestListUserChats_429ArmsGateForNextCall(t *testing.T) {
+	tokenSrv := newChatsTokenServer(t)
+	var calls int
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	defer graphSrv.Close()
+
+	g := NewChatsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
+	).(*graphClient)
+
+	start := time.Now()
+	_, err := g.ListUserChats(context.Background(), "u1", chatsFrom, chatsTo)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
+		"the retry must have waited out the gate armed by the 429")
+
+	// The gate is client-wide: after the successful retry it has expired, so a
+	// second user's call goes straight through.
+	start = time.Now()
+	_, err = g.ListUserChats(context.Background(), "u2", chatsFrom, chatsTo)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 500*time.Millisecond)
+	assert.Equal(t, 3, calls)
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -367,7 +464,16 @@ func TestListUserChats_EmptyUserID(t *testing.T) {
 Run: `go test -race -run TestListUserChats ./pkg/msgraph/`
 Expected: FAIL to compile — `undefined: ChatsReader`, `undefined: NewChatsClient`.
 
-- [ ] **Step 3: Implement `pkg/msgraph/chats.go`**
+- [ ] **Step 3: Implement the throttle gate fields and `pkg/msgraph/chats.go`**
+
+First, in `pkg/msgraph/msgraph.go`, add two fields to the existing `graphClient` struct (after the `token`/`tokenAt` fields, reusing the existing `mu` is NOT safe — the token critical section does network I/O — so the gate gets its own mutex):
+
+```go
+	throttleMu    sync.Mutex
+	throttleUntil time.Time // tenant-wide gate: no request is sent before this instant
+```
+
+Then create `pkg/msgraph/chats.go`:
 
 ```go
 package msgraph
@@ -389,8 +495,9 @@ import (
 type ChatsReader interface {
 	// ListUserChats returns the user's chats whose lastUpdatedDateTime falls in
 	// the exclusive window (from, to), with members expanded. It follows
-	// @odata.nextLink pagination and retries throttled (429/503) responses
-	// honoring Retry-After.
+	// @odata.nextLink pagination. Throttled (429/503) responses are retried
+	// per Retry-After AND arm a tenant-wide gate shared by all goroutines on
+	// this client, since Graph throttles per app+tenant.
 	ListUserChats(ctx context.Context, userID string, from, to time.Time) ([]Chat, error)
 }
 
@@ -419,13 +526,14 @@ type ChatMember struct {
 	VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime"`
 }
 
-// Throttle-retry bounds for chat listing. Graph rate-limits per app+tenant;
-// the job retries a bounded number of times per request and honors the
-// server-provided Retry-After, capped so a hostile header can't stall a worker.
+// Throttle bounds for chat listing. Graph rate-limits per app+tenant, so a
+// throttle response arms a client-wide gate shared by every worker goroutine
+// (see noteThrottle/waitThrottle) in addition to the per-request retry loop.
+// The gate is capped so a hostile Retry-After can't stall the run.
 const (
 	chatsMaxAttempts      = 4
 	chatsDefaultRetryWait = 2 * time.Second
-	chatsMaxRetryWait     = 30 * time.Second
+	chatsMaxThrottleWait  = 5 * time.Minute
 )
 
 func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to time.Time) ([]Chat, error) {
@@ -465,10 +573,16 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 	return chats, nil
 }
 
-// getThrottled GETs a Graph URL, retrying 429/503 responses per Retry-After
-// (bounded attempts, capped wait, ctx-aware).
+// getThrottled GETs a Graph URL. Every attempt first waits out the
+// tenant-wide throttle gate; a 429/503 response (Graph throttles per
+// app+tenant) arms/extends the gate for ALL workers sharing this client and
+// retries up to chatsMaxAttempts. The gate is armed even on the final failed
+// attempt so the rest of the pool still backs off after this user fails.
 func (g *graphClient) getThrottled(ctx context.Context, token, endpoint string) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
+		if err := g.waitThrottle(ctx); err != nil {
+			return nil, err
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, fmt.Errorf("build chats request: %w", err)
@@ -487,13 +601,15 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint string) 
 		}
 		throttled := resp.StatusCode == http.StatusTooManyRequests ||
 			resp.StatusCode == http.StatusServiceUnavailable
+		if throttled {
+			g.noteThrottle(resp.Header.Get("Retry-After"))
+		}
 		switch {
 		case resp.StatusCode == http.StatusOK:
 			return body, nil
 		case throttled && attempt < chatsMaxAttempts:
-			if err := waitRetryAfter(ctx, resp.Header.Get("Retry-After")); err != nil {
-				return nil, err
-			}
+			// Loop: the next iteration's waitThrottle waits out the gate we
+			// just armed.
 		default:
 			// Surface only status + Graph error code; never the raw body (it can
 			// carry upstream payload).
@@ -511,38 +627,64 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint string) 
 	}
 }
 
-// waitRetryAfter waits out a Retry-After header (default when absent/invalid,
-// capped), aborting early when ctx is done. Timer-based so a cancelled run
-// stops waiting immediately (this is backoff, not goroutine synchronization).
-func waitRetryAfter(ctx context.Context, header string) error {
+// noteThrottle arms/extends the tenant-wide throttle gate from a Retry-After
+// header (default when absent/invalid, capped against hostile values). The
+// gate only ever extends — a later, shorter Retry-After never shrinks it.
+func (g *graphClient) noteThrottle(retryAfter string) {
 	wait := chatsDefaultRetryWait
-	if secs, err := strconv.Atoi(header); err == nil && secs >= 0 {
+	if secs, err := strconv.Atoi(retryAfter); err == nil && secs >= 0 {
 		wait = time.Duration(secs) * time.Second
 	}
-	if wait > chatsMaxRetryWait {
-		wait = chatsMaxRetryWait
+	if wait > chatsMaxThrottleWait {
+		wait = chatsMaxThrottleWait
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("wait for graph retry-after: %w", ctx.Err())
-	case <-timer.C:
-		return nil
+	until := time.Now().Add(wait)
+	g.throttleMu.Lock()
+	defer g.throttleMu.Unlock()
+	if until.After(g.throttleUntil) {
+		g.throttleUntil = until
+	}
+}
+
+// throttleDeadline returns the current gate deadline (zero when unarmed).
+func (g *graphClient) throttleDeadline() time.Time {
+	g.throttleMu.Lock()
+	defer g.throttleMu.Unlock()
+	return g.throttleUntil
+}
+
+// waitThrottle blocks until the tenant-wide gate has expired, aborting early
+// when ctx is done. Timer-based, not time.Sleep, so a cancelled run stops
+// waiting immediately (this is backoff, not goroutine synchronization). The
+// deadline is re-read after waking because another worker's 429 may have
+// extended the gate while we slept.
+func (g *graphClient) waitThrottle(ctx context.Context) error {
+	for {
+		wait := time.Until(g.throttleDeadline())
+		if wait <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("wait for graph throttle gate: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 }
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `go test -race -run TestListUserChats ./pkg/msgraph/`
-Expected: PASS. Then `make test SERVICE=pkg/msgraph` for the whole package.
+Run: `go test -race -run 'TestListUserChats|TestThrottleGate' ./pkg/msgraph/`
+Expected: PASS (the gate tests take ~2s wall time — they wait out real 1s gates). Then `make test SERVICE=pkg/msgraph` for the whole package.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add pkg/msgraph/chats.go pkg/msgraph/chats_test.go
-git commit -m "feat(msgraph): add ChatsReader for listing user Teams chats"
+git add pkg/msgraph/msgraph.go pkg/msgraph/chats.go pkg/msgraph/chats_test.go
+git commit -m "feat(msgraph): add ChatsReader with tenant-wide throttle gate"
 ```
 
 ---

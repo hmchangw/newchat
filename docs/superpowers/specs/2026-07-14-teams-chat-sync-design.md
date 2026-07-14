@@ -178,8 +178,19 @@ required vars.
   with user id (never the client secret or token).
 - OTel tracer init via `otelutil.InitTracer("teams-chat-sync")`, mirroring the
   presence sync.
-- Graph 429s are retried inside `pkg/msgraph` honoring `Retry-After`, bounded;
-  persistent throttling surfaces as a per-user failure.
+- **Graph throttling (429/503) is handled inside `pkg/msgraph` at two levels:**
+  1. **Per-request retry:** each request retries up to 4 attempts, honoring the
+     server's `Retry-After` header (default 2s when absent, capped).
+  2. **Tenant-wide throttle gate:** Graph throttles per app+tenant, so a
+     throttle response also arms a client-wide gate (`throttleUntil` on the
+     shared `graphClient`, mutex-guarded, monotonically extended). Every
+     worker waits out the gate before sending its next request — one
+     throttled worker pauses the whole pool instead of the pool hammering an
+     already-throttled tenant. The gate wait is capped (5m) so a hostile
+     header can't stall the run; waits are timer+ctx based, never `time.Sleep`.
+  Persistent throttling (retries exhausted) surfaces as a per-user failure:
+  the watermark holds and the user is retried next run, while the armed gate
+  still slows the remaining workers.
 
 ## Testing (TDD, ≥ 80% coverage)
 
@@ -191,8 +202,10 @@ required vars.
   - Watermark: advanced on success, held on Graph failure and on upsert failure, skipped when `from >= to`, default-from fallback.
   - Job exit: non-zero when any user fails.
 - **Unit — `pkg/msgraph`** (httptest stubs, existing style): query encoding
-  (filter/expand/select), nextLink pagination, 429 Retry-After retry, token
-  error, Graph error, empty result.
+  (filter/expand/select), nextLink pagination, 429 Retry-After retry, retries
+  exhausted, tenant-wide throttle gate (armed by a 429, blocks the next call,
+  monotonic extension, ctx-cancel abort, capped wait), token error, Graph
+  error, empty result.
 - **Integration** (`testutil.MongoDB`, `//go:build integration`, `TestMain` →
   `testutil.RunTests`): siteID unchanged across repeated upserts, oneOnOne doc
   untouched by a second upsert, group fields refreshed, watermark persisted,
