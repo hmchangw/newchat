@@ -28,9 +28,6 @@ func TestRoomsGetResponse_JSONRoundTrip(t *testing.T) {
 		{name: "one room", in: RoomsGetResponse{Rooms: map[string]LastMessage{
 			"r1": {MessageID: "m1", Sender: Participant{ID: "u1", Account: "alice"}, Content: "hi", CreatedAt: 1_714_000_000_000},
 		}}},
-		{name: "deleted last", in: RoomsGetResponse{Rooms: map[string]LastMessage{
-			"r2": {MessageID: "m9", Sender: Participant{ID: "u2", Account: "bob"}, Content: "", CreatedAt: 1_714_000_000_999, Deleted: true},
-		}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,12 +38,4 @@ func TestRoomsGetResponse_JSONRoundTrip(t *testing.T) {
 			assert.Equal(t, tc.in, got)
 		})
 	}
-}
-
-// deleted=false must be omitted from the wire (omitempty) so the common,
-// not-deleted case stays compact.
-func TestLastMessage_OmitsDeletedWhenFalse(t *testing.T) {
-	data, err := json.Marshal(LastMessage{MessageID: "m1", Content: "hi", CreatedAt: 1})
-	require.NoError(t, err)
-	assert.NotContains(t, string(data), "deleted")
 }

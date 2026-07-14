@@ -62,7 +62,7 @@ func TestEnrichWithRoomInfo_LocalAndCrossSite(t *testing.T) {
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: true, Name: "Ops", UserCount: 3, LastMsgAt: &newer, LastMsgID: "m-3"}}, nil)
 
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 	assert.Equal(t, "eng-sub", subs[0].Name, "subscription name must survive enrichment")
 	assert.True(t, subs[0].Alert, "stored alert preserved")
@@ -95,7 +95,7 @@ func TestEnrichWithRoomInfo_LocalKeyMaterial(t *testing.T) {
 	}
 	// No GetRoomsInfo expectation: an all-local input must never hit the RPC.
 
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 	require.NotNil(t, subs[0].Room)
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -116,7 +116,7 @@ func TestEnrichWithRoomInfo_LocalNoKey(t *testing.T) {
 			RoomName: "Eng", UserCount: 5, LastMsgID: "m-base"},
 	}
 
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 	require.NotNil(t, subs[0].Room, "local room must still be built from the baseline")
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -136,7 +136,7 @@ func TestEnrichWithRoomInfo_LocalInvalidKeyLength(t *testing.T) {
 			RoomName: "Eng", UserCount: 5, RoomKeyPriv: []byte("short"), RoomKeyVer: 2},
 	}
 
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 	require.NotNil(t, subs[0].Room, "invalid-length key still yields a baseline room object")
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -164,7 +164,7 @@ func TestEnrichWithRoomInfo_AllRoomTypesKeyed(t *testing.T) {
 					RoomName: "room", RoomKeyPriv: key32(0xAB), RoomKeyVer: 4},
 			}
 
-			svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 			require.NotNil(t, subs[0].Room)
 			require.NotNil(t, subs[0].Room.PrivateKey, "every room type returns its key")
@@ -183,7 +183,7 @@ func TestEnrichWithRoomInfo_CrossSiteRPCZeroFields(t *testing.T) {
 	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{ID: "a", RoomID: "r2", SiteID: "site-b"}, UserCount: 5, LastMsgID: "m-base"}}
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: true, Name: "Ops"}}, nil)
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 	require.NotNil(t, subs[0].Room)
 	assert.Equal(t, "Ops", subs[0].Room.Name)
 	assert.Equal(t, 5, subs[0].UserCount, "internal baseline untouched")
@@ -198,7 +198,7 @@ func TestEnrichWithRoomInfo_CrossSiteNotFoundNoRoom(t *testing.T) {
 	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{ID: "a", RoomID: "r2", SiteID: "site-b"}, UserCount: 5, LastMsgID: "m-base"}}
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: false}}, nil)
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 	assert.Len(t, subs, 1)
 	assert.False(t, subs[0].Alert)
 	assert.Nil(t, subs[0].Room, "not-found cross-site room ⇒ no room object (no local baseline)")
@@ -212,7 +212,7 @@ func TestEnrichWithRoomInfo_LocalDeletedRoomNoRoom(t *testing.T) {
 		{Subscription: model.Subscription{ID: "a", RoomID: "r1", SiteID: "site-a", Name: "team"},
 			RoomName: "Del-Team", UserCount: 5, RoomKeyPriv: key32(0xAB), RoomKeyVer: 1},
 	}
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 	assert.Nil(t, subs[0].Room, "soft-deleted local room ⇒ no room object")
 	assert.Equal(t, "team", subs[0].Name, "the subscription itself is kept")
 }
@@ -238,7 +238,7 @@ func TestEnrichWithRoomInfo_CrossSiteDeletedRoomDroppedFromList(t *testing.T) {
 			{RoomID: "r3", Found: true, Name: "Ops"},
 		}, nil)
 
-	got := svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 	require.Len(t, got, 2, "the cross-site Del- sub is dropped from a list")
 	assert.Equal(t, "loc", got[0].ID, "local sub survives, order preserved")
@@ -257,7 +257,7 @@ func TestEnrichWithRoomInfo_CrossSiteDeletedRoomKeptRoomlessInLookup(t *testing.
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: true, Name: "Del-Ops"}}, nil)
 
-	got := svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, false)
+	got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, false, false)
 
 	require.Len(t, got, 1, "single-item lookup keeps the Del- sub")
 	assert.Equal(t, "del", got[0].ID)
@@ -280,7 +280,7 @@ func TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers(t *testing.T
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-c", []string{"r3"}).
 		Return([]model.RoomInfo{{RoomID: "r3", Found: true, Name: "Ops", LastMsgAt: &newer}}, nil)
 
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 
 	require.NotNil(t, subs[0].Room, "local sub built from baseline")
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -293,8 +293,8 @@ func TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers(t *testing.T
 func TestEnrichWithRoomInfo_Empty(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	// No GetRoomsInfo / GetMany expectations: empty input must short-circuit before any call.
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), nil, true)
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), []model.EnrichedSubscription{}, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), nil, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), []model.EnrichedSubscription{}, true, false)
 }
 
 // TestEnrichWithRoomInfo_LocalNeverRecomputesFlags pins that local enrichment
@@ -309,7 +309,7 @@ func TestEnrichWithRoomInfo_LocalNeverRecomputesFlags(t *testing.T) {
 		{Subscription: model.Subscription{ID: "a", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, Alert: false, HasMention: false},
 			RoomName: "Eng", LastMsgAt: &newer, LastMentionAllAt: &mentionAt},
 	}
-	svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 	assert.False(t, subs[0].Alert, "room lastMsgAt newer than lastSeen must NOT flip stored alert")
 	assert.False(t, subs[0].HasMention, "room lastMentionAllAt newer than lastSeen must NOT flip stored hasMention")
 }
@@ -366,7 +366,7 @@ func TestEnrichWithRoomInfo_ComputesHasUnread_Local(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, _, _, _, _, _ := newSvc(t)
 			subs := []model.EnrichedSubscription{tc.sub}
-			svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 			assert.Equal(t, tc.want, subs[0].HasUnread)
 		})
 	}
@@ -424,7 +424,7 @@ func TestEnrichWithRoomInfo_ComputesHasGroupMention_Local(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, _, _, _, _, _ := newSvc(t)
 			subs := []model.EnrichedSubscription{tc.sub}
-			svc.enrichWithRoomInfo(ctx("alice", "site-a"), subs, true)
+			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
 			assert.Equal(t, tc.want, subs[0].HasGroupMention)
 		})
 	}

@@ -17,9 +17,9 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
-// newRoomsService builds a service with bare mocks (no permissive room-time
-// default) so each rooms.get test states its exact per-room expectations.
-func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository) {
+// newRoomsService builds a service with bare mocks. rooms.get is server-to-server
+// now — no access (subscription) check — so tests only set room-time + message reads.
+func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -31,7 +31,7 @@ func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageR
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
-	return svc, msgs, subs, rooms
+	return svc, msgs, rooms
 }
 
 func roomsCtx() *natsrouter.Context {
@@ -47,11 +47,9 @@ const (
 	roomsGetPreviewRunes = 256
 )
 
-func TestHistoryService_RoomsGet_FullAccess(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
+func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
 
-	// Full access (nil historySharedSince) ⇒ the unbounded GetMessagesBefore walk.
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, true, nil)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hello", CreatedAt: roomLastMsgAt, Sender: models.Participant{ID: "u1", Account: "alice"}}}, false), nil)
@@ -64,31 +62,11 @@ func TestHistoryService_RoomsGet_FullAccess(t *testing.T) {
 	assert.Equal(t, "hello", lm.Content)
 	assert.Equal(t, "alice", lm.Sender.Account)
 	assert.Equal(t, roomLastMsgAt.UnixMilli(), lm.CreatedAt)
-	assert.False(t, lm.Deleted)
-}
-
-func TestHistoryService_RoomsGet_WindowedAccess(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
-	since := roomCreatedAt.Add(24 * time.Hour)
-
-	// Windowed access (non-nil historySharedSince) ⇒ GetMessagesBetweenDesc, floored at the join window.
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(&since, true, nil)
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
-	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", since, gomock.Any(), gomock.Any()).
-		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
-
-	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
-	require.NoError(t, err)
-	require.Contains(t, resp.Rooms, "r1")
-	assert.Equal(t, "m2", resp.Rooms["r1"].MessageID)
 }
 
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
+	svc, msgs, rooms := newRoomsService(t)
 
-	// Empty room: GetRoomTimes yields zero lastMsgAt (normalised to createdAt), the
-	// walk returns no rows, so the room is omitted from the response.
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, true, nil)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(time.Time{}, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage(nil, false), nil)
@@ -99,28 +77,14 @@ func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
 	assert.NotNil(t, resp.Rooms)
 }
 
-func TestHistoryService_RoomsGet_NotSubscribedDegrades(t *testing.T) {
-	svc, _, subs, rooms := newRoomsService(t)
-
-	// Not subscribed ⇒ getAccessSince Forbidden ⇒ that room degrades to no entry.
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, false, nil)
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).AnyTimes()
-
-	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Rooms, "r1")
-}
-
 func TestHistoryService_RoomsGet_PerRoomDegradeKeepsSiblings(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
+	svc, msgs, rooms := newRoomsService(t)
 
 	// r1 history read errors → omitted; r2 succeeds → returned.
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, true, nil)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage(nil, false), errors.New("cassandra timeout"))
 
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r2").Return(nil, true, nil)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r2").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r2", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r2", Msg: "ok", CreatedAt: roomLastMsgAt}}, false), nil)
@@ -131,25 +95,47 @@ func TestHistoryService_RoomsGet_PerRoomDegradeKeepsSiblings(t *testing.T) {
 	require.Contains(t, resp.Rooms, "r2")
 }
 
-func TestHistoryService_RoomsGet_DeletedLastReturnedAsIs(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
+// Latest message deleted → walk back within the page and return the first survivor.
+func TestHistoryService_RoomsGet_SkipsDeletedTail(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
 
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, true, nil)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage([]models.Message{{MessageID: "m9", RoomID: "r1", Msg: "", Deleted: true, CreatedAt: roomLastMsgAt}}, false), nil)
+		Return(makePage([]models.Message{
+			{MessageID: "m3", RoomID: "r1", Msg: "", Deleted: true, CreatedAt: roomLastMsgAt},
+			{MessageID: "m2", RoomID: "r1", Msg: "", Deleted: true, CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-2 * time.Minute), Sender: models.Participant{Account: "alice"}},
+		}, false), nil)
 
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
 	require.Contains(t, resp.Rooms, "r1")
-	assert.True(t, resp.Rooms["r1"].Deleted)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, "alive", resp.Rooms["r1"].Content)
+}
+
+// Every message in the page is deleted (and the page is the whole room) → no entry.
+func TestHistoryService_RoomsGet_AllDeletedOmitted(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	// A short all-deleted page (below the walk page size) means no older messages
+	// remain, so a single read is enough to conclude "no last message".
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m2", RoomID: "r1", Msg: "", Deleted: true, CreatedAt: roomLastMsgAt},
+			{MessageID: "m1", RoomID: "r1", Msg: "", Deleted: true, CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+		}, false), nil).Times(1)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.NotContains(t, resp.Rooms, "r1")
 }
 
 func TestHistoryService_RoomsGet_DedupsRoomIDs(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
+	svc, msgs, rooms := newRoomsService(t)
 
 	// A duplicate roomId resolves once (Times(1) on each per-room read).
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, true, nil).Times(1)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "x", CreatedAt: roomLastMsgAt}}, false), nil).Times(1)
@@ -160,10 +146,9 @@ func TestHistoryService_RoomsGet_DedupsRoomIDs(t *testing.T) {
 }
 
 func TestHistoryService_RoomsGet_ContentPreviewTrimmed(t *testing.T) {
-	svc, msgs, subs, rooms := newRoomsService(t)
+	svc, msgs, rooms := newRoomsService(t)
 	long := strings.Repeat("世", 1000) // 1000 runes, well over the preview cap
 
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "alice", "r1").Return(nil, true, nil)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: long, CreatedAt: roomLastMsgAt}}, false), nil)
@@ -176,13 +161,13 @@ func TestHistoryService_RoomsGet_ContentPreviewTrimmed(t *testing.T) {
 }
 
 func TestHistoryService_RoomsGet_EmptyRoomIDs(t *testing.T) {
-	svc, _, _, _ := newRoomsService(t)
+	svc, _, _ := newRoomsService(t)
 	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: nil})
 	assertBadRequestErr(t, err, "roomIds must not be empty")
 }
 
 func TestHistoryService_RoomsGet_TooManyRoomIDs(t *testing.T) {
-	svc, _, _, _ := newRoomsService(t)
+	svc, _, _ := newRoomsService(t)
 	ids := make([]string, roomsGetMaxBatch+1)
 	for i := range ids {
 		ids[i] = "r" + string(rune('a'+i%26))

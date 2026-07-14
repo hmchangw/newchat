@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -17,16 +16,14 @@ const (
 	maxRoomsGetBatch        = 100 // mirrors maxGetByIDsBatchSize
 	maxRoomsGetConcurrency  = 16  // mirrors cassrepo.maxConcurrentIDReads
 	lastMessagePreviewRunes = 256 // room-list snippet cap
+	lastMsgWalkPageSize     = 50  // messages scanned per walk-back page
+	lastMsgWalkMaxPages     = 5   // ponytail: cap the deleted-tail walk; a room with >250 trailing deletes just shows no last message
 )
 
-// RoomsGet handles chat.user.{account}.request.history.{siteID}.rooms.get: for each
-// requested room the caller can access, return its latest message (A2 read-time,
-// no walk-back). Per-room failures (incl. not-subscribed) degrade to no entry so
-// one bad room never fails the batch.
+// RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
+// room, return its latest non-deleted message. Server-to-server (no per-account access
+// check). Per-room failures degrade to no entry so one bad room never fails the batch.
 func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequest) (*models.RoomsGetResponse, error) {
-	account := c.Param("account")
-	c.WithLogValues("account", account)
-
 	if len(req.RoomIDs) == 0 {
 		return nil, errcode.BadRequest("roomIds must not be empty")
 	}
@@ -54,7 +51,7 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			lm, ok := s.roomLastMessage(c, account, roomID, now)
+			lm, ok := s.roomLastMessage(c, roomID, now)
 			if !ok {
 				return
 			}
@@ -68,53 +65,54 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	return &models.RoomsGetResponse{Rooms: out}, nil
 }
 
-// roomLastMessage resolves one room's latest message at read time. ok=false means
-// drop the room (not subscribed, empty, or a read failure). A soft-deleted latest
-// message is returned as-is with Deleted=true — no walk-back to an earlier survivor.
-func (s *HistoryService) roomLastMessage(ctx context.Context, account, roomID string, now time.Time) (models.LastMessage, bool) {
-	accessSince, lastMsgAt, createdAt, err := s.checkAccessAndRoomTimes(ctx, account, roomID, nil, now)
+// roomLastMessage resolves one room's latest NON-deleted message at read time.
+// ok=false means drop the room (empty, all-deleted within the walk cap, or a read
+// failure). Walks backward from lastMsgAt in pages, skipping soft-deleted messages.
+func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now time.Time) (models.LastMessage, bool) {
+	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, nil, now)
 	if err != nil {
-		slog.WarnContext(ctx, "rooms.get room degraded", "account", account, "room_id", roomID,
+		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 		return models.LastMessage{}, false
 	}
 
-	pageReq, err := parsePageRequest("", 1)
+	pageReq, err := parsePageRequest("", lastMsgWalkPageSize)
 	if err != nil {
 		return models.LastMessage{}, false
 	}
-	// Cap the walk at the last message so a dormant room is a single-bucket read.
-	before := lastMsgAt.Add(time.Millisecond)
+	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+	before := ceiling.Add(time.Millisecond)
 
-	var page cassrepo.Page[models.Message]
-	if accessSince == nil {
-		// Clamp createdAt to the configured floor (mirrors LoadHistory).
-		historyFloor := now.Add(-s.historyFloor)
-		walkFloor := createdAt
-		if walkFloor.IsZero() || walkFloor.Before(historyFloor) {
-			walkFloor = historyFloor
+	for range lastMsgWalkMaxPages {
+		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, pageReq)
+		if err != nil {
+			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+			return models.LastMessage{}, false
 		}
-		page, err = s.msgReader.GetMessagesBefore(ctx, roomID, before, walkFloor, pageReq)
-	} else {
-		page, err = s.msgReader.GetMessagesBetweenDesc(ctx, roomID, *accessSince, before, pageReq)
+		if len(page.Data) == 0 {
+			return models.LastMessage{}, false // room empty or floor reached
+		}
+		for i := range page.Data {
+			m := page.Data[i]
+			if m.Deleted {
+				continue
+			}
+			return models.LastMessage{
+				MessageID: m.MessageID,
+				Sender:    m.Sender,
+				Content:   previewContent(m.Msg),
+				CreatedAt: m.CreatedAt.UTC().UnixMilli(),
+			}, true
+		}
+		// Whole page deleted. A short page means the walk is exhausted (no older
+		// messages) — stop. Otherwise page again strictly before the oldest one seen.
+		if len(page.Data) < lastMsgWalkPageSize {
+			return models.LastMessage{}, false
+		}
+		before = page.Data[len(page.Data)-1].CreatedAt
 	}
-	if err != nil {
-		slog.WarnContext(ctx, "rooms.get latest-message read degraded", "account", account, "room_id", roomID,
-			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-		return models.LastMessage{}, false
-	}
-	if len(page.Data) == 0 {
-		return models.LastMessage{}, false
-	}
-
-	m := page.Data[0]
-	return models.LastMessage{
-		MessageID: m.MessageID,
-		Sender:    m.Sender,
-		Content:   previewContent(m.Msg),
-		CreatedAt: m.CreatedAt.UTC().UnixMilli(),
-		Deleted:   m.Deleted,
-	}, true
+	return models.LastMessage{}, false // deleted tail longer than the walk cap
 }
 
 // previewContent trims a message body to a rune-bounded room-list snippet.

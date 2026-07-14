@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -54,8 +53,8 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
-	res.Data = s.enrichWithRoomInfo(c, res.Data, true)
-	s.enrichWithLastMessage(c, res.Data)
+	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
+	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, withLastMsg)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
@@ -173,11 +172,13 @@ func distinctListNames(subs []model.EnrichedSubscription) (bots, dmCounterparts 
 	return bots, dmCounterparts
 }
 
-// enrichWithRoomInfo populates sub.Room for every subscription and returns the
-// surviving slice. LOCAL subs (subs[i].SiteID == s.siteID) are enriched entirely
+// enrichWithRoomInfoAndLastMsg populates sub.Room for every subscription and returns
+// the surviving slice. LOCAL subs (subs[i].SiteID == s.siteID) are enriched entirely
 // from local Mongo — the $lookup baseline plus the room key read from the local
 // rooms collection, with NO room-service RPC. Only CROSS-SITE subs fan out to the
-// per-site GetRoomsInfo RPC, since their room docs live on another site.
+// per-site GetRoomsInfo RPC, since their room docs live on another site. When
+// withLastMsg, a single grouping also drives one rooms.get per site (all sites incl.
+// local) to attach each room's last message.
 //
 // dropDeleted controls how a soft-deleted ("Del-") room is handled, mirroring the
 // Mongo deleted-filter so LOCAL and CROSS-SITE rooms behave identically:
@@ -191,29 +192,29 @@ func distinctListNames(subs []model.EnrichedSubscription) (bots, dmCounterparts 
 // enrichLocal. Callers MUST use the returned slice, not the input.
 //
 // alert/hasMention are stored subscription state and are never touched here.
-func (s *UserService) enrichWithRoomInfo(c *natsrouter.Context, subs []model.EnrichedSubscription, dropDeleted bool) []model.EnrichedSubscription {
+func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs []model.EnrichedSubscription, dropDeleted, withLastMsg bool) []model.EnrichedSubscription {
 	if len(subs) == 0 {
 		return subs
 	}
 
-	// Partition by locality, building each remote site's roomID list directly here.
+	// Group by site once — both fan-outs read this grouping. Room info comes from the
+	// $lookup baseline for the local site and GetRoomsInfo for the rest; last message
+	// is not in the baseline, so its rooms.get runs for ALL sites incl. local.
 	// No roomID dedup: the unique (roomId, account) index means one account holds at
 	// most one sub per room, so a site's roomIDs are already distinct.
-	var localIdx []int
 	idxBySite := map[string][]int{}
 	roomIDsBySite := map[string][]string{}
 	for i := range subs {
-		if subs[i].SiteID == s.siteID {
-			localIdx = append(localIdx, i)
-			continue
-		}
 		site := subs[i].SiteID
 		idxBySite[site] = append(idxBySite[site], i)
 		roomIDsBySite[site] = append(roomIDsBySite[site], subs[i].RoomID)
 	}
 
-	s.enrichLocal(subs, localIdx)
+	s.enrichLocal(subs, idxBySite[s.siteID])
 	dropped := s.enrichCrossSite(c, subs, idxBySite, roomIDsBySite)
+	if withLastMsg {
+		s.enrichLastMessage(c, subs, idxBySite, roomIDsBySite)
+	}
 	// Single-item lookups (dropDeleted=false) keep a cross-site Del- sub room-less;
 	// only the list/count paths remove it.
 	if !dropDeleted || len(dropped) == 0 {
@@ -260,12 +261,15 @@ func (s *UserService) enrichLocal(subs []model.EnrichedSubscription, localIdx []
 // no local room doc for a cross-site room). It returns the indices of subs whose
 // remote room is soft-deleted ("Del-"), for the caller to drop.
 func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) []int {
-	if len(idxBySite) == 0 {
-		return nil
-	}
+	// The grouping includes the local site (served from the $lookup baseline); skip it here.
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
-		sites = append(sites, site)
+		if site != s.siteID {
+			sites = append(sites, site)
+		}
+	}
+	if len(sites) == 0 {
+		return nil
 	}
 	infoBySite := make([]map[string]model.RoomInfo, len(sites)) // nil ⇒ site degraded
 	// WaitGroup (not errgroup): errgroup.WithContext would cancel sibling site RPCs on the first error; per-site degradation must keep siblings running.
@@ -321,27 +325,13 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 	return dropped
 }
 
-// maxRoomsGetChunk bounds each rooms.get RPC's roomIds — mirrors history-service's
-// own maxRoomsGetBatch cap, which rejects a batch over 100 outright.
-const maxRoomsGetChunk = 100
-
-// enrichWithLastMessage populates sub.Room.LastMessage (read-time A2 resolve, no
-// denormalized write path) for every subscription with a Room, fanning out one
-// rooms.get RPC per site — unlike enrichWithRoomInfo, LOCAL subs need this call
-// too (last-message isn't part of the $lookup baseline). A degraded/absent site,
-// or a room the RPC omits, just leaves LastMessage nil; it never fails the list.
-func (s *UserService) enrichWithLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription) {
-	account := c.Param("account")
-	idxBySite := map[string][]int{}
-	for i := range subs {
-		if subs[i].Room == nil {
-			continue // soft-deleted room — nothing to attach a last message to
-		}
-		idxBySite[subs[i].SiteID] = append(idxBySite[subs[i].SiteID], i)
-	}
-	if len(idxBySite) == 0 {
-		return
-	}
+// enrichLastMessage populates sub.Room.LastMessage (read-time resolve, no denormalized
+// write path) via one rooms.get RPC per site — LOCAL subs need it too (last-message
+// isn't part of the $lookup baseline). One call per site: a subscription page is
+// bounded well under history-service's 100-roomId batch cap, so no chunk-split is
+// needed. Reuses the caller's per-site grouping. A degraded/absent site, or a room the
+// RPC omits, just leaves LastMessage nil; it never fails the list.
+func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
 		sites = append(sites, site)
@@ -361,27 +351,12 @@ func (s *UserService) enrichWithLastMessage(c *natsrouter.Context, subs []model.
 			if c.Err() != nil {
 				return
 			}
-			roomIDs := make([]string, 0, len(idxBySite[site]))
-			seen := make(map[string]struct{}, len(idxBySite[site]))
-			for _, j := range idxBySite[site] {
-				rid := subs[j].RoomID
-				if _, dup := seen[rid]; dup {
-					continue
-				}
-				seen[rid] = struct{}{}
-				roomIDs = append(roomIDs, rid)
+			m, err := s.history.RoomsGet(c, site, roomIDsBySite[site])
+			if err != nil {
+				slog.WarnContext(c, "last-message enrichment degraded", "account", c.Param("account"), "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+				return
 			}
-			merged := make(map[string]model.LastMessage, len(roomIDs))
-			for start := 0; start < len(roomIDs); start += maxRoomsGetChunk {
-				end := min(start+maxRoomsGetChunk, len(roomIDs))
-				chunk, err := s.history.RoomsGet(c, account, site, roomIDs[start:end])
-				if err != nil {
-					slog.WarnContext(c, "last-message enrichment degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
-					continue
-				}
-				maps.Copy(merged, chunk)
-			}
-			lastMsgBySite[i] = merged
+			lastMsgBySite[i] = m
 		}()
 	}
 	wg.Wait()
@@ -391,6 +366,10 @@ func (s *UserService) enrichWithLastMessage(c *natsrouter.Context, subs []model.
 			continue
 		}
 		for _, j := range idxBySite[site] {
+			// Soft-deleted room (Room==nil) has nothing to attach a last message to.
+			if subs[j].Room == nil {
+				continue
+			}
 			lm, ok := m[subs[j].RoomID]
 			if !ok {
 				continue
@@ -503,7 +482,7 @@ func (s *UserService) GetChannels(c *natsrouter.Context, req models.GetChannelsR
 	if err != nil {
 		return nil, fmt.Errorf("get channels: %w", err)
 	}
-	res.Data = s.enrichWithRoomInfo(c, res.Data, true)
+	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, false)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
@@ -532,7 +511,7 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	// Del- DM is kept room-less. The wire DMSubscription points at the boxed stored
 	// sub plus HRInfo.
 	one := []model.EnrichedSubscription{dm.EnrichedSubscription}
-	one = s.enrichWithRoomInfo(c, one, false)
+	one = s.enrichWithRoomInfoAndLastMsg(c, one, false, false)
 	return &models.DMResponse{Subscription: model.DMSubscription{
 		Subscription: &one[0].Subscription,
 		HRInfo:       dm.HRInfo,
@@ -555,7 +534,7 @@ func (s *UserService) GetByRoomID(c *natsrouter.Context, req models.GetByRoomIDR
 		return &models.SubscriptionListResponse{Subscriptions: []model.SubscriptionItem{}, Total: 0}, nil
 	}
 	one := []model.EnrichedSubscription{*sub}
-	one = s.enrichWithRoomInfo(c, one, false)
+	one = s.enrichWithRoomInfoAndLastMsg(c, one, false, false)
 	items := s.buildListItems(c, one)
 	return &models.SubscriptionListResponse{Subscriptions: items, Total: len(items)}, nil
 }

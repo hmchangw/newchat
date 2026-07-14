@@ -823,7 +823,7 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 	}}
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
-	history.EXPECT().RoomsGet(gomock.Any(), "alice", "site-a", []string{"r1"}).
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}).
 		Return(map[string]model.LastMessage{"r1": {MessageID: "m9", Content: "hi", CreatedAt: 123}}, nil)
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err)
@@ -834,6 +834,25 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 	assert.Equal(t, "m9", room.LastMessage.MessageID)
 }
 
+// includeLastMessage:false skips the rooms.get RPC entirely.
+func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
+	svc, subs, _ := newSvcRawHistory(t)
+	storeSubs := []model.EnrichedSubscription{{
+		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
+		RoomName:     "General", UserCount: 3,
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	// No history.RoomsGet EXPECT — the mock ctrl fails if it's called.
+	no := false
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current", IncludeLastMessage: &no})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	room := resp.Subscriptions[0].Base().Room
+	require.NotNil(t, room)
+	assert.Nil(t, room.LastMessage, "excluded last message stays nil")
+}
+
 func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	svc, subs, history := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
@@ -842,7 +861,7 @@ func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	}}
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
-	history.EXPECT().RoomsGet(gomock.Any(), "alice", "site-a", []string{"r1"}).
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}).
 		Return(nil, errors.New("history down"))
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err, "a degraded rooms.get must not fail the list")

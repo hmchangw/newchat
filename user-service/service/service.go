@@ -57,7 +57,7 @@ type ThreadSubscriptionRepository interface {
 // RPCs, fanned out across sites by the thread-inbox aggregator.
 type HistoryClient interface {
 	GetThreadList(ctx context.Context, siteID string, req model.ThreadSubscriptionListRequest) (model.ThreadSubscriptionListResponse, error)
-	RoomsGet(ctx context.Context, account, siteID string, roomIDs []string) (map[string]model.LastMessage, error)
+	RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error)
 }
 
 // PresenceClient is the consumer-defined interface for user-presence-service RPC calls.
