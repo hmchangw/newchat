@@ -13,9 +13,10 @@
 # Services default OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, so
 # they reach this stack without endpoint changes. BUT observability is OFF by
 # default (O11Y_ENABLED=false, zero-impact) — a service only exports once it sets
-# O11Y_ENABLED=true. `make dev` opts in automatically; for a service's own
-# docker-compose, add `- O11Y_ENABLED=true` (or export it) or you'll see no
-# telemetry. Joins the external chat-local network owned by compose.deps.yaml.
+# O11Y_ENABLED=true. `make dev` and the aggregate compose.services.yaml opt in
+# automatically. A service's standalone deployment Compose remains off unless
+# it explicitly passes the master switch. Joins the external chat-local network
+# owned by compose.deps.yaml.
 name: chat-local-o11y
 
 services:
@@ -49,7 +50,11 @@ services:
     # on Docker Desktop/WSL. Run as root so Prometheus can discover service
     # containers without chmod'ing the host socket.
     user: "0:0"
-    command: ["--config.file=/etc/prometheus/prometheus.yaml"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      # Keep trace exemplars emitted by the SDK so Grafana can jump from a
+      # metric sample to the corresponding Tempo trace.
+      - "--enable-feature=exemplar-storage"
     volumes:
       - ./o11y/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro # Docker SD for :2112 targets
