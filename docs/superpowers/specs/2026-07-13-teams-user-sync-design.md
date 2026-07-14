@@ -5,7 +5,9 @@
 
 ## 1. Purpose
 
-A long-running cron batch service that keeps the MongoDB `teams_user`
+A run-once batch job, triggered by a Kubernetes CronJob (revised 2026-07-14
+from the original long-running in-process cron design), that keeps the
+MongoDB `teams_user`
 collection populated with every Teams (Azure AD) user in the tenant, joined
 with the HR system's site assignment. On each scheduled run it walks the
 Microsoft Graph `/users` directory page by page, finds users not yet in
@@ -28,7 +30,7 @@ The resulting `teams_user` document is:
 
 | Question | Decision |
 |---|---|
-| Scheduling | Cron expression via **robfig/cron/v3** (new dependency, approved). Skip-if-running via robfig's built-in `cron.SkipIfStillRunning` job wrapper. |
+| Scheduling | **Kubernetes CronJob** triggers the binary; one invocation = one sync run (revised from in-process robfig/cron). Skip-if-running comes from the CronJob's `concurrencyPolicy: Forbid` — the schedule and that policy are owned by ops/IaC, like stream topology. |
 | Sync strategy | **Page-streaming** (Approach A): process each Graph page immediately — memory bounded at one page, partial progress survives a mid-run failure. |
 | HR miss | A Teams user with no matching `hr.accountName` is **skipped** (no write) and counted; the per-run summary logs the total. Retried naturally next run. |
 | Write scope | **Insert missing only** — users already present in `teams_user` (by `_id`) are left untouched; no UPN-change refresh in v1. The write itself is an idempotent upsert (mechanism, not scope — see §3.3 step 4). |
@@ -37,15 +39,15 @@ The resulting `teams_user` document is:
 ## 3. Architecture
 
 New flat service directory `teams-user-sync` at the repo root
-(`package main`), standard per-service layout. The service uses **no NATS and
-no request-serving HTTP** — it is a pure scheduled batch job. Like every other
-long-running service in the repo it serves `pkg/health` liveness/readiness
-probes on `HEALTH_ADDR` (readiness pings both Mongo clients). Graceful
-shutdown via `pkg/shutdown.Wait`.
+(`package main`), standard per-service layout. The binary is a **run-once
+batch job**: no NATS, no HTTP, no in-process scheduler, no health listener
+(Kubernetes Jobs take no traffic and are not probed). SIGTERM/SIGINT cancels
+the run via `signal.NotifyContext` — a deliberate deviation from the
+`pkg/shutdown.Wait` convention, which is for long-running services.
 
 ```
 teams-user-sync/
-├── main.go              # config parse, wiring, cron start, graceful shutdown
+├── main.go              # config parse, wiring, one sync run, exit code
 ├── config.go            # Config struct (caarlos0/env)
 ├── handler.go           # Syncer: updateUsers run + per-page flow
 ├── store.go             # Store interface + //go:generate mockgen
@@ -62,16 +64,17 @@ teams-user-sync/
 
 ### 3.1 Scheduling
 
-- `robfig/cron/v3` with the schedule from `SYNC_CRON` (default `0 2 * * *`).
-- The job is registered wrapped in `cron.SkipIfStillRunning(logger)` — if a
-  fire occurs while the previous run is still executing, it is skipped (and
-  robfig logs the skip). This is exactly the required "skip if the previous
-  job is not yet finished" semantics with no hand-rolled locking.
-- `RUN_ON_START=true` (default `false`) additionally triggers one run
-  immediately at startup — dev/compose convenience.
-- Shutdown: `cron.Stop()` returns a context that is done when the in-flight
-  job (if any) finishes; `main.go` waits on it with a timeout consistent with
-  the repo-wide 25s shutdown budget, then disconnects both Mongo clients.
+- A **Kubernetes CronJob** (ops/IaC-owned manifest) runs the container on
+  schedule; each invocation performs exactly one `updateUsers` pass and exits.
+- The required "skip if the previous job is not yet finished" semantics are
+  provided by the CronJob's `concurrencyPolicy: Forbid` — a fire that arrives
+  while the previous Job is still running is skipped by Kubernetes itself.
+- Exit code carries the outcome: non-zero on any Graph/Mongo failure so the
+  Job records the failure; the next scheduled fire retries from scratch
+  (writes are idempotent upserts, so reruns are safe).
+- SIGTERM/SIGINT (pod deletion, `activeDeadlineSeconds`) cancels the run's
+  context so it aborts between operations; deferred disconnects run under
+  their own timeout.
 
 ### 3.2 Graph client (`pkg/msgraph` extension)
 
@@ -116,7 +119,7 @@ For each Graph page (≤ `GRAPH_PAGE_SIZE` users):
    reruns and read-replica lag harmless — no duplicate-key failures.
 
 Any Graph or Mongo error aborts the run with a wrapped error logged once at
-the run level. The next cron fire retries from scratch; idempotent upserts
+the run level. The next CronJob fire retries from scratch; idempotent upserts
 make that safe.
 
 ### 3.4 Model
@@ -185,8 +188,6 @@ indexing.
 
 | Env var | Required | Default | Purpose |
 |---|---|---|---|
-| `SYNC_CRON` | no | `0 2 * * *` | Cron expression (5-field) for the sync job |
-| `RUN_ON_START` | no | `false` | Fire one sync immediately at startup |
 | `TEAMS_TENANT_ID` | yes | — | Azure AD tenant |
 | `TEAMS_CLIENT_ID` | yes | — | App registration client id |
 | `TEAMS_CLIENT_SECRET` | yes | — | App registration secret |
@@ -197,7 +198,8 @@ indexing.
 | `MONGO_WRITE_URI` | yes | — | Write cluster URI (`teams_user` upserts) |
 | `MONGO_WRITE_USERNAME` / `MONGO_WRITE_PASSWORD` | no | empty | Write credentials |
 | `MONGO_WRITE_DB` | no | `chat` | Write database name |
-| `HEALTH_ADDR` | no | `:8081` | `pkg/health` probe listener address |
+| `GRAPH_BASE_URL` | no | empty (public Graph) | Graph API endpoint override (tests, on-prem gateways) |
+| `GRAPH_TOKEN_URL` | no | empty (public login) | OAuth2 token endpoint override |
 
 Parsed with `caarlos0/env` into a typed `Config`; fail fast on missing
 required vars. Secrets are `required` with no defaults.
@@ -208,8 +210,8 @@ required vars. Secrets are `required` with no defaults.
   carried in `context.Context` and attached to every log line of the run.
 - End-of-run summary log: pages walked, users seen, already present,
   invalid-UPN-skipped, HR-unmatched, upserted, duration.
-- `pkg/health` probes on `HEALTH_ADDR` (repo convention): liveness always OK,
-  readiness pings the read and write Mongo clients.
+- No HTTP listener: Kubernetes Jobs are not probed and take no traffic; the
+  Job's exit code and the run-summary log line are the observability surface.
 - No Prometheus endpoint in v1.
 
 ## 4. Error handling
@@ -237,8 +239,6 @@ once at the run boundary. Never log tokens or Graph response bodies.
   supplying both read and write handles + `httptest` Graph server: seeds
   `hr` and partial `teams_user`, runs `updateUsers`, asserts exact resulting
   `teams_user` docs; second run is a no-op (idempotency).
-- **Cron wiring** — unit test that the registered job skips when the previous
-  run is still executing (drive `SkipIfStillRunning` wrapper directly).
 - Coverage: ≥ 80% package minimum, ≥ 90% target on `handler.go` and
   `store_mongo.go` per repo policy.
 
@@ -246,8 +246,9 @@ once at the run boundary. Never log tokens or Graph response bodies.
 
 - `deploy/Dockerfile` — standard multi-stage (`golang:1.25.12-alpine` →
   `alpine:3.21`), repo-root build context.
-- `deploy/docker-compose.yml` — service + a single MongoDB (read and write
-  URIs both pointed at it), `RUN_ON_START=true` for instant feedback. No NATS.
+- `deploy/docker-compose.yml` — one ad-hoc sync run against local deps
+  (`restart: "no"`; read and write URIs both pointed at the shared local
+  MongoDB). The production CronJob manifest is ops/IaC-owned. No NATS.
 - `deploy/azure-pipelines.yml` — copied from a sibling service.
 
 ## 7. Out of scope (v1)

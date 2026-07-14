@@ -7,7 +7,12 @@
 > `splitUPN` returns only `(account, ok)`, `NewSyncer(store, graph, pageSize)` has
 > no `emailDomain` parameter, `TEAMS_EMAIL_DOMAIN` config is gone, and the
 > `DomainSkipped` stat is now `InvalidUPN` (malformed UPNs only; guests fall out
-> as HR-unmatched); (2) msgraph constructors take `*Config` (gocritic hugeParam).
+> as HR-unmatched); (2) msgraph constructors take `*Config` (gocritic hugeParam);
+> (3) **2026-07-14: converted to a Kubernetes-CronJob-triggered one-shot** — the
+> in-process robfig/cron scheduler, skip guard, `RUN_ON_START`, and health
+> listener (Tasks 7–8 as written) were removed; `run()` now performs exactly one
+> sync and exits, with `concurrencyPolicy: Forbid` on the ops-owned CronJob
+> providing the skip-if-still-running semantics.
 > Affected snippets below have been corrected where reviewers flagged them; the
 > repository code is authoritative.
 

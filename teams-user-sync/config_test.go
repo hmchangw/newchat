@@ -24,12 +24,11 @@ func TestConfig_Defaults(t *testing.T) {
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
 
-	assert.Equal(t, "0 2 * * *", cfg.SyncCron)
-	assert.False(t, cfg.RunOnStart)
 	assert.Equal(t, 500, cfg.GraphPageSize)
+	assert.Empty(t, cfg.GraphBaseURL)
+	assert.Empty(t, cfg.GraphTokenURL)
 	assert.Equal(t, "chat", cfg.MongoReadDB)
 	assert.Equal(t, "chat", cfg.MongoWriteDB)
-	assert.Equal(t, ":8081", cfg.HealthAddr)
 	assert.Equal(t, "tenant", cfg.TeamsTenantID)
 	assert.Equal(t, "mongodb://read:27017", cfg.MongoReadURI)
 	assert.Equal(t, "mongodb://write:27017", cfg.MongoWriteURI)
@@ -37,17 +36,17 @@ func TestConfig_Defaults(t *testing.T) {
 
 func TestConfig_Overrides(t *testing.T) {
 	setRequiredEnv(t)
-	t.Setenv("SYNC_CRON", "30 4 * * *")
-	t.Setenv("RUN_ON_START", "true")
 	t.Setenv("GRAPH_PAGE_SIZE", "100")
+	t.Setenv("GRAPH_BASE_URL", "http://graph.local")
+	t.Setenv("GRAPH_TOKEN_URL", "http://token.local")
 	t.Setenv("MONGO_READ_DB", "replica")
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
 
-	assert.Equal(t, "30 4 * * *", cfg.SyncCron)
-	assert.True(t, cfg.RunOnStart)
 	assert.Equal(t, 100, cfg.GraphPageSize)
+	assert.Equal(t, "http://graph.local", cfg.GraphBaseURL)
+	assert.Equal(t, "http://token.local", cfg.GraphTokenURL)
 	assert.Equal(t, "replica", cfg.MongoReadDB)
 }
 

@@ -3,83 +3,75 @@
 package main
 
 import (
+	"context"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
+	"net/http/httptest"
 	"testing"
-	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-// TestRun_GracefulLifecycle boots the full service wiring against the shared
-// test Mongo (cron scheduled but never firing, no Graph traffic), waits for
-// the health listener, then drives the SIGTERM graceful-shutdown path.
-func TestRun_GracefulLifecycle(t *testing.T) {
+// TestRun_OneShotEndToEnd drives the run-once binary path: env pointed at the
+// shared test Mongo and a fake Graph, a single run() invocation syncs the
+// tenant and returns nil (exit 0 for the Kubernetes Job).
+func TestRun_OneShotEndToEnd(t *testing.T) {
+	db := testutil.MongoDB(t, "teams_user_sync_run")
+	ctx := context.Background()
+
+	_, err := db.Collection("hr").InsertOne(ctx, bson.M{"accountName": "alice", "siteID": "site-a"})
+	require.NoError(t, err)
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	t.Cleanup(tokenSrv.Close)
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"value":[{"id":"id-alice","userPrincipalName":"Alice@corp.example"}]}`))
+	}))
+	t.Cleanup(graphSrv.Close)
+
 	uri := testutil.MongoURI(t)
 	setRequiredEnv(t)
 	t.Setenv("MONGO_READ_URI", uri)
 	t.Setenv("MONGO_WRITE_URI", uri)
-	t.Setenv("HEALTH_ADDR", "127.0.0.1:18099")
-	t.Setenv("SYNC_CRON", "0 2 * * *")
-	t.Setenv("RUN_ON_START", "false")
+	t.Setenv("MONGO_READ_DB", db.Name())
+	t.Setenv("MONGO_WRITE_DB", db.Name())
+	t.Setenv("GRAPH_BASE_URL", graphSrv.URL)
+	t.Setenv("GRAPH_TOKEN_URL", tokenSrv.URL)
 
-	// Subscribing a guard channel to SIGTERM disables the default terminate
-	// action process-wide, so the kill below can never take down the test
-	// binary even if it lands before run() registers its own handler.
-	guard := make(chan os.Signal, 1)
-	signal.Notify(guard, syscall.SIGTERM)
-	defer signal.Stop(guard)
+	require.NoError(t, run())
 
-	done := make(chan error, 1)
-	go func() { done <- run() }()
-
-	// The health listener is the last dependency started before run blocks in
-	// shutdown.Wait, so a serving /healthz means wiring completed.
-	require.Eventually(t, func() bool {
-		resp, err := http.Get("http://127.0.0.1:18099/healthz")
-		if err != nil {
-			return false
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 30*time.Second, 100*time.Millisecond, "health listener never came up")
-
-	// Readiness must see both Mongo clients.
-	resp, err := http.Get("http://127.0.0.1:18099/readyz")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Re-send until run() observes it, closing the startup race between the
-	// health listener and shutdown.Wait's own signal registration.
-	deadline := time.After(30 * time.Second)
-	for {
-		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
-		select {
-		case err := <-done:
-			require.NoError(t, err)
-			return
-		case <-deadline:
-			t.Fatal("run did not shut down after SIGTERM")
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
+	var doc model.TeamsUser
+	require.NoError(t, db.Collection("teams_user").FindOne(ctx, bson.M{"_id": "id-alice"}).Decode(&doc))
+	assert.Equal(t, model.TeamsUser{
+		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a",
+	}, doc)
 }
 
-// TestRun_InvalidCronFailsAfterConnect exercises the startup error path where
-// both Mongo clients are already connected: run must return the registration
-// error (after disconnecting both clients) instead of hanging.
-func TestRun_InvalidCronFailsAfterConnect(t *testing.T) {
+// TestRun_GraphFailureReturnsError verifies a failed sync surfaces as a
+// non-nil error (exit 1) so the Kubernetes Job records the failure.
+func TestRun_GraphFailureReturnsError(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	t.Cleanup(tokenSrv.Close)
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(graphSrv.Close)
+
 	uri := testutil.MongoURI(t)
 	setRequiredEnv(t)
 	t.Setenv("MONGO_READ_URI", uri)
 	t.Setenv("MONGO_WRITE_URI", uri)
-	t.Setenv("SYNC_CRON", "not a cron")
+	t.Setenv("GRAPH_BASE_URL", graphSrv.URL)
+	t.Setenv("GRAPH_TOKEN_URL", tokenSrv.URL)
 
 	err := run()
-	require.ErrorContains(t, err, "register sync cron")
+	require.ErrorContains(t, err, "update users")
 }
