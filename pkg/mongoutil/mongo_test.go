@@ -90,6 +90,8 @@ func TestSanitizeURI(t *testing.T) {
 		{"username-only stripped", "mongodb://user@host:27017", "mongodb://host:27017"},
 		{"no credentials unchanged", "mongodb://host:27017", "mongodb://host:27017"},
 		{"srv scheme", "mongodb+srv://user:secret@cluster.example.net/db", "mongodb+srv://cluster.example.net/db"},
+		{"query options stripped", "mongodb://host:27017/db?authMechanismProperties=AWS_SESSION_TOKEN:tok&proxyPassword=hunter2", "mongodb://host:27017/db"},
+		{"fragment stripped", "mongodb://host:27017/db#frag", "mongodb://host:27017/db"},
 		{"unparseable", "mongodb://user:sec ret@%zz", "invalid-uri"},
 	}
 	for _, tc := range tests {

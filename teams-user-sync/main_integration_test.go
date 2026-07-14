@@ -69,3 +69,17 @@ func TestRun_GracefulLifecycle(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_InvalidCronFailsAfterConnect exercises the startup error path where
+// both Mongo clients are already connected: run must return the registration
+// error (after disconnecting both clients) instead of hanging.
+func TestRun_InvalidCronFailsAfterConnect(t *testing.T) {
+	uri := testutil.MongoURI(t)
+	setRequiredEnv(t)
+	t.Setenv("MONGO_READ_URI", uri)
+	t.Setenv("MONGO_WRITE_URI", uri)
+	t.Setenv("SYNC_CRON", "not a cron")
+
+	err := run()
+	require.ErrorContains(t, err, "register sync cron")
+}

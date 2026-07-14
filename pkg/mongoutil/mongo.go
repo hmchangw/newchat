@@ -35,15 +35,18 @@ func connect(ctx context.Context, opts *options.ClientOptions, uri string) (*mon
 	return client, nil
 }
 
-// sanitizeURI strips any userinfo (user:pass@) from a connection string so it
-// is safe to log — URIs may embed credentials instead of using the separate
-// username/password parameters.
+// sanitizeURI reduces a connection string to scheme://host/path so it is safe
+// to log: userinfo (user:pass@) may embed credentials, and query options can
+// carry secrets too (e.g. authMechanismProperties session tokens,
+// proxyPassword).
 func sanitizeURI(uri string) string {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return "invalid-uri"
 	}
 	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
 	return u.Redacted()
 }
 

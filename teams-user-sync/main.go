@@ -44,7 +44,15 @@ func run() error {
 	}
 	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWriteURI, cfg.MongoWriteUsername, cfg.MongoWritePassword)
 	if err != nil {
+		mongoutil.Disconnect(ctx, readClient)
 		return fmt.Errorf("connect mongo write client: %w", err)
+	}
+	// disconnect is shared by every startup error path below and by the
+	// graceful shutdown sequence, so an early return never leaks a client.
+	disconnect := func(ctx context.Context) error {
+		mongoutil.Disconnect(ctx, readClient)
+		mongoutil.Disconnect(ctx, writeClient)
+		return nil
 	}
 
 	store := newMongoStore(readClient.Database(cfg.MongoReadDB), writeClient.Database(cfg.MongoWriteDB))
@@ -61,6 +69,7 @@ func run() error {
 
 	c := cron.New(cron.WithLogger(cronSlogLogger{}))
 	if _, err := c.AddJob(cfg.SyncCron, job); err != nil {
+		_ = disconnect(ctx)
 		return fmt.Errorf("register sync cron %q: %w", cfg.SyncCron, err)
 	}
 	c.Start()
@@ -77,37 +86,39 @@ func run() error {
 		}()
 	}
 
+	stopCron := func(ctx context.Context) error {
+		stopCtx := c.Stop() // done when the in-flight scheduled job (if any) finishes
+		startupDone := make(chan struct{})
+		go func() { startupRun.Wait(); close(startupDone) }()
+		select {
+		case <-stopCtx.Done():
+		case <-ctx.Done():
+			return fmt.Errorf("stop cron: in-flight sync did not finish before timeout")
+		}
+		select {
+		case <-startupDone:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("stop cron: on-start sync did not finish before timeout")
+		}
+	}
+
 	stopHealth, err := health.Serve(cfg.HealthAddr, 5*time.Second,
 		health.Check{Name: "mongo-read", Probe: func(ctx context.Context) error { return readClient.Ping(ctx, nil) }},
 		health.Check{Name: "mongo-write", Probe: func(ctx context.Context) error { return writeClient.Ping(ctx, nil) }},
 	)
 	if err != nil {
+		// The scheduler (and a possible on-start run) is already live — stop
+		// and wait for it under the shutdown budget before disconnecting.
+		stopCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+		if stopErr := stopCron(stopCtx); stopErr != nil {
+			slog.Error("stop cron after health failure", "error", stopErr)
+		}
+		_ = disconnect(stopCtx)
 		return fmt.Errorf("start health listener: %w", err)
 	}
 
-	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error {
-			stopCtx := c.Stop() // done when the in-flight scheduled job (if any) finishes
-			startupDone := make(chan struct{})
-			go func() { startupRun.Wait(); close(startupDone) }()
-			select {
-			case <-stopCtx.Done():
-			case <-ctx.Done():
-				return fmt.Errorf("stop cron: in-flight sync did not finish before timeout")
-			}
-			select {
-			case <-startupDone:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("stop cron: on-start sync did not finish before timeout")
-			}
-		},
-		stopHealth,
-		func(ctx context.Context) error {
-			mongoutil.Disconnect(ctx, readClient)
-			mongoutil.Disconnect(ctx, writeClient)
-			return nil
-		},
-	)
+	shutdown.Wait(ctx, 25*time.Second, stopCron, stopHealth, disconnect)
 	return nil
 }
