@@ -2,7 +2,7 @@ package mongoutil
 
 import "go.mongodb.org/mongo-driver/v2/mongo/options"
 
-// queryOptions: WithSort/Limit/Skip only affect FindMany; FindOne uses projection only.
+// queryOptions: WithSort/Limit/Skip only affect FindMany.
 type queryOptions struct {
 	projection any
 	sort       any

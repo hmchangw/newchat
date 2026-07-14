@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
 
@@ -34,6 +35,28 @@ type getMessageByIDRequest struct {
 	MessageID string `json:"messageId"`
 }
 
+// quotedParentProjection decodes only the fields FetchQuotedParent copies into
+// the snapshot. It deliberately omits the full cassandra.Message — most notably
+// the marshal-only Reactions map (struct-keyed, no UnmarshalJSON) whose decoder
+// sonic rejects — so the reply decodes under sonic with no codec exception.
+//
+// MessageID is intentionally absent: a get-by-id reply's message_id is
+// tautologically the requested id (history queries WHERE message_id = ?), so the
+// caller's param is authoritative. RoomID is kept from the reply so the snapshot
+// records the message's actual room rather than trusting history-service's
+// cross-room guard.
+type quotedParentProjection struct {
+	RoomID                string                  `json:"roomId"`
+	Sender                cassandra.Participant   `json:"sender"`
+	CreatedAt             time.Time               `json:"createdAt"`
+	Msg                   string                  `json:"msg"`
+	Mentions              []cassandra.Participant `json:"mentions"`
+	DecodedAttachments    []cassandra.Attachment  `json:"attachments"`
+	ThreadParentID        string                  `json:"threadParentId"`
+	ThreadParentCreatedAt *time.Time              `json:"threadParentCreatedAt"`
+	TShow                 bool                    `json:"tshow"`
+}
+
 // FetchQuotedParent issues a NATS request to history-service's GetMessageByID
 // handler at subject.MsgGet(account, roomID, siteID). On a successful reply,
 // projects the returned cassandra.Message into a cassandra.QuotedParentMessage
@@ -44,7 +67,7 @@ func (f *historyParentFetcher) FetchQuotedParent(
 	ctx context.Context,
 	account, roomID, siteID, messageID string,
 ) (*cassandra.QuotedParentMessage, error) {
-	reqBytes, err := json.Marshal(getMessageByIDRequest{MessageID: messageID})
+	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
 		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
 	}
@@ -63,20 +86,22 @@ func (f *historyParentFetcher) FetchQuotedParent(
 		return nil, ee
 	}
 
-	var parent cassandra.Message
-	if err := json.Unmarshal(msg.Data, &parent); err != nil {
+	var parent quotedParentProjection
+	if err := sonic.Unmarshal(msg.Data, &parent); err != nil {
 		return nil, fmt.Errorf("unmarshal parent message: %w", err)
 	}
 
 	return &cassandra.QuotedParentMessage{
-		MessageID:             parent.MessageID,
-		RoomID:                parent.RoomID,
+		MessageID:             messageID,     // param — tautological for a by-id reply
+		RoomID:                parent.RoomID, // reply — the message's actual room
 		Sender:                parent.Sender,
 		CreatedAt:             parent.CreatedAt,
 		Msg:                   parent.Msg,
 		Mentions:              parent.Mentions,
-		MessageLink:           fmt.Sprintf("%s/%s/%s", f.chatBaseURL, parent.RoomID, parent.MessageID),
+		DecodedAttachments:    parent.DecodedAttachments,
+		MessageLink:           messageLink(f.chatBaseURL, parent.RoomID, messageID),
 		ThreadParentID:        parent.ThreadParentID,
 		ThreadParentCreatedAt: parent.ThreadParentCreatedAt,
+		TShow:                 parent.TShow,
 	}, nil
 }

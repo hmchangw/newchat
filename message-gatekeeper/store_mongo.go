@@ -9,6 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -19,6 +20,7 @@ type MongoStore struct {
 	rooms         *mongo.Collection
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
+	metaRec       roommetacache.Recorder
 }
 
 func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL time.Duration) *MongoStore {
@@ -27,6 +29,7 @@ func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL time.Du
 		rooms:         db.Collection("rooms"),
 		valkey:        valkey,
 		metaTTL:       metaTTL,
+		metaRec:       cachemetrics.For("roommeta", "l2"),
 	}
 }
 
@@ -43,5 +46,5 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 }
 
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-	return roommetacache.ReadThrough(ctx, s.valkey, s.rooms, roomID, s.metaTTL)
+	return roommetacache.ReadThrough(ctx, s.valkey, s.rooms, roomID, s.metaTTL, s.metaRec)
 }

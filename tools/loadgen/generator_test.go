@@ -343,8 +343,13 @@ func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
 	// cannot deliver 100k sub-millisecond ticks/sec, so it plateaus far below
 	// target. The batched pacer releases rate*interval events per coarse tick
 	// and must out-dispatch it by a wide margin. A relative comparison (same
-	// process, back to back) cancels host-speed and race-detector overhead, so
-	// the assertion holds under `-race` and on loaded CI.
+	// process, back to back) cancels host-speed and race-detector overhead.
+	//
+	// Both quantities are ceilings — the *most* each path can dispatch — so we
+	// measure the peak over a few short trials. A single 200ms sample is one
+	// GC pause or scheduler stall away from under-counting, which on a loaded
+	// CI runner can briefly compress the ratio below the margin; taking the
+	// best-of-N cancels those transient dips without changing what is asserted.
 	runAt := func(maxInFlight int) int {
 		p, _ := BuiltinPreset("small")
 		f := BuildFixtures(&p, 42, "site-local")
@@ -361,9 +366,19 @@ func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
 		require.NoError(t, g.Run(ctx))
 		return rp.count()
 	}
+	// peakOf returns the highest dispatch count over trials short runs.
+	peakOf := func(maxInFlight, trials int) int {
+		best := 0
+		for i := 0; i < trials; i++ {
+			if c := runAt(maxInFlight); c > best {
+				best = c
+			}
+		}
+		return best
+	}
 
-	serial := runAt(0)   // legacy one-per-tick ceiling
-	paced := runAt(5000) // batched pacer
+	serial := peakOf(0, 3)   // legacy one-per-tick ceiling
+	paced := peakOf(5000, 3) // batched pacer
 	require.Positive(t, serial)
 	assert.Greater(t, float64(paced), float64(serial)*1.3,
 		"batched pacer (%d) should out-dispatch the serial ticker (%d) at 100k rps", paced, serial)

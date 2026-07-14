@@ -1,51 +1,18 @@
 name: room-service
 
 services:
-  vault:
-    image: hashicorp/vault:1.18
-    cap_add:
-      - IPC_LOCK
-    environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=dev-only-token
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
-    networks:
-      - chat-local
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8200/v1/sys/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  vault-bootstrap:
-    image: hashicorp/vault:1.18
-    depends_on:
-      vault:
-        condition: service_healthy
-    environment:
-      - VAULT_ADDR=http://vault:8200
-      - VAULT_TOKEN=dev-only-token
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        vault secrets enable -path=transit transit || true
-        vault write -f transit/keys/chat-kek
-    networks:
-      - chat-local
-
   room-service:
     build:
       context: ../..
       dockerfile: room-service/deploy/Dockerfile
     pull_policy: build
-    depends_on:
-      vault-bootstrap:
-        condition: service_completed_successfully
     environment:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      # Dev-only pprof profiling on the health port (off by default). Flip on
+      # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - SITE_URL=http://localhost:3000
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
@@ -54,13 +21,24 @@ services:
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=24h
-      - CASSANDRA_HOSTS=cassandra
-      - CASSANDRA_KEYSPACE=chat
+      # Microsoft Teams integration. The deep-link RPCs (calls/room, calls/user)
+      # only need TEAMS_EMAIL_DOMAIN; the meetings RPC needs the Azure app creds
+      # below and reports not-configured until they are set (live test only).
+      - TEAMS_EMAIL_DOMAIN=dev.local
+      - TEAMS_TENANT_ID=
+      - TEAMS_CLIENT_ID=
+      - TEAMS_CLIENT_SECRET=
+      - ROOM_MEMBERS_LIMIT=500
+      - ROOM_MEMBERS_CALL_LIMIT=20
       - BOOTSTRAP_STREAMS=true
       - ATREST_ENABLED=true
       - VAULT_ADDR=http://vault:8200
       - VAULT_TOKEN=dev-only-token
       - ATREST_VAULT_TRANSIT_KEY=chat-kek
+      # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
+      # request/reply/consumed body capture (pair with the X-Debug-Payload header).
+      - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
+      - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

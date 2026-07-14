@@ -15,7 +15,7 @@ All subjects are dot-delimited and organized into four namespaces:
 | `chat.user.{account}.*` | Per-user | Events, streams, and requests scoped to a single user |
 | `chat.room.{roomID}.*` | Per-room | Events and streams scoped to a single room |
 | `fanout.{siteID}.*` | Backend | Internal message fan-out (JetStream only) |
-| `outbox.{siteID}.*` | Backend | Cross-site federation (JetStream only) |
+| `chat.inbox.{siteID}.*` | Backend | Cross-site federation — direct inbox publish (JetStream only) |
 
 ## Client Subscription Model
 
@@ -186,14 +186,6 @@ Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on
 
 Stream wildcard: `chat.user.*.request.room.*.{siteID}.member.>`
 
-### OUTBOX Stream (`OUTBOX_{siteID}`)
-
-| Subject Pattern | Publisher | Consumer | Purpose |
-|-----------------|-----------|----------|---------|
-| `outbox.{siteID}.to.{destSiteID}.{eventType}` | room-worker, broadcast-worker | Remote site's INBOX | Cross-site outbound events |
-
-Stream wildcard: `outbox.{siteID}.>`
-
 ### PUSH_NOTIFICATION Stream (`PUSH_NOTIFICATION_{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
@@ -206,7 +198,21 @@ This is a server-only, backend stream. Clients never interact with it.
 
 ### INBOX Stream (`INBOX_{siteID}`)
 
-Sourced from remote sites' OUTBOX streams. Processed by `inbox-worker`.
+Cross-site federation events are published **directly** into a site's INBOX —
+there is no OUTBOX stream and no sourcing/SubjectTransform. A service at the
+origin site issues a JetStream publish to the destination site's `external`
+lane, routed across the NATS supercluster to the destination's INBOX.
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.inbox.{siteID}.external.{eventType}` | room-worker, room-service, message-worker, user-service (at the **origin** site, targeting this site) | inbox-worker (applies to DB); search-sync-worker (member events) | Cross-site (remote-origin) federation events |
+| `chat.inbox.{siteID}.internal.{eventType}` | room-worker (same site) | search-sync-worker (member events) | Same-site search-indexing feed; inbox-worker does NOT consume it |
+
+Stream wildcards: `chat.inbox.{siteID}.external.>` and `chat.inbox.{siteID}.internal.>`
+
+`inbox-worker` filters the `external.>` lane only — the structural guard that
+keeps it from re-applying same-site events the originating service already wrote
+to the local DB. `search-sync-worker` consumes member events on both lanes.
 
 ## Auth Permissions (NATS JWT)
 
@@ -242,7 +248,8 @@ All client publishes — message sends, member invites, room CRUD requests, typi
 | `RoomsCreate(account)` | `chat.user.{account}.request.rooms.create` |
 | `RoomsList(account)` | `chat.user.{account}.request.rooms.list` |
 | `RoomsGet(account, roomID)` | `chat.user.{account}.request.rooms.get.{roomID}` |
-| `Outbox(siteID, destSiteID, eventType)` | `outbox.{siteID}.to.{destSiteID}.{eventType}` |
+| `InboxExternal(siteID, eventType)` | `chat.inbox.{siteID}.external.{eventType}` |
+| `InboxInternal(siteID, eventType)` | `chat.inbox.{siteID}.internal.{eventType}` |
 | `Fanout(siteID, roomID)` | `fanout.{siteID}.{roomID}` |
 
 ### New Builders (to be added)
@@ -265,7 +272,7 @@ All client publishes — message sends, member invites, room CRUD requests, typi
 | `RoomsListWildcard()` | `chat.user.*.request.rooms.list` | room-service |
 | `RoomsGetWildcard()` | `chat.user.*.request.rooms.get.*` | room-service |
 | `FanoutWildcard(siteID)` | `fanout.{siteID}.>` | FANOUT stream |
-| `OutboxWildcard(siteID)` | `outbox.{siteID}.>` | OUTBOX stream |
+| `InboxExternalAll(siteID)` | `chat.inbox.{siteID}.external.>` | INBOX stream — inbox-worker filter |
 
 ## Visual: Complete Message Flow
 

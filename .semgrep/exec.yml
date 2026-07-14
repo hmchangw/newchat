@@ -1,0 +1,16 @@
+rules:
+  - id: dangerous-exec-command
+    languages: [go]
+    severity: WARNING
+    message: >
+      Subprocess launched with a variable first argument (binary path) or
+      variable argv element. Mirrors gosec G204 (CWE-78 / CWE-95). If the
+      inputs are demonstrably untainted, suppress with both `// #nosec G204`
+      and `// nosemgrep` (rule-ID-agnostic, inline on the call line or on
+      the line directly above), with a short justification.
+    patterns:
+      - pattern-either:
+          - pattern: exec.Command($BIN, ...)
+          - pattern: exec.CommandContext($CTX, $BIN, ...)
+      - pattern-not: exec.Command("...", ...)
+      - pattern-not: exec.CommandContext($CTX, "...", ...)

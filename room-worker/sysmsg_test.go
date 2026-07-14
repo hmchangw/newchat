@@ -13,27 +13,86 @@ func TestFormatAddedSingle(t *testing.T) {
 		&model.User{EngName: "Alice", ChineseName: "愛麗絲"},
 		&model.User{EngName: "Bob", ChineseName: "鮑勃"},
 	)
-	assert.Equal(t, `"Alice 愛麗絲" added "Bob 鮑勃" to the channel`, got)
+	assert.Equal(t, `"Alice 愛麗絲" added "Bob 鮑勃" to the chatroom`, got)
 }
 
-func TestFormatAddedMulti(t *testing.T) {
-	got := formatAddedMulti(&model.User{EngName: "Alice", ChineseName: "愛麗絲"})
-	assert.Equal(t, `"Alice 愛麗絲" added members to the channel`, got)
+func TestFormatAddedCounts(t *testing.T) {
+	alice := &model.User{EngName: "Alice", ChineseName: "愛麗絲"}
+	cases := []struct {
+		name         string
+		people, orgs int
+		want         string
+	}{
+		{"people plural", 3, 0, `"Alice 愛麗絲" added 3 people to the chatroom`},
+		{"people singular", 1, 0, `"Alice 愛麗絲" added 1 person to the chatroom`},
+		{"orgs plural", 0, 2, `"Alice 愛麗絲" added 2 organizations to the chatroom`},
+		{"orgs singular", 0, 1, `"Alice 愛麗絲" added 1 organization to the chatroom`},
+		{"both plural", 2, 3, `"Alice 愛麗絲" added 2 people and 3 organizations to the chatroom`},
+		{"both singular", 1, 1, `"Alice 愛麗絲" added 1 person and 1 organization to the chatroom`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, formatAddedCounts(alice, tc.people, tc.orgs))
+		})
+	}
+}
+
+func TestAddedContent(t *testing.T) {
+	alice := &model.User{EngName: "Alice", ChineseName: "愛"}
+	bob := &model.User{EngName: "Bob", ChineseName: "鮑"}
+	lookup := func(a string) *model.User {
+		if a == "bob" {
+			return bob
+		}
+		return nil
+	}
+	assert.Equal(t, `"Alice 愛" added "Bob 鮑" to the chatroom`,
+		addedContent(alice, []string{"bob"}, nil, lookup))
+	assert.Equal(t, `"Alice 愛" added 1 person to the chatroom`,
+		addedContent(alice, []string{"x"}, nil, lookup))
+	assert.Equal(t, `"Alice 愛" added 1 organization to the chatroom`,
+		addedContent(alice, nil, []string{"o1"}, lookup))
+	assert.Equal(t, `"Alice 愛" added 1 person and 1 organization to the chatroom`,
+		addedContent(alice, []string{"bob"}, []string{"o1"}, lookup))
+	assert.Equal(t, `"Alice 愛" added 2 people and 1 organization to the chatroom`,
+		addedContent(alice, []string{"bob", "carol"}, []string{"o1"}, lookup))
+}
+
+func TestWithoutAccount(t *testing.T) {
+	cases := []struct {
+		name     string
+		accounts []string
+		account  string
+		want     []string
+	}{
+		{"present", []string{"alice", "bob", "carol"}, "alice", []string{"bob", "carol"}},
+		{"absent", []string{"bob", "carol"}, "alice", []string{"bob", "carol"}},
+		{"only element", []string{"alice"}, "alice", []string{}},
+		{"nil input", nil, "alice", []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, withoutAccount(tc.accounts, tc.account))
+		})
+	}
 }
 
 func TestFormatRemovedUser(t *testing.T) {
-	got := formatRemovedUser(&model.User{EngName: "Bob", ChineseName: "鮑勃"})
-	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel`, got)
+	got := formatRemovedUser(
+		&model.User{EngName: "Alice", ChineseName: "愛"},
+		&model.User{EngName: "Bob", ChineseName: "鮑勃"},
+	)
+	assert.Equal(t, `"Alice 愛" removed "Bob 鮑勃" from the chatroom`, got)
 }
 
 func TestFormatRemovedOrg(t *testing.T) {
-	got := formatRemovedOrg("Engineering", "", "orgX")
-	assert.Equal(t, `"Engineering" has been removed from the channel`, got)
+	got := formatRemovedOrg(&model.User{EngName: "Alice", ChineseName: "愛"}, "Engineering", "", "orgX")
+	assert.Equal(t, `"Alice 愛" removed "Engineering" from the chatroom`, got)
 }
 
 func TestFormatLeft(t *testing.T) {
 	got := formatLeft(&model.User{EngName: "Bob", ChineseName: "鮑勃"})
-	assert.Equal(t, `"Bob 鮑勃" left the channel`, got)
+	assert.Equal(t, `"Bob 鮑勃" left the chatroom`, got)
 }
 
 func TestDisplayName(t *testing.T) {
@@ -87,7 +146,7 @@ func TestDisplayName(t *testing.T) {
 
 func TestFormatLeft_FallsBackToAccount(t *testing.T) {
 	got := formatLeft(&model.User{Account: "alice"})
-	assert.Equal(t, `"alice" left the channel`, got)
+	assert.Equal(t, `"alice" left the chatroom`, got)
 }
 
 func TestFormatAddedSingle_SingleNameSide(t *testing.T) {
@@ -95,7 +154,7 @@ func TestFormatAddedSingle_SingleNameSide(t *testing.T) {
 		&model.User{EngName: "Alice"},
 		&model.User{ChineseName: "鮑勃"},
 	)
-	assert.Equal(t, `"Alice" added "鮑勃" to the channel`, got)
+	assert.Equal(t, `"Alice" added "鮑勃" to the chatroom`, got)
 }
 
 func TestDisplayName_DelegatesToCombineWithFallback(t *testing.T) {
@@ -113,7 +172,8 @@ func TestDisplayOrg(t *testing.T) {
 	assert.Equal(t, "orgX", displayOrg("", "", "orgX"))
 }
 
-func TestFormatRemovedOrg_NewSignature(t *testing.T) {
-	assert.Equal(t, `"Eng 工程部" has been removed from the channel`, formatRemovedOrg("Eng", "工程部", "orgX"))
-	assert.Equal(t, `"orgX" has been removed from the channel`, formatRemovedOrg("", "", "orgX"))
+func TestFormatRemovedOrg_Fallbacks(t *testing.T) {
+	alice := &model.User{EngName: "Alice", ChineseName: "愛"}
+	assert.Equal(t, `"Alice 愛" removed "Eng 工程部" from the chatroom`, formatRemovedOrg(alice, "Eng", "工程部", "orgX"))
+	assert.Equal(t, `"Alice 愛" removed "orgX" from the chatroom`, formatRemovedOrg(alice, "", "", "orgX"))
 }

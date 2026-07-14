@@ -13,6 +13,7 @@ type ReadReceiptCollector struct {
 	samples    []time.Duration
 	errors     map[errClass]int
 	saturation int
+	underrun   int
 }
 
 // NewReadReceiptCollector returns an empty collector.
@@ -48,6 +49,17 @@ func (c *ReadReceiptCollector) RecordSaturation() {
 	c.saturation++
 }
 
+// RecordUnderrun adds n events that the pacer could not release on schedule
+// (the load box fell behind the target cadence). n<=0 ticks are no-ops.
+func (c *ReadReceiptCollector) RecordUnderrun(n int) {
+	if n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.underrun += n
+}
+
 // Samples returns a defensive copy of the latency tape.
 func (c *ReadReceiptCollector) Samples() []time.Duration {
 	c.mu.Lock()
@@ -73,4 +85,11 @@ func (c *ReadReceiptCollector) Saturation() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.saturation
+}
+
+// UnderrunCount returns the total emit-underrun events.
+func (c *ReadReceiptCollector) UnderrunCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.underrun
 }

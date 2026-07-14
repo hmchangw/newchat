@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="wsp-ns">
+    <mxGraphModel dx="2000" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Namespace: wsp (nextgen)" style="text;html=1;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#263238;" vertex="1" parent="1">
+          <mxGeometry x="100" y="20" width="1800" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Bot platform + portal + admin topology after cutover" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontColor=#546e7a;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="100" y="55" width="1800" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="url_bot" value="https://botplatform-&lt;siteId&gt;.wsp.&lt;domain&gt;" style="text;html=1;align=center;fontSize=10;fontFamily=Courier New;fontColor=#37474f;" vertex="1" parent="1">
+          <mxGeometry x="200" y="100" width="400" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="url_portal" value="https://portal.&lt;domain&gt;/v1/login" style="text;html=1;align=center;fontSize=10;fontFamily=Courier New;fontColor=#37474f;" vertex="1" parent="1">
+          <mxGeometry x="780" y="100" width="400" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="url_admin" value="https://admin-&lt;siteId&gt;.wsp.&lt;domain&gt;/login" style="text;html=1;align=center;fontSize=10;fontFamily=Courier New;fontColor=#37474f;" vertex="1" parent="1">
+          <mxGeometry x="1400" y="100" width="400" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="botsdk" value="Bot SDK" style="shape=mxgraph.kubernetes.icon;prIcon=replica_set;html=1;fillColor=#ad1457;strokeColor=#ad1457;fontColor=#ad1457;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="380" y="135" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="user_actor" value="" style="shape=umlActor;html=1;fontColor=#1565c0;strokeColor=#1565c0;fillColor=#1565c0;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="960" y="135" width="36" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="admin_actor" value="Admin" style="shape=umlActor;html=1;fontColor=#ad1457;strokeColor=#ad1457;fillColor=#ad1457;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1580" y="135" width="36" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="twsp_gw" value="twsp-gateway&#xa;(Istio ingress)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3949ab;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="280" y="240" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="portal_svc" value="portal-service&#xa;(global)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="840" y="240" width="280" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="admin_portal" value="Admin Portal Web&#xa;(admin UI for managing bots)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#ad1457;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="240" width="280" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="admin_svc" value="Admin Service&#xa;https://admin-api-&lt;siteId&gt;.wsp.&lt;domain&gt;&#xa;/api/v1/bot/&lt;id&gt;/suspend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#ad1457;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="430" width="280" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="botplatform" value="Nextgen Botplatform&#xa;&#xa;POST /v1/login          (bot SDK — returns legacy {userId, authToken, me})&#xa;POST /api/v1/login      (alias for legacy wire path)&#xa;POST /v1/auth/validate  (gateway + auth-service)&#xa;&#xa;supports v1 (legacy compat) + v2 API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=11;fontStyle=1;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="320" y="430" width="640" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bp_db" value="users +&#xa;sessions&#xa;(MongoDB)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="80" y="450" width="160" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nats_gw" value="NATS gateway&#xa;(JetStream + req/reply broker)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="420" y="660" width="380" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bot_room" value="Bot Room Service" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="120" y="800" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="room_db" value="MongoDB&#xa;(rooms, subs)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#eceff1;strokeColor=#37474f;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="160" y="910" width="140" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bot_msg" value="Bot Msg Handler" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="500" y="800" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="cass" value="Cassandra&#xa;(messages)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#eceff1;strokeColor=#37474f;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="540" y="910" width="140" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="jetstream" value="Bot Message Canonical&#xa;JetStream" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="860" y="800" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="search_sync" value="Search Sync Worker" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="780" y="940" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="es" value="ES" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#eceff1;strokeColor=#37474f;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="830" y="1050" width="120" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="broadcast" value="Broadcast Worker" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="940" width="220" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="auth_svc" value="auth-service (existing, extended)&#xa;&#xa;POST /auth&#xa;  ssoToken      → existing OIDC path (UNCHANGED)&#xa;  authToken     → NEW: validate via botplatform&#xa;  scope from roles: admin &gt; bot &gt; user" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3949ab;fontSize=10;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="600" width="500" height="140" as="geometry" />
+        </mxCell>
+
+        <mxCell id="caption" value="Login is direct Mongo (botplatform reads users + writes sessions). Bot operations (room, message) flow through NATS req/reply via NATS gateway — out of scope for this PR.&#xa;Portal cross-site forwarding uses the public botplatform URL of the user's home site (no internal hostnames required)." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;fontSize=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="300" y="1180" width="1400" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_bot_gw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ad1457;" edge="1" parent="1" source="botsdk" target="twsp_gw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_user_portal" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1565c0;" edge="1" parent="1" source="user_actor" target="portal_svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_admin_admin" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ad1457;" edge="1" parent="1" source="admin_actor" target="admin_portal">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_admin_portal" value="login via&#xa;portal /v1/login" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#ad1457;dashed=1;fontSize=9;" edge="1" parent="1" source="admin_portal" target="portal_svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_admin_svc" value="bot ops&#xa;(suspend, rotate)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ad1457;fontSize=9;" edge="1" parent="1" source="admin_portal" target="admin_svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_gw_bp" value="route&#xa;/api/v1, /api/v2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;fontSize=9;" edge="1" parent="1" source="twsp_gw" target="botplatform">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_portal_bp" value="forwards login&#xa;(in-cluster + east-west)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;strokeColor=#1565c0;dashed=1;fontSize=9;" edge="1" parent="1" source="portal_svc" target="botplatform">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_bp_db" value="users find&#xa;sessions read/write" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1565c0;fontSize=9;" edge="1" parent="1" source="botplatform" target="bp_db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_bp_nats" value="nats req/reply" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;fontSize=9;" edge="1" parent="1" source="botplatform" target="nats_gw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_nats_room" value="req/reply" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;fontSize=9;" edge="1" parent="1" source="nats_gw" target="bot_room">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_room_db" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;" edge="1" parent="1" source="bot_room" target="room_db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_nats_msg" value="req/reply" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;fontSize=9;" edge="1" parent="1" source="nats_gw" target="bot_msg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_msg_cass" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;" edge="1" parent="1" source="bot_msg" target="cass">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_msg_js" value="canonical event" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#ef6c00;fontSize=9;" edge="1" parent="1" source="bot_msg" target="jetstream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_js_ss" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;" edge="1" parent="1" source="jetstream" target="search_sync">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ss_es" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;" edge="1" parent="1" source="search_sync" target="es">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_js_bc" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;" edge="1" parent="1" source="jetstream" target="broadcast">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_bp_auth" value="POST /v1/auth/validate&#xa;(local-site only)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#3949ab;dashed=1;fontSize=9;" edge="1" parent="1" source="botplatform" target="auth_svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

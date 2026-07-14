@@ -12,32 +12,28 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
-	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
-
-// PublishFunc publishes data to a subject (core NATS).
-type PublishFunc func(ctx context.Context, subj string, data []byte) error
 
 // Handler holds presence dependencies.
 type Handler struct {
 	store    PresenceStore
 	userDir  UserDirectory
 	peer     PeerPresenceClient
-	publish  PublishFunc
+	publish  presencestore.PublishFunc
 	siteID   string
 	batchMax int
 	now      func() time.Time
 }
 
 // NewHandler builds a Handler.
-func NewHandler(store PresenceStore, userDir UserDirectory, peer PeerPresenceClient, publish PublishFunc, siteID string, batchMax int) *Handler {
+func NewHandler(store PresenceStore, userDir UserDirectory, peer PeerPresenceClient, publish presencestore.PublishFunc, siteID string, batchMax int) *Handler {
 	return &Handler{store: store, userDir: userDir, peer: peer, publish: publish, siteID: siteID, batchMax: batchMax, now: time.Now}
 }
 
 // publishState publishes a user's effective status to its state subject.
 func (h *Handler) publishState(ctx context.Context, account string, status model.PresenceStatus) {
-	publishState(ctx, h.publish, h.siteID, account, status, h.now())
+	presencestore.PublishState(ctx, h.publish, h.siteID, account, status, h.now())
 }
 
 // Hello handles a fire-and-forget connection-init message. It registers the
@@ -240,20 +236,4 @@ func (h *Handler) QueryBatch(c *natsrouter.Context, req model.PresenceQuery) (*m
 		})
 	}
 	return &model.PresenceQueryResponse{States: states, Timestamp: now}, nil
-}
-
-// publishState marshals + publishes a PresenceState to the account's state
-// subject. Package-level so the sweeper can reuse it. Failures are logged here
-// (never silent) since publishing is best-effort fan-out with no caller to
-// surface the error to.
-func publishState(ctx context.Context, publish PublishFunc, siteID, account string, status model.PresenceStatus, now time.Time) {
-	st := model.PresenceState{Account: account, SiteID: siteID, Status: status, Timestamp: now.UTC().UnixMilli()}
-	data, err := natsutil.MarshalResponse(st)
-	if err != nil {
-		slog.Error("publish presence state failed: marshal", "error", err, "account", account)
-		return
-	}
-	if err := publish(ctx, subject.PresenceState(account), data); err != nil {
-		slog.Error("publish presence state failed", "error", err, "account", account)
-	}
 }

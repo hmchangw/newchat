@@ -15,12 +15,18 @@ export interface FetchThreadMessagesResponse {
   messages: Message[]
   nextCursor?: string
   hasNext: boolean
+  /**
+   * UTC milliseconds since Unix epoch. Present only when every thread
+   * subscriber has read — mirrors LoadHistoryResponse.minUserLastSeenAt.
+   */
+  minUserLastSeenAt?: number
 }
 
 interface WireResponse {
   messages?: HistoryMessage[]
   nextCursor?: string
   hasNext?: boolean
+  minUserLastSeenAt?: number
 }
 
 /**
@@ -43,5 +49,6 @@ export async function fetchThreadMessages(
     messages: normalizeHistoricalMessages(asc),
     nextCursor: resp.nextCursor,
     hasNext: resp.hasNext ?? false,
+    minUserLastSeenAt: resp.minUserLastSeenAt,
   }
 }

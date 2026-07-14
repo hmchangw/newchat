@@ -154,7 +154,7 @@ func TestCapacityMembersGenerator_StopsAtTargetSize(t *testing.T) {
 
 	pubCh := make(chan struct{}, 100)
 	pub.afterPublish = func(call recordedPublish) {
-		collector.RecordBroadcast(call.roomID, call.accounts, time.Now())
+		collector.RecordMemberEvent(call.roomID, call.accounts, time.Now())
 		pubCh <- struct{}{}
 	}
 

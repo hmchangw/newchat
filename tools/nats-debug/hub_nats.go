@@ -9,7 +9,26 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
+
+// debugHeader builds the NATS header carrying the optional X-Debug intent for an
+// outbound message. It returns nil when nothing is requested, so the message is
+// byte-identical to a plain publish/request. Header names are reused from
+// pkg/natsutil to stay bound to the same wire contract as the services.
+func debugHeader(dbg DebugHeaders) nats.Header {
+	h := nats.Header{}
+	if dbg.Level != "" {
+		h.Set(natsutil.DebugHeader, dbg.Level)
+	}
+	if dbg.Payload {
+		h.Set(natsutil.DebugPayloadHeader, "1")
+	}
+	if len(h) == 0 {
+		return nil
+	}
+	return h
+}
 
 type natsSub struct {
 	id      string
@@ -154,14 +173,15 @@ func (h *natsHub) Unsubscribe(id string) error {
 	return nil
 }
 
-func (h *natsHub) Publish(subject, payload string) error {
+func (h *natsHub) Publish(subject, payload string, dbg DebugHeaders) error {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	if h.sourceConn == nil {
 		return fmt.Errorf("not connected to source NATS")
 	}
-	if err := h.sourceConn.Publish(subject, []byte(payload)); err != nil {
+	msg := &nats.Msg{Subject: subject, Data: []byte(payload), Header: debugHeader(dbg)}
+	if err := h.sourceConn.PublishMsg(msg); err != nil {
 		return fmt.Errorf("publish to %s: %w", subject, err)
 	}
 	slog.Info("published", "subject", subject)
@@ -238,7 +258,7 @@ func (h *natsHub) DisconnectRequest() {
 	slog.Info("disconnected from request NATS")
 }
 
-func (h *natsHub) Request(subject, payload string, timeoutMs int) (string, error) {
+func (h *natsHub) Request(subject, payload string, timeoutMs int, dbg DebugHeaders) (string, error) {
 	h.mu.RLock()
 	conn := h.requestConn
 	h.mu.RUnlock()
@@ -247,7 +267,8 @@ func (h *natsHub) Request(subject, payload string, timeoutMs int) (string, error
 		return "", fmt.Errorf("not connected to request NATS")
 	}
 
-	msg, err := conn.Request(subject, []byte(payload), time.Duration(timeoutMs)*time.Millisecond)
+	req := &nats.Msg{Subject: subject, Data: []byte(payload), Header: debugHeader(dbg)}
+	msg, err := conn.RequestMsg(req, time.Duration(timeoutMs)*time.Millisecond)
 	if err != nil {
 		return "", err
 	}

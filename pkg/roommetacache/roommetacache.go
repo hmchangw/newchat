@@ -17,7 +17,6 @@ package roommetacache
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
@@ -26,8 +25,13 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 )
+
+// fetchTimeout bounds the detached shared load so a hung backend cannot leak
+// the singleflight goroutine or pin the in-flight key. See the design spec.
+const fetchTimeout = 10 * time.Second
 
 // Meta is the cached projection of a room document. Both consumers
 // (gatekeeper and broadcast-worker) use these four fields and nothing
@@ -52,20 +56,22 @@ type Cache struct {
 	loader Loader
 	sf     singleflight.Group
 
-	hits     atomic.Uint64
-	misses   atomic.Uint64
-	loadErrs atomic.Uint64
+	metrics Recorder
 }
 
-// Stats is a snapshot of the cache's hit/miss counters.
-type Stats struct {
-	Hits, Misses, LoadErrors uint64
-	Size                     int
+// Option configures a Cache at construction.
+type Option func(*Cache)
+
+// WithMetrics overrides the L1 hit/miss/error recorder. Defaults to the
+// package-default cachemetrics recorder tagged cache="roommeta",tier="l1"
+// (distinct from the tier="l2" series ReadThrough records).
+func WithMetrics(r Recorder) Option {
+	return func(c *Cache) { c.metrics = r }
 }
 
 // New constructs a Cache with the given capacity, TTL, and loader.
 // size and ttl must both be positive; loader must be non-nil.
-func New(size int, ttl time.Duration, loader Loader) (*Cache, error) {
+func New(size int, ttl time.Duration, loader Loader, opts ...Option) (*Cache, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("roommetacache: size must be positive, got %d", size)
 	}
@@ -75,10 +81,15 @@ func New(size int, ttl time.Duration, loader Loader) (*Cache, error) {
 	if loader == nil {
 		return nil, fmt.Errorf("roommetacache: loader must not be nil")
 	}
-	return &Cache{
-		lru:    lru.NewLRU[string, Meta](size, nil, ttl),
-		loader: loader,
-	}, nil
+	c := &Cache{
+		lru:     lru.NewLRU[string, Meta](size, nil, ttl),
+		loader:  loader,
+		metrics: cachemetrics.For("roommeta", "l1"),
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
 }
 
 // Get returns the cached Meta for roomID. On miss it calls the configured
@@ -86,38 +97,35 @@ func New(size int, ttl time.Duration, loader Loader) (*Cache, error) {
 // are returned to the caller and not cached.
 func (c *Cache) Get(ctx context.Context, roomID string) (Meta, error) {
 	if v, ok := c.lru.Get(roomID); ok {
-		c.hits.Add(1)
+		c.metrics.Hit(ctx)
 		return v, nil
 	}
-	c.misses.Add(1)
 
-	v, err, _ := c.sf.Do(roomID, func() (interface{}, error) {
-		// Recheck the cache inside singleflight in case a sibling caller
-		// populated it while we were waiting for the lock.
+	resCh := c.sf.DoChan(roomID, func() (interface{}, error) {
+		// Recheck inside singleflight in case a sibling populated the entry while we waited.
 		if cached, ok := c.lru.Get(roomID); ok {
 			return cached, nil
 		}
-		loaded, err := c.loader(ctx, roomID)
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
+		defer cancel()
+		loaded, err := c.loader(fetchCtx, roomID)
 		if err != nil {
 			return Meta{}, err
 		}
 		c.lru.Add(roomID, loaded)
 		return loaded, nil
 	})
-	if err != nil {
-		c.loadErrs.Add(1)
-		return Meta{}, fmt.Errorf("get room meta for %q: %w", roomID, err)
-	}
-	return v.(Meta), nil
-}
-
-// Stats returns a snapshot of the cache's counters.
-func (c *Cache) Stats() Stats {
-	return Stats{
-		Hits:       c.hits.Load(),
-		Misses:     c.misses.Load(),
-		LoadErrors: c.loadErrs.Load(),
-		Size:       c.lru.Len(),
+	select {
+	case res := <-resCh:
+		if res.Err != nil {
+			c.metrics.Error(ctx)
+			return Meta{}, fmt.Errorf("get room meta for %q: %w", roomID, res.Err)
+		}
+		c.metrics.Miss(ctx)
+		return res.Val.(Meta), nil
+	case <-ctx.Done():
+		c.metrics.Error(ctx)
+		return Meta{}, ctx.Err()
 	}
 }
 

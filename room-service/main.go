@@ -14,9 +14,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
-	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/otelutil"
@@ -37,13 +38,23 @@ type config struct {
 	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
 	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
 	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	CassandraHosts           string          `env:"CASSANDRA_HOSTS,required"`
-	CassandraKeyspace        string          `env:"CASSANDRA_KEYSPACE"        envDefault:"chat"`
-	CassandraUsername        string          `env:"CASSANDRA_USERNAME"        envDefault:""`
-	CassandraPassword        string          `env:"CASSANDRA_PASSWORD"        envDefault:""`
-	CassandraNumConns        int             `env:"CASSANDRA_NUM_CONNS"       envDefault:"8"`
+	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	// Microsoft Teams integration. Teams* credentials are required only for the
+	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
+	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
+	// returns errTeamsNotConfigured; the deep-link RPCs still work.
+	TeamsTenantID     string `env:"TEAMS_TENANT_ID"          envDefault:""`
+	TeamsClientID     string `env:"TEAMS_CLIENT_ID"          envDefault:""`
+	TeamsClientSecret string `env:"TEAMS_CLIENT_SECRET"      envDefault:""`
+	TeamsEmailDomain  string `env:"TEAMS_EMAIL_DOMAIN"       envDefault:"dev.local"`
+	// TeamsTLSInsecure disables Graph TLS verification (dev/on-prem self-signed
+	// certs only). Never enable in production.
+	TeamsTLSInsecure     bool `env:"TEAMS_TLS_INSECURE" envDefault:"false"`
+	RoomMembersLimit     int  `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
+	RoomMembersCallLimit int  `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest   atrest.Config      // env vars already prefixed ATREST_*
@@ -124,18 +135,28 @@ func main() {
 	}
 	ensureCancel()
 
-	cassSession, err := cassutil.Connect(cassutil.Config{
-		Hosts:    cfg.CassandraHosts,
-		Keyspace: cfg.CassandraKeyspace,
-		Username: cfg.CassandraUsername,
-		Password: cfg.CassandraPassword,
-		NumConns: cfg.CassandraNumConns,
-	})
-	if err != nil {
-		slog.Error("cassandra connect failed", "error", err)
-		os.Exit(1)
+	// Read receipts resolve the target message through history-service (which
+	// owns message history) over NATS, so room-service has no direct Cassandra
+	// dependency. A history-service outage degrades only read receipts
+	// (errcode.Unavailable); core room/membership/subscription operations are
+	// all MongoDB-backed and unaffected.
+	msgReader := newHistoryMessageReader(nc, cfg.SiteID)
+
+	// Graph client backs the meetings RPC. Constructed only when the Azure app
+	// credentials are present; otherwise the meetings RPC reports not-configured
+	// while the deep-link RPCs keep working.
+	var graphClient msgraph.Client
+	if cfg.TeamsTenantID != "" && cfg.TeamsClientID != "" && cfg.TeamsClientSecret != "" {
+		if cfg.TeamsTLSInsecure {
+			slog.Warn("Graph TLS verification disabled — dev/on-prem only, never production", "TEAMS_TLS_INSECURE", true)
+		}
+		graphClient = msgraph.New(msgraph.Config{
+			TenantID:              cfg.TeamsTenantID,
+			ClientID:              cfg.TeamsClientID,
+			ClientSecret:          cfg.TeamsClientSecret,
+			TLSInsecureSkipVerify: cfg.TeamsTLSInsecure,
+		})
 	}
-	cassReader := NewCassMessageReader(cassSession)
 
 	// Eager at-rest DEK provisioning: when enabled, room creation provisions
 	// the room's wrapped DEK so the first message write doesn't pay the create
@@ -155,7 +176,7 @@ func main() {
 	}
 
 	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout)
-	handler := NewHandler(store, keyStore, memberListClient, cassReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
+	handler := NewHandler(store, keyStore, memberListClient, msgReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
 		func(ctx context.Context, subj string, data []byte, msgID string) error {
 			msg := natsutil.NewMsg(ctx, subj, data)
 			var opts []jetstream.PublishOpt
@@ -177,10 +198,23 @@ func main() {
 		nc.NatsConn().MaxPayload(),
 	)
 	handler.dekProvisioner = dekProvisioner
+	handler.graphClient = graphClient
+	handler.teamsMeetingStore = store
+	handler.teamsEmailDomain = cfg.TeamsEmailDomain
+	handler.roomMembersLimit = cfg.RoomMembersLimit
+	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
 	router := natsrouter.New(nc, "room-service")
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	handler.Register(router)
+
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
+		natsutil.HealthCheck(nc),
+	)
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
 
 	slog.Info("room-service running", "site", cfg.SiteID)
 
@@ -195,12 +229,12 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
-		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(context.Context) error {
 			if vaultWrapper != nil {
 				return vaultWrapper.Close()
 			}
 			return nil
 		},
+		func(ctx context.Context) error { return healthStop(ctx) },
 	)
 }

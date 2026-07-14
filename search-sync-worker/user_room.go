@@ -17,7 +17,7 @@ import (
 // worker pods sharing the same durable consumer. Out-of-order delivery of
 // (added, removed) pairs for the same (user, room) is handled by an
 // application-level timestamp guard inside the painless scripts — each update
-// carries the OutboxEvent timestamp in `params.ts` and compares against the
+// carries the InboxEvent timestamp in `params.ts` and compares against the
 // per-room stored timestamp in `ctx._source.roomTimestamps`, skipping the
 // write (via `ctx.op = 'none'`) if the incoming event is stale. Concurrent
 // writers from different pods serialize on the primary shard's per-doc lock,
@@ -69,7 +69,7 @@ func storedScriptBody(source string) json.RawMessage {
 }
 
 // addRoomScript / removeRoomScript implement application-level last-write-wins
-// on (user, room) using `params.ts` (OutboxEvent.Timestamp in millis). Stale
+// on (user, room) using `params.ts` (InboxEvent.Timestamp in millis). Stale
 // events short-circuit via `ctx.op = 'none'` which tells ES to skip the write
 // entirely — no version bump, no disk I/O.
 //
@@ -161,7 +161,7 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 		}
 
 		switch evt.Type {
-		case model.OutboxMemberAdded:
+		case model.InboxMemberAdded:
 			body, err := buildAddRoomUpdateBody(account, roomID, ts, hss)
 			if err != nil {
 				return nil, err
@@ -172,7 +172,7 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 				DocID:  account,
 				Doc:    body,
 			})
-		case model.OutboxMemberRemoved:
+		case model.InboxMemberRemoved:
 			body, err := buildRemoveRoomUpdateBody(roomID, ts)
 			if err != nil {
 				return nil, err

@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -25,6 +26,11 @@ import (
 )
 
 const maxContentBytes = 20 * 1024 // 20 KB
+
+// quotedParentUnavailablePlaceholder is the degraded-mode quoted-parent body used
+// when the authoritative fetch fails transiently. It never persists —
+// message-worker re-projects the real snapshot before the durable write.
+const quotedParentUnavailablePlaceholder = "Content temporarily unavailable"
 
 // replyFunc is the function signature for publishing a reply to a NATS subject.
 type replyFunc func(ctx context.Context, msg *nats.Msg) error
@@ -48,12 +54,18 @@ type Handler struct {
 	siteID             string
 	parentFetcher      ParentMessageFetcher
 	largeRoomThreshold int
+	maxAttachments     int
+	maxAttachmentBytes int
+	// chatBaseURL builds the messageLink on the degraded-mode placeholder quoted
+	// snapshot, from trusted inputs (the send room + the validated quoted message
+	// ID) so the link is correct even on the outage path.
+	chatBaseURL string
 }
 
 // NewHandler constructs a new Handler with the given dependencies.
 // users may be nil; when nil, sender display-name resolution is skipped and
 // downstream consumers fall back to UserAccount.
-func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold int) *Handler {
+func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold, maxAttachments, maxAttachmentBytes int, chatBaseURL string) *Handler {
 	return &Handler{
 		store:              store,
 		users:              users,
@@ -62,6 +74,9 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 		siteID:             siteID,
 		parentFetcher:      parentFetcher,
 		largeRoomThreshold: largeRoomThreshold,
+		maxAttachments:     maxAttachments,
+		maxAttachmentBytes: maxAttachmentBytes,
+		chatBaseURL:        chatBaseURL,
 	}
 }
 
@@ -71,7 +86,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// processMessage validation (was triple-decoded on the hot path).
 	rawData := msg.Data()
 	var req model.SendMessageRequest
-	parseErr := json.Unmarshal(rawData, &req)
+	parseErr := sonic.Unmarshal(rawData, &req)
 
 	// Enrich the logger before the subject parse so even the malformed-subject
 	// path carries request_id + a best-effort account. roomID is added later.
@@ -98,7 +113,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	ctx = errcode.WithLogValues(ctx, "room_id", roomID)
 
 	if parseErr != nil {
-		// Do not WithCause(parseErr) — json.SyntaxError strings embed the
+		// Do not WithCause(parseErr) — JSON parse error strings embed the
 		// offending substring from an unauthenticated entry-point (see doc.go).
 		bad := errcode.BadRequest("unmarshal send message request")
 		debugFlowRejected(ctx, req.RequestID, "unmarshal")
@@ -225,8 +240,15 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid thread parent message ID %q: must be a 20-char base62 string", req.ThreadParentMessageID))
 	}
 
-	// Validate content is non-empty
-	if req.Content == "" {
+	// Validate the quoted parent ID at the boundary too: on the degrade path it is
+	// copied verbatim into the snapshot MessageID and messageLink, so a malformed
+	// value must fail fast rather than leak into the canonical event.
+	if req.QuotedParentMessageID != "" && !idgen.IsValidMessageID(req.QuotedParentMessageID) {
+		return nil, errcode.BadRequest(fmt.Sprintf("invalid quoted parent message ID %q: must be a 20-char base62 string", req.QuotedParentMessageID))
+	}
+
+	// A message with attachments may carry empty content.
+	if req.Content == "" && len(req.Attachments) == 0 {
 		return nil, errcode.BadRequest("content must not be empty")
 	}
 
@@ -238,9 +260,21 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		)
 	}
 
-	// Validate thread parent fields are paired
-	if req.ThreadParentMessageID != "" && req.ThreadParentMessageCreatedAt == nil {
-		return nil, errcode.BadRequest("validate thread parent fields: threadParentMessageCreatedAt is required when threadParentMessageId is set")
+	// Validate attachments: count + total byte caps. Blobs are otherwise opaque
+	// here (decoded leniently on the read path) — but an empty blob is rejected
+	// since it carries no attachment and would yield a contentless message.
+	if len(req.Attachments) > h.maxAttachments {
+		return nil, errcode.BadRequest(fmt.Sprintf("too many attachments: max %d", h.maxAttachments))
+	}
+	var attachmentBytes int
+	for i, a := range req.Attachments {
+		if len(a) == 0 {
+			return nil, errcode.BadRequest(fmt.Sprintf("attachment[%d] must not be empty", i))
+		}
+		attachmentBytes += len(a)
+	}
+	if attachmentBytes > h.maxAttachmentBytes {
+		return nil, errcode.BadRequest(fmt.Sprintf("attachments exceed maximum size of %d bytes", h.maxAttachmentBytes))
 	}
 
 	// Verify subscription
@@ -287,20 +321,20 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// Build Message
 	now := time.Now().UTC()
 
-	var threadParentCreatedAt *time.Time
-	if req.ThreadParentMessageCreatedAt != nil {
-		t := time.UnixMilli(*req.ThreadParentMessageCreatedAt).UTC()
-		threadParentCreatedAt = &t
-	}
-
-	quotedSnapshot, err := h.resolveQuoteSnapshot(ctx, account, roomID, siteID, req.QuotedParentMessageID, req.ThreadParentMessageID)
+	quotedSnapshot, quotedUnverified, err := h.resolveQuoteSnapshot(ctx, account, roomID, siteID, req.QuotedParentMessageID, req.ThreadParentMessageID, now)
 	if err != nil {
 		return nil, err
 	}
 	if req.QuotedParentMessageID != "" {
 		// debug: quote passed the same-conversation-context check.
-		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID)
+		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID, "unverified", quotedUnverified)
 	}
+
+	// Resolve the thread parent's createdAt + sender account server-side,
+	// best-effort: a fetch failure ships the event without the values (each
+	// consumer falls back to a store it owns), so a Cassandra outage never blocks
+	// the send path. Both ride the same fetch.
+	threadParentCreatedAt, threadParentSenderAccount := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
 
 	// Compose the sender's render-ready display name once at write time so every
 	// downstream consumer (notification-worker, future search-sync-worker) reads
@@ -337,11 +371,15 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		ThreadParentMessageCreatedAt: threadParentCreatedAt,
 		TShow:                        tshow,
 		QuotedParentMessage:          quotedSnapshot,
+		Attachments:                  req.Attachments,
 	}
 
-	// Publish MessageEvent to MESSAGES_CANONICAL
-	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: siteID, Timestamp: now.UnixMilli()}
-	evtData, err := json.Marshal(evt)
+	// Publish MessageEvent to MESSAGES_CANONICAL. QuotedParentUnverified rides the
+	// envelope (not the persisted Message) so message-worker knows to re-project
+	// the authoritative snapshot before the durable write when the gatekeeper had
+	// to fall back to the untrusted client snapshot.
+	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: siteID, Timestamp: now.UnixMilli(), QuotedParentUnverified: quotedUnverified, ThreadParentSenderAccount: threadParentSenderAccount}
+	evtData, err := sonic.Marshal(evt)
 	if err != nil {
 		return nil, fmt.Errorf("marshal message event: %w", err)
 	}
@@ -355,41 +393,145 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
 		"phase", "published", "request_id", req.RequestID, "subject", canonicalSubj, "bytes", len(evtData))
 
-	return json.Marshal(msg)
+	return sonic.Marshal(msg)
 }
 
-// resolveQuoteSnapshot fetches the quoted parent and returns its snapshot.
-// The strict same-conversation-context rule rejects cross-thread quotes:
-// main-room messages may only quote main-room parents, and thread-T messages
-// may only quote other thread-T messages — including the thread's own parent.
-func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, siteID, quotedParentMessageID, newMessageThreadID string) (*cassandra.QuotedParentMessage, error) {
+// resolveThreadParent resolves the thread parent's createdAt and sender account
+// server-side, returning (nil, "") for a non-thread reply. It reuses the quote
+// snapshot when the parent is also the verified quoted message (the unverified
+// placeholder carries a synthetic timestamp), otherwise fetches by ID. Both
+// values come from the same snapshot in one fetch. Best-effort: any failure logs
+// a warning and returns (nil, "") — downstream consumers fall back to their own
+// stores.
+func (h *Handler) resolveThreadParent(
+	ctx context.Context,
+	account, roomID, siteID string,
+	req *model.SendMessageRequest,
+	quotedSnapshot *cassandra.QuotedParentMessage,
+	quotedUnverified bool,
+) (*time.Time, string) {
+	if req.ThreadParentMessageID == "" {
+		return nil, ""
+	}
+	if quotedSnapshot != nil && !quotedUnverified && req.QuotedParentMessageID == req.ThreadParentMessageID {
+		t := quotedSnapshot.CreatedAt.UTC()
+		return &t, quotedSnapshot.Sender.Account
+	}
+	if h.parentFetcher == nil {
+		return nil, ""
+	}
+	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
+	if err != nil || snap == nil {
+		slog.WarnContext(ctx, "thread parent resolution failed, publishing without it",
+			"error", err,
+			"parent_message_id", req.ThreadParentMessageID,
+			"request_id", req.RequestID)
+		return nil, ""
+	}
+	t := snap.CreatedAt.UTC()
+	return &t, snap.Sender.Account
+}
+
+// resolveQuoteSnapshot resolves the quoted parent into a snapshot, preferring the
+// authoritative history fetch and enforcing the same-conversation rule (a message
+// may only quote parents in its own thread or main room). The bool is the
+// "unverified" marker — true when the snapshot is the degraded placeholder.
+//
+// Fetch failures are tiered:
+//   - terminal (not_found, forbidden, bad_request): reject — a quote must never
+//     resurrect a missing parent or bypass access control.
+//   - transient (history unavailable/internal, NATS timeout): degrade to a
+//     placeholder (marked unverified) with the fixed "Content temporarily
+//     unavailable" body — which message-worker re-projects (or drops) before the
+//     durable write.
+func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, siteID, quotedParentMessageID, newMessageThreadID string, now time.Time) (*cassandra.QuotedParentMessage, bool, error) {
 	if quotedParentMessageID == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, quotedParentMessageID)
-	switch {
-	case err != nil:
-		// Preserve upstream errcode classification (transient → Unavailable,
-		// real 404 → NotFound). For non-errcode infra failures (NATS timeout,
-		// no-responders, unmarshal), classify as Unavailable — a transient
-		// quoted-parent fetch failure shouldn't surface to the client as 404.
-		var ee *errcode.Error
-		if errors.As(err, &ee) {
-			return nil, ee
-		}
-		return nil, errcode.Unavailable(fmt.Sprintf("fetch quoted parent %s", quotedParentMessageID), errcode.WithCause(err))
-	case snap == nil:
+	if err == nil && snap == nil {
 		// A nil snapshot with no error is a fetcher contract violation, not a
-		// genuine missing parent. Return a bare error so the caller's branch
-		// classifies this as infra (Nak for redelivery + log) rather than
-		// permanently dropping the message via a 404 reply+Ack.
-		return nil, fmt.Errorf("fetch quoted parent %s: fetcher returned nil snapshot", quotedParentMessageID)
-	case snap.ThreadParentID != newMessageThreadID:
-		return nil, errcode.BadRequest(fmt.Sprintf("quoted parent %s thread context mismatch: parent thread %q, new message thread %q",
-			quotedParentMessageID, snap.ThreadParentID, newMessageThreadID))
-	default:
-		return snap, nil
+		// genuine missing parent. Synthesize a transient error so we degrade to the
+		// placeholder rather than treating it as authoritative-empty.
+		err = fmt.Errorf("fetch quoted parent %s: fetcher returned nil snapshot", quotedParentMessageID)
 	}
+	if err != nil {
+		var ee *errcode.Error
+		if quoteFetchErrIsTerminal(err) && errors.As(err, &ee) {
+			// Terminal typed *errcode.Error → reply + Ack; preserves the upstream
+			// category (not_found, forbidden, …) for the client. The errors.As guard
+			// is belt-and-suspenders: quoteFetchErrIsTerminal only reports true for a
+			// typed errcode today, but guarding the bool means a future predicate
+			// change can't fall through here returning a nil *errcode.Error.
+			return nil, false, ee
+		}
+		// Transient failure: degrade to a placeholder snapshot rather than NAK, so
+		// the message still flows through the outage. message-worker re-projects the
+		// authoritative snapshot (or drops the quote) before the durable write.
+		ph := h.placeholderQuoteSnapshot(roomID, quotedParentMessageID, newMessageThreadID, now)
+		slog.WarnContext(ctx, "quoted-parent fetch failed; using placeholder snapshot",
+			"request_id", natsutil.RequestIDFromContext(ctx), "quoted_id", quotedParentMessageID, "error", err)
+		return ph, true, nil
+	}
+	if cerr := checkQuoteThreadContext(snap, quotedParentMessageID, newMessageThreadID, roomID); cerr != nil {
+		return nil, false, cerr
+	}
+	return snap, false, nil
+}
+
+// quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a
+// permanent reason not to quote (reject) vs a transient infra failure (degrade
+// to the placeholder). Only unavailable/internal errcodes and non-errcode infra
+// failures (NATS timeout, no-responders, unmarshal) are transient; every other
+// errcode category (not_found, forbidden, bad_request, …) is terminal.
+// history-service collapses a Cassandra read failure to code=internal, so
+// internal is treated as transient here.
+func quoteFetchErrIsTerminal(err error) bool {
+	var ee *errcode.Error
+	if errors.As(err, &ee) {
+		switch ee.Code {
+		case errcode.CodeUnavailable, errcode.CodeInternal:
+			return false
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// placeholderQuoteSnapshot builds the degraded-mode quoted-parent snapshot for a
+// transient fetch failure. Only identity/link fields are real; the body is always
+// the fixed "Content temporarily unavailable" placeholder (the client cannot
+// supply the quoted-parent content). ThreadParentID mirrors the quoting message's
+// thread to satisfy the same-conversation rule, and CreatedAt is cosmetic. The
+// caller marks it unverified (see resolveQuoteSnapshot); the body is re-projected
+// authoritatively by message-worker before the durable write.
+func (h *Handler) placeholderQuoteSnapshot(roomID, messageID, newMessageThreadID string, now time.Time) *cassandra.QuotedParentMessage {
+	return &cassandra.QuotedParentMessage{
+		MessageID:      messageID,
+		RoomID:         roomID,
+		CreatedAt:      now,
+		Msg:            quotedParentUnavailablePlaceholder,
+		MessageLink:    messageLink(h.chatBaseURL, roomID, messageID),
+		ThreadParentID: newMessageThreadID,
+	}
+}
+
+// checkQuoteThreadContext enforces the same-conversation rule between the quoted
+// parent and the quoting message. newMessageRoomID is the quoting message's own
+// room, needed for the TShow carve-out below.
+func checkQuoteThreadContext(snap *cassandra.QuotedParentMessage, quotedParentMessageID, newMessageThreadID, newMessageRoomID string) error {
+	// TShow ("also send to channel") carve-out: the parent also lives in its channel
+	// room, so quoting it from that room (a main-room message) is legitimate.
+	tshowChannelQuote := snap.TShow && newMessageThreadID == "" && snap.RoomID == newMessageRoomID
+	if snap.ThreadParentID != newMessageThreadID &&
+		// Thread-root quote: starter is a main-room msg (ThreadParentID=="") whose ID is the thread parent — allowed.
+		(snap.ThreadParentID != "" || quotedParentMessageID != newMessageThreadID) &&
+		!tshowChannelQuote {
+		return errcode.BadRequest(fmt.Sprintf("quoted parent %s thread context mismatch: parent thread %q, new message thread %q",
+			quotedParentMessageID, snap.ThreadParentID, newMessageThreadID))
+	}
+	return nil
 }
 
 // canBypassLargeRoomCap reports whether the subscriber is exempt from the

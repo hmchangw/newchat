@@ -35,3 +35,20 @@ func TestNewValidator_RejectsEmptyAudiences(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, ErrNoAudiences)
 }
+
+func TestClaims_Account(t *testing.T) {
+	tests := []struct {
+		name   string
+		claims Claims
+		want   string
+	}{
+		{"preferred_username wins", Claims{PreferredUsername: "alice", Name: "Alice W"}, "alice"},
+		{"name alone is not an account", Claims{Name: "Alice W"}, ""},
+		{"both blank is blank", Claims{}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.claims.Account())
+		})
+	}
+}

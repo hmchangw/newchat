@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -19,9 +20,10 @@ import (
 
 // stubMsg implements jetstream.Msg for testing.
 type stubMsg struct {
-	data   []byte
-	acked  bool
-	nacked bool
+	data    []byte
+	headers nats.Header
+	acked   bool
+	nacked  bool
 }
 
 func (m *stubMsg) Data() []byte                              { return m.data }
@@ -34,7 +36,7 @@ func (m *stubMsg) TermWithReason(string) error               { return nil }
 func (m *stubMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
 func (m *stubMsg) Subject() string                           { return "" }
 func (m *stubMsg) Reply() string                             { return "" }
-func (m *stubMsg) Headers() nats.Header                      { return nil }
+func (m *stubMsg) Headers() nats.Header                      { return m.headers }
 func (m *stubMsg) DoubleAck(context.Context) error           { return nil }
 
 func makeStubMsg(t *testing.T, evt *model.MessageEvent) *stubMsg {
@@ -47,7 +49,7 @@ func makeStubMsg(t *testing.T, evt *model.MessageEvent) *stubMsg {
 func TestHandler_Add(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 
 	evt := model.MessageEvent{
 		Event: model.EventCreated,
@@ -66,7 +68,7 @@ func TestHandler_Add(t *testing.T) {
 func TestHandler_Add_MalformedJSON(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 
 	msg := &stubMsg{data: []byte("{invalid")}
 	h.Add(msg)
@@ -92,7 +94,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(1)).
 			Return([]searchengine.BulkResult{{Status: 201}}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 		msg := makeStubMsg(t, &baseEvt)
 		h.Add(msg)
 		h.Flush(context.Background())
@@ -109,7 +111,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(1)).
 			Return([]searchengine.BulkResult{{Status: 409, Error: "version conflict"}}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 		msg := makeStubMsg(t, &baseEvt)
 		h.Add(msg)
 		h.Flush(context.Background())
@@ -125,7 +127,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(1)).
 			Return([]searchengine.BulkResult{{Status: 500, Error: "internal"}}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 		msg := makeStubMsg(t, &baseEvt)
 		h.Add(msg)
 		h.Flush(context.Background())
@@ -141,7 +143,7 @@ func TestHandler_Flush(t *testing.T) {
 			Bulk(gomock.Any(), gomock.Len(2)).
 			Return(nil, fmt.Errorf("connection refused"))
 
-		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 		msg1 := makeStubMsg(t, &baseEvt)
 		evt2 := baseEvt
 		evt2.Message.ID = "m2"
@@ -159,7 +161,7 @@ func TestHandler_Flush(t *testing.T) {
 	t.Run("empty flush is no-op", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
-		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 		h.Flush(context.Background())
 		assert.Equal(t, 0, h.MessageCount())
 	})
@@ -175,7 +177,7 @@ func TestHandler_Flush(t *testing.T) {
 				{Status: 500, Error: "shard failure"},
 			}, nil)
 
-		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}), 500)
+		h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500)
 		msgs := make([]*stubMsg, 3)
 		for i := range msgs {
 			evt := baseEvt
@@ -501,4 +503,56 @@ func TestHandler_FanOut(t *testing.T) {
 		assert.False(t, msg1.acked)
 		assert.True(t, msg1.nacked, "msg 1 had one failing action → nakked")
 	})
+}
+
+// TestHandler_ZstdDecompression exercises the Nats-Encoding:zstd path
+// via a spy Collection that captures the bytes BuildAction receives.
+// Ensures compression is applied transparently at the handler layer so
+// collections never see the compressed frame.
+func TestHandler_ZstdDecompression(t *testing.T) {
+	original := []byte(`{"timestamp":1,"employees":[{"sectId":"S1"}]}`)
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	require.NoError(t, err)
+	compressed := enc.EncodeAll(original, nil)
+	require.NoError(t, enc.Close())
+
+	spy := &captureCollection{}
+	h := NewHandler(NewMockStore(gomock.NewController(t)), spy, 10)
+	h.Add(&stubMsg{
+		data:    compressed,
+		headers: nats.Header{"Nats-Encoding": []string{"zstd"}},
+	})
+
+	assert.Equal(t, original, spy.received, "BuildAction should receive decompressed bytes")
+}
+
+// TestHandler_UncompressedPassthrough — plain messages with no
+// Nats-Encoding header reach BuildAction unchanged.
+func TestHandler_UncompressedPassthrough(t *testing.T) {
+	payload := []byte(`{"timestamp":1,"employees":[]}`)
+
+	spy := &captureCollection{}
+	h := NewHandler(NewMockStore(gomock.NewController(t)), spy, 10)
+	h.Add(&stubMsg{data: payload})
+
+	assert.Equal(t, payload, spy.received)
+}
+
+// captureCollection records the bytes passed to BuildAction so tests
+// can assert on the exact payload the handler forwarded.
+type captureCollection struct {
+	received []byte
+}
+
+func (c *captureCollection) StreamConfig(string) jetstream.StreamConfig {
+	return jetstream.StreamConfig{}
+}
+func (c *captureCollection) ConsumerName() string                      { return "capture" }
+func (c *captureCollection) FilterSubjects(string) []string            { return nil }
+func (c *captureCollection) TemplateName() string                      { return "" }
+func (c *captureCollection) TemplateBody() json.RawMessage             { return nil }
+func (c *captureCollection) StoredScripts() map[string]json.RawMessage { return nil }
+func (c *captureCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
+	c.received = append(c.received[:0], data...)
+	return nil, nil
 }

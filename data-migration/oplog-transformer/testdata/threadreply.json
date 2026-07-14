@@ -1,0 +1,1 @@
+{"_id":"reply00000000001","rid":"room1","msg":"a reply","ts":{"$date":"2023-01-02T05:00:00Z"},"tmid":"abc123def456ghi78","u":{"_id":"u2","username":"bob","name":"Bob B"}}

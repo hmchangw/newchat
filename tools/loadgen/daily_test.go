@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 func TestParseDailyConfig_Defaults(t *testing.T) {
@@ -188,4 +191,109 @@ func TestMergeActionThresholds(t *testing.T) {
 	require.Equal(t, 200.0, th.ActionP95Ms["member_add"], "default preserved for non-overridden")
 	require.Equal(t, 800.0, th.ActionP99Ms["member_add"], "p99 override applied")
 	require.Equal(t, 250.0, th.ActionP99Ms["mark_read"], "p99 default preserved")
+}
+
+func TestParseDailyConfig_PresenceDefaultsOff(t *testing.T) {
+	cfg, err := parseDailyConfig([]string{"--preset=daily-heavy"})
+	require.NoError(t, err)
+	assert.False(t, cfg.Presence)
+	assert.Equal(t, 30*time.Second, cfg.PresenceHeartbeat)
+	assert.Equal(t, 8, cfg.PresencePublisherConns)
+	assert.Equal(t, 2, cfg.PresenceObserverConns)
+}
+
+func TestParseDailyConfig_PresenceEnabled(t *testing.T) {
+	cfg, err := parseDailyConfig([]string{"--preset=daily-heavy", "--presence", "--presence-heartbeat=15s"})
+	require.NoError(t, err)
+	assert.True(t, cfg.Presence)
+	assert.Equal(t, 15*time.Second, cfg.PresenceHeartbeat)
+}
+
+func TestEmitPresence_NoPoolIsNoop(t *testing.T) {
+	// With no presence pool, emitPresence must be a safe no-op.
+	env := &stepEnv{} // presencePool nil
+	u := newPresenceUserForAccount("user-1", "site-test")
+	emitPresence(env, u, u.hello(nowMillis())) // must not panic
+}
+
+func TestEmitPresence_RecordsExpectation(t *testing.T) {
+	c := newPresenceCollector()
+	env := &stepEnv{presenceCollector: c}
+	// A non-nil pool with zero publisher conns -> Publish returns an error,
+	// which emitPresence records as attempted+failed.
+	env.presencePool = &presencePool{collector: c}
+	u := newPresenceUserForAccount("user-1", "site-test")
+	emitPresence(env, u, u.hello(nowMillis()))
+	assert.Equal(t, int64(1), c.Attempted())
+	assert.Equal(t, int64(1), c.Failed())
+}
+
+func TestPresenceFlip_EmitsActivityOnChange(t *testing.T) {
+	c := newPresenceCollector()
+	env := &stepEnv{presenceCollector: c, presencePool: &presencePool{collector: c}}
+	u := &userState{Account: "user-1", presence: newPresenceUserForAccount("user-1", "site-test")}
+	// Bring presence online first (hello), so activity transitions can measure.
+	emitPresence(env, u.presence, u.presence.hello(nowMillis()))
+	c.Reset()
+
+	// active unchanged -> no emit.
+	u.active = true
+	presenceFlip(env, u, true)
+	assert.Equal(t, int64(0), c.Attempted())
+
+	// changed true->false -> setAway(true) -> away (measurable).
+	u.active = false
+	presenceFlip(env, u, true)
+	assert.Equal(t, int64(1), c.Attempted())
+}
+
+func TestPresenceFlip_NoPoolIsNoop(t *testing.T) {
+	env := &stepEnv{} // presencePool nil
+	u := &userState{Account: "user-1", presence: newPresenceUserForAccount("user-1", "site-test")}
+	u.active = false
+	presenceFlip(env, u, true) // changed, but no pool -> must not panic and no-op
+}
+
+func TestSnapshotPresenceStats_NilWhenDisabled(t *testing.T) {
+	env := &stepEnv{} // no presence collector
+	r := StepResult{}
+	snapshotPresenceStats(env, &r)
+	assert.Nil(t, r.Presence)
+}
+
+func TestSnapshotPresenceStats_PopulatesFromCollector(t *testing.T) {
+	c := newPresenceCollector()
+	now := time.Now()
+	// Two resolved transitions -> two latency samples.
+	c.Expect("user-1", model.StatusOnline, now)
+	c.Observe("user-1", model.StatusOnline, now.Add(10*time.Millisecond))
+	c.Expect("user-2", model.StatusAway, now)
+	c.Observe("user-2", model.StatusAway, now.Add(20*time.Millisecond))
+	env := &stepEnv{presencePool: &presencePool{collector: c}, presenceCollector: c}
+	r := StepResult{}
+	snapshotPresenceStats(env, &r)
+	require.NotNil(t, r.Presence)
+	assert.Equal(t, int64(2), r.Presence.Attempted)
+	assert.Equal(t, int64(0), r.Presence.Failed)
+	assert.InDelta(t, 20, r.Presence.P99Ms, 5)
+}
+
+func TestSnapshotPresenceStats_NilWhenPoolInitFailed(t *testing.T) {
+	// --presence requested but newPresencePool failed: collector is non-nil but
+	// pool is nil. The snapshot must stay nil so the report doesn't print a
+	// misleading all-zeros, 0%-error presence block for a run that never emitted.
+	env := &stepEnv{presenceCollector: newPresenceCollector()} // presencePool nil
+	r := StepResult{}
+	snapshotPresenceStats(env, &r)
+	assert.Nil(t, r.Presence)
+}
+
+func TestProdEnvFactory_PresenceDisabledLeavesNil(t *testing.T) {
+	f := &prodEnvFactory{baseCfg: &config{NatsURL: "nats://127.0.0.1:14222", SiteID: "site-test"}}
+	users := []*userState{{ID: "u0", Account: "user-0"}}
+	cfg := dailyConfig{Preset: "daily-heavy", MultiplexPoolSize: 0} // Presence false
+	env := f.Build(cfg, users)
+	assert.Nil(t, env.presencePool)
+	assert.Nil(t, env.presenceCollector)
+	assert.Nil(t, users[0].presence)
 }

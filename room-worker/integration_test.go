@@ -55,8 +55,8 @@ func (p *publishCapture) fn() PublishFunc {
 	}
 }
 
-// outboxOnPrefix returns the captured publishes whose subject starts with prefix.
-func (p *publishCapture) outboxOnPrefix(prefix string) []capturedPublish {
+// publishesOnPrefix returns the captured publishes whose subject starts with prefix.
+func (p *publishCapture) publishesOnPrefix(prefix string) []capturedPublish {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []capturedPublish
@@ -126,6 +126,43 @@ func TestMongoStore_Integration(t *testing.T) {
 	if room.UserCount != 1 {
 		t.Errorf("UserCount = %d, want 1 (actual subscription count)", room.UserCount)
 	}
+}
+
+// TestMongoStore_ApplyMemberCountDelta covers the add-member hot path: the $inc
+// applies the delta atomically, and reconcileDue follows the per-room TTL —
+// true when never reconciled or once the TTL has elapsed, false within it.
+func TestMongoStore_ApplyMemberCountDelta(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{ID: "rd", Name: "delta", UserCount: 5, AppCount: 1})
+	require.NoError(t, err)
+
+	// Never reconciled → due; $inc applies userDelta/appDelta.
+	due, err := store.ApplyMemberCountDelta(ctx, "rd", 3, 2, time.Minute)
+	require.NoError(t, err)
+	assert.True(t, due, "a room never reconciled should be due")
+	room, err := store.GetRoom(ctx, "rd")
+	require.NoError(t, err)
+	assert.Equal(t, 8, room.UserCount, "userCount incremented by 3")
+	assert.Equal(t, 3, room.AppCount, "appCount incremented by 2")
+
+	// ReconcileMemberCounts stamps countsReconciledAt → not due within the TTL.
+	require.NoError(t, store.ReconcileMemberCounts(ctx, "rd"))
+	due, err = store.ApplyMemberCountDelta(ctx, "rd", 0, 0, time.Minute)
+	require.NoError(t, err)
+	assert.False(t, due, "within TTL the recompute should not be due")
+
+	// ttl=0 forces a recompute every time (legacy behaviour).
+	due, err = store.ApplyMemberCountDelta(ctx, "rd", 0, 0, 0)
+	require.NoError(t, err)
+	assert.True(t, due, "ttl=0 is always due")
+
+	// Missing room: no-op, not due, no error (matches ReconcileMemberCounts).
+	due, err = store.ApplyMemberCountDelta(ctx, "missing", 1, 0, time.Minute)
+	require.NoError(t, err)
+	assert.False(t, due)
 }
 
 func TestMongoStore_GetSubscription_Integration(t *testing.T) {
@@ -451,8 +488,8 @@ func TestReconcileMemberCountsSplitsBots(t *testing.T) {
 	mustInsertSub(t, db, &model.Subscription{
 		ID: "s3", User: model.SubscriptionUser{Account: "carol"}, RoomID: "r1",
 	})
-	// Bot subs carry u.isBot=true in production (stamped by newSub via
-	// model.IsBotAccount); set it explicitly here since the test inserts the
+	// Bot subs carry u.isBot=true in production (stamped by newSub for
+	// ".bot"/"p_" accounts); set it explicitly here since the test inserts the
 	// document directly. ReconcileMemberCounts now counts off this flag.
 	mustInsertSub(t, db, &model.Subscription{
 		ID: "s4", User: model.SubscriptionUser{Account: "weather.bot", IsBot: true}, RoomID: "r1",
@@ -472,6 +509,115 @@ func mustInsertUser(t *testing.T, db *mongo.Database, u *model.User) {
 	t.Helper()
 	_, err := db.Collection("users").InsertOne(context.Background(), u)
 	require.NoError(t, err)
+}
+
+// TestMongoStore_UserCache covers the cached user-read path: EnableUserCache
+// wraps the reader without breaking reads, and a missing account still maps to
+// the store's ErrUserNotFound sentinel that handlers branch on.
+func TestMongoStore_UserCache(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnableUserCache(100, time.Minute))
+	ctx := context.Background()
+
+	_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"})
+	require.NoError(t, err)
+
+	// Read through the cache twice; both return the seeded user.
+	for range 2 {
+		u, err := store.GetUser(ctx, "alice")
+		require.NoError(t, err)
+		assert.Equal(t, "u1", u.ID)
+		assert.Equal(t, "alice", u.Account)
+	}
+
+	// Missing account maps to the store's ErrUserNotFound (not userstore's).
+	_, err = store.GetUser(ctx, "ghost")
+	assert.ErrorIs(t, err, ErrUserNotFound)
+
+	// Batch lookup returns only existing users (negative results not cached).
+	users, err := store.FindUsersByAccounts(ctx, []string{"alice", "ghost"})
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	assert.Equal(t, "alice", users[0].Account)
+}
+
+// TestMongoStore_RoomMetaCache covers the cached GetRoomMeta path: it serves the
+// room's stable fields from the in-process cache and still errors on a miss.
+func TestMongoStore_RoomMetaCache(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnableRoomMetaCache(100, time.Minute))
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "rm", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 7,
+	})
+	require.NoError(t, err)
+
+	// Two reads (miss then hit) both return the stable fields.
+	for range 2 {
+		room, err := store.GetRoomMeta(ctx, "rm")
+		require.NoError(t, err)
+		assert.Equal(t, "rm", room.ID)
+		assert.Equal(t, "general", room.Name)
+		assert.Equal(t, model.RoomTypeChannel, room.Type)
+		assert.Equal(t, "site-a", room.SiteID)
+	}
+
+	_, err = store.GetRoomMeta(ctx, "nope")
+	require.Error(t, err)
+}
+
+// TestMongoStore_GetRoom_FullDocumentWithCacheEnabled guards the regression
+// where enabling the meta cache made GetRoom serve a partial (Meta-only) room
+// with a zero CreatedAt. GetRoom must always return the full document — the DM
+// idempotency path (serverCreateDM) depends on existing.CreatedAt — regardless
+// of whether the add-path meta cache is enabled.
+func TestMongoStore_GetRoom_FullDocumentWithCacheEnabled(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnableRoomMetaCache(100, time.Minute))
+	ctx := context.Background()
+
+	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "rfull", Name: "general", Type: model.RoomTypeDM, SiteID: "site-a",
+		UserCount: 2, CreatedAt: createdAt, UpdatedAt: createdAt,
+	})
+	require.NoError(t, err)
+
+	room, err := store.GetRoom(ctx, "rfull")
+	require.NoError(t, err)
+	assert.Equal(t, "rfull", room.ID)
+	assert.Equal(t, model.RoomTypeDM, room.Type)
+	assert.Equal(t, createdAt, room.CreatedAt, "GetRoom must return the persisted CreatedAt, not a zero value")
+}
+
+// TestMongoStore_ListAddMemberCandidates_SkipsIRMForDirectAdds asserts the
+// no-org optimization: the room_members read is skipped, so
+// HasIndividualRoomMember is false even when an individual row exists.
+func TestMongoStore_ListAddMemberCandidates_SkipsIRMForDirectAdds(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u9", Account: "dave", SiteID: "site-a"})
+	require.NoError(t, err)
+	// An individual room_members row exists for dave in room rx.
+	_, err = db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+		ID: idgen.GenerateUUIDv7(), RoomID: "rx",
+		Member: model.RoomMemberEntry{ID: "u9", Type: model.RoomMemberIndividual, Account: "dave"},
+	})
+	require.NoError(t, err)
+
+	// Direct (no-org) add: the IRM read is skipped, so the flag is false despite
+	// the existing row (the handler never reads it on the no-org path).
+	cands, err := store.ListAddMemberCandidates(ctx, nil, []string{"dave"}, "rx")
+	require.NoError(t, err)
+	require.Len(t, cands, 1)
+	assert.Equal(t, "dave", cands[0].Account)
+	assert.False(t, cands[0].HasIndividualRoomMember, "no-org add skips the room_members read")
 }
 
 func TestMongoStore_ListAddMemberCandidates_Integration(t *testing.T) {
@@ -608,7 +754,7 @@ func TestProcessCreateRoomDMPersistsTwoSubsAndZeroMembers(t *testing.T) {
 	assert.Equal(t, []string{"alice", "bob"}, room.Accounts, "DM participant accounts persisted, paired by index with uids")
 }
 
-func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
+func TestProcessCreateRoomChannel_InboxPerRemoteSite(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -651,18 +797,19 @@ func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
 		assert.Equal(t, "site-A", s.SiteID, "sub %s siteID", s.User.Account)
 	}
 
-	assert.Empty(t, cap.outboxOnPrefix(subject.Outbox("site-A", "site-A", "")),
-		"no outbox to home site-A")
+	assert.Empty(t, cap.publishesOnPrefix(subject.InboxExternal("site-A", "")),
+		"no inbox to home site-A")
+	assert.Empty(t, cap.publishesOnPrefix(subject.Outbox("site-A", "site-A", "")),
+		"no outbox relay to home site-A")
 
-	// One member_added outbox per remote site — carries all the info
+	// One member_added outbox relay per remote site — carries all the info
 	// inbox-worker needs for sub creation AND search-sync-worker for MV update.
-	memberB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", model.OutboxMemberAdded))
-	memberC := cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", model.OutboxMemberAdded))
-	require.Len(t, memberB, 1, "exactly one member_added outbox to site-B")
-	require.Len(t, memberC, 1, "exactly one member_added outbox to site-C")
+	memberB := cap.publishesOnPrefix(subject.Outbox("site-A", "site-B", model.InboxMemberAdded))
+	memberC := cap.publishesOnPrefix(subject.Outbox("site-A", "site-C", model.InboxMemberAdded))
+	require.Len(t, memberB, 1, "exactly one member_added outbox relay for site-B")
+	require.Len(t, memberC, 1, "exactly one member_added outbox relay for site-C")
 
-	var memberEnvB model.OutboxEvent
-	require.NoError(t, json.Unmarshal(memberB[0].data, &memberEnvB))
+	_, memberEnvB := unwrapOutbox(t, memberB[0].data)
 	var memberPayloadB model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(memberEnvB.Payload, &memberPayloadB))
 	assert.ElementsMatch(t, []string{"bob", "carol"}, memberPayloadB.Accounts)
@@ -673,8 +820,7 @@ func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
 	assert.Nil(t, memberPayloadB.HistorySharedSince)
 	assert.Equal(t, reqID+":site-B", memberB[0].msgID)
 
-	var memberEnvC model.OutboxEvent
-	require.NoError(t, json.Unmarshal(memberC[0].data, &memberEnvC))
+	_, memberEnvC := unwrapOutbox(t, memberC[0].data)
 	var memberPayloadC model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(memberEnvC.Payload, &memberPayloadC))
 	assert.ElementsMatch(t, []string{"ian"}, memberPayloadC.Accounts)
@@ -686,7 +832,7 @@ func TestProcessCreateRoomChannel_OutboxPerRemoteSite(t *testing.T) {
 	assert.Equal(t, reqID+":site-C", memberC[0].msgID)
 }
 
-func TestProcessCreateRoomDM_OutboxToCounterpartSite(t *testing.T) {
+func TestProcessCreateRoomDM_InboxToCounterpartSite(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -723,15 +869,16 @@ func TestProcessCreateRoomDM_OutboxToCounterpartSite(t *testing.T) {
 		assert.Equal(t, "site-A", s.SiteID, "sub %s siteID", s.User.Account)
 	}
 
-	assert.Empty(t, cap.outboxOnPrefix(subject.Outbox("site-A", "site-A", "")))
-	assert.Empty(t, cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", "")))
+	assert.Empty(t, cap.publishesOnPrefix(subject.InboxExternal("site-A", "")))
+	assert.Empty(t, cap.publishesOnPrefix(subject.InboxExternal("site-C", "")))
+	assert.Empty(t, cap.publishesOnPrefix(subject.Outbox("site-A", "site-A", "")))
+	assert.Empty(t, cap.publishesOnPrefix(subject.Outbox("site-A", "site-C", "")))
 
-	// One member_added outbox to the recipient's site — carries everything
+	// One member_added outbox relay to the recipient's site — carries everything
 	// inbox-worker needs to build the DM recipient's sub with the right shape.
-	memberB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", model.OutboxMemberAdded))
+	memberB := cap.publishesOnPrefix(subject.Outbox("site-A", "site-B", model.InboxMemberAdded))
 	require.Len(t, memberB, 1)
-	var memberEnv model.OutboxEvent
-	require.NoError(t, json.Unmarshal(memberB[0].data, &memberEnv))
+	_, memberEnv := unwrapOutbox(t, memberB[0].data)
 	var memberPayload model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(memberEnv.Payload, &memberPayload))
 	assert.Equal(t, model.RoomTypeDM, memberPayload.RoomType)
@@ -742,7 +889,7 @@ func TestProcessCreateRoomDM_OutboxToCounterpartSite(t *testing.T) {
 	assert.Equal(t, reqID+":site-B", memberB[0].msgID)
 }
 
-func TestProcessAddMembers_OutboxPerRemoteSite(t *testing.T) {
+func TestProcessAddMembers_InboxPerRemoteSite(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -805,18 +952,17 @@ func TestProcessAddMembers_OutboxPerRemoteSite(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), newSubs)
 
-	pubsB := cap.outboxOnPrefix(subject.Outbox("site-A", "site-B", "member_added"))
-	pubsC := cap.outboxOnPrefix(subject.Outbox("site-A", "site-C", "member_added"))
-	pubsA := cap.outboxOnPrefix(subject.Outbox("site-A", "site-A", "member_added"))
+	pubsB := cap.publishesOnPrefix(subject.Outbox("site-A", "site-B", "member_added"))
+	pubsC := cap.publishesOnPrefix(subject.Outbox("site-A", "site-C", "member_added"))
+	pubsA := cap.publishesOnPrefix(subject.Outbox("site-A", "site-A", "member_added"))
 	require.Len(t, pubsB, 1)
 	require.Len(t, pubsC, 1)
-	assert.Empty(t, pubsA, "no member_added outbox to home site-A")
+	assert.Empty(t, pubsA, "no member_added outbox relay to home site-A")
 
 	// Each remote site receives only its own homed accounts — bob (site-B) and
 	// ian (site-C) are partitioned by the userMap[].SiteID filter at the publish
 	// site so we never ship cross-site account identities over the wire.
-	var envB model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubsB[0].data, &envB))
+	_, envB := unwrapOutbox(t, pubsB[0].data)
 	var evtB model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(envB.Payload, &evtB))
 	assert.ElementsMatch(t, []string{"bob"}, evtB.Accounts)
@@ -824,8 +970,7 @@ func TestProcessAddMembers_OutboxPerRemoteSite(t *testing.T) {
 	assert.Equal(t, "site-A", evtB.SiteID)
 	assert.Equal(t, reqID+":site-B", pubsB[0].msgID)
 
-	var envC model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubsC[0].data, &envC))
+	_, envC := unwrapOutbox(t, pubsC[0].data)
 	var evtC model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(envC.Payload, &evtC))
 	assert.ElementsMatch(t, []string{"ian"}, evtC.Accounts)
@@ -909,34 +1054,34 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, h.processAddMembers(ctx, body))
 
-	pubs := cap.outboxOnPrefix(subject.InboxMemberAdded("site-A"))
+	pubs := cap.publishesOnPrefix(subject.InboxInternal("site-A", model.InboxMemberAdded))
 	require.Len(t, pubs, 1, "exactly one local INBOX member_added publish per add-members call")
 
-	var outboxEvt model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubs[0].data, &outboxEvt))
-	assert.Equal(t, "member_added", outboxEvt.Type)
-	assert.Equal(t, "site-A", outboxEvt.SiteID)
-	assert.Equal(t, "site-A", outboxEvt.DestSiteID, "self-loop: dest must equal origin")
+	var inboxEvt model.InboxEvent
+	require.NoError(t, json.Unmarshal(pubs[0].data, &inboxEvt))
+	assert.Equal(t, "member_added", inboxEvt.Type)
+	assert.Equal(t, "site-A", inboxEvt.SiteID)
+	assert.Equal(t, "site-A", inboxEvt.DestSiteID, "self-loop: dest must equal origin")
 
 	var inner model.MemberAddEvent
-	require.NoError(t, json.Unmarshal(outboxEvt.Payload, &inner))
+	require.NoError(t, json.Unmarshal(inboxEvt.Payload, &inner))
 	assert.Equal(t, "member_added", inner.Type)
 	assert.Equal(t, roomID, inner.RoomID)
 	assert.Equal(t, "site-A", inner.SiteID)
 	assert.ElementsMatch(t, []string{"charlie", "bob"}, inner.Accounts,
 		"local INBOX must carry full add set — same-site (charlie) + remote (bob)")
 	assert.Equal(t, reqID+":site-A", pubs[0].msgID,
-		"Nats-Msg-Id must be natsutil.OutboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
+		"Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
 
 	// members_added sys-message: requester is the sender, Content is server-rendered.
-	sysPubs := cap.outboxOnPrefix(subject.MsgCanonicalCreated("site-A"))
+	sysPubs := cap.publishesOnPrefix(subject.MsgCanonicalCreated("site-A"))
 	require.Len(t, sysPubs, 1, "exactly one members_added sys-message per add-members call")
 	var sysEvt model.MessageEvent
 	require.NoError(t, json.Unmarshal(sysPubs[0].data, &sysEvt))
 	assert.Equal(t, model.MessageTypeMembersAdded, sysEvt.Message.Type)
 	assert.Equal(t, "alice", sysEvt.Message.UserAccount, "sender is the requester")
-	assert.Equal(t, `"Alice 爱丽丝" added members to the channel`, sysEvt.Message.Content,
-		"multi-add Content uses formatAddedMulti(requester)")
+	assert.Equal(t, `"Alice 爱丽丝" added 2 people to the chatroom`, sysEvt.Message.Content,
+		"multi-add Content uses formatAddedCounts(requester, 2, 0)")
 }
 
 func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {
@@ -978,31 +1123,33 @@ func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, h.processRemoveMember(ctx, body))
 
-	pubs := cap.outboxOnPrefix(subject.InboxMemberRemoved("site-A"))
+	pubs := cap.publishesOnPrefix(subject.InboxInternal("site-A", model.InboxMemberRemoved))
 	require.Len(t, pubs, 1)
 
-	var outboxEvt model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubs[0].data, &outboxEvt))
-	assert.Equal(t, "member_removed", outboxEvt.Type)
-	assert.Equal(t, "site-A", outboxEvt.SiteID)
-	assert.Equal(t, "site-A", outboxEvt.DestSiteID)
+	var inboxEvt model.InboxEvent
+	require.NoError(t, json.Unmarshal(pubs[0].data, &inboxEvt))
+	assert.Equal(t, "member_removed", inboxEvt.Type)
+	assert.Equal(t, "site-A", inboxEvt.SiteID)
+	assert.Equal(t, "site-A", inboxEvt.DestSiteID)
 
 	var inner model.MemberRemoveEvent
-	require.NoError(t, json.Unmarshal(outboxEvt.Payload, &inner))
+	require.NoError(t, json.Unmarshal(inboxEvt.Payload, &inner))
 	assert.Equal(t, "member_removed", inner.Type, "admin-remove: inner type is member_removed")
 	assert.Equal(t, roomID, inner.RoomID)
 	assert.Equal(t, []string{"bob"}, inner.Accounts)
 	assert.Equal(t, reqID+":site-A", pubs[0].msgID)
 
 	// member_removed sys-message: requester is the sender, Content is server-rendered.
-	sysPubs := cap.outboxOnPrefix(subject.MsgCanonicalCreated("site-A"))
+	sysPubs := cap.publishesOnPrefix(subject.MsgCanonicalCreated("site-A"))
 	require.Len(t, sysPubs, 1, "exactly one member_removed sys-message per remove-member call")
 	var sysEvt model.MessageEvent
 	require.NoError(t, json.Unmarshal(sysPubs[0].data, &sysEvt))
 	assert.Equal(t, model.MessageTypeMemberRemoved, sysEvt.Message.Type)
 	assert.Equal(t, "alice", sysEvt.Message.UserAccount, "sender is the requester, not the removed user")
-	assert.Equal(t, `"Bob 鲍勃" has been removed from the channel`, sysEvt.Message.Content,
-		"forced-remove Content uses formatRemovedUser(user)")
+	// requester "alice" has no EngName/ChineseName set above, so displayName
+	// falls back to the account → "alice" (also exercises the fallback path).
+	assert.Equal(t, `"alice" removed "Bob 鲍勃" from the chatroom`, sysEvt.Message.Content,
+		"forced-remove Content names actor then target")
 }
 
 // --- Sync DM endpoint integration tests ---
@@ -1059,36 +1206,32 @@ func TestSyncCreateDM_DM_PersistsRoomAndSubs(t *testing.T) {
 	assert.Equal(t, 1, subjects[subject.SubscriptionUpdate("bob")])
 }
 
-func TestSyncCreateDM_SelfDM_PersistsSingleFavoritedSub(t *testing.T) {
-	ctx := newIntegSyncDMCtx()
+func TestProcessCreateRoom_SelfDM_PersistsSingleFavoritedSub(t *testing.T) {
+	ctx := context.Background()
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	siteID := "site-A"
 
 	mustInsertUser(t, db, &model.User{ID: "u-alice", Account: "alice", SiteID: siteID, EngName: "Alice", ChineseName: "愛麗絲"})
 
-	cap := &publishCapture{}
-	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender)
+	h := newIntegrationHandler(t, store, siteID)
+	ctx = natsutil.WithRequestID(ctx, "0193abcd-0193-7abc-89ab-0193abcd0193")
 
-	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeDM, RequesterAccount: "alice", OtherAccount: "alice"}
-	got, err := handler.serverCreateDM(ctx, req)
+	roomID := idgen.BuildDMRoomID("u-alice", "u-alice")
+	body, err := json.Marshal(model.CreateRoomRequest{
+		RoomID:           roomID,
+		Users:            []string{"alice"}, // self → single-member DM
+		RequesterID:      "u-alice",
+		RequesterAccount: "alice",
+		Timestamp:        time.Now().UTC().UnixMilli(),
+	})
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.True(t, got.Success)
-	assert.Equal(t, "alice", got.Subscription.User.Account)
-	assert.True(t, got.Subscription.Favorite)
-	assert.True(t, got.Subscription.IsSubscribed)
-	assert.Equal(t, model.RoomTypeDM, got.Subscription.RoomType)
-
-	roomID := got.Subscription.RoomID
-	require.NotEmpty(t, roomID)
+	require.NoError(t, h.processCreateRoom(ctx, body))
 
 	room, err := store.GetRoom(ctx, roomID)
 	require.NoError(t, err)
 	assert.Equal(t, model.RoomTypeDM, room.Type)
 	assert.Equal(t, siteID, room.SiteID)
-	assert.Equal(t, 1, room.UserCount)
-	assert.Equal(t, 0, room.AppCount)
 	assert.Equal(t, []string{"u-alice"}, room.UIDs)
 	assert.Equal(t, []string{"alice"}, room.Accounts)
 
@@ -1103,18 +1246,14 @@ func TestSyncCreateDM_SelfDM_PersistsSingleFavoritedSub(t *testing.T) {
 	assert.Equal(t, "alice", persisted.Name)
 	assert.Equal(t, model.RoomTypeDM, persisted.RoomType)
 
-	subjects := map[string]int{}
-	cap.mu.Lock()
-	total := len(cap.captured)
-	for _, p := range cap.captured {
-		subjects[p.subject]++
-	}
-	cap.mu.Unlock()
-	assert.Equal(t, 1, subjects[subject.SubscriptionUpdate("alice")])
-	assert.Equal(t, 1, total, "subscription.update only; no outbox (same-site) and no canonical member event (Option C)")
+	// Deterministic id → a redelivery is idempotent (still one room, one sub).
+	require.NoError(t, h.processCreateRoom(ctx, body))
+	subCount, err = db.Collection("subscriptions").CountDocuments(ctx, bson.M{"roomId": roomID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), subCount, "redelivery is idempotent")
 }
 
-func TestSyncCreateDM_BotDM_CrossSiteOutbox(t *testing.T) {
+func TestSyncCreateDM_BotDM_CrossSiteInbox(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	siteID := "site-A"
@@ -1129,8 +1268,8 @@ func TestSyncCreateDM_BotDM_CrossSiteOutbox(t *testing.T) {
 	_, err := handler.serverCreateDM(newIntegSyncDMCtx(), req)
 	require.NoError(t, err)
 
-	pubs := cap.outboxOnPrefix(subject.Outbox(siteID, "site-B", model.OutboxMemberAdded))
-	assert.Len(t, pubs, 1, "exactly one outbox to site-B")
+	pubs := cap.publishesOnPrefix(subject.Outbox(siteID, "site-B", model.InboxMemberAdded))
+	assert.Len(t, pubs, 1, "exactly one outbox relay for site-B")
 }
 
 func TestSyncCreateDM_RetryIdempotent(t *testing.T) {
@@ -1165,12 +1304,12 @@ func TestSyncCreateDM_RetryIdempotent(t *testing.T) {
 	assert.Equal(t, int64(2), subCount, "redelivery must not create duplicate subs")
 }
 
-// Federation convergence: the cross-site OUTBOX payload carries the deterministic
+// Federation convergence: the cross-site inbox payload carries the deterministic
 // BuildDMRoomID, so the remote inbox-worker (and any replay) writes to the SAME
 // room ID as the home site. The payload-derived dedup key (room id + requester
 // account + createdAt + dest) is identical across replays, so JetStream dedup
 // blocks duplicates.
-func TestSyncCreateDM_CrossSite_OutboxPayloadConverges(t *testing.T) {
+func TestSyncCreateDM_CrossSite_InboxPayloadConverges(t *testing.T) {
 	ctx := newIntegSyncDMCtx()
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -1192,15 +1331,14 @@ func TestSyncCreateDM_CrossSite_OutboxPayloadConverges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantRoomID, persisted.ID)
 
-	// 2. OUTBOX payload carries the same RoomID + the dedup key includes destSiteID.
-	pubs := cap1.outboxOnPrefix(subject.Outbox(siteID, "site-B", model.OutboxMemberAdded))
+	// 2. Outbox relay payload carries the same RoomID + the dedup key includes destSiteID.
+	pubs := cap1.publishesOnPrefix(subject.Outbox(siteID, "site-B", model.InboxMemberAdded))
 	require.Len(t, pubs, 1)
-	var env model.OutboxEvent
-	require.NoError(t, json.Unmarshal(pubs[0].data, &env))
+	_, env := unwrapOutbox(t, pubs[0].data)
 	var payload model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(env.Payload, &payload))
 	assert.Equal(t, wantRoomID, payload.RoomID,
-		"outbox RoomID must match local room.ID so remote site converges")
+		"inbox RoomID must match local room.ID so remote site converges")
 	assert.Equal(t, model.RoomTypeDM, payload.RoomType)
 	assert.Equal(t, "alice", payload.RequesterAccount)
 	assert.Equal(t, []string{"bob"}, payload.Accounts)
@@ -1209,12 +1347,12 @@ func TestSyncCreateDM_CrossSite_OutboxPayloadConverges(t *testing.T) {
 
 	// 3. Replay produces the same Nats-Msg-Id because the dedup key is derived
 	//    from the (stable) payload seed — room id + requester account + createdAt +
-	//    dest — not the request ID. JetStream OUTBOX dedup rejects the second emit.
+	//    dest — not the request ID. JetStream INBOX dedup rejects the second emit.
 	cap2 := &publishCapture{}
 	handler2 := NewHandler(store, siteID, cap2.fn(), testKeyStore, testKeySender)
 	_, err = handler2.serverCreateDM(newIntegSyncDMCtx(), req)
 	require.NoError(t, err)
-	pubs2 := cap2.outboxOnPrefix(subject.Outbox(siteID, "site-B", model.OutboxMemberAdded))
+	pubs2 := cap2.publishesOnPrefix(subject.Outbox(siteID, "site-B", model.InboxMemberAdded))
 	require.Len(t, pubs2, 1)
 	assert.Equal(t, pubs[0].msgID, pubs2[0].msgID,
 		"replay must produce identical Nats-Msg-Id so broker dedup blocks duplicate cross-site events")
@@ -1884,7 +2022,7 @@ func TestIntegration_ProcessRoomRename(t *testing.T) {
 	}
 
 	// One sys message published to canonical.
-	sysPubs := cap.outboxOnPrefix(subject.MsgCanonicalCreated(siteID))
+	sysPubs := cap.publishesOnPrefix(subject.MsgCanonicalCreated(siteID))
 	require.Len(t, sysPubs, 1, "exactly one sys message published for room rename")
 	var sysEvt model.MessageEvent
 	require.NoError(t, json.Unmarshal(sysPubs[0].data, &sysEvt))
@@ -1901,15 +2039,15 @@ func TestIntegration_ProcessRoomRename(t *testing.T) {
 	}
 	cap.mu.Unlock()
 
-	// One outbox publish to remote site-b.
-	outboxPubs := cap.outboxOnPrefix(subject.Outbox(siteID, remoteSite, model.OutboxRoomRenamed))
-	require.Len(t, outboxPubs, 1, "exactly one outbox publish to remote site-b")
-	var outboxEvt model.OutboxEvent
-	require.NoError(t, json.Unmarshal(outboxPubs[0].data, &outboxEvt))
-	var outboxPayload model.RoomRenamedOutboxPayload
-	require.NoError(t, json.Unmarshal(outboxEvt.Payload, &outboxPayload))
-	assert.Equal(t, roomID, outboxPayload.RoomID)
-	assert.Equal(t, newName, outboxPayload.NewName)
+	// One OUTBOX relay to remote site-b (room_renamed rides the ordered lane, not
+	// a direct INBOX publish).
+	relayPubs := cap.publishesOnPrefix(subject.Outbox(siteID, remoteSite, model.InboxRoomRenamed))
+	require.Len(t, relayPubs, 1, "exactly one outbox relay to remote site-b")
+	_, inboxEvt := unwrapOutbox(t, relayPubs[0].data)
+	var inboxPayload model.RoomRenamedInboxPayload
+	require.NoError(t, json.Unmarshal(inboxEvt.Payload, &inboxPayload))
+	assert.Equal(t, roomID, inboxPayload.RoomID)
+	assert.Equal(t, newName, inboxPayload.NewName)
 }
 
 // TestMongoStore_UpdateSubscriptionNamesForRoom_StampsTimestamp asserts the
@@ -1965,4 +2103,24 @@ func TestMongoStore_UpdateSubscriptionNamesForRoom_StampsTimestamp(t *testing.T)
 	gotName, gotTs = subName()
 	assert.Equal(t, "newest", gotName)
 	assert.Equal(t, newer.UnixMilli(), gotTs.UnixMilli())
+}
+
+func TestMongoStore_GetApp_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("apps").InsertOne(ctx, model.App{
+		ID:        "app1",
+		Name:      "Helper Bot",
+		Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+	})
+	require.NoError(t, err)
+
+	app, err := store.GetApp(ctx, "helper.bot")
+	require.NoError(t, err)
+	assert.Equal(t, "Helper Bot", app.Name)
+
+	_, err = store.GetApp(ctx, "missing.bot")
+	assert.ErrorIs(t, err, ErrAppNotFound)
 }

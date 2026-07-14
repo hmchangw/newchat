@@ -26,6 +26,10 @@ services:
       # Local dev pins to site-suffixed indices; prod uses aliases owned by ops/IaC.
       - SEARCH_USER_ROOM_INDEX=user-room-mv-site-local
       - SEARCH_SPOTLIGHT_INDEX=spotlight-site-local-v1
+      # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
+      # request/reply/consumed body capture (pair with the X-Debug-Payload header).
+      - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
+      - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
     ports:
       # Expose /metrics so Prometheus / curl can scrape from the host
       # during local dev. The listener is bound on 0.0.0.0:9090 inside

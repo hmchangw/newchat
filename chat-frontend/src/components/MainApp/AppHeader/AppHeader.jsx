@@ -1,6 +1,8 @@
 import { useNats } from '@/context/NatsContext'
 import SearchBar from './SearchBar/SearchBar'
 import ThemeToggle from './ThemeToggle/ThemeToggle'
+import DebugLevelSelect from './DebugLevelSelect/DebugLevelSelect'
+import DebugPayloadToggle from './DebugPayloadToggle/DebugPayloadToggle'
 import UnreadBadge from './UnreadBadge'
 import './style.css'
 
@@ -21,6 +23,8 @@ export default function AppHeader({ onSelectRoom, onEnterSearch }) {
       <span className="app-header-user">
         {user?.account} · {user?.siteId}
       </span>
+      <DebugLevelSelect />
+      <DebugPayloadToggle />
       <ThemeToggle />
       <button type="button" className="app-header-logout" onClick={disconnect}>
         Logout

@@ -81,6 +81,30 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		assert.Equal(t, threadParentCreatedAt, got.ThreadParentCreatedAt.UTC())
 	})
 
+	t.Run("captures the parent's decoded attachments into the snapshot", func(t *testing.T) {
+		nc := startTestNATS(t)
+		parent := cassandra.Message{
+			MessageID:          messageID,
+			RoomID:             roomID,
+			Sender:             cassandra.Participant{ID: "u-bob", Account: "bob"},
+			CreatedAt:          parentCreatedAt,
+			Msg:                "has an attachment",
+			DecodedAttachments: []cassandra.Attachment{{ID: "f1", Title: "a.png", Type: "file"}},
+		}
+		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
+			data, _ := json.Marshal(parent)
+			_ = m.Msg.Respond(data)
+		})
+		require.NoError(t, err)
+
+		fetcher := newHistoryParentFetcher(nc, baseURL)
+		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Len(t, got.DecodedAttachments, 1)
+		assert.Equal(t, "f1", got.DecodedAttachments[0].ID)
+	})
+
 	t.Run("history returns errcode error envelope — returns error", func(t *testing.T) {
 		nc := startTestNATS(t)
 

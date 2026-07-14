@@ -105,28 +105,28 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 
 	t.Run("debug rung emits flow persisted AND debug decision breadcrumbs", func(t *testing.T) {
 		rec.reset()
-		require.NoError(t, h.processMessage(admitRung("debug"), mkData("hello")))
+		require.NoError(t, h.processMessage(admitRung("debug"), mkData("hello"), false))
 		assert.True(t, rec.has(logctx.LevelFlow, "message-worker persisted"), "flow breadcrumb present at debug")
 		assert.True(t, rec.has(slog.LevelDebug, "message-worker mentions resolved"), "debug decision breadcrumb present")
 	})
 
 	t.Run("flow rung emits only the flow breadcrumb", func(t *testing.T) {
 		rec.reset()
-		require.NoError(t, h.processMessage(admitRung("flow"), mkData("hello")))
+		require.NoError(t, h.processMessage(admitRung("flow"), mkData("hello"), false))
 		assert.True(t, rec.has(logctx.LevelFlow, "message-worker persisted"))
 		assert.False(t, rec.hasLevel(slog.LevelDebug))
 	})
 
 	t.Run("unadmitted context emits nothing below INFO", func(t *testing.T) {
 		rec.reset()
-		require.NoError(t, h.processMessage(context.Background(), mkData("hello")))
+		require.NoError(t, h.processMessage(context.Background(), mkData("hello"), false))
 		assert.False(t, rec.hasLevel(logctx.LevelFlow))
 		assert.False(t, rec.hasLevel(slog.LevelDebug))
 	})
 
 	t.Run("breadcrumbs never carry message content", func(t *testing.T) {
 		rec.reset()
-		require.NoError(t, h.processMessage(admitRung("debug"), mkData("SUPER-SECRET-BODY")))
+		require.NoError(t, h.processMessage(admitRung("debug"), mkData("SUPER-SECRET-BODY"), false))
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
 		for i := range rec.recs {

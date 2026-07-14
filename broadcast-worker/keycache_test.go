@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -408,150 +406,29 @@ func TestCachedKeyProvider_WinnerCancelDoesNotPoisonOtherCallers(t *testing.T) {
 	assert.Equal(t, 1, inner.callCount("room1"))
 }
 
-func TestCachedKeyProvider_StatsCountHitsAndMisses(t *testing.T) {
+func TestCachedKeyProvider_Metrics_HitMissError(t *testing.T) {
+	ctx := context.Background()
 	inner := newFakeKeyStore()
 	inner.set("room1", makeKey(1))
-	inner.set("room2", makeKey(2))
-
+	rec := &fakeRecorder{}
 	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
+	c.metrics = rec
 
-	// Two misses (one per room).
-	_, err := c.Get(context.Background(), "room1")
+	// Miss: not cached, inner load succeeds.
+	_, err := c.Get(ctx, "room1")
 	require.NoError(t, err)
-	_, err = c.Get(context.Background(), "room2")
+	assert.Equal(t, [3]int{0, 1, 0}, [3]int{rec.hits, rec.misses, rec.errs})
+
+	// Hit.
+	_, err = c.Get(ctx, "room1")
 	require.NoError(t, err)
+	assert.Equal(t, [3]int{1, 1, 0}, [3]int{rec.hits, rec.misses, rec.errs})
 
-	// Three hits.
-	for i := 0; i < 3; i++ {
-		_, err := c.Get(context.Background(), "room1")
-		require.NoError(t, err)
-	}
-
-	hits, misses := c.stats()
-	assert.Equal(t, int64(3), hits)
-	assert.Equal(t, int64(2), misses)
-}
-
-func TestCachedKeyProvider_StatsErrorAndCancelCountAsMisses(t *testing.T) {
-	// An error or caller-ctx cancellation means the caller did not get a
-	// value from the cache directly; both count as misses regardless of
-	// outcome. (Hit rate measures cache effectiveness; a failed lookup
-	// did not benefit from the cache.)
-	inner := newFakeKeyStore()
+	// Error: inner load fails.
 	inner.err = errors.New("boom")
-
-	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
-
-	_, err := c.Get(context.Background(), "room1")
+	_, err = c.Get(ctx, "room2")
 	require.Error(t, err)
-
-	hits, misses := c.stats()
-	assert.Equal(t, int64(0), hits)
-	assert.Equal(t, int64(1), misses)
-}
-
-// syncBuffer is a goroutine-safe wrapper around bytes.Buffer for capturing
-// slog output in tests where the logger writes from a goroutine while the
-// test reads concurrently.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-func (b *syncBuffer) Len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Len()
-}
-
-func TestCachedKeyProvider_StatsLoggerEmitsLineAndExitsOnCancel(t *testing.T) {
-	inner := newFakeKeyStore()
-	inner.set("room1", makeKey(1))
-	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
-
-	// Drive a known mix: 1 miss, 4 hits → 80% hit rate.
-	_, err := c.Get(context.Background(), "room1")
-	require.NoError(t, err)
-	for i := 0; i < 4; i++ {
-		_, err := c.Get(context.Background(), "room1")
-		require.NoError(t, err)
-	}
-
-	buf := &syncBuffer{}
-	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		c.runStatsLogger(ctx, 5*time.Millisecond, logger)
-		close(done)
-	}()
-
-	// Wait for at least one tick to fire.
-	require.Eventually(t, func() bool { return buf.Len() > 0 }, time.Second, 1*time.Millisecond)
-	cancel()
-	<-done
-
-	out := buf.String()
-	assert.Contains(t, out, `"msg":"room-key cache"`)
-	assert.Contains(t, out, `"hits":4`)
-	assert.Contains(t, out, `"misses":1`)
-	assert.Contains(t, out, `"hit_rate":"80.00%"`)
-}
-
-func TestCachedKeyProvider_StatsLoggerHandlesZeroLookups(t *testing.T) {
-	// When no Get calls have occurred in the window, the rate field should
-	// say "n/a" rather than dividing by zero.
-	c := NewCachedKeyProvider(newFakeKeyStore(), testCacheSize, time.Minute)
-
-	buf := &syncBuffer{}
-	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		c.runStatsLogger(ctx, 5*time.Millisecond, logger)
-		close(done)
-	}()
-
-	require.Eventually(t, func() bool { return buf.Len() > 0 }, time.Second, 1*time.Millisecond)
-	cancel()
-	<-done
-
-	assert.Contains(t, buf.String(), `"hit_rate":"n/a"`)
-}
-
-func TestCachedKeyProvider_StatsLoggerResetsCountersEachWindow(t *testing.T) {
-	inner := newFakeKeyStore()
-	inner.set("room1", makeKey(1))
-	c := NewCachedKeyProvider(inner, testCacheSize, time.Minute)
-
-	// Prime one miss + one hit.
-	_, err := c.Get(context.Background(), "room1")
-	require.NoError(t, err)
-	_, err = c.Get(context.Background(), "room1")
-	require.NoError(t, err)
-
-	hits, misses := c.snapshot()
-	assert.Equal(t, int64(1), hits)
-	assert.Equal(t, int64(1), misses)
-
-	// snapshot must have reset to zero so the next window measures fresh.
-	hits, misses = c.stats()
-	assert.Equal(t, int64(0), hits)
-	assert.Equal(t, int64(0), misses)
+	assert.Equal(t, [3]int{1, 1, 1}, [3]int{rec.hits, rec.misses, rec.errs})
 }
 
 func TestKeyCacheTTLSafe(t *testing.T) {

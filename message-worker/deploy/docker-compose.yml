@@ -1,51 +1,18 @@
 name: message-worker
 
 services:
-  vault:
-    image: hashicorp/vault:1.18
-    cap_add:
-      - IPC_LOCK
-    environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=dev-only-token
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
-    networks:
-      - chat-local
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8200/v1/sys/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  vault-bootstrap:
-    image: hashicorp/vault:1.18
-    depends_on:
-      vault:
-        condition: service_healthy
-    environment:
-      - VAULT_ADDR=http://vault:8200
-      - VAULT_TOKEN=dev-only-token
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        vault secrets enable -path=transit transit || true
-        vault write -f transit/keys/chat-kek
-    networks:
-      - chat-local
-
   message-worker:
     build:
       context: ../..
       dockerfile: message-worker/deploy/Dockerfile
     pull_policy: build
-    depends_on:
-      vault-bootstrap:
-        condition: service_completed_successfully
     environment:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      # Dev-only pprof profiling on the health port (off by default). Flip on
+      # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - CASSANDRA_HOSTS=cassandra
       - CASSANDRA_KEYSPACE=chat
       - MONGO_URI=mongodb://mongodb:27017
@@ -59,6 +26,14 @@ services:
       - VAULT_ADDR=http://vault:8200
       - VAULT_TOKEN=dev-only-token
       - ATREST_VAULT_TRANSIT_KEY=chat-kek
+      # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
+      # request/reply/consumed body capture (pair with the X-Debug-Payload header).
+      - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
+      - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
+      # /metrics (atrest DEK + cache_*_total counters); scraped by the
+      # observability Prometheus over chat-local. No host port mapping —
+      # search-service already owns host :9090.
+      - METRICS_ADDR=:9090
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

@@ -4,20 +4,22 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 // Sweeper periodically recomputes accounts whose sweep deadline has passed
 // and publishes any resulting status changes.
 type Sweeper struct {
 	store    PresenceStore
-	publish  PublishFunc
+	publish  presencestore.PublishFunc
 	siteID   string
 	interval time.Duration
 	now      func() time.Time
 }
 
 // NewSweeper builds a Sweeper.
-func NewSweeper(store PresenceStore, publish PublishFunc, siteID string, interval time.Duration) *Sweeper {
+func NewSweeper(store PresenceStore, publish presencestore.PublishFunc, siteID string, interval time.Duration) *Sweeper {
 	return &Sweeper{store: store, publish: publish, siteID: siteID, interval: interval, now: time.Now}
 }
 
@@ -44,7 +46,7 @@ func (s *Sweeper) tick(ctx context.Context) error {
 		return err
 	}
 	for _, ch := range changes {
-		publishState(ctx, s.publish, s.siteID, ch.Account, ch.Effective, s.now())
+		presencestore.PublishState(ctx, s.publish, s.siteID, ch.Account, ch.Effective, s.now())
 	}
 	return nil
 }

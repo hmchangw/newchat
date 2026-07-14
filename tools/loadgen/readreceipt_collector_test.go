@@ -7,6 +7,15 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestReadReceiptCollector_Underrun(t *testing.T) {
+	c := NewReadReceiptCollector()
+	assert.Equal(t, 0, c.UnderrunCount())
+	c.RecordUnderrun(5)
+	c.RecordUnderrun(0) // zero is a no-op tick, must not change the tally
+	c.RecordUnderrun(4)
+	assert.Equal(t, 9, c.UnderrunCount())
+}
+
 func TestReadReceiptCollector_SamplesAndErrors(t *testing.T) {
 	c := NewReadReceiptCollector()
 	c.RecordSample(15 * time.Millisecond)

@@ -164,7 +164,11 @@ func NewSustainedMembersGenerator(cfg *SustainedMembersConfig, seed int64) *Sust
 }
 
 // Run drives the publish loop. Returns ErrPoolsExhausted if every room runs
-// out of candidates before ctx is cancelled.
+// out of candidates before ctx is cancelled. The arrival rate is paced by the
+// batched pacer (events released per coarse tick), so achieved RPS is not
+// capped by single-ticker resolution; events the pacer cannot release on
+// schedule are tallied as the "underrun" publish-error reason (a load-box
+// diagnostic, not a real publish failure).
 func (g *SustainedMembersGenerator) Run(ctx context.Context) error {
 	if g.cfg.Rate <= 0 {
 		return fmt.Errorf("rate must be > 0")
@@ -172,11 +176,9 @@ func (g *SustainedMembersGenerator) Run(ctx context.Context) error {
 	if g.cfg.UsersPerAdd <= 0 {
 		return fmt.Errorf("usersPerAdd must be > 0")
 	}
-	interval := time.Second / time.Duration(g.cfg.Rate)
-	if interval <= 0 {
-		interval = time.Nanosecond
-	}
-	tick := time.NewTicker(interval)
+
+	p := newPacer(g.cfg.Rate, time.Now())
+	tick := time.NewTicker(p.interval)
 	defer tick.Stop()
 
 	var sem chan struct{}
@@ -184,43 +186,47 @@ func (g *SustainedMembersGenerator) Run(ctx context.Context) error {
 		sem = make(chan struct{}, g.cfg.MaxInFlight)
 	}
 	var wg sync.WaitGroup
+	drain := func() {
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(drainGracePeriod):
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(drainGracePeriod):
-			}
+			drain()
 			return nil
 		case <-tick.C:
-			roomID, accounts, ok := g.takeNext()
-			if !ok {
-				// Drain in-flight before returning so prior publishes complete.
-				done := make(chan struct{})
-				go func() { wg.Wait(); close(done) }()
-				select {
-				case <-done:
-				case <-time.After(drainGracePeriod):
+			emit, underrun := p.tick(time.Now())
+			if underrun > 0 {
+				g.cfg.Metrics.MemberPublishErrors.WithLabelValues("underrun").Add(float64(underrun))
+			}
+			for i := 0; i < emit; i++ {
+				roomID, accounts, ok := g.takeNext()
+				if !ok {
+					// Drain in-flight before returning so prior publishes complete.
+					drain()
+					return ErrPoolsExhausted
 				}
-				return ErrPoolsExhausted
-			}
-			if sem == nil {
-				g.publishOne(ctx, roomID, accounts)
-				continue
-			}
-			select {
-			case sem <- struct{}{}:
-				wg.Add(1)
-				go func() {
-					defer func() { <-sem; wg.Done() }()
+				if sem == nil {
 					g.publishOne(ctx, roomID, accounts)
-				}()
-			default:
-				g.cfg.Metrics.MemberPublishErrors.WithLabelValues("saturated").Inc()
-				g.giveBack(roomID, accounts)
+					continue
+				}
+				select {
+				case sem <- struct{}{}:
+					wg.Add(1)
+					go func() {
+						defer func() { <-sem; wg.Done() }()
+						g.publishOne(ctx, roomID, accounts)
+					}()
+				default:
+					g.cfg.Metrics.MemberPublishErrors.WithLabelValues("saturated").Inc()
+					g.giveBack(roomID, accounts)
+				}
 			}
 		}
 	}
@@ -327,7 +333,7 @@ func (g *CapacityMembersGenerator) Run(ctx context.Context) error {
 	for i := range g.cfg.Fixtures.Rooms {
 		perRoom[g.cfg.Fixtures.Rooms[i].ID] = make(chan struct{}, 1)
 	}
-	g.cfg.Collector.OnBroadcast(func(roomID string, _ []string) {
+	g.cfg.Collector.OnMemberEvent(func(roomID string, _ []string) {
 		if ch, ok := perRoom[roomID]; ok {
 			select {
 			case ch <- struct{}{}:

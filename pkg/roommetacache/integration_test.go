@@ -37,7 +37,7 @@ func TestReadThrough_MissPopulatesThenServesFromL2(t *testing.T) {
 	require.NoError(t, err)
 
 	// First read: L2 miss → Mongo → populate L2.
-	got, err := ReadThrough(ctx, client, rooms, "r1", time.Minute)
+	got, err := ReadThrough(ctx, client, rooms, "r1", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, "general", got.Name)
 	assert.Equal(t, 3, got.UserCount)
@@ -46,7 +46,7 @@ func TestReadThrough_MissPopulatesThenServesFromL2(t *testing.T) {
 	_, err = rooms.DeleteOne(ctx, bson.M{"_id": "r1"})
 	require.NoError(t, err)
 
-	again, err := ReadThrough(ctx, client, rooms, "r1", time.Minute)
+	again, err := ReadThrough(ctx, client, rooms, "r1", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, "general", again.Name)
 	assert.Equal(t, 3, again.UserCount)
@@ -62,7 +62,7 @@ func TestReadThrough_NilClientReadsMongo(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := ReadThrough(ctx, nil, rooms, "r2", time.Minute)
+	got, err := ReadThrough(ctx, nil, rooms, "r2", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, "ops", got.Name)
 }
@@ -80,7 +80,7 @@ func TestBustMeta_RemovesL2Entry(t *testing.T) {
 	require.NoError(t, err)
 
 	// Populate L2.
-	_, err = ReadThrough(ctx, client, rooms, "r3", time.Minute)
+	_, err = ReadThrough(ctx, client, rooms, "r3", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 
 	// Authoritative write + bust.
@@ -89,7 +89,7 @@ func TestBustMeta_RemovesL2Entry(t *testing.T) {
 	BustMeta(ctx, client, "r3")
 
 	// Next read repopulates from Mongo with the fresh value.
-	got, err := ReadThrough(ctx, client, rooms, "r3", time.Minute)
+	got, err := ReadThrough(ctx, client, rooms, "r3", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, "second", got.Name)
 }

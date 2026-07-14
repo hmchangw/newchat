@@ -45,11 +45,10 @@ export function isSSOTokenInvalidError(err) {
 
 export async function redirectToReloginOnTokenInvalid() {
   try {
-    // Clear oidc-client-ts's stashed user + the LoginPage's siteId stash.
+    // Clear oidc-client-ts's stashed user state.
     if (manager) {
       try { await manager.removeUser() } catch { /* best-effort */ }
     }
-    window.sessionStorage.removeItem('oidc.siteId')
     const mgr = getOidcManager()
     await mgr.signinRedirect()
   } catch {

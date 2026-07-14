@@ -94,11 +94,12 @@ func TestHandler_DMFanout_DebugBreadcrumbs(t *testing.T) {
 	us := NewMockUserStore(ctrl)
 	pub := &mockPublisher{}
 	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil).AnyTimes()
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil).AnyTimes()
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil).AnyTimes()
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil).AnyTimes()
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), false)
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false)
 	rec := installRecorder(t)
 
 	t.Run("flow rung: fan-out outcome with recipient count, no debug/trace", func(t *testing.T) {
@@ -149,10 +150,11 @@ func TestHandler_DMFanout_NoContentLeak(t *testing.T) {
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
 	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil).AnyTimes()
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil).AnyTimes()
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil).AnyTimes()
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil).AnyTimes()
-	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), false)
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false)
 
 	rec := installRecorder(t)
 	require.NoError(t, h.HandleMessage(admitRung("trace"), data)) // most verbose path

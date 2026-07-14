@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,26 +84,15 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 		}
 		return pErr
 	})
-	g.Go(func() error {
-		t, rErr := s.rooms.GetMinUserLastSeenAt(gctx, roomID)
-		if rErr != nil {
-			slog.Warn("loading minUserLastSeenAt", "error", rErr, "room_id", roomID)
-			return nil
-		}
-		lastSeenFloor = t
-		return nil
-	})
+	g.Go(s.readFloorInto(gctx, roomID, &lastSeenFloor))
 	if err := g.Wait(); err != nil {
 		return nil, fmt.Errorf("loading history: %w", err)
 	}
 
-	var minMs *int64
-	if lastSeenFloor != nil {
-		ms := lastSeenFloor.UTC().UnixMilli()
-		minMs = &ms
-	}
+	minMs := millisPtr(lastSeenFloor)
 
 	redactUnavailableQuotes(page.Data, accessSince)
+	setDecodedAttachments(c, page.Data)
 	return &models.LoadHistoryResponse{
 		Messages:          page.Data,
 		MinUserLastSeenAt: minMs,
@@ -138,21 +128,35 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 		return nil, err
 	}
 
-	var page cassrepo.Page[models.Message]
-	if lowerBound.IsZero() {
-		page, err = s.msgReader.GetAllMessagesAsc(c, roomID, floor, ceiling, pageReq)
-	} else {
-		page, err = s.msgReader.GetMessagesAfter(c, roomID, lowerBound, ceiling, pageReq)
-	}
-	if err != nil {
+	// Page read + MinUserLastSeenAt read in parallel; the receipt read is non-fatal.
+	var (
+		page          cassrepo.Page[models.Message]
+		lastSeenFloor *time.Time
+	)
+	g, gctx := errgroup.WithContext(c)
+	g.Go(func() error {
+		var pErr error
+		if lowerBound.IsZero() {
+			page, pErr = s.msgReader.GetAllMessagesAsc(gctx, roomID, floor, ceiling, pageReq)
+		} else {
+			page, pErr = s.msgReader.GetMessagesAfter(gctx, roomID, lowerBound, ceiling, pageReq)
+		}
+		return pErr
+	})
+	g.Go(s.readFloorInto(gctx, roomID, &lastSeenFloor))
+	if err := g.Wait(); err != nil {
 		return nil, fmt.Errorf("loading next messages: %w", err)
 	}
 
+	minMs := millisPtr(lastSeenFloor)
+
 	redactUnavailableQuotes(page.Data, accessSince)
+	setDecodedAttachments(c, page.Data)
 	return &models.LoadNextMessagesResponse{
-		Messages:   page.Data,
-		NextCursor: page.NextCursor,
-		HasNext:    page.HasNext,
+		Messages:          page.Data,
+		NextCursor:        page.NextCursor,
+		HasNext:           page.HasNext,
+		MinUserLastSeenAt: minMs,
 	}, nil
 }
 
@@ -193,8 +197,11 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 	if remaining <= 0 {
 		only := *centralMsg
 		redactUnavailableQuote(&only, accessSince)
+		decodeMessageAttachments(c, &only)
+		// Serial best-effort read — this path issues no page reads to parallelise against.
 		return &models.LoadSurroundingMessagesResponse{
-			Messages: []models.Message{only},
+			Messages:          []models.Message{only},
+			MinUserLastSeenAt: s.minUserLastSeenMillis(c, roomID),
 		}, nil
 	}
 	beforeCount := (remaining + 1) / 2
@@ -210,8 +217,9 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 	}
 
 	var (
-		beforePage cassrepo.Page[models.Message]
-		afterPage  cassrepo.Page[models.Message]
+		beforePage    cassrepo.Page[models.Message]
+		afterPage     cassrepo.Page[models.Message]
+		lastSeenFloor *time.Time
 	)
 	g, gctx := errgroup.WithContext(c)
 	g.Go(func() error {
@@ -234,10 +242,13 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 		}
 		return nil
 	})
+	g.Go(s.readFloorInto(gctx, roomID, &lastSeenFloor))
 	if err := g.Wait(); err != nil {
 		// errgroup error already carries the (before|after) direction.
 		return nil, err
 	}
+
+	minMs := millisPtr(lastSeenFloor)
 
 	// Assemble in ASC order: reverse the DESC before-page, append central, then after-page.
 	messages := make([]models.Message, 0, len(beforePage.Data)+1+len(afterPage.Data))
@@ -248,11 +259,44 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 	messages = append(messages, afterPage.Data...)
 
 	redactUnavailableQuotes(messages, accessSince)
+	setDecodedAttachments(c, messages)
 	return &models.LoadSurroundingMessagesResponse{
-		Messages:   messages,
-		MoreBefore: beforePage.HasNext,
-		MoreAfter:  afterPage.HasNext,
+		Messages:          messages,
+		MoreBefore:        beforePage.HasNext,
+		MoreAfter:         afterPage.HasNext,
+		MinUserLastSeenAt: minMs,
 	}, nil
+}
+
+// millisPtr converts a read-floor time to UTC millis; nil in → nil out.
+func millisPtr(t *time.Time) *int64 {
+	if t == nil {
+		return nil
+	}
+	ms := t.UTC().UnixMilli()
+	return &ms
+}
+
+// readFloorInto returns an errgroup task that best-effort loads the room read-floor
+// into *dst. A read error logs and leaves *dst nil — messages still return.
+func (s *HistoryService) readFloorInto(ctx context.Context, roomID string, dst **time.Time) func() error {
+	return func() error {
+		t, err := s.rooms.GetMinUserLastSeenAt(ctx, roomID)
+		if err != nil {
+			slog.Warn("loading minUserLastSeenAt", "error", err, "room_id", roomID)
+			return nil
+		}
+		*dst = t
+		return nil
+	}
+}
+
+// minUserLastSeenMillis reads the room read-floor as UTC millis; best-effort — a read error logs and yields nil.
+// Serial counterpart to readFloorInto for paths with no page read to parallelise against.
+func (s *HistoryService) minUserLastSeenMillis(ctx context.Context, roomID string) *int64 {
+	var t *time.Time
+	_ = s.readFloorInto(ctx, roomID, &t)()
+	return millisPtr(t)
 }
 
 func (s *HistoryService) GetMessageByID(c *natsrouter.Context, req models.GetMessageByIDRequest) (*models.Message, error) {
@@ -275,7 +319,52 @@ func (s *HistoryService) GetMessageByID(c *natsrouter.Context, req models.GetMes
 	}
 
 	redactUnavailableQuote(msg, accessSince)
+	decodeMessageAttachments(c, msg)
 	return msg, nil
+}
+
+// maxGetByIDsBatchSize caps the number of IDs per msg.get.ids request.
+const maxGetByIDsBatchSize = 100
+
+// GetMessagesByIDs handles chat.user.{account}.request.room.{roomID}.{siteID}.msg.get.ids.
+// Returns messages in input order; IDs not found or outside the access window are silently omitted.
+func (s *HistoryService) GetMessagesByIDs(c *natsrouter.Context, req models.GetMessagesByIDsRequest) (*models.GetMessagesByIDsResponse, error) {
+	account := c.Param("account")
+	roomID := c.Param("roomID")
+	c.WithLogValues("account", account, "room_id", roomID)
+
+	accessSince, err := s.getAccessSince(c, account, roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(req.MessageIDs) == 0 {
+		return nil, errcode.BadRequest("messageIds must not be empty")
+	}
+	if len(req.MessageIDs) > maxGetByIDsBatchSize {
+		return nil, errcode.BadRequest("too many messageIds")
+	}
+
+	fetched, err := s.msgReader.GetMessagesByIDs(c, req.MessageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetching messages by IDs: %w", err)
+	}
+
+	kept := fetched[:0]
+	for i := range fetched {
+		// Scope to the subject's room — fetch is by ID alone, so drop any cross-room match.
+		if fetched[i].RoomID != roomID {
+			continue
+		}
+		if accessSince != nil && fetched[i].CreatedAt.Before(*accessSince) {
+			continue
+		}
+		kept = append(kept, fetched[i])
+	}
+
+	redactUnavailableQuotes(kept, accessSince)
+	setDecodedAttachments(c, kept)
+	return &models.GetMessagesByIDsResponse{Messages: kept}, nil
 }
 
 // EditMessage handles chat.user.{account}.request.room.{roomID}.{siteID}.msg.edit.
@@ -332,16 +421,17 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 	canonicalEvt := model.MessageEvent{
 		Event: model.EventUpdated,
 		Message: model.Message{
-			ID:                    msg.MessageID,
-			RoomID:                msg.RoomID,
-			UserID:                msg.Sender.ID,
-			UserAccount:           msg.Sender.Account,
-			Content:               req.NewMsg,
-			CreatedAt:             msg.CreatedAt,
-			EditedAt:              &editedAt,
-			UpdatedAt:             &editedAt,
-			ThreadParentMessageID: msg.ThreadParentID,
-			TShow:                 msg.TShow,
+			ID:                           msg.MessageID,
+			RoomID:                       msg.RoomID,
+			UserID:                       msg.Sender.ID,
+			UserAccount:                  msg.Sender.Account,
+			Content:                      req.NewMsg,
+			CreatedAt:                    msg.CreatedAt,
+			EditedAt:                     &editedAt,
+			UpdatedAt:                    &editedAt,
+			ThreadParentMessageID:        msg.ThreadParentID,
+			ThreadParentMessageCreatedAt: msg.ThreadParentCreatedAt,
+			TShow:                        msg.TShow,
 		},
 		SiteID:    siteID,
 		Timestamp: editedAtMs,
@@ -407,15 +497,16 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	canonicalEvt := model.MessageEvent{
 		Event: model.EventDeleted,
 		Message: model.Message{
-			ID:                    msg.MessageID,
-			RoomID:                msg.RoomID,
-			UserID:                msg.Sender.ID,
-			UserAccount:           msg.Sender.Account,
-			Content:               msg.Msg,
-			CreatedAt:             msg.CreatedAt,
-			UpdatedAt:             &actualDeletedAt,
-			ThreadParentMessageID: msg.ThreadParentID,
-			TShow:                 msg.TShow,
+			ID:                           msg.MessageID,
+			RoomID:                       msg.RoomID,
+			UserID:                       msg.Sender.ID,
+			UserAccount:                  msg.Sender.Account,
+			Content:                      msg.Msg,
+			CreatedAt:                    msg.CreatedAt,
+			UpdatedAt:                    &actualDeletedAt,
+			ThreadParentMessageID:        msg.ThreadParentID,
+			ThreadParentMessageCreatedAt: msg.ThreadParentCreatedAt,
+			TShow:                        msg.TShow,
 		},
 		SiteID:    siteID,
 		Timestamp: deletedAtMs,

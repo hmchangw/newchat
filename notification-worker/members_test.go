@@ -47,14 +47,28 @@ func (f *fakeCache) Invalidate(_ context.Context, roomID string) error {
 }
 
 type fakeLoader struct {
-	calls atomic.Int32
-	out   []roomsubcache.Member
-	err   error
-	delay time.Duration
+	calls   atomic.Int32
+	out     []roomsubcache.Member
+	err     error
+	delay   time.Duration
+	block   chan struct{} // when non-nil, blocks (unconditionally) before returning
+	entered chan struct{} // when non-nil (buffered), signals once when entered
 }
 
-func (f *fakeLoader) Load(_ context.Context, _ string) ([]roomsubcache.Member, error) {
+func (f *fakeLoader) Load(ctx context.Context, _ string) ([]roomsubcache.Member, error) {
 	f.calls.Add(1)
+	if f.entered != nil {
+		select {
+		case f.entered <- struct{}{}:
+		default:
+		}
+	}
+	if f.block != nil {
+		<-f.block
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
@@ -143,3 +157,67 @@ func (e *erroringCache) Set(context.Context, string, []roomsubcache.Member, time
 	return nil
 }
 func (e *erroringCache) Invalidate(context.Context, string) error { return nil }
+
+func TestCachedMemberLookup_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
+	cache := newFakeCache()
+	loader := &fakeLoader{
+		out:     []roomsubcache.Member{{ID: "u1", Account: "alice"}},
+		block:   make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
+	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, e := lookup.GetMembers(leaderCtx, "r1")
+		leaderDone <- e
+	}()
+	<-loader.entered
+
+	waiterReady := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterReady)
+		_, e := lookup.GetMembers(context.Background(), "r1")
+		waiterDone <- e
+	}()
+	<-waiterReady
+
+	cancelLeader()
+	require.ErrorIs(t, <-leaderDone, context.Canceled)
+	close(loader.block)
+	require.NoError(t, <-waiterDone, "waiter must not be poisoned by the leader's cancel")
+
+	got, err := lookup.GetMembers(context.Background(), "r1")
+	require.NoError(t, err)
+	assert.Equal(t, loader.out, got)
+	assert.Equal(t, int32(1), loader.calls.Load(), "shared load should have populated the cache")
+}
+
+func TestCachedMemberLookup_CallerCancelReturnsCtxErr(t *testing.T) {
+	cache := newFakeCache()
+	loader := &fakeLoader{
+		out:     []roomsubcache.Member{{ID: "u1", Account: "alice"}},
+		block:   make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
+	defer close(loader.block)
+	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, e := lookup.GetMembers(ctx, "r1")
+		done <- e
+	}()
+	<-loader.entered
+	cancel()
+
+	select {
+	case e := <-done:
+		require.ErrorIs(t, e, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller did not return on its own ctx cancel within 2s")
+	}
+}

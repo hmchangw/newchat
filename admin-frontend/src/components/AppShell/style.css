@@ -1,0 +1,61 @@
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-shell-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-xl);
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.app-shell-nav-links {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.app-shell-nav-link {
+  padding: var(--space-sm) var(--space-md);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--easing),
+              color var(--motion-fast) var(--easing);
+}
+
+.app-shell-nav-link:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.app-shell-nav-link.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.app-shell-account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.app-shell-account-name {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.app-shell-main {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}

@@ -14,28 +14,28 @@ type stubThreadLookup struct {
 	err error
 }
 
-func (s *stubThreadLookup) Followers(_ context.Context, _ string) (map[string]struct{}, error) {
+func (s *stubThreadLookup) Lookup(_ context.Context, _ string) (ThreadRoomInfo, error) {
 	if s.err != nil {
-		return nil, s.err
+		return ThreadRoomInfo{}, s.err
 	}
 	set := make(map[string]struct{}, len(s.out))
 	for _, a := range s.out {
 		set[a] = struct{}{}
 	}
-	return set, nil
+	return ThreadRoomInfo{Followers: set}, nil
 }
 
 func TestThreadFollowers_Resolve(t *testing.T) {
 	s := &stubThreadLookup{out: []string{"alice", "bob"}}
-	got, err := s.Followers(context.Background(), "parent-1")
+	got, err := s.Lookup(context.Background(), "parent-1")
 	require.NoError(t, err)
-	assert.Contains(t, got, "alice")
-	assert.Contains(t, got, "bob")
-	assert.NotContains(t, got, "carol")
+	assert.Contains(t, got.Followers, "alice")
+	assert.Contains(t, got.Followers, "bob")
+	assert.NotContains(t, got.Followers, "carol")
 }
 
 func TestThreadFollowers_PropagatesError(t *testing.T) {
 	s := &stubThreadLookup{err: errors.New("mongo down")}
-	_, err := s.Followers(context.Background(), "parent-1")
+	_, err := s.Lookup(context.Background(), "parent-1")
 	assert.Error(t, err)
 }

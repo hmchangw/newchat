@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -44,6 +48,9 @@ type config struct {
 	MongoPassword      string                  `env:"MONGO_PASSWORD"       envDefault:""`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"      envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"       envDefault:"5m"`
+	HealthAddr         string                  `env:"HEALTH_ADDR"          envDefault:":8081"`
+	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr        string                  `env:"METRICS_ADDR"         envDefault:":9090"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
@@ -53,6 +60,7 @@ type config struct {
 
 func main() {
 	logctx.SetupDefault(os.Stdout)
+	pretouchJSON()
 
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
@@ -74,6 +82,11 @@ func main() {
 	tracerShutdown, err := otelutil.InitTracer(ctx, "message-worker")
 	if err != nil {
 		slog.Error("init tracer failed", "error", err)
+		os.Exit(1)
+	}
+	meterShutdown, err := otelutil.InitMeter("message-worker")
+	if err != nil {
+		slog.Error("init meter failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -137,7 +150,7 @@ func main() {
 	}
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
-		// verbose-tracing intent ride onto downstream badge/outbox events.
+		// verbose-tracing intent ride onto downstream badge/inbox events.
 		msg := natsutil.NewMsg(ctx, subj, data)
 		if msgID == "" {
 			if err := nc.PublishMsg(ctx, msg); err != nil {
@@ -199,6 +212,29 @@ func main() {
 		}
 	}()
 
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
+		natsutil.HealthCheck(nc),
+	)
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
+
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes the atrest DEK and user-cache counters.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	slog.Info("message-worker running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
@@ -216,7 +252,11 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
+		// Stop /metrics late so Prometheus can scrape the final drain-window counts,
+		// then flush the meter provider before client connections close.
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
+		func(ctx context.Context) error { return meterShutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
@@ -226,6 +266,7 @@ func main() {
 			}
 			return nil
 		},
+		func(ctx context.Context) error { return healthStop(ctx) },
 	)
 }
 

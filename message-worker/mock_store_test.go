@@ -15,6 +15,7 @@ import (
 	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
+	cassandra "github.com/hmchangw/chat/pkg/model/cassandra"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -42,6 +43,22 @@ func (m *MockStore) EXPECT() *MockStoreMockRecorder {
 	return m.recorder
 }
 
+// GetMessageCreatedAt mocks base method.
+func (m *MockStore) GetMessageCreatedAt(ctx context.Context, messageID string) (time.Time, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetMessageCreatedAt", ctx, messageID)
+	ret0, _ := ret[0].(time.Time)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetMessageCreatedAt indicates an expected call of GetMessageCreatedAt.
+func (mr *MockStoreMockRecorder) GetMessageCreatedAt(ctx, messageID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMessageCreatedAt", reflect.TypeOf((*MockStore)(nil).GetMessageCreatedAt), ctx, messageID)
+}
+
 // GetMessageSender mocks base method.
 func (m *MockStore) GetMessageSender(ctx context.Context, messageID string) (*cassParticipant, error) {
 	m.ctrl.T.Helper()
@@ -55,6 +72,22 @@ func (m *MockStore) GetMessageSender(ctx context.Context, messageID string) (*ca
 func (mr *MockStoreMockRecorder) GetMessageSender(ctx, messageID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMessageSender", reflect.TypeOf((*MockStore)(nil).GetMessageSender), ctx, messageID)
+}
+
+// GetQuotedParentSnapshot mocks base method.
+func (m *MockStore) GetQuotedParentSnapshot(ctx context.Context, messageID string) (*cassandra.QuotedParentMessage, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetQuotedParentSnapshot", ctx, messageID)
+	ret0, _ := ret[0].(*cassandra.QuotedParentMessage)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetQuotedParentSnapshot indicates an expected call of GetQuotedParentSnapshot.
+func (mr *MockStoreMockRecorder) GetQuotedParentSnapshot(ctx, messageID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetQuotedParentSnapshot", reflect.TypeOf((*MockStore)(nil).GetQuotedParentSnapshot), ctx, messageID)
 }
 
 // SaveMessage mocks base method.
@@ -138,6 +171,20 @@ func (mr *MockThreadStoreMockRecorder) AddReplyAccounts(ctx, threadRoomID, accou
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddReplyAccounts", reflect.TypeOf((*MockThreadStore)(nil).AddReplyAccounts), ctx, threadRoomID, accounts)
 }
 
+// AdvanceThreadSubscriptionLastSeen mocks base method.
+func (m *MockThreadStore) AdvanceThreadSubscriptionLastSeen(ctx context.Context, threadRoomID, account string, at time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AdvanceThreadSubscriptionLastSeen", ctx, threadRoomID, account, at)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AdvanceThreadSubscriptionLastSeen indicates an expected call of AdvanceThreadSubscriptionLastSeen.
+func (mr *MockThreadStoreMockRecorder) AdvanceThreadSubscriptionLastSeen(ctx, threadRoomID, account, at any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AdvanceThreadSubscriptionLastSeen", reflect.TypeOf((*MockThreadStore)(nil).AdvanceThreadSubscriptionLastSeen), ctx, threadRoomID, account, at)
+}
+
 // CreateThreadRoom mocks base method.
 func (m *MockThreadStore) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
 	m.ctrl.T.Helper()
@@ -150,6 +197,21 @@ func (m *MockThreadStore) CreateThreadRoom(ctx context.Context, room *model.Thre
 func (mr *MockThreadStoreMockRecorder) CreateThreadRoom(ctx, room any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateThreadRoom", reflect.TypeOf((*MockThreadStore)(nil).CreateThreadRoom), ctx, room)
+}
+
+// GetHistorySharedSince mocks base method.
+func (m *MockThreadStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetHistorySharedSince", ctx, roomID, accounts)
+	ret0, _ := ret[0].(map[string]*time.Time)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetHistorySharedSince indicates an expected call of GetHistorySharedSince.
+func (mr *MockThreadStoreMockRecorder) GetHistorySharedSince(ctx, roomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHistorySharedSince", reflect.TypeOf((*MockThreadStore)(nil).GetHistorySharedSince), ctx, roomID, accounts)
 }
 
 // GetThreadRoomByParentMessageID mocks base method.

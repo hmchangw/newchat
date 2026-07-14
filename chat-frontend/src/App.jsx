@@ -6,6 +6,7 @@ import { ThreadEventsProvider } from '@/context/ThreadEventsContext'
 import LoginPage from '@/pages/LoginPage'
 import MainApp from '@/components/MainApp/MainApp'
 import OidcCallback from '@/pages/OidcCallback'
+import BotLoginPage from '@/pages/BotLoginPage'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
 
 function AppContent() {
@@ -29,6 +30,13 @@ function AppContent() {
 
   if (pathname === '/oidc-callback') {
     return <OidcCallback onDone={handleOidcDone} />
+  }
+
+  // Bot/admin password login — independent of DEV_MODE (bots never SSO).
+  // Gated on !connected so that once login succeeds (connected flips true)
+  // the user falls through to MainApp even while the URL is still /dev-login.
+  if (!connected && pathname === '/dev-login') {
+    return <BotLoginPage />
   }
 
   if (!connected) {

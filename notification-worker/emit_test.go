@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 type recordedPublish struct {
@@ -49,7 +48,7 @@ func (f *fakePublisher) PublishMsg(_ context.Context, msg *nats.Msg) error {
 	return nil
 }
 
-func TestMobileEmitter_PublishesGzippedBatch(t *testing.T) {
+func TestMobileEmitter_PublishesRawJSONBatch(t *testing.T) {
 	pub := &fakePublisher{}
 	em := newMobileEmitter(pub, "site-a", 0)
 	evt := model.PushNotificationEvent{
@@ -64,14 +63,11 @@ func TestMobileEmitter_PublishesGzippedBatch(t *testing.T) {
 	r := pub.records[0]
 	assert.Equal(t, "chat.server.notification.push.site-a.send", r.subject)
 	assert.Equal(t, "m1-b0", r.msgID, "Nats-Msg-Id is the batch dedup key")
-	assert.Equal(t, "gzip", r.headers.Get("Content-Encoding"))
+	assert.Empty(t, r.headers.Get("Content-Encoding"), "payload is published uncompressed")
 	assert.Equal(t, "application/json", r.headers.Get("Content-Type"))
 
-	// Payload must round-trip via the shared natsutil decoder so any consumer can use it.
-	decoded, err := natsutil.DecodePayload(&nats.Msg{Data: r.payload, Header: r.headers})
-	require.NoError(t, err)
 	var got model.PushNotificationEvent
-	require.NoError(t, json.Unmarshal(decoded, &got))
+	require.NoError(t, json.Unmarshal(r.payload, &got))
 	assert.Equal(t, evt, got)
 }
 
@@ -88,7 +84,7 @@ func TestMobileEmitter_RejectsOversizedBatch(t *testing.T) {
 	err := em.Emit(context.Background(), model.PushNotificationEvent{
 		ID:       "m1-b0",
 		Accounts: []string{"alice", "bob", "carol", "dave"},
-		Body:     "this body plus accounts and headers will gzip larger than 64 bytes",
+		Body:     "this body plus accounts and headers will marshal to more than 64 bytes",
 		RoomID:   "r1",
 	})
 	require.Error(t, err)

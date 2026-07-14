@@ -128,7 +128,7 @@
     }
     label:first-of-type { margin-top: 0; }
 
-    input, textarea {
+    input, textarea, select {
       width: 100%;
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -140,9 +140,20 @@
       outline: none;
       transition: border-color 0.15s;
     }
-    input:focus, textarea:focus {
+    input:focus, textarea:focus, select:focus {
       border-color: var(--primary);
     }
+    .debug-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .debug-row input[type="checkbox"] { width: auto; margin: 0; }
+    .debug-row label { margin: 0; }
+    .debug-note { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
     textarea {
       resize: vertical;
       min-height: 80px;
@@ -463,7 +474,19 @@
       <input id="pub-subject" type="text" placeholder="chat.room.my-room" />
       <label>Payload (JSON)</label>
       <textarea id="pub-payload" placeholder='{"content": "hello world"}'></textarea>
-      <button class="btn btn-primary btn-full" onclick="doPublish()">Publish</button>
+      <label>X-Debug level</label>
+      <select id="pub-debug">
+        <option value="">Off</option>
+        <option value="flow">flow</option>
+        <option value="debug">debug</option>
+        <option value="trace">trace</option>
+      </select>
+      <div class="debug-row">
+        <input id="pub-debug-payload" type="checkbox" />
+        <label for="pub-debug-payload">X-Debug-Payload</label>
+      </div>
+      <div class="debug-note">Logs the body only on services with <code>DEBUG_LOG_PAYLOADS</code> enabled (dev only).</div>
+      <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="doPublish()">Publish</button>
     </div>
 
     <!-- Request / Reply -->
@@ -487,7 +510,19 @@
       </div>
       <label>Payload (JSON)</label>
       <textarea id="req-payload" placeholder='{"content": "hello"}'></textarea>
-      <button id="btn-send-request" class="btn btn-primary btn-full" onclick="doRequest()">Send Request</button>
+      <label>X-Debug level</label>
+      <select id="req-debug">
+        <option value="">Off</option>
+        <option value="flow">flow</option>
+        <option value="debug">debug</option>
+        <option value="trace">trace</option>
+      </select>
+      <div class="debug-row">
+        <input id="req-debug-payload" type="checkbox" />
+        <label for="req-debug-payload">X-Debug-Payload</label>
+      </div>
+      <div class="debug-note">Logs the body only on services with <code>DEBUG_LOG_PAYLOADS</code> enabled (dev only).</div>
+      <button id="btn-send-request" class="btn btn-primary btn-full" style="margin-top:10px" onclick="doRequest()">Send Request</button>
       <div id="req-response" class="response-area">—</div>
     </div>
 
@@ -651,9 +686,11 @@ function renderSubList() {
 async function doPublish() {
   const subject = document.getElementById('pub-subject').value.trim();
   const payload = document.getElementById('pub-payload').value.trim();
+  const debug = document.getElementById('pub-debug').value;
+  const debugPayload = document.getElementById('pub-debug-payload').checked;
   if (!subject) { toast('Enter a subject', 'err'); return; }
   try {
-    await api('POST', '/api/publish', { subject, payload });
+    await api('POST', '/api/publish', { subject, payload, debug, debugPayload });
     toast(`Published → ${subject}`, 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -777,6 +814,8 @@ async function doRequest() {
   const subject   = document.getElementById('req-subject').value.trim();
   const payload   = document.getElementById('req-payload').value.trim();
   const timeoutMs = parseInt(document.getElementById('req-timeout').value, 10);
+  const debug         = document.getElementById('req-debug').value;
+  const debugPayload  = document.getElementById('req-debug-payload').checked;
   const respEl    = document.getElementById('req-response');
   const btn       = document.getElementById('btn-send-request');
 
@@ -789,7 +828,7 @@ async function doRequest() {
   respEl.innerHTML = '—';
 
   try {
-    const data = await api('POST', '/api/request', { subject, payload, timeoutMs });
+    const data = await api('POST', '/api/request', { subject, payload, timeoutMs, debug, debugPayload });
     respEl.className = 'response-area has-reply';
     respEl.innerHTML = prettyJSON(data.payload);
   } catch (e) {

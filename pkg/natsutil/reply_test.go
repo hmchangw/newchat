@@ -31,7 +31,18 @@ func TestMarshalResponse(t *testing.T) {
 
 func startTestNATS(t *testing.T) *nats.Conn {
 	t.Helper()
+	return startTestNATSWithMaxPayload(t, 0)
+}
+
+// startTestNATSWithMaxPayload starts an embedded server; maxPayload > 0 caps the
+// negotiated max_payload so an oversize reply can be exercised deterministically
+// without marshalling megabytes.
+func startTestNATSWithMaxPayload(t *testing.T, maxPayload int32) *nats.Conn {
+	t.Helper()
 	opts := &natsserver.Options{Port: -1}
+	if maxPayload > 0 {
+		opts.MaxPayload = maxPayload
+	}
 	ns, err := natsserver.NewServer(opts)
 	require.NoError(t, err)
 	ns.Start()
@@ -41,6 +52,27 @@ func startTestNATS(t *testing.T) *nats.Conn {
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
 	return nc
+}
+
+// A reply that would exceed the negotiated max_payload must come back as the
+// "response too large" error envelope, not a silent timeout (issue #404).
+func TestReplyJSON_OversizeReply(t *testing.T) {
+	nc := startTestNATSWithMaxPayload(t, 4096)
+	const subj = "test.replyjson.oversize"
+	sub, err := nc.Subscribe(subj, func(m *nats.Msg) {
+		natsutil.ReplyJSON(m, model.Room{ID: "r1", Name: strings.Repeat("x", 8192)})
+	})
+	require.NoError(t, err)
+	defer func() { _ = sub.Unsubscribe() }()
+
+	reply, err := nc.Request(subj, []byte(`{}`), 2*time.Second)
+	require.NoError(t, err) // the bug: this used to time out (no reply at all)
+	body := string(reply.Data)
+	if !strings.Contains(body, `"code":"internal"`) ||
+		!strings.Contains(body, `"reason":"response_too_large"`) ||
+		!strings.Contains(body, `"error":"response payload exceeds maximum size"`) {
+		t.Fatalf("expected oversize error envelope, got: %s", body)
+	}
 }
 
 // ReplyJSON's marshal-failure branch writes a fixed internal-error envelope.

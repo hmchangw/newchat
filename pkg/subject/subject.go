@@ -3,7 +3,22 @@ package subject
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
+
+// IsValidAccountToken reports whether s can serve as the {account} token of a
+// NATS subject: non-empty, no '.'/'*'/'>' runes, no whitespace or control runes.
+func IsValidAccountToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r == '.' || r == '*' || r == '>' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // ParseUserRoomSubject extracts the user account and roomID from subjects
 // matching the pattern "chat.user.{account}.*.room.{roomID}.…".
@@ -50,6 +65,12 @@ func MsgSend(account, roomID, siteID string) string {
 // handler.
 func MsgGet(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.get", account, roomID, siteID)
+}
+
+// MsgGetIDs returns the concrete subject for a GetMessagesByIDs batch request.
+// Pair with MsgGetIDsPattern, which history-service uses to register the handler.
+func MsgGetIDs(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.get.ids", account, roomID, siteID)
 }
 
 func UserResponse(account, requestID string) string {
@@ -113,6 +134,37 @@ func RoomCanonicalMemberEvent(siteID, eventType string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.event.member.%s", siteID, eventType)
 }
 
+// Outbox returns the OUTBOX-stream subject a service publishes a federation relay
+// event on: chat.outbox.{originSiteID}.{destSiteID}.{eventType}. outbox-worker
+// consumes the OUTBOX stream and forwards each event's Envelope to the
+// destination site's INBOX. Destination and event type ride the subject so a
+// per-destination consumer can filter (or pause) on a single peer.
+func Outbox(originSiteID, destSiteID, eventType string) string {
+	return fmt.Sprintf("chat.outbox.%s.%s.%s", originSiteID, destSiteID, eventType)
+}
+
+// OutboxWildcard matches every event on a site's OUTBOX stream:
+// chat.outbox.{originSiteID}.>. Use as the OUTBOX_{siteID} stream's subject
+// pattern and for a consumer draining all destinations; a per-destination
+// consumer filters chat.outbox.{originSiteID}.{destSiteID}.> instead.
+func OutboxWildcard(originSiteID string) string {
+	return fmt.Sprintf("chat.outbox.%s.>", originSiteID)
+}
+
+// ParseOutbox extracts (originSiteID, destSiteID, eventType) from an OUTBOX
+// subject of the form chat.outbox.{origin}.{dest}.{eventType}. Returns ok=false
+// on any malformed subject. Event types are single dot-free tokens (the
+// pkg/outbox partition and the consumer FilterSubjects both treat them as one
+// token), so the subject is always exactly five tokens.
+func ParseOutbox(subj string) (originSiteID, destSiteID, eventType string, ok bool) {
+	parts := strings.Split(subj, ".")
+	if len(parts) != 5 || parts[0] != "chat" || parts[1] != "outbox" ||
+		parts[2] == "" || parts[3] == "" || parts[4] == "" {
+		return "", "", "", false
+	}
+	return parts[2], parts[3], parts[4], true
+}
+
 func SubscriptionUpdate(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.subscription.update", account)
 }
@@ -125,55 +177,43 @@ func Notification(account string) string {
 	return fmt.Sprintf("chat.user.%s.notification", account)
 }
 
-func Outbox(siteID, destSiteID, eventType string) string {
-	return fmt.Sprintf("outbox.%s.to.%s.%s", siteID, destSiteID, eventType)
+// InboxExternal is the subject a service uses to publish a cross-site
+// (remote-origin) federation event directly into the destination site's INBOX
+// stream: `chat.inbox.{siteID}.external.{eventType}`. The JetStream publish is
+// routed across the NATS supercluster to the destination's INBOX. inbox-worker
+// consumes this lane and applies the event to the destination's DB.
+func InboxExternal(siteID, eventType string) string {
+	return fmt.Sprintf("chat.inbox.%s.external.%s", siteID, eventType)
 }
 
-// InboxMemberAdded is the local-publish subject for a same-site member_added
-// event. It lands in the local INBOX stream without the `aggregate` segment.
-func InboxMemberAdded(siteID string) string {
-	return fmt.Sprintf("chat.inbox.%s.member_added", siteID)
+// InboxInternal is the subject a same-site service uses to publish a
+// local-origin event into its own INBOX stream:
+// `chat.inbox.{siteID}.internal.{eventType}`. The internal lane is a
+// search-indexing feed only — inbox-worker does NOT consume it, because the
+// originating service already applied the change to the local DB synchronously.
+func InboxInternal(siteID, eventType string) string {
+	return fmt.Sprintf("chat.inbox.%s.internal.%s", siteID, eventType)
 }
 
-// InboxMemberRemoved is the local-publish subject for a same-site
-// member_removed event. It lands in the local INBOX stream without the
-// `aggregate` segment.
-func InboxMemberRemoved(siteID string) string {
-	return fmt.Sprintf("chat.inbox.%s.member_removed", siteID)
+// InboxExternalAll returns the wildcard matching every external-lane event on a
+// site's INBOX stream: `chat.inbox.{siteID}.external.>`. Use with
+// jetstream.ConsumerConfig.FilterSubjects to scope a consumer to the remote-
+// origin lane only — excluding internal-lane publishes reserved for
+// search-sync-worker.
+func InboxExternalAll(siteID string) string {
+	return fmt.Sprintf("chat.inbox.%s.external.>", siteID)
 }
 
-// InboxMemberAddedAggregate is the transformed subject for a federated
-// member_added event after INBOX SubjectTransform rewrites
-// `outbox.{src}.to.{siteID}.member_added` to this form.
-func InboxMemberAddedAggregate(siteID string) string {
-	return fmt.Sprintf("chat.inbox.%s.aggregate.member_added", siteID)
-}
-
-// InboxMemberRemovedAggregate is the transformed subject for a federated
-// member_removed event.
-func InboxMemberRemovedAggregate(siteID string) string {
-	return fmt.Sprintf("chat.inbox.%s.aggregate.member_removed", siteID)
-}
-
-// InboxAggregateAll returns the wildcard pattern matching every federated
-// (aggregate-lane) event on a site's INBOX stream:
-// `chat.inbox.{siteID}.aggregate.>`. Use with
-// jetstream.ConsumerConfig.FilterSubjects to scope a consumer to the
-// federated lane only — excluding local-lane publishes that are reserved
-// for search-sync-worker.
-func InboxAggregateAll(siteID string) string {
-	return fmt.Sprintf("chat.inbox.%s.aggregate.>", siteID)
-}
-
-// InboxMemberEventSubjects returns the subject filters a consumer should use
-// to receive both local and federated member_added/member_removed events for
-// the given site. Use with jetstream.ConsumerConfig.FilterSubjects (NATS 2.10+).
+// InboxMemberEventSubjects returns the subject filters a consumer should use to
+// receive member_added/member_removed events on both the internal (same-site)
+// and external (cross-site) lanes for the given site. Use with
+// jetstream.ConsumerConfig.FilterSubjects (NATS 2.10+).
 func InboxMemberEventSubjects(siteID string) []string {
 	return []string{
-		InboxMemberAdded(siteID),
-		InboxMemberRemoved(siteID),
-		InboxMemberAddedAggregate(siteID),
-		InboxMemberRemovedAggregate(siteID),
+		InboxInternal(siteID, "member_added"),
+		InboxInternal(siteID, "member_removed"),
+		InboxExternal(siteID, "member_added"),
+		InboxExternal(siteID, "member_removed"),
 	}
 }
 
@@ -187,6 +227,17 @@ func MsgCanonicalUpdated(siteID string) string {
 
 func MsgCanonicalDeleted(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.deleted", siteID)
+}
+
+// MigrationInternalMsgEdit is the server-only request subject for applying a migrated
+// message edit. MUST be locked to server identities in NATS permissions (no client access).
+func MigrationInternalMsgEdit(siteID string) string {
+	return fmt.Sprintf("chat.migration.internal.%s.msg.edit", siteID)
+}
+
+// MigrationInternalMsgDelete is the server-only request subject for a migrated soft-delete.
+func MigrationInternalMsgDelete(siteID string) string {
+	return fmt.Sprintf("chat.migration.internal.%s.msg.delete", siteID)
 }
 
 func MsgCanonicalPinned(siteID string) string {
@@ -220,10 +271,19 @@ func RoomsInfoBatch(siteID string) string {
 	return fmt.Sprintf("chat.server.request.room.%s.info.batch", siteID)
 }
 
-// ThreadUnreadSummary is the server-to-server request subject for a per-site
-// thread unread rollup for a single user.
-func ThreadUnreadSummary(siteID string) string {
-	return fmt.Sprintf("chat.server.request.room.%s.thread.unread.summary", siteID)
+// ThreadRoomInfoBatch is the server-to-server request subject for a batch
+// lookup of thread rooms' lastMsgAt + parent room type; room-service also
+// registers its handler on this subject. Mirrors RoomsInfoBatch.
+func ThreadRoomInfoBatch(siteID string) string {
+	return fmt.Sprintf("chat.server.request.room.%s.thread.info.batch", siteID)
+}
+
+// ThreadSubscriptionList is the server-to-server request subject for the per-site
+// leaf of the cross-site thread inbox: the user-service aggregator fans out one
+// request per candidate site to history-service, which subscribes on the same
+// subject. Mirrors RoomsInfoBatch.
+func ThreadSubscriptionList(siteID string) string {
+	return fmt.Sprintf("chat.server.request.thread.%s.subscription.list", siteID)
 }
 
 // RoomKeyEnsure is the server-to-server request subject for the room key ensure
@@ -351,19 +411,9 @@ func MsgCanonicalWildcard(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.>", siteID)
 }
 
-func OutboxWildcard(siteID string) string {
-	return fmt.Sprintf("outbox.%s.>", siteID)
-}
-
 // RoomsInfoBatchSubscribe is the per-site subscription subject for room-service.
 func RoomsInfoBatchSubscribe(siteID string) string {
 	return fmt.Sprintf("chat.server.request.room.%s.info.batch", siteID)
-}
-
-// ThreadUnreadSummarySubscribe is the per-site subscription subject for the
-// thread unread summary RPC.
-func ThreadUnreadSummarySubscribe(siteID string) string {
-	return fmt.Sprintf("chat.server.request.room.%s.thread.unread.summary", siteID)
 }
 
 func UserResponseWildcard() string {
@@ -397,6 +447,12 @@ func MsgSurroundingPattern(siteID string) string {
 // callers publish on.
 func MsgGetPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.msg.get", siteID)
+}
+
+// MsgGetIDsPattern is the natsrouter pattern for the GetMessagesByIDs batch handler.
+// Pair with MsgGetIDs for the concrete-subject form callers publish on.
+func MsgGetIDsPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.msg.get.ids", siteID)
 }
 
 // MsgEditPattern is the natsrouter pattern for editing a message.
@@ -674,6 +730,36 @@ func SearchUsersPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.search.%s.users", siteID)
 }
 
+// --- custom emoji (media-service) ---
+
+// EmojiList builds the concrete subject for listing a site's custom emoji.
+func EmojiList(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.emoji.%s.list", account, siteID)
+}
+
+// EmojiListPattern is the natsrouter pattern for the emoji list RPC. siteID is
+// baked in so each site's media-service only serves its own emoji set —
+// clients target the room's origin site.
+func EmojiListPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.emoji.%s.list", siteID)
+}
+
+// EmojiDelete builds the concrete subject for deleting a custom emoji.
+func EmojiDelete(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.emoji.%s.delete", account, siteID)
+}
+
+// EmojiDeletePattern is the natsrouter pattern for the emoji delete RPC.
+func EmojiDeletePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.emoji.%s.delete", siteID)
+}
+
 // --- room-service natsrouter pattern builders (siteID baked in) ---
 
 func RoomCreatePattern(siteID string) string {
@@ -744,11 +830,62 @@ func RoomAppCmdMenuPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.app.cmd-menu", siteID)
 }
 
-// isValidAccountToken rejects empty tokens and tokens containing NATS wildcard
-// characters ('*' or '>'). Subject parsers use it as the boundary guard for the
-// account token so wildcard semantics never leak into identity parsing.
+// --- Microsoft Teams integration ---
+//
+// TeamsRoomCall + TeamsMeeting are room-scoped (the roomID rides the subject so
+// membership can be checked), matching every other room RPC. TeamsUserCall is a
+// 1:1 deep-link builder with no room; the target account travels in the body.
+
+// TeamsRoomCall returns the concrete subject for the room-call deep-link RPC.
+// Returns an error if account contains a NATS wildcard. Shared pkg/ code must
+// not panic on bad input (F12), so this returns the error rather than panicking
+// like the older sibling builders (e.g. RoomAppTabs, MsgHistory).
+func TeamsRoomCall(account, roomID, siteID string) (string, error) {
+	if !isValidAccountToken(account) {
+		return "", fmt.Errorf("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.teams.call", account, roomID, siteID), nil
+}
+
+// TeamsRoomCallPattern is the natsrouter registration pattern for the room-call RPC.
+func TeamsRoomCallPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.teams.call", siteID)
+}
+
+// TeamsMeeting returns the concrete subject for the Graph onlineMeeting RPC.
+// Returns an error if account contains a NATS wildcard. Shared pkg/ code must
+// not panic on bad input (F12).
+func TeamsMeeting(account, roomID, siteID string) (string, error) {
+	if !isValidAccountToken(account) {
+		return "", fmt.Errorf("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.teams.meeting", account, roomID, siteID), nil
+}
+
+// TeamsMeetingPattern is the natsrouter registration pattern for the meetings RPC.
+func TeamsMeetingPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.teams.meeting", siteID)
+}
+
+// TeamsUserCall returns the concrete subject for the 1:1 user-call deep-link RPC.
+// Returns an error if account contains a NATS wildcard. Shared pkg/ code must
+// not panic on bad input (F12).
+func TeamsUserCall(account, siteID string) (string, error) {
+	if !isValidAccountToken(account) {
+		return "", fmt.Errorf("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.teams.%s.call.user", account, siteID), nil
+}
+
+// TeamsUserCallPattern is the natsrouter registration pattern for the user-call RPC.
+func TeamsUserCallPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.teams.%s.call.user", siteID)
+}
+
+// isValidAccountToken is the parsers' boundary guard for the account token so
+// wildcard semantics never leak into identity parsing.
 func isValidAccountToken(token string) bool {
-	return token != "" && !strings.ContainsAny(token, "*>")
+	return IsValidAccountToken(token)
 }
 
 // ParseRoomCreateSubject extracts the account from chat.user.{account}.request.room.{siteID}.create.
@@ -784,20 +921,13 @@ func RoomCanonicalOperation(s string) (string, bool) {
 	return op, true
 }
 
-// --- mock-user-service / future user-service builders ---
+// --- user-service builders ---
 
 func UserStatusGetByName(account, siteID string) string {
 	if !isValidAccountToken(account) {
 		panic("invalid account token: contains NATS wildcard characters")
 	}
 	return fmt.Sprintf("chat.user.%s.request.user.%s.status.getByName", account, siteID)
-}
-
-func UserStatusSet(account, siteID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.status.set", account, siteID)
 }
 
 func UserProfileGetByName(account, siteID string) string {
@@ -807,18 +937,11 @@ func UserProfileGetByName(account, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.user.%s.profile.getByName", account, siteID)
 }
 
-func UserSubscriptionGetCurrent(account, siteID string) string {
+func UserStatusSet(account, siteID string) string {
 	if !isValidAccountToken(account) {
 		panic("invalid account token: contains NATS wildcard characters")
 	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.getCurrent", account, siteID)
-}
-
-func UserSubscriptionGetRooms(account, siteID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.getRooms", account, siteID)
+	return fmt.Sprintf("chat.user.%s.request.user.%s.status.set", account, siteID)
 }
 
 func UserSubscriptionGetChannels(account, siteID string) string {
@@ -835,39 +958,11 @@ func UserSubscriptionGetDM(account, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.getDM", account, siteID)
 }
 
-func UserSubscriptionGetApps(account, siteID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.getApps", account, siteID)
-}
-
 func UserSubscriptionCount(account, siteID string) string {
 	if !isValidAccountToken(account) {
 		panic("invalid account token: contains NATS wildcard characters")
 	}
 	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.count", account, siteID)
-}
-
-func UserSubscriptionSubscribeApp(account, siteID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.subscribeApp", account, siteID)
-}
-
-func UserSubscriptionUnsubscribeApp(account, siteID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.unsubscribeApp", account, siteID)
-}
-
-func UserRoomSubscriptionGet(account, siteID, roomID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.user.%s.room.%s.subscription.get", account, siteID, roomID)
 }
 
 func UserAppsList(account, siteID string) string {
@@ -877,26 +972,27 @@ func UserAppsList(account, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.user.%s.apps.list", account, siteID)
 }
 
+// UserAppsCategories keeps the legacy panic-on-wildcard style of its User*
+// siblings (not the F12 error-return style) for family consistency.
+func UserAppsCategories(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.apps.categories", account, siteID)
+}
+
 // --- natsrouter pattern builders (siteID baked in, account left as {account} placeholder) ---
 
 func UserStatusGetByNamePattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.status.getByName", siteID)
 }
 
-func UserStatusSetPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.status.set", siteID)
-}
-
 func UserProfileGetByNamePattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.profile.getByName", siteID)
 }
 
-func UserSubscriptionGetCurrentPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.getCurrent", siteID)
-}
-
-func UserSubscriptionGetRoomsPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.getRooms", siteID)
+func UserStatusSetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.status.set", siteID)
 }
 
 func UserSubscriptionGetChannelsPattern(siteID string) string {
@@ -907,28 +1003,95 @@ func UserSubscriptionGetDMPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.getDM", siteID)
 }
 
-func UserSubscriptionGetAppsPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.getApps", siteID)
-}
-
 func UserSubscriptionCountPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.count", siteID)
 }
 
-func UserSubscriptionSubscribeAppPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.subscribeApp", siteID)
-}
-
-func UserSubscriptionUnsubscribeAppPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.unsubscribeApp", siteID)
-}
-
-func UserRoomSubscriptionGetPattern(siteID string) string {
-	return fmt.Sprintf("chat.user.{account}.request.user.%s.room.{roomID}.subscription.get", siteID)
-}
-
 func UserAppsListPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.apps.list", siteID)
+}
+
+func UserAppsCategoriesPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.apps.categories", siteID)
+}
+
+// UserMe is the concrete subject for the /me self-info endpoint — a deliberate
+// single-token action ("me"), not the {area}.{action} shape of its siblings.
+func UserMe(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.me", account, siteID)
+}
+
+// UserMePattern is the natsrouter pattern for the /me endpoint.
+func UserMePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.me", siteID)
+}
+
+func UserSubscriptionList(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.list", account, siteID)
+}
+
+func UserSubscriptionListPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.list", siteID)
+}
+
+// UserThreadList is the concrete client-facing subject for the cross-site thread
+// inbox RPC. siteID is the CALLER's own home site — the site that holds the
+// user's federated subscriptions and runs the aggregator. Pair with
+// UserThreadListPattern for user-service's registration.
+func UserThreadList(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.thread.list", account, siteID)
+}
+
+// UserThreadListPattern is the natsrouter pattern user-service registers for the
+// thread inbox RPC (siteID baked in, account left as {account}).
+func UserThreadListPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.thread.list", siteID)
+}
+
+// UserThreadUnreadSummary is the client-facing subject for the cross-site thread
+// unread badge. siteID is the CALLER's own home site. Pair with
+// UserThreadUnreadSummaryPattern for user-service's registration.
+func UserThreadUnreadSummary(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.thread.unread.summary", account, siteID)
+}
+
+// UserThreadUnreadSummaryPattern is the natsrouter pattern user-service registers.
+func UserThreadUnreadSummaryPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.thread.unread.summary", siteID)
+}
+
+func UserSubscriptionSetAppSubscription(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.setAppSubscription", account, siteID)
+}
+
+func UserSubscriptionSetAppSubscriptionPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.setAppSubscription", siteID)
+}
+
+func UserSubscriptionGetByRoomID(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.subscription.getByRoomID", account, siteID)
+}
+
+func UserSubscriptionGetByRoomIDPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.getByRoomID", siteID)
 }
 
 // ParseUserSubject parses any 8-token subject of the form
@@ -967,14 +1130,6 @@ func ParseStatusSubject(subj string) (account, action string, ok bool) {
 func ParseSubscriptionSubject(subj string) (account, action string, ok bool) {
 	a, _, area, act, k := ParseUserSubject(subj)
 	if !k || area != "subscription" {
-		return "", "", false
-	}
-	return a, act, true
-}
-
-func ParseProfileSubject(subj string) (account, action string, ok bool) {
-	a, _, area, act, k := ParseUserSubject(subj)
-	if !k || area != "profile" {
 		return "", "", false
 	}
 	return a, act, true
@@ -1078,4 +1233,21 @@ func ParseSubscriptionUpdateAccount(s string) (account string, ok bool) {
 		return "", false
 	}
 	return parts[2], true
+}
+
+// MigrationOplog builds the subject for one raw CDC event: chat.migration.oplog.{siteID}.{collection}.{op}. collection is the raw source name (e.g. rocketchat_message), op is insert|update|replace|delete.
+func MigrationOplog(siteID, collection, op string) string {
+	return fmt.Sprintf("chat.migration.oplog.%s.%s.%s", siteID, collection, op)
+}
+
+// MigrationOplogWildcard matches every oplog event for a site — the MIGRATION_OPLOG_{siteID} stream's subjects.
+func MigrationOplogWildcard(siteID string) string {
+	return fmt.Sprintf("chat.migration.oplog.%s.>", siteID)
+}
+
+// OrgSyncEmployeesUpsert is the subject search-sync-worker's spotlight-org
+// collection consumes from; hr-syncer publishes on the same subject at the
+// central site.
+func OrgSyncEmployeesUpsert(centralSiteID string) string {
+	return fmt.Sprintf("chat.hr.%s.employees.upsert", centralSiteID)
 }

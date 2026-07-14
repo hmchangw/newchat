@@ -1,0 +1,150 @@
+/* Design tokens.
+ *
+ * Layer 1: PRIMITIVES — raw scales (spacing, radius, type, shadow, motion).
+ *   Theme-agnostic. Same in light and dark.
+ *
+ * Layer 2: SEMANTIC ROLES — bg-surface, text-primary, accent, etc.
+ *   Defined on :root for light; overridden on :root[data-theme='dark'].
+ *
+ * Components reference SEMANTIC roles (var(--bg-surface)) or scales
+ * (var(--space-md)). Never literal colors, never raw px for spacing.
+ */
+
+:root {
+  /* ─────────── Primitives ─────────── */
+
+  /* Spacing scale — 4 px base, T-shirt sizes. Use these for padding,
+     gap, and margin. Avoid raw px. */
+  --space-2xs: 2px;
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  12px;
+  --space-lg:  16px;
+  --space-xl:  24px;
+  --space-2xl: 32px;
+
+  /* Radius scale */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-pill: 999px;
+  --radius-circle: 50%;
+
+  /* Type scale — px so it doesn't compound on nested em */
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-base: 14px;
+  --text-md:   15px;
+  --text-lg:   17px;
+  --text-xl:   20px;
+
+  /* Font weights */
+  --font-regular: 400;
+  --font-medium:  500;
+  --font-semibold: 600;
+  --font-bold:    700;
+
+  /* Line heights */
+  --line-tight:  1.2;
+  --line-normal: 1.45;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-med:  200ms;
+  --easing:      cubic-bezier(.2, .8, .2, 1);
+
+  /* ─────────── Semantic roles — LIGHT ─────────── */
+
+  /* Surfaces */
+  --bg-app: #ffffff;
+  --bg-sidebar: #f7f8fa;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f3f5;
+  --bg-input: #f4f5f7;
+  --bg-input-hover: #eceef1;
+  --bg-hover: #eef0f3;
+  --bg-selected: #e2e8f0;
+
+  /* Bubbles — own vs others on the message feed. */
+  --bubble-other: #f1f3f5;
+  --bubble-own: #e0e7ff;
+
+  /* Text */
+  --text-primary: #1a1a1a;
+  --text-secondary: #44464a;
+  --text-muted: #6b7280;
+  --text-on-accent: #ffffff;
+  --text-error: #b42318;
+
+  /* Borders */
+  --border-subtle: #e4e6ea;
+  --border-strong: #cfd3d8;
+  --border-focus: #4752c4;
+
+  /* Accent */
+  --accent: #4752c4;
+  --accent-hover: #3a44a8;
+  --accent-soft: rgba(71, 82, 196, 0.12);
+  --accent-soft-hover: rgba(71, 82, 196, 0.18);
+
+  /* Status */
+  --status-error: #b42318;
+  --status-error-bg: #fef3f2;
+  --status-error-hover: #94251e;
+  --status-success: #0f8a4f;
+  --status-success-bg: #ecfdf3;
+  --mention: #b45309;
+  --mention-all: #b42318;
+
+  /* Effects */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.10);
+  --shadow-dialog: 0 12px 32px rgba(15, 23, 42, 0.14);
+  --scrim: rgba(15, 23, 42, 0.45);
+  --focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--accent);
+}
+
+:root[data-theme='dark'] {
+  /* Surfaces — Discord-influenced neutrals */
+  --bg-app: #1e1f22;
+  --bg-sidebar: #2b2d31;
+  --bg-surface: #313338;
+  --bg-elevated: #2b2d31;
+  --bg-input: #383a40;
+  --bg-input-hover: #404249;
+  --bg-hover: #393b40;
+  --bg-selected: #404249;
+
+  --bubble-other: #383a40;
+  --bubble-own: #3d4a8a;
+
+  --text-primary: #f2f3f5;
+  --text-secondary: #dbdee1;
+  --text-muted: #949ba4;
+  --text-on-accent: #ffffff;
+  --text-error: #f87171;
+
+  --border-subtle: #3f4147;
+  --border-strong: #4e5058;
+  --border-focus: #7c89f5;
+
+  --accent: #5865f2;
+  --accent-hover: #4a55d1;
+  --accent-soft: rgba(88, 101, 242, 0.20);
+  --accent-soft-hover: rgba(88, 101, 242, 0.30);
+
+  --status-error: #f87171;
+  --status-error-bg: rgba(248, 113, 113, 0.10);
+  --status-error-hover: #f87171cc;
+  --status-success: #43b581;
+  --status-success-bg: rgba(67, 181, 129, 0.12);
+  --mention: #faa61a;
+  --mention-all: #ed4245;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.36);
+  --shadow-dialog: 0 12px 32px rgba(0, 0, 0, 0.50);
+  --scrim: rgba(0, 0, 0, 0.6);
+  --focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
+}

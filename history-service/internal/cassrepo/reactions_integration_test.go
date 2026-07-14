@@ -62,8 +62,8 @@ func TestRepository_AddReaction_TopLevel(t *testing.T) {
 	// messages_by_id has the reaction.
 	var fromByID models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&fromByID))
 	require.Contains(t, fromByID, key)
 	assert.Equal(t, reactor.Account, fromByID[key].Account)
@@ -110,8 +110,8 @@ func TestRepository_AddReaction_ThreadReply(t *testing.T) {
 	// messages_by_id has the reaction.
 	var fromByID models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&fromByID))
 	require.Contains(t, fromByID, key)
 
@@ -166,8 +166,8 @@ func TestRepository_AddReaction_Pinned(t *testing.T) {
 	// messages_by_id has the reaction (source of truth).
 	var primaryReactions models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&primaryReactions))
 	require.Contains(t, primaryReactions, key)
 
@@ -214,8 +214,8 @@ func TestRepository_AddReaction_Idempotent(t *testing.T) {
 
 	var got models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&got))
 	require.Len(t, got, 1, "same key must not create a second map entry")
 	assert.Equal(t, "Alice (updated)", got[key].EngName, "overwrite should replace ReactorInfo")
@@ -248,8 +248,8 @@ func TestRepository_RemoveReaction_TopLevel(t *testing.T) {
 
 	var got models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&got))
 	assert.NotContains(t, got, key, "removed cell must be gone from messages_by_id")
 
@@ -262,8 +262,8 @@ func TestRepository_RemoveReaction_TopLevel(t *testing.T) {
 	// Remove does NOT bump updated_at — row reflects Add (addedAt), not Remove.
 	var gotUpdatedAt time.Time
 	require.NoError(t, repo.session.Query(
-		`SELECT updated_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT updated_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotUpdatedAt))
 	assert.WithinDuration(t, addedAt, gotUpdatedAt, time.Second,
 		"messages_by_id.updated_at must reflect the add (not the remove)")
@@ -311,8 +311,8 @@ func TestRepository_RemoveReaction_ThreadReply(t *testing.T) {
 
 	var got models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&got))
 	assert.NotContains(t, got, key, "removed cell must be gone from messages_by_id")
 
@@ -324,8 +324,8 @@ func TestRepository_RemoveReaction_ThreadReply(t *testing.T) {
 
 	var gotUpdatedAt time.Time
 	require.NoError(t, repo.session.Query(
-		`SELECT updated_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT updated_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotUpdatedAt))
 	assert.WithinDuration(t, addedAt, gotUpdatedAt, time.Second,
 		"messages_by_id.updated_at must reflect the add (not the remove)")
@@ -361,8 +361,8 @@ func TestRepository_AddReaction_BumpsUpdatedAt(t *testing.T) {
 
 	var got time.Time
 	require.NoError(t, repo.session.Query(
-		`SELECT updated_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT updated_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&got))
 	assert.WithinDuration(t, reactor.ReactedAt, got, time.Second,
 		"messages_by_id.updated_at must reflect the add time")
@@ -410,8 +410,8 @@ func TestRepository_RemoveReaction_Pinned(t *testing.T) {
 	// messages_by_id reflects the remove.
 	var primaryReactions models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&primaryReactions))
 	assert.NotContains(t, primaryReactions, key)
 
@@ -492,8 +492,8 @@ func TestRepository_MultipleReactions_DifferentEmojiAndUsers(t *testing.T) {
 
 	var got models.Reactions
 	require.NoError(t, repo.session.Query(
-		`SELECT reactions FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT reactions FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&got))
 	require.Len(t, got, 3, "three distinct (emoji, user) pairs must produce three map entries")
 	for _, c := range cases {

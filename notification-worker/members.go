@@ -13,6 +13,10 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
+// memberFetchTimeout bounds the detached shared load so a hung backend cannot
+// leak the singleflight goroutine or pin the in-flight key. See the design spec.
+const memberFetchTimeout = 10 * time.Second
+
 // memberLoader reads the canonical member list for a room; a function type so tests can inject a fake.
 type memberLoader func(ctx context.Context, roomID string) ([]roomsubcache.Member, error)
 
@@ -43,24 +47,31 @@ func (c *cachedMemberLookup) GetMembers(ctx context.Context, roomID string) ([]r
 	}
 
 	// Miss path: singleflight collapses concurrent Mongo loads on the same room.
-	members, err, _ := c.sf.Do(roomID, func() (any, error) {
+	resCh := c.sf.DoChan(roomID, func() (any, error) {
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memberFetchTimeout)
+		defer cancel()
 		// Re-check inside the flight in case a sibling caller already populated.
-		if got, err := c.cache.Get(ctx, roomID); err == nil {
+		if got, err := c.cache.Get(fetchCtx, roomID); err == nil {
 			return got, nil
 		}
-		loaded, lerr := c.load(ctx, roomID)
+		loaded, lerr := c.load(fetchCtx, roomID)
 		if lerr != nil {
 			return nil, fmt.Errorf("load members for room %s: %w", roomID, lerr)
 		}
-		if setErr := c.cache.Set(ctx, roomID, loaded, c.ttl); setErr != nil {
+		if setErr := c.cache.Set(fetchCtx, roomID, loaded, c.ttl); setErr != nil {
 			slog.Warn("roomsubcache set failed", "error", setErr, "roomId", roomID)
 		}
 		return loaded, nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("get members for room %s: %w", roomID, err)
+	select {
+	case res := <-resCh:
+		if res.Err != nil {
+			return nil, fmt.Errorf("get members for room %s: %w", roomID, res.Err)
+		}
+		return res.Val.([]roomsubcache.Member), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return members.([]roomsubcache.Member), nil
 }
 
 // Invalidate drops the room from Valkey on membership change.

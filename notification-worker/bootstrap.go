@@ -38,8 +38,8 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 			Name:     pushCfg.Name,
 			Subjects: pushCfg.Subjects,
 			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON
-			// at near-zero CPU. Belt-and-braces alongside the publisher's gzip: gzip shrinks
-			// inter-replica wire bytes, S2 shrinks on-disk bytes after gzip overhead.
+			// at near-zero CPU. Shrinks inter-replica wire bytes and on-disk bytes; the
+			// publisher sends raw JSON, so S2 is the only compression layer.
 			Compression: jetstream.S2Compression,
 		}); err != nil {
 			return fmt.Errorf("create PUSH_NOTIFICATION stream: %w", err)

@@ -8,11 +8,11 @@ CREATE TABLE IF NOT EXISTS chat.messages_by_room (
   msg                      TEXT,
   mentions                 SET<FROZEN<"Participant">>,
   attachments              LIST<BLOB>,
-  file                     FROZEN<"File">,
   card                     FROZEN<"Card">,
   card_action              FROZEN<"CardAction">,
   tshow                    BOOLEAN, // means from thread [also sent to channel]
   tcount                   INT,     // reply thread count
+  thread_last_msg_at       TIMESTAMP, // timestamp of most recent thread reply
   thread_parent_id         TEXT,
   thread_parent_created_at TIMESTAMP, // for FE to query thread parent message when also sent to channel (tshow=true)
   quoted_parent_message    FROZEN<"QuotedParentMessage">,

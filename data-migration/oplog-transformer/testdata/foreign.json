@@ -1,0 +1,1 @@
+{"_id":"fgn456abc789def01","rid":"room1","msg":"hi from site-a","ts":{"$date":"2023-01-02T03:04:05Z"},"u":{"_id":"u9","username":"bob","name":"Bob B"},"federation":{"origin":"site-a.example.internal"}}

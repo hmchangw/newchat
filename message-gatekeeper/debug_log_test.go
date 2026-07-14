@@ -101,7 +101,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 	store.EXPECT().GetSubscription(gomock.Any(), account, roomID).Return(sub, nil).AnyTimes()
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(roommetacache.Meta{ID: roomID, UserCount: 1}, nil).AnyTimes()
 
-	h := NewHandler(store, nil, makePublishFunc(nil, nil), func(context.Context, *nats.Msg) error { return nil }, siteID, nil, 500)
+	h := NewHandler(store, nil, makePublishFunc(nil, nil), func(context.Context, *nats.Msg) error { return nil }, siteID, nil, 500, 1, 8192, "")
 
 	newReq := func() model.SendMessageRequest {
 		return model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hello world", RequestID: reqID}

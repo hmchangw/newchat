@@ -192,3 +192,56 @@ func TestCollection_AggregatePaged_EmptyCollection(t *testing.T) {
 	assert.NotNil(t, page.Data)
 	assert.Empty(t, page.Data)
 }
+
+func TestCollection_AggregatePagedHasMore(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	col := NewCollection[testDoc](db.Collection("hasmore_docs"))
+
+	_, err := db.Collection("hasmore_docs").InsertMany(ctx, []interface{}{
+		testDoc{ID: "d1", Name: "A", Age: 1},
+		testDoc{ID: "d2", Name: "B", Age: 2},
+		testDoc{ID: "d3", Name: "C", Age: 3},
+		testDoc{ID: "d4", Name: "D", Age: 4},
+		testDoc{ID: "d5", Name: "E", Age: 5},
+	})
+	require.NoError(t, err)
+
+	pipeline := bson.A{bson.D{{Key: "$sort", Value: bson.D{{Key: "age", Value: 1}}}}}
+
+	cases := []struct {
+		name        string
+		req         OffsetPageRequest
+		wantHasMore bool
+		wantIDs     []string
+	}{
+		{"middle page over-fetches +1 and trims, more remain", OffsetPageRequest{Offset: 0, Limit: 2}, true, []string{"d1", "d2"}},
+		{"last partial page reports no more", OffsetPageRequest{Offset: 4, Limit: 2}, false, []string{"d5"}},
+		{"exact-fit full page (nothing beyond) reports no more", OffsetPageRequest{Offset: 0, Limit: 5}, false, []string{"d1", "d2", "d3", "d4", "d5"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			page, err := col.AggregatePagedHasMore(ctx, pipeline, tc.req)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantHasMore, page.HasMore)
+			require.Len(t, page.Data, len(tc.wantIDs))
+			for i, id := range tc.wantIDs {
+				assert.Equal(t, id, page.Data[i].ID, "row %d", i)
+			}
+		})
+	}
+}
+
+func TestCollection_AggregatePagedHasMore_EmptyCollection(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	col := NewCollection[testDoc](db.Collection("hasmore_docs_empty"))
+
+	pipeline := bson.A{bson.D{{Key: "$match", Value: bson.M{"name": "Nobody"}}}}
+
+	page, err := col.AggregatePagedHasMore(ctx, pipeline, OffsetPageRequest{Offset: 0, Limit: 10})
+	require.NoError(t, err)
+	assert.False(t, page.HasMore)
+	assert.NotNil(t, page.Data, "Data must be non-nil so JSON marshals to []")
+	assert.Empty(t, page.Data)
+}

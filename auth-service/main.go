@@ -12,21 +12,31 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nkeys"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
 type config struct {
-	Port                string        `env:"PORT"                  envDefault:"8080"`
-	DevMode             bool          `env:"DEV_MODE"              envDefault:"false"`
-	AuthSigningKey      string        `env:"AUTH_SIGNING_KEY,required"`
-	NATSJWTExpiry       time.Duration `env:"NATS_JWT_EXPIRY"        envDefault:"2h"`
-	NATSJWTExpiryJitter float64       `env:"NATS_JWT_EXPIRY_JITTER" envDefault:"0.1"`
+	Port                 string        `env:"PORT"                     envDefault:"8080"`
+	DevMode              bool          `env:"DEV_MODE"                 envDefault:"false"`
+	AuthScopedSigningKey string        `env:"AUTH_SCOPED_SIGNING_KEY,required"`
+	AuthAccountPubKey    string        `env:"AUTH_ACCOUNT_PUB_KEY,required"`
+	NATSJWTExpiry        time.Duration `env:"NATS_JWT_EXPIRY"           envDefault:"2h"`
+	NATSJWTExpiryJitter  float64       `env:"NATS_JWT_EXPIRY_JITTER"    envDefault:"0.1"`
 
 	// OIDC settings — required when DEV_MODE is false.
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
 	OIDCAudiences []string `env:"OIDC_AUDIENCES" envSeparator:","`
 	TLSSkipVerify bool     `env:"TLS_SKIP_VERIFY"           envDefault:"false"`
+
+	// BotplatformURL is the LOCAL site's botplatform-service URL. When set,
+	// auth-service exposes the session-token branch of POST /auth: a client
+	// supplying authToken (instead of ssoToken) gets its session validated
+	// via botplatform's /api/v1/auth/validate and a role-scoped NATS JWT minted.
+	// Unset = session-token requests fail with 503 upstream_unavailable.
+	BotplatformURL string `env:"BOTPLATFORM_URL"`
 }
 
 func main() {
@@ -44,18 +54,32 @@ func run() error {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
-	signingKP, err := nkeys.FromSeed([]byte(cfg.AuthSigningKey))
+	signingKP, err := nkeys.FromSeed([]byte(cfg.AuthScopedSigningKey))
 	if err != nil {
 		return fmt.Errorf("parse signing key: %w", err)
+	}
+	if skPub, err := signingKP.PublicKey(); err != nil || !nkeys.IsValidPublicAccountKey(skPub) {
+		return fmt.Errorf("AUTH_SCOPED_SIGNING_KEY is not an account-type signing key")
+	}
+	if !nkeys.IsValidPublicAccountKey(cfg.AuthAccountPubKey) {
+		return fmt.Errorf("AUTH_ACCOUNT_PUB_KEY is not a valid account public key")
 	}
 
 	ctx := context.Background()
 
+	opts := []Option{WithJitter(cfg.NATSJWTExpiryJitter)}
+	if cfg.BotplatformURL != "" {
+		rc := restyutil.New("", restyutil.WithTimeout(5*time.Second))
+		opts = append(opts, WithBotplatformValidator(
+			newHTTPBotplatformValidator(rc, cfg.BotplatformURL)))
+		slog.Info("session-token branch enabled", "botplatform_url", cfg.BotplatformURL)
+	}
+
 	var handler *AuthHandler
 
 	if cfg.DevMode {
-		slog.Info("dev mode enabled — OIDC validation disabled")
-		handler = NewAuthHandler(nil, signingKP, cfg.NATSJWTExpiry, true, WithJitter(cfg.NATSJWTExpiryJitter))
+		slog.Warn("dev mode enabled — OIDC validation disabled")
+		handler = NewAuthHandler(nil, signingKP, cfg.AuthAccountPubKey, cfg.NATSJWTExpiry, true, opts...)
 	} else {
 		if cfg.OIDCIssuerURL == "" || len(cfg.OIDCAudiences) == 0 {
 			return fmt.Errorf("OIDC_ISSUER_URL and OIDC_AUDIENCES are required when DEV_MODE is false")
@@ -71,15 +95,15 @@ func run() error {
 			return fmt.Errorf("create oidc validator: %w", err)
 		}
 		slog.Info("oidc validator initialized", "issuer", cfg.OIDCIssuerURL)
-		handler = NewAuthHandler(oidcValidator, signingKP, cfg.NATSJWTExpiry, false, WithJitter(cfg.NATSJWTExpiryJitter))
+		handler = NewAuthHandler(oidcValidator, signingKP, cfg.AuthAccountPubKey, cfg.NATSJWTExpiry, false, opts...)
 	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(requestIDMiddleware())
-	r.Use(accessLogMiddleware())
-	r.Use(corsMiddleware())
+	r.Use(ginutil.RequestID())
+	r.Use(ginutil.AccessLog())
+	r.Use(ginutil.CORS())
 	registerRoutes(r, handler)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)

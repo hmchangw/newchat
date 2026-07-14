@@ -1,0 +1,11 @@
+.pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.pager-status {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}

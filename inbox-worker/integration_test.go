@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -43,7 +44,7 @@ func TestInboxWorker_MemberAdded_Integration(t *testing.T) {
 		t.Fatalf("seed user: %v", err)
 	}
 
-	// Create outbox event for member_added
+	// Create inbox event for member_added
 	hssMillis := time.Now().UTC().UnixMilli()
 	change := model.MemberAddEvent{
 		Type: "member_added", RoomID: "r1", Accounts: []string{"u2"}, SiteID: "site-b",
@@ -52,7 +53,7 @@ func TestInboxWorker_MemberAdded_Integration(t *testing.T) {
 		Timestamp:          time.Now().UTC().UnixMilli(),
 	}
 	changeData, _ := json.Marshal(change)
-	evt := model.OutboxEvent{Type: "member_added", SiteID: "site-a", DestSiteID: "site-b", Payload: changeData}
+	evt := model.InboxEvent{Type: "member_added", SiteID: "site-a", DestSiteID: "site-b", Payload: changeData}
 	evtData, _ := json.Marshal(evt)
 
 	if err := handler.HandleEvent(ctx, evtData); err != nil {
@@ -87,7 +88,7 @@ func TestInboxWorker_RoomSync_Integration(t *testing.T) {
 
 	room := model.Room{ID: "r1", Name: "synced-room", Type: model.RoomTypeChannel, UserCount: 5}
 	roomData, _ := json.Marshal(room)
-	evt := model.OutboxEvent{Type: "room_sync", Payload: roomData}
+	evt := model.InboxEvent{Type: "room_sync", Payload: roomData}
 	evtData, _ := json.Marshal(evt)
 
 	if err := handler.HandleEvent(ctx, evtData); err != nil {
@@ -134,7 +135,7 @@ func TestInboxWorker_RoleUpdated_Integration(t *testing.T) {
 	}
 	subEvtData, _ := json.Marshal(subEvt)
 
-	evt := model.OutboxEvent{
+	evt := model.InboxEvent{
 		Type: "role_updated", SiteID: "site-a", DestSiteID: "site-b",
 		Payload: subEvtData, Timestamp: time.Now().UTC().UnixMilli(),
 	}
@@ -185,7 +186,7 @@ func TestInboxWorker_BulkCreateSubscriptions_IdempotentUpsert(t *testing.T) {
 	require.NoError(t, store.BulkCreateSubscriptions(ctx, []*model.Subscription{original}))
 
 	// Re-issue with a "fresher" copy that has no LastSeenAt — simulates a
-	// redelivered outbox event materializing the same sub.
+	// redelivered inbox event materializing the same sub.
 	redelivered := &model.Subscription{
 		ID:       "sub-redelivered",
 		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
@@ -242,7 +243,7 @@ func TestInboxWorker_MemberRemoved_Integration(t *testing.T) {
 		Type: "member-removed", RoomID: "r1", Accounts: []string{"bob"}, SiteID: "site-a",
 	}
 	payload, _ := json.Marshal(memberEvt)
-	evt := model.OutboxEvent{
+	evt := model.InboxEvent{
 		Type: "member_removed", SiteID: "site-a", DestSiteID: "site-b",
 		Payload: payload, Timestamp: time.Now().UnixMilli(),
 	}
@@ -336,18 +337,33 @@ func TestInbox_UpdateSubscriptionRead_EqualTimestampSkipped(t *testing.T) {
 	assert.True(t, got.Alert) // unchanged
 }
 
-func TestInbox_UpdateSubscriptionRead_MissingSubscriptionNoOp(t *testing.T) {
+func TestInbox_UpdateSubscriptionRead_MissingSubscriptionErrors(t *testing.T) {
 	ctx := context.Background()
-	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(setupMongo(t))
 
-	now := time.Now().UTC()
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "missing-room", "ghost", now, false))
+	// No subscription seeded — a genuinely missing sub must error so the event redelivers until
+	// member_added lands (field events can race ahead of member_added on the worker pool).
+	err := store.UpdateSubscriptionRead(ctx, "missing-room", "ghost", time.Now().UTC(), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subscription not found")
+}
+
+func TestInbox_UpdateSubscriptionMute_MissingSubscriptionErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newGuardStore(setupMongo(t))
+
+	err := store.UpdateSubscriptionMute(ctx, "missing-room", "ghost", true, time.UnixMilli(100).UTC())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subscription not found")
+}
+
+func TestInbox_UpdateSubscriptionFavorite_MissingSubscriptionErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newGuardStore(setupMongo(t))
+
+	err := store.UpdateSubscriptionFavorite(ctx, "missing-room", "ghost", true, time.UnixMilli(100).UTC())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subscription not found")
 }
 
 func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T) {
@@ -375,7 +391,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T)
 	}
 	subData, err := json.Marshal(sub)
 	require.NoError(t, err)
-	evtData, err := json.Marshal(model.OutboxEvent{
+	evtData, err := json.Marshal(model.InboxEvent{
 		Type: "thread_subscription_upserted", SiteID: "site-a", DestSiteID: "site-b",
 		Payload: subData, Timestamp: now.UnixMilli(),
 	})
@@ -392,6 +408,48 @@ func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T)
 	assert.False(t, got.HasMention)
 	assert.True(t, got.CreatedAt.Equal(now))
 	assert.True(t, got.UpdatedAt.Equal(now))
+}
+
+// TestInboxWorker_ThreadSubscription_DedupByUserAccount_Integration pins the natural key to
+// (threadRoomId, userAccount) — matching message-worker's threadStoreMongo. Two upserts for the same
+// (threadRoomId, userAccount) must converge on ONE row even if userId differs, so inbox-worker and
+// message-worker never disagree about which row is "the" subscription. (Keyed by userId, the old
+// code left two rows here.)
+func TestInboxWorker_ThreadSubscription_DedupByUserAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		roomCol:      db.Collection("rooms"),
+		userCol:      db.Collection("users"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+	require.NoError(t, store.ensureIndexes(ctx))
+
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	first := model.ThreadSubscription{
+		ID: "ts-first", ParentMessageID: "pm-1", RoomID: "r1", ThreadRoomID: "tr-1",
+		UserID: "u-bob", UserAccount: "bob", SiteID: "site-a", CreatedAt: now, UpdatedAt: now,
+	}
+	// Same (threadRoomId, userAccount) but a different userId — keyed by userAccount this is the
+	// same subscription, so it must NOT create a second row.
+	second := model.ThreadSubscription{
+		ID: "ts-second", ParentMessageID: "pm-1", RoomID: "r1", ThreadRoomID: "tr-1",
+		UserID: "u-bob-other", UserAccount: "bob", SiteID: "site-a", CreatedAt: now, UpdatedAt: now.Add(time.Minute),
+	}
+	require.NoError(t, store.UpsertThreadSubscription(ctx, &first))
+	require.NoError(t, store.UpsertThreadSubscription(ctx, &second))
+
+	count, err := db.Collection("thread_subscriptions").
+		CountDocuments(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": "bob"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "thread-sub dedups by (threadRoomId, userAccount), matching message-worker")
+
+	var got model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").
+		FindOne(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": "bob"}).Decode(&got))
+	assert.Equal(t, "ts-first", got.ID, "$setOnInsert keeps the first row; the second upsert is a no-op insert")
 }
 
 func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *testing.T) {
@@ -417,7 +475,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *
 	}
 	mentionData, err := json.Marshal(mentionSub)
 	require.NoError(t, err)
-	mentionEvt, err := json.Marshal(model.OutboxEvent{
+	mentionEvt, err := json.Marshal(model.InboxEvent{
 		Type: "thread_subscription_upserted", SiteID: "site-a", DestSiteID: "site-b",
 		Payload: mentionData, Timestamp: now.UnixMilli(),
 	})
@@ -431,7 +489,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *
 	plainSub.UpdatedAt = later
 	plainData, err := json.Marshal(plainSub)
 	require.NoError(t, err)
-	plainEvt, err := json.Marshal(model.OutboxEvent{
+	plainEvt, err := json.Marshal(model.InboxEvent{
 		Type: "thread_subscription_upserted", SiteID: "site-a", DestSiteID: "site-b",
 		Payload: plainData, Timestamp: later.UnixMilli(),
 	})
@@ -455,7 +513,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *
 	thirdSub.UpdatedAt = evenLater
 	thirdData, err := json.Marshal(thirdSub)
 	require.NoError(t, err)
-	thirdEvt, err := json.Marshal(model.OutboxEvent{
+	thirdEvt, err := json.Marshal(model.InboxEvent{
 		Type: "thread_subscription_upserted", SiteID: "site-a", DestSiteID: "site-b",
 		Payload: thirdData, Timestamp: evenLater.UnixMilli(),
 	})
@@ -509,7 +567,7 @@ func TestHandleMemberAdded_Channel_PersistsRemoteSubs(t *testing.T) {
 		Timestamp:        time.Now().UTC().UnixMilli(),
 	})
 	require.NoError(t, err)
-	evt, err := json.Marshal(model.OutboxEvent{
+	evt, err := json.Marshal(model.InboxEvent{
 		Type:       "member_added",
 		SiteID:     "site-A",
 		DestSiteID: "site-B",
@@ -551,7 +609,7 @@ func TestHandleMemberAdded_DM_PersistsRemoteCounterpartSub(t *testing.T) {
 		Timestamp:        time.Now().UTC().UnixMilli(),
 	})
 	require.NoError(t, err)
-	evt, err := json.Marshal(model.OutboxEvent{
+	evt, err := json.Marshal(model.InboxEvent{
 		Type:       "member_added",
 		SiteID:     "site-A",
 		DestSiteID: "site-B",
@@ -608,13 +666,13 @@ func TestInboxWorker_FilterScoping_Integration(t *testing.T) {
 	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, jetstream.ConsumerConfig{
 		Durable:        "inbox-worker",
 		AckPolicy:      jetstream.AckExplicitPolicy,
-		FilterSubjects: []string{subject.InboxAggregateAll(siteID)},
+		FilterSubjects: []string{subject.InboxExternalAll(siteID)},
 	})
 	require.NoError(t, err)
 
-	_, err = js.Publish(ctx, subject.InboxMemberAdded(siteID), []byte(`{"type":"member_added"}`))
+	_, err = js.Publish(ctx, subject.InboxInternal(siteID, model.InboxMemberAdded), []byte(`{"type":"member_added"}`))
 	require.NoError(t, err)
-	_, err = js.Publish(ctx, subject.InboxMemberAddedAggregate(siteID), []byte(`{"type":"member_added"}`))
+	_, err = js.Publish(ctx, subject.InboxExternal(siteID, model.InboxMemberAdded), []byte(`{"type":"member_added"}`))
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -628,7 +686,7 @@ func TestInboxWorker_FilterScoping_Integration(t *testing.T) {
 	info, err := cons.Info(ctx)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, info.NumPending,
-		"FilterSubjects must scope inbox-worker to the aggregate.> lane only")
+		"FilterSubjects must scope inbox-worker to the external.> lane only")
 }
 
 func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
@@ -821,7 +879,7 @@ func TestMongoInboxStore_UpdateSubscriptionNamesForRoom(t *testing.T) {
 	assert.Equal(t, "untouched", otherSub.Name)
 }
 
-func TestMongoInboxStore_ApplySubscriptionVisibility(t *testing.T) {
+func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 	seed := func(t *testing.T, db *mongo.Database) {
 		t.Helper()
 		_, err := db.Collection("subscriptions").InsertMany(context.Background(), []any{
@@ -852,7 +910,7 @@ func TestMongoInboxStore_ApplySubscriptionVisibility(t *testing.T) {
 		store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
 		seed(t, db)
 
-		require.NoError(t, store.ApplySubscriptionVisibility(context.Background(), "r1", true, false, "bob", time.Now().UTC()))
+		require.NoError(t, store.ApplySubscriptionRestriction(context.Background(), "r1", true, false, "bob", time.Now().UTC()))
 
 		subs := loadSubs(t, db)
 		roles := rolesByAccount(subs)
@@ -870,7 +928,7 @@ func TestMongoInboxStore_ApplySubscriptionVisibility(t *testing.T) {
 		store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
 		seed(t, db)
 
-		require.NoError(t, store.ApplySubscriptionVisibility(context.Background(), "r1", true, true, "", time.Now().UTC()))
+		require.NoError(t, store.ApplySubscriptionRestriction(context.Background(), "r1", true, true, "", time.Now().UTC()))
 
 		subs := loadSubs(t, db)
 		roles := rolesByAccount(subs)
@@ -888,7 +946,7 @@ func TestMongoInboxStore_ApplySubscriptionVisibility(t *testing.T) {
 		store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
 		seed(t, db)
 
-		require.NoError(t, store.ApplySubscriptionVisibility(context.Background(), "r1", false, false, "bob", time.Now().UTC()))
+		require.NoError(t, store.ApplySubscriptionRestriction(context.Background(), "r1", false, false, "bob", time.Now().UTC()))
 
 		subs := loadSubs(t, db)
 		roles := rolesByAccount(subs)
@@ -918,16 +976,16 @@ func TestIntegration_HandleRoomRenamed(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Construct and marshal the outbox event.
-	renamePayload := model.RoomRenamedOutboxPayload{
+	// Construct and marshal the inbox event.
+	renamePayload := model.RoomRenamedInboxPayload{
 		RoomID:    "r1",
 		NewName:   "renamed",
 		Timestamp: time.Now().UTC().UnixMilli(),
 	}
 	payloadData, err := json.Marshal(renamePayload)
 	require.NoError(t, err)
-	evt := model.OutboxEvent{
-		Type:       string(model.OutboxRoomRenamed),
+	evt := model.InboxEvent{
+		Type:       string(model.InboxRoomRenamed),
 		SiteID:     "site-a",
 		DestSiteID: "site-b",
 		Payload:    payloadData,
@@ -967,8 +1025,8 @@ func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Construct and marshal the outbox event: bob becomes new owner.
-	visPayload := model.RoomRestrictedOutboxPayload{
+	// Construct and marshal the inbox event: bob becomes new owner.
+	visPayload := model.RoomRestrictedInboxPayload{
 		RoomID:         "r1",
 		Restricted:     true,
 		ExternalAccess: false,
@@ -977,8 +1035,8 @@ func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 	}
 	payloadData, err := json.Marshal(visPayload)
 	require.NoError(t, err)
-	evt := model.OutboxEvent{
-		Type:       string(model.OutboxRoomRestricted),
+	evt := model.InboxEvent{
+		Type:       string(model.InboxRoomRestricted),
 		SiteID:     "site-a",
 		DestSiteID: "site-b",
 		Payload:    payloadData,
@@ -1008,6 +1066,90 @@ func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 	assert.Equal(t, []model.Role{model.RoleOwner}, rolesByAccount["bob"], "bob should be owner")
 	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["alice"], "alice should be member")
 	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["carol"], "carol should be member")
+}
+
+// ensureIndexes must standardize on (threadRoomId, userAccount) — the same
+// natural key room-service, message-worker, and history-service create — and
+// drop the legacy (threadRoomId, userId) index that message-worker explicitly
+// removes. Otherwise the two services thrash the index across restarts and the
+// collection ends up with two conflicting unique constraints.
+func TestInboxStore_EnsureIndexes_DropsLegacyAndCreatesUserAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	threadSubs := db.Collection("thread_subscriptions")
+	store := &mongoInboxStore{threadSubCol: threadSubs}
+
+	// Simulate a DB where the legacy index already exists (older inbox-worker).
+	_, err := threadSubs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.ensureIndexes(ctx))
+
+	cur, err := threadSubs.Indexes().List(ctx)
+	require.NoError(t, err)
+	var idxs []bson.M
+	require.NoError(t, cur.All(ctx, &idxs))
+
+	names := make(map[string]bool, len(idxs))
+	for _, ix := range idxs {
+		if n, ok := ix["name"].(string); ok {
+			names[n] = true
+		}
+	}
+	assert.True(t, names["threadRoomId_1_userAccount_1"],
+		"ensureIndexes must create the canonical (threadRoomId, userAccount) unique index")
+	assert.False(t, names["threadRoomId_1_userId_1"],
+		"ensureIndexes must drop the legacy (threadRoomId, userId) index")
+}
+
+// Regression: a federated upsert for an existing (threadRoomId, userAccount)
+// whose userId differs from the local document must MERGE onto that document,
+// not insert a second one. userId is a site-local identity; only userAccount is
+// stable across federation. Keying the upsert on userId lets the filter miss the
+// existing doc and either create a silent duplicate or — once the canonical
+// (threadRoomId, userAccount) unique index is present — fail with E11000 and
+// poison the federation lane.
+func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	threadSubs := db.Collection("thread_subscriptions")
+	store := &mongoInboxStore{threadSubCol: threadSubs}
+	require.NoError(t, store.ensureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Existing local document for (tr-1, "bob") with the local userId.
+	first := &model.ThreadSubscription{
+		ID: "ts-local", ParentMessageID: "pm-1", RoomID: "r1", ThreadRoomID: "tr-1",
+		UserID: "u-bob-local", UserAccount: "bob", SiteID: "site-a",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.UpsertThreadSubscription(ctx, first))
+
+	// Federated event for the SAME (threadRoomId, userAccount) but a different
+	// userId. Must merge (monotonic mention), not collide.
+	later := now.Add(time.Minute)
+	second := &model.ThreadSubscription{
+		ID: "ts-remote", ParentMessageID: "pm-1", RoomID: "r1", ThreadRoomID: "tr-1",
+		UserID: "u-bob-remote", UserAccount: "bob", SiteID: "site-a",
+		HasMention: true, CreatedAt: later, UpdatedAt: later,
+	}
+	require.NoError(t, store.UpsertThreadSubscription(ctx, second),
+		"upsert keyed on userId would insert a duplicate and hit the (threadRoomId,userAccount) unique index")
+
+	count, err := threadSubs.CountDocuments(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": "bob"})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, count, "must dedupe on (threadRoomId, userAccount), not create a second document")
+
+	var got model.ThreadSubscription
+	require.NoError(t, threadSubs.
+		FindOne(ctx, bson.M{"threadRoomId": "tr-1", "userAccount": "bob"}).Decode(&got))
+	assert.Equal(t, "ts-local", got.ID, "first insert's _id is preserved via $setOnInsert")
+	assert.True(t, got.HasMention, "monotonic mention merged from the federated event")
+	assert.True(t, got.UpdatedAt.Equal(later), "updatedAt advances to the later event")
 }
 
 // Missing thread-sub: gate doesn't match, Subscription is skipped too.
@@ -1199,39 +1341,39 @@ func TestInbox_UpdateSubscriptionNamesForRoom_NewerApplies(t *testing.T) {
 	assert.Equal(t, "newer", got.Name)
 }
 
-func TestInbox_ApplySubscriptionVisibility_OutOfOrderSkipped(t *testing.T) {
+func TestInbox_ApplySubscriptionRestriction_OutOfOrderSkipped(t *testing.T) {
 	ctx := context.Background()
 	store := newGuardStore(setupMongo(t))
 
 	// Sub last set restricted=true by a newer event (ts=200).
 	_, err := store.subCol.InsertOne(ctx, bson.M{
 		"_id": "s1", "roomId": "r1", "u": bson.M{"account": "alice"},
-		"restricted": true, "externalAccess": false, "visibilityUpdatedAt": time.UnixMilli(200).UTC(),
+		"restricted": true, "externalAccess": false, "restrictUpdatedAt": time.UnixMilli(200).UTC(),
 	})
 	require.NoError(t, err)
 
 	// An older unrestrict (ts=100) must not regress visibility state.
-	require.NoError(t, store.ApplySubscriptionVisibility(ctx, "r1", false, false, "", time.UnixMilli(100).UTC()))
+	require.NoError(t, store.ApplySubscriptionRestriction(ctx, "r1", false, false, "", time.UnixMilli(100).UTC()))
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
 	assert.True(t, got.Restricted) // unchanged
 }
 
-func TestInbox_ApplySubscriptionVisibility_NewerApplies(t *testing.T) {
+func TestInbox_ApplySubscriptionRestriction_NewerApplies(t *testing.T) {
 	ctx := context.Background()
 	store := newGuardStore(setupMongo(t))
 
-	// Two subs at an older visibilityUpdatedAt; a newer restrict rewrites roles.
+	// Two subs at an older restrictUpdatedAt; a newer restrict rewrites roles.
 	_, err := store.subCol.InsertMany(ctx, []any{
 		bson.M{"_id": "s1", "roomId": "r1", "u": bson.M{"account": "alice"},
-			"roles": []model.Role{model.RoleOwner}, "restricted": false, "visibilityUpdatedAt": time.UnixMilli(100).UTC()},
+			"roles": []model.Role{model.RoleOwner}, "restricted": false, "restrictUpdatedAt": time.UnixMilli(100).UTC()},
 		bson.M{"_id": "s2", "roomId": "r1", "u": bson.M{"account": "bob"},
-			"roles": []model.Role{model.RoleMember}, "restricted": false, "visibilityUpdatedAt": time.UnixMilli(100).UTC()},
+			"roles": []model.Role{model.RoleMember}, "restricted": false, "restrictUpdatedAt": time.UnixMilli(100).UTC()},
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplySubscriptionVisibility(ctx, "r1", true, false, "bob", time.UnixMilli(200).UTC()))
+	require.NoError(t, store.ApplySubscriptionRestriction(ctx, "r1", true, false, "bob", time.UnixMilli(200).UTC()))
 
 	var alice, bob model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&alice))
@@ -1272,4 +1414,61 @@ func TestInbox_UpsertRoom_NewerUpdatedAtApplies(t *testing.T) {
 	var got model.Room
 	require.NoError(t, store.roomCol.FindOne(ctx, bson.M{"_id": "r1"}).Decode(&got))
 	assert.Equal(t, "newer", got.Name)
+}
+
+func TestInboxWorker_UpdateUserStatus_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	store := &mongoInboxStore{
+		subCol:  db.Collection("subscriptions"),
+		roomCol: db.Collection("rooms"),
+		userCol: db.Collection("users"),
+	}
+
+	_, err := db.Collection("users").InsertOne(ctx, model.User{
+		ID: "u1", Account: "alice", SiteID: "site-b", StatusText: "old", StatusIsShow: true,
+	})
+	require.NoError(t, err)
+
+	t1 := time.UnixMilli(1000).UTC()
+	t2 := time.UnixMilli(2000).UTC()
+
+	t.Run("updates text and isShow when both supplied", func(t *testing.T) {
+		hide := false
+		require.NoError(t, store.UpdateUserStatus(ctx, "alice", "out to lunch", &hide, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		assert.Equal(t, "out to lunch", got.StatusText)
+		assert.False(t, got.StatusIsShow)
+	})
+
+	t.Run("text-only update leaves stored isShow untouched", func(t *testing.T) {
+		// Stored isShow is currently false from the previous subtest; a nil
+		// isShow must not clobber it.
+		require.NoError(t, store.UpdateUserStatus(ctx, "alice", "heads down", nil, t2))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		assert.Equal(t, "heads down", got.StatusText)
+		assert.False(t, got.StatusIsShow)
+	})
+
+	t.Run("stale event is rejected by the statusUpdatedAt high-water guard", func(t *testing.T) {
+		// statusUpdatedAt is t2; a t1 (older) event must be a no-op, not regress the text.
+		require.NoError(t, store.UpdateUserStatus(ctx, "alice", "STALE", nil, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		assert.Equal(t, "heads down", got.StatusText, "stale status must not overwrite a newer one")
+	})
+
+	t.Run("unknown account is a no-op", func(t *testing.T) {
+		require.NoError(t, store.UpdateUserStatus(ctx, "ghost", "nope", nil, t2))
+
+		count, err := store.userCol.CountDocuments(ctx, bson.M{"account": "ghost"})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+	})
 }

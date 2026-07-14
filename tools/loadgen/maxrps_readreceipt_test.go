@@ -33,3 +33,11 @@ func TestBuildReadReceiptInputs(t *testing.T) {
 	assert.Empty(t, in.Pending)
 	assert.False(t, in.Inconclusive)
 }
+
+func TestBuildReadReceiptInputs_PopulatesEmitUnderrun(t *testing.T) {
+	c := NewReadReceiptCollector()
+	c.RecordUnderrun(5)
+	c.RecordUnderrun(4)
+	in := buildReadReceiptInputs(2000, 30*time.Second, c)
+	assert.Equal(t, 9, in.EmitUnderrun)
+}

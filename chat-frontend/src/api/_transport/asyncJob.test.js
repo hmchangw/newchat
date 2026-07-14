@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { StringCodec } from 'nats.ws'
-import { requestWithAsyncResult, ASYNC_JOB_ERROR_KINDS, formatAsyncJobError, AsyncJobError } from './asyncJob'
+import { requestWithAsyncResult, requestSync, ASYNC_JOB_ERROR_KINDS, formatAsyncJobError, AsyncJobError } from './asyncJob'
+
+const HYPHENATED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const sc = StringCodec()
 
@@ -81,6 +83,61 @@ describe('requestWithAsyncResult', () => {
     expect(opts.headers.get('X-Request-ID')).toBe('req-1')
   })
 
+  it('sends the X-Debug header with the level when opts.debugLevel is set', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1', debugLevel: 'trace' })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Debug')).toBe('trace')
+  })
+
+  it('omits the X-Debug header by default', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1' })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Debug')).toBe('')
+  })
+
+  it('omits the X-Debug header when debugLevel is "off"', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1', debugLevel: 'off' })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Debug')).toBe('')
+  })
+
+  it('sends X-Debug-Payload=1 when opts.debugPayload is true', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1', debugPayload: true })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Debug-Payload')).toBe('1')
+  })
+
+  it('captures payloads independently of the debug level', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1', debugPayload: true })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Debug')).toBe('')
+    expect(opts.headers.get('X-Debug-Payload')).toBe('1')
+  })
+
+  it('omits X-Debug-Payload by default', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1' })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Debug-Payload')).toBe('')
+  })
+
   it('resolves with sync + async results when async status is ok', async () => {
     const nc = makeNc({ syncReply: { status: 'accepted', roomId: 'r1', roomType: 'channel' } })
     const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1' })
@@ -127,10 +184,13 @@ describe('requestWithAsyncResult', () => {
         requestId: 'req-1',
         asyncTimeout: 500,
       })
+      // Attach the rejection handler before advancing: the async timer API
+      // flushes the rejection during the advance, so a later .catch would miss it.
+      const settled = p.catch((e) => e)
       await Promise.resolve()
       await Promise.resolve()
-      vi.advanceTimersByTime(600)
-      const err = await p.catch((e) => e)
+      await vi.advanceTimersByTimeAsync(600)
+      const err = await settled
       expect(err.kind).toBe(ASYNC_JOB_ERROR_KINDS.AsyncTimeout)
       expect(err.message).toMatch(/timeout/i)
     } finally {
@@ -147,9 +207,12 @@ describe('requestWithAsyncResult', () => {
         requestId: 'req-1',
         asyncTimeout: 100,
       })
+      // Attach the rejection assertion before advancing so the async timer
+      // flush doesn't surface the rejection as unhandled.
+      const rejection = expect(p).rejects.toThrow()
       await Promise.resolve(); await Promise.resolve()
-      vi.advanceTimersByTime(200)
-      await expect(p).rejects.toThrow()
+      await vi.advanceTimersByTimeAsync(200)
+      await rejection
       expect(unsubSpy).toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
@@ -237,6 +300,14 @@ describe('formatAsyncJobError', () => {
     expect(formatAsyncJobError(err)).toBe('This room is at capacity.')
   })
 
+  it('maps account_not_ready to the contact-administrator copy', () => {
+    const err = new AsyncJobError('account not ready for chat', ASYNC_JOB_ERROR_KINDS.SyncError, {
+      code: 'forbidden',
+      reason: 'account_not_ready',
+    })
+    expect(formatAsyncJobError(err)).toBe("Your account isn't ready for chat yet — contact your administrator.")
+  })
+
   it('returns the humanized copy for not_room_member', () => {
     const err = new AsyncJobError('only room members can do that', ASYNC_JOB_ERROR_KINDS.AsyncError, {
       reason: 'not_room_member',
@@ -290,5 +361,37 @@ describe('formatAsyncJobError', () => {
         expect(formatted, `kind=${kind} should produce non-empty hint`).toBeTruthy()
       }
     }
+  })
+})
+
+describe('requestSync', () => {
+  it('stamps a valid hyphenated-UUID X-Request-ID header when none is given', async () => {
+    const nc = makeNc({ syncReply: { count: 3 } })
+    await requestSync(nc, 'chat.user.alice.request.user.s1.subscription.count', { unread: true })
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers).toBeDefined()
+    expect(opts.headers.get('X-Request-ID')).toMatch(HYPHENATED_UUID)
+  })
+
+  it('uses an explicit requestId when provided', async () => {
+    const nc = makeNc({ syncReply: { count: 0 } })
+    await requestSync(nc, 'subj', {}, { requestId: '01970a4f-8c2d-7c9a-abcd-e0123456789f' })
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('X-Request-ID')).toBe('01970a4f-8c2d-7c9a-abcd-e0123456789f')
+  })
+
+  it('returns the decoded reply on success', async () => {
+    const nc = makeNc({ syncReply: { count: 7 } })
+    const result = await requestSync(nc, 'subj', {})
+    expect(result).toEqual({ count: 7 })
+  })
+
+  it('throws an AsyncJobError carrying code/reason on an errcode envelope', async () => {
+    const nc = makeNc({ syncReply: { error: 'we could not find that user', code: 'not_found', reason: 'user_not_found' } })
+    const err = await requestSync(nc, 'subj', {}).catch((e) => e)
+    expect(err).toBeInstanceOf(AsyncJobError)
+    expect(err.kind).toBe(ASYNC_JOB_ERROR_KINDS.SyncError)
+    expect(err.code).toBe('not_found')
+    expect(err.reason).toBe('user_not_found')
   })
 })

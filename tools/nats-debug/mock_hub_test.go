@@ -92,17 +92,17 @@ func (mr *MockHubMockRecorder) DisconnectRequest() *gomock.Call {
 }
 
 // Publish mocks base method.
-func (m *MockHub) Publish(subject, payload string) error {
+func (m *MockHub) Publish(subject, payload string, dbg DebugHeaders) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Publish", subject, payload)
+	ret := m.ctrl.Call(m, "Publish", subject, payload, dbg)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Publish indicates an expected call of Publish.
-func (mr *MockHubMockRecorder) Publish(subject, payload any) *gomock.Call {
+func (mr *MockHubMockRecorder) Publish(subject, payload, dbg any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Publish", reflect.TypeOf((*MockHub)(nil).Publish), subject, payload)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Publish", reflect.TypeOf((*MockHub)(nil).Publish), subject, payload, dbg)
 }
 
 // RegisterSSEClient mocks base method.
@@ -120,18 +120,18 @@ func (mr *MockHubMockRecorder) RegisterSSEClient(ch any) *gomock.Call {
 }
 
 // Request mocks base method.
-func (m *MockHub) Request(subject, payload string, timeoutMs int) (string, error) {
+func (m *MockHub) Request(subject, payload string, timeoutMs int, dbg DebugHeaders) (string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Request", subject, payload, timeoutMs)
+	ret := m.ctrl.Call(m, "Request", subject, payload, timeoutMs, dbg)
 	ret0, _ := ret[0].(string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Request indicates an expected call of Request.
-func (mr *MockHubMockRecorder) Request(subject, payload, timeoutMs any) *gomock.Call {
+func (mr *MockHubMockRecorder) Request(subject, payload, timeoutMs, dbg any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Request", reflect.TypeOf((*MockHub)(nil).Request), subject, payload, timeoutMs)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Request", reflect.TypeOf((*MockHub)(nil).Request), subject, payload, timeoutMs, dbg)
 }
 
 // Status mocks base method.

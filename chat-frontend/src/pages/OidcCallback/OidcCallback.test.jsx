@@ -45,12 +45,10 @@ describe('OidcCallback', () => {
     const onDone = vi.fn()
     useNats.mockReturnValue({ connect })
 
-    const fakeUser = { access_token: 'access-token-123' }
+    const fakeUser = { access_token: 'access-token-123', profile: { preferred_username: 'alice' } }
     getOidcManager.mockReturnValue({
       signinRedirectCallback: vi.fn().mockResolvedValue(fakeUser),
     })
-
-    window.sessionStorage.setItem('oidc.siteId', 'site-A')
 
     const replaceStateSpy = vi.spyOn(window.history, 'replaceState')
 
@@ -60,7 +58,7 @@ describe('OidcCallback', () => {
       expect(connect).toHaveBeenCalledWith({
         mode: 'sso',
         ssoToken: 'access-token-123',
-        siteId: 'site-A',
+        account: 'alice',
       })
     })
 
@@ -95,7 +93,6 @@ describe('OidcCallback', () => {
     getOidcManager.mockReturnValue({
       signinRedirectCallback: vi.fn().mockResolvedValue({ access_token: 'tok' }),
     })
-    window.sessionStorage.setItem('oidc.siteId', 'site-A')
 
     render(<OidcCallback onDone={vi.fn()} />)
 

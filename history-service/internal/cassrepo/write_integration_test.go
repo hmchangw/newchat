@@ -4,6 +4,7 @@ package cassrepo
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	cassmodel "github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
 func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
@@ -51,8 +53,8 @@ func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 	var gotMsg string
 	var gotEditedAt time.Time
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg)
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
@@ -107,8 +109,8 @@ func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 	var gotMsg string
 	var gotEditedAt time.Time
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg)
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
@@ -171,8 +173,8 @@ func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 	var gotEditedAt time.Time
 
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg, "messages_by_id should reflect the edit")
 	assert.WithinDuration(t, editedAt, gotEditedAt, time.Second)
@@ -229,8 +231,8 @@ func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 	var gotMsg string
 	var gotUpdatedAt time.Time
 	require.NoError(t, session.Query(
-		`SELECT deleted, msg, updated_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT deleted, msg, updated_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotDeleted, &gotMsg, &gotUpdatedAt))
 	assert.True(t, gotDeleted, "messages_by_id.deleted should be true")
 	assert.Equal(t, "original", gotMsg, "msg content must be preserved")
@@ -302,8 +304,8 @@ func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 	// messages_by_id: reply now deleted
 	var gotDeleted bool
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		replyID, replyCreatedAt,
+		`SELECT deleted FROM messages_by_id WHERE message_id = ?`,
+		replyID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted)
 
@@ -375,8 +377,8 @@ func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 	var gotDeleted bool
 
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT deleted FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted, "messages_by_id should be deleted")
 
@@ -459,8 +461,8 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 	// Both tables' tcount should now be 2.
 	var gotTcount int
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		parentID, parentCreatedAt,
+		`SELECT tcount FROM messages_by_id WHERE message_id = ?`,
+		parentID,
 	).Scan(&gotTcount))
 	assert.Equal(t, 2, gotTcount, "messages_by_id.tcount = count-based 2")
 
@@ -469,6 +471,139 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
 	).Scan(&gotTcount))
 	assert.Equal(t, 2, gotTcount, "messages_by_room.tcount = count-based 2")
+}
+
+func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-tlm-del"
+	threadRoomID := "thread-tlm-del"
+	parentID := "m-tlm-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", false,
+	).Exec())
+
+	// Seed 2 replies: survivor (newer) and the one being deleted (oldest reply).
+	survivorAt := parentCreatedAt.Add(5 * time.Second)
+	replyAt := parentCreatedAt.Add(3 * time.Second) // older than survivor
+	replyID := "m-tlm-reply-del"
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		threadRoomID, survivorAt, "m-tlm-survivor", roomID, sender, "survivor", parentID, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replyID, roomID, replyAt, sender, "reply to delete", parentID, parentCreatedAt, threadRoomID, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		threadRoomID, replyAt, replyID, roomID, sender, "reply to delete", parentID, false,
+	).Exec())
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             replyID,
+		RoomID:                roomID,
+		CreatedAt:             replyAt,
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+	}
+	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	// tlm must equal survivorAt (the max created_at among surviving replies).
+	var gotTlm *time.Time
+	require.NoError(t, session.Query(
+		`SELECT thread_last_msg_at FROM messages_by_id WHERE message_id = ?`,
+		parentID,
+	).Scan(&gotTlm))
+	require.NotNil(t, gotTlm, "tlm must be set to surviving max after delete")
+	assert.True(t, gotTlm.Equal(survivorAt), "tlm must equal the newest surviving reply's createdAt")
+
+	var gotTlmRoom *time.Time
+	require.NoError(t, session.Query(
+		`SELECT thread_last_msg_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
+	).Scan(&gotTlmRoom))
+	require.NotNil(t, gotTlmRoom, "messages_by_room.tlm must be set to surviving max after delete")
+	assert.True(t, gotTlmRoom.Equal(survivorAt))
+}
+
+func TestRepository_SoftDeleteMessage_ClearsTlmOnLastReplyDelete(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-tlm-last"
+	threadRoomID := "thread-tlm-last"
+	parentID := "m-tlm-last-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	replyAt := parentCreatedAt.Add(5 * time.Second)
+	replyID := "m-tlm-last-reply"
+
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", false,
+	).Exec())
+
+	// Seed only one reply — deleting it leaves count=0, tlm=NULL.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replyID, roomID, replyAt, sender, "only reply", parentID, parentCreatedAt, threadRoomID, false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		threadRoomID, replyAt, replyID, roomID, sender, "only reply", parentID, false,
+	).Exec())
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             replyID,
+		RoomID:                roomID,
+		CreatedAt:             replyAt,
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+	}
+	_, applied, newTcount, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NotNil(t, newTcount)
+	assert.Equal(t, 0, *newTcount, "tcount must be 0 after deleting last reply")
+
+	// tlm must be NULL on the parent.
+	var gotTlm *time.Time
+	require.NoError(t, session.Query(
+		`SELECT thread_last_msg_at FROM messages_by_id WHERE message_id = ?`,
+		parentID,
+	).Scan(&gotTlm))
+	assert.Nil(t, gotTlm, "tlm must be NULL after last reply is deleted (count→0)")
+
+	var gotTlmRoom *time.Time
+	require.NoError(t, session.Query(
+		`SELECT thread_last_msg_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
+	).Scan(&gotTlmRoom))
+	assert.Nil(t, gotTlmRoom, "messages_by_room.tlm must be NULL after last reply is deleted")
 }
 
 func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
@@ -538,8 +673,8 @@ func TestRepository_UpdateMessageContent_MissingThreadRoomID_ReturnsError(t *tes
 	var gotMsg string
 	var gotEditedAt *time.Time
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		"m-no-tr", createdAt,
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ?`,
+		"m-no-tr",
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "original", gotMsg, "msg must not be updated on validation failure")
 	assert.Nil(t, gotEditedAt, "edited_at must remain nil on validation failure")
@@ -572,8 +707,8 @@ func TestRepository_SoftDeleteMessage_MissingThreadRoomID_ReturnsError(t *testin
 	var gotDeleted bool
 	var gotUpdatedAt *time.Time
 	require.NoError(t, session.Query(
-		`SELECT deleted, updated_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		"m-no-tr-del", createdAt,
+		`SELECT deleted, updated_at FROM messages_by_id WHERE message_id = ?`,
+		"m-no-tr-del",
 	).Scan(&gotDeleted, &gotUpdatedAt))
 	assert.False(t, gotDeleted, "deleted must remain false on validation failure")
 	assert.Nil(t, gotUpdatedAt, "updated_at must remain nil on validation failure")
@@ -640,8 +775,8 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	// Confirm tcount went 1 -> 0 on both parent rows.
 	var tcount int
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		parentID, parentCreatedAt,
+		`SELECT tcount FROM messages_by_id WHERE message_id = ?`,
+		parentID,
 	).Scan(&tcount))
 	assert.Equal(t, 0, tcount, "first delete should have decremented messages_by_id.tcount")
 	require.NoError(t, session.Query(
@@ -663,8 +798,8 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	// tcount must still be 0 (not -1 / not double-decremented). casDecrement
 	// also clamps at zero, but the LWT gate is the proper defense.
 	require.NoError(t, session.Query(
-		`SELECT tcount FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		parentID, parentCreatedAt,
+		`SELECT tcount FROM messages_by_id WHERE message_id = ?`,
+		parentID,
 	).Scan(&tcount))
 	assert.Equal(t, 0, tcount, "second delete must not double-decrement messages_by_id.tcount")
 	require.NoError(t, session.Query(
@@ -820,8 +955,8 @@ func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T)
 	var gotDeleted bool
 	var gotType string
 	require.NoError(t, session.Query(
-		`SELECT deleted, type FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT deleted, type FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotDeleted, &gotType))
 	assert.True(t, gotDeleted)
 	assert.Equal(t, MessageTypeRemoved, gotType, "messages_by_id must have type='message_removed' for thread parent")
@@ -873,8 +1008,8 @@ func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T)
 	// type column should be empty (not set).
 	var gotType string
 	require.NoError(t, session.Query(
-		`SELECT type FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT type FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotType))
 	assert.Empty(t, gotType, "regular message delete must NOT set type")
 }
@@ -927,8 +1062,8 @@ func TestRepository_SoftDeleteMessage_ReplyThreadParent_SetsTypeRemoved(t *testi
 	// Verify messages_by_id: type = 'message_removed'.
 	var gotType string
 	require.NoError(t, session.Query(
-		`SELECT type FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT type FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotType))
 	assert.Equal(t, MessageTypeRemoved, gotType, "messages_by_id must have type='message_removed'")
 
@@ -1180,8 +1315,8 @@ func TestUpdateMessageContent_NonExistent_CipherEnabled_ReturnsErrMessageNotFoun
 	// No ghost row was materialised.
 	var got string
 	err = session.Query(
-		`SELECT msg FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		"m-ghost-enc", now,
+		`SELECT msg FROM messages_by_id WHERE message_id = ?`,
+		"m-ghost-enc",
 	).Scan(&got)
 	require.ErrorIs(t, err, gocql.ErrNotFound, "no row must be upserted by the failed edit")
 }
@@ -1235,8 +1370,8 @@ func TestEditMessage_Encrypted_NullsLegacyPlaintextColumns(t *testing.T) {
 		},
 		{
 			name: "messages_by_id",
-			q:    `SELECT msg, attachments, sys_msg_data FROM messages_by_id WHERE message_id=? AND created_at=?`,
-			args: []any{"m-null", now},
+			q:    `SELECT msg, attachments, sys_msg_data FROM messages_by_id WHERE message_id=?`,
+			args: []any{"m-null"},
 		},
 	} {
 		var (
@@ -1249,6 +1384,67 @@ func TestEditMessage_Encrypted_NullsLegacyPlaintextColumns(t *testing.T) {
 		assert.Nil(t, attachments, "%s: legacy attachments must be NULL after encrypted edit", table.name)
 		assert.Equal(t, []byte{0xAA}, sysMsgData, "%s: un-encrypted sys_msg_data must be preserved after encrypted edit", table.name)
 	}
+}
+
+// TestEditMessage_Encrypted_PreservesQuotedParentMetadata verifies that
+// editing a quote message under the cipher-enabled path keeps the quoted
+// parent's metadata (message_id, sender, …) in the plaintext column while only
+// the body moves into enc_payload — the documented StripEncryptedFields
+// contract. Regression guard for the whole-column-null data loss (#385).
+func TestEditMessage_Encrypted_PreservesQuotedParentMetadata(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, cipher)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	roomID := "r-edit-quote-1"
+	parentCreatedAt := now.Add(-time.Minute)
+	quoted := &cassmodel.QuotedParentMessage{
+		MessageID:   "m-parent",
+		RoomID:      roomID,
+		Sender:      cassmodel.Participant{ID: "u-parent", Account: "bob"},
+		CreatedAt:   parentCreatedAt,
+		Msg:         "parent body",
+		MessageLink: "https://chat/m-parent",
+	}
+
+	// Seed an encrypted quote row: body in enc_payload, metadata in the
+	// plaintext quoted_parent_message column (as the write path stores it).
+	enc := atrest.SplitForEncryption(&cassmodel.Message{Msg: "child body", QuotedParentMessage: quoted})
+	payload, meta, err := cipher.Encrypt(ctx, roomID, enc)
+	require.NoError(t, err)
+	stored := *quoted
+	atrest.StripEncryptedFields(&cassmodel.Message{QuotedParentMessage: &stored})
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, enc_payload, enc_meta, quoted_parent_message, site_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(now), now, "m-child", payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, &stored, "site-a",
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, created_at, room_id, enc_payload, enc_meta, quoted_parent_message, site_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"m-child", now, roomID, payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, &stored, "site-a",
+	).Exec())
+
+	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
+		RoomID: roomID, MessageID: "m-child", CreatedAt: now,
+	}, "edited child body", now.Add(time.Minute)))
+
+	// Read back through the history read path (decrypt + struct scan).
+	got, err := repo.GetMessageByID(ctx, "m-child")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.QuotedParentMessage, "quoted parent must survive the encrypted edit")
+	assert.Equal(t, "m-parent", got.QuotedParentMessage.MessageID, "quoted parent messageId must be intact")
+	assert.Equal(t, "u-parent", got.QuotedParentMessage.Sender.ID, "quoted parent sender must be intact")
+	assert.Equal(t, "https://chat/m-parent", got.QuotedParentMessage.MessageLink)
+	assert.True(t, got.QuotedParentMessage.CreatedAt.Equal(parentCreatedAt), "quoted parent createdAt must be intact")
+	assert.Equal(t, "parent body", got.QuotedParentMessage.Msg, "quoted parent body restored from enc_payload")
+	assert.Equal(t, "edited child body", got.Msg)
 }
 
 // TestEditMessage_Plaintext_NullsEncryptedColumns verifies that editing
@@ -1303,8 +1499,8 @@ func TestEditMessage_Plaintext_NullsEncryptedColumns(t *testing.T) {
 		},
 		{
 			name: "messages_by_id",
-			q:    `SELECT msg, enc_payload, enc_meta FROM messages_by_id WHERE message_id=? AND created_at=?`,
-			args: []any{"m-rb", now},
+			q:    `SELECT msg, enc_payload, enc_meta FROM messages_by_id WHERE message_id=?`,
+			args: []any{"m-rb"},
 		},
 	} {
 		var (
@@ -1319,13 +1515,13 @@ func TestEditMessage_Plaintext_NullsEncryptedColumns(t *testing.T) {
 	}
 }
 
-// TestEditMessage_Encrypted_NullsLegacyQuotedParent verifies that editing
-// a legacy row with a plaintext quoted_parent_message UDT under the
-// cipher-enabled path nulls the on-disk UDT column. Without this, the
-// re-encryption cycle promotes the quoted body INTO the bundle (via
-// readEncryptedFields) but leaves the plaintext column on disk — defeating
-// the at-rest goal for the quoted parent body.
-func TestEditMessage_Encrypted_NullsLegacyQuotedParent(t *testing.T) {
+// TestEditMessage_Encrypted_PreservesLegacyQuotedParentMetadata verifies that
+// editing a legacy row with a plaintext quoted_parent_message UDT under the
+// cipher-enabled path keeps the parent's metadata in the plaintext column while
+// only the body sub-fields (msg, attachments) move into enc_payload — the
+// StripEncryptedFields contract. Regression guard for the whole-column-null
+// data loss (#385).
+func TestEditMessage_Encrypted_PreservesLegacyQuotedParentMetadata(t *testing.T) {
 	ctx := context.Background()
 	session := setupCassandra(t)
 	mongoDB := setupMongo(t)
@@ -1376,13 +1572,19 @@ func TestEditMessage_Encrypted_NullsLegacyQuotedParent(t *testing.T) {
 		},
 		{
 			name: "messages_by_id",
-			q:    `SELECT quoted_parent_message FROM messages_by_id WHERE message_id=? AND created_at=?`,
-			args: []any{"m-q", now},
+			q:    `SELECT quoted_parent_message FROM messages_by_id WHERE message_id=?`,
+			args: []any{"m-q"},
 		},
 	} {
 		var got *cassmodel.QuotedParentMessage
 		require.NoError(t, session.Query(table.q, table.args...).Scan(&got), "select from %s", table.name)
-		assert.Nil(t, got, "%s: quoted_parent_message must be NULL after encrypted edit — the body has been promoted into enc_payload", table.name)
+		require.NotNil(t, got, "%s: quoted_parent_message metadata must survive the encrypted edit", table.name)
+		assert.Equal(t, "q-parent", got.MessageID, "%s: messageId preserved", table.name)
+		assert.Equal(t, roomID, got.RoomID, "%s: roomId preserved", table.name)
+		assert.Equal(t, "alice", got.Sender.Account, "%s: sender preserved", table.name)
+		assert.True(t, parentCreatedAt.Equal(got.CreatedAt), "%s: createdAt preserved", table.name)
+		assert.Empty(t, got.Msg, "%s: body moved into enc_payload", table.name)
+		assert.Nil(t, got.Attachments, "%s: body attachments moved into enc_payload", table.name)
 	}
 }
 
@@ -1441,8 +1643,8 @@ func TestRepository_UpdateMessageContent_TShowThreadReply(t *testing.T) {
 	var gotEditedAt time.Time
 
 	require.NoError(t, session.Query(
-		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT msg, edited_at FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotMsg, &gotEditedAt))
 	assert.Equal(t, "edited", gotMsg)
 
@@ -1521,8 +1723,8 @@ func TestRepository_SoftDeleteMessage_TShowThreadReply(t *testing.T) {
 
 	var gotDeleted bool
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		replyID, replyCreatedAt,
+		`SELECT deleted FROM messages_by_id WHERE message_id = ?`,
+		replyID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted)
 
@@ -1538,4 +1740,27 @@ func TestRepository_SoftDeleteMessage_TShowThreadReply(t *testing.T) {
 		roomID, bucket, replyCreatedAt, replyID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted, "TShow reply soft-delete must propagate to the messages_by_room copy")
+}
+
+func TestRepository_countThreadReplies_CapsAtThreadcountCap(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+
+	base := time.Now().UTC()
+	for i := 0; i < threadcount.Cap+10; i++ {
+		require.NoError(t, session.Query(
+			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id) VALUES (?, ?, ?)`,
+			"thread-1", base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("reply-%d", i),
+		).WithContext(ctx).Exec())
+	}
+
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 10, nil)
+	n, tlm, err := repo.countThreadReplies(ctx, "thread-1")
+	require.NoError(t, err)
+	assert.Equal(t, threadcount.Cap, n)
+	// Even over Cap, tlm must be the newest reply — the DESC clustering order
+	// surfaces it first, so the bounded scan still observes the true maximum.
+	require.NotNil(t, tlm)
+	newest := base.Add(time.Duration(threadcount.Cap+9) * time.Millisecond)
+	assert.Equal(t, newest.UnixMilli(), tlm.UnixMilli())
 }

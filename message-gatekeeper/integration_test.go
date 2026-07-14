@@ -97,7 +97,7 @@ func buildHandlerWithCapture(t *testing.T, db *mongo.Database) (*Handler, func()
 		return &jetstream.PubAck{}, nil
 	}
 	reply := func(_ context.Context, _ *nats.Msg) error { return nil }
-	return NewHandler(NewMongoStore(db, nil, 0), users, pub, reply, "site-a", nil, 500),
+	return NewHandler(NewMongoStore(db, nil, 0), users, pub, reply, "site-a", nil, 500, 1, 8192, ""),
 		func() *nats.Msg { return captured }
 }
 

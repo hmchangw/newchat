@@ -11,7 +11,7 @@ import (
 )
 
 const baseColumns = "room_id, created_at, message_id, thread_room_id, sender, " +
-	"msg, mentions, attachments, file, card, card_action, tshow, tcount, " +
+	"msg, mentions, attachments, card, card_action, tshow, tcount, thread_last_msg_at, " +
 	"thread_parent_id, thread_parent_created_at, quoted_parent_message, " +
 	"visible_to, reactions, deleted, " +
 	"type, sys_msg_data, site_id, edited_at, updated_at, pinned_at, " +

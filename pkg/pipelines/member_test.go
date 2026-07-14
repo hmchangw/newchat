@@ -8,163 +8,44 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-func TestGetNewMembersPipeline(t *testing.T) {
-	t.Run("three stages returned", func(t *testing.T) {
-		got := GetNewMembersPipeline([]string{"org1"}, []string{"alice"}, "room1", "")
-		assert.Len(t, got, 3)
+func TestMatchCandidatesFilter(t *testing.T) {
+	t.Run("orgs and accounts produce three $or branches", func(t *testing.T) {
+		f := MatchCandidatesFilter([]string{"org1", "org2"}, []string{"alice", "bob"}, "")
+		or, ok := f["$or"].(bson.A)
+		require.True(t, ok, "$or must be a bson.A")
+		assert.Equal(t, bson.A{
+			bson.M{"sectId": bson.M{"$in": []string{"org1", "org2"}}},
+			bson.M{"deptId": bson.M{"$in": []string{"org1", "org2"}}},
+			bson.M{"account": bson.M{"$in": []string{"alice", "bob"}}},
+		}, or)
 	})
 
-	t.Run("$or filter with both orgIDs and directAccounts", func(t *testing.T) {
-		got := GetNewMembersPipeline([]string{"org1", "org2"}, []string{"alice"}, "room1", "")
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		orFilter := match["$or"].(bson.A)
-
-		// sectId + deptId for the one orgID group, plus account = 3 clauses.
-		assert.Len(t, orFilter, 3)
-		assert.NotNil(t, orFilter[0])
-		assert.NotNil(t, orFilter[1])
-		assert.NotNil(t, orFilter[2])
+	t.Run("orgs only omits the account branch", func(t *testing.T) {
+		f := MatchCandidatesFilter([]string{"org1"}, nil, "")
+		assert.Len(t, f["$or"], 2)
 	})
 
-	t.Run("bot exclusion via $not regex", func(t *testing.T) {
-		got := GetNewMembersPipeline([]string{"org1"}, []string{"alice"}, "room1", "")
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-
-		notFilter := match["account"]
-		assert.NotNil(t, notFilter)
+	t.Run("accounts only omits the org branches", func(t *testing.T) {
+		f := MatchCandidatesFilter(nil, []string{"alice"}, "")
+		assert.Equal(t, bson.A{bson.M{"account": bson.M{"$in": []string{"alice"}}}}, f["$or"])
 	})
 
-	t.Run("$or filter contains orgIDs when provided", func(t *testing.T) {
-		got := GetNewMembersPipeline([]string{"org1"}, nil, "room1", "")
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		orFilter := match["$or"].(bson.A)
-
-		// sectId + deptId clauses for the org group.
-		assert.Len(t, orFilter, 2)
-		sectIdFilter := orFilter[0].(bson.M)
-		assert.Contains(t, sectIdFilter, "sectId")
-		deptIdFilter := orFilter[1].(bson.M)
-		assert.Contains(t, deptIdFilter, "deptId")
+	t.Run("always excludes bots via a $not regex on account", func(t *testing.T) {
+		f := MatchCandidatesFilter(nil, []string{"alice"}, "")
+		acct, ok := f["account"].(bson.M)
+		require.True(t, ok)
+		rx, ok := acct["$not"].(bson.Regex)
+		require.True(t, ok, "account.$not must be a regex")
+		assert.Equal(t, botOrPseudoAccountRegex, rx.Pattern)
+		_, hasNe := acct["$ne"]
+		assert.False(t, hasNe, "no $ne when excludeAccount is empty")
 	})
 
-	t.Run("$or filter contains directAccounts when provided", func(t *testing.T) {
-		got := GetNewMembersPipeline(nil, []string{"alice"}, "room1", "")
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		orFilter := match["$or"].(bson.A)
-
-		assert.Len(t, orFilter, 1)
-		accountFilter := orFilter[0].(bson.M)
-		assert.Contains(t, accountFilter, "account")
-	})
-
-	t.Run("$lookup stage correct", func(t *testing.T) {
-		got := GetNewMembersPipeline([]string{"org1"}, []string{"alice"}, "room1", "")
-		stage1 := got[1].(bson.M)
-		lookup := stage1["$lookup"].(bson.M)
-
-		assert.Equal(t, "subscriptions", lookup["from"])
-		assert.Equal(t, "existingSub", lookup["as"])
-		assert.NotNil(t, lookup["let"])
-		assert.NotNil(t, lookup["pipeline"])
-	})
-
-	t.Run("$match stage filters empty existingSub array", func(t *testing.T) {
-		got := GetNewMembersPipeline([]string{"org1"}, []string{"alice"}, "room1", "")
-		stage2 := got[2].(bson.M)
-		match := stage2["$match"].(bson.M)
-		existingSub := match["existingSub"].(bson.M)
-		eqA := existingSub["$eq"].(bson.A)
-		assert.Len(t, eqA, 0, "compare against the empty array literal")
-	})
-}
-
-func TestGetNewMembersPipelineEmptyRoomID(t *testing.T) {
-	pipe := GetNewMembersPipeline([]string{"org-fx"}, []string{"bob"}, "", "")
-	require.NotEmpty(t, pipe)
-
-	hasLookup := false
-	for _, stage := range pipe {
-		m, ok := stage.(bson.M)
-		if !ok {
-			continue
-		}
-		if _, found := m["$lookup"]; found {
-			hasLookup = true
-		}
-	}
-	assert.False(t, hasLookup, "empty-roomID branch must drop the subscriptions $lookup")
-}
-
-func TestGetNewMembersPipelineWithRoomIDStillHasLookup(t *testing.T) {
-	pipe := GetNewMembersPipeline([]string{"org-fx"}, []string{"bob"}, "r1", "")
-	require.NotEmpty(t, pipe)
-
-	hasLookup := false
-	for _, stage := range pipe {
-		m, ok := stage.(bson.M)
-		if !ok {
-			continue
-		}
-		if _, found := m["$lookup"]; found {
-			hasLookup = true
-		}
-	}
-	assert.True(t, hasLookup, "non-empty roomID must keep the subscriptions $lookup")
-}
-
-func TestGetAddMemberCandidatesPipeline(t *testing.T) {
-	t.Run("stage count is 4", func(t *testing.T) {
-		got, err := GetAddMemberCandidatesPipeline([]string{"org1"}, []string{"alice"}, "room1", "")
-		require.NoError(t, err)
-		assert.Len(t, got, 4)
-	})
-
-	t.Run("$match shape with orgIDs only — 2 OR clauses: sectId, deptId", func(t *testing.T) {
-		got, err := GetAddMemberCandidatesPipeline([]string{"org1"}, nil, "room1", "")
-		require.NoError(t, err)
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		orFilter := match["$or"].(bson.A)
-		assert.Len(t, orFilter, 2, "sectId + deptId clauses for orgIDs only")
-		assert.Contains(t, orFilter[0].(bson.M), "sectId")
-		assert.Contains(t, orFilter[1].(bson.M), "deptId")
-	})
-
-	t.Run("$match shape with directAccounts only — 1 OR clause for account", func(t *testing.T) {
-		got, err := GetAddMemberCandidatesPipeline(nil, []string{"alice"}, "room1", "")
-		require.NoError(t, err)
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		orFilter := match["$or"].(bson.A)
-		assert.Len(t, orFilter, 1)
-		assert.Contains(t, orFilter[0].(bson.M), "account")
-	})
-
-	t.Run("$match shape with both — 3 elements in $or: sectId, deptId, account", func(t *testing.T) {
-		got, err := GetAddMemberCandidatesPipeline([]string{"org1"}, []string{"alice"}, "room1", "")
-		require.NoError(t, err)
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		orFilter := match["$or"].(bson.A)
-		assert.Len(t, orFilter, 3, "sectId + deptId + account")
-	})
-
-	t.Run("excludeAccount adds $ne to the account filter", func(t *testing.T) {
-		got, err := GetAddMemberCandidatesPipeline([]string{"org1"}, []string{"alice"}, "room1", "exclude-me")
-		require.NoError(t, err)
-		stage0 := got[0].(bson.M)
-		match := stage0["$match"].(bson.M)
-		accountFilter := match["account"].(bson.M)
-		assert.Equal(t, "exclude-me", accountFilter["$ne"])
-	})
-
-	t.Run("error on empty roomID", func(t *testing.T) {
-		got, err := GetAddMemberCandidatesPipeline([]string{"org1"}, nil, "", "")
-		assert.Nil(t, got)
-		assert.ErrorIs(t, err, ErrRoomIDRequired)
+	t.Run("excludeAccount adds a $ne on account", func(t *testing.T) {
+		f := MatchCandidatesFilter([]string{"org1"}, nil, "exclude-me")
+		acct := f["account"].(bson.M)
+		assert.Equal(t, "exclude-me", acct["$ne"])
+		_, hasNot := acct["$not"]
+		assert.True(t, hasNot, "bot filter is retained alongside $ne")
 	})
 }

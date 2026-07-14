@@ -37,15 +37,19 @@ type RoomsInfoBatchRequest struct {
 
 // RoomInfo is a single aggregated room record: Mongo metadata + room key.
 type RoomInfo struct {
-	RoomID           string  `json:"roomId"`
-	Found            bool    `json:"found"`
-	SiteID           string  `json:"siteId,omitempty"`
-	Name             string  `json:"name,omitempty"`
-	LastMsgAt        *int64  `json:"lastMsgAt,omitempty"`
-	LastMentionAllAt *int64  `json:"lastMentionAllAt,omitempty"`
-	PrivateKey       *string `json:"privateKey,omitempty"`
-	KeyVersion       *int    `json:"keyVersion,omitempty"`
-	Error            string  `json:"error,omitempty"`
+	RoomID            string  `json:"roomId"`
+	Found             bool    `json:"found"`
+	SiteID            string  `json:"siteId,omitempty"`
+	Name              string  `json:"name,omitempty"`
+	UserCount         int     `json:"userCount,omitempty"`
+	AppCount          int     `json:"appCount,omitempty"`
+	LastMsgAt         *int64  `json:"lastMsgAt,omitempty"`
+	LastMsgID         string  `json:"lastMsgId,omitempty"`
+	LastMentionAllAt  *int64  `json:"lastMentionAllAt,omitempty"`
+	MinUserLastSeenAt *int64  `json:"minUserLastSeenAt,omitempty"`
+	PrivateKey        *string `json:"privateKey,omitempty"`
+	KeyVersion        *int    `json:"keyVersion,omitempty"`
+	Error             string  `json:"error,omitempty"`
 }
 
 // RoomsInfoBatchResponse contains one entry per requested roomID, in input order.

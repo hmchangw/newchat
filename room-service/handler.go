@@ -25,8 +25,10 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -52,6 +54,18 @@ type Handler struct {
 	restrictedRoomMinMembers int
 	siteURL                  *url.URL
 	maxResponseBytes         int64
+
+	// Microsoft Teams integration. graphClient is nil-safe: only the meetings
+	// RPC uses it (the deep-link RPCs are pure string building). teamsEmailDomain
+	// derives a member's email as account@domain. teamsMeetingStore backs the
+	// per-room idempotency record (Mongo unique key on roomId+siteId).
+	// roomMembersLimit / roomMembersCallLimit cap the member set for meetings and
+	// calls respectively.
+	graphClient          msgraph.Client
+	teamsMeetingStore    TeamsMeetingStore
+	teamsEmailDomain     string
+	roomMembersLimit     int
+	roomMembersCallLimit int
 }
 
 func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, siteURL *url.URL, maxResponseBytes int64) *Handler {
@@ -97,9 +111,12 @@ func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.RoomRenamePattern(h.siteID), h.roomRename)
 	natsrouter.Register(r, subject.RoomRestricted(h.siteID), h.roomRestricted)
 	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), h.roomsInfoBatch)
-	natsrouter.Register(r, subject.ThreadUnreadSummarySubscribe(h.siteID), h.threadUnreadSummary)
+	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), h.threadRoomInfoBatch)
 	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), h.ensureRoomKey)
 	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), h.createRoom)
+	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), h.teamsRoomCall)
+	natsrouter.Register(r, subject.TeamsUserCallPattern(h.siteID), h.teamsUserCall)
+	natsrouter.Register(r, subject.TeamsMeetingPattern(h.siteID), h.teamsMeeting)
 }
 
 func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest) (*model.CreateRoomReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
@@ -123,6 +140,13 @@ func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest)
 	}
 	if requester.EngName == "" || requester.ChineseName == "" {
 		return nil, errInvalidUserData
+	}
+
+	// A DM with no post-strip counterpart is a self-DM (classifyAndValidate only
+	// emits RoomTypeDM with empty Users for that case). Handle it before the switch
+	// so each switch case stays single-purpose.
+	if roomType == model.RoomTypeDM && len(req.Users) == 0 {
+		return h.handleCreateSelfDM(ctx, &req, requester)
 	}
 
 	switch roomType {
@@ -156,9 +180,10 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 {
 		if len(deduped) == 1 && len(req.Users) == 0 {
-			// Pre-strip set was [requester] and post-strip is empty →
-			// self-DM.
-			return "", errSelfDM
+			// Pre-strip set was [requester] and post-strip is empty → self-DM
+			// (note-to-self). A DM with zero post-strip users is unambiguously
+			// the self case; createRoom routes it to handleCreateSelfDM.
+			return model.RoomTypeDM, nil
 		}
 	}
 
@@ -172,7 +197,7 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 			return "", errChannelNameTooLong
 		}
 		for _, a := range req.Users {
-			if isBot(a) {
+			if model.IsBot(a) || model.IsPlatformAdminAccount(a) {
 				return "", errBotInChannel
 			}
 		}
@@ -183,6 +208,30 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 
 // maxChannelNameRunes caps the rune length of a client-supplied channel name.
 const maxChannelNameRunes = 100
+
+// handleCreateSelfDM opens-or-creates the caller's one self-DM (note-to-self)
+// through the same async create path as a 2-party DM: dedup, then publish the
+// canonical create event with the deterministic self-DM room id. room-worker's
+// processCreateRoom builds the single-member room. One-per-user is the same
+// FindDMSubscription dedup the 2-party path uses (and the deterministic id makes
+// a redelivery idempotent on the worker side).
+func (h *Handler) handleCreateSelfDM(ctx context.Context, req *model.CreateRoomRequest, requester *model.User) (*model.CreateRoomReply, error) {
+	existing, err := h.store.FindDMSubscription(ctx, requester.Account, requester.Account)
+	if err == nil && existing != nil {
+		return &model.CreateRoomReply{Status: model.CreateRoomStatusExists, RoomID: existing.RoomID}, nil
+	}
+	if err != nil && !errors.Is(err, model.ErrSubscriptionNotFound) {
+		return nil, fmt.Errorf("self-dm dedup check: %w", err)
+	}
+
+	// Deterministic id (BuildDMRoomID with the requester on both sides); the
+	// requester is its own counterpart, so the worker types this as a DM and
+	// builds a single-member room.
+	req.RoomID = idgen.BuildDMRoomID(requester.ID, requester.ID)
+	req.Users = []string{requester.Account}
+	req.ResolvedUsers = []string{requester.Account}
+	return h.publishCreateRoom(ctx, req, requester, model.RoomTypeDM)
+}
 
 func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.CreateRoomRequest, requester *model.User, roomType model.RoomType) (*model.CreateRoomReply, error) {
 	otherAccount := req.Users[0]
@@ -284,8 +333,8 @@ func (h *Handler) handleCreateRoomChannel(ctx context.Context, req *model.Create
 		)
 	}
 
-	// Preserve req.Users / req.Orgs as the literal client request for sys-message payloads.
-	// The worker uses ResolvedUsers / ResolvedOrgs for capacity and member materialization.
+	// Preserve req.Users / req.Orgs as the literal request for room_created; the worker
+	// uses ResolvedUsers / ResolvedOrgs for materialization and the members_added sys-msg.
 	req.ResolvedUsers = allUsers
 	req.ResolvedOrgs = allOrgs
 	req.RoomID = idgen.GenerateID()
@@ -353,7 +402,7 @@ func (h *Handler) listMembers(c *natsrouter.Context) (*model.ListRoomMembersResp
 	requesterAccount := c.Param("account")
 	roomID := c.Param("roomID")
 
-	_, err := h.store.GetSubscription(ctx, requesterAccount, roomID)
+	err := h.store.CheckMembership(ctx, requesterAccount, roomID)
 	switch {
 	case errors.Is(err, model.ErrSubscriptionNotFound):
 		return nil, errNotRoomMember
@@ -389,7 +438,7 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 	requesterAccount := c.Param("account")
 	roomID := c.Param("roomID")
 
-	_, err := h.store.GetSubscription(ctx, requesterAccount, roomID)
+	err := h.store.CheckMembership(ctx, requesterAccount, roomID)
 	switch {
 	case errors.Is(err, model.ErrSubscriptionNotFound):
 		return nil, errNotRoomMember
@@ -459,7 +508,7 @@ func (h *Handler) requireMembershipAndGetRoom(ctx context.Context, account, room
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, subErr = h.store.GetSubscription(ctx, account, roomID)
+		subErr = h.store.CheckMembership(ctx, account, roomID)
 	}()
 	go func() {
 		defer wg.Done()
@@ -547,17 +596,18 @@ func (h *Handler) listMentionableSubscriptions(c *natsrouter.Context) (*model.Me
 	}
 
 	mentionableCap := room.UserCount + room.AppCount
+	if mentionableCap == 0 {
+		return &model.MentionableSubscriptionsResponse{Subscriptions: []model.MentionableSubscription{}}, nil
+	}
 	var limit int
 	if req.Limit == nil {
-		if mentionableCap == 0 {
-			return &model.MentionableSubscriptionsResponse{Subscriptions: []model.MentionableSubscription{}}, nil
-		}
 		limit = min(defaultMentionableLimit, mentionableCap)
 	} else {
 		limit = *req.Limit
-		if limit <= 0 || limit > mentionableCap {
+		if limit <= 0 {
 			return nil, errMentionableLimitInvalid
 		}
+		limit = min(limit, mentionableCap) // clamp over-cap instead of rejecting
 	}
 
 	// Filter is a literal substring. QuoteMeta escapes regex metacharacters
@@ -720,7 +770,8 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, fmt.Errorf("set owner role: %w", err)
 	}
 
-	subEvtData, err := h.publishSubscriptionUpdate(ctx, req.Account, "role_updated", sub, now)
+	// Role updates are channel-only (guarded above); the channel name is already in hand.
+	subEvtData, err := h.publishSubscriptionUpdate(ctx, req.Account, "role_updated", sub, room.Name, now)
 	if err != nil {
 		return nil, err
 	}
@@ -730,35 +781,25 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, fmt.Errorf("get user siteId: %w", err)
 	}
 	if userSiteID != "" && userSiteID != h.siteID {
-		outbox := model.OutboxEvent{
-			Type:       "role_updated",
-			SiteID:     h.siteID,
-			DestSiteID: userSiteID,
-			Payload:    subEvtData, // inbox-worker.handleRoleUpdated decodes a SubscriptionUpdateEvent
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, err := json.Marshal(outbox)
-		if err != nil {
-			return nil, fmt.Errorf("marshal outbox event: %w", err)
-		}
-		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, "role_updated"), outboxData, ""); err != nil {
-			return nil, fmt.Errorf("publish role-updated outbox: %w", err)
+		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxRoleUpdated, subEvtData, req.Account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate role-updated: %w", err)
 		}
 	}
 
 	return &model.StatusReply{Status: "ok"}, nil
 }
 
-// publishSubscriptionUpdate marshals a SubscriptionUpdateEvent for sub with the
-// given action and best-effort publishes it to the account's subscription.update
-// subject over core NATS. A publish failure is logged, not returned — the DB
-// write is the source of truth; clients reconcile on next refetch. Returns the
-// marshaled event so callers can reuse it (e.g. as a cross-site outbox payload).
-func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action string, sub *model.Subscription, ts time.Time) ([]byte, error) {
+// publishSubscriptionUpdate best-effort publishes a SubscriptionUpdateEvent
+// (sub, action, roomName) over core NATS; a publish failure is logged, not
+// returned — the DB write is the source of truth and clients reconcile on next
+// refetch. Returns the marshaled event so callers can reuse it (e.g. as a
+// cross-site inbox payload).
+func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action string, sub *model.Subscription, roomName string, ts time.Time) ([]byte, error) {
 	subEvt := model.SubscriptionUpdateEvent{
 		UserID:       sub.User.ID,
 		Subscription: *sub,
 		Action:       action,
+		RoomName:     roomName,
 		Timestamp:    ts.UnixMilli(),
 	}
 	data, err := json.Marshal(subEvt)
@@ -766,9 +807,22 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 		return nil, fmt.Errorf("marshal subscription update event: %w", err)
 	}
 	if err := h.publishCore(ctx, subject.SubscriptionUpdate(account), data); err != nil {
-		slog.Error("subscription update publish failed", "error", err, "account", account)
+		slog.ErrorContext(ctx, "subscription update publish failed",
+			"request_id", natsutil.RequestIDFromContext(ctx), "error", err, "account", account)
 	}
 	return data, nil
+}
+
+// federateOne durably relays one cross-site event onto the local OUTBOX stream
+// (the durability boundary — only a local publish failure reaches the client);
+// outbox-worker forwards it to destSiteID's INBOX. No-op when destSiteID is
+// empty or local (outbox.Publish owns that guard, and the envelope build). The
+// dedupID derived from dedupSeed is the OUTBOX publish's Nats-Msg-Id too, so a
+// client retry can't double-enqueue the same (destination, event) into the
+// outbox.
+func (h *Handler) federateOne(ctx context.Context, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupSeed string, ts int64) error {
+	dedupID := natsutil.InboxDedupID(ctx, destSiteID, dedupSeed)
+	return outbox.Publish(ctx, h.publishToStream, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
 func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest) (*model.StatusReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
@@ -809,7 +863,7 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	// create-channel: a client that explicitly lists a bot must see a hard
 	// error rather than a silent drop.
 	for _, a := range req.Users {
-		if isBot(a) {
+		if model.IsBot(a) || model.IsPlatformAdminAccount(a) {
 			return nil, errBotInChannel
 		}
 	}
@@ -834,29 +888,38 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, err
 	}
 
-	// 7. Count net-new members (count-only — actual list materialized in room-worker)
-	newCount, err := h.store.CountNewMembers(ctx, allOrgs, allUsers, roomID, "")
-	if err != nil {
-		return nil, fmt.Errorf("count new members: %w", err)
-	}
+	// 7/8. Capacity check. Short-circuit: with no orgs, the request adds at most
+	// len(allUsers) new individuals (bot/dup/already-subscribed pruning can only
+	// make it fewer), so when the room has headroom for that upper bound we
+	// accept without the costlier CountNewMembers resolution. room.UserCount is
+	// kept current by room-worker; a rare transient undercount can only
+	// over-admit by the drift, and only matters near the cap — where the
+	// condition below falls through to the exact count. Org requests have no
+	// cheap upper bound, so they always take the precise path.
+	newCount := -1 // -1 records the short-circuited case (capacity satisfied by the upper bound, not counted)
+	if len(allOrgs) > 0 || room.UserCount+len(allUsers) > h.maxRoomSize {
+		// Count net-new members (count-only — actual list materialized in room-worker).
+		n, err := h.store.CountNewMembers(ctx, allOrgs, allUsers, roomID, "")
+		if err != nil {
+			return nil, fmt.Errorf("count new members: %w", err)
+		}
+		newCount = n
 
-	// debug: how the requested refs resolved and the capacity arithmetic.
-	slog.DebugContext(ctx, "room-service addMembers resolved",
-		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID,
-		"orgs", len(allOrgs), "users", len(allUsers), "new_count", newCount,
-		"current_count", room.UserCount, "max_size", h.maxRoomSize)
+		// debug: how the requested refs resolved and the capacity arithmetic.
+		slog.DebugContext(ctx, "room-service addMembers resolved",
+			"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID,
+			"orgs", len(allOrgs), "users", len(allUsers), "new_count", newCount,
+			"current_count", room.UserCount, "max_size", h.maxRoomSize)
 
-	// 8. Capacity check — use room.UserCount (kept current by room-worker's
-	// ReconcileUserCount after each membership change) instead of issuing a
-	// separate CountSubscriptions query.
-	if room.UserCount+newCount > h.maxRoomSize {
-		return nil, errcode.Conflict(
-			fmt.Sprintf("room is at maximum capacity (%d): cannot add %d members to room with %d existing", h.maxRoomSize, newCount, room.UserCount),
-			errcode.WithReason(errcode.RoomMaxSizeReached),
-			errcode.WithMetadata("maxRoomSize", strconv.Itoa(h.maxRoomSize),
-				"currentUserCount", strconv.Itoa(room.UserCount),
-				"attempted", strconv.Itoa(room.UserCount+newCount)),
-		)
+		if room.UserCount+newCount > h.maxRoomSize {
+			return nil, errcode.Conflict(
+				fmt.Sprintf("room is at maximum capacity (%d): cannot add %d members to room with %d existing", h.maxRoomSize, newCount, room.UserCount),
+				errcode.WithReason(errcode.RoomMaxSizeReached),
+				errcode.WithMetadata("maxRoomSize", strconv.Itoa(h.maxRoomSize),
+					"currentUserCount", strconv.Itoa(room.UserCount),
+					"attempted", strconv.Itoa(room.UserCount+newCount)),
+			)
+		}
 	}
 
 	// 9. Normalize and publish — Users and Orgs ship as merged-but-unresolved.
@@ -967,7 +1030,7 @@ func (h *Handler) expandChannelRefs(ctx context.Context, requester string, refs 
 		refCtx, cancel := h.contextWithMemberListTimeout(ctx)
 
 		if ref.SiteID == h.siteID {
-			if _, subErr := h.store.GetSubscription(refCtx, requester, ref.RoomID); subErr != nil {
+			if subErr := h.store.CheckMembership(refCtx, requester, ref.RoomID); subErr != nil {
 				cancel()
 				if errors.Is(subErr, context.DeadlineExceeded) {
 					return nil, nil, errcode.Unavailable(fmt.Sprintf("timeout listing members of channel %s@%s", ref.RoomID, ref.SiteID))
@@ -1089,39 +1152,42 @@ func (h *Handler) roomsInfoBatch(c *natsrouter.Context, req model.RoomsInfoBatch
 	return &model.RoomsInfoBatchResponse{Rooms: infos}, nil
 }
 
-func (h *Handler) threadUnreadSummary(c *natsrouter.Context, req model.ThreadUnreadSummaryRequest) (*model.ThreadUnreadSummaryResponse, error) {
+func (h *Handler) threadRoomInfoBatch(c *natsrouter.Context, req model.ThreadRoomInfoBatchRequest) (*model.ThreadRoomInfoBatchResponse, error) {
 	var ctx context.Context = c
 	start := time.Now()
-	if req.UserAccount == "" {
-		return nil, errcode.BadRequest("userAccount must not be empty")
+	if len(req.ThreadRoomIDs) == 0 {
+		return nil, errcode.BadRequest("threadRoomIds must not be empty")
 	}
-
-	if span := trace.SpanFromContext(ctx); span.IsRecording() {
-		span.SetAttributes(attribute.String("site_id", h.siteID))
+	if len(req.ThreadRoomIDs) > h.maxBatchSize {
+		return nil, errcode.BadRequest(fmt.Sprintf("batch size %d exceeds limit %d", len(req.ThreadRoomIDs), h.maxBatchSize))
 	}
-
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	summary, err := h.store.GetThreadUnreadSummary(ctx, req.UserAccount, h.siteID)
+	rows, err := h.store.GetThreadRoomInfos(ctx, req.ThreadRoomIDs)
 	if err != nil {
-		return nil, fmt.Errorf("get thread unread summary: %w", err)
+		return nil, fmt.Errorf("get thread room infos: %w", err)
 	}
-
-	resp := &model.ThreadUnreadSummaryResponse{
-		Unread:              summary.Unread,
-		UnreadDirectMessage: summary.UnreadDirectMessage,
-		UnreadMention:       summary.UnreadMention,
-		LastMessageAt:       timePtrToMillis(summary.LastMessageAt),
+	byID := make(map[string]ThreadRoomInfoRow, len(rows))
+	for _, r := range rows {
+		byID[r.ThreadRoomID] = r
 	}
-
-	slog.Debug("thread unread summary handled",
-		"site_id", h.siteID,
-		"unread", resp.Unread,
-		"latency_ms", time.Since(start).Milliseconds(),
-	)
-
-	return resp, nil
+	threads := make([]model.ThreadRoomInfo, 0, len(req.ThreadRoomIDs))
+	for _, id := range req.ThreadRoomIDs {
+		if r, ok := byID[id]; ok {
+			threads = append(threads, model.ThreadRoomInfo{
+				ThreadRoomID: id, Found: true,
+				LastMsgAt: r.LastMsgAt.UTC().UnixMilli(),
+			})
+		} else {
+			threads = append(threads, model.ThreadRoomInfo{ThreadRoomID: id, Found: false})
+		}
+	}
+	slog.DebugContext(ctx, "thread room info batch handled",
+		"site_id", h.siteID, "batch_size", len(req.ThreadRoomIDs),
+		"request_id", natsutil.RequestIDFromContext(ctx),
+		"latency_ms", time.Since(start).Milliseconds())
+	return &model.ThreadRoomInfoBatchResponse{Threads: threads}, nil
 }
 
 // timePtrToMillis converts a nullable timestamp to UnixMilli for wire responses,
@@ -1152,8 +1218,12 @@ func (h *Handler) aggregateRoomInfo(ids []string, rooms []model.Room, keys map[s
 		foundCount++
 		entry.SiteID = r.SiteID
 		entry.Name = r.Name
+		entry.UserCount = r.UserCount
+		entry.AppCount = r.AppCount
+		entry.LastMsgID = r.LastMsgID
 		entry.LastMsgAt = timePtrToMillis(r.LastMsgAt)
 		entry.LastMentionAllAt = timePtrToMillis(r.LastMentionAllAt)
+		entry.MinUserLastSeenAt = timePtrToMillis(r.MinUserLastSeenAt)
 		if kp, ok := keys[id]; ok && kp != nil {
 			enc := base64.StdEncoding.EncodeToString(kp.KeyPair.PrivateKey)
 			ver := kp.Version
@@ -1236,7 +1306,7 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 
 	switch {
 	case userSiteID == "":
-		slog.Warn("user not found locally; skipping cross-site outbox", "account", account)
+		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
 	case userSiteID != h.siteID:
 		payload := model.SubscriptionReadEvent{
 			Account:    account,
@@ -1249,19 +1319,8 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		if err != nil {
 			return nil, fmt.Errorf("marshal subscription_read payload: %w", err)
 		}
-		outbox := model.OutboxEvent{
-			Type:       model.OutboxSubscriptionRead,
-			SiteID:     h.siteID,
-			DestSiteID: userSiteID,
-			Payload:    payloadData,
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, err := json.Marshal(outbox)
-		if err != nil {
-			return nil, fmt.Errorf("marshal outbox event: %w", err)
-		}
-		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, model.OutboxSubscriptionRead), outboxData, ""); err != nil {
-			return nil, fmt.Errorf("publish subscription_read outbox: %w", err)
+		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionRead, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate subscription_read: %w", err)
 		}
 	}
 
@@ -1272,6 +1331,22 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 	}
 	if sub.LastSeenAt != nil && sub.LastSeenAt.After(*room.LastMsgAt) {
 		return &model.StatusReply{Status: "accepted"}, nil
+	}
+
+	// Best-effort subscription.update to the reader's account (multi-device sync).
+	if !model.IsBot(account) {
+		updatedSub := *sub
+		updatedSub.LastSeenAt = &now
+		updatedSub.Alert = newAlert
+		// Set the derived flags explicitly (don't rely on the projection omitting
+		// them). Reading the room clears both hasMention and hasGroupMention.
+		updatedSub.HasMention = false
+		updatedSub.HasGroupMention = false
+		// roomName omitted: clients don't use it on read events.
+		if _, err := h.publishSubscriptionUpdate(ctx, account, "read", &updatedSub, "", now); err != nil {
+			slog.Error("subscription update on read failed", "error", err,
+				"request_id", natsutil.RequestIDFromContext(ctx), "account", account)
+		}
 	}
 
 	minTime, err := h.store.MinSubscriptionLastSeenByRoomID(ctx, roomID)
@@ -1372,46 +1447,61 @@ func (h *Handler) messageReadReceipt(c *natsrouter.Context, req model.ReadReceip
 	}
 
 	var (
-		msgRoomID    string
-		msgCreatedAt time.Time
-		msgSender    string
-		msgFound     bool
-		subErr       error
+		meta     MessageReadMeta
+		msgFound bool
+		subErr   error
+		msgErr   error
 	)
-	g, gctx := errgroup.WithContext(ctx)
+	// Plain errgroup (no WithContext): both tasks always return nil and capture
+	// their errors above, so we can enforce error precedence ourselves —
+	// membership before the message lookup. The message is resolved via
+	// history-service, so a history-service outage surfaces as msgErr
+	// (errcode.Unavailable); checking subErr first means a non-member still gets
+	// not_room_member rather than the unavailable error.
+	var g errgroup.Group
 	g.Go(func() error {
-		_, err := h.store.GetSubscription(gctx, requesterAccount, roomID)
-		subErr = err
+		subErr = h.store.CheckMembership(ctx, requesterAccount, roomID)
 		return nil
 	})
 	g.Go(func() error {
-		var err error
-		msgRoomID, msgCreatedAt, msgSender, msgFound, err = h.msgReader.GetMessageRoomAndCreatedAt(gctx, req.MessageID)
-		if err != nil {
-			return fmt.Errorf("get message: %w", err)
-		}
+		meta, msgFound, msgErr = h.msgReader.GetMessageReadMeta(ctx, requesterAccount, roomID, req.MessageID)
 		return nil
 	})
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
+	_ = g.Wait()
+
 	if subErr != nil {
 		if errors.Is(subErr, model.ErrSubscriptionNotFound) {
 			return nil, errNotRoomMember
 		}
 		return nil, fmt.Errorf("get subscription: %w", subErr)
 	}
+	if msgErr != nil {
+		return nil, fmt.Errorf("get message: %w", msgErr)
+	}
 	if !msgFound {
 		return nil, errMessageNotFound
 	}
-	if msgRoomID != roomID {
+	// Belt-and-suspenders: history-service already scopes the lookup to roomID
+	// (a wrong-room message comes back as not-found), so this guards only against
+	// a future reader that does not pre-filter by room.
+	if meta.RoomID != roomID {
 		return nil, errMessageRoomMismatch
 	}
-	if msgSender != requesterAccount {
+	if meta.Sender != requesterAccount {
 		return nil, errNotMessageSender
 	}
 
-	rows, err := h.store.ListReadReceipts(ctx, roomID, msgCreatedAt, msgSender, h.maxRoomSize)
+	// A thread-only reply never appears in the channel, so channel read-position
+	// isn't evidence of reading it — resolve readers from thread read-state instead (#443).
+	var (
+		rows []ReadReceiptRow
+		err  error
+	)
+	if meta.ThreadOnly {
+		rows, err = h.store.ListThreadReadReceipts(ctx, meta.ThreadRoomID, meta.CreatedAt, meta.Sender, h.maxRoomSize)
+	} else {
+		rows, err = h.store.ListReadReceipts(ctx, roomID, meta.CreatedAt, meta.Sender, h.maxRoomSize)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list read receipts: %w", err)
 	}
@@ -1448,7 +1538,7 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	)
 	var g errgroup.Group
 	g.Go(func() error {
-		_, err := h.store.GetSubscription(ctx, account, roomID)
+		err := h.store.CheckMembership(ctx, account, roomID)
 		subErr = err
 		return err
 	})
@@ -1503,7 +1593,7 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 
 	switch {
 	case userSiteID == "":
-		slog.Warn("user not found locally; skipping cross-site outbox", "account", account)
+		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
 	case userSiteID != h.siteID:
 		payload := model.ThreadReadEvent{
 			Account:         account,
@@ -1519,23 +1609,124 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		if err != nil {
 			return nil, fmt.Errorf("marshal thread_read payload: %w", err)
 		}
-		outbox := model.OutboxEvent{
-			Type:       model.OutboxThreadRead,
-			SiteID:     h.siteID,
-			DestSiteID: userSiteID,
-			Payload:    payloadData,
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, err := json.Marshal(outbox)
-		if err != nil {
-			return nil, fmt.Errorf("marshal outbox event: %w", err)
-		}
-		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, model.OutboxThreadRead), outboxData, ""); err != nil {
-			return nil, fmt.Errorf("publish thread_read outbox: %w", err)
+		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxThreadRead, payloadData, tsub.ThreadRoomID+":"+account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate thread_read: %w", err)
 		}
 	}
 
+	// Recompute the thread-room read floor, mirroring the room read-floor logic
+	// in messageRead. Best-effort: a failure here must not fail the RPC.
+	if err := h.recomputeThreadFloor(ctx, tsub.ThreadRoomID); err != nil {
+		slog.ErrorContext(ctx, "recompute thread floor failed", "error", err,
+			"request_id", natsutil.RequestIDFromContext(ctx), "threadRoomId", tsub.ThreadRoomID)
+	}
+
 	return &model.StatusReply{Status: "accepted"}, nil
+}
+
+// recomputeThreadFloor fetches the thread room document, applies the
+// skip-guard (if the thread room has no messages yet, skip), computes
+// MIN(lastSeenAt) across all thread_subscriptions, and writes the result
+// to thread_rooms.minUserLastSeenAt when the floor changes, then fans out a
+// best-effort thread_message_read event.
+func (h *Handler) recomputeThreadFloor(ctx context.Context, threadRoomID string) error {
+	tr, err := h.store.GetThreadRoomByID(ctx, threadRoomID)
+	if err != nil {
+		return fmt.Errorf("get thread room: %w", err)
+	}
+	if tr == nil {
+		// Thread room not yet persisted — nothing to update.
+		return nil
+	}
+	// Skip when the thread room has never received a message (mirrors
+	// the room.LastMsgAt == nil guard in messageRead).
+	if tr.LastMsgAt.IsZero() {
+		return nil
+	}
+
+	minTime, err := h.store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, threadRoomID)
+	if err != nil {
+		return fmt.Errorf("min thread subscription lastSeenAt: %w", err)
+	}
+	if sameFloor(minTime, tr.MinUserLastSeenAt) {
+		return nil
+	}
+	if err := h.store.UpdateThreadRoomMinUserLastSeenAt(ctx, threadRoomID, minTime); err != nil {
+		return fmt.Errorf("update thread room minUserLastSeenAt: %w", err)
+	}
+	// Best-effort: the floor write above is the source of truth; a fan-out
+	// failure must not fail the RPC.
+	h.publishThreadMessageReadEvent(ctx, tr, minTime)
+	return nil
+}
+
+// publishThreadMessageReadEvent fans a thread read-floor advance out to the
+// parent room's audience, routed by the parent room's type. Best-effort: every
+// get/list/marshal/publish failure is logged, never returned.
+func (h *Handler) publishThreadMessageReadEvent(ctx context.Context, tr *model.ThreadRoom, floor *time.Time) {
+	room, err := h.store.GetRoom(ctx, tr.RoomID)
+	if err != nil {
+		slog.Error("get parent room for thread_message_read fan-out failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
+		return
+	}
+	if room == nil {
+		// Best-effort no-op on a missing parent room — never panic the RPC (GetThreadRoomByID can return (nil,nil)).
+		return
+	}
+	switch room.Type {
+	case model.RoomTypeChannel:
+		h.publishThreadChannelEvent(ctx, tr, floor)
+	case model.RoomTypeDM:
+		h.publishThreadDMEvents(ctx, tr, floor)
+	default:
+		// botDM and other types get no read-floor fan-out, matching messageRead.
+	}
+}
+
+// buildThreadMessageReadEvent constructs the wire payload announcing that a
+// thread's read floor advanced to floor (nil when no floor can be established).
+func (h *Handler) buildThreadMessageReadEvent(tr *model.ThreadRoom, floor *time.Time) model.ThreadMessageReadEvent {
+	return model.ThreadMessageReadEvent{
+		Type:              model.RoomEventThreadMessageRead,
+		RoomID:            tr.RoomID,
+		ThreadRoomID:      tr.ID,
+		MinUserLastSeenAt: floor,
+		Timestamp:         time.Now().UTC().UnixMilli(),
+	}
+}
+
+// publishThreadChannelEvent fans the advance out once to the parent channel's
+// room event subject. Used for a RoomTypeChannel parent.
+func (h *Handler) publishThreadChannelEvent(ctx context.Context, tr *model.ThreadRoom, floor *time.Time) {
+	payload, err := json.Marshal(h.buildThreadMessageReadEvent(tr, floor))
+	if err != nil {
+		slog.Error("marshal thread_message_read channel event failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
+		return
+	}
+	if err := h.publishCore(ctx, subject.RoomEvent(tr.RoomID), payload); err != nil {
+		slog.Error("publish thread_message_read channel event failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
+	}
+}
+
+// publishThreadDMEvents fans the advance out to each DM member on their per-user
+// event subject. Used for a RoomTypeDM parent.
+func (h *Handler) publishThreadDMEvents(ctx context.Context, tr *model.ThreadRoom, floor *time.Time) {
+	subs, err := h.store.ListSubscriptionsByRoom(ctx, tr.RoomID)
+	if err != nil {
+		slog.Error("list subscriptions for thread_message_read DM fan-out failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
+		return
+	}
+	payload, err := json.Marshal(h.buildThreadMessageReadEvent(tr, floor))
+	if err != nil {
+		slog.Error("marshal thread_message_read DM event failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
+		return
+	}
+	for i := range subs {
+		account := subs[i].User.Account
+		if err := h.publishCore(ctx, subject.UserRoomEvent(account), payload); err != nil {
+			slog.Error("publish thread_message_read DM event failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID, "account", account)
+		}
+	}
 }
 
 // ensureRoomKey handles server-to-server requests to ensure a room
@@ -1614,7 +1805,7 @@ func (h *Handler) roomRename(c *natsrouter.Context, req model.RoomRenameRequest)
 		return nil, errRenameChannelOnly
 	}
 
-	if !isPlatformAdmin(requesterUser) {
+	if !model.IsPlatformAdmin(requesterUser) {
 		sub, subErr := h.store.GetSubscription(ctx, account, roomID)
 		if subErr != nil {
 			if errors.Is(subErr, mongo.ErrNoDocuments) || errors.Is(subErr, model.ErrSubscriptionNotFound) {
@@ -1645,7 +1836,7 @@ func (h *Handler) roomRename(c *natsrouter.Context, req model.RoomRenameRequest)
 
 // roomRestricted is the sync chat.server.> RPC. Account in the body is
 // the audit identity (no subject prefix authenticates the caller — this RPC
-// is server-side admin tooling). Mongo writes + sys-message publish + outbox
+// is server-side admin tooling). Mongo writes + sys-message publish + inbox
 // fan-out happen inline; caller retries safely via dedup IDs.
 func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestrictedRequest) (*model.StatusWithRequestReply, error) {
 	var ctx context.Context = c
@@ -1665,7 +1856,7 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 	if getUserErr != nil && !errors.Is(getUserErr, ErrUserNotFound) {
 		return nil, fmt.Errorf("get user: %w", getUserErr)
 	}
-	if !isPlatformAdmin(requesterUser) {
+	if !model.IsPlatformAdmin(requesterUser) {
 		return nil, errOnlyAdmins
 	}
 
@@ -1683,11 +1874,11 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 	isTransition := req.Restricted && !room.Restricted
 
 	if req.Restricted && req.OwnerAccount != "" {
-		if _, subErr := h.store.GetSubscription(ctx, req.OwnerAccount, req.RoomID); subErr != nil {
-			if errors.Is(subErr, mongo.ErrNoDocuments) || errors.Is(subErr, model.ErrSubscriptionNotFound) {
+		if subErr := h.store.CheckMembership(ctx, req.OwnerAccount, req.RoomID); subErr != nil {
+			if errors.Is(subErr, model.ErrSubscriptionNotFound) {
 				return nil, errOwnerNotMember
 			}
-			return nil, fmt.Errorf("get owner subscription: %w", subErr)
+			return nil, fmt.Errorf("check owner membership: %w", subErr)
 		}
 	}
 	if isTransition {
@@ -1707,7 +1898,7 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		}
 		return nil, fmt.Errorf("update room restricted: %w", err)
 	}
-	if err := h.store.ApplySubscriptionVisibility(ctx, req.RoomID, req.Restricted, req.ExternalAccess, req.OwnerAccount, time.UnixMilli(req.Timestamp).UTC()); err != nil {
+	if err := h.store.ApplySubscriptionRestriction(ctx, req.RoomID, req.Restricted, req.ExternalAccess, req.OwnerAccount, time.UnixMilli(req.Timestamp).UTC()); err != nil {
 		if errors.Is(err, ErrOwnerNotSubscribed) {
 			return nil, errOwnerNotMember
 		}
@@ -1757,7 +1948,7 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 	}
 	users, err := h.store.FindUsersByAccounts(ctx, accounts)
 	if err != nil {
-		return nil, fmt.Errorf("find users for outbox fan-out: %w", err)
+		return nil, fmt.Errorf("find users for inbox fan-out: %w", err)
 	}
 	seenSites := make(map[string]struct{})
 	var remoteSites []string
@@ -1772,7 +1963,7 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		remoteSites = append(remoteSites, users[i].SiteID)
 	}
 	if len(remoteSites) > 0 {
-		payload, err := json.Marshal(model.RoomRestrictedOutboxPayload{
+		payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
 			RoomID:         req.RoomID,
 			Restricted:     req.Restricted,
 			ExternalAccess: req.ExternalAccess,
@@ -1780,19 +1971,11 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 			Timestamp:      req.Timestamp,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("marshal restricted outbox payload: %w", err)
+			return nil, fmt.Errorf("marshal restricted inbox payload: %w", err)
 		}
 		for _, remoteSiteID := range remoteSites {
-			evt := model.OutboxEvent{
-				Type: model.OutboxRoomRestricted, SiteID: h.siteID, DestSiteID: remoteSiteID,
-				Payload: payload, Timestamp: time.Now().UTC().UnixMilli(),
-			}
-			evtData, mErr := json.Marshal(evt)
-			if mErr != nil {
-				return nil, fmt.Errorf("marshal restricted outbox event: %w", mErr)
-			}
-			if err := h.publishToStream(ctx, subject.Outbox(h.siteID, remoteSiteID, model.OutboxRoomRestricted), evtData, natsutil.OutboxDedupID(ctx, remoteSiteID, requestID)); err != nil {
-				return nil, fmt.Errorf("publish restricted outbox to %s: %w", remoteSiteID, err)
+			if err := h.federateOne(ctx, req.RoomID, remoteSiteID, model.InboxRoomRestricted, payload, requestID, req.Timestamp); err != nil {
+				return nil, fmt.Errorf("federate room_restricted to %s: %w", remoteSiteID, err)
 			}
 		}
 	}
@@ -1824,7 +2007,8 @@ func (h *Handler) muteToggle(c *natsrouter.Context) (*model.MuteToggleResponse, 
 		return nil, fmt.Errorf("toggle subscription mute: %w", err)
 	}
 
-	if _, err := h.publishSubscriptionUpdate(ctx, account, "mute_toggled", sub, now); err != nil {
+	// roomName omitted: the frontend doesn't use it for mute, so we avoid an extra lookup.
+	if _, err := h.publishSubscriptionUpdate(ctx, account, "mute_toggled", sub, "", now); err != nil {
 		return nil, err
 	}
 
@@ -1858,19 +2042,8 @@ func (h *Handler) muteToggle(c *natsrouter.Context) (*model.MuteToggleResponse, 
 		if err != nil {
 			return nil, fmt.Errorf("marshal mute-toggled payload: %w", err)
 		}
-		outbox := model.OutboxEvent{
-			Type:       model.OutboxSubscriptionMuteToggled,
-			SiteID:     h.siteID,
-			DestSiteID: userSiteID,
-			Payload:    payloadData,
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, err := json.Marshal(outbox)
-		if err != nil {
-			return nil, fmt.Errorf("marshal outbox event: %w", err)
-		}
-		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, model.OutboxSubscriptionMuteToggled), outboxData, ""); err != nil {
-			return nil, fmt.Errorf("publish mute-toggled outbox: %w", err)
+		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionMuteToggled, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate mute-toggled: %w", err)
 		}
 	}
 
@@ -1901,7 +2074,8 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 		return nil, fmt.Errorf("toggle subscription favorite: %w", err)
 	}
 
-	if _, err := h.publishSubscriptionUpdate(ctx, account, "favorite_toggled", sub, now); err != nil {
+	// roomName omitted: the frontend doesn't use it for favorite, so we avoid an extra lookup.
+	if _, err := h.publishSubscriptionUpdate(ctx, account, "favorite_toggled", sub, "", now); err != nil {
 		return nil, err
 	}
 
@@ -1920,19 +2094,8 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 		if err != nil {
 			return nil, fmt.Errorf("marshal favorite-toggled payload: %w", err)
 		}
-		outbox := model.OutboxEvent{
-			Type:       model.OutboxSubscriptionFavoriteToggled,
-			SiteID:     h.siteID,
-			DestSiteID: userSiteID,
-			Payload:    payloadData,
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, err := json.Marshal(outbox)
-		if err != nil {
-			return nil, fmt.Errorf("marshal outbox event: %w", err)
-		}
-		if err := h.publishToStream(ctx, subject.Outbox(h.siteID, userSiteID, model.OutboxSubscriptionFavoriteToggled), outboxData, ""); err != nil {
-			return nil, fmt.Errorf("publish favorite-toggled outbox: %w", err)
+		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionFavoriteToggled, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate favorite-toggled: %w", err)
 		}
 	}
 
@@ -2050,7 +2213,6 @@ func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsRe
 			Name:      app.ChannelTab.Name,
 			TabURL:    tabURL,
 			Assistant: app.Assistant,
-			AvatarURL: app.AvatarURL,
 		})
 	}
 	return boundedReply(h, &model.GetRoomAppTabsResponse{Apps: out})

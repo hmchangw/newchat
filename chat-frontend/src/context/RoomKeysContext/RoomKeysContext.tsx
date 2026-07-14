@@ -76,11 +76,14 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
 
     const liveNats = natsRef.current
 
-    // TODO: initial keys arrive via the subscription.get* RPCs (user-service
-    // responsibility — to be extended in a follow-up). Until then,
-    // RoomKeysContext populates from live RoomKeyEvent subscriptions only;
-    // reconnecting users re-acquire keys when a rotation or membership change
-    // next fires for each room.
+    // TODO: seed initial keys from sub.room.privateKey + sub.room.keyVersion
+    // delivered by subscription.list. The backend now populates these fields
+    // (SubscriptionRoom.PrivateKey / KeyVersion in pkg/model). Wiring them
+    // here requires exposing a seedKey() method on RoomKeysContextValue and
+    // calling it from useRoomSubscriptions.js after the BUCKETS_LOADED
+    // dispatch. Until that follow-up lands, RoomKeysContext populates from
+    // live RoomKeyEvent subscriptions only; reconnecting users re-acquire
+    // keys when a rotation or membership change next fires for each room.
     const sub = subscribeToRoomKeyEvents(liveNats, (raw) => {
       const evt = raw as RoomKeyEvent
       if (!evt || typeof evt.roomId !== 'string' || typeof evt.version !== 'number' || typeof evt.privateKey !== 'string') return

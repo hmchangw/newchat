@@ -1,0 +1,80 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - data-migration/oplog-connector/
+      - pkg/
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - data-migration/oplog-connector/
+      - pkg/
+
+variables:
+  GO_VERSION: '1.25.12'
+  SERVICE_PATH: data-migration/oplog-connector
+  IMAGE_NAME: oplog-connector
+  REGISTRY: '$(containerRegistry)'
+
+stages:
+  - stage: Validate
+    displayName: 'Lint & Test'
+    jobs:
+      - job: LintAndTest
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: GoTool@0
+            inputs:
+              version: '$(GO_VERSION)'
+            displayName: 'Install Go $(GO_VERSION)'
+
+          - script: go vet ./$(SERVICE_PATH)/... ./pkg/...
+            displayName: 'Go Vet'
+
+          - script: go test ./pkg/... -v -race -coverprofile=coverage-pkg.out
+            displayName: 'Test shared packages'
+
+          # Run unit + integration (-tags=integration) so start()/lifecycle — which
+          # are only reachable with real Mongo/NATS (testcontainers) — count toward
+          # the coverage floor. Requires Docker on the agent.
+          - script: go test ./$(SERVICE_PATH)/... -tags=integration -v -race -coverprofile=coverage-$(IMAGE_NAME).out
+            displayName: 'Test $(IMAGE_NAME) (unit + integration)'
+
+          - script: |
+              set -euo pipefail
+              pct=$(go tool cover -func=coverage-$(IMAGE_NAME).out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+              echo "$(IMAGE_NAME) total coverage: ${pct}%"
+              awk -v p="$pct" 'BEGIN { exit (p+0 < 80) }' || { echo "##vso[task.logissue type=error]coverage ${pct}% is below the 80% floor (CLAUDE.md §4)"; exit 1; }
+            displayName: 'Enforce 80% coverage floor'
+
+          - script: go build -o /dev/null ./$(SERVICE_PATH)/
+            displayName: 'Build $(IMAGE_NAME)'
+
+  - stage: Build
+    displayName: 'Build & Push Image'
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: BuildImage
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: 'chat/$(IMAGE_NAME)'
+              command: 'buildAndPush'
+              Dockerfile: '$(SERVICE_PATH)/deploy/Dockerfile'
+              buildContext: '.'
+              tags: |
+                $(Build.BuildId)
+                latest
+            displayName: 'Build & push $(IMAGE_NAME)'

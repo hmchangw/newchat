@@ -6,11 +6,11 @@ CREATE TABLE IF NOT EXISTS chat.messages_by_id (
   msg                      TEXT,
   mentions                 SET<FROZEN<"Participant">>,
   attachments              LIST<BLOB>,
-  file                     FROZEN<"File">,
   card                     FROZEN<"Card">,
   card_action              FROZEN<"CardAction">,
   tshow                    BOOLEAN,
   tcount                   INT, // reply thread count
+  thread_last_msg_at       TIMESTAMP, // timestamp of most recent thread reply
   thread_parent_id         TEXT,
   thread_parent_created_at TIMESTAMP,
   quoted_parent_message    FROZEN<"QuotedParentMessage">,
@@ -25,8 +25,8 @@ CREATE TABLE IF NOT EXISTS chat.messages_by_id (
   updated_at               TIMESTAMP,
   pinned_at                TIMESTAMP,
   pinned_by                FROZEN<"Participant">,
-  PRIMARY KEY (message_id, created_at)
-) WITH CLUSTERING ORDER BY (created_at DESC);
+  PRIMARY KEY (message_id)
+);
 
 ALTER TABLE chat.messages_by_id ADD enc_payload BLOB;
 ALTER TABLE chat.messages_by_id ADD enc_meta FROZEN<"EncMeta">;

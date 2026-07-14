@@ -13,7 +13,7 @@ var (
 	ErrUserNotFound       = errors.New("user not found")                        // GetUser: no matching account
 	ErrAppNotFound        = errors.New("app not found")                         // GetApp: no matching bot account
 	ErrRoomNotFound       = errors.New("room not found")                        // UpdateRoomVisibility: no matching room
-	ErrOwnerNotSubscribed = errors.New("owner account is no longer subscribed") // ApplySubscriptionVisibility: owner left
+	ErrOwnerNotSubscribed = errors.New("owner account is no longer subscribed") // ApplySubscriptionRestriction: owner left
 )
 
 //go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main
@@ -35,14 +35,11 @@ type RoomCounts struct {
 	OwnerCount  int
 }
 
-// ThreadUnreadSummary is the result of GetThreadUnreadSummary — a per-site
-// rollup of a single user's thread unread state, computed in one aggregation.
-// The bson tags let the aggregation's $group output decode straight into it.
-type ThreadUnreadSummary struct {
-	Unread              bool       `bson:"unread"`
-	UnreadDirectMessage bool       `bson:"unreadDirectMessage"`
-	UnreadMention       bool       `bson:"unreadMention"`
-	LastMessageAt       *time.Time `bson:"lastMessageAt"`
+// ThreadRoomInfoRow is one thread room's last-activity time, the result of
+// GetThreadRoomInfos.
+type ThreadRoomInfoRow struct {
+	ThreadRoomID string
+	LastMsgAt    time.Time
 }
 
 type ReadReceiptRow struct {
@@ -62,8 +59,14 @@ type RoomBotAppEntry struct {
 type RoomStore interface {
 	GetRoom(ctx context.Context, id string) (*model.Room, error)
 	ListRoomsByIDs(ctx context.Context, ids []string) ([]model.Room, error)
-	GetThreadUnreadSummary(ctx context.Context, account, siteID string) (*ThreadUnreadSummary, error)
 	GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error)
+	// CheckMembership verifies (account, roomID) has a subscription without
+	// decoding the document — an {_id:1}-projected existence check for the
+	// many call sites that only need the membership gate, not the sub's fields.
+	// Returns nil when subscribed, model.ErrSubscriptionNotFound (wrapped) when
+	// not, or a wrapped infra error otherwise. Same error contract as
+	// GetSubscription so callers branch identically on errors.Is.
+	CheckMembership(ctx context.Context, account, roomID string) error
 	// ListMemberStatuses returns up to `limit` members of roomID, each
 	// projected from the corresponding users document as {account, engName,
 	// chineseName, statusIsShow, statusText}. Subscriptions whose user
@@ -86,7 +89,8 @@ type RoomStore interface {
 	// account so an org-expanded requester is not double-counted against the
 	// cap (the requester is added separately as the owner).
 	// Used by addMembers and handleCreateRoomChannel for capacity validation.
-	// Delegates to pkg/pipelines.GetNewMembersPipeline + a $count terminal stage.
+	// Resolves candidates via pkg/pipelines.MatchCandidatesFilter, then (for a
+	// non-empty roomID) subtracts already-subscribed accounts via an indexed read.
 	CountNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID, excludeAccount string) (int, error)
 	// ListRoomMembers returns the members of roomID. When enrich=true, the
 	// returned RoomMember.Member entries carry display fields populated via
@@ -135,7 +139,7 @@ type RoomStore interface {
 	SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool, rolesUpdatedAt time.Time) (*model.Subscription, error)
 	// GetUserSiteID returns the home site of a user looked up by account.
 	// Returns ("", nil) when the user is not found locally; callers treat
-	// that as "skip cross-site outbox".
+	// that as "skip cross-site inbox".
 	GetUserSiteID(ctx context.Context, account string) (string, error)
 	// MinSubscriptionLastSeenByRoomID returns the room's strict read floor:
 	// the MIN(lastSeenAt) across ALL of the room's subscriptions, but only
@@ -150,13 +154,19 @@ type RoomStore interface {
 
 	ListReadReceipts(ctx context.Context, roomID string, since time.Time, excludeAccount string, limit int) ([]ReadReceiptRow, error)
 
+	// ListThreadReadReceipts is the thread-scoped counterpart of ListReadReceipts:
+	// readers are thread subscribers whose thread lastSeenAt passed the message,
+	// not room members whose channel read-position did. Used for thread-only
+	// replies, which never appear in the channel (see #443).
+	ListThreadReadReceipts(ctx context.Context, threadRoomID string, since time.Time, excludeAccount string, limit int) ([]ReadReceiptRow, error)
+
 	// GetUser returns the user by account, or ErrUserNotFound.
 	GetUser(ctx context.Context, account string) (*model.User, error)
 	// GetApp returns the app whose Assistant.Name == botAccount, or ErrAppNotFound.
 	GetApp(ctx context.Context, botAccount string) (*model.App, error)
 	// ListDefaultChannelTabApps returns apps whose channelTab.enabled AND
 	// channelTab.default are both true, sorted by channelTab.name asc.
-	// Projection: _id, avatarUrl, assistant, channelTab. Empty result is
+	// Projection: _id, assistant, channelTab. Empty result is
 	// ([], nil).
 	ListDefaultChannelTabApps(ctx context.Context) ([]model.App, error)
 	// ListRoomBotApps returns one entry per bot subscribed to roomID,
@@ -181,20 +191,37 @@ type RoomStore interface {
 
 	UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
 
+	// GetThreadRoomByID returns the thread room document for threadRoomID.
+	// Returns (nil, nil) when no document matches.
+	GetThreadRoomByID(ctx context.Context, threadRoomID string) (*model.ThreadRoom, error)
+	// MinThreadSubscriptionLastSeenByThreadRoomID returns the thread room's strict
+	// read floor: MIN(lastSeenAt) across ALL thread_subscriptions for threadRoomID,
+	// but only when every subscriber has a usable lastSeenAt (> zero). Returns nil
+	// if any subscriber has never read or if there are no subscriptions.
+	// Bots are counted as ordinary subscribers — a bot subscriber pins the floor to
+	// nil since bots never call Mark Thread as Read.
+	MinThreadSubscriptionLastSeenByThreadRoomID(ctx context.Context, threadRoomID string) (*time.Time, error)
+	// UpdateThreadRoomMinUserLastSeenAt sets or clears thread_rooms.minUserLastSeenAt
+	// for threadRoomID. A nil value clears the field via $unset; non-nil writes via $set.
+	UpdateThreadRoomMinUserLastSeenAt(ctx context.Context, threadRoomID string, t *time.Time) error
+	// GetThreadRoomInfos returns each existing thread room's lastMsgAt. Missing
+	// thread rooms are omitted, not an error.
+	GetThreadRoomInfos(ctx context.Context, threadRoomIDs []string) ([]ThreadRoomInfoRow, error)
+
 	// UpdateRoomVisibility sets rooms.{restricted, externalAccess, updatedAt}.
 	// Returns ErrRoomNotFound when no room matches.
 	UpdateRoomVisibility(ctx context.Context, roomID string, restricted, externalAccess bool) error
-	// ApplySubscriptionVisibility writes the {restricted, externalAccess} denorm
+	// ApplySubscriptionRestriction writes the {restricted, externalAccess} denorm
 	// flags to every subscription of the room. When restricted=true and
 	// ownerAccount is non-empty, an aggregation-pipeline $cond also rewrites
 	// roles so only ownerAccount holds RoleOwner. Returns ErrOwnerNotSubscribed
 	// when ownerAccount has no active subscription in the room (the rewrite
-	// would leave zero owners). Stamps visibilityUpdatedAt so the origin doc
+	// would leave zero owners). Stamps restrictUpdatedAt so the origin doc
 	// carries the same high-water mark the federated event publishes (inbox-worker
 	// guards remote applies against it).
-	ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error
+	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error
 	// ListSubscriptionsByRoom returns every subscription in the room. Used to
-	// drive cross-site outbox fan-out (one event per remote site).
+	// drive cross-site inbox fan-out (one event per remote site).
 	ListSubscriptionsByRoom(ctx context.Context, roomID string) ([]model.Subscription, error)
 	// FindUsersByAccounts returns the User docs for the supplied accounts. Used
 	// to bucket subscriptions by home site for cross-site fan-out.
@@ -221,9 +248,39 @@ type DEKProvisioner interface {
 	EnsureDEK(ctx context.Context, roomID string) error
 }
 
-// MessageReader looks up a message by ID. found=false with err=nil means no row matched.
+// MessageReadMeta is the read-receipt-relevant metadata for a message.
+// ThreadOnly marks a reply that lives only in a thread (threadParentId set,
+// not tshow) — it never appears in the channel, so its readers must come from
+// thread read-state, not the parent-room read-position (see #443).
+type MessageReadMeta struct {
+	RoomID       string
+	CreatedAt    time.Time
+	Sender       string
+	ThreadRoomID string
+	ThreadOnly   bool
+}
+
+// MessageReader looks up a message within a room. found=false with err=nil means
+// no message matched the (account, roomID, messageID) tuple. The lookup is scoped
+// to roomID so a wrong-room message resolves as not-found.
 type MessageReader interface {
-	GetMessageRoomAndCreatedAt(ctx context.Context, messageID string) (
-		roomID string, createdAt time.Time, senderAccount string, found bool, err error,
+	GetMessageReadMeta(ctx context.Context, account, roomID, messageID string) (meta MessageReadMeta, found bool, err error)
+}
+
+// TeamsMeetingStore is the first-class idempotency record for a room's Teams
+// meeting. It replaces the message-bucket marker scan with a dedicated Mongo
+// document keyed unique on (roomId, siteId), mirroring the unique-index +
+// IsDuplicateKeyError retry-safe-write convention room-service already uses for
+// room_members and subscriptions (see store_mongo.go EnsureIndexes).
+type TeamsMeetingStore interface {
+	// GetTeamsMeeting fast-path reads the room's existing meeting record.
+	// found=false with err=nil means the room has no meeting yet.
+	GetTeamsMeeting(ctx context.Context, roomID, siteID string) (
+		record *model.TeamsMeetingRecord, found bool, err error,
 	)
+	// InsertTeamsMeeting inserts the meeting record. The (roomId, siteId)
+	// unique index makes this the idempotency gate: a concurrent second insert
+	// returns a duplicate-key error (mongo.IsDuplicateKeyError), which the
+	// handler treats as "a concurrent winner already wrote it" and reads back.
+	InsertTeamsMeeting(ctx context.Context, record model.TeamsMeetingRecord) error
 }

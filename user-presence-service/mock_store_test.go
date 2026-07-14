@@ -15,6 +15,7 @@ import (
 	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
+	presencestore "github.com/hmchangw/chat/user-presence-service/presencestore"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -175,10 +176,10 @@ func (mr *MockPresenceStoreMockRecorder) SetManual(ctx, account, status any) *go
 }
 
 // Sweep mocks base method.
-func (m *MockPresenceStore) Sweep(ctx context.Context, now time.Time) ([]StatusChange, error) {
+func (m *MockPresenceStore) Sweep(ctx context.Context, now time.Time) ([]presencestore.StatusChange, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Sweep", ctx, now)
-	ret0, _ := ret[0].([]StatusChange)
+	ret0, _ := ret[0].([]presencestore.StatusChange)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

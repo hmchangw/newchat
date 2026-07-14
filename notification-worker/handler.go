@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"time"
 
+	"github.com/bytedance/sonic"
+
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -34,6 +36,7 @@ type RoomMetaGetter interface {
 type HandlerDeps struct {
 	Members            MemberCache
 	Followers          ThreadFollowerLister
+	Parent             ParentFetcher // resolves a thread's parent author + createdAt from history-service
 	Presence           PresenceSnapshotter
 	Hook               Vetoer
 	Emitter            Emitter
@@ -73,8 +76,10 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
-	if err := json.Unmarshal(data, &evt); err != nil {
-		return fmt.Errorf("unmarshal message event: %w", err)
+	if err := sonic.Unmarshal(data, &evt); err != nil {
+		// Malformed payload — it will never parse on redelivery. Mark permanent
+		// so the caller Acks (drops) it instead of retrying until MaxDeliver.
+		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
 	// Non-created events are filtered at the broker; defensive backstop only.
 	if evt.Event != model.EventCreated && evt.Event != "" {
@@ -111,15 +116,36 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	isThreadOnlyReply := msg.ThreadParentMessageID != "" && !msg.TShow
 
 	var followers map[string]struct{}
+	// parentCreatedAt + parentSenderAccount feed the suppression gate and the
+	// parent-author recipient. The gatekeeper resolves both best-effort on the send
+	// path and carries them on the event; use them when present and fall back to a
+	// history-service fetch only when either is absent (edit/delete events bypass the
+	// gatekeeper, or a gatekeeper soft-fail). The parent pre-exists, so the fetch is
+	// race-free and authoritative.
+	var parentCreatedAt *time.Time
+	var parentSenderAccount string
 	if isThreadOnlyReply {
-		f, ferr := h.deps.Followers.Followers(ctx, msg.ThreadParentMessageID)
+		// A clean thread_rooms miss returns empty followers + nil error (the first-reply
+		// race); an actual Mongo failure must NAK rather than silently ack and drop
+		// follower-only recipients.
+		info, ferr := h.deps.Followers.Lookup(ctx, msg.ThreadParentMessageID)
 		if ferr != nil {
-			slog.Warn("thread followers lookup failed, treating as empty",
-				"error", ferr, "parentMessageId", msg.ThreadParentMessageID,
-				"request_id", natsutil.RequestIDFromContext(ctx))
-			f = map[string]struct{}{}
+			return fmt.Errorf("lookup thread room for parent %s: %w", msg.ThreadParentMessageID, ferr)
 		}
-		followers = f
+		followers = info.Followers
+		if msg.ThreadParentMessageCreatedAt != nil && evt.ThreadParentSenderAccount != "" {
+			parentCreatedAt = msg.ThreadParentMessageCreatedAt
+			parentSenderAccount = evt.ThreadParentSenderAccount
+		} else {
+			// The reply sender can always read the parent they replied to; fetch on their behalf.
+			parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
+			if perr != nil {
+				return fmt.Errorf("fetch thread parent %s: %w", msg.ThreadParentMessageID, perr)
+			}
+			pc := parent.CreatedAt
+			parentCreatedAt = &pc
+			parentSenderAccount = parent.SenderAccount
+		}
 	}
 
 	roomType := members[0].RoomType
@@ -141,7 +167,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		if m.Muted {
 			continue
 		}
-		if isRestricted(m, msg, isThreadOnlyReply) {
+		if isRestricted(m, msg, isThreadOnlyReply, parentCreatedAt) {
 			continue
 		}
 
@@ -149,6 +175,13 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 
 		if isThreadOnlyReply {
 			_, follows := followers[m.Account]
+			// The parent author is always notified of replies to their own thread, even
+			// before thread_rooms exists (they aren't yet in replyAccounts). The restricted-
+			// room gate above still applies, but never excludes them — they were present
+			// when they authored the parent.
+			if m.Account == parentSenderAccount {
+				follows = true
+			}
 			if !follows && !mentioned {
 				continue
 			}
@@ -249,17 +282,17 @@ func mentionedSet(parsed mention.ParseResult) map[string]bool {
 	return out
 }
 
-// isRestricted filters members who joined after the relevant message timestamp.
-// Thread replies use the parent's CreatedAt; a nil parent ts is "no access" (legacy records).
-func isRestricted(m roomsubcache.Member, msg model.Message, isThreadOnlyReply bool) bool { //nolint:gocritic // hugeParam: hot loop, pointer indirection adds no benefit
+// isRestricted filters members who joined after the message timestamp (the parent's
+// createdAt for thread-only replies); a nil parentCreatedAt suppresses, not leaks.
+func isRestricted(m roomsubcache.Member, msg model.Message, isThreadOnlyReply bool, parentCreatedAt *time.Time) bool { //nolint:gocritic // hugeParam: hot loop, pointer indirection adds no benefit
 	if m.HistorySharedSince == nil {
 		return false
 	}
 	if isThreadOnlyReply {
-		if msg.ThreadParentMessageCreatedAt == nil {
+		if parentCreatedAt == nil {
 			return true
 		}
-		return msg.ThreadParentMessageCreatedAt.UnixMilli() < *m.HistorySharedSince
+		return parentCreatedAt.UnixMilli() < *m.HistorySharedSince
 	}
 	return msg.CreatedAt.UnixMilli() < *m.HistorySharedSince
 }

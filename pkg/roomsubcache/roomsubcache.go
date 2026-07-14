@@ -14,9 +14,18 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
+
+// Recorder records the outcome of a cache lookup. cachemetrics.Recorder
+// satisfies it; tests substitute a spy.
+type Recorder interface {
+	Hit(ctx context.Context)
+	Miss(ctx context.Context)
+	Error(ctx context.Context)
+}
 
 // DefaultMaxValueBytes caps the size of a cached blob accepted by Get.
 // Sized to comfortably accommodate ~250k members at ~64B/member; serves
@@ -49,6 +58,7 @@ type Cache interface {
 type valkeyCache struct {
 	client        valkeyutil.Client
 	maxValueBytes int
+	metrics       Recorder
 }
 
 // Option configures a valkeyCache at construction.
@@ -61,9 +71,19 @@ func WithMaxValueBytes(n int) Option {
 	return func(c *valkeyCache) { c.maxValueBytes = n }
 }
 
+// WithMetrics overrides the hit/miss/error recorder. Defaults to the
+// package-default cachemetrics recorder tagged cache="roomsub",tier="l2".
+func WithMetrics(r Recorder) Option {
+	return func(c *valkeyCache) { c.metrics = r }
+}
+
 // NewValkeyCache returns a Cache backed by the given Valkey client.
 func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
-	c := &valkeyCache{client: client, maxValueBytes: DefaultMaxValueBytes}
+	c := &valkeyCache{
+		client:        client,
+		maxValueBytes: DefaultMaxValueBytes,
+		metrics:       cachemetrics.For("roomsub", "l2"),
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -85,15 +105,23 @@ func (c *valkeyCache) Get(ctx context.Context, roomID string) ([]Member, error) 
 	}
 	raw, err := c.client.Get(ctx, cacheKey(roomID))
 	if err != nil {
+		if errors.Is(err, valkeyutil.ErrCacheMiss) {
+			c.metrics.Miss(ctx)
+		} else {
+			c.metrics.Error(ctx)
+		}
 		return nil, fmt.Errorf("get cached subscriptions for room %s: %w", roomID, err)
 	}
 	if c.maxValueBytes > 0 && len(raw) > c.maxValueBytes {
+		c.metrics.Error(ctx)
 		return nil, fmt.Errorf("get cached subscriptions for room %s: blob exceeds max %d bytes (got %d)", roomID, c.maxValueBytes, len(raw))
 	}
 	members := []Member{}
 	if err := json.Unmarshal([]byte(raw), &members); err != nil {
+		c.metrics.Error(ctx)
 		return nil, fmt.Errorf("get cached subscriptions for room %s: unmarshal: %w", roomID, err)
 	}
+	c.metrics.Hit(ctx)
 	return members, nil
 }
 

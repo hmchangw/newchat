@@ -63,7 +63,7 @@ func int64Ptr(v int64) *int64 {
 	return &v
 }
 
-// publishInboxMemberEvent wraps an InboxMemberEvent inside an OutboxEvent
+// publishInboxMemberEvent wraps an InboxMemberEvent inside an InboxEvent
 // with the given Type and publishes it to `subj`. Caller picks `subj`
 // (local vs. aggregate, added vs. removed) via pkg/subject builders.
 func publishInboxMemberEvent(
@@ -77,7 +77,7 @@ func publishInboxMemberEvent(
 	payloadData, err := json.Marshal(payload)
 	require.NoError(t, err)
 
-	evt := model.OutboxEvent{
+	evt := model.InboxEvent{
 		Type:       eventType,
 		SiteID:     payload.SiteID,
 		DestSiteID: payload.SiteID,
@@ -157,8 +157,8 @@ func TestSpotlightSync_Integration(t *testing.T) {
 	require.NoError(t, err)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newSpotlightCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(spotlightTemplateBody(indexName))))
+	coll := newSpotlightCollection(indexName, true)
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody())))
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
@@ -179,25 +179,25 @@ func TestSpotlightSync_Integration(t *testing.T) {
 
 	// Local member_added: alice joins engineering
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r-eng", "engineering", siteID, []string{"alice"}, nil, joinedAt, 1000),
 	)
 
 	// Local member_added: alice joins platform
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r-platform", "platform", siteID, []string{"alice"}, nil, joinedAt, 1100),
 	)
 
 	// Federated (aggregate) member_added: bob joins engineering via a cross-site event
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAddedAggregate(siteID), model.OutboxMemberAdded,
+		subject.InboxExternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r-eng", "engineering", siteID, []string{"bob"}, nil, joinedAt, 1200),
 	)
 
 	// Federated (aggregate) member_removed: alice leaves platform
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberRemovedAggregate(siteID), model.OutboxMemberRemoved,
+		subject.InboxExternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved,
 		buildInboxMemberEvent("r-platform", "platform", siteID, []string{"alice"}, nil, 0, 1300),
 	)
 
@@ -249,8 +249,8 @@ func TestSpotlightSync_BulkInvite(t *testing.T) {
 	require.NoError(t, err)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newSpotlightCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(spotlightTemplateBody(indexName))))
+	coll := newSpotlightCollection(indexName, true)
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody())))
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
@@ -270,7 +270,7 @@ func TestSpotlightSync_BulkInvite(t *testing.T) {
 	payload := buildInboxMemberEvent("r-platform", "platform", siteID,
 		[]string{"dave", "erin", "frank"}, nil, joinedAt, 5000)
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded, payload)
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded, payload)
 
 	// Only ONE JetStream message is drained, but it produces THREE ES index
 	// actions — handler.ActionCount() > MessageCount() is the whole point
@@ -299,7 +299,7 @@ func TestSpotlightSync_BulkInvite(t *testing.T) {
 		remove := buildInboxMemberEvent("r-platform", "platform", siteID,
 			[]string{"dave", "erin", "frank"}, nil, 0, 6000)
 		publishInboxMemberEvent(t, ctx, js,
-			subject.InboxMemberRemoved(siteID), model.OutboxMemberRemoved, remove)
+			subject.InboxInternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved, remove)
 		drainConsumer(t, ctx, cons, handler, 1)
 		refreshIndex(t, esURL, indexName)
 
@@ -344,30 +344,30 @@ func TestUserRoomSync_Integration(t *testing.T) {
 
 	// alice joins 3 rooms via local events
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r1", "general", siteID, []string{"alice"}, nil, joinedAt, 1000))
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r2", "random", siteID, []string{"alice"}, nil, joinedAt, 1100))
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r3", "eng", siteID, []string{"alice"}, nil, joinedAt, 1200))
 
 	// bob joins r1 via a federated (aggregate) event
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAddedAggregate(siteID), model.OutboxMemberAdded,
+		subject.InboxExternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r1", "general", siteID, []string{"bob"}, nil, joinedAt, 1300))
 
 	// alice leaves r2 via a local event
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberRemoved(siteID), model.OutboxMemberRemoved,
+		subject.InboxInternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved,
 		buildInboxMemberEvent("r2", "random", siteID, []string{"alice"}, nil, 0, 1400))
 
 	// alice joins a restricted room. user-room now stores it in
 	// `restrictedRooms{}` instead of skipping.
 	const restrictedHSS int64 = 1743984000000
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r-restricted", "archives", siteID, []string{"alice"}, int64Ptr(restrictedHSS), joinedAt, 1500))
 
 	drainConsumer(t, ctx, cons, handler, 6)
@@ -465,7 +465,7 @@ func TestUserRoomSync_BulkInvite(t *testing.T) {
 
 	// Unrestricted bulk: 3 users to r-platform in one event → 3 user-room docs.
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r-platform", "platform", siteID,
 			[]string{"dave", "erin", "frank"}, nil, joinedAt, 5000))
 
@@ -473,7 +473,7 @@ func TestUserRoomSync_BulkInvite(t *testing.T) {
 	// User-room now routes these into `restrictedRooms{}` instead of skipping.
 	const archivesHSS int64 = 1743984000000
 	publishInboxMemberEvent(t, ctx, js,
-		subject.InboxMemberAdded(siteID), model.OutboxMemberAdded,
+		subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded,
 		buildInboxMemberEvent("r-archives", "archives", siteID,
 			[]string{"heidi", "ivan", "judy"}, int64Ptr(archivesHSS), joinedAt, 5100))
 
@@ -506,7 +506,7 @@ func TestUserRoomSync_BulkInvite(t *testing.T) {
 
 	t.Run("bulk remove evicts rooms from unrestricted users", func(t *testing.T) {
 		publishInboxMemberEvent(t, ctx, js,
-			subject.InboxMemberRemoved(siteID), model.OutboxMemberRemoved,
+			subject.InboxInternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved,
 			buildInboxMemberEvent("r-platform", "platform", siteID,
 				[]string{"dave", "erin", "frank"}, nil, 0, 6000))
 		drainConsumer(t, ctx, cons, handler, 1)
@@ -522,7 +522,7 @@ func TestUserRoomSync_BulkInvite(t *testing.T) {
 
 	t.Run("bulk remove evicts rooms from restricted users", func(t *testing.T) {
 		publishInboxMemberEvent(t, ctx, js,
-			subject.InboxMemberRemoved(siteID), model.OutboxMemberRemoved,
+			subject.InboxInternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved,
 			buildInboxMemberEvent("r-archives", "archives", siteID,
 				[]string{"heidi", "ivan", "judy"}, int64Ptr(archivesHSS), 0, 6100))
 		drainConsumer(t, ctx, cons, handler, 1)
@@ -581,7 +581,7 @@ func TestUserRoomSync_LWWGuard(t *testing.T) {
 
 	publish := func(subj, eventType, roomID string, ts int64) {
 		var j int64
-		if eventType == model.OutboxMemberAdded {
+		if eventType == model.InboxMemberAdded {
 			j = joinedAt
 		}
 		publishInboxMemberEvent(t, ctx, js, subj, eventType,
@@ -598,14 +598,14 @@ func TestUserRoomSync_LWWGuard(t *testing.T) {
 	}
 
 	// Step 1: initial add at ts=2000 creates the doc via upsert.
-	publish(subject.InboxMemberAdded(siteID), model.OutboxMemberAdded, "rA", 2000)
+	publish(subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded, "rA", 2000)
 	drainConsumer(t, ctx, cons, handler, 1)
 	rooms, rts := getCharlieState()
 	assert.Contains(t, rooms, "rA", "step 1: initial add should put rA in rooms")
 	assert.Equal(t, float64(2000), rts["rA"], "step 1: stored ts should be 2000")
 
 	// Step 2: stale add at ts=1000 should be a no-op via ctx.op='none'.
-	publish(subject.InboxMemberAdded(siteID), model.OutboxMemberAdded, "rA", 1000)
+	publish(subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded, "rA", 1000)
 	drainConsumer(t, ctx, cons, handler, 1)
 	rooms, rts = getCharlieState()
 	assert.Contains(t, rooms, "rA", "step 2: rA should still be in rooms after stale add")
@@ -613,14 +613,14 @@ func TestUserRoomSync_LWWGuard(t *testing.T) {
 		"step 2: stale add must not overwrite a newer stored timestamp")
 
 	// Step 3: stale remove at ts=1500 should also be a no-op.
-	publish(subject.InboxMemberRemoved(siteID), model.OutboxMemberRemoved, "rA", 1500)
+	publish(subject.InboxInternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved, "rA", 1500)
 	drainConsumer(t, ctx, cons, handler, 1)
 	rooms, rts = getCharlieState()
 	assert.Contains(t, rooms, "rA", "step 3: rA should survive stale remove")
 	assert.Equal(t, float64(2000), rts["rA"], "step 3: stored timestamp unchanged after stale remove")
 
 	// Step 4: newer remove at ts=3000 evicts the room.
-	publish(subject.InboxMemberRemoved(siteID), model.OutboxMemberRemoved, "rA", 3000)
+	publish(subject.InboxInternal(siteID, model.InboxMemberRemoved), model.InboxMemberRemoved, "rA", 3000)
 	drainConsumer(t, ctx, cons, handler, 1)
 	rooms, rts = getCharlieState()
 	assert.NotContains(t, rooms, "rA", "step 4: newer remove should evict rA")
@@ -628,14 +628,14 @@ func TestUserRoomSync_LWWGuard(t *testing.T) {
 		"step 4: remove must bump stored timestamp to the remove's ts")
 
 	// Step 5: re-add with newer ts=4000 puts the room back.
-	publish(subject.InboxMemberAdded(siteID), model.OutboxMemberAdded, "rA", 4000)
+	publish(subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded, "rA", 4000)
 	drainConsumer(t, ctx, cons, handler, 1)
 	rooms, rts = getCharlieState()
 	assert.Contains(t, rooms, "rA", "step 5: re-add with newer ts should restore rA")
 	assert.Equal(t, float64(4000), rts["rA"], "step 5: stored ts should bump to 4000")
 
 	// Step 6: stale add at ts=2500 after the re-add is still a no-op.
-	publish(subject.InboxMemberAdded(siteID), model.OutboxMemberAdded, "rA", 2500)
+	publish(subject.InboxInternal(siteID, model.InboxMemberAdded), model.InboxMemberAdded, "rA", 2500)
 	drainConsumer(t, ctx, cons, handler, 1)
 	rooms, rts = getCharlieState()
 	assert.Contains(t, rooms, "rA", "step 6: rA should still be present")

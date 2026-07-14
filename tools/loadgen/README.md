@@ -61,11 +61,15 @@ the run binary itself never touches ciphertext.
 
 - `loadgen seed --preset=<name> [--seed=42]` — idempotently populate
   MongoDB with fixtures, including a per-room key in each room document.
+  Indexes are owned by the services (`EnsureIndexes`), not the seeder: it
+  preserves whatever indexes already exist, so bring the services up first
+  (`make up`) for the seeded data to be indexed as in production.
 - `loadgen run --preset=<name> [flags]` — open-loop publish at `--rate`
   msgs/sec for `--duration`, print a summary at the end. Flags:
   `--seed`, `--warmup`, `--inject=frontdoor|canonical`, `--csv=<path>`.
-- `loadgen teardown --preset=<name> [--seed=42]` — drop the seeded
-  Mongo collections (the per-room keys go with the room documents).
+- `loadgen teardown --preset=<name> [--seed=42]` — clear the seeded
+  Mongo data (the per-room keys go with the room documents), preserving
+  the services' indexes so a following seed starts indexed.
 
 ## Reading the summary
 
@@ -86,7 +90,9 @@ the run binary itself never touches ciphertext.
 
 Benchmarks the add-member pipeline:
 `room-service.handleAddMembers` → `chat.room.canonical.{siteID}.member.add`
-(ROOMS stream) → `room-worker` → `chat.room.{roomID}.event.member` broadcast.
+(ROOMS stream) → `room-worker` → `chat.room.{roomID}.event.member` event. E2 is
+the emission of that event, gated by room-worker's ROOMS-consumer throughput —
+not a broadcast fan-out.
 
 ### Quick start
 
@@ -213,7 +219,7 @@ make -C tools/loadgen/deploy teardown-roomread PRESET=medium
 - Synchronous request/reply: gated on p95/p99 latency and error rate only
   (no consumer-pending signal). Defaults: `--slo-p95=100ms`, `--slo-p99=250ms`,
   `--slo-error-rate=0.001`; override via the shared `max-rps` flags.
-- Single-site only: all seeded users are local, so no cross-site outbox event is
+- Single-site only: all seeded users are local, so no cross-site inbox event is
   published on the read path.
 - Presets are the messages presets (`small`/`medium`/`large`/`realistic`); room
   size distribution drives floor-write contention.
@@ -279,6 +285,146 @@ most reads.
   `no-thread-parents` counter is informational (thread requests that
   landed on a room with no seeded parents and fell back to history).
 
+## Thread-read workload (GetThreadMessages benchmark)
+
+Finds the maximum sustainable RPS for **loading thread messages** —
+`history-service.GetThreadMessages`, the single-partition slice read on the
+Cassandra `thread_messages_by_thread` table. This isolates the thread-read
+ceiling that the `history` workload only measures blended with `LoadHistory`
+(via its `--mix`); read the focused number here and compare it against the
+blended `history` run on the same box.
+
+**First-page opens only.** Each request opens a thread cold — pick a seeded
+parent and fetch the first page of replies (no cursor). Models the dominant
+real case (a user clicking into a thread).
+
+**Reuses the history fixtures and seed.** Like `read-receipt`, this workload
+reads the history presets' rooms/subscriptions and the seeded thread parents +
+replies; there is no dedicated seed. Requires `CASSANDRA_HOSTS` and the same
+`MESSAGE_BUCKET_HOURS` as the running services.
+
+### Quick start
+
+```bash
+make -C tools/loadgen/deploy up
+
+# Seed rooms/subs/keys (Mongo) + parents/replies/thread_rooms (Cassandra+Mongo).
+# Use a preset that seeds threads: history-medium or history-large
+# (history-small has ThreadRate 0 and seeds no threads).
+loadgen seed --workload=thread-read --preset=history-medium
+
+# Ramp the thread-read path.
+loadgen max-rps --workload=thread-read --preset=history-medium
+
+# Clean up.
+loadgen teardown --workload=thread-read --preset=history-medium
+```
+
+Via the deploy Makefile:
+
+```bash
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=thread-read PRESET=history-medium
+```
+
+### Presets
+
+Reuses the **history** presets. `history-medium` / `history-large` seed thread
+parents in every room; `history-small` seeds none, so a thread-read ramp on it
+issues no real reads (every request is counted as `no-thread-parents` and the
+step reports no samples).
+
+### Subcommands
+
+- `loadgen seed --workload=thread-read --preset=<name> [--seed=42]` — delegates
+  to the history seed (Mongo users/rooms/subscriptions/thread\_rooms + room keys;
+  Cassandra `messages_by_room` / `messages_by_id` / `thread_messages_by_thread`).
+- `loadgen max-rps --workload=thread-read --preset=<name> [flags]` — ramp the
+  GetThreadMessages read path. Honors `--page-limit` (default 20),
+  `--request-timeout` (default 5s), and the shared ramp flags (`--steps`
+  defaults to `200,500,1000,2000,5000`, `--warmup`, `--hold`, `--cooldown`,
+  `--slo-*`, `--csv`).
+- `loadgen teardown --workload=thread-read --preset=<name>` — delegates to the
+  history teardown.
+
+### Reading the summary
+
+Synchronous request/reply: gated on the single `thread-read` latency series'
+p95/p99 and the error rate only (no consumer-pending signal, so
+`--slo-pending-growth` is ignored). A non-zero error rate at low RPS usually
+means a seeding/config problem — a `MESSAGE_BUCKET_HOURS` mismatch making the
+seeded parents unreadable, or pointing the run at `history-small`. The verdict,
+INCONCLUSIVE load-box guard, and CSV output behave exactly as for the other
+read workloads.
+
+## Thread-reply workload (thread-send benchmark)
+
+Finds the maximum sustainable RPS for sending **thread replies**, directly
+comparable to the `messages` workload on the same box. A thread reply costs
+more than a plain message send because `message-gatekeeper` issues a
+synchronous `GetMessageByID` RPC to `history-service` to resolve the parent
+(extra E1 latency), and `message-worker` writes `thread_messages_by_thread`
+plus thread-metadata fan-out (extra E2 latency).
+
+**Frontdoor only.** The unique thread cost is on the gatekeeper path, so the
+`thread` workload always uses frontdoor injection and ignores `--inject`.
+
+**Parents must be pre-seeded.** The gatekeeper fetches the parent message, so
+each reply must reference a real message. `seed --workload=thread` writes
+`--parents-per-room` (default 8) parent messages per room into Cassandra
+(`messages_by_room` + `messages_by_id`). Requires `CASSANDRA_HOSTS` and the
+same `MESSAGE_BUCKET_HOURS` as the running services.
+
+### Quick start
+
+```bash
+# 1. Seed rooms/subs/keys (Mongo) + parents (Cassandra). Use the same --seed
+#    and --parents-per-room you will run with (defaults: seed 42, 8 parents).
+loadgen seed --workload=thread --preset=medium --seed=42
+
+# 2. Ramp the thread-reply send path.
+loadgen max-rps --workload=thread --preset=medium --seed=42
+
+# 3. (optional) Compare against plain sends on the same box.
+loadgen max-rps --workload=messages --preset=medium --inject=frontdoor
+
+# 4. Clean up (TRUNCATEs message tables + clears Mongo fixtures + room keys).
+loadgen teardown --workload=thread --preset=medium --seed=42
+```
+
+Via the deploy Makefile:
+
+```bash
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=thread PRESET=medium
+```
+
+### Presets
+
+Reuses the messages presets (`small`/`medium`/`large`/`realistic`).
+
+### Subcommands
+
+- `loadgen seed --workload=thread --preset=<name> [--seed=42] [--parents-per-room=N]` —
+  populate Mongo (users/rooms/subscriptions/room keys) and Cassandra
+  (parent messages for each room). N defaults to 8 (the `0 → 8` fallback in `BuildThreadFixtures`).
+- `loadgen max-rps --workload=thread --preset=<name> [--seed=42] [--parents-per-room=N] [flags]` —
+  ramp thread-reply sends. `--parents-per-room` (default 8) must equal the value
+  used at seed time. Shared ramp flags (`--steps`, `--warmup`, `--hold`,
+  `--cooldown`, `--slo-*`, `--csv`) behave identically to the `messages`
+  workload.
+- `loadgen teardown --workload=thread --preset=<name> --seed=42` — drop the
+  seeded Mongo fixtures and TRUNCATE Cassandra message tables. `--seed` is
+  required because teardown rebuilds the room list to remove per-room keys.
+
+### Seed-matching caveat
+
+`--seed` and `--parents-per-room` **must match** between `seed` and `max-rps`.
+The ramp rebuilds parent IDs from the seed to reference them; a mismatch
+makes every reply target a non-existent parent and the gatekeeper rejects
+the run. Both default to seed `42` / 8 parents — `max-rps --workload=thread`
+now accepts `--parents-per-room` (default 8) so a non-default seed-time value
+can be passed through. Leave both at the defaults for a straightforward
+comparison against the `messages` workload.
+
 ## max-rps — auto-find Max RPS under SLO
 
 Automatically finds the maximum RPS each workload can sustain while all
@@ -287,7 +433,7 @@ list of steps, holds at each step for a measurement window, evaluates SLO
 signals, and reports the largest step at which every signal passed.
 
 ```bash
-loadgen max-rps --workload=messages|history|read-receipt --preset=<name> [flags]
+loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read --preset=<name> [flags]
 ```
 
 ### Quick start
@@ -315,10 +461,10 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--workload` | `messages` | `messages`, `history`, or `read-receipt` |
+| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, or `thread-read` |
 | `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets) |
 | `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` | explicit ordered RPS list; `k` suffix = ×1000 |
-| `--request-timeout` | `5s` | **history / read-receipt**: per-request reply timeout |
+| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read**: per-request reply timeout |
 | `--warmup` | `10s` | per-step warmup (samples discarded) |
 | `--hold` | `30s` | per-step measurement window |
 | `--cooldown` | `5s` | per-step settle gap before next step |
@@ -492,7 +638,7 @@ Before `loadgen daily` will produce a meaningful verdict, you need:
 | Docker-local stack running | Daily talks to message-gatekeeper, room-service, broadcast-worker, etc. | `make -C tools/loadgen/deploy up` |
 | Mongo `users`/`rooms`/`subscriptions` seeded for the preset | Gatekeeper rejects every send with "user not subscribed" otherwise | `loadgen seed --workload=messages --preset=<your daily preset>` |
 | Per-room AES-256-GCM keys (in the room documents) | broadcast-worker decrypts with these when `ENCRYPTION_ENABLED=true` (default) | Written by the same `loadgen seed` step |
-| JetStream streams (`MESSAGES`, `MESSAGES_CANONICAL`, `ROOMS`, `OUTBOX`, `INBOX`) | The whole pipeline | Auto-created by services at startup when `BOOTSTRAP_STREAMS=true` (docker-local default) |
+| JetStream streams (`MESSAGES`, `MESSAGES_CANONICAL`, `ROOMS`, `INBOX`) | The whole pipeline | Auto-created by services at startup when `BOOTSTRAP_STREAMS=true` (docker-local default) |
 | Cassandra tables | message-worker writes here; history-service reads here | Created by `docker-local/cassandra/init/*.cql` at first stack boot |
 | `NATS_CREDS_FILE` pointing at credentials with `pub/sub` on `chat.>` | Loadgen otherwise dials anonymously and gets permission violations | docker-local writes `backend.creds` with full perms via `docker-local/setup.sh` |
 
@@ -543,6 +689,17 @@ loadgen daily \
   --warmup=15s --hold=45s --cooldown=10s \
   --max-direct-users=2000 --multiplex-pool-size=200 \
   --csv=results.csv
+```
+
+**Optional presence load:** `--presence` makes each daily user also maintain
+presence (a `hello` on activation, a `ping` every `--presence-heartbeat`, and an
+activity flip on each active↔idle Markov transition). Presence latency/errors
+are reported **observationally** — a `presence:` line under each step and
+`presence_*` CSV columns — and never affect the daily PASS/TRIP/INCONCLUSIVE
+verdict. Off by default; absent the flag, the daily run is unchanged.
+
+```bash
+loadgen daily --preset=daily-heavy --presence --presence-heartbeat=30s --csv=daily.csv
 ```
 
 ### Environment variables
@@ -644,7 +801,7 @@ run:
 - **Service-error signal is dormant.** The verdict's `service_errors > 0 → trip` arm is wired but the URL map is empty because backend services don't expose `/metrics`. To enable: add a Prometheus endpoint per service and populate `svcURLs` in `prodEnvFactory.Build`.
 - **CPU% in self-metrics is disabled.** The earlier goroutine-count-as-CPU proxy made the tool unusable at scale (every step INCONCLUSIVE above ~4000 users). Real CPU measurement (gopsutil) is a follow-up. The GC pause p99 signal still fires the loadgen-saturation INCONCLUSIVE branch.
 - **Reconnect / presence storms are out of scope.** That's a separate scenario PR.
-- **Cross-site federation (OUTBOX / INBOX) is out of scope.** Single-site only.
+- **Cross-site federation (INBOX) is out of scope.** Single-site only.
 - **Not a CI gate.** Invoked manually for capacity work; the deploy harness produces a CSV the operator interprets.
 
 ### Design references
@@ -708,3 +865,79 @@ preset; run e.g. `make -C tools/loadgen/deploy run-capacity PRESET=members-capac
   (cold-cache penalty).
 - Live N-connection pool to measure NATS core delivery fan-out to real member
   connections.
+
+## Presence workload
+
+Two subcommands that benchmark `user-presence-service` over NATS. No
+Mongo seeding is required: both use synthetic accounts (`u-NNNNNN`) that
+the service accepts via the JWT self-token on `hello`/`ping`/`activity`/`bye`
+without looking them up in any store.
+
+**NATS credentials.** Both subcommands read the same `NATS_URL`,
+`NATS_CREDS_FILE`, and `SITE_ID` env vars as every other loadgen subcommand.
+The credentials must permit publishing on `chat.user.*` and subscribing to
+`chat.user.presence.state.*`. The docker-local `backend.creds` covers both.
+
+**In-repo tests** use an embedded NATS server with a fake presence responder,
+so no Docker stack is needed for unit testing. Integration coverage against
+the real `user-presence-service` (which needs Docker + Valkey) is a CI
+concern.
+
+### presence-sustained — find max sustainable population
+
+Finds the maximum presence population N that the service can sustain
+within SLO. It ramps N through `--steps`: at each step it activates
+the delta of new users (each sends `hello`), warms up, then holds while
+users heartbeat (`ping`, a no-op at the service) and churn (activity
+flips and reconnects). Graded on:
+
+- state-publish latency p95/p99 (`--p95-ms` / `--p99-ms`)
+- error rate: missing observations + publish failures (`--error-rate`)
+- loadgen self-saturation INCONCLUSIVE guard (GC pause)
+
+Reports the largest N where every signal passed.
+
+```
+loadgen presence-sustained --steps=1k,2k,5k,10k --hold=120s --csv=presence.csv
+```
+
+### presence-storm — find largest survivable reconnect storm
+
+At a fixed warmed population (`--users`), ramps the dropped-and-reconnected
+fraction through `--storm-steps`. Two storm modes:
+
+- `--storm-mode=graceful` — drops users via `bye` then re-`hello`s; pure
+  thundering-herd.
+- `--storm-mode=silent` — stops pinging until the sweeper marks users
+  offline, then re-`hello`s; models a gateway blip and also exercises
+  the offline sweeper.
+
+Per fraction it grades recovery time vs `--recovery-slo`, spike p99
+(`--p99-ms`), and error rate (`--error-rate`). Reports the largest fraction
+that recovered within SLO.
+
+```
+loadgen presence-storm --users=20000 --storm-steps=0.1,0.25,0.5,1.0 --storm-mode=graceful
+```
+
+### presence-capacity — find max concurrent online users
+
+Cumulatively ramps a synthetic population through `--steps`. Each step
+activates the delta of new users (each `hello`, which measures connect-edge
+latency), then holds with every user online and heartbeating, counting
+**false offlines** (users the service wrongly swept offline) and **ping
+sustainability**. Reports the largest N held without tripping.
+
+- Connect-edge latency (`hello`→`online`) is measured during activation; the
+  steady-state hold has no transitions to time.
+- False offlines are the ceiling signal. A loadgen-induced ping shortfall
+  reads INCONCLUSIVE, never TRIP, so the load box is never mistaken for a
+  service limit.
+
+Graded on connect p95/p99 (`--connect-p95-ms` / `--connect-p99-ms`), false-
+offline rate (`--false-offline-rate`), connect error rate (`--error-rate`),
+with a ping-sustainability + GC-pause INCONCLUSIVE guard.
+
+```
+loadgen presence-capacity --steps=10k,20k,50k,100k,200k --hold=120s --csv=cap.csv
+```

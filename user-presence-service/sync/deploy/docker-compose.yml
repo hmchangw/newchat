@@ -1,0 +1,31 @@
+name: user-presence-sync
+
+services:
+  user-presence-sync:
+    build:
+      context: ../../..
+      dockerfile: user-presence-service/sync/deploy/Dockerfile
+    environment:
+      - SITE_ID=site-local
+      - EXTERNAL_TTL=5m
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - VALKEY_ADDRS=valkey:6379
+      - GRAPH_TENANT_ID=${GRAPH_TENANT_ID}
+      - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
+      - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}
+      - GRAPH_ROPC_USERNAME=${GRAPH_ROPC_USERNAME}
+      - GRAPH_ROPC_PASSWORD=${GRAPH_ROPC_PASSWORD}
+      - GRAPH_TLS_INSECURE_SKIP_VERIFY=${GRAPH_TLS_INSECURE_SKIP_VERIFY:-false}
+      # Proxy (optional) is taken from the standard env vars via ProxyFromEnvironment.
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+    volumes:
+      - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

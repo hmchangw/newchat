@@ -74,57 +74,21 @@ func newRoomReadGenerator(cfg *roomReadGeneratorConfig, seed int64) *roomReadGen
 	return &roomReadGenerator{cfg: *cfg, rng: r, zipf: z, roomSubs: lookup}
 }
 
-// Run drives the open-loop publisher until ctx cancels. Mirrors HistoryGenerator.Run.
+// Run drives the open-loop publisher until ctx cancels. Mirrors HistoryGenerator.Run:
+// MaxInFlight>0 uses the batched pacer (so achieved RPS is not capped by
+// single-ticker resolution); MaxInFlight<=0 selects the legacy serial path,
+// retained for bisection — it will not ramp past the single-ticker ceiling.
 func (g *roomReadGenerator) Run(ctx context.Context) error {
 	if g.cfg.Rate <= 0 {
 		return fmt.Errorf("rate must be > 0")
 	}
-	interval := time.Second / time.Duration(g.cfg.Rate)
-	if interval <= 0 {
-		interval = time.Nanosecond
-	}
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-
 	if g.cfg.MaxInFlight <= 0 {
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-tick.C:
-				g.requestOne(ctx)
-			}
-		}
+		serialDispatch(ctx, g.cfg.Rate, g.requestOne)
+		return nil
 	}
-
-	sem := make(chan struct{}, g.cfg.MaxInFlight)
-	var wg sync.WaitGroup
-	for {
-		select {
-		case <-ctx.Done():
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(drainGracePeriod):
-			}
-			return nil
-		case <-tick.C:
-			select {
-			case sem <- struct{}{}:
-				wg.Add(1)
-				go func() {
-					defer func() {
-						<-sem
-						wg.Done()
-					}()
-					g.requestOne(ctx)
-				}()
-			default:
-				g.cfg.Collector.RecordSaturation()
-			}
-		}
-	}
+	pacedDispatch(ctx, g.cfg.Rate, g.cfg.MaxInFlight,
+		g.cfg.Collector.RecordUnderrun, g.cfg.Collector.RecordSaturation, g.requestOne)
+	return nil
 }
 
 func (g *roomReadGenerator) requestOne(ctx context.Context) {

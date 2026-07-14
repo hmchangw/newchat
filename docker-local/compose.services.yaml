@@ -15,9 +15,44 @@ include:
   - ../message-gatekeeper/deploy/docker-compose.yml
   - ../message-worker/deploy/docker-compose.yml
   - ../notification-worker/deploy/docker-compose.yml
+  - ../outbox-worker/deploy/docker-compose.yml
+  - ../portal-service/deploy/docker-compose.yml
   - ../room-service/deploy/docker-compose.yml
   - ../room-worker/deploy/docker-compose.yml
   - ../search-service/deploy/docker-compose.yml
   - ../search-sync-worker/deploy/docker-compose.yml
   - ../upload-service/deploy/docker-compose.yml
   - ../user-presence-service/deploy/docker-compose.yml
+  - ../user-service/deploy/docker-compose.yml
+
+services:
+  # Unified `/api/v1` gateway (docker-local Task 5 of the unified-gateway
+  # migration). Fronts auth/upload/media/botplatform on the single baseUrl
+  # port :7777; routing is a static file (./traefik/dynamic.yml) rather than
+  # Docker-label discovery, so the included services above need no
+  # gateway-specific labels. Portal-service is NOT routed here — it keeps its
+  # own direct port (8085); see traefik/dynamic.yml for why.
+  traefik:
+    image: traefik:3.6.4
+    command:
+      - --entrypoints.web.address=:7777
+      - --ping=true
+      - --ping.entrypoint=web
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+    ports:
+      - "7777:7777"
+    volumes:
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7777/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

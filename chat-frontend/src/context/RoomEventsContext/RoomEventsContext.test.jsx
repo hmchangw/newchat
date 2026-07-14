@@ -25,9 +25,8 @@ vi.mock('@/context/RoomKeysContext', () => ({
 
 /** Turn an inline "room-shaped" fixture into a subscription record that
  *  the new bootstrap (3 subscription RPCs) returns. The real user-service
- *  embeds room metadata (userCount, lastMsgAt) inline on each subscription
- *  reply — this helper mirrors that shape so tests can keep declaring
- *  rooms in the old `{id, name, type, siteId, …}` form. */
+ *  now embeds room metadata under `room` (not top-level), so this helper
+ *  nests userCount / lastMsgAt / lastMsgId there to mirror the wire shape. */
 function roomToSub(room) {
   return {
     id: `sub-${room.id}`,
@@ -40,9 +39,11 @@ function roomToSub(room) {
     joinedAt: '2026-01-01T00:00:00Z',
     hasMention: false,
     alert: false,
-    userCount: room.userCount,
-    lastMsgAt: room.lastMsgAt ?? null,
-    lastMsgId: room.lastMsgId,
+    room: {
+      userCount: room.userCount,
+      lastMsgAt: room.lastMsgAt ?? null,
+      lastMsgId: room.lastMsgId,
+    },
   }
 }
 
@@ -98,10 +99,9 @@ describe('RoomEventsProvider', () => {
     const history = [
       { id: 'm1', roomId: 'a', content: 'old', createdAt: '2026-04-17T10:00:00Z', sender: { account: 'bob' } },
     ]
-    const request = vi.fn().mockImplementation((subject) => {
+    const request = vi.fn().mockImplementation((subject, payload) => {
       if (subject.includes('.msg.history')) return Promise.resolve({ messages: [...history] })
-      if (subject.endsWith('.subscription.getRooms')) return Promise.resolve({ subscriptions: [] })
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected subject: ' + subject)
     })
     const nats = mockNats({ request })
@@ -178,10 +178,10 @@ describe('RoomEventsProvider subscriptions', () => {
       { id: 'g1', name: 'general-channel', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: '2026-04-17T10:00:00Z' },
       { id: 'd1', name: 'dm',    type: 'dm',    siteId: 'site-A', userCount: 2, lastMsgAt: '2026-04-17T11:00:00Z' },
     ]
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected request: ' + subject)
     })
     const subjects = []
@@ -203,8 +203,8 @@ describe('RoomEventsProvider subscriptions', () => {
 
   it('applies DM events from the user-scoped subscription', async () => {
     const rooms = [{ id: 'd1', name: 'dm', type: 'dm', siteId: 'site-A', userCount: 2, lastMsgAt: null }]
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
       return Promise.resolve({ subscriptions: [] })
     })
@@ -233,8 +233,7 @@ describe('RoomEventsProvider subscriptions', () => {
 
   it('opens a new channel subscription when a channel room is added', async () => {
     const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms')) return Promise.resolve({ subscriptions: [] })
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected request: ' + subject)
     })
     const handlers = new Map()
@@ -262,8 +261,8 @@ describe('RoomEventsProvider subscriptions', () => {
 
   it('drops state and unsubscribes on room removal', async () => {
     const rooms = [{ id: 'g1', name: 'g', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null }]
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
       return Promise.resolve({ subscriptions: [] })
     })
@@ -296,12 +295,13 @@ describe('RoomEventsProvider subscriptions', () => {
     // them to `owner`; useSubscription should reflect the new roles
     // without any other refresh.
     const rooms = [{ id: 'g1', name: 'g', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null }]
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
-      if (subject.endsWith('.subscription.getCurrent'))
+      if (subject.endsWith('.subscription.list') && payload?.type === 'current')
         return Promise.resolve({ subscriptions: [{ roomId: 'g1', roles: ['member'], name: 'g' }] })
-      if (subject.endsWith('.subscription.getApps')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list') && payload?.type === 'apps')
+        return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected request: ' + subject)
     })
     const handlers = new Map()
@@ -357,8 +357,8 @@ describe('RoomEventsProvider subscriptions', () => {
 
   async function setupMentionScenario() {
     const rooms = [{ id: 'g1', name: 'g', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null }]
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
       return Promise.resolve({ subscriptions: [] })
     })
@@ -422,14 +422,13 @@ describe('RoomEventsProvider subscriptions', () => {
     // the guard on the dispatch, user A's late resolve would dispatch into user B's state.
     let resolveAliceHistory
     const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       if (subject.includes('alice') && subject.includes('.msg.history')) {
         return new Promise((resolve) => { resolveAliceHistory = resolve })
       }
       if (subject.includes('bob') && subject.includes('.msg.history')) {
         return new Promise(() => {}) // bob's history never resolves in this test
       }
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected: ' + subject)
     })
     const subscribe = vi.fn().mockReturnValue({ unsubscribe: vi.fn() })
@@ -481,13 +480,13 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
       { id: 'm11', roomId: 'r1', content: 'hit',    createdAt: '2026-04-17T11:01:00Z', sender: { account: 'bob' } },
       { id: 'm12', roomId: 'r1', content: 'after',  createdAt: '2026-04-17T11:02:00Z', sender: { account: 'bob' } },
     ]
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
       if (subject.includes('.msg.surrounding')) {
         return Promise.resolve({ messages: surrounding })
       }
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected subject: ' + subject)
     })
     const nats = mockNats({ request })
@@ -507,7 +506,10 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
     render(wrap(<Probe />, nats))
     // Wait for rooms list to load so summary is present (so jumpToMessage uses room siteId)
     await waitFor(() =>
-      expect(request).toHaveBeenCalledWith('chat.user.alice.request.user.site-A.subscription.getRooms', {})
+      expect(request).toHaveBeenCalledWith(
+        'chat.user.alice.request.user.site-A.subscription.list',
+        { type: 'rooms' },
+      )
     )
 
     await act(async () => {
@@ -533,8 +535,8 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
       { id: 'r1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null },
     ]
     const handlers = new Map()
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
       if (subject.includes('.msg.surrounding')) {
         return Promise.resolve({
@@ -543,7 +545,7 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
           ],
         })
       }
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected subject: ' + subject)
     })
     const subscribe = vi.fn().mockImplementation((subject, cb) => {
@@ -619,13 +621,12 @@ describe('RoomEventsProvider message.read wiring', () => {
   }
 
   function setupWithRooms(rooms) {
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
       // Other bootstrap RPCs return empty bucket; everything else
       // (message.read etc.) doesn't care about the reply shape.
-      if (subject.endsWith('.subscription.getCurrent')) return Promise.resolve({ subscriptions: [] })
-      if (subject.endsWith('.subscription.getApps')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       return Promise.resolve({})
     })
     const handlers = new Map()
@@ -649,7 +650,10 @@ describe('RoomEventsProvider message.read wiring', () => {
       return null
     }
     render(wrap(<Probe />, nats))
-    await waitFor(() => expect(request).toHaveBeenCalledWith('chat.user.alice.request.user.site-A.subscription.getRooms', {}))
+    await waitFor(() => expect(request).toHaveBeenCalledWith(
+      'chat.user.alice.request.user.site-A.subscription.list',
+      { type: 'rooms' },
+    ))
 
     act(() => { captured('g1') })
 
@@ -896,10 +900,10 @@ describe('RoomEventsProvider message.read wiring', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const rooms = [{ id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 4, lastMsgAt: null }]
-      const request = vi.fn().mockImplementation((subject) => {
-        if (subject.endsWith('.subscription.getRooms'))
-        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
-        if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+          return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
         return Promise.resolve({}) // every other (incl. message.read)
       })
       const handlers = new Map()
@@ -955,10 +959,10 @@ describe('RoomEventsProvider message.read wiring', () => {
         { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 4, lastMsgAt: null },
         { id: 'g2', name: 'other',   type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null },
       ]
-      const request = vi.fn().mockImplementation((subject) => {
-        if (subject.endsWith('.subscription.getRooms'))
-        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
-        if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+          return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
         return Promise.resolve({})
       })
       const handlers = new Map()
@@ -1015,32 +1019,31 @@ describe('RoomEventsProvider sidebar buckets bootstrap', () => {
     const calls = []
     const request = vi.fn().mockImplementation((subject, payload) => {
       calls.push({ subject, payload })
-      if (subject.endsWith('.subscription.getRooms'))
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: [{ roomId: 'c1', roomType: 'channel', name: 'c1', siteId: 'site-A' }] })
-      if (subject.endsWith('.subscription.getCurrent'))
+      if (subject.endsWith('.subscription.list') && payload?.type === 'current')
         return Promise.resolve({ subscriptions: [{ roomId: 'f1', roomType: 'channel', name: 'f1', siteId: 'site-A' }] })
-      if (subject.endsWith('.subscription.getApps'))
+      if (subject.endsWith('.subscription.list') && payload?.type === 'apps')
         return Promise.resolve({ subscriptions: [{ roomId: 'a1', roomType: 'botDM', name: 'a1', siteId: 'site-A' }] })
       throw new Error('unexpected subject: ' + subject)
     })
     const nats = mockNats({ request })
 
     render(wrap(<SummariesProbe />, nats))
-    // Three subscription RPCs total — listRooms is no longer fired
-    // because subscriptions carry room metadata inline (Reviewer note
-    // on PR #188).
+    // Three subscription RPCs total — all to subscription.list with different `type` values.
+    // listRooms is not fired because subscriptions carry room metadata inline.
     await waitFor(() => expect(request).toHaveBeenCalledTimes(3))
 
-    const getCurrent = calls.find((c) => c.subject.endsWith('.subscription.getCurrent'))
-    const getApps = calls.find((c) => c.subject.endsWith('.subscription.getApps'))
-    const getRooms = calls.find((c) => c.subject.endsWith('.subscription.getRooms'))
+    const getCurrent = calls.find((c) => c.payload?.type === 'current')
+    const getApps = calls.find((c) => c.payload?.type === 'apps')
+    const getRooms = calls.find((c) => c.payload?.type === 'rooms')
 
-    expect(getCurrent.subject).toBe('chat.user.alice.request.user.site-A.subscription.getCurrent')
-    expect(getCurrent.payload).toEqual({ favorite: true })
-    expect(getApps.subject).toBe('chat.user.alice.request.user.site-A.subscription.getApps')
-    expect(getApps.payload).toEqual({})
-    expect(getRooms.subject).toBe('chat.user.alice.request.user.site-A.subscription.getRooms')
-    expect(getRooms.payload).toEqual({})
+    expect(getCurrent.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
+    expect(getCurrent.payload).toEqual({ type: 'current', favorite: true })
+    expect(getApps.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
+    expect(getApps.payload).toEqual({ type: 'apps' })
+    expect(getRooms.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
+    expect(getRooms.payload).toEqual({ type: 'rooms' })
 
     // No `rooms.list` RPC was made.
     expect(calls.find((c) => c.subject.endsWith('.rooms.list'))).toBeUndefined()
@@ -1050,12 +1053,12 @@ describe('RoomEventsProvider sidebar buckets bootstrap', () => {
     // getApps rejects; getCurrent + getRooms resolve. Sidebar should
     // still bootstrap with the rooms from getRooms; the Apps bucket
     // comes back empty (instead of black-holing the whole sidebar).
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({ subscriptions: [{ roomId: 'c1', roomType: 'channel', name: 'c1', siteId: 'site-A' }] })
-      if (subject.endsWith('.subscription.getCurrent'))
+      if (subject.endsWith('.subscription.list') && payload?.type === 'current')
         return Promise.resolve({ subscriptions: [] })
-      if (subject.endsWith('.subscription.getApps'))
+      if (subject.endsWith('.subscription.list') && payload?.type === 'apps')
         return Promise.reject(new Error('boom'))
       throw new Error('unexpected subject: ' + subject)
     })
@@ -1091,11 +1094,11 @@ describe('useSidebarSections', () => {
       ids.map((id) => roomToSub(room(id, typeFor(id))))
     return mockNats({
       request: vi.fn().mockImplementation((subject, payload) => {
-        if (subject.endsWith('.subscription.getCurrent') && payload?.favorite)
+        if (subject.endsWith('.subscription.list') && payload?.type === 'current' && payload?.favorite)
           return Promise.resolve({ subscriptions: subsFor(buckets.favoriteIds) })
-        if (subject.endsWith('.subscription.getApps'))
+        if (subject.endsWith('.subscription.list') && payload?.type === 'apps')
           return Promise.resolve({ subscriptions: subsFor(buckets.appIds, () => 'botDM') })
-        if (subject.endsWith('.subscription.getRooms'))
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
           return Promise.resolve({ subscriptions: subsFor(buckets.channelDmIds) })
         throw new Error('unexpected subject: ' + subject)
       }),
@@ -1208,11 +1211,11 @@ describe('useSidebarSections', () => {
     // includes hrInfo so the friend's display name is reachable.
     const nats = mockNats({
       request: vi.fn().mockImplementation((subject, payload) => {
-        if (subject.endsWith('.subscription.getCurrent') && payload?.favorite)
+        if (subject.endsWith('.subscription.list') && payload?.type === 'current' && payload?.favorite)
           return Promise.resolve({ subscriptions: [] })
-        if (subject.endsWith('.subscription.getApps'))
+        if (subject.endsWith('.subscription.list') && payload?.type === 'apps')
           return Promise.resolve({ subscriptions: [] })
-        if (subject.endsWith('.subscription.getRooms'))
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
           return Promise.resolve({
             subscriptions: [
               {
@@ -1256,11 +1259,11 @@ describe('useSubscription', () => {
   it('returns the full per-room subscription once the bucket bootstrap resolves', async () => {
     const nats = mockNats({
       request: vi.fn().mockImplementation((subject, payload) => {
-        if (subject.endsWith('.subscription.getCurrent') && payload?.favorite)
+        if (subject.endsWith('.subscription.list') && payload?.type === 'current' && payload?.favorite)
           return Promise.resolve({ subscriptions: [] })
-        if (subject.endsWith('.subscription.getApps'))
+        if (subject.endsWith('.subscription.list') && payload?.type === 'apps')
           return Promise.resolve({ subscriptions: [] })
-        if (subject.endsWith('.subscription.getRooms'))
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
           return Promise.resolve({
             subscriptions: [
               {
@@ -1326,8 +1329,8 @@ describe('RoomEventsProvider missing-key path', () => {
     // Prime the mock factory so RoomEventsContext reads the test's spies.
     currentRoomKeysMock = roomKeysMock
 
-    const request = vi.fn().mockImplementation((subject) => {
-      if (subject.endsWith('.subscription.getRooms'))
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
         return Promise.resolve({
           subscriptions: [
             {
@@ -1341,13 +1344,15 @@ describe('RoomEventsProvider missing-key path', () => {
               joinedAt: '2026-01-01T00:00:00Z',
               hasMention: false,
               alert: false,
-              userCount: 2,
-              lastMsgAt: null,
-              lastMsgId: null,
+              room: {
+                userCount: 2,
+                lastMsgAt: null,
+                lastMsgId: null,
+              },
             },
           ],
         })
-      if (subject.includes('.subscription.get')) return Promise.resolve({ subscriptions: [] })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
       throw new Error('unexpected request: ' + subject)
     })
     const handlers = new Map()

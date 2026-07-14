@@ -175,7 +175,7 @@ func provisionHistorySchema(t *testing.T, session *gocql.Session, keyspace strin
 			sender FROZEN<"Participant">, msg TEXT,
 			mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>,
 			file FROZEN<"File">, card FROZEN<"Card">, card_action FROZEN<"CardAction">,
-			thread_parent_id TEXT, quoted_parent_message FROZEN<"QuotedParentMessage">,
+			thread_parent_id TEXT, tshow BOOLEAN, quoted_parent_message FROZEN<"QuotedParentMessage">,
 			visible_to TEXT, reactions MAP<TEXT, FROZEN<SET<FROZEN<"Participant">>>>,
 			deleted BOOLEAN, type TEXT, sys_msg_data BLOB, site_id TEXT,
 			edited_at TIMESTAMP, updated_at TIMESTAMP,

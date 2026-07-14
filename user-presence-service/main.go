@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 type NATSConfig struct {
@@ -45,12 +46,18 @@ type PresenceConfig struct {
 }
 
 type Config struct {
-	SiteID   string         `env:"SITE_ID,required"`
-	NATS     NATSConfig     `envPrefix:"NATS_"`
-	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
-	Mongo    MongoConfig    `envPrefix:"MONGO_"`
-	Presence PresenceConfig `envPrefix:"PRESENCE_"`
+	SiteID        string         `env:"SITE_ID,required"`
+	UserCacheSize int            `env:"USER_CACHE_SIZE" envDefault:"10000"`
+	UserCacheTTL  time.Duration  `env:"USER_CACHE_TTL"  envDefault:"5m"`
+	NATS          NATSConfig     `envPrefix:"NATS_"`
+	Valkey        ValkeyConfig   `envPrefix:"VALKEY_"`
+	Mongo         MongoConfig    `envPrefix:"MONGO_"`
+	Presence      PresenceConfig `envPrefix:"PRESENCE_"`
 }
+
+// Compile-time guarantee that the extracted store satisfies the daemon's
+// consumer interface (including SetExternal).
+var _ PresenceStore = (*presencestore.Store)(nil)
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
@@ -87,8 +94,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := NewValkeyStore(
-		ClusterConfig{Addrs: cfg.Valkey.Addrs, Password: cfg.Valkey.Password},
+	store, err := presencestore.NewValkeyStore(
+		presencestore.ClusterConfig{Addrs: cfg.Valkey.Addrs, Password: cfg.Valkey.Password},
 		cfg.Presence.StaleThreshold, cfg.Presence.ConnsTTL,
 	)
 	if err != nil {
@@ -101,7 +108,14 @@ func main() {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
-	userDir := userstore.NewMongoStore(mongoClient.Database(cfg.Mongo.DB).Collection("users"))
+	userDir, err := userstore.NewCache(
+		userstore.NewMongoStore(mongoClient.Database(cfg.Mongo.DB).Collection("users")),
+		cfg.UserCacheSize, cfg.UserCacheTTL)
+	if err != nil {
+		slog.Error("init user cache failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
 	nc, err := natsutil.Connect(cfg.NATS.URL, cfg.NATS.CredsFile)
 	if err != nil {

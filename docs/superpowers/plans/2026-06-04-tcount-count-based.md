@@ -628,3 +628,11 @@ CREATE TABLE thread_reply_counts (
 - **Read-path:** `tcount` value comes from this COUNTER table instead of the live scan, making it O(1).
 
 Until the COUNTER table ships, the current O(N) scan is correct behavior. Threads with fewer than ~500 replies see sub-millisecond scan latency on a well-partitioned Cassandra cluster; the trade-off is acceptable for the initial rollout.
+
+**Resolution (superseded):** The COUNTER-table + reconciliation-job approach was
+not pursued. A Cassandra `counter` increment is not idempotent under JetStream
+redelivery and would re-introduce the drift this design eliminated, requiring a
+new scheduled reconciliation job. Instead the per-write scan was bounded by a
+display cap (`pkg/threadcount.Cap = 99`), keeping the idempotent, stateless
+recompute-then-blind-SET model with no new table or job. See
+`docs/superpowers/specs/2026-06-21-bounded-thread-reply-count-design.md`.

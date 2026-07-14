@@ -1,0 +1,39 @@
+name: media-service
+
+services:
+  media-service:
+    build:
+      context: ../..
+      dockerfile: media-service/deploy/Dockerfile
+    pull_policy: build
+    # No host port publish: traefik fronts this at :7777 (/api/v1/avatar) and
+    # in-network callers reach it as media-service:8080. Publishing host 8080
+    # collided with auth-service and botplatform-service, which also default to 8080.
+    environment:
+      - PORT=8080
+      - LOG_LEVEL=info
+      - SITE_ID=site-local
+      # JSON array of {siteID, domain} for cross-cluster avatar redirects. Adjust for your local setup.
+      - 'CLUSTER_DOMAINS=[{"siteID":"site-local","domain":"http://localhost:8080"}]'
+      - EMPLOYEE_PHOTO_BASE_URL=http://localhost:8081/photos
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_USE_SSL=false
+      - MINIO_BUCKET=avatars
+      - MAX_UPLOAD_BYTES=1048576
+      - CACHE_MAX_AGE_SECONDS=21600
+      - EID_CACHE_TTL=24h
+      - EID_CACHE_CAPACITY=120000
+      - NATS_URL=nats://nats:4222
+      - EMOJI_MAX_UPLOAD_BYTES=262144
+      - EMOJI_MAX_DIMENSION=512
+      - EMOJI_DELETE_ENABLED=true
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

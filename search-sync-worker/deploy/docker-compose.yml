@@ -9,10 +9,22 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      # Dev-only pprof profiling on the health port (off by default). Flip on
+      # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - SEARCH_URL=http://elasticsearch:9200
       - SEARCH_BACKEND=elasticsearch
       - MSG_INDEX_PREFIX=messages-site-local-v1
       - SPOTLIGHT_INDEX=spotlight-site-local-v1
+      - SPOTLIGHT_ORG_INDEX=spotlightorg-site-local-v1
+      # hr-syncer runs at one central site; for single-site local dev,
+      # point at ourselves.
+      - HR_CENTRAL_SITE_ID=site-local
+      # Optional JetStream domain of the remote NATS cluster that owns the HR
+      # OrgSyncStream. Set when hr-syncer runs in a different domain so this
+      # worker's spotlight-org consumer targets that domain. Leave unset for
+      # single-cluster local dev (the HR stream is in this cluster's domain).
+      # - HR_JETSTREAM_DOMAIN=hr-hub
       - USER_ROOM_INDEX=user-room-mv-site-local
       - BOOTSTRAP_STREAMS=true
       # Optional YYYY-MM-DD (UTC) cutoff for the messages collection.

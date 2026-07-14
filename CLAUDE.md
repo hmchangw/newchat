@@ -20,9 +20,9 @@
 | Testing | `go.uber.org/mock` (mockgen), `stretchr/testify` (assertions), `testcontainers-go` (integration) |
 | Containers | Docker multi-stage builds, Docker Compose |
 
-**Event flow:** User publishes message to MESSAGES stream → `message-gatekeeper` validates and publishes to MESSAGES_CANONICAL → `message-worker` persists to Cassandra, `broadcast-worker` delivers to room members, `notification-worker` sends notifications → cross-site events flow via OUTBOX/INBOX streams.
+**Event flow:** User publishes message to MESSAGES stream → `message-gatekeeper` validates and publishes to MESSAGES_CANONICAL → `message-worker` persists to Cassandra, `broadcast-worker` delivers to room members, `notification-worker` sends notifications → cross-site events are published directly into remote sites' INBOX streams.
 
-**Multi-site federation:** Each site runs independently with its own NATS, MongoDB, and Cassandra. Cross-site events use the Outbox/Inbox pattern — local events go to the OUTBOX stream, remote sites source from it into their INBOX stream. User subscriptions and room metadata are scoped by `siteID`.
+**Multi-site federation:** Each site runs independently with its own NATS, MongoDB, and Cassandra. Cross-site events cross the NATS supercluster as a direct JetStream publish into the destination site's INBOX stream (`chat.inbox.{destSiteID}.external.{eventType}`, no sourcing/SubjectTransform). Origin-side, `room-service`'s request/reply federation and `room-worker`'s order-sensitive events (`member_added`/`member_removed`/`room_renamed`) are buffered through a local per-site `OUTBOX` stream that `outbox-worker` drains and forwards, so a failed cross-gateway publish is durably retried rather than lost. Both lanes are per remote peer (from `ALL_SITE_IDS`) so a down peer's parked forwards (`MaxDeliver=-1`, never Ack) fill only their own consumer's ack-pending budget instead of stalling delivery to healthy peers: the order-sensitive events ride per-destination FIFO lanes (`MaxAckPending=1`, so they can't overtake each other — e.g. a rename can't overtake the add that creates the subscription it renames; one in-flight probe per down peer); the order-insensitive subscription-state events ride a per-destination concurrent consumer (default budget). Other consumer-originated events (messages) publish to the remote INBOX directly. User subscriptions and room metadata are scoped by `siteID`.
 
 **Repo structure:** Monorepo with single `go.mod` at root. Services are flat `package main` directories at the repo root — no `cmd/` or `internal/`. Shared code lives in `pkg/`. Each service has a `deploy/` subdirectory with Dockerfile, docker-compose.yml, and azure-pipelines.yml. Claude discovers services by exploring the repo.
 
@@ -37,6 +37,8 @@
 - `mock_store_test.go` — Generated mocks (never edit manually)
 
 All services follow this layout, including `message-gatekeeper` (validates messages and publishes to MESSAGES_CANONICAL).
+
+**Note:** request/reply services with a larger surface (e.g. `user-service`, `history-service`) MAY instead use a sub-package layout under the service directory (`config/`, `models/`, `mongorepo/`, `service/`, `service/mocks/`) — this is a sanctioned exception, not a deviation. The store interface still lives with its consumer (`service/`), and generated mocks still go in a dedicated mocks package (`service/mocks/`).
 
 ## Section 2: Common Commands
 
@@ -201,6 +203,8 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Every request body and response payload is a field table (current style). Each field has an explicit type — never `object`. Compound types get their own named table (shared types in §3.0 Shared schemas, one-offs inline) and are referenced by linked name (e.g. `[Participant](#participant)`, `ChannelRef[]`, `map<emoji, UserRef[]>`).
 - Every success response includes a JSON example.
 - Keep edits clean: minimal prose, no redundant comments or long explanations.
+- If the change also touches `docs/client-api/request-reply.md` or `docs/client-api/events.md` (the derived request/reply and events views), update the matching view(s) in the same PR — they must never drift from the canonical `docs/client-api.md`.
+- Any change to a client-facing **request/reply struct or a server→client event struct** in `pkg/model/` (including `pkg/model/event.go`) — adding, removing, renaming, or retyping a field — must update `docs/client-api.md` **and** its derived views (`docs/client-api/request-reply.md`, `docs/client-api/events.md`) in the same PR, even when no handler registration changed.
 
 ### Before Editing
 - Always read a file before modifying it — understand existing code before suggesting changes
@@ -226,7 +230,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Use `github.com/nats-io/nats.go` for core and `github.com/nats-io/nats.go/jetstream` for JetStream
 - Connect in `main.go` — on failure, log and exit immediately, don't retry at startup
 - Use `iter.Stop()` + `wg.Wait()` + `nc.Drain()` for graceful shutdown — see "JetStream Consumer Pattern" and "Graceful Shutdown" sections
-- All NATS payloads are JSON — use `encoding/json` with typed structs from `pkg/model`, never `map[string]interface{}`
+- All NATS payloads are JSON with typed structs from `pkg/model`, never `map[string]interface{}`. Codec: the message hot-path workers (`broadcast-worker`, `message-worker`, `notification-worker`, `message-gatekeeper`) marshal/unmarshal via `github.com/bytedance/sonic` (default config) for throughput, warmed at startup with `pkg/jsonwarm.Pretouch`; everywhere else uses `encoding/json`. sonic's default output is semantically equivalent but not byte-identical to stdlib (HTML metacharacters left unescaped, map keys unsorted), so only adopt it on a path after confirming no consumer relies on byte-identity (payload hashing, signatures, dedup keys) or marshals `map` fields — see the sonic wire-compat tests in `broadcast-worker`/`message-gatekeeper`. One exception: `message-gatekeeper/fetcher_history.go` decodes a narrow projection rather than the full `cassandra.Message`, because that type embeds the marshal-only struct-keyed `Reactions` map whose decoder sonic rejects.
 - Use NATS request/reply for synchronous operations; `nc.QueueSubscribe` with service name as queue group
 - Use `natsutil.ReplyJSON` for success responses; for errors return a typed `*errcode.Error` from the handler and let `errnats.Reply` / `errhttp.Write` marshal the envelope (see `docs/error-handling.md`).
 - Define all stream configs in `pkg/stream/stream.go` with name pattern `<STREAM>_<siteID>`
@@ -247,7 +251,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - **Tier 3 — specialist, you'll know when.** Don't use these in ordinary request/reply handlers:
   - `errcode.Permanent` / `IsPermanent` — JetStream **workers only**, to Ack-poison vs Nak-retry.
   - `errcode.Parse` — **cross-site consumers** decoding a remote envelope (e.g. `memberlist_client.go`).
-  - `errnats.Marshal` / `MarshalQuiet` / `ReplyQuiet` — outbox/already-logged paths; the plain `Reply` already classifies-and-logs once, so `Quiet` exists only to avoid a double-log.
+  - `errnats.Marshal` / `MarshalQuiet` / `ReplyQuiet` — already-logged paths; the plain `Reply` already classifies-and-logs once, so `Quiet` exists only to avoid a double-log.
   - `errcode.Classify`, `WithLogger`, `WithLogValues` — boundary/observability plumbing; handlers get request-id logging for free from the router middleware.
 - **Never log AND return.** `Reply`/`Write` run `Classify`, which logs once at a category-aware level. A `slog.Error(...)` before returning the same error double-logs.
 - **`WithCause` wraps an infra error, never another `*errcode.Error`** (one-errcode-per-chain; it panics otherwise, and semgrep guards it). Never put a raw token/body/subject in a cause or message — it reaches the server log.
@@ -263,17 +267,19 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - User-scoped: `chat.user.{account}.…`
 - Room-scoped: `chat.room.{roomID}.…`
 - MESSAGES_CANONICAL: `chat.msg.canonical.{siteID}.created` (`.edited`, `.deleted` for future)
-- Outbox: `outbox.{siteID}.to.{destSiteID}.{eventType}`
+- Inbox (cross-site, remote-origin): `chat.inbox.{destSiteID}.external.{eventType}` — published directly into the destination site's INBOX
+- Inbox (same-site search feed): `chat.inbox.{siteID}.internal.{eventType}`
+- Outbox (origin-side federation buffer): `chat.outbox.{siteID}.{destSiteID}.{eventType}` — `room-service` (subscription-state events) and `room-worker` (membership events) publish one event per destination; `outbox-worker` forwards each to the destination INBOX (destination scoped so the per-peer membership FIFO consumers can filter on one site)
 - Wildcards: `*` for single-token, `>` for multi-token tail — define patterns in `pkg/subject`
 
 ### JetStream Streams
 - `MESSAGES_{siteID}` — User message submissions
 - `MESSAGES_CANONICAL_{siteID}` — Validated messages (single source of truth for downstream workers)
 - `ROOMS_{siteID}` — Member invite requests
-- `OUTBOX_{siteID}` — Cross-site outbound events
-- `INBOX_{siteID}` — Cross-site inbound events (sourced from remote OUTBOX)
+- `INBOX_{siteID}` — Cross-site federation events, published directly by remote sites onto the `external.>` lane (no sourcing/SubjectTransform); same-site services also publish a search-only feed onto the `internal.>` lane
+- `OUTBOX_{siteID}` — Origin-side federation buffer: `room-service` publishes an `OutboxEvent` here for its request/reply cross-site events, `room-worker` for its order-sensitive events (membership + `room_renamed`); `outbox-worker` consumes it and forwards each event to the destination's INBOX with at-least-once retry — per remote peer (from `ALL_SITE_IDS`, `MaxDeliver=-1`), a concurrent consumer for the order-insensitive subscription-state event types plus a FIFO consumer (`MaxAckPending=1`) for the order-sensitive types (`member_added`/`member_removed`/`room_renamed`, which share one lane so they can't overtake each other); per-destination (not one shared consumer) so a down peer's parked forwards fill only its own ack-pending budget instead of stalling healthy peers. The two filter sets partition the stream and live in `pkg/outbox` (`ConcurrentEventTypes` / `OrderedEventTypes`); a new OUTBOX event type MUST be added to exactly one of them — producers publish via `outbox.Publish`, which rejects types outside the partition instead of letting them sit in the stream unconsumed. Owned by `outbox-worker`
 - **Stream bootstrap is opt-in.** Services that consume from or publish to a stream MUST NOT create it in production — streams are owned by ops/IaC. Each such service's `config` includes `Bootstrap bootstrapConfig` (env prefix `BOOTSTRAP_`) with a single `Enabled` field tagged `env:"STREAMS" envDefault:"false"`. The service's `bootstrap.go` defines a `bootstrapStreams(ctx, js, siteID, enabled) error` helper that no-ops when `Enabled=false`. Local `deploy/docker-compose.yml` sets `BOOTSTRAP_STREAMS=true` so any service can stand up against a fresh NATS in dev. New services that interact with JetStream MUST follow this convention.
-- **Stream bootstrap ownership.** When a service does bootstrap a stream in dev, the helper sets ONLY the stream's schema — `Name + Subjects` from `pkg/stream.<Stream>(siteID)`. Federation config (`Sources` + `SubjectTransforms` for cross-site sourcing) is owned by ops/IaC and MUST NOT appear in any service's `bootstrap.go`. INBOX has a single owning service (`inbox-worker`); other services that consume from INBOX (e.g., `search-sync-worker`) skip it in their bootstrap loop and rely on `inbox-worker` to create the stream.
+- **Stream bootstrap ownership.** When a service does bootstrap a stream in dev, the helper sets ONLY the stream's schema — `Name + Subjects` from `pkg/stream.<Stream>(siteID)`. Cross-site federation is direct-publish: a service at the origin site JetStream-publishes to the destination's `chat.inbox.{destSiteID}.external.>` lane, routed by the NATS supercluster/gateway topology (an ops/IaC concern that MUST NOT appear in any service's `bootstrap.go`). INBOX has a single owning service (`inbox-worker`) and OUTBOX has a single owning service (`outbox-worker`). Other services that consume from or publish to a remote INBOX (e.g., `search-sync-worker`, and the cross-site publishers room-worker/message-worker/user-service, plus `outbox-worker` which forwards the federated events) rely on `inbox-worker` to create the local stream and on ops/IaC for the routing that makes a remote publish land. `room-service` no longer publishes cross-site directly, and `room-worker` no longer publishes its order-sensitive events (membership, `room_renamed`) cross-site directly — both publish an `OutboxEvent` to the local OUTBOX and `outbox-worker` does the forwarding.
 
 ### MongoDB
 - Never use ORMs (no GORM, no ent) — use native drivers directly
@@ -283,10 +289,12 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Primary keys: application-generated via `pkg/idgen`, mapped to `bson:"_id"`. Format depends on the entity:
   - **Subscriptions, RoomMembers, ThreadRooms, ThreadSubscriptions**: UUIDv7 hex without hyphens (32 chars) via `idgen.GenerateUUIDv7()` — time-ordered for B-tree locality on high-write collections
   - **Channel Rooms**: 17-char base62 via `idgen.GenerateID()` — short, human-friendly
-  - **DM Rooms**: sorted concat of two `user.ID` strings (~34 chars) via `idgen.BuildDMRoomID(a, b)` — deterministic, no separate dedup needed
+  - **DM Rooms**: sorted concat of two `user.ID` strings (~34 chars) via `idgen.BuildDMRoomID(a, b)` — deterministic, no separate dedup needed. A DM room is **always exactly two participants** — a direct message is never among 3 people or more; any conversation of 3+ users is a channel room, never a DM
   - **Messages**: 20-char base62 via `idgen.GenerateMessageID()` for new IDs (or client-supplied for user messages). `idgen.IsValidMessageID` accepts **either 17 or 20 char** base62 — 17 is the legacy length retained for backward compatibility with messages written before the 20-char cutover (federation replays, JetStream redeliveries, historical records).
 - Check `mongo.ErrNoDocuments` explicitly when a missing record is expected
 - Create indexes in the store constructor or a dedicated `EnsureIndexes` method at startup
+- **No `$lookup`**: server-side joins (`$lookup` in aggregation pipelines) are forbidden unless there is a very good, documented reason — prefer separate queries or denormalized data, and justify any exception in the PR. Pre-existing `$lookup` sites are grandfathered; when you touch one, add an inline `// $lookup justification: …` comment explaining why a join is unavoidable
+- **Always project precisely**: every find/aggregation MUST specify an explicit projection that selects only the fields the caller needs — never fetch whole documents when a subset suffices
 
 ### Cassandra
 - Driver: `github.com/gocql/gocql`
@@ -315,7 +323,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Always provide `envDefault` for non-critical config (port, database name, log level); never default secrets or connection strings — mark them `required`
 
 ### Docker
-- Multi-stage Dockerfiles: `golang:1.25.11-alpine` builder, `alpine:3.21` runtime
+- Multi-stage Dockerfiles: `golang:1.25.12-alpine` builder, `alpine:3.21` runtime
 - Location: `<service>/deploy/Dockerfile`
 - Build context: repo root so `pkg/` and `go.mod` are accessible
 - Docker Compose for local dev only — include only the dependencies the service needs

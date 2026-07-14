@@ -9,6 +9,9 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      # Dev-only pprof profiling on the health port (off by default). Flip on
+      # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - BOOTSTRAP_STREAMS=true

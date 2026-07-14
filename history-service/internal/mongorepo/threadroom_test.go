@@ -27,6 +27,19 @@ func insertThreadSubscription(t *testing.T, db *mongo.Database, ts model.ThreadS
 	require.NoError(t, err)
 }
 
+// insertSubscription seeds a minimal room subscription so the thread-list
+// membership $lookup treats account as still a member of roomID.
+func insertSubscription(t *testing.T, db *mongo.Database, account, roomID string) {
+	t.Helper()
+	_, err := db.Collection("subscriptions").InsertOne(context.Background(), model.Subscription{
+		ID:     account + ":" + roomID,
+		User:   model.SubscriptionUser{Account: account},
+		RoomID: roomID,
+		SiteID: "site-a",
+	})
+	require.NoError(t, err)
+}
+
 func timePtr(t time.Time) *time.Time { return &t }
 
 func TestThreadRoomRepo_GetThreadRooms(t *testing.T) {
@@ -141,4 +154,43 @@ func TestThreadRoomRepo_GetUnreadThreadRooms(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), pageNone.Total)
 	assert.Empty(t, pageNone.Data)
+}
+
+func TestThreadRoomRepo_GetMinThreadUserLastSeenAt(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewThreadRoomRepo(db)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	floorTime := base.Add(30 * time.Minute)
+
+	// Thread room with minUserLastSeenAt set.
+	insertThreadRoom(t, db, model.ThreadRoom{
+		ID: "tr-floor", RoomID: "r1", ParentMessageID: "p1",
+		LastMsgAt:         base,
+		CreatedAt:         base,
+		UpdatedAt:         base,
+		MinUserLastSeenAt: &floorTime,
+	})
+
+	// Thread room without the field.
+	insertThreadRoom(t, db, model.ThreadRoom{
+		ID: "tr-no-floor", RoomID: "r1", ParentMessageID: "p2",
+		LastMsgAt: base, CreatedAt: base, UpdatedAt: base,
+	})
+
+	got, err := repo.GetMinThreadUserLastSeenAt(ctx, "tr-floor")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, floorTime, *got, time.Second)
+
+	// Field unset → nil.
+	got, err = repo.GetMinThreadUserLastSeenAt(ctx, "tr-no-floor")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// Missing document → nil.
+	got, err = repo.GetMinThreadUserLastSeenAt(ctx, "tr-missing")
+	require.NoError(t, err)
+	assert.Nil(t, got)
 }

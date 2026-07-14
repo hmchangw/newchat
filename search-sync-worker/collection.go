@@ -33,8 +33,8 @@ type Collection interface {
 	// emit lightweight `{"script":{"id":...}}` references instead of repeating
 	// the full source in every fan-out bulk action.
 	StoredScripts() map[string]json.RawMessage
-	// BuildAction converts raw JetStream message data into one or more
-	// BulkActions. An empty slice means the event should be acked without
-	// any ES write (e.g., filtered out).
+	// BuildAction converts the already-decompressed JetStream message body
+	// into one or more BulkActions (empty slice = ack with no ES write,
+	// e.g. filtered).
 	BuildAction(data []byte) ([]searchengine.BulkAction, error)
 }

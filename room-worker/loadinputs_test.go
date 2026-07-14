@@ -14,7 +14,7 @@ import (
 )
 
 // TestLoadAddMemberInputs_RunsReadsConcurrently proves the three independent
-// up-front reads (GetRoom, ListAddMemberCandidates, HasOrgRoomMembers) are
+// up-front reads (GetRoomMeta, ListAddMemberCandidates, HasOrgRoomMembers) are
 // issued concurrently: each mock blocks on a shared release channel after
 // signalling arrival, so serial execution would only ever reach one before the
 // others are unblocked and the test would time out.
@@ -27,7 +27,7 @@ func TestLoadAddMemberInputs_RunsReadsConcurrently(t *testing.T) {
 	release := make(chan struct{})
 	block := func() { arrived <- struct{}{}; <-release }
 
-	store.EXPECT().GetRoom(gomock.Any(), "r1").DoAndReturn(
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").DoAndReturn(
 		func(_ context.Context, _ string) (*model.Room, error) {
 			block()
 			return &model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil
@@ -86,7 +86,7 @@ func TestLoadAddMemberInputs_PropagatesErrors(t *testing.T) {
 		{
 			name: "get room fails",
 			setup: func(s *MockSubscriptionStore) {
-				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, sentinel)
+				s.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(nil, sentinel)
 				s.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil)
 				s.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 			},
@@ -95,7 +95,7 @@ func TestLoadAddMemberInputs_PropagatesErrors(t *testing.T) {
 		{
 			name: "list candidates fails",
 			setup: func(s *MockSubscriptionStore) {
-				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+				s.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 				s.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, sentinel)
 				s.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 			},
@@ -104,7 +104,7 @@ func TestLoadAddMemberInputs_PropagatesErrors(t *testing.T) {
 		{
 			name: "has-org-members fails",
 			setup: func(s *MockSubscriptionStore) {
-				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+				s.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 				s.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil)
 				s.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, sentinel)
 			},

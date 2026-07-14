@@ -1,0 +1,92 @@
+name: oplog-migration-demo
+
+# Local end-to-end migration demo. Adds the LEGACY source (a Mongo replica set)
+# plus the two migration services onto the SHARED `chat-local` network, wired to
+# the shared NATS / Mongo / Cassandra started by `make deps-up`.
+#
+#   source-mongo (legacy RS) ──▶ oplog-connector ──▶ MIGRATION_OPLOG_{site}
+#                                          │
+#                                          ▼
+#                                 oplog-transformer ──▶ chat.msg.canonical.{site}.* (X-Migration: live)
+#                                          │                       │
+#                                          └─ source FindByID      ▼
+#                                                          message-worker / history-service
+#                                                          broadcast/notification SKIP (migrated)
+#
+# Prereqs: `make deps-up` (shared infra) and `make up` (canonical services) must
+# be running first. See data-migration/DEMO.md.
+
+services:
+  # The LEGACY RocketChat-style source. A single-node replica set so change
+  # streams work. Distinct from the new-stack `mongodb` (chat-local-mongodb).
+  source-mongo:
+    image: mongo:7
+    container_name: migration-source-mongo
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          'try { rs.status().ok } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"source-mongo:27017"}]}) }'
+      interval: 5s
+      timeout: 10s
+      retries: 15
+    networks:
+      - chat-local
+
+  oplog-connector:
+    build:
+      context: ..
+      dockerfile: data-migration/oplog-connector/deploy/Dockerfile
+    pull_policy: build
+    container_name: migration-oplog-connector
+    depends_on:
+      source-mongo:
+        condition: service_healthy
+    environment:
+      - SITE_ID=site-local
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
+      - SOURCE_DB=rocketchat
+      - CHECKPOINT_DB=migration
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      # Demo scope is messages only (the transformer only handles messages today).
+      - WATCH_COLLECTIONS=rocketchat_message
+      - READ_PREFERENCE=primaryPreferred
+      - BOOTSTRAP_STREAMS=true # owns MIGRATION_OPLOG; creates it in dev
+      - METRICS_ADDR=:9090
+      - LOG_LEVEL=info
+    volumes:
+      - ./backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+  oplog-transformer:
+    build:
+      context: ..
+      dockerfile: data-migration/oplog-transformer/deploy/Dockerfile
+    pull_policy: build
+    container_name: migration-oplog-transformer
+    depends_on:
+      source-mongo:
+        condition: service_healthy
+    environment:
+      - SITE_ID=site-local
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      # Source lookups for `update` events (connector sends only the delta).
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
+      - SOURCE_DB=rocketchat
+      - SOURCE_MESSAGE_COLLECTION=rocketchat_message
+      - SOURCE_READ_PREFERENCE=primaryPreferred
+      - METRICS_ADDR=:9090
+      - LOG_LEVEL=info
+    volumes:
+      - ./backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

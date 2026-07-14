@@ -1,6 +1,19 @@
 package main
 
-import "regexp"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// messageLink builds the canonical deep link to a message from trusted inputs.
+// Single source of truth for the link format, shared by the authoritative
+// history fetch (fetcher_history.go) and the degraded-mode placeholder snapshot
+// (handler.go) so the two paths can't drift. baseURL is operator-supplied
+// (CHAT_BASE_URL); its trailing slash is trimmed so the link never doubles up.
+func messageLink(baseURL, roomID, messageID string) string {
+	return fmt.Sprintf("%s/%s/%s", strings.TrimRight(baseURL, "/"), roomID, messageID)
+}
 
 // botPattern matches account names treated as bots. Mirrors
 // room-service/helper.go:32. Promotion to a shared pkg/botid is a future

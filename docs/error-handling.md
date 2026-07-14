@@ -153,26 +153,26 @@ automatically.
 ### Request-ID minting and dedup safety (dedup-critical paths)
 
 Some handlers in **room-service** and **room-worker** fan out to JetStream
-publishes whose `Nats-Msg-Id` (via `natsutil.OutboxDedupID`,
+publishes whose `Nats-Msg-Id` (via `natsutil.InboxDedupID`,
 `natsutil.CanonicalDedupID`, and the in-package `messageDedupSeed` helper) and
 whose canonical message IDs (via `idgen.MessageIDFromRequestID`) are derived
 from the request ID. A server-side mint there weakens client-retry
 deduplication: a client retrying without `X-Request-ID` (or with a malformed
 value) gets a fresh server-minted ID each attempt, produces a different dedup
-key each time, and can silently duplicate outbox events and system messages.
+key each time, and can silently duplicate cross-site inbox events and system messages.
 
 **Both services mint at the boundary** (`natsrouter.RequestID()`), so every
 handler always has a request ID for logging and no server-to-server call is
 rejected for a missing header. Dedup safety is preserved two ways:
 
 - **Payload-derived dedup** (preferred): `room-worker.serverCreateDM`
-  (`chat.server.request.room.{siteID}.create.dm`) derives its cross-site OUTBOX
+  (`chat.server.request.room.{siteID}.create.dm`) derives its cross-site inbox
   dedup key from a deterministic payload seed (`room.ID` + `requester.Account` +
   `room.CreatedAt` in ms, suffixed with the destination site), independent of
   the request ID. Retries dedup correctly even with a minted/absent header.
 - **Caller-supplied stable ID** (contract): handlers that still derive dedup or
   canonical IDs from the request ID — notably `room-service.roomRestricted`
-  (`idgen.MessageIDFromRequestID` + `OutboxDedupID`) and the async ROOMS-stream
+  (`idgen.MessageIDFromRequestID` + `InboxDedupID`) and the async ROOMS-stream
   paths reached via `room-service` member RPCs — rely on the caller sending a
   **stable** `X-Request-ID` across retries. This is a contract expectation, no
   longer enforced at the boundary; a caller that omits it forfeits retry dedup.

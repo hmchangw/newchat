@@ -14,6 +14,8 @@ vi.mock('./SearchBar/SearchBar', () => ({
   ),
 }))
 vi.mock('./ThemeToggle/ThemeToggle', () => ({ default: () => <span>fake-theme</span> }))
+vi.mock('./DebugLevelSelect/DebugLevelSelect', () => ({ default: () => <span>fake-debug</span> }))
+vi.mock('./DebugPayloadToggle/DebugPayloadToggle', () => ({ default: () => <span>fake-payload</span> }))
 vi.mock('./UnreadBadge', () => ({ default: () => <span>fake-unread</span> }))
 
 describe('AppHeader', () => {

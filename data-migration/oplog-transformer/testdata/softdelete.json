@@ -1,0 +1,1 @@
+{"_id":"abc123def456ghi78","rid":"room1","msg":"","t":"rm","ts":{"$date":"2023-01-02T03:04:05Z"},"editedAt":{"$date":"2023-01-02T05:00:00Z"},"u":{"_id":"u1","username":"alice","name":"Alice A"}}

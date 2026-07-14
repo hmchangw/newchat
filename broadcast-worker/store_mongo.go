@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -33,10 +34,18 @@ type mongoStore struct {
 	threadRoomCol *mongo.Collection
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
+	metaRec       roommetacache.Recorder
 }
 
 func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration) *mongoStore {
-	return &mongoStore{roomCol: roomCol, subCol: subCol, threadRoomCol: threadRoomCol, valkey: valkey, metaTTL: metaTTL}
+	return &mongoStore{
+		roomCol:       roomCol,
+		subCol:        subCol,
+		threadRoomCol: threadRoomCol,
+		valkey:        valkey,
+		metaTTL:       metaTTL,
+		metaRec:       cachemetrics.For("roommeta", "l2"),
+	}
 }
 
 func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
@@ -63,7 +72,7 @@ func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]mo
 }
 
 func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL)
+	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec)
 }
 
 func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
@@ -116,15 +125,36 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	return nil
 }
 
-func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string) error {
-	filter := bson.M{
-		"roomId":    roomID,
-		"u.account": bson.M{"$in": accounts},
+// subscriptionMentionsFilter matches subs that have NOT already read past
+// msgCreatedAt. $not/$gte (not $lt) so it still matches a missing/null
+// lastSeenAt — plain $lt skips missing fields, wrongly excluding never-read subs (#467).
+func subscriptionMentionsFilter(roomID string, accounts []string, msgCreatedAt time.Time) bson.M {
+	return bson.M{
+		"roomId":     roomID,
+		"u.account":  bson.M{"$in": accounts},
+		"lastSeenAt": bson.M{"$not": bson.M{"$gte": msgCreatedAt}},
 	}
+}
+
+func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	filter := subscriptionMentionsFilter(roomID, accounts, msgCreatedAt)
 	update := bson.M{"$set": bson.M{"hasMention": true}}
 	_, err := m.subCol.UpdateMany(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("set subscription mentions for room %s: %w", roomID, err)
+	}
+	return nil
+}
+
+// AdvanceSubscriptionLastSeen advances the sender's lastSeenAt via $max so it
+// never regresses a sender who already read later. A missing subscription is a
+// best-effort no-op (MatchedCount unchecked).
+func (m *mongoStore) AdvanceSubscriptionLastSeen(ctx context.Context, roomID, account string, at time.Time) error {
+	if _, err := m.subCol.UpdateOne(ctx,
+		bson.M{"roomId": roomID, "u.account": account},
+		bson.M{"$max": bson.M{"lastSeenAt": at}},
+	); err != nil {
+		return fmt.Errorf("advance lastSeenAt for %q in room %q: %w", account, roomID, err)
 	}
 	return nil
 }
@@ -146,6 +176,36 @@ func (m *mongoStore) GetThreadFollowers(ctx context.Context, parentMessageID str
 		if a != "" {
 			out[a] = struct{}{}
 		}
+	}
+	return out, nil
+}
+
+func (m *mongoStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
+	out := make(map[string]*time.Time, len(accounts))
+	if len(accounts) == 0 {
+		return out, nil
+	}
+	filter := bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}}
+	opts := options.Find().SetProjection(bson.M{"u.account": 1, "historySharedSince": 1, "_id": 0})
+	cursor, err := m.subCol.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("query history windows for room %s: %w", roomID, err)
+	}
+	defer cursor.Close(ctx)
+	// Minimal decode shape: the projection returns only u.account + historySharedSince,
+	// so decode just those rather than the full model.SubscriptionUser (whose other
+	// fields would silently be zero-valued).
+	var rows []struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
+		HistorySharedSince *time.Time `bson:"historySharedSince"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode history windows: %w", err)
+	}
+	for i := range rows {
+		out[rows[i].User.Account] = rows[i].HistorySharedSince
 	}
 	return out, nil
 }

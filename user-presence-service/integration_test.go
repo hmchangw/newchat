@@ -12,16 +12,17 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/testutil"
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 // newTestStore returns a store over a per-test cluster. Per CLAUDE.md, the
 // per-test cluster is used because the store wraps a client whose Close() it
 // owns; the test never calls store.Close() (StartValkeyCluster's t.Cleanup
 // closes the client).
-func newTestStore(t *testing.T, stale, connsTTL time.Duration) *valkeyStore {
+func newTestStore(t *testing.T, stale, connsTTL time.Duration) *presencestore.Store {
 	t.Helper()
 	c := testutil.StartValkeyCluster(t)
-	return newValkeyStoreFromClient(c, stale, connsTTL)
+	return presencestore.NewValkeyStoreFromClient(c, stale, connsTTL)
 }
 
 func TestValkeyStore_ConnectionLifecycle(t *testing.T) {

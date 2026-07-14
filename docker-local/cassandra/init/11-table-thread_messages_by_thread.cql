@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS chat.thread_messages_by_thread (
   msg                   TEXT,
   mentions              SET<FROZEN<"Participant">>,
   attachments           LIST<BLOB>,
-  file                  FROZEN<"File">,
   card                  FROZEN<"Card">,
   card_action           FROZEN<"CardAction">,
   quoted_parent_message FROZEN<"QuotedParentMessage">,
@@ -25,3 +24,4 @@ CREATE TABLE IF NOT EXISTS chat.thread_messages_by_thread (
 
 ALTER TABLE chat.thread_messages_by_thread ADD enc_payload BLOB;
 ALTER TABLE chat.thread_messages_by_thread ADD enc_meta FROZEN<"EncMeta">;
+ALTER TABLE chat.thread_messages_by_thread ADD tshow BOOLEAN;

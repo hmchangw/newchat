@@ -9,8 +9,10 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      - USER_CACHE_SIZE=10000
+      - USER_CACHE_TTL=5m
       - VALKEY_ADDRS=valkey:6379
-      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - PRESENCE_HEARTBEAT_INTERVAL=15s
       - PRESENCE_STALE_THRESHOLD=45s

@@ -26,18 +26,46 @@ type ThreadSubscription struct {
 	UpdatedAt  time.Time  `json:"updatedAt"   bson:"updatedAt"`
 }
 
-// ThreadUnreadSummaryRequest is the NATS request body for the per-site thread
-// unread summary RPC. Filtered on userAccount (the key every thread_subscriptions
-// query and index uses).
-type ThreadUnreadSummaryRequest struct {
-	UserAccount string `json:"userAccount"`
+// ThreadUnreadRow is an account's thread-sub joined with its subscription: the
+// badge fields plus the room type. Only rows the account can still access
+// survive the join; RoomType feeds the DM tally.
+type ThreadUnreadRow struct {
+	ThreadRoomID string     `json:"threadRoomId" bson:"threadRoomId"`
+	SiteID       string     `json:"siteId"       bson:"siteId"`
+	RoomType     RoomType   `json:"roomType"     bson:"roomType"`
+	LastSeenAt   *time.Time `json:"lastSeenAt"   bson:"lastSeenAt"`
+	HasMention   bool       `json:"hasMention"   bson:"hasMention"`
 }
 
-// ThreadUnreadSummaryResponse is the per-site thread unread rollup for one user.
-// LastMessageAt is UnixMilli; nil when the user has no threads on this site.
+// ThreadUnreadSummaryRequest is the client-facing thread-unread badge request. The
+// account rides the subject; no body fields.
+type ThreadUnreadSummaryRequest struct{}
+
+// ThreadUnreadSummaryResponse is the cross-site thread-unread badge. Booleans are ORed
+// and LastMessageAt is maxed over the responding sites. UnavailableSites lists
+// sites whose RPC failed so a client can distinguish degraded from authoritative.
 type ThreadUnreadSummaryResponse struct {
-	Unread              bool   `json:"unread"`
-	UnreadDirectMessage bool   `json:"unreadDirectMessage"`
-	UnreadMention       bool   `json:"unreadMention"`
-	LastMessageAt       *int64 `json:"lastMessageAt,omitempty"`
+	Unread              bool     `json:"unread"`
+	UnreadDirectMessage bool     `json:"unreadDirectMessage"`
+	UnreadMention       bool     `json:"unreadMention"`
+	LastMessageAt       *int64   `json:"lastMessageAt,omitempty"` // UnixMilli
+	UnavailableSites    []string `json:"unavailableSites,omitempty"`
+}
+
+// ThreadRoomInfoBatchRequest asks room-service for a batch of thread rooms' info.
+type ThreadRoomInfoBatchRequest struct {
+	ThreadRoomIDs []string `json:"threadRoomIds"`
+}
+
+// ThreadRoomInfo is one thread room's last-activity time. Found=false means the
+// thread room does not exist (LastMsgAt is 0).
+type ThreadRoomInfo struct {
+	ThreadRoomID string `json:"threadRoomId"`
+	Found        bool   `json:"found"`
+	LastMsgAt    int64  `json:"lastMsgAt"` // UnixMilli; 0 when Found=false
+}
+
+// ThreadRoomInfoBatchResponse is the batch reply, one entry per requested id.
+type ThreadRoomInfoBatchResponse struct {
+	Threads []ThreadRoomInfo `json:"threads"`
 }

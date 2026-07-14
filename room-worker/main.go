@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -29,21 +33,35 @@ import (
 )
 
 type config struct {
-	NatsURL          string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile    string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID           string                  `env:"SITE_ID"         envDefault:"site-local"`
-	MongoURI         string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB          string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername    string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword    string                  `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers       int                     `env:"MAX_WORKERS"        envDefault:"100"`
-	KeyFanoutWorkers int                     `env:"KEY_FANOUT_WORKERS" envDefault:"32"` // see defaultKeyFanoutWorkers in handler.go
-	Consumer         stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap        bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	DebugLog         logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
+	MongoURI          string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB           string                  `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername     string                  `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword     string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers        int                     `env:"MAX_WORKERS"        envDefault:"100"`
+	KeyFanoutWorkers  int                     `env:"KEY_FANOUT_WORKERS" envDefault:"32"` // see defaultKeyFanoutWorkers in handler.go
+	UserCacheSize     int                     `env:"USER_CACHE_SIZE"    envDefault:"10000"`
+	UserCacheTTL      time.Duration           `env:"USER_CACHE_TTL"     envDefault:"5m"`
+	RoomMetaCacheSize int                     `env:"ROOM_META_CACHE_SIZE" envDefault:"10000"`
+	RoomMetaCacheTTL  time.Duration           `env:"ROOM_META_CACHE_TTL"  envDefault:"60s"`
+	Consumer          stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap         bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr        string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled      bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr       string                  `env:"METRICS_ADDR" envDefault:":9090"`
+	DebugLog          logctx.Config           `envPrefix:"DEBUG_LOG_"`
 
 	// Grace window during which a rotated-out previous key remains valid for decrypt.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
+
+	// MemberCountReconcileTTL bounds how often the add-member hot path runs a
+	// full O(room) recompute of userCount/appCount. Between recomputes the
+	// counts are maintained incrementally ($inc by the actual delta); a full
+	// reconcile runs at most once per room per TTL as a drift safety net. 0
+	// forces a recompute on every add (legacy behaviour).
+	MemberCountReconcileTTL time.Duration `env:"MEMBER_COUNT_RECONCILE_TTL" envDefault:"60s"`
 
 	// Valkey backs best-effort room-meta L2 cache invalidation. Optional: when
 	// VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles).
@@ -141,6 +159,28 @@ func main() {
 	streamCfg := stream.Rooms(cfg.SiteID)
 
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
+	// User cache is on by default; a non-positive size disables it cleanly rather
+	// than failing startup (the LRU constructor rejects size<=0).
+	if cfg.UserCacheSize > 0 {
+		if err := store.EnableUserCache(cfg.UserCacheSize, cfg.UserCacheTTL); err != nil {
+			slog.Error("failed to enable user cache", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
+	} else {
+		slog.Info("user-cache disabled", "size", cfg.UserCacheSize)
+	}
+	// Room-meta cache is on by default; a non-positive size disables it cleanly
+	// rather than failing startup (the LRU constructor rejects size<=0).
+	if cfg.RoomMetaCacheSize > 0 {
+		if err := store.EnableRoomMetaCache(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL); err != nil {
+			slog.Error("failed to enable room-meta cache", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
+	} else {
+		slog.Info("room-meta-cache disabled", "size", cfg.RoomMetaCacheSize)
+	}
 	handler := NewHandler(store, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		msg := natsutil.NewMsg(ctx, subj, data)
 		if msgID == "" {
@@ -150,7 +190,7 @@ func main() {
 			}
 			return nil
 		}
-		// JetStream-backed (MESSAGES_CANONICAL, OUTBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
+		// JetStream-backed (MESSAGES_CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
 		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}
@@ -159,6 +199,7 @@ func main() {
 	handler.SetKeyFanoutWorkers(cfg.KeyFanoutWorkers)
 	handler.dekProvisioner = dekProvisioner
 	handler.valkey = metaValkey
+	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
 	router := natsrouter.New(nc, "room-worker")
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
@@ -201,6 +242,29 @@ func main() {
 		}
 	}()
 
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
+		natsutil.HealthCheck(nc),
+	)
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
+
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes the atrest DEK and cache hit-rate counters.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	slog.Info("room-worker running", "site", cfg.SiteID)
 
 	// Shutdown ordering: drain inbound work first, then close client connections,
@@ -232,9 +296,14 @@ func main() {
 			}
 			return nil
 		},
+		// Stop /metrics late so Prometheus can scrape the final drain-window counts,
+		// then flush the meter provider.
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { return meterShutdown(ctx) },
 	}
+
+	hooks = append(hooks, func(ctx context.Context) error { return healthStop(ctx) })
 
 	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
@@ -265,7 +334,7 @@ func runJobWithRecovery(msgCtx context.Context, handler jobProcessor, msg jetstr
 	// RequestID middleware mints one when the client omits it), so by the time a
 	// message lands on the ROOMS stream the header should always be a valid UUID.
 	// If we end up minting here, room-service failed to stamp one — an anomaly
-	// worth an Error log, because downstream OutboxDedupID / message-ID generation
+	// worth an Error log, because downstream InboxDedupID / message-ID generation
 	// derives dedup keys from the request ID. Note: clients that retry without a
 	// stable X-Request-ID still defeat dedup upstream (room-service mints a fresh
 	// ID each attempt); the boundary no longer rejects them. See

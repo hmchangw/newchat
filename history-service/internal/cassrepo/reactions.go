@@ -15,11 +15,11 @@ import (
 // reads it for reaction freshness, so the touch is dead work.
 
 const (
-	addReactionMsgByID   = `UPDATE messages_by_id SET reactions[?] = ?, updated_at = ? WHERE message_id = ? AND created_at = ?`
+	addReactionMsgByID   = `UPDATE messages_by_id SET reactions[?] = ?, updated_at = ? WHERE message_id = ?`
 	addReactionMsgByRoom = `UPDATE messages_by_room SET reactions[?] = ?, updated_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
 	addReactionThreadMsg = `UPDATE thread_messages_by_thread SET reactions[?] = ?, updated_at = ? WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`
 
-	removeReactionMsgByID   = `DELETE reactions[?] FROM messages_by_id WHERE message_id = ? AND created_at = ?`
+	removeReactionMsgByID   = `DELETE reactions[?] FROM messages_by_id WHERE message_id = ?`
 	removeReactionMsgByRoom = `DELETE reactions[?] FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
 	removeReactionThreadMsg = `DELETE reactions[?] FROM thread_messages_by_thread WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`
 )
@@ -34,7 +34,7 @@ func (r *Repository) AddReaction(ctx context.Context, msg *models.Message, key m
 	reactedAt := reactor.ReactedAt
 
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-	batch.Query(addReactionMsgByID, key, reactor, reactedAt, msg.MessageID, msg.CreatedAt)
+	batch.Query(addReactionMsgByID, key, reactor, reactedAt, msg.MessageID)
 	if msg.ThreadParentID == "" {
 		b := r.bucket.Of(msg.CreatedAt)
 		batch.Query(addReactionMsgByRoom, key, reactor, reactedAt, msg.RoomID, b, msg.CreatedAt, msg.MessageID)
@@ -57,7 +57,7 @@ func (r *Repository) RemoveReaction(ctx context.Context, msg *models.Message, ke
 	}
 
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-	batch.Query(removeReactionMsgByID, key, msg.MessageID, msg.CreatedAt)
+	batch.Query(removeReactionMsgByID, key, msg.MessageID)
 	if msg.ThreadParentID == "" {
 		b := r.bucket.Of(msg.CreatedAt)
 		batch.Query(removeReactionMsgByRoom, key, msg.RoomID, b, msg.CreatedAt, msg.MessageID)

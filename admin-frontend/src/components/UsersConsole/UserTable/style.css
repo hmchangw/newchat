@@ -1,0 +1,48 @@
+.users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+
+.users-table th,
+.users-table td {
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.users-table th {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+}
+
+.users-table-actions {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.users-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-2xs) var(--space-sm);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+}
+
+.users-status-badge.is-active {
+  background: var(--status-success-bg);
+  color: var(--status-success);
+}
+
+.users-status-badge.is-deactivated {
+  background: var(--status-error-bg);
+  color: var(--status-error);
+}
+
+.users-table-status {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--text-muted);
+}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
@@ -25,17 +28,36 @@ func TestSiteIDs_AreLocalAndRemote(t *testing.T) {
 func TestBuildUsers_ReturnsExpectedRoster(t *testing.T) {
 	users := BuildUsers()
 
-	require.Len(t, users, 10)
+	require.Len(t, users, 11)
 
 	wantIDs := []string{
 		"u-alice", "u-bob", "u-carol", "u-dave", "u-eve",
 		"u-frank", "u-grace", "u-heidi", "u-ivan", "u-judy",
+		"u-admin",
 	}
 	gotIDs := make([]string, len(users))
 	for i, u := range users {
 		gotIDs[i] = u.ID
 	}
 	assert.Equal(t, wantIDs, gotIDs)
+}
+
+// TestBuildUsers_AdminHasLoginCredentials is the regression test for demo
+// bot/admin password login (docker-local Task 5 of the unified-gateway
+// migration): u-admin must carry the admin role and a bcrypt hash that
+// botplatform-service's verifyPassword (bcrypt-compare against
+// sha256hex(plaintext)) accepts for the documented demo password.
+func TestBuildUsers_AdminHasLoginCredentials(t *testing.T) {
+	users := usersByAccount()
+	admin, ok := users["admin"]
+	require.True(t, ok, "seed roster must include an admin account")
+
+	assert.True(t, model.HasLoginRole(admin.Roles), "admin account must carry a login-eligible role")
+	require.NotEmpty(t, admin.Services.Password.Bcrypt, "admin account must carry a bcrypt password hash")
+
+	sum := sha256.Sum256([]byte(demoAdminPassword))
+	err := bcrypt.CompareHashAndPassword([]byte(admin.Services.Password.Bcrypt), []byte(hex.EncodeToString(sum[:])))
+	assert.NoError(t, err, "stored hash must verify against the documented demo password")
 }
 
 func TestBuildUsers_AccountMatchesIDSuffix(t *testing.T) {
@@ -57,7 +79,7 @@ func TestBuildUsers_SiteDistribution(t *testing.T) {
 			t.Fatalf("unexpected siteId %q on user %s", u.SiteID, u.ID)
 		}
 	}
-	assert.Equal(t, 8, local, "8 local users (alice..heidi)")
+	assert.Equal(t, 9, local, "9 local users (alice..heidi, admin)")
 	assert.Equal(t, 2, remote, "2 remote users (ivan, judy)")
 }
 

@@ -1,0 +1,55 @@
+# Traefik dynamic configuration (file provider) for the local-dev unified
+# `/api/v1` gateway (see docs/superpowers/plans/2026-07-06-unified-api-gateway.md).
+# Routes are plain PathPrefix matches forwarded to each owning service's
+# in-network container:port on the shared chat-local Docker network — no
+# Docker-label discovery, so services don't need any gateway-specific
+# annotations of their own.
+#
+# Portal-service's own /api/v1/login is deliberately NOT routed here — portal
+# stays "portal-direct" (its own host port, 8085), not behind the gateway.
+http:
+  routers:
+    auth:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      entryPoints:
+        - web
+      service: auth-service
+
+    file:
+      rule: "PathPrefix(`/api/v1/file`)"
+      entryPoints:
+        - web
+      service: upload-service
+
+    avatar:
+      rule: "PathPrefix(`/api/v1/avatar`)"
+      entryPoints:
+        - web
+      service: media-service
+
+    password-change:
+      rule: "PathPrefix(`/api/v1/password/change`)"
+      entryPoints:
+        - web
+      service: botplatform-service
+
+  services:
+    auth-service:
+      loadBalancer:
+        servers:
+          - url: "http://auth-service:8080"
+
+    upload-service:
+      loadBalancer:
+        servers:
+          - url: "http://upload-service:8080"
+
+    media-service:
+      loadBalancer:
+        servers:
+          - url: "http://media-service:8080"
+
+    botplatform-service:
+      loadBalancer:
+        servers:
+          - url: "http://botplatform-service:8080"

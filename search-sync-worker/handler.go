@@ -60,11 +60,17 @@ func NewHandler(store Store, collection Collection, bulkSize int) *Handler {
 	}
 }
 
-// Add parses a JetStream message via the collection and adds its actions to
-// the buffer. If the collection produces zero actions (e.g., a filtered
-// event), the message is immediately acked without touching the buffer.
+// Add parses a JetStream message via the collection and adds its actions
+// to the buffer. If the collection produces zero actions, the message is
+// acked without touching the buffer.
 func (h *Handler) Add(msg jetstream.Msg) {
-	actions, err := h.collection.BuildAction(msg.Data())
+	data, err := decodePayload(msg)
+	if err != nil {
+		slog.Error("decode payload", "error", err)
+		natsutil.Ack(msg, "decode payload failed")
+		return
+	}
+	actions, err := h.collection.BuildAction(data)
 	if err != nil {
 		slog.Error("build action", "error", err)
 		natsutil.Ack(msg, "build action failed")

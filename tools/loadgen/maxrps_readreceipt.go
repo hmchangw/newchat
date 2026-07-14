@@ -25,6 +25,7 @@ func buildReadReceiptInputs(targetRPS int, hold time.Duration, c *ReadReceiptCol
 		AttemptedOps: len(samples) + failed,
 		FailedOps:    failed,
 		Saturation:   c.Saturation(),
+		EmitUnderrun: c.UnderrunCount(),
 		Latencies: []seriesSamples{
 			{Name: "read-receipt", Samples: samples},
 		},

@@ -18,6 +18,7 @@ type GroupImageObject struct {
 	FileID   string `json:"objectId"`
 	GroupID  string `json:"groupId"`
 	Filename string `json:"fileName"`
+	FileSize int64  `json:"fileSize"`
 }
 
 // UploadGroupImageResponse is one item in the Drive bulk-upload response.

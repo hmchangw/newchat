@@ -14,6 +14,8 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/pipelines"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/userstore"
 )
 
 type MongoStore struct {
@@ -21,6 +23,17 @@ type MongoStore struct {
 	rooms         *mongo.Collection
 	roomMembers   *mongo.Collection
 	users         *mongo.Collection
+	apps          *mongo.Collection
+	// userReader serves point lookups (GetUser, FindUsersByAccounts) and the
+	// direct-account candidate fast path. Defaults to an uncached read of the
+	// users collection; EnableUserCache wraps it in an LRU+TTL cache. The
+	// `users` collection above is still used directly for the org-expansion
+	// candidate query, which the by-account reader cannot serve.
+	userReader userstore.UserStore
+	// roomMeta, when non-nil (EnableRoomMetaCache), fronts GetRoomMeta with an
+	// in-process LRU+TTL cache of the room's stable fields. Nil means GetRoomMeta
+	// reads Mongo directly.
+	roomMeta *roommetacache.Cache
 }
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
@@ -29,7 +42,39 @@ func NewMongoStore(db *mongo.Database) *MongoStore {
 		rooms:         db.Collection("rooms"),
 		roomMembers:   db.Collection("room_members"),
 		users:         db.Collection("users"),
+		apps:          db.Collection("apps"),
+		userReader:    userstore.NewMongoStore(db.Collection("users")),
 	}
+}
+
+// EnableUserCache wraps the store's user reader in an in-process LRU+TTL cache.
+// Call once at startup; user docs are near-static (account→id and isBot are
+// immutable, org fields change rarely) so a short TTL bounds staleness. Reads
+// fall through to Mongo on miss; ErrUserNotFound is not negatively cached.
+func (s *MongoStore) EnableUserCache(size int, ttl time.Duration) error {
+	cache, err := userstore.NewCache(s.userReader, size, ttl)
+	if err != nil {
+		return fmt.Errorf("enable user cache: %w", err)
+	}
+	s.userReader = cache
+	return nil
+}
+
+// EnableRoomMetaCache fronts GetRoomMeta with an in-process LRU+TTL cache. The
+// add-member hot path (loadAddMemberInputs) reads only the stable fields
+// (Type/Name/SiteID/ID/UserCount), so caching them is safe; a rename is
+// reflected after at most the TTL. GetRoom is deliberately left uncached so the
+// DM idempotency path still sees the room's real CreatedAt. Call once at startup.
+func (s *MongoStore) EnableRoomMetaCache(size int, ttl time.Duration) error {
+	rooms := s.rooms // capture only the collection, not the whole store
+	cache, err := roommetacache.New(size, ttl, func(ctx context.Context, roomID string) (roommetacache.Meta, error) {
+		return roommetacache.FetchFromMongo(ctx, rooms, roomID)
+	})
+	if err != nil {
+		return fmt.Errorf("enable room meta cache: %w", err)
+	}
+	s.roomMeta = cache
+	return nil
 }
 
 // ListByRoom returns all subscriptions for roomID across every site. Not part
@@ -51,7 +96,7 @@ func (s *MongoStore) ListByRoom(ctx context.Context, roomID string) ([]model.Sub
 // ReconcileMemberCounts recomputes the room's AppCount (bot subs) and UserCount
 // (everyone else) and writes both back in a single updateOne. AppCount is an
 // index-backed CountDocuments on {roomId, u.isBot} (the flag is stamped at
-// sub-creation via model.IsBotAccount) and UserCount is total minus bots — both
+// sub-creation for ".bot"/"p_" accounts) and UserCount is total minus bots — both
 // counts use the index and no per-document regex runs. Deriving UserCount by
 // subtraction also means legacy docs written before u.isBot existed (and any
 // missing the field) correctly fall into UserCount rather than being dropped.
@@ -68,11 +113,13 @@ func (s *MongoStore) ReconcileMemberCounts(ctx context.Context, roomID string) e
 		return fmt.Errorf("count app subscriptions: %w", err)
 	}
 
+	now := time.Now().UTC()
 	if _, err := s.rooms.UpdateOne(ctx, bson.M{"_id": roomID}, bson.M{
 		"$set": bson.M{
-			"userCount": total - appCount,
-			"appCount":  appCount,
-			"updatedAt": time.Now().UTC(),
+			"userCount":          total - appCount,
+			"appCount":           appCount,
+			"countsReconciledAt": now,
+			"updatedAt":          now,
 		},
 	}); err != nil {
 		return fmt.Errorf("update room counts: %w", err)
@@ -80,6 +127,43 @@ func (s *MongoStore) ReconcileMemberCounts(ctx context.Context, roomID string) e
 	return nil
 }
 
+// ApplyMemberCountDelta atomically $inc's userCount/appCount and reports whether
+// a full recompute is now due. The $inc is O(1); the delta is the actual number
+// of subscriptions created/removed by the caller, so it stays correct under
+// JetStream redelivery (net-new is recomputed from live state each delivery) and
+// concurrent adds ($inc is atomic). The returned countsReconciledAt drives the
+// per-room TTL: a crash between the subscription write and this $inc, or a rare
+// racing duplicate, can leave the counter slightly drifted until the next
+// reconcile, which this method schedules once the TTL elapses.
+func (s *MongoStore) ApplyMemberCountDelta(ctx context.Context, roomID string, userDelta, appDelta int, ttl time.Duration) (bool, error) {
+	var doc struct {
+		CountsReconciledAt time.Time `bson:"countsReconciledAt"`
+	}
+	err := s.rooms.FindOneAndUpdate(ctx,
+		bson.M{"_id": roomID},
+		bson.M{
+			"$inc": bson.M{"userCount": userDelta, "appCount": appDelta},
+			"$set": bson.M{"updatedAt": time.Now().UTC()},
+		},
+		options.FindOneAndUpdate().
+			SetReturnDocument(options.After).
+			SetProjection(bson.M{"countsReconciledAt": 1}),
+	).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			// No such room — nothing to count, nothing to reconcile (matches
+			// ReconcileMemberCounts' no-op-on-missing UpdateOne).
+			return false, nil
+		}
+		return false, fmt.Errorf("apply member count delta for room %q: %w", roomID, err)
+	}
+	return doc.CountsReconciledAt.IsZero() || time.Since(doc.CountsReconciledAt) > ttl, nil
+}
+
+// GetRoom returns the full room document from Mongo. It is never cache-served:
+// callers such as serverCreateDM's idempotency path read time-sensitive fields
+// (CreatedAt) that the meta cache does not carry. The add-member hot path uses
+// GetRoomMeta instead, which only needs the stable fields.
 func (s *MongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
 	var room model.Room
 	if err := s.rooms.FindOne(ctx, bson.M{"_id": roomID}).Decode(&room); err != nil {
@@ -88,16 +172,52 @@ func (s *MongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 	return &room, nil
 }
 
+// GetRoomMeta returns a room populated with only its stable fields
+// (ID/Type/Name/SiteID/UserCount) — the subset the add-member hot path reads.
+// When the meta cache is enabled it is served from the in-process LRU+TTL cache;
+// otherwise it falls through to a direct Mongo read. The returned room's
+// CreatedAt/UpdatedAt are zero — callers needing those must use GetRoom.
+func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Room, error) {
+	var (
+		meta roommetacache.Meta
+		err  error
+	)
+	if s.roomMeta != nil {
+		meta, err = s.roomMeta.Get(ctx, roomID)
+	} else {
+		meta, err = roommetacache.FetchFromMongo(ctx, s.rooms, roomID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount}, nil
+}
+
 func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, error) {
-	var u model.User
-	err := s.users.FindOne(ctx, bson.M{"account": account}).Decode(&u)
-	if errors.Is(err, mongo.ErrNoDocuments) {
+	u, err := s.userReader.FindUserByAccount(ctx, account)
+	if errors.Is(err, userstore.ErrUserNotFound) {
 		return nil, ErrUserNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get user %q: %w", account, err)
 	}
-	return &u, nil
+	return u, nil
+}
+
+// GetApp reads the apps collection, which room-service owns and indexes
+// (assistant.name); room-worker only reads it and creates no index of its own.
+// Projects only name — the one field callers use (the botDM roomName).
+func (s *MongoStore) GetApp(ctx context.Context, botAccount string) (*model.App, error) {
+	var a model.App
+	err := s.apps.FindOne(ctx, bson.M{"assistant.name": botAccount},
+		options.FindOne().SetProjection(bson.M{"name": 1})).Decode(&a)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, ErrAppNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get app for bot %q: %w", botAccount, err)
+	}
+	return &a, nil
 }
 
 func (s *MongoStore) CreateRoom(ctx context.Context, room *model.Room, key *roomkeystore.RoomKeyPair) (bool, error) {
@@ -139,32 +259,30 @@ func (s *MongoStore) CreateRoom(ctx context.Context, room *model.Room, key *room
 }
 
 func (s *MongoStore) ListNewMembersForNewRoom(ctx context.Context, orgIDs, accounts []string, excludeAccount string) ([]string, error) {
-	pipe := pipelines.GetNewMembersPipeline(orgIDs, accounts, "", excludeAccount)
-	pipe = append(pipe, bson.M{"$group": bson.M{
-		"_id":      nil,
-		"accounts": bson.M{"$addToSet": "$account"},
-	}})
-	cur, err := s.users.Aggregate(ctx, pipe)
+	if len(orgIDs) == 0 && len(accounts) == 0 {
+		return nil, nil
+	}
+	filter := pipelines.MatchCandidatesFilter(orgIDs, accounts, excludeAccount)
+	cur, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 0}))
 	if err != nil {
 		return nil, fmt.Errorf("list new members for new room: %w", err)
 	}
 	defer cur.Close(ctx)
-	if !cur.Next(ctx) {
-		// Distinguish a true empty result from a cursor/read failure — the
-		// caller must not proceed to room creation when membership resolution
-		// silently failed.
-		if err := cur.Err(); err != nil {
-			return nil, fmt.Errorf("iterate aggregation result: %w", err)
-		}
+	var rows []struct {
+		Account string `bson:"account"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode new members for new room: %w", err)
+	}
+	if len(rows) == 0 {
 		return nil, nil
 	}
-	var doc struct {
-		Accounts []string `bson:"accounts"`
+	// account is unique in the users collection, so rows carry no duplicates.
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Account
 	}
-	if err := cur.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("decode aggregation result: %w", err)
-	}
-	return doc.Accounts, nil
+	return out, nil
 }
 
 func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
@@ -394,18 +512,7 @@ func (s *MongoStore) BulkCreateRoomMembers(ctx context.Context, members []*model
 }
 
 func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
-	if len(accounts) == 0 {
-		return nil, nil
-	}
-	cursor, err := s.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}})
-	if err != nil {
-		return nil, fmt.Errorf("find users by accounts: %w", err)
-	}
-	var users []model.User
-	if err := cursor.All(ctx, &users); err != nil {
-		return nil, fmt.Errorf("decode users: %w", err)
-	}
-	return users, nil
+	return s.userReader.FindUsersByAccounts(ctx, accounts)
 }
 
 func (s *MongoStore) HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error) {
@@ -420,20 +527,101 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 	if len(orgIDs) == 0 && len(directAccounts) == 0 {
 		return nil, nil
 	}
-	pipeline, err := pipelines.GetAddMemberCandidatesPipeline(orgIDs, directAccounts, roomID, "")
-	if err != nil {
-		return nil, fmt.Errorf("build add-member candidates pipeline: %w", err)
+	// 1. Resolve the candidate users (account + id).
+	type candidate struct{ ID, Account string }
+	var candidates []candidate
+	if len(orgIDs) == 0 {
+		// Direct accounts only: resolve via the user reader (cache-friendly) and
+		// filter bots in Go — avoids the users query and the $not regex entirely.
+		users, err := s.userReader.FindUsersByAccounts(ctx, directAccounts)
+		if err != nil {
+			return nil, fmt.Errorf("find add-member candidate users: %w", err)
+		}
+		for i := range users {
+			if model.IsBot(users[i].Account) || model.IsPlatformAdminAccount(users[i].Account) {
+				continue
+			}
+			candidates = append(candidates, candidate{ID: users[i].ID, Account: users[i].Account})
+		}
+	} else {
+		// Org expansion needs the sectId/deptId query on the users collection,
+		// which the by-account reader cannot serve.
+		filter := pipelines.MatchCandidatesFilter(orgIDs, directAccounts, "")
+		cursor, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 1}))
+		if err != nil {
+			return nil, fmt.Errorf("find add-member candidates: %w", err)
+		}
+		var rows []struct {
+			ID      string `bson:"_id"`
+			Account string `bson:"account"`
+		}
+		if err := cursor.All(ctx, &rows); err != nil {
+			return nil, fmt.Errorf("decode add-member candidates: %w", err)
+		}
+		for _, r := range rows {
+			candidates = append(candidates, candidate{ID: r.ID, Account: r.Account})
+		}
 	}
-	cursor, err := s.users.Aggregate(ctx, pipeline)
-	if err != nil {
-		return nil, fmt.Errorf("aggregate add-member candidates: %w", err)
+	if len(candidates) == 0 {
+		return nil, nil
 	}
-	defer cursor.Close(ctx)
-	var out []AddMemberCandidate
-	if err := cursor.All(ctx, &out); err != nil {
-		return nil, fmt.Errorf("decode add-member candidates: %w", err)
+	accounts := make([]string, len(candidates))
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		accounts[i] = c.Account
+		ids[i] = c.ID
+	}
+	// 2. Already-subscribed candidates (always needed).
+	subbed, err := pipelines.SubscribedAccounts(ctx, s.subscriptions, roomID, accounts)
+	if err != nil {
+		return nil, err
+	}
+	// 3. Existing individual room_members rows — only consulted when the room
+	// tracks individuals, which the worker gates on writeIndividuals (orgs in
+	// the request OR pre-existing org rows). With no orgs the handler never
+	// reads HasIndividualRoomMember, so skip this room_members read entirely;
+	// for an org-bearing request it always runs. (A no-org add to a room that
+	// formerly had orgs may re-attempt a few individual inserts, which
+	// BulkCreateRoomMembers absorbs as idempotent dup-key no-ops.)
+	var irm map[string]struct{}
+	if len(orgIDs) > 0 {
+		irm, err = s.individualMemberIDs(ctx, roomID, ids)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out := make([]AddMemberCandidate, len(candidates))
+	for i, c := range candidates {
+		_, hasSub := subbed[c.Account]
+		_, hasIRM := irm[c.ID]
+		out[i] = AddMemberCandidate{Account: c.Account, HasSubscription: hasSub, HasIndividualRoomMember: hasIRM}
 	}
 	return out, nil
+}
+
+// individualMemberIDs returns the subset of user ids that already have an
+// individual room_members row for roomID. Indexed on
+// (rid, member.type, member.id).
+func (s *MongoStore) individualMemberIDs(ctx context.Context, roomID string, ids []string) (map[string]struct{}, error) {
+	cursor, err := s.roomMembers.Find(ctx,
+		bson.M{"rid": roomID, "member.type": string(model.RoomMemberIndividual), "member.id": bson.M{"$in": ids}},
+		options.Find().SetProjection(bson.M{"member.id": 1, "_id": 0}))
+	if err != nil {
+		return nil, fmt.Errorf("find existing room members for room %q: %w", roomID, err)
+	}
+	var rows []struct {
+		Member struct {
+			ID string `bson:"id"`
+		} `bson:"member"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode existing room members: %w", err)
+	}
+	set := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		set[r.Member.ID] = struct{}{}
+	}
+	return set, nil
 }
 
 func (s *MongoStore) GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error) {

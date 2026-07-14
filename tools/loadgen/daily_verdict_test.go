@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -278,4 +279,28 @@ func repeatFloat(v float64, n int) []float64 {
 		out[i] = v
 	}
 	return out
+}
+
+func TestEvaluateStep_IgnoresPresence(t *testing.T) {
+	// evaluateStep must never read Presence; a healthy step stays PASS
+	// regardless of presence stats, which are populated outside the verdict.
+	in := stepInputs{
+		N: 100, EffectiveN: 100,
+		HoldDuration:   time.Minute,
+		LatencySamples: []float64{10, 20, 30},
+		AttemptedOps:   1000, FailedOps: 0,
+		Self: SelfMetrics{GCPauseP99Ms: 5},
+	}
+	r := evaluateStep(in, defaultThresholds())
+	assert.False(t, r.Tripped)
+	assert.False(t, r.Inconclusive)
+	assert.Nil(t, r.Presence) // evaluateStep does not set it
+}
+
+func TestPresenceObsStats_Shape(t *testing.T) {
+	s := PresenceObsStats{P50Ms: 5, P95Ms: 40, P99Ms: 90, Attempted: 100, Failed: 2}
+	if s.Attempted > 0 {
+		s.ErrorRate = float64(s.Failed) / float64(s.Attempted)
+	}
+	assert.InDelta(t, 0.02, s.ErrorRate, 1e-9)
 }

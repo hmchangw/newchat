@@ -17,8 +17,9 @@ import (
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 
-	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -39,6 +40,8 @@ type config struct {
 	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
 	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
 // mongoInboxStore implements InboxStore using MongoDB.
@@ -102,9 +105,17 @@ func (s *mongoInboxStore) UpdateSubscriptionRoles(ctx context.Context, account, 
 	if err != nil {
 		return fmt.Errorf("update subscription roles for %q in room %q: %w", account, roomID, err)
 	}
-	if res.MatchedCount > 0 {
-		return nil
+	if res.MatchedCount == 0 {
+		return s.naksIfSubscriptionMissing(ctx, account, roomID)
 	}
+	return nil
+}
+
+// naksIfSubscriptionMissing disambiguates a MatchedCount==0 guarded subscription write. A genuinely
+// missing subscription returns an error (Nak → redelivered until member_added lands, the
+// federation/migration race where field events can race ahead of member_added); a stale event the
+// high-water guard rejected is a silent no-op (the sub exists with a newer-or-equal value).
+func (s *mongoInboxStore) naksIfSubscriptionMissing(ctx context.Context, account, roomID string) error {
 	exists, err := s.subscriptionExists(ctx, account, roomID)
 	if err != nil {
 		return fmt.Errorf("check subscription exists for %q in room %q: %w", account, roomID, err)
@@ -154,6 +165,40 @@ func (s *mongoInboxStore) FindUsersByAccounts(ctx context.Context, accounts []st
 	return users, nil
 }
 
+// UpdateUserStatus mirrors a cross-site status change onto the local users doc
+// keyed by account. statusIsShow is written only when non-nil so a text-only
+// update cannot clobber the stored flag. A missing user (no doc on this site)
+// is a silent no-op — the event is for an account that doesn't live here.
+func (s *mongoInboxStore) UpdateUserStatus(ctx context.Context, account, statusText string, statusIsShow *bool, statusUpdatedAt time.Time) error {
+	set := bson.M{"statusText": statusText, "statusUpdatedAt": statusUpdatedAt}
+	if statusIsShow != nil {
+		set["statusIsShow"] = *statusIsShow
+	}
+	// Guard on the statusUpdatedAt high-water mark so an out-of-order or duplicate event
+	// (the status fans to all sites) can't regress to an older status.
+	filter := bson.M{"account": account, "$or": bson.A{
+		bson.M{"statusUpdatedAt": bson.M{"$exists": false}},
+		bson.M{"statusUpdatedAt": bson.M{"$lt": statusUpdatedAt}},
+	}}
+	res, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set})
+	if err != nil {
+		return fmt.Errorf("update user status for %q: %w", account, err)
+	}
+	if res.MatchedCount == 0 {
+		// The UpdateOne above already committed; MatchedCount==0 is a correct no-op (account not on
+		// this site, or a stale event the guard rejected). CountDocuments only picks the warn
+		// message, so a failure here must not Nak/retry an already-applied write — log and move on.
+		count, cerr := s.userCol.CountDocuments(ctx, bson.M{"account": account})
+		switch {
+		case cerr != nil:
+			slog.WarnContext(ctx, "user existence check failed, skipping unknown-account log", "account", account, "error", cerr)
+		case count == 0:
+			slog.WarnContext(ctx, "user_status_updated for unknown account, skipping", "account", account)
+		}
+	}
+	return nil
+}
+
 // BulkCreateSubscriptions inserts the supplied subs idempotently. Each is
 // keyed by (roomId, u.account) and written via $setOnInsert so an existing
 // sub (from a previous delivery, or with read-state already accumulated) is
@@ -190,8 +235,12 @@ func (s *mongoInboxStore) UpdateSubscriptionMute(ctx context.Context, roomID, ac
 		},
 	}
 	update := bson.M{"$set": bson.M{"muted": muted, "muteUpdatedAt": muteUpdatedAt}}
-	if _, err := s.subCol.UpdateOne(ctx, filter, update); err != nil {
+	res, err := s.subCol.UpdateOne(ctx, filter, update)
+	if err != nil {
 		return fmt.Errorf("update subscription mute for %q in room %q: %w", account, roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return s.naksIfSubscriptionMissing(ctx, account, roomID)
 	}
 	return nil
 }
@@ -210,8 +259,12 @@ func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID
 		},
 	}
 	update := bson.M{"$set": bson.M{"favorite": favorite, "favoriteUpdatedAt": favoriteUpdatedAt}}
-	if _, err := s.subCol.UpdateOne(ctx, filter, update); err != nil {
+	res, err := s.subCol.UpdateOne(ctx, filter, update)
+	if err != nil {
 		return fmt.Errorf("update subscription favorite for %q in room %q: %w", account, roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return s.naksIfSubscriptionMissing(ctx, account, roomID)
 	}
 	return nil
 }
@@ -226,31 +279,49 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 		},
 	}
 	update := bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert}}
-	if _, err := s.subCol.UpdateOne(ctx, filter, update); err != nil {
+	res, err := s.subCol.UpdateOne(ctx, filter, update)
+	if err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return s.naksIfSubscriptionMissing(ctx, account, roomID)
 	}
 	return nil
 }
 
-// ensureIndexes creates the unique index on (threadRoomId, userId) used by
-// UpsertThreadSubscription. The index name and shape match what message-worker
-// creates in its own threadStoreMongo so both services agree on the natural
-// key for thread subscriptions.
+// ensureIndexes creates the unique index on (threadRoomId, userAccount) used by
+// UpsertThreadSubscription. The shape matches what room-service, message-worker,
+// and history-service create so every service that touches thread_subscriptions
+// agrees on the natural key. userAccount is the stable cross-site identity;
+// userId is site-local, so keying on it would let federated upserts miss
+// existing documents and collide on this unique index.
 func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
+	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the
+	// (threadRoomId, userAccount) index can be created without a key conflict.
+	// Mirrors message-worker's threadStoreMongo.EnsureIndexes; the index may not
+	// exist (fresh deploy / test container), so ignore all errors.
+	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
+
 	if _, err := s.threadSubCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userId) index: %w", err)
+		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
 	return nil
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a
-// (threadRoomId, userId) pair, and on subsequent events updates only
+// (threadRoomId, userAccount) pair, and on subsequent events updates only
 // updatedAt and (monotonically) hasMention. $setOnInsert pins the immutable
 // fields on insert; $set always refreshes updatedAt; $max on hasMention
 // guarantees a non-mention event never clears a prior mention=true.
+//
+// The dedupe key is userAccount (not userId) so it matches the unique index and
+// the key used by message-worker / room-service / history-service. userId is a
+// site-local identity that can differ between the local document and a federated
+// event for the same account; keying on it would insert a duplicate that then
+// collides with the (threadRoomId, userAccount) unique index.
 //
 // $max on a bool works because BSON encodes false (0x00) < true (0x01), so
 // $max(existing, incoming) for a bool is equivalent to a monotonic OR.
@@ -259,7 +330,7 @@ func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
 // only — never by $setOnInsert) so MongoDB doesn't reject the update with a
 // "conflicting update operators" error.
 func (s *mongoInboxStore) UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
-	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userId": sub.UserID}
+	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
 	update := bson.M{
 		"$setOnInsert": bson.M{
 			"_id":             sub.ID,
@@ -301,25 +372,25 @@ func (s *mongoInboxStore) UpdateSubscriptionNamesForRoom(ctx context.Context, ro
 	return nil
 }
 
-// ApplySubscriptionVisibility writes {restricted, externalAccess, roles} to all
-// subs in the room, each guarded by its own visibilityUpdatedAt ($lt) so an
+// ApplySubscriptionRestriction writes {restricted, externalAccess, roles} to all
+// subs in the room, each guarded by its own restrictUpdatedAt ($lt) so an
 // out-of-order visibility change cannot regress the flags/roles. The guard lives
 // in the filter for both the restrict-with-owner pipeline branch and the
 // flags-only branch.
-func (s *mongoInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error {
+func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error {
 	filter := bson.M{
 		"roomId": roomID,
 		"$or": bson.A{
-			bson.M{"visibilityUpdatedAt": bson.M{"$exists": false}},
-			bson.M{"visibilityUpdatedAt": bson.M{"$lt": visibilityUpdatedAt}},
+			bson.M{"restrictUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"restrictUpdatedAt": bson.M{"$lt": restrictUpdatedAt}},
 		},
 	}
 	if restricted && ownerAccount != "" {
 		pipeline := mongo.Pipeline{
 			bson.D{{Key: "$set", Value: bson.M{
-				"restricted":          true,
-				"externalAccess":      externalAccess,
-				"visibilityUpdatedAt": visibilityUpdatedAt,
+				"restricted":        true,
+				"externalAccess":    externalAccess,
+				"restrictUpdatedAt": restrictUpdatedAt,
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
@@ -333,7 +404,7 @@ func (s *mongoInboxStore) ApplySubscriptionVisibility(ctx context.Context, roomI
 		return nil
 	}
 	if _, err := s.subCol.UpdateMany(ctx, filter, bson.M{
-		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess, "visibilityUpdatedAt": visibilityUpdatedAt},
+		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess, "restrictUpdatedAt": restrictUpdatedAt},
 	}); err != nil {
 		return fmt.Errorf("apply visibility (flags only): %w", err)
 	}
@@ -433,7 +504,7 @@ func main() {
 
 	inboxCfg := stream.Inbox(cfg.SiteID)
 
-	// Local lane is reserved for search-sync-worker; scope to aggregate.> only.
+	// Internal lane is reserved for search-sync-worker; scope to external.> only.
 	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
@@ -442,7 +513,7 @@ func main() {
 
 	handler := NewHandler(store)
 
-	// Two-lane pull pattern over the single INBOX aggregate consumer:
+	// Two-lane pull pattern over the single INBOX external consumer:
 	//
 	//   - Membership events (member_added/member_removed) run on ONE
 	//     sequential lane. They are NOT individually order-safe — a physical
@@ -475,25 +546,8 @@ func main() {
 		// redelivery. On panic it Acks (poison drop).
 		jobguard.Run(msg.Msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msg.Context(), msg.Headers(), msg.Subject())
-			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
-				// Permanent failures (poison messages) Ack so JetStream stops
-				// redelivering; transient infra errors Nak for redelivery.
-				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-					if err := msg.Ack(); err != nil {
-						slog.Error("failed to ack permanent message", "error", err)
-					}
-					return
-				}
-				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := msg.Nak(); err != nil {
-					slog.Error("failed to nak message", "error", err)
-				}
-				return
-			}
-			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack message", "error", err)
-			}
+			// Federated events: Ack-drop poison, Nak transient with backoff.
+			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
 		})
 	}
 
@@ -531,6 +585,14 @@ func main() {
 		}
 	}()
 
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
+		natsutil.HealthCheck(nc),
+	)
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("inbox-worker started", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
@@ -551,26 +613,27 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error { return healthStop(ctx) },
 	)
 }
 
-// isMembershipSubject reports whether an INBOX aggregate-lane subject carries a
+// isMembershipSubject reports whether an INBOX external-lane subject carries a
 // membership event (member_added/member_removed) for this site. Those events
 // are routed to a single sequential lane because, unlike the read-receipt and
 // role/mute/room_sync handlers, they have no per-document high-water-mark guard
 // and so must be applied in order to avoid the add/remove resurrection race.
 func isMembershipSubject(subj, siteID string) bool {
-	return subj == subject.InboxMemberAddedAggregate(siteID) ||
-		subj == subject.InboxMemberRemovedAggregate(siteID)
+	return subj == subject.InboxExternal(siteID, model.InboxMemberAdded) ||
+		subj == subject.InboxExternal(siteID, model.InboxMemberRemoved)
 }
 
 // buildConsumerConfig returns the durable consumer config for
 // inbox-worker. The site-scoped FilterSubjects keeps inbox-worker on the
-// federated `aggregate.>` lane only; same-site direct publishes are
+// cross-site `external.>` lane only; same-site internal publishes are
 // reserved for search-sync-worker.
 func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "inbox-worker"
-	cc.FilterSubjects = []string{subject.InboxAggregateAll(siteID)}
+	cc.FilterSubjects = []string{subject.InboxExternalAll(siteID)}
 	return cc
 }

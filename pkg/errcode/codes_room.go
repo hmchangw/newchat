@@ -21,4 +21,11 @@ const (
 	// against a DM or bot-DM. The frontend uses it to render a "this only
 	// works in channels" hint instead of a generic 400.
 	RoomNonChannelOperation Reason = "non_channel_operation"
+	// RoomReadReceiptsUnavailable marks a read-receipt request that could not be
+	// served because the message-history service used to resolve the target
+	// message is unreachable. room-service treats this as a soft dependency —
+	// core room operations keep working — so the frontend should show "read
+	// receipts temporarily unavailable" and allow a retry rather than surfacing a
+	// hard failure.
+	RoomReadReceiptsUnavailable Reason = "read_receipts_unavailable"
 )

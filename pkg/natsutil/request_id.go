@@ -120,13 +120,13 @@ func RequireRequestID(ctx context.Context, headers nats.Header, subject string) 
 	return WithRequestID(ctx, inbound), inbound, nil
 }
 
-// OutboxDedupID composes a JetStream Nats-Msg-Id as base+":"+destSiteID. base
+// InboxDedupID composes a JetStream Nats-Msg-Id as base+":"+destSiteID. base
 // is the X-Request-ID from ctx; falls back to payloadSeed when ctx carries no
 // request ID, with a warn log so partial-deployment cases are observable.
-func OutboxDedupID(ctx context.Context, destSiteID, payloadSeed string) string {
+func InboxDedupID(ctx context.Context, destSiteID, payloadSeed string) string {
 	base := RequestIDFromContext(ctx)
 	if base == "" {
-		slog.Warn("missing X-Request-ID; falling back to payload-derived outbox dedup base", "destSiteID", destSiteID)
+		slog.Warn("missing X-Request-ID; falling back to payload-derived inbox dedup base", "destSiteID", destSiteID)
 		base = payloadSeed
 	}
 	return base + ":" + destSiteID

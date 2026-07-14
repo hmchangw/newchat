@@ -23,7 +23,6 @@ type Message struct {
 	Attachments                  [][]byte                       `json:"attachments,omitempty"                  bson:"attachments,omitempty"`
 	Card                         *cassandra.Card                `json:"card,omitempty"                         bson:"card,omitempty"`
 	CardAction                   *cassandra.CardAction          `json:"cardAction,omitempty"                   bson:"cardAction,omitempty"`
-	File                         *cassandra.File                `json:"file,omitempty"                         bson:"file,omitempty"`
 	Mentions                     []Participant                  `json:"mentions,omitempty"                     bson:"mentions,omitempty"`
 	CreatedAt                    time.Time                      `json:"createdAt"                              bson:"createdAt"`
 	EditedAt                     *time.Time                     `json:"editedAt,omitempty"                     bson:"editedAt,omitempty"`
@@ -55,19 +54,31 @@ type RoomRestrictedSysData struct {
 	OwnerAccount   string `json:"ownerAccount,omitempty" bson:"ownerAccount,omitempty"`
 }
 
+// TeamsMeetStartedSysData is the JSON payload stored in Message.SysMsgData for
+// a teams_meet_started system message — emitted when a Microsoft Teams online
+// meeting is created for a room. It is also the read-back source the meetings
+// RPC uses for per-room idempotency.
+type TeamsMeetStartedSysData struct {
+	MeetingID string `json:"meetingId" bson:"meetingId"`
+	JoinURL   string `json:"joinUrl"   bson:"joinUrl"`
+}
+
 type SendMessageRequest struct {
-	ID                           string `json:"id"`
-	Content                      string `json:"content"`
-	RequestID                    string `json:"requestId"`
-	ThreadParentMessageID        string `json:"threadParentMessageId,omitempty"`
-	ThreadParentMessageCreatedAt *int64 `json:"threadParentMessageCreatedAt,omitempty"`
-	QuotedParentMessageID        string `json:"quotedParentMessageId,omitempty"`
+	ID                    string `json:"id"`
+	Content               string `json:"content"`
+	RequestID             string `json:"requestId"`
+	ThreadParentMessageID string `json:"threadParentMessageId,omitempty"`
+	QuotedParentMessageID string `json:"quotedParentMessageId,omitempty"`
 	// TShow requests that a thread reply also appear in the parent room's
 	// channel timeline (the "Also send to channel" option). Only meaningful
 	// when ThreadParentMessageID is set — message-gatekeeper normalizes it to
 	// false on non-thread sends. Maps onto Message.TShow; same wire name as
 	// the persisted message field the reply echoes back.
 	TShow bool `json:"tshow,omitempty"`
+	// Attachments carries render-ready attachment blobs produced by upload-service
+	// (one JSON object per element). message-gatekeeper validates and copies them
+	// onto the canonical Message.
+	Attachments [][]byte `json:"attachments,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's

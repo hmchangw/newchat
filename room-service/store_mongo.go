@@ -17,10 +17,8 @@ import (
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
-// botAccountRegex matches bot/app accounts by the ".bot" suffix.
-// Distinct from helper.go::botPattern which also matches "^p_" — that
-// clause is a pre-existing bug (p_ accounts are platform admins, not
-// bots) and is out of scope for this change.
+// botAccountRegex matches bot/app accounts by the ".bot" suffix only — it excludes
+// "p_" platform-admin accounts, which have user records and are looked up as users here.
 const botAccountRegex = `\.bot$`
 
 var botAccountPattern = regexp.MustCompile(botAccountRegex)
@@ -29,10 +27,12 @@ type MongoStore struct {
 	rooms               *mongo.Collection
 	subscriptions       *mongo.Collection
 	threadSubscriptions *mongo.Collection
+	threadRooms         *mongo.Collection
 	roomMembers         *mongo.Collection
 	users               *mongo.Collection
 	apps                *mongo.Collection
 	botCmdMenus         *mongo.Collection
+	teamsMeetings       *mongo.Collection
 }
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
@@ -40,10 +40,12 @@ func NewMongoStore(db *mongo.Database) *MongoStore {
 		rooms:               db.Collection("rooms"),
 		subscriptions:       db.Collection("subscriptions"),
 		threadSubscriptions: db.Collection("thread_subscriptions"),
+		threadRooms:         db.Collection("thread_rooms"),
 		roomMembers:         db.Collection("room_members"),
 		users:               db.Collection("users"),
 		apps:                db.Collection("apps"),
 		botCmdMenus:         db.Collection("bot_cmd_menu"),
+		teamsMeetings:       db.Collection("teams_meetings"),
 	}
 }
 
@@ -75,10 +77,29 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
 	}
+	// Unique: account is a user's identity, so at most one users doc per account.
+	// findUsersForDisplay already folds results into a map keyed by account, and
+	// user-service declares this index unique on the shared collection — both must
+	// agree or the second service's CreateOne hits IndexOptionsConflict.
 	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "account", Value: 1}},
+		Keys:    bson.D{{Key: "account", Value: 1}},
+		Options: options.Index().SetUnique(true),
 	}); err != nil {
-		return fmt.Errorf("ensure users (account) index: %w", err)
+		// E11000 here means pre-existing duplicate account values (populated env
+		// pre-rollout) — point operators at the one-time dedupe preflight.
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("ensure users (account) unique index: duplicate account values exist in the users "+
+				"collection — run the one-time dedupe preflight (group users by account, resolve n>1) before "+
+				"starting this service: %w", err)
+		}
+		// A pre-existing non-unique account_1 conflicts (85 IndexOptionsConflict /
+		// 86 IndexKeySpecsConflict); Mongo won't upgrade it — the operator must drop it.
+		if se := mongo.ServerError(nil); errors.As(err, &se) && (se.HasErrorCode(85) || se.HasErrorCode(86)) {
+			return fmt.Errorf("ensure users (account) unique index: a non-unique account_1 index already exists on "+
+				"the users collection — drop the old non-unique account_1 index (db.users.dropIndex(\"account_1\")) "+
+				"before starting this service so it can be recreated as unique: %w", err)
+		}
+		return fmt.Errorf("ensure users (account) unique index: %w", err)
 	}
 	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "sectId", Value: 1}, {Key: "account", Value: 1}},
@@ -146,8 +167,17 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure thread_subscriptions (parentMessageId,userAccount) index: %w", err)
 	}
-	// Backs GetThreadUnreadSummary's $match {userAccount, siteId}. No existing
-	// thread_subscriptions index has userAccount as a prefix.
+	// Backs MinThreadSubscriptionLastSeenByThreadRoomID: covered index seek on
+	// (threadRoomId, lastSeenAt ASC) returns the subscriber with the smallest
+	// lastSeenAt in one seek — same algorithm as the (roomId, lastSeenAt) index
+	// on subscriptions that backs MinSubscriptionLastSeenByRoomID.
+	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "threadRoomId", Value: 1}, {Key: "lastSeenAt", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,lastSeenAt) index: %w", err)
+	}
+	// Backs per-user, per-site thread_subscriptions lookups on {userAccount,
+	// siteId}. No existing thread_subscriptions index has userAccount as a prefix.
 	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "userAccount", Value: 1}, {Key: "siteId", Value: 1}},
 	}); err != nil {
@@ -167,12 +197,74 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure bot_cmd_menu (activeStatus,name) index: %w", err)
 	}
+	// Unique logical key for teams_meetings — the per-room idempotency record for
+	// the meetings RPC. A concurrent second create hits this constraint and the
+	// loser reads back the winner's record instead of inserting a duplicate (and
+	// thus publishing a second teams_meet_started system message). Same retry-safe
+	// rationale as the room_members / subscriptions unique indexes above.
+	if _, err := s.teamsMeetings.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "siteId", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("ensure teams_meetings (roomId,siteId) unique index: %w", err)
+	}
 	return nil
+}
+
+// GetTeamsMeeting fast-path reads the room's existing Teams meeting record.
+// found=false with err=nil means the room has no meeting yet.
+func (s *MongoStore) GetTeamsMeeting(ctx context.Context, roomID, siteID string) (*model.TeamsMeetingRecord, bool, error) {
+	var rec model.TeamsMeetingRecord
+	err := s.teamsMeetings.FindOne(ctx, bson.M{"roomId": roomID, "siteId": siteID}).Decode(&rec)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get teams meeting for room %q: %w", roomID, err)
+	}
+	return &rec, true, nil
+}
+
+// InsertTeamsMeeting inserts the meeting record. The (roomId, siteId) unique
+// index makes this the idempotency gate: a concurrent second insert returns a
+// duplicate-key error the handler detects via mongo.IsDuplicateKeyError (which
+// unwraps with errors.As) and reads back the winner's record.
+func (s *MongoStore) InsertTeamsMeeting(ctx context.Context, record model.TeamsMeetingRecord) error {
+	if _, err := s.teamsMeetings.InsertOne(ctx, record); err != nil {
+		return fmt.Errorf("insert teams meeting record: %w", err)
+	}
+	return nil
+}
+
+// roomReadProjection is the field set GetRoom returns — the union of every
+// Room field read by a handler call site. The full Room doc is never needed on
+// these read paths, and projecting trims the BSON decode (a top CPU consumer in
+// profiling) plus the wire payload. Keep in sync with the Room field reads in
+// handler.go; the projection-field integration test guards drift.
+var roomReadProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "type", Value: 1}, {Key: "name", Value: 1},
+	{Key: "userCount", Value: 1}, {Key: "appCount", Value: 1},
+	{Key: "restricted", Value: 1}, {Key: "externalAccess", Value: 1},
+	{Key: "lastMsgAt", Value: 1}, {Key: "minUserLastSeenAt", Value: 1},
+	{Key: "lastMentionAllAt", Value: 1},
+}
+
+// subscriptionReadProjection is the field set GetSubscription returns — the
+// union of every Subscription field read by a handler call site. The fat
+// Subscription doc (~30 fields incl. byte arrays and time pointers) is never
+// needed here; projecting trims the reflection-heavy BSON decode. Keep in sync
+// with the Subscription field reads in handler.go; the projection-field
+// integration test guards drift.
+var subscriptionReadProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "u", Value: 1}, {Key: "roomId", Value: 1},
+	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1}, {Key: "alert", Value: 1},
+	{Key: "threadUnread", Value: 1}, {Key: "lastSeenAt", Value: 1},
 }
 
 func (s *MongoStore) GetRoom(ctx context.Context, id string) (*model.Room, error) {
 	var room model.Room
-	if err := s.rooms.FindOne(ctx, bson.M{"_id": id}).Decode(&room); err != nil {
+	opts := options.FindOne().SetProjection(roomReadProjection)
+	if err := s.rooms.FindOne(ctx, bson.M{"_id": id}, opts).Decode(&room); err != nil {
 		return nil, fmt.Errorf("room %q not found: %w", id, err)
 	}
 	return &room, nil
@@ -181,13 +273,31 @@ func (s *MongoStore) GetRoom(ctx context.Context, id string) (*model.Room, error
 func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
 	var sub model.Subscription
 	filter := bson.M{"u.account": account, "roomId": roomID}
-	if err := s.subscriptions.FindOne(ctx, filter).Decode(&sub); err != nil {
+	opts := options.FindOne().SetProjection(subscriptionReadProjection)
+	if err := s.subscriptions.FindOne(ctx, filter, opts).Decode(&sub); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, fmt.Errorf("%q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
 		}
 		return nil, fmt.Errorf("get subscription for %q in room %q: %w", account, roomID, err)
 	}
 	return &sub, nil
+}
+
+// membershipExistsProjection returns only _id so the existence check decodes
+// essentially nothing — the cheapest form of GetSubscription for call sites
+// that use the result solely as a membership gate.
+var membershipExistsProjection = bson.D{{Key: "_id", Value: 1}}
+
+func (s *MongoStore) CheckMembership(ctx context.Context, account, roomID string) error {
+	filter := bson.M{"u.account": account, "roomId": roomID}
+	opts := options.FindOne().SetProjection(membershipExistsProjection)
+	if err := s.subscriptions.FindOne(ctx, filter, opts).Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return fmt.Errorf("%q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
+		}
+		return fmt.Errorf("check membership for %q in room %q: %w", account, roomID, err)
+	}
+	return nil
 }
 
 // GetSubscriptionWithMembership loads the target subscription joined with their
@@ -352,23 +462,44 @@ func (s *MongoStore) CountNewMembers(ctx context.Context, orgIDs, directAccounts
 	if len(orgIDs) == 0 && len(directAccounts) == 0 {
 		return 0, nil
 	}
-	pipeline := pipelines.GetNewMembersPipeline(orgIDs, directAccounts, roomID, excludeAccount)
-	pipeline = append(pipeline, bson.M{"$count": "n"})
-
-	cursor, err := s.users.Aggregate(ctx, pipeline)
+	filter := pipelines.MatchCandidatesFilter(orgIDs, directAccounts, excludeAccount)
+	// Create path (no room yet): every resolved candidate is a new member, so a
+	// plain indexed count suffices — there are no subscriptions to subtract.
+	if roomID == "" {
+		n, err := s.users.CountDocuments(ctx, filter)
+		if err != nil {
+			return 0, fmt.Errorf("count new members: %w", err)
+		}
+		return int(n), nil
+	}
+	// Add path: resolve candidate accounts, then subtract those already
+	// subscribed via one indexed read scoped to the candidate set — instead of
+	// a correlated-$lookup aggregation.
+	cursor, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 0}))
 	if err != nil {
-		return 0, fmt.Errorf("count new members: %w", err)
+		return 0, fmt.Errorf("find candidate accounts: %w", err)
 	}
-	var results []struct {
-		Count int `bson:"n"`
+	var rows []struct {
+		Account string `bson:"account"`
 	}
-	if err := cursor.All(ctx, &results); err != nil {
-		return 0, fmt.Errorf("decode count new members: %w", err)
+	if err := cursor.All(ctx, &rows); err != nil {
+		return 0, fmt.Errorf("decode candidate accounts: %w", err)
 	}
-	if len(results) == 0 {
+	if len(rows) == 0 {
 		return 0, nil
 	}
-	return results[0].Count, nil
+	// account is unique in the users collection, so rows carry no duplicates.
+	accounts := make([]string, len(rows))
+	for i, r := range rows {
+		accounts[i] = r.Account
+	}
+	subbed, err := pipelines.SubscribedAccounts(ctx, s.subscriptions, roomID, accounts)
+	if err != nil {
+		return 0, fmt.Errorf("resolve subscribed accounts: %w", err)
+	}
+	// subbed is a subset of the candidate accounts (the $in query bounds it), so
+	// the new-member count is just the candidates minus those already subscribed.
+	return len(accounts) - len(subbed), nil
 }
 
 // ListRoomMembers returns the members of a room. It prefers the room_members
@@ -454,6 +585,9 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 		rm.Member.IsOwner = d.IsOwner
 		if rm.Member.Type == model.RoomMemberOrg {
 			orgIDs = append(orgIDs, rm.Member.ID)
+		} else {
+			rm.Member.SectName = d.SectName
+			rm.Member.EmployeeID = d.EmployeeID
 		}
 		members[i] = rm
 	}
@@ -485,6 +619,7 @@ func (s *MongoStore) attachOrgDisplay(ctx context.Context, roomID string, member
 			members[i].Member.MemberCount = a.memberCount
 		}
 		members[i].Member.OrgName = orgDisplaySectName(agg[id], id)
+		members[i].Member.OrgDescription = orgDisplayDescription(agg[id])
 	}
 	return nil
 }
@@ -501,13 +636,15 @@ func (s *MongoStore) fetchOrgDisplayUsers(ctx context.Context, orgIDs []string) 
 			{"sectId": bson.M{"$in": orgIDs}},
 		}},
 		options.Find().SetProjection(bson.M{
-			"_id":        0,
-			"deptId":     1,
-			"sectId":     1,
-			"deptName":   1,
-			"deptTCName": 1,
-			"sectName":   1,
-			"sectTCName": 1,
+			"_id":             0,
+			"deptId":          1,
+			"sectId":          1,
+			"deptName":        1,
+			"deptTCName":      1,
+			"sectName":        1,
+			"sectTCName":      1,
+			"deptDescription": 1,
+			"sectDescription": 1,
 		}),
 	)
 	if err != nil {
@@ -538,6 +675,8 @@ type roomMemberEnrichedDisplay struct {
 	EngName     string `bson:"engName,omitempty"`
 	ChineseName string `bson:"chineseName,omitempty"`
 	IsOwner     bool   `bson:"isOwner,omitempty"`
+	SectName    string `bson:"sectName,omitempty"`
+	EmployeeID  string `bson:"employeeId,omitempty"`
 }
 
 // enrichRoomMembersStages returns the $lookup + $set stages appended to the
@@ -561,7 +700,7 @@ func enrichRoomMembersStages(roomID string) []bson.D {
 					bson.M{"$eq": bson.A{"$account", "$$acct"}},
 				}}}},
 				bson.M{"$limit": 1},
-				bson.M{"$project": bson.M{"engName": 1, "chineseName": 1, "_id": 0}},
+				bson.M{"$project": bson.M{"engName": 1, "chineseName": 1, "sectName": 1, "employeeId": 1, "_id": 0}},
 			},
 			"as": "_userMatch",
 		}}},
@@ -588,6 +727,8 @@ func enrichRoomMembersStages(roomID string) []bson.D {
 			"display": bson.M{
 				"engName":     bson.M{"$arrayElemAt": bson.A{"$_userMatch.engName", 0}},
 				"chineseName": bson.M{"$arrayElemAt": bson.A{"$_userMatch.chineseName", 0}},
+				"sectName":    bson.M{"$arrayElemAt": bson.A{"$_userMatch.sectName", 0}},
+				"employeeId":  bson.M{"$arrayElemAt": bson.A{"$_userMatch.employeeId", 0}},
 				"isOwner": bson.M{"$in": bson.A{
 					"owner",
 					bson.M{"$ifNull": bson.A{
@@ -699,6 +840,8 @@ func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, 
 		if u, ok := userByAccount[acct]; ok {
 			members[i].Member.EngName = u.EngName
 			members[i].Member.ChineseName = u.ChineseName
+			members[i].Member.SectName = u.SectName
+			members[i].Member.EmployeeID = u.EmployeeID
 			continue
 		}
 		if name, ok := appByAssistant[acct]; ok {
@@ -714,7 +857,7 @@ func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, 
 func (s *MongoStore) findUsersForDisplay(ctx context.Context, accounts []string) (map[string]*model.User, error) {
 	cursor, err := s.users.Find(ctx,
 		bson.M{"account": bson.M{"$in": accounts}},
-		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "engName": 1, "chineseName": 1}),
+		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "engName": 1, "chineseName": 1, "sectName": 1, "employeeId": 1}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("find users for display: %w", err)
@@ -902,7 +1045,7 @@ func (s *MongoStore) FindExistingAccounts(ctx context.Context, accounts []string
 func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
 	res, err := s.subscriptions.UpdateOne(ctx,
 		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert}},
+		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert, "hasMention": false}},
 	)
 	if err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
@@ -1115,6 +1258,59 @@ func (s *MongoStore) ListReadReceipts(
 	return rows, nil
 }
 
+// ListThreadReadReceipts mirrors ListReadReceipts over thread_subscriptions:
+// readers are thread subscribers whose thread lastSeenAt passed the message.
+// thread_subscriptions store userAccount/userId flat (no embedded "u" doc), so
+// the match and the users $lookup key off those fields directly.
+func (s *MongoStore) ListThreadReadReceipts(
+	ctx context.Context,
+	threadRoomID string,
+	since time.Time,
+	excludeAccount string,
+	limit int,
+) ([]ReadReceiptRow, error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"threadRoomId": threadRoomID,
+			"lastSeenAt":   bson.M{"$gte": since},
+			"userAccount":  bson.M{"$ne": excludeAccount},
+		}}},
+		{{Key: "$lookup", Value: bson.M{
+			"from": "users",
+			"let":  bson.M{"uid": "$userId"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": []any{"$_id", "$$uid"}}}},
+				bson.M{"$project": bson.M{"_id": 1, "account": 1, "chineseName": 1, "engName": 1}},
+			},
+			"as": "user",
+		}}},
+		{{Key: "$unwind", Value: bson.M{
+			"path":                       "$user",
+			"preserveNullAndEmptyArrays": false,
+		}}},
+		{{Key: "$replaceWith", Value: "$user"}},
+		{{Key: "$limit", Value: int64(limit)}},
+	}
+	cursor, err := s.threadSubscriptions.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate thread read receipts for thread room %q: %w", threadRoomID, err)
+	}
+	defer cursor.Close(ctx)
+
+	rows := make([]ReadReceiptRow, 0)
+	for cursor.Next(ctx) {
+		var r ReadReceiptRow
+		if err := cursor.Decode(&r); err != nil {
+			return nil, fmt.Errorf("decode thread read-receipt row for thread room %q: %w", threadRoomID, err)
+		}
+		rows = append(rows, r)
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("iterate thread read receipts for thread room %q: %w", threadRoomID, err)
+	}
+	return rows, nil
+}
+
 func (s *MongoStore) GetThreadSubscriptionByParent(ctx context.Context, account, parentMessageID, roomID string) (*model.ThreadSubscription, error) {
 	var ts model.ThreadSubscription
 	err := s.threadSubscriptions.FindOne(ctx, bson.M{
@@ -1169,13 +1365,12 @@ func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, a
 
 // ListDefaultChannelTabApps returns apps whose channelTab.enabled AND
 // channelTab.default are both true, sorted by channelTab.name asc.
-// Projection: _id, avatarUrl, assistant, channelTab. Empty result is ([], nil).
+// Projection: _id, assistant, channelTab. Empty result is ([], nil).
 func (s *MongoStore) ListDefaultChannelTabApps(ctx context.Context) ([]model.App, error) {
 	opts := options.Find().
 		SetSort(bson.D{{Key: "channelTab.name", Value: 1}}).
 		SetProjection(bson.M{
 			"_id":        1,
-			"avatarUrl":  1,
 			"assistant":  1,
 			"channelTab": 1,
 		})
@@ -1262,14 +1457,8 @@ func (s *MongoStore) ListActiveCmdMenus(ctx context.Context, assistantNames []st
 	return menus, nil
 }
 
-// ListMemberStatuses returns up to `limit` members of roomID, each projected
-// from the joined users document as MemberStatus. Subscriptions whose user
-// document has been deleted are dropped by the $unwind with
-// preserveNullAndEmptyArrays:false rather than returned half-populated.
-// $limit runs AFTER the join so the wire contract ("up to limit live rows")
-// holds even when the room contains orphan subscriptions whose user document
-// has been hard-deleted. Pre-join $limit would silently under-deliver in that
-// case. Mirrors ListReadReceipts.
+// ListMemberStatuses returns up to limit members of roomID (projected from the joined
+// user doc); orphan subs and empty-statusText members are dropped before the post-join $limit.
 func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limit int) ([]model.MemberStatus, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"roomId": roomID}}},
@@ -1296,6 +1485,8 @@ func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limi
 		}}},
 		{{Key: "$unwind", Value: bson.M{"path": "$user", "preserveNullAndEmptyArrays": false}}},
 		{{Key: "$replaceWith", Value: "$user"}},
+		// Exclude members with no status set; an empty statusText is not a presence to surface.
+		{{Key: "$match", Value: bson.M{"statusText": bson.M{"$nin": bson.A{"", nil}}}}},
 		{{Key: "$limit", Value: int64(limit)}},
 	}
 	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
@@ -1456,13 +1647,13 @@ func (s *MongoStore) UpdateRoomVisibility(ctx context.Context, roomID string, re
 	return nil
 }
 
-// ApplySubscriptionVisibility writes the {restricted, externalAccess} denorm
+// ApplySubscriptionRestriction writes the {restricted, externalAccess} denorm
 // flags to every subscription of the room. When restricted=true and ownerAccount
 // is non-empty, an aggregation-pipeline $cond also rewrites roles so only
 // ownerAccount holds RoleOwner — atomically, so the restrict transition cannot
 // land in a zero-owner state. Returns ErrOwnerNotSubscribed when ownerAccount
 // has no active subscription in the room.
-func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error {
+func (s *MongoStore) ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error {
 	filter := bson.M{"roomId": roomID}
 
 	if restricted && ownerAccount != "" {
@@ -1478,9 +1669,9 @@ func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID str
 		}
 		pipeline := mongo.Pipeline{
 			bson.D{{Key: "$set", Value: bson.M{
-				"restricted":          true,
-				"externalAccess":      externalAccess,
-				"visibilityUpdatedAt": visibilityUpdatedAt,
+				"restricted":        true,
+				"externalAccess":    externalAccess,
+				"restrictUpdatedAt": restrictUpdatedAt,
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
@@ -1495,16 +1686,20 @@ func (s *MongoStore) ApplySubscriptionVisibility(ctx context.Context, roomID str
 	}
 
 	if _, err := s.subscriptions.UpdateMany(ctx, filter, bson.M{
-		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess, "visibilityUpdatedAt": visibilityUpdatedAt},
+		"$set": bson.M{"restricted": restricted, "externalAccess": externalAccess, "restrictUpdatedAt": restrictUpdatedAt},
 	}); err != nil {
 		return fmt.Errorf("apply visibility (flags only): %w", err)
 	}
 	return nil
 }
 
-// ListSubscriptionsByRoom returns every subscription in the room.
+// ListSubscriptionsByRoom returns every subscription in the room. Callers only
+// read the subscriber account, so project just that field.
 func (s *MongoStore) ListSubscriptionsByRoom(ctx context.Context, roomID string) ([]model.Subscription, error) {
-	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID})
+	cursor, err := s.subscriptions.Find(ctx,
+		bson.M{"roomId": roomID},
+		options.Find().SetProjection(bson.M{"_id": 0, "u.account": 1}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions for room %q: find: %w", roomID, err)
 	}
@@ -1516,12 +1711,16 @@ func (s *MongoStore) ListSubscriptionsByRoom(ctx context.Context, roomID string)
 }
 
 // FindUsersByAccounts returns User docs for the supplied accounts. Empty input
-// returns nil, nil.
+// returns nil, nil. The sole caller only reads siteId (for cross-site inbox
+// fan-out), so project just that field.
 func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
 	if len(accounts) == 0 {
 		return nil, nil
 	}
-	cursor, err := s.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}})
+	cursor, err := s.users.Find(ctx,
+		bson.M{"account": bson.M{"$in": accounts}},
+		options.Find().SetProjection(bson.M{"_id": 0, "siteId": 1}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("find users by accounts: %w", err)
 	}
@@ -1532,64 +1731,95 @@ func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string)
 	return users, nil
 }
 
-// GetThreadUnreadSummary rolls up a single user's thread unread state on this
-// site. Unread = subscribed AND threadRoom.lastMsgAt > lastSeenAt (nil lastSeenAt
-// = never seen = unread, via BSON null being the smallest value). The booleans
-// are an OR across the user's threads, expressed as $max over per-row booleans
-// (BSON orders false < true). lastMessageAt is the newest thread message time.
-func (s *MongoStore) GetThreadUnreadSummary(ctx context.Context, account, siteID string) (*ThreadUnreadSummary, error) {
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{"userAccount": account, "siteId": siteID}}},
-		{{Key: "$lookup", Value: bson.M{
-			"from":         "thread_rooms",
-			"localField":   "threadRoomId",
-			"foreignField": "_id",
-			"as":           "tr",
-		}}},
-		{{Key: "$unwind", Value: "$tr"}},
-		{{Key: "$lookup", Value: bson.M{
-			"from":         "rooms",
-			"localField":   "roomId",
-			"foreignField": "_id",
-			"as":           "room",
-		}}},
-		{{Key: "$unwind", Value: bson.M{"path": "$room", "preserveNullAndEmptyArrays": true}}},
-		{{Key: "$addFields", Value: bson.M{
-			"isUnread": bson.M{"$gt": bson.A{"$tr.lastMsgAt", "$lastSeenAt"}},
-			"isDMUnread": bson.M{"$and": bson.A{
-				bson.M{"$gt": bson.A{"$tr.lastMsgAt", "$lastSeenAt"}},
-				bson.M{"$eq": bson.A{"$room.type", model.RoomTypeDM}},
-			}},
-		}}},
-		{{Key: "$group", Value: bson.M{
-			"_id":    nil,
-			"unread": bson.M{"$max": "$isUnread"},
-			// unreadMention is not conditioned on isUnread: UpdateThreadSubscriptionRead
-			// always clears hasMention to false, so a true value implies the thread is
-			// still unread. inbox-worker's $max-merge can re-set it on a late federated
-			// mention event after a local read — intentional, pre-existing behavior.
-			"unreadDirectMessage": bson.M{"$max": "$isDMUnread"},
-			"unreadMention":       bson.M{"$max": "$hasMention"},
-			"lastMessageAt":       bson.M{"$max": "$tr.lastMsgAt"},
-		}}},
-	}
-
-	cursor, err := s.threadSubscriptions.Aggregate(ctx, pipeline)
+// GetThreadRoomByID returns the thread_rooms document for threadRoomID,
+// projected to lastMsgAt + minUserLastSeenAt for the floor-recompute path.
+// Other ThreadRoom fields are NOT populated. Returns (nil, nil) when no
+// document matches.
+func (s *MongoStore) GetThreadRoomByID(ctx context.Context, threadRoomID string) (*model.ThreadRoom, error) {
+	var tr model.ThreadRoom
+	err := s.threadRooms.FindOne(ctx, bson.M{"_id": threadRoomID},
+		options.FindOne().SetProjection(bson.M{"lastMsgAt": 1, "minUserLastSeenAt": 1, "_id": 0}),
+	).Decode(&tr)
 	if err != nil {
-		return nil, fmt.Errorf("aggregate thread unread summary: %w", err)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get thread room %q: %w", threadRoomID, err)
+	}
+	return &tr, nil
+}
+
+// MinThreadSubscriptionLastSeenByThreadRoomID returns the thread room's strict
+// read floor: the minimum lastSeenAt across ALL thread_subscriptions for
+// threadRoomID, but only when every subscriber has a usable lastSeenAt (> zero).
+// Returns nil when any subscriber has never read, or when there are no subscribers.
+// The (threadRoomId, lastSeenAt) index (non-sparse) returns the smallest value
+// first — a missing/null/zero lastSeenAt sorts before real dates, so the first
+// document answers both "is anyone unread?" and "what is the floor?" in one seek.
+func (s *MongoStore) MinThreadSubscriptionLastSeenByThreadRoomID(ctx context.Context, threadRoomID string) (*time.Time, error) {
+	var doc struct {
+		LastSeenAt time.Time `bson:"lastSeenAt"`
+	}
+	err := s.threadSubscriptions.FindOne(ctx,
+		bson.M{"threadRoomId": threadRoomID},
+		options.FindOne().
+			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
+			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),
+	).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find min lastSeenAt for thread room %q: %w", threadRoomID, err)
+	}
+	if !doc.LastSeenAt.After(time.Time{}) {
+		return nil, nil
+	}
+	minTime := doc.LastSeenAt
+	return &minTime, nil
+}
+
+// UpdateThreadRoomMinUserLastSeenAt sets or clears thread_rooms.minUserLastSeenAt
+// for threadRoomID. A nil value clears the field via $unset; non-nil writes via $set.
+func (s *MongoStore) UpdateThreadRoomMinUserLastSeenAt(ctx context.Context, threadRoomID string, t *time.Time) error {
+	var update bson.M
+	if t == nil {
+		update = bson.M{"$unset": bson.M{"minUserLastSeenAt": ""}}
+	} else {
+		update = bson.M{"$set": bson.M{"minUserLastSeenAt": *t}}
+	}
+	if _, err := s.threadRooms.UpdateOne(ctx, bson.M{"_id": threadRoomID}, update); err != nil {
+		return fmt.Errorf("update minUserLastSeenAt for thread room %q: %w", threadRoomID, err)
+	}
+	return nil
+}
+
+// GetThreadRoomInfos returns each existing thread room's lastMsgAt via a single
+// projected find; missing thread rooms are omitted.
+func (s *MongoStore) GetThreadRoomInfos(ctx context.Context, threadRoomIDs []string) ([]ThreadRoomInfoRow, error) {
+	cursor, err := s.threadRooms.Find(ctx,
+		bson.M{"_id": bson.M{"$in": threadRoomIDs}},
+		options.Find().SetProjection(bson.M{"_id": 1, "lastMsgAt": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find thread rooms: %w", err)
 	}
 	defer cursor.Close(ctx)
 
-	if !cursor.Next(ctx) {
-		if err := cursor.Err(); err != nil {
-			return nil, fmt.Errorf("iterate thread unread summary: %w", err)
-		}
-		return &ThreadUnreadSummary{}, nil
+	var trs []struct {
+		ID        string    `bson:"_id"`
+		LastMsgAt time.Time `bson:"lastMsgAt"`
+	}
+	if err := cursor.All(ctx, &trs); err != nil {
+		return nil, fmt.Errorf("decode thread rooms: %w", err)
 	}
 
-	var result ThreadUnreadSummary
-	if err := cursor.Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode thread unread summary: %w", err)
+	out := make([]ThreadRoomInfoRow, 0, len(trs))
+	for _, tr := range trs {
+		out = append(out, ThreadRoomInfoRow{
+			ThreadRoomID: tr.ID,
+			LastMsgAt:    tr.LastMsgAt,
+		})
 	}
-	return &result, nil
+	return out, nil
 }

@@ -141,11 +141,10 @@ func TestMiddleware_ExecutionOrder(t *testing.T) {
 
 	doneCh := make(chan []string, 1)
 
-	// Use the outermost middleware to capture the full order after chain completes.
 	var order []string
 	r.Use(func(c *Context) {
 		c.Next()
-		doneCh <- order // send after entire chain (all afters) is done
+		doneCh <- order
 	})
 
 	makeMiddleware := func(name string) HandlerFunc {
@@ -183,7 +182,6 @@ func TestMiddleware_ShortCircuit(t *testing.T) {
 	r := New(nc, "test-service")
 
 	r.Use(func(c *Context) {
-		// Short-circuit — abort and respond directly
 		c.Abort()
 		c.Msg.Respond([]byte(`{"rejected":true}`))
 	})
@@ -275,7 +273,6 @@ func TestRegister_RouteErrorSimple(t *testing.T) {
 	var result errcode.Error
 	require.NoError(t, json.Unmarshal(resp.Data, &result))
 	assert.Equal(t, "user alice not allowed", result.Message)
-	// Err/Errf now map to bad_request (code is always present in the new envelope).
 	assert.Equal(t, "bad_request", string(result.Code))
 }
 
@@ -330,14 +327,12 @@ func TestRegisterVoid_NoReply(t *testing.T) {
 			return nil
 		})
 
-	// Use Request (expects reply) — should timeout since RegisterVoid doesn't reply
 	data, _ := json.Marshal(testReq{Name: "hello"})
 	_, err := nc.Request(context.Background(), "events.typing", data, 200*time.Millisecond)
 	require.Error(t, err)
 }
 
 func TestErrcodeError_Error(t *testing.T) {
-	// errcode.Error.Error() returns the user-safe message only (no "code: " prefix).
 	e := errcode.NotFound("room not found")
 	assert.Equal(t, "room not found", e.Error())
 
@@ -349,7 +344,6 @@ func TestErrcodeError_WrappedInFmtErrorf(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	// errcode error wrapped with fmt.Errorf should still be detected via errors.As
 	Register(r, "test.{id}",
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("context: %w", errcode.Forbidden("not allowed"))
@@ -402,7 +396,6 @@ func TestContext_Abort(t *testing.T) {
 		})
 
 	data, _ := json.Marshal(testReq{})
-	// Error expected: middleware aborts without replying, so request times out.
 	_, err := nc.Request(context.Background(), "test.abort", data, 200*time.Millisecond)
 	require.Error(t, err)
 	assert.False(t, handlerCalled)
@@ -506,10 +499,6 @@ func TestLogging_LogsRequest(t *testing.T) {
 	assert.Equal(t, "ok", result.Greeting)
 }
 
-// TestReplyRouteError and TestErrConstants were removed when the natsrouter
-// shim (Err*/RouteError/ReplyRouteError) was deleted — they tested the shim
-// itself. errcode constructors are covered by pkg/errcode/options_test.go.
-
 func TestRegister_TypedInternalError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
@@ -539,7 +528,6 @@ func TestContext_SetContext_Propagates(t *testing.T) {
 }
 
 func TestRequestIDMiddleware_StoresIDOnUnderlyingContext(t *testing.T) {
-	// natsutil.RequestIDFromContext(c) must equal c.Get("requestID") — the contract publish helpers rely on.
 	c := NewContext(nil)
 	c.Msg = &nats.Msg{Header: nats.Header{}}
 	testID := "01893f8b-1c4a-7000-abcd-ef0123456789"
@@ -598,10 +586,8 @@ func TestRequestIDMiddleware_RegeneratesOnMalformedHeader(t *testing.T) {
 }
 
 func TestRequestIDMiddleware_OtherCtxKeysStillReadable(t *testing.T) {
-	// Regression test: after RequestID() runs, c.Value(otherKey) must NOT hang.
-	// Bug history: an earlier version passed c (the *Context) as parent to
-	// WithRequestID, creating a circular ctx.parent → c → ctx.parent loop on
-	// any non-requestIDKey lookup. Fixed by passing c.ctx instead.
+	// Regression: an earlier version passed c as parent to WithRequestID, creating a circular ctx.parent loop.
+	// Fixed by passing c.ctx instead — other-key lookups must complete in finite time.
 	type otherKey int
 	const k otherKey = 0
 
@@ -641,20 +627,15 @@ func TestRouter_WithMaxConcurrency_IgnoresNonPositive(t *testing.T) {
 	assert.Nil(t, r2.sem, "WithMaxConcurrency(-1) leaves the router unbounded")
 }
 
-// TestRouter_replyBusy_NoReplySubject verifies that fire-and-forget
-// messages (empty Reply subject) trigger the silent-drop path with a
-// Warn log and no panic. In-package unit test — no NATS connection
-// required because replyBusy short-circuits before touching the wire.
+// TestRouter_replyBusy_NoReplySubject verifies fire-and-forget messages (empty Reply) trigger silent-drop without panic.
 func TestRouter_replyBusy_NoReplySubject(t *testing.T) {
 	r := New(nil, "test")
 	msg := &nats.Msg{Subject: "void.subject", Reply: ""}
-	// Must not panic. Reply == "" hits the early-return path.
 	r.replyBusy(msg)
 }
 
 func TestDefault_PreInstallsMiddleware(t *testing.T) {
 	r := Default(nil, "test")
-	// Recovery, RequestID, Logging — three middleware functions.
 	assert.Len(t, r.middleware, 3, "Default should pre-install Recovery, RequestID, Logging")
 }
 
@@ -664,9 +645,7 @@ func TestDefault_ForwardsOptions(t *testing.T) {
 	assert.Equal(t, 7, cap(r.sem))
 }
 
-// TestRouter_admit_Unbounded verifies that on an unbounded router
-// (sem == nil) admit always succeeds and returns a non-nil no-op
-// release that can be called safely.
+// TestRouter_admit_Unbounded verifies unbounded router always admits and returns a safe no-op release.
 func TestRouter_admit_Unbounded(t *testing.T) {
 	r := New(nil, "test")
 	require.Nil(t, r.sem)
@@ -678,8 +657,7 @@ func TestRouter_admit_Unbounded(t *testing.T) {
 	require.NotPanics(t, release, "release must be safe to call repeatedly when no-op")
 }
 
-// TestRouter_admit_BoundedAvailable verifies the bounded acquire path:
-// a slot is taken from the semaphore on success, and release returns it.
+// TestRouter_admit_BoundedAvailable verifies bounded acquire: slot taken on success, returned on release.
 func TestRouter_admit_BoundedAvailable(t *testing.T) {
 	r := New(nil, "test", WithMaxConcurrency(1))
 	require.NotNil(t, r.sem)
@@ -699,10 +677,7 @@ func TestRouter_admit_BoundedAvailable(t *testing.T) {
 	release2()
 }
 
-// TestRouter_admit_BoundedSaturated verifies the rejection path: when
-// the semaphore is full, admit returns (false, nil). The nil release
-// is intentional — see admit() doc — so any caller that blindly
-// `defer release()` before the admitted-check will panic loudly.
+// TestRouter_admit_BoundedSaturated verifies full semaphore returns (false, nil); nil release is intentional footgun.
 func TestRouter_admit_BoundedSaturated(t *testing.T) {
 	r := New(nil, "test", WithMaxConcurrency(1))
 

@@ -1,0 +1,1 @@
+{"_id":"sysMsg00000000001","rid":"room1","msg":"p_newmember","t":"user_added","ts":{"$date":"2023-01-02T03:04:05Z"},"u":{"_id":"u1","username":"alice","name":"Alice A"}}

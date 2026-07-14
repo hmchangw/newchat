@@ -21,12 +21,10 @@ export default function OidcCallback({ onDone }) {
         const user = await manager.signinRedirectCallback()
         if (cancelled) return
 
-        const siteId = window.sessionStorage.getItem('oidc.siteId') || ''
-
         await connect({
           mode: 'sso',
           ssoToken: user.access_token,
-          siteId,
+          account: user.profile?.preferred_username,
         })
         if (cancelled) return
 

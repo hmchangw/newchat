@@ -3,15 +3,22 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 )
+
+// cacheRecorder records the outcome of a cache lookup. cachemetrics.Recorder
+// satisfies it; tests substitute a spy.
+type cacheRecorder interface {
+	Hit(ctx context.Context)
+	Miss(ctx context.Context)
+	Error(ctx context.Context)
+}
 
 // CachedKeyProvider wraps a RoomKeyProvider with a bounded in-process
 // LRU+TTL cache. Concurrent misses on the same roomID are coalesced via
@@ -44,8 +51,7 @@ type CachedKeyProvider struct {
 	lru   *lru.LRU[string, *roomkeystore.VersionedKeyPair]
 	sf    singleflight.Group
 
-	hits   atomic.Int64
-	misses atomic.Int64
+	metrics cacheRecorder
 }
 
 // NewCachedKeyProvider returns a cache wrapping inner with the given
@@ -53,8 +59,9 @@ type CachedKeyProvider struct {
 // cache only when both are configured > 0.
 func NewCachedKeyProvider(inner RoomKeyProvider, size int, ttl time.Duration) *CachedKeyProvider {
 	return &CachedKeyProvider{
-		inner: inner,
-		lru:   lru.NewLRU[string, *roomkeystore.VersionedKeyPair](size, nil, ttl),
+		inner:   inner,
+		lru:     lru.NewLRU[string, *roomkeystore.VersionedKeyPair](size, nil, ttl),
+		metrics: cachemetrics.For("roomkey", "l1"),
 	}
 }
 
@@ -67,10 +74,9 @@ func NewCachedKeyProvider(inner RoomKeyProvider, size int, ttl time.Duration) *C
 // ctx.Done() via the select below and can give up independently.
 func (c *CachedKeyProvider) Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
 	if key, ok := c.lru.Get(roomID); ok {
-		c.hits.Add(1)
+		c.metrics.Hit(ctx)
 		return key, nil
 	}
-	c.misses.Add(1)
 
 	resCh := c.sf.DoChan(roomID, func() (any, error) {
 		// Re-check under the singleflight gate: another flight may have
@@ -96,58 +102,19 @@ func (c *CachedKeyProvider) Get(ctx context.Context, roomID string) (*roomkeysto
 	select {
 	case res := <-resCh:
 		if res.Err != nil {
+			c.metrics.Error(ctx)
 			return nil, res.Err
 		}
+		// A nil key (room has no provisioned key) is a clean, successful
+		// fall-through — count it as a miss, not an error.
+		c.metrics.Miss(ctx)
 		if res.Val == nil {
 			return nil, nil
 		}
 		return res.Val.(*roomkeystore.VersionedKeyPair), nil
 	case <-ctx.Done():
+		c.metrics.Error(ctx)
 		return nil, ctx.Err()
-	}
-}
-
-// stats returns the current hit/miss counts without resetting them.
-func (c *CachedKeyProvider) stats() (hits, misses int64) {
-	return c.hits.Load(), c.misses.Load()
-}
-
-// snapshot returns and resets the hit/miss counters, so the next call
-// observes a fresh window.
-func (c *CachedKeyProvider) snapshot() (hits, misses int64) {
-	return c.hits.Swap(0), c.misses.Swap(0)
-}
-
-// RunStatsLogger emits a slog summary of cache hits/misses/rate every
-// interval until ctx is canceled. Each line summarizes the window since
-// the previous tick; counters are reset on every emit. Callers spawn
-// this in a goroutine and cancel ctx during shutdown.
-func (c *CachedKeyProvider) RunStatsLogger(ctx context.Context, interval time.Duration) {
-	c.runStatsLogger(ctx, interval, slog.Default())
-}
-
-func (c *CachedKeyProvider) runStatsLogger(ctx context.Context, interval time.Duration, logger *slog.Logger) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			hits, misses := c.snapshot()
-			total := hits + misses
-			rate := "n/a"
-			if total > 0 {
-				rate = fmt.Sprintf("%.2f%%", float64(hits)/float64(total)*100)
-			}
-			logger.Info("room-key cache",
-				"hits", hits,
-				"misses", misses,
-				"hit_rate", rate,
-				"size", c.lru.Len(),
-				"window", interval,
-			)
-		}
 	}
 }
 

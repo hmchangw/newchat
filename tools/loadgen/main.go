@@ -73,7 +73,7 @@ type config struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
 		os.Exit(2)
 	}
 	cfg, err := env.ParseAs[config]()
@@ -116,6 +116,12 @@ func dispatch(ctx context.Context, cfg *config) int {
 		return runDaily(ctx, cfg, os.Args[2:])
 	case "max-room-size":
 		return runMaxRoomSize(ctx, cfg, os.Args[2:])
+	case "presence-sustained":
+		return runPresenceSustained(ctx, cfg, os.Args[2:])
+	case "presence-storm":
+		return runPresenceStorm(ctx, cfg, os.Args[2:])
+	case "presence-capacity":
+		return runPresenceCapacity(ctx, cfg, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		return 2
@@ -124,7 +130,7 @@ func dispatch(ctx context.Context, cfg *config) int {
 
 func runSeed(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("seed", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|members|history|read-receipt|room-read|botroom")
+	workload := fs.String("workload", "messages", "messages|thread|members|history|read-receipt|room-read|thread-read|botroom")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	readRatio := fs.Float64("read-ratio", 0.7, "read-receipt only: fraction of each room's subscribers to mark as readers")
@@ -134,6 +140,7 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	// the generated room/subscription IDs differ and the gatekeeper rejects
 	// every send. Zero (default) means use the preset's built-in count.
 	users := fs.Int("users", 0, "override preset.Users for the messages workload (0 = use preset default; must match `loadgen daily --users` if you use both)")
+	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
 	_ = fs.Parse(args)
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -142,6 +149,8 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	switch *workload {
 	case "messages":
 		return runSeedMessages(ctx, cfg, *preset, *seed, *users)
+	case "thread":
+		return runSeedThread(ctx, cfg, *preset, *seed, *users, *parentsPerRoom)
 	case "members":
 		return runSeedMembers(ctx, cfg, *preset, *seed)
 	case "history":
@@ -150,6 +159,8 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 		return runSeedReadReceipt(ctx, cfg, *preset, *seed, *readRatio)
 	case "room-read":
 		return runSeedRoomRead(ctx, cfg, *preset, *seed)
+	case "thread-read":
+		return runSeedHistory(ctx, cfg, *preset, *seed)
 	case "botroom":
 		return runSeedBotRoom(ctx, cfg, *preset, *seed)
 	default:
@@ -277,7 +288,7 @@ func runTeardownBotRoom(ctx context.Context, cfg *config, preset string, seed in
 
 func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("teardown", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|members|history|room-read|botroom")
+	workload := fs.String("workload", "messages", "messages|thread|members|history|room-read|thread-read|botroom")
 	preset := fs.String("preset", "", "preset name (required to identify which room keys to delete)")
 	seed := fs.Int64("seed", 42, "RNG seed (must match the seed used at seed time)")
 	_ = fs.Parse(args)
@@ -288,12 +299,16 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	switch *workload {
 	case "messages":
 		return runTeardownMessages(ctx, cfg, *preset, *seed)
+	case "thread":
+		return runTeardownThread(ctx, cfg, *preset, *seed)
 	case "members":
 		return runTeardownMembers(ctx, cfg, *preset, *seed)
 	case "history":
 		return runTeardownHistory(ctx, cfg, *preset, *seed)
 	case "room-read":
 		return runTeardownRoomRead(ctx, cfg, *preset, *seed)
+	case "thread-read":
+		return runTeardownHistory(ctx, cfg, *preset, *seed)
 	case "botroom":
 		return runTeardownBotRoom(ctx, cfg, *preset, *seed)
 	default:
@@ -474,11 +489,11 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 	collector := NewMemberCollector(metrics, p.Name, injectMode)
 
 	e2Sub, err := nc.NatsConn().Subscribe(subject.RoomMemberEventWildcard(), func(m *nats.Msg) {
-		roomID, accounts, ok := ParseMemberAddBroadcast(m.Data)
+		roomID, accounts, ok := ParseMemberAddEvent(m.Data)
 		if !ok {
 			return
 		}
-		collector.RecordBroadcast(roomID, accounts, time.Now())
+		collector.RecordMemberEvent(roomID, accounts, time.Now())
 	})
 	if err != nil {
 		slog.Error("subscribe e2", "error", err)
@@ -534,9 +549,9 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 	runCtx, cancelRun := context.WithTimeout(ctx, *duration)
 	defer cancelRun()
 	genErr := gen.Run(runCtx)
-	time.Sleep(2 * time.Second) // drain trailing replies/broadcasts
+	time.Sleep(2 * time.Second) // drain trailing replies/member events
 	collector.DiscardBefore(warmupDeadline)
-	missingReplies, missingBroadcasts := collector.Finalize()
+	missingReplies, missingEvents := collector.Finalize()
 
 	cancelSamplers()
 	samplerWG.Wait()
@@ -570,7 +585,7 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 		Duration: *duration, Warmup: *warmup, UsersPerAdd: *usersPerAdd,
 		Sent: sent, SentMeasured: sentMeasured,
 		PublishErrors: pubErrs, RoomServiceErrors: rsErrs,
-		MissingReplies: missingReplies, MissingBroadcasts: missingBroadcasts,
+		MissingReplies: missingReplies, MissingEvents: missingEvents,
 		E1:      ComputePercentiles(collector.E1Samples()),
 		E2:      ComputePercentiles(collector.E2Samples()),
 		E1Count: collector.E1Count(), E2Count: collector.E2Count(),
@@ -584,7 +599,7 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 			slog.Error("csv export", "error", err)
 		}
 	}
-	totalErrs := summary.PublishErrors + summary.RoomServiceErrors + summary.MissingReplies + summary.MissingBroadcasts
+	totalErrs := summary.PublishErrors + summary.RoomServiceErrors + summary.MissingReplies + summary.MissingEvents
 	return DetermineExitCode(summary.SentMeasured, totalErrs)
 }
 
@@ -613,7 +628,7 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	usersPerAdd := fs.Int("users-per-add", 10, "users per add request")
 	targetSize := fs.Int("target-size", 0, "stop each room when its member count >= target-size (required)")
 	maxRate := fs.Int("max-rate", 0, "optional cap on per-room req/sec; 0 = sequential pacing only")
-	e2Timeout := fs.Duration("e2-timeout", 30*time.Second, "max wait for broadcast per add")
+	e2Timeout := fs.Duration("e2-timeout", 30*time.Second, "max wait for member event per add")
 	csvPath := fs.String("csv", "", "optional CSV output path")
 	_ = fs.Parse(args)
 
@@ -685,11 +700,11 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	collector := NewMemberCollector(metrics, p.Name, injectMode)
 
 	e2Sub, err := nc.NatsConn().Subscribe(subject.RoomMemberEventWildcard(), func(m *nats.Msg) {
-		roomID, accounts, ok := ParseMemberAddBroadcast(m.Data)
+		roomID, accounts, ok := ParseMemberAddEvent(m.Data)
 		if !ok {
 			return
 		}
-		collector.RecordBroadcast(roomID, accounts, time.Now())
+		collector.RecordMemberEvent(roomID, accounts, time.Now())
 	})
 	if err != nil {
 		slog.Error("subscribe e2", "error", err)

@@ -23,12 +23,15 @@ type fakeSubSource struct {
 	started     chan struct{} // when non-nil, signals each entry
 }
 
-func (f *fakeSubSource) GetHistorySharedSince(_ context.Context, _, _ string) (*time.Time, bool, error) {
+func (f *fakeSubSource) GetHistorySharedSince(ctx context.Context, _, _ string) (*time.Time, bool, error) {
 	if f.started != nil {
 		f.started <- struct{}{}
 	}
 	if f.block != nil {
 		<-f.block
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
 	}
 	f.calls.Add(1)
 	return f.sharedSince, f.subscribed, f.err
@@ -136,21 +139,6 @@ func TestSubscriptionCache_SingleflightDedupesConcurrentMisses(t *testing.T) {
 	assert.Equal(t, int32(1), src.calls.Load(), "concurrent misses for the same key should load once")
 }
 
-func TestSubscriptionCache_Stats(t *testing.T) {
-	ts := time.Now().UTC()
-	src := &fakeSubSource{sharedSince: &ts, subscribed: true}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
-	require.NoError(t, err)
-
-	_, _, _ = c.GetHistorySharedSince(context.Background(), "alice", "r1") // miss
-	_, _, _ = c.GetHistorySharedSince(context.Background(), "alice", "r1") // hit
-	_, _, _ = c.GetHistorySharedSince(context.Background(), "alice", "r1") // hit
-
-	s := c.Stats()
-	assert.Equal(t, uint64(2), s.Hits)
-	assert.Equal(t, uint64(1), s.Misses)
-}
-
 func TestNewSubscriptionCache_InvalidConfig(t *testing.T) {
 	src := &fakeSubSource{}
 	_, err := NewSubscriptionCache(src, 0, time.Minute)
@@ -241,4 +229,72 @@ func TestRoomCache_MinUserLastSeenAtValue(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, ts, *got)
+}
+
+func TestSubscriptionCache_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
+	ts := time.Now().UTC()
+	src := &fakeSubSource{
+		sharedSince: &ts,
+		subscribed:  true,
+		block:       make(chan struct{}),
+		started:     make(chan struct{}),
+	}
+	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	require.NoError(t, err)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, _, e := c.GetHistorySharedSince(leaderCtx, "alice", "r1")
+		leaderDone <- e
+	}()
+	<-src.started
+
+	waiterReady := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterReady)
+		_, _, e := c.GetHistorySharedSince(context.Background(), "alice", "r1")
+		waiterDone <- e
+	}()
+	<-waiterReady
+
+	cancelLeader()
+	require.ErrorIs(t, <-leaderDone, context.Canceled)
+	close(src.block)
+	require.NoError(t, <-waiterDone, "waiter must not be poisoned by the leader's cancel")
+
+	_, sub, err := c.GetHistorySharedSince(context.Background(), "alice", "r1")
+	require.NoError(t, err)
+	assert.True(t, sub)
+	assert.Equal(t, int32(1), src.calls.Load(), "shared load should have populated the cache")
+}
+
+func TestSubscriptionCache_CallerCancelReturnsCtxErr(t *testing.T) {
+	ts := time.Now().UTC()
+	src := &fakeSubSource{
+		sharedSince: &ts,
+		subscribed:  true,
+		block:       make(chan struct{}),
+		started:     make(chan struct{}),
+	}
+	defer close(src.block)
+	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, e := c.GetHistorySharedSince(ctx, "alice", "r1")
+		done <- e
+	}()
+	<-src.started
+	cancel()
+
+	select {
+	case e := <-done:
+		require.ErrorIs(t, e, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller did not return on its own ctx cancel within 2s")
+	}
 }

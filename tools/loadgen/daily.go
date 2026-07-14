@@ -41,6 +41,13 @@ type dailyConfig struct {
 	// later into per-action threshold maps. Empty string keeps defaults.
 	ActionP95Ms string
 	ActionP99Ms string
+
+	// Presence load (opt-in). When Presence is false the daily run is
+	// unchanged — no presence pool is built and no presence is emitted.
+	Presence               bool
+	PresenceHeartbeat      time.Duration
+	PresencePublisherConns int
+	PresenceObserverConns  int
 }
 
 func parseDailyConfig(args []string) (dailyConfig, error) {
@@ -108,6 +115,10 @@ for the full design and SLO rationale.
 	usersOverride := fs.Int("users", 0, "override preset.Users (0 = use preset default; must match `loadgen seed --users` if you used it)")
 	actionP95 := fs.String("action-p95-ms", "", "comma-separated per-action p95 latency caps in ms (e.g. \"read_receipt:80,scroll_history:300\"). Overrides defaults. Action names: send, read_receipt, scroll_history, refresh_room_list, member_add, room_create, mute_toggle.")
 	actionP99 := fs.String("action-p99-ms", "", "comma-separated per-action p99 latency caps in ms; same format as --action-p95-ms.")
+	presence := fs.Bool("presence", false, "emit presence load (hello/ping/activity) per daily user; observational stats only, never affects the verdict")
+	presenceHeartbeat := fs.Duration("presence-heartbeat", 30*time.Second, "per-user presence ping interval (only with --presence)")
+	presencePub := fs.Int("presence-publisher-conns", 8, "presence publisher connection count (only with --presence)")
+	presenceObs := fs.Int("presence-observer-conns", 2, "presence observer connection count (only with --presence)")
 	if err := fs.Parse(args); err != nil {
 		return dailyConfig{}, err
 	}
@@ -129,19 +140,23 @@ for the full design and SLO rationale.
 	}
 
 	return dailyConfig{
-		Preset:             *preset,
-		Steps:              parsedSteps,
-		Warmup:             *warmup,
-		Hold:               *hold,
-		Cooldown:           *cooldown,
-		StopOnTrip:         *stopOnTrip,
-		MaxDirectUsers:     *maxDirect,
-		MultiplexPoolSize:  *mux,
-		MaxConnsPerProcess: *maxConns,
-		CSVPath:            *csvPath,
-		Users:              *usersOverride,
-		ActionP95Ms:        *actionP95,
-		ActionP99Ms:        *actionP99,
+		Preset:                 *preset,
+		Steps:                  parsedSteps,
+		Warmup:                 *warmup,
+		Hold:                   *hold,
+		Cooldown:               *cooldown,
+		StopOnTrip:             *stopOnTrip,
+		MaxDirectUsers:         *maxDirect,
+		MultiplexPoolSize:      *mux,
+		MaxConnsPerProcess:     *maxConns,
+		CSVPath:                *csvPath,
+		Users:                  *usersOverride,
+		ActionP95Ms:            *actionP95,
+		ActionP99Ms:            *actionP99,
+		Presence:               *presence,
+		PresenceHeartbeat:      *presenceHeartbeat,
+		PresencePublisherConns: *presencePub,
+		PresenceObserverConns:  *presenceObs,
 	}, nil
 }
 
@@ -250,6 +265,12 @@ type stepEnv struct {
 	cooldown       time.Duration
 	mintJWT        func(ctx context.Context, account string) error // optional; nil = skip
 
+	// Presence load (nil when --presence is off). presencePool owns its own
+	// publisher + observer conns, independent of the message pools.
+	presencePool      *presencePool
+	presenceCollector *presenceCollector
+	presenceHeartbeat time.Duration
+
 	holdStartNanos    atomic.Int64
 	holdDurationNanos atomic.Int64
 	activatedCount    atomic.Int64
@@ -319,6 +340,9 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	_, _ = env.scrapeServices(ctx) // first call records baseline
 
 	env.collector.Reset()
+	if env.presenceCollector != nil {
+		env.presenceCollector.Reset()
+	}
 
 	if err := waitOrCancel(ctx, env.hold); err != nil {
 		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during hold")
@@ -361,6 +385,7 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		Self:            snapshotSelfMetrics(),
 	}
 	r := evaluateStep(in, env.thresholds)
+	snapshotPresenceStats(env, &r)
 
 	_ = waitOrCancel(ctx, env.cooldown)
 	return r
@@ -417,6 +442,12 @@ func activateUsers(ctx context.Context, env *stepEnv, from, to int) {
 			env.skippedCount.Add(1)
 			continue
 		}
+		// Emit the presence hello BEFORE launching the emitter goroutine so the
+		// `go` statement orders the hello's writes to u.presence.status/away
+		// ahead of the goroutine's ping/setAway reads (happens-before edge).
+		if env.presencePool != nil && u.presence != nil {
+			emitPresence(env, u.presence, u.presence.hello(nowMillis()))
+		}
 		// Per-user emitter runs through warmup + hold + cooldown, reading
 		// the current envelope anchor from env on each tick so step
 		// transitions take effect within ~1s. Pass the per-user index so
@@ -457,13 +488,28 @@ func startEmitter(ctx context.Context, env *stepEnv, u *userState, userIdx int) 
 
 		tick := time.NewTicker(1 * time.Second)
 		defer tick.Stop()
+
+		// Optional presence ping ticker (own interval, independent of the 1s
+		// Markov tick). Only armed when --presence is on.
+		var presenceC <-chan time.Time
+		if env.presencePool != nil && u.presence != nil && env.presenceHeartbeat > 0 {
+			pt := time.NewTicker(env.presenceHeartbeat)
+			defer pt.Stop()
+			presenceC = pt.C
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-presenceC:
+				emitPresence(env, u.presence, u.presence.ping(nowMillis()))
+				continue
 			case <-tick.C:
 			}
+			wasActive := u.active
 			u.step(r)
+			presenceFlip(env, u, wasActive)
 			if !u.active {
 				continue
 			}
@@ -527,6 +573,53 @@ func doAction(ctx context.Context, env *stepEnv, u *userState, r *rand.Rand, w a
 	if err != nil && env.collector != nil {
 		env.collector.RecordActionFailure()
 	}
+}
+
+// emitPresence publishes one presence transition for u and records its
+// attempt/expectation/failure on the presence collector. No-op when presence
+// is disabled (nil pool) or u has no presence state.
+func emitPresence(env *stepEnv, u *presenceUser, tr presenceTransition) {
+	if u == nil {
+		return
+	}
+	// emitTransitionRaw handles the nil-pool guard, the no-op (empty expect)
+	// skip for steady pings, and attempt/expectation/failure accounting.
+	emitTransitionRaw(env.presencePool, env.presenceCollector, tr)
+}
+
+// snapshotPresenceStats fills r.Presence from the presence collector (after
+// counting unresolved expectations as failures). No-op when presence is off or
+// the presence pool failed to initialize (presencePool nil) — otherwise a
+// failed init would emit a misleading all-zeros, 0%-error presence block.
+func snapshotPresenceStats(env *stepEnv, r *StepResult) {
+	if env.presencePool == nil || env.presenceCollector == nil {
+		return
+	}
+	env.presenceCollector.ReapMissing()
+	attempted := env.presenceCollector.Attempted()
+	failed := env.presenceCollector.Failed()
+	lat := env.presenceCollector.LatenciesMs()
+	s := &PresenceObsStats{
+		P50Ms:     percentile(lat, 0.50),
+		P95Ms:     percentile(lat, 0.95),
+		P99Ms:     percentile(lat, 0.99),
+		Attempted: attempted,
+		Failed:    failed,
+	}
+	if attempted > 0 {
+		s.ErrorRate = float64(failed) / float64(attempted)
+	}
+	r.Presence = s
+}
+
+// presenceFlip emits an activity transition when the user's active state
+// changed this tick. active->idle => away; idle->active => not away. No-op when
+// presence is disabled or the state didn't change.
+func presenceFlip(env *stepEnv, u *userState, wasActive bool) {
+	if env.presencePool == nil || u.presence == nil || u.active == wasActive {
+		return
+	}
+	emitPresence(env, u.presence, u.presence.setAway(!u.active, nowMillis()))
 }
 
 // runDailyForTest is the testable variant: takes an envFactory so tests can
@@ -643,6 +736,9 @@ func closePools(env *stepEnv) {
 	if env.multiplex != nil {
 		env.multiplex.Close()
 	}
+	if env.presencePool != nil {
+		env.presencePool.Close()
+	}
 }
 
 func groupSubsByUser(subs []model.Subscription) map[string][]string {
@@ -736,6 +832,23 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		siteID = "site-local"
 	}
 
+	var presencePool *presencePool
+	var presenceCollector *presenceCollector
+	if cfg.Presence {
+		presenceCollector = newPresenceCollector()
+		pp, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile,
+			cfg.PresencePublisherConns, cfg.PresenceObserverConns, presenceCollector)
+		if err != nil {
+			slog.Error("presence pool init failed; presence emission disabled", "err", err)
+			presencePool = nil
+		} else {
+			presencePool = pp
+		}
+		for _, u := range users {
+			u.presence = newPresenceUserForAccount(u.Account, siteID)
+		}
+	}
+
 	return &stepEnv{
 		collector: col, direct: direct, multiplex: mux, users: users,
 		thresholds: defaultThresholds(),
@@ -745,14 +858,17 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		scrapeServices: func(ctx context.Context) (map[string]int64, error) {
 			return scraper.Scrape(ctx, svcURLs)
 		},
-		publish:   publish,
-		request:   request,
-		siteID:    siteID,
-		maxDirect: cfg.MaxDirectUsers,
-		mintJWT:   buildAuthMintFn(),
-		warmup:    cfg.Warmup,
-		hold:      cfg.Hold,
-		cooldown:  cfg.Cooldown,
+		publish:           publish,
+		request:           request,
+		siteID:            siteID,
+		maxDirect:         cfg.MaxDirectUsers,
+		mintJWT:           buildAuthMintFn(),
+		warmup:            cfg.Warmup,
+		hold:              cfg.Hold,
+		cooldown:          cfg.Cooldown,
+		presencePool:      presencePool,
+		presenceCollector: presenceCollector,
+		presenceHeartbeat: cfg.PresenceHeartbeat,
 	}
 }
 

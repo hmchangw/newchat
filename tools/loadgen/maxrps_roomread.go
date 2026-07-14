@@ -33,6 +33,7 @@ func buildRoomReadInputs(targetRPS int, hold time.Duration, c *RoomReadCollector
 		AttemptedOps: len(samples) + failed,
 		FailedOps:    failed,
 		Saturation:   c.SaturationCount(),
+		EmitUnderrun: c.UnderrunCount(),
 		Latencies: []seriesSamples{
 			{Name: "room-read", Samples: roomReadLatencies(samples)},
 		},

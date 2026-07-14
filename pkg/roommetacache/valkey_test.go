@@ -79,7 +79,7 @@ func TestReadThrough_L2Hit(t *testing.T) {
 	fake.data[MetaKey("r1")] = string(raw)
 
 	// nil *mongo.Collection is safe: on an L2 hit, Mongo is never touched.
-	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute)
+	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
@@ -99,7 +99,7 @@ func TestReadThrough_L2Hit_DoesNotPopulate(t *testing.T) {
 	fake.data[MetaKey("r1")] = string(raw)
 
 	// nil *mongo.Collection is safe on a hit — Mongo must never be touched.
-	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute)
+	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 	assert.Empty(t, fake.sets, "Set must not be called on a cache hit")

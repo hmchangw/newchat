@@ -6,6 +6,7 @@ package testutil
 // is a no-op if its container was never started.
 func TerminateAll() {
 	TerminateMongo()
+	TerminateMongoReplicaSet()
 	TerminateCassandra()
 	TerminateMinIO()
 	TerminateElasticsearch()

@@ -161,7 +161,6 @@ func TestRepository_GetThreadMessages_ColumnScan(t *testing.T) {
 
 	sender := models.Participant{ID: "u1", EngName: "Alice", CompanyName: "Acme", AppID: "app1", AppName: "MyApp", IsBot: false, Account: "alice"}
 	mentionUser := models.Participant{ID: "u3", Account: "charlie"}
-	file := models.File{ID: "f1", Name: "doc.pdf", Type: "application/pdf"}
 	card := models.Card{Template: "approval", Data: []byte("card-data")}
 	cardAction := models.CardAction{Verb: "approve", Text: "Approve", CardID: "c1", DisplayText: "Click", HideExecLog: true, CardTmID: "tm1", Data: []byte("action-data")}
 	quotedSender := models.Participant{ID: "u5", Account: "eve"}
@@ -177,16 +176,16 @@ func TestRepository_GetThreadMessages_ColumnScan(t *testing.T) {
 
 	insertCQL := `INSERT INTO thread_messages_by_thread (
         thread_room_id, created_at, message_id, room_id, thread_parent_id,
-        sender, msg, mentions, attachments, file, card, card_action,
+        sender, msg, mentions, attachments, card, card_action,
         quoted_parent_message, visible_to, reactions, deleted,
         type, sys_msg_data, site_id, edited_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	insertArgs := []any{
 		"tr-full", ts, "m-reply-full", "r-thread-full", "m-thread-parent",
 		sender, "thread reply body",
 		[]models.Participant{mentionUser},
 		[][]byte{[]byte("attach1"), []byte("attach2")},
-		file, card, cardAction,
+		card, cardAction,
 		quotedMsg, "u1",
 		reactions,
 		true, "user_joined", []byte("sys-data"),
@@ -225,11 +224,6 @@ func TestRepository_GetThreadMessages_ColumnScan(t *testing.T) {
 	require.Len(t, msg.Attachments, 2)
 	assert.Equal(t, []byte("attach1"), msg.Attachments[0])
 	assert.Equal(t, []byte("attach2"), msg.Attachments[1])
-
-	require.NotNil(t, msg.File)
-	assert.Equal(t, "f1", msg.File.ID)
-	assert.Equal(t, "doc.pdf", msg.File.Name)
-	assert.Equal(t, "application/pdf", msg.File.Type)
 
 	require.NotNil(t, msg.Card)
 	assert.Equal(t, "approval", msg.Card.Template)
@@ -271,11 +265,37 @@ func TestRepository_GetThreadMessages_ColumnScan(t *testing.T) {
 	require.NotNil(t, msg.UpdatedAt)
 	assert.Equal(t, updatedAt.UTC(), msg.UpdatedAt.UTC())
 
-	// Columns that DON'T exist on thread_messages_by_thread must remain at zero value.
+	// tshow was not set in the seeded row; must come back false (column default).
 	assert.False(t, msg.TShow)
+	// Columns absent from thread_messages_by_thread must remain at zero value.
 	assert.Nil(t, msg.ThreadParentCreatedAt)
 	assert.Nil(t, msg.PinnedAt)
 	assert.Nil(t, msg.PinnedBy)
+}
+
+func TestRepository_GetThreadMessages_ReturnsTShow(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	ts := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
+	tshow := true
+	err := session.Query(
+		`INSERT INTO thread_messages_by_thread
+		 (thread_room_id, created_at, message_id, room_id, thread_parent_id, sender, msg, site_id, updated_at, type, tshow)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"tr-tshow-read", ts, "m-tshow-read", "r-tshow-read", "m-parent-tshow",
+		map[string]interface{}{"id": "u1", "account": "alice"},
+		"tshow reply", "site-A", ts, "text", tshow,
+	).Exec()
+	require.NoError(t, err)
+
+	q, err := ParsePageRequest("", 10)
+	require.NoError(t, err)
+	page, err := repo.GetThreadMessages(ctx, "tr-tshow-read", ts.Add(time.Hour), ts.AddDate(0, 0, -1), q)
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+	assert.True(t, page.Data[0].TShow, "GetThreadMessages must return tshow=true for a row seeded with tshow=true")
 }
 
 func TestGetThreadMessages_AcrossMultipleDays(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
@@ -52,11 +53,31 @@ type stubFollowers struct {
 	out map[string]map[string]struct{}
 }
 
-func (s *stubFollowers) Followers(_ context.Context, parentID string) (map[string]struct{}, error) {
+func (s *stubFollowers) Lookup(_ context.Context, parentID string) (ThreadRoomInfo, error) {
+	info := ThreadRoomInfo{Followers: map[string]struct{}{}}
 	if v, ok := s.out[parentID]; ok {
-		return v, nil
+		info.Followers = v
 	}
-	return map[string]struct{}{}, nil
+	return info, nil
+}
+
+// stubParent is a ParentFetcher test double: FetchParent returns a fixed parent
+// (or error). The zero value returns an empty ParentMessageInfo — fine for thread
+// tests whose members carry no HistorySharedSince and that don't assert on the
+// parent author.
+type stubParent struct {
+	info *ParentMessageInfo
+	err  error
+}
+
+func (s stubParent) FetchParent(context.Context, string, string, string, string) (*ParentMessageInfo, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.info != nil {
+		return s.info, nil
+	}
+	return &ParentMessageInfo{}, nil
 }
 
 type stubPresence struct {
@@ -101,6 +122,7 @@ func newTestHandler(members MemberCache, followers ThreadFollowerLister, presenc
 	return NewHandler(HandlerDeps{
 		Members:            members,
 		Followers:          followers,
+		Parent:             stubParent{},
 		Presence:           presence,
 		Hook:               hook,
 		Emitter:            emit,
@@ -368,6 +390,8 @@ func TestHandle_InvalidJSON(t *testing.T) {
 	h := newTestHandler(&stubMembers{}, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
 	err := h.HandleMessage(context.Background(), []byte("not json"))
 	assert.Error(t, err)
+	_, perm := errcode.IsPermanent(err)
+	assert.True(t, perm, "a malformed payload can never parse on redelivery — must be a permanent (drop) error")
 }
 
 type errHook struct{}
@@ -392,7 +416,9 @@ func TestHandle_HookError_FailOpen(t *testing.T) {
 	assert.ElementsMatch(t, []string{"bob"}, emit.accounts(), "hook error must fail-open")
 }
 
-func TestHandle_ThreadOnlyReply_NilParentCreatedAt_Restricted(t *testing.T) {
+// A parent fetch failure must NAK (return an error) so JetStream redelivers, rather
+// than silently acking and dropping the thread reply's recipients.
+func TestHandle_ThreadOnlyReply_ParentFetchError_NAKs(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
 			{ID: "alice", Account: "alice"},
@@ -403,28 +429,209 @@ func TestHandle_ThreadOnlyReply_NilParentCreatedAt_Restricted(t *testing.T) {
 		"parent-1": {"bob": {}},
 	}}
 	emit := &recordingEmitter{}
-	h := newTestHandler(members, followers, noopPresenceSnapshotter{}, noopVetoer{}, emit)
-
-	threshold := int64(1700000000000)
-	members.out["r1"][1].HistorySharedSince = &threshold
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             stubParent{err: errors.New("history timeout")},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
 
 	msg := model.Message{
 		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
-		ThreadParentMessageID:        "parent-1",
-		ThreadParentMessageCreatedAt: nil, // legacy: no parent ts
-		TShow:                        false,
+		ThreadParentMessageID: "parent-1",
+		TShow:                 false,
+		Content:               "thread reply",
 	}
-	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&msg)))
-	assert.Empty(t, emit.accounts(), "nil parent CreatedAt with HistorySharedSince must restrict bob")
+	err := h.HandleMessage(context.Background(), msgEvent(&msg))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fetch thread parent")
+	assert.Empty(t, emit.accounts(), "no notifications emitted when the parent fetch fails")
+}
+
+// The parent createdAt comes authoritatively from history-service (stubParent), not
+// the event or thread_rooms: a member who joined before the parent is notified; one
+// who joined after is suppressed.
+func TestHandle_ThreadOnlyReply_ParentCreatedAtFromHistory(t *testing.T) {
+	parentMillis := int64(1700000000000)
+	parentCreatedAt := time.UnixMilli(parentMillis).UTC()
+	before := parentMillis - 1000 // joined before the parent → not restricted
+	after := parentMillis + 1000  // joined after the parent → restricted
+
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob", HistorySharedSince: &before},
+			{ID: "carol", Account: "carol", HistorySharedSince: &after},
+		},
+	}}
+	followers := &stubFollowers{
+		out: map[string]map[string]struct{}{"parent-1": {"bob": {}, "carol": {}}},
+	}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             stubParent{info: &ParentMessageInfo{CreatedAt: parentCreatedAt}},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+		ThreadParentMessageID: "parent-1",
+		TShow:                 false,
+		Content:               "thread reply",
+	})))
+	assert.ElementsMatch(t, []string{"bob"}, emit.accounts(),
+		"bob (joined before parent) notified; carol (joined after parent) suppressed")
+}
+
+// The parent author is always notified of replies to their own thread, even on the
+// first reply (before thread_rooms exists, so they are not yet a follower) and when
+// they were not @-mentioned.
+func TestHandle_ThreadOnlyReply_ParentSenderAlwaysNotified(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"}, // reply sender
+			{ID: "carol", Account: "carol"}, // parent author, not a follower, not mentioned
+			{ID: "dave", Account: "dave"},   // uninvolved bystander
+		},
+	}}
+	// thread_rooms not created yet → empty followers (the first-reply race).
+	followers := &stubFollowers{}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             stubParent{info: &ParentMessageInfo{SenderAccount: "carol"}},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+		ThreadParentMessageID: "parent-1",
+		TShow:                 false,
+		Content:               "thread reply",
+	})))
+	assert.ElementsMatch(t, []string{"carol"}, emit.accounts(),
+		"parent author carol notified; uninvolved dave excluded")
+}
+
+// failIfCalledParent is a ParentFetcher double that fails the test if FetchParent
+// is ever invoked — used to prove the event-carried parent values are used and the
+// history-service round-trip is skipped.
+type failIfCalledParent struct{ t *testing.T }
+
+func (p failIfCalledParent) FetchParent(context.Context, string, string, string, string) (*ParentMessageInfo, error) {
+	p.t.Helper()
+	p.t.Error("FetchParent must not be called when the event carries the parent createdAt + sender account")
+	return &ParentMessageInfo{}, nil
+}
+
+// When the gatekeeper resolved the parent on the send path, the event carries both
+// the parent createdAt and the parent sender account. notification-worker must use
+// them directly and skip FetchParent — while still notifying the parent author
+// (race-free) and gating restricted followers by the event's createdAt.
+func TestHandle_ThreadOnlyReply_UsesEventParent_SkipsFetch(t *testing.T) {
+	parentMillis := int64(1700000000000)
+	parentCreatedAt := time.UnixMilli(parentMillis).UTC()
+	before := parentMillis - 1000 // joined before the parent → not restricted
+	after := parentMillis + 1000  // joined after the parent → restricted
+
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},                          // reply sender
+			{ID: "carol", Account: "carol"},                          // parent author (from event)
+			{ID: "bob", Account: "bob", HistorySharedSince: &before}, // follower, unrestricted
+			{ID: "eve", Account: "eve", HistorySharedSince: &after},  // follower, restricted
+		},
+	}}
+	followers := &stubFollowers{
+		out: map[string]map[string]struct{}{"parent-1": {"bob": {}, "eve": {}}},
+	}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             failIfCalledParent{t}, // must NOT be called
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+
+	evt := model.MessageEvent{
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+			ThreadParentMessageID:        "parent-1",
+			ThreadParentMessageCreatedAt: &parentCreatedAt, // gatekeeper-resolved
+			TShow:                        false,
+			Content:                      "thread reply",
+		},
+		SiteID:                    "site-a",
+		ThreadParentSenderAccount: "carol", // gatekeeper-resolved parent author
+	}
+	data, _ := json.Marshal(evt)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+	assert.ElementsMatch(t, []string{"carol", "bob"}, emit.accounts(),
+		"parent author + unrestricted follower notified; restricted follower suppressed by event createdAt")
+}
+
+// When the event lacks the parent sender account (gatekeeper soft-fail, or an
+// edit/delete event that bypassed the gatekeeper), notification-worker falls back to
+// FetchParent even if createdAt is present — both values come from the same fetch.
+func TestHandle_ThreadOnlyReply_MissingSenderAccount_FallsBackToFetch(t *testing.T) {
+	parentCreatedAt := time.UnixMilli(1700000000000).UTC()
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"}, // reply sender
+			{ID: "carol", Account: "carol"}, // parent author, only reachable via fetch
+		},
+	}}
+	followers := &stubFollowers{}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             stubParent{info: &ParentMessageInfo{SenderAccount: "carol", CreatedAt: parentCreatedAt}},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+
+	// createdAt present on the event, but no sender account → fetch fallback.
+	evt := model.MessageEvent{
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+			ThreadParentMessageID:        "parent-1",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+			TShow:                        false,
+			Content:                      "thread reply",
+		},
+		SiteID: "site-a",
+	}
+	data, _ := json.Marshal(evt)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+	assert.ElementsMatch(t, []string{"carol"}, emit.accounts(),
+		"parent author from fetch fallback is notified")
 }
 
 type errFollowers struct{}
 
-func (errFollowers) Followers(context.Context, string) (map[string]struct{}, error) {
-	return nil, fmt.Errorf("mongo timeout")
+func (errFollowers) Lookup(context.Context, string) (ThreadRoomInfo, error) {
+	return ThreadRoomInfo{}, fmt.Errorf("mongo timeout")
 }
 
-func TestHandle_ThreadFollowersError_FailOpenEmptySet(t *testing.T) {
+func TestHandle_ThreadFollowersError_NAKs(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
 			{ID: "alice", Account: "alice"},
@@ -441,8 +648,11 @@ func TestHandle_ThreadFollowersError_FailOpenEmptySet(t *testing.T) {
 		TShow:                 false,
 		CreatedAt:             time.Now(),
 	}
-	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(msg)))
-	assert.Empty(t, emit.accounts(), "non-mentioned non-followers are dropped when follower lookup fails")
+	// An actual thread-room lookup failure (Mongo down) must NAK for redelivery, not
+	// silently ack and drop follower-only recipients + restricted-room filtering.
+	err := h.HandleMessage(context.Background(), msgEvent(msg))
+	require.Error(t, err)
+	assert.Empty(t, emit.accounts(), "no notifications emitted when the lookup fails")
 }
 
 func TestNewHandler_DefaultLargeRoomThreshold(t *testing.T) {

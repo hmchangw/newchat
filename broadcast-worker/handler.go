@@ -8,14 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
-
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/bytedance/sonic"
+
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -39,32 +42,51 @@ type RoomKeyProvider interface {
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
 }
 
-// Handler processes MESSAGES_CANONICAL messages and broadcasts room events.
-type Handler struct {
-	store     Store
-	userStore userstore.UserStore
-	pub       Publisher
-	keyStore  RoomKeyProvider
-	encrypt   bool
-	encoder   *roomcrypto.Encoder
+// ParentMessageInfo is the subset of a thread's parent message the channel fan-out
+// needs: the author (always a recipient) and the creation time (feeds the mention
+// visibility gate).
+type ParentMessageInfo struct {
+	SenderAccount string
+	CreatedAt     time.Time
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, encrypt bool) *Handler {
+// ParentFetcher resolves a thread's parent message from history-service. The parent
+// pre-exists (a reply targets it), so this is race-free — unlike thread_rooms, which
+// message-worker may not have created yet on the first reply.
+type ParentFetcher interface {
+	FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (*ParentMessageInfo, error)
+}
+
+// Handler processes MESSAGES_CANONICAL messages and broadcasts room events.
+type Handler struct {
+	store         Store
+	userStore     userstore.UserStore
+	pub           Publisher
+	keyStore      RoomKeyProvider
+	parentFetcher ParentFetcher
+	encrypt       bool
+	encoder       *roomcrypto.Encoder
+}
+
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool) *Handler {
 	return &Handler{
-		store:     store,
-		userStore: userStore,
-		pub:       pub,
-		keyStore:  keyStore,
-		encrypt:   encrypt,
-		encoder:   roomcrypto.NewEncoder(),
+		store:         store,
+		userStore:     userStore,
+		pub:           pub,
+		keyStore:      keyStore,
+		parentFetcher: parentFetcher,
+		encrypt:       encrypt,
+		encoder:       roomcrypto.NewEncoder(),
 	}
 }
 
 // HandleMessage processes a single MESSAGES_CANONICAL message payload.
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
-	if err := json.Unmarshal(data, &evt); err != nil {
-		return fmt.Errorf("unmarshal message event: %w", err)
+	if err := sonic.Unmarshal(data, &evt); err != nil {
+		// Malformed payload — it will never parse on redelivery. Mark permanent
+		// so the caller Acks (drops) it instead of retrying until MaxDeliver.
+		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
 
 	switch evt.Event {
@@ -94,7 +116,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 // badge events published by message-worker.
 func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 	var evt model.MessageEvent
-	if err := json.Unmarshal(data, &evt); err != nil {
+	if err := sonic.Unmarshal(data, &evt); err != nil {
 		slog.ErrorContext(ctx, "unmarshal server-broadcast event failed; dropping",
 			"error", err,
 			"request_id", natsutil.RequestIDFromContext(ctx))
@@ -149,13 +171,21 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
 		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
 	}
+	// Sending implies the sender has read up to their own message: advance the
+	// sender's lastSeenAt so the room read-floor (minUserLastSeenAt) doesn't count
+	// the sender against their own message (#396). Best-effort.
+	if err := h.store.AdvanceSubscriptionLastSeen(ctx, msg.RoomID, msg.UserAccount, msg.CreatedAt); err != nil {
+		slog.WarnContext(ctx, "advance sender lastSeenAt failed",
+			"error", err, "room_id", msg.RoomID, "account", msg.UserAccount,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	}
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
 	}
 
 	if len(resolved.Accounts) > 0 {
-		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts); err != nil {
+		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts, msg.CreatedAt); err != nil {
 			return fmt.Errorf("set subscription mentions: %w", err)
 		}
 	}
@@ -193,11 +223,12 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
 	}
 
-	// Channel rooms: only thread subscribers and @-mentioned accounts receive the
-	// event. Fetch the subscriber list and build fanOut before any further work.
+	// Channel rooms: only thread followers and (history-gated) @-mentioned accounts
+	// receive the event. channelThreadFanOut applies the visibility gate and builds
+	// the recipient set.
 	var fanOut []string
 	if meta.Type == model.RoomTypeChannel {
-		fanOut, err = h.channelThreadFanOut(ctx, parentMsgID, msg.UserAccount, parsed.Accounts)
+		fanOut, err = h.channelThreadFanOut(ctx, msg.RoomID, evt.SiteID, parentMsgID, msg.UserAccount, parsed.Accounts, msg.ThreadParentMessageCreatedAt, evt.ThreadParentSenderAccount)
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for parent %s: %w", parentMsgID, err)
 		}
@@ -233,20 +264,16 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if len(resolved.Participants) > 0 {
 			roomEvt.Mentions = resolved.Participants
 		}
-		payload, err := json.Marshal(roomEvt)
+		payload, err := sonic.Marshal(roomEvt)
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
 		}
 		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		// DM thread replies fan out to all members. @-mention badges are correct
-		// since DM members can see the reply. lastMsgAt is intentionally NOT
-		// updated: thread replies must not trigger hasUnread for non-participants.
-		if len(resolved.Accounts) > 0 {
-			if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts); err != nil {
-				return fmt.Errorf("set subscription mentions: %w", err)
-			}
-		}
+		// DM thread replies fan out to all members. The thread-sub mention badge is
+		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
+		// touch subscriptions here. lastMsgAt is intentionally NOT updated (would
+		// wrongly mark hasUnread for non-participants).
 		return h.publishDMEvents(ctx, meta, clientMsg, evt.Timestamp, resolved.Accounts)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping thread fan-out",
@@ -301,7 +328,7 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 	switch room.Type {
 	case model.RoomTypeChannel:
 		parsed := mention.Parse(msg.Content)
-		fanOut, err := h.channelThreadFanOut(ctx, parentMsgID, msg.UserAccount, parsed.Accounts)
+		fanOut, err := h.channelThreadFanOut(ctx, room.ID, room.SiteID, parentMsgID, msg.UserAccount, parsed.Accounts, msg.ThreadParentMessageCreatedAt, evt.ThreadParentSenderAccount)
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for thread update of parent %s: %w", parentMsgID, err)
 		}
@@ -311,7 +338,7 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			return nil
 		}
-		payload, err := json.Marshal(&edit)
+		payload, err := sonic.Marshal(&edit)
 		if err != nil {
 			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
 		}
@@ -354,12 +381,12 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		// receive the delete. Only the channel path uses mentions; the DM path
 		// fans out to all members.
 		parsed := mention.Parse(msg.Content)
-		fanOut, err := h.channelThreadFanOut(ctx, parentMsgID, msg.UserAccount, parsed.Accounts)
+		fanOut, err := h.channelThreadFanOut(ctx, room.ID, room.SiteID, parentMsgID, msg.UserAccount, parsed.Accounts, msg.ThreadParentMessageCreatedAt, evt.ThreadParentSenderAccount)
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for thread delete of parent %s: %w", parentMsgID, err)
 		}
 		if len(fanOut) > 0 {
-			payload, err := json.Marshal(&del)
+			payload, err := sonic.Marshal(&del)
 			if err != nil {
 				return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
 			}
@@ -383,9 +410,9 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		// publishThreadMetadata handles unknown types by logging and skipping.
 	}
 
-	// Badge (tcount) update applies to all room types.
+	// Badge (tcount + tlm) update applies to all room types.
 	if evt.NewTCount != nil {
-		h.publishThreadBadge(ctx, room, *evt.NewTCount, parentMsgID, msg.ID, evt.Timestamp)
+		h.publishThreadBadge(ctx, room, *evt.NewTCount, evt.NewThreadLastMsgAt, parentMsgID, msg.ID, evt.Timestamp)
 	}
 
 	return nil
@@ -408,25 +435,26 @@ func (h *Handler) handleThreadTCountUpdated(ctx context.Context, evt *model.Mess
 	if err != nil {
 		return fmt.Errorf("get room %s: %w", evt.Message.RoomID, err)
 	}
-	return h.publishThreadMetadata(ctx, room, *evt.NewTCount,
+	return h.publishThreadMetadata(ctx, room, *evt.NewTCount, evt.NewThreadLastMsgAt,
 		evt.Message.ThreadParentMessageID, evt.Message.ID,
 		model.ThreadActionReplyAdded, evt.Timestamp)
 }
 
-func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, newTcount int,
+func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, newTcount int, newTlm *time.Time,
 	parentMsgID, replyMsgID string, action model.ThreadAction, eventTimestamp int64) error {
 	evt := model.ThreadMetadataUpdatedEvent{
-		Type:            model.RoomEventThreadMetadataUpdated,
-		RoomID:          room.ID,
-		SiteID:          room.SiteID,
-		ParentMessageID: parentMsgID,
-		ReplyMessageID:  replyMsgID,
-		NewTCount:       newTcount,
-		Action:          action,
-		Timestamp:       time.Now().UTC().UnixMilli(),
-		EventTimestamp:  eventTimestamp,
+		Type:               model.RoomEventThreadMetadataUpdated,
+		RoomID:             room.ID,
+		SiteID:             room.SiteID,
+		ParentMessageID:    parentMsgID,
+		ReplyMessageID:     replyMsgID,
+		NewTCount:          newTcount,
+		NewThreadLastMsgAt: newTlm,
+		Action:             action,
+		Timestamp:          time.Now().UTC().UnixMilli(),
+		EventTimestamp:     eventTimestamp,
 	}
-	payload, err := json.Marshal(evt)
+	payload, err := sonic.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("marshal thread metadata event for room %s: %w", room.ID, err)
 	}
@@ -476,7 +504,7 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 	// above) but still count toward the thread's reply-count badge. Since
 	// handleThreadDeleted is bypassed for TShow=true, we publish the badge update here.
 	if msg.ThreadParentMessageID != "" && evt.NewTCount != nil {
-		h.publishThreadBadge(ctx, room, *evt.NewTCount, msg.ThreadParentMessageID, msg.ID, evt.Timestamp)
+		h.publishThreadBadge(ctx, room, *evt.NewTCount, evt.NewThreadLastMsgAt, msg.ThreadParentMessageID, msg.ID, evt.Timestamp)
 	}
 	return nil
 }
@@ -484,8 +512,8 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 // publishThreadBadge publishes a thread-metadata badge update for a deleted
 // reply. Errors are logged but not returned: badge updates are best-effort and
 // JetStream will redeliver the parent event on failure.
-func (h *Handler) publishThreadBadge(ctx context.Context, room *model.Room, newTCount int, parentMsgID, replyMsgID string, timestamp int64) {
-	if err := h.publishThreadMetadata(ctx, room, newTCount, parentMsgID, replyMsgID, model.ThreadActionReplyDeleted, timestamp); err != nil {
+func (h *Handler) publishThreadBadge(ctx context.Context, room *model.Room, newTCount int, newTlm *time.Time, parentMsgID, replyMsgID string, timestamp int64) {
+	if err := h.publishThreadMetadata(ctx, room, newTCount, newTlm, parentMsgID, replyMsgID, model.ThreadActionReplyDeleted, timestamp); err != nil {
 		slog.ErrorContext(ctx, "publish thread badge for deleted reply failed",
 			"error", err,
 			"parentMessageID", parentMsgID,
@@ -600,11 +628,12 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 	notif := model.NotificationEvent{
 		Type:          "reaction",
 		RoomID:        msg.RoomID,
+		RoomType:      room.Type,
 		Message:       msg,
 		ReactionDelta: evt.ReactionDelta,
 		Timestamp:     time.Now().UTC().UnixMilli(),
 	}
-	data, marshalErr := json.Marshal(notif)
+	data, marshalErr := sonic.Marshal(notif)
 	if marshalErr != nil {
 		slog.ErrorContext(ctx, "marshal reaction author notification failed",
 			"error", marshalErr,
@@ -630,7 +659,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 // type: channel events go to the room stream, DM/botDM events fan out per
 // non-bot member. evt must marshal to the wire payload for roomEvtType.
 func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvtType model.RoomEventType, messageID string, evt any) error {
-	payload, err := json.Marshal(evt)
+	payload, err := sonic.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("marshal %s event: %w", roomEvtType, err)
 	}
@@ -709,7 +738,7 @@ func (h *Handler) encryptEditedContent(ctx context.Context, roomID string, edite
 	if err != nil {
 		return fmt.Errorf("encrypt edit content for room %s: %w", roomID, err)
 	}
-	encJSON, err := json.Marshal(encrypted)
+	encJSON, err := sonic.Marshal(encrypted)
 	if err != nil {
 		return fmt.Errorf("marshal encrypted edit content: %w", err)
 	}
@@ -737,7 +766,7 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	if !h.encrypt {
 		return nil
 	}
-	msgJSON, err := json.Marshal(clientMsg)
+	msgJSON, err := sonic.Marshal(clientMsg)
 	if err != nil {
 		return fmt.Errorf("marshal client message for room %s: %w", roomID, err)
 	}
@@ -749,7 +778,7 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	if err != nil {
 		return fmt.Errorf("encrypt message for room %s: %w", roomID, err)
 	}
-	encJSON, err := json.Marshal(encrypted)
+	encJSON, err := sonic.Marshal(encrypted)
 	if err != nil {
 		return fmt.Errorf("marshal encrypted message for room %s: %w", roomID, err)
 	}
@@ -767,7 +796,7 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta roommetacache.Me
 	if err := h.encryptRoomEvent(ctx, meta.ID, clientMsg, &evt); err != nil {
 		return fmt.Errorf("encrypt channel event for room %s: %w", meta.ID, err)
 	}
-	payload, err := json.Marshal(evt)
+	payload, err := sonic.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("marshal channel event: %w", err)
 	}
@@ -822,7 +851,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, 
 		evt := buildRoomEvent(meta, clientMsg, timestamp)
 		evt.HasMention = hasMention
 
-		payload, err := json.Marshal(evt)
+		payload, err := sonic.Marshal(evt)
 		if err != nil {
 			return fmt.Errorf("marshal DM event for user %s: %w", account, err)
 		}
@@ -875,10 +904,21 @@ func buildClientMessage(msg *model.Message, userMap map[string]model.User) *mode
 		sender.ChineseName = msg.UserAccount
 		sender.EngName = msg.UserAccount
 	}
-	return &model.ClientMessage{
-		Message: *msg,
-		Sender:  &sender,
+	decoded, _ := cassandra.DecodeAttachments(msg.Attachments)
+	cm := &model.ClientMessage{
+		Message:     *msg,
+		Sender:      &sender,
+		Attachments: decoded,
 	}
+	// The embedded Message.Attachments (raw [][]byte) is an internal transport
+	// detail; cm.Attachments (decoded) is the sole client-facing form. Null the
+	// raw copy so the object carries one representation. Safe: Message: *msg is a
+	// value copy, so reassigning this slice header does not touch the caller's *msg.
+	cm.Message.Attachments = nil
+	// The quoted parent arrives already-decoded on the canonical wire (the
+	// gatekeeper projects its DecodedAttachments into the snapshot), so no decode
+	// is needed here — it rides along via the embedded Message: *msg copy.
+	return cm
 }
 
 // publishToThreadAccounts publishes payload concurrently to every account in
@@ -916,46 +956,99 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 	return nil
 }
 
-// threadFanOutAccounts builds the deduplicated fan-out recipient list for
-// a thread event. senderAccount is always excluded. extraAccounts
-// (e.g. @mentioned users from the message payload) are added after the
-// follower pass.
-func threadFanOutAccounts(senderAccount string, followers map[string]struct{}, extraAccounts []string) []string {
-	seen := map[string]struct{}{senderAccount: {}}
+// threadFanOutAccounts builds the deduplicated fan-out recipient list for a
+// thread event. The message sender is always included first (unless a bot):
+// they authored the reply and are therefore a thread participant, so their own
+// devices must receive the event for multi-device sync. The sender is added
+// directly here rather than relied upon via replyAccounts — replyAccounts is
+// written by message-worker on a separate, unordered MESSAGES_CANONICAL
+// consumer, so a fan-out that depended on it would race the sender's own first
+// reply and silently drop the echo. followers (thread repliers) and
+// extraAccounts (@-mentioned users) are merged after, deduped. Bots are always
+// excluded.
+func threadFanOutAccounts(senderAccount, parentSenderAccount string, followers map[string]struct{}, extraAccounts []string) []string {
+	seen := map[string]struct{}{}
 	var fanOut []string
-	for acc := range followers {
+	add := func(acc string) {
+		if acc == "" {
+			return
+		}
 		if _, ok := seen[acc]; ok {
-			continue
+			return
 		}
 		if isBot(acc) {
-			continue
+			return
 		}
 		seen[acc] = struct{}{}
 		fanOut = append(fanOut, acc)
 	}
+	add(senderAccount)       // reply author — thread participant, include race-free
+	add(parentSenderAccount) // parent author — thread owner, always included, race-free
+	for acc := range followers {
+		add(acc)
+	}
 	for _, acc := range extraAccounts {
-		if _, ok := seen[acc]; ok {
-			continue
-		}
-		if isBot(acc) {
-			continue
-		}
-		seen[acc] = struct{}{}
-		fanOut = append(fanOut, acc)
+		add(acc)
 	}
 	return fanOut
 }
 
-// channelThreadFanOut resolves the deduplicated recipient list for a channel
-// thread event: it fetches the parent message's thread followers and merges
-// them with the @-mentioned accounts, excluding the sender. Shared by the
-// channel branch of every thread handler (created/updated/deleted).
-func (h *Handler) channelThreadFanOut(ctx context.Context, parentMsgID, sender string, mentions []string) ([]string, error) {
+// allowedThreadMentions filters mentions to room members whose history window admits
+// the thread parent (mentionVisible); non-members (absent from the window map) are
+// excluded. Returns nil for empty input.
+func (h *Handler) allowedThreadMentions(ctx context.Context, roomID string, mentions []string, parentCreatedAt *time.Time) ([]string, error) {
+	if len(mentions) == 0 {
+		return nil, nil
+	}
+	windows, err := h.store.GetHistorySharedSince(ctx, roomID, mentions)
+	if err != nil {
+		return nil, fmt.Errorf("get history windows for room %s: %w", roomID, err)
+	}
+	allowed := make([]string, 0, len(mentions))
+	for _, acc := range mentions {
+		hss, isMember := windows[acc]
+		// Exclude non-members (no room subscription) outright; keep a member only when
+		// their history window admits the thread's parent.
+		if !isMember || !mentionVisible(hss, parentCreatedAt) {
+			continue
+		}
+		allowed = append(allowed, acc)
+	}
+	return allowed, nil
+}
+
+// channelThreadFanOut builds the deduplicated channel recipient set: the reply sender
+// + the parent author (both included for multi-device sync / thread ownership, race-free)
+// + the parent's thread followers + history-gated @-mentions, bots excluded.
+//
+// The parent's CreatedAt (gate) and author account (recipient) come from the event
+// when the gatekeeper resolved them on the send path (eventParentCreatedAt != nil &&
+// eventParentSenderAccount != "") — skipping the history-service round-trip. When either
+// is absent (edit/delete canonical events bypass the gatekeeper, or a gatekeeper
+// soft-fail) both are fetched from history-service; a fetch error is returned so the
+// caller NAKs and JetStream redelivers. The gate lives here so no thread handler can
+// bypass it.
+func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, parentMsgID, sender string, mentions []string, eventParentCreatedAt *time.Time, eventParentSenderAccount string) ([]string, error) {
+	parent := &ParentMessageInfo{}
+	if eventParentCreatedAt != nil && eventParentSenderAccount != "" {
+		parent.CreatedAt = *eventParentCreatedAt
+		parent.SenderAccount = eventParentSenderAccount
+	} else {
+		fetched, err := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
+		if err != nil {
+			return nil, fmt.Errorf("fetch thread parent %s: %w", parentMsgID, err)
+		}
+		parent = fetched
+	}
+	allowed, err := h.allowedThreadMentions(ctx, roomID, mentions, &parent.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
 	followers, err := h.store.GetThreadFollowers(ctx, parentMsgID)
 	if err != nil {
 		return nil, fmt.Errorf("get thread followers for parent %s: %w", parentMsgID, err)
 	}
-	return threadFanOutAccounts(sender, followers, mentions), nil
+	return threadFanOutAccounts(sender, parent.SenderAccount, followers, allowed), nil
 }
 
 // usersByAccount indexes a slice of users by their Account for O(1) lookup

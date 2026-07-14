@@ -1,0 +1,55 @@
+name: oplog-collections-transformer
+
+# Local dev only. Stands up a source Mongo (standalone — update lookups use FindOne, no replica
+# set required), a target Mongo, a JetStream-enabled NATS, and the transformer.
+# Production streams/manifests are ops/IaC-owned — the transformer owns no streams.
+
+services:
+  source-mongo:
+    image: mongo:7
+    networks:
+      - oplog-col-local
+
+  target-mongo:
+    image: mongo:7
+    networks:
+      - oplog-col-local
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    networks:
+      - oplog-col-local
+
+  oplog-collections-transformer:
+    build:
+      context: ../..
+      dockerfile: data-migration/oplog-collections-transformer/deploy/Dockerfile
+    depends_on:
+      source-mongo:
+        condition: service_started
+      target-mongo:
+        condition: service_started
+      nats:
+        condition: service_started
+    environment:
+      - SITE_ID=site-local
+      - NATS_URL=nats://nats:4222
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/
+      - SOURCE_DB=rocketchat
+      - TARGET_MONGO_URI=mongodb://target-mongo:27017/
+      - TARGET_DB=chat
+      - ROOMS_COLLECTION=rocketchat_rooms
+      - SUBSCRIPTIONS_COLLECTION=rocketchat_subscriptions
+      - THREAD_SUBS_COLLECTION=company_thread_subscriptions
+      - USERS_COLLECTION=users
+      - ROOM_MEMBERS_COLLECTION=company_room_members
+      - SOURCE_READ_PREFERENCE=primaryPreferred
+      - BOOTSTRAP_STREAMS=true
+      - LOG_LEVEL=info
+    networks:
+      - oplog-col-local
+
+networks:
+  oplog-col-local:
+    driver: bridge

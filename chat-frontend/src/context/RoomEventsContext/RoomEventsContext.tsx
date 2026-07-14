@@ -380,8 +380,8 @@ export function useSidebarSections(): SidebarSection[] {
     const apps: RoomSummary[] = []
     const channelDm: RoomSummary[] = []
     // Cold-start safety: if all three bucket Sets are empty, the
-    // subscription.get* RPCs either failed or haven't landed yet.
-    // listRooms is independent and may have populated `summaries`
+    // subscription.list RPCs either failed or haven't landed yet.
+    // subscription.list is independent and may have populated `summaries`
     // already; strict partitioning would drop every one of those
     // rooms and render an empty sidebar. Fall back to a flat list
     // under Channels and DMs so the user can still reach their rooms;

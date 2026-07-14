@@ -25,17 +25,17 @@ func TestUserRoomCollection_Metadata(t *testing.T) {
 	cfg := coll.StreamConfig("site-a")
 	assert.Equal(t, "INBOX_site-a", cfg.Name)
 	assert.Equal(t, []string{
-		"chat.inbox.site-a.*",
-		"chat.inbox.site-a.aggregate.>",
+		"chat.inbox.site-a.internal.>",
+		"chat.inbox.site-a.external.>",
 	}, cfg.Subjects)
 	assert.Empty(t, cfg.Sources)
 
 	filters := coll.FilterSubjects("site-a")
 	assert.ElementsMatch(t, []string{
-		"chat.inbox.site-a.member_added",
-		"chat.inbox.site-a.member_removed",
-		"chat.inbox.site-a.aggregate.member_added",
-		"chat.inbox.site-a.aggregate.member_removed",
+		"chat.inbox.site-a.internal.member_added",
+		"chat.inbox.site-a.internal.member_removed",
+		"chat.inbox.site-a.external.member_added",
+		"chat.inbox.site-a.external.member_removed",
 	}, filters)
 }
 
@@ -90,7 +90,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689600000
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, ts)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, ts)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded_Restricted(t *testing.T) {
 	const hssVal int64 = 1735689500000
 	hss := hssVal
 	payload.HistorySharedSince = &hss
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, ts)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, ts)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -180,7 +180,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689700000
-	data := makeInboxMemberEvent(t, model.OutboxMemberRemoved, payload, ts)
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, ts)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestUserRoomCollection_BuildAction_BulkMixed_AllRestricted(t *testing.T) {
 	hss := hssVal
 	payload.HistorySharedSince = &hss
 
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -285,7 +285,7 @@ func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob", "carol"}
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 12345)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 12345)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -306,13 +306,13 @@ func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
 func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 
-	t.Run("malformed outbox event", func(t *testing.T) {
+	t.Run("malformed inbox event", func(t *testing.T) {
 		_, err := coll.BuildAction([]byte("{invalid"))
 		assert.Error(t, err)
 	})
 
 	t.Run("malformed payload", func(t *testing.T) {
-		data, _ := json.Marshal(map[string]any{"type": model.OutboxMemberAdded, "payload": "not-bytes"})
+		data, _ := json.Marshal(map[string]any{"type": model.InboxMemberAdded, "payload": "not-bytes"})
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
@@ -320,7 +320,7 @@ func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {
 	t.Run("empty account in list", func(t *testing.T) {
 		payload := baseInboxMemberEvent()
 		payload.Accounts = []string{"alice", ""}
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
@@ -328,7 +328,7 @@ func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {
 	t.Run("missing room id", func(t *testing.T) {
 		payload := baseInboxMemberEvent()
 		payload.RoomID = ""
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
@@ -336,13 +336,13 @@ func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {
 	t.Run("empty accounts", func(t *testing.T) {
 		payload := baseInboxMemberEvent()
 		payload.Accounts = nil
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
 
 	t.Run("missing timestamp", func(t *testing.T) {
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, baseInboxMemberEvent(), 0)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, baseInboxMemberEvent(), 0)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})

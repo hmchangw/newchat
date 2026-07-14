@@ -50,13 +50,16 @@ bin/
 # Frontend
 node_modules/
 chat-frontend/dist/
+admin-frontend/dist/
 
 # Vitest cache (created when vitest is run from a non-package directory)
 .vite/
 chat-frontend/.vite/
+admin-frontend/.vite/
 
 # Vitest junit reporter output (CI artifact, not source)
 chat-frontend/junit.xml
+admin-frontend/junit.xml
 
 # Local-only verification cache (tools/buildcache).
 .cache/
@@ -66,3 +69,11 @@ tmp/
 .air.*.toml
 /loadgen
 .claude/worktrees/
+
+# stray local builds of the data-migration services
+/oplog-connector
+/oplog-transformer
+/oplog-collections-transformer
+
+# Captured pprof profiles from `make profile`.
+profiles/

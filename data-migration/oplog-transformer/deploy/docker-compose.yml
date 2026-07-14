@@ -1,0 +1,51 @@
+name: oplog-transformer
+
+# Local dev only. Stands up a single-node Mongo replica set (the transformer reads the
+# source collection for update lookups), a JetStream-enabled NATS, and the transformer.
+# Production streams/manifests are ops/IaC-owned — the transformer owns no streams.
+
+services:
+  source-mongo:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      # Initiate the replica set once, then report healthy.
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          'try { rs.status() } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"source-mongo:27017"}]}) }'
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    networks:
+      - oplog-local
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    networks:
+      - oplog-local
+
+  oplog-transformer:
+    build:
+      context: ../..
+      dockerfile: data-migration/oplog-transformer/deploy/Dockerfile
+    depends_on:
+      source-mongo:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      - SITE_ID=site-local
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
+      - SOURCE_DB=rocketchat
+      - NATS_URL=nats://nats:4222
+      - SOURCE_READ_PREFERENCE=primaryPreferred
+      - LOG_LEVEL=info
+    networks:
+      - oplog-local
+
+networks:
+  oplog-local:
+    driver: bridge

@@ -46,8 +46,8 @@ func benchMemberData(b *testing.B, n int) []byte {
 	if err != nil {
 		b.Fatal(err)
 	}
-	evt := model.OutboxEvent{
-		Type: model.OutboxMemberAdded, SiteID: "site-a", DestSiteID: "site-a",
+	evt := model.InboxEvent{
+		Type: model.InboxMemberAdded, SiteID: "site-a", DestSiteID: "site-a",
 		Payload: payloadData, Timestamp: 1735689600000,
 	}
 	data, err := json.Marshal(&evt)
@@ -61,7 +61,7 @@ func benchMemberData(b *testing.B, n int) []byte {
 // 1:1 messages collection — the CPU work a pipelined flush would overlap with
 // the previous batch's ES round-trip.
 func BenchmarkBuildAction_Message(b *testing.B) {
-	coll := newMessageCollection("messages-site-a-v1", time.Time{})
+	coll := newMessageCollection("messages-site-a-v1", time.Time{}, false)
 	data := benchMessageData(b)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -96,7 +96,7 @@ func BenchmarkBuildAction_UserRoom(b *testing.B) {
 func BenchmarkBuildAction_Spotlight(b *testing.B) {
 	for _, n := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprintf("accounts=%d", n), func(b *testing.B) {
-			coll := newSpotlightCollection("spotlight-site-a-v1")
+			coll := newSpotlightCollection("spotlight-site-a-v1", false)
 			data := benchMemberData(b, n)
 			b.ReportAllocs()
 			b.ResetTimer()

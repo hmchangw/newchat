@@ -8,9 +8,10 @@ import (
 
 func TestSeedIDs_UsersMatchesBuildUsers(t *testing.T) {
 	got := usersIDs()
-	assert.Len(t, got, 10)
+	assert.Len(t, got, 11)
 	assert.Contains(t, got, "u-alice")
 	assert.Contains(t, got, "u-judy")
+	assert.Contains(t, got, "u-admin")
 }
 
 func TestSeedIDs_RoomsMatchesBuildRooms(t *testing.T) {
@@ -21,7 +22,7 @@ func TestSeedIDs_RoomsMatchesBuildRooms(t *testing.T) {
 }
 
 func TestSeedIDs_AllCollectionsExposeIDs(t *testing.T) {
-	assert.Len(t, usersIDs(), 10)
+	assert.Len(t, usersIDs(), 11)
 	assert.Len(t, roomIDs(), 6)
 	assert.Len(t, subscriptionIDs(), 23)
 	assert.Len(t, roomMemberIDs(), 19)

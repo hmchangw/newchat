@@ -50,20 +50,23 @@ func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageReposi
 		GetRoomTimes(gomock.Any(), gomock.Any()).
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
 		MinTimes(0)
+	// Permissive default: existing GetThreadMessages tests don't verify the floor field.
+	threadRooms.EXPECT().GetMinThreadUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	return svc, msgs, subs, pub, threadRooms
 }
 
 // newServiceWithRoomMock additionally exposes the room mock, pre-stubbed with a permissive
-// GetRoomTimes default (override with Times(N) to assert resolver behaviour); no UserStore/CustomEmojiStore pre-stubs.
-func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository, *mocks.MockUserStore, *mocks.MockCustomEmojiStore) {
+// GetRoomTimes default (override with Times(N) to assert resolver behaviour); no UserStore/AppStore pre-stubs.
+func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository, *mocks.MockUserStore, *mocks.MockAppStore) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	rooms := mocks.NewMockRoomRepository(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
-	customEmojis := mocks.NewMockCustomEmojiStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
 	rooms.EXPECT().
 		GetRoomTimes(gomock.Any(), gomock.Any()).
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
@@ -78,7 +81,7 @@ func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockM
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
 	}
-	return service.New(msgs, subs, rooms, pub, threadRooms, users, customEmojis, cfg), msgs, subs, rooms, pub, threadRooms, users, customEmojis
+	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg), msgs, subs, rooms, pub, threadRooms, users, apps
 }
 
 // assertInternalErr verifies err collapses to the generic "internal error" envelope at the
@@ -279,15 +282,16 @@ func TestHistoryService_LoadHistory_AccessErrorTakesPrecedence(t *testing.T) {
 	rooms := mocks.NewMockRoomRepository(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
-	customEmojis := mocks.NewMockCustomEmojiStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{
 		MessageHistoryFloorDays: 90,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
 	}
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, users, customEmojis, cfg)
+	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	c := testContext()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, false, errors.New("access db error"))
@@ -300,19 +304,73 @@ func TestHistoryService_LoadHistory_AccessErrorTakesPrecedence(t *testing.T) {
 	assertInternalErr(t, err, "verifying room access")
 }
 
-func TestHistoryService_LoadNextMessages_DoesNotReadRoom(t *testing.T) {
+func TestHistoryService_LoadNextMessages_ReturnsMinUserLastSeenAt(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	floor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).Return(makePage(nil, false), nil)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(&floor, nil)
+
+	resp, err := svc.LoadNextMessages(c, models.LoadNextMessagesRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, resp.MinUserLastSeenAt)
+	assert.Equal(t, floor.UTC().UnixMilli(), *resp.MinUserLastSeenAt)
+}
+
+func TestHistoryService_LoadNextMessages_NoMinUserLastSeenAt(t *testing.T) {
 	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
-	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(makePage(nil, false), nil)
-	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Times(0)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).Return(makePage(nil, false), nil)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(nil, nil)
 
-	_, err := svc.LoadNextMessages(c, models.LoadNextMessagesRequest{})
+	resp, err := svc.LoadNextMessages(c, models.LoadNextMessagesRequest{})
 	require.NoError(t, err)
+	assert.Nil(t, resp.MinUserLastSeenAt)
+
+	// omitempty must keep the field out of the JSON.
+	raw, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "minUserLastSeenAt")
 }
 
-func TestHistoryService_LoadSurroundingMessages_DoesNotReadRoom(t *testing.T) {
+func TestHistoryService_LoadNextMessages_RoomReadError_DegradesGracefully(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	pageMessages := []models.Message{{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute)}}
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).Return(makePage(pageMessages, false), nil)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(nil, fmt.Errorf("mongo down"))
+
+	resp, err := svc.LoadNextMessages(c, models.LoadNextMessagesRequest{})
+	require.NoError(t, err)
+	assert.Len(t, resp.Messages, 1)
+	assert.Nil(t, resp.MinUserLastSeenAt)
+}
+
+func TestHistoryService_LoadSurroundingMessages_ReturnsMinUserLastSeenAt(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	floor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).Return(makePage(nil, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).Return(makePage(nil, false), nil)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(&floor, nil)
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
+	require.NoError(t, err)
+	require.NotNil(t, resp.MinUserLastSeenAt)
+	assert.Equal(t, floor.UTC().UnixMilli(), *resp.MinUserLastSeenAt)
+}
+
+func TestHistoryService_LoadSurroundingMessages_NoMinUserLastSeenAt(t *testing.T) {
 	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
 
@@ -321,10 +379,50 @@ func TestHistoryService_LoadSurroundingMessages_DoesNotReadRoom(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).Return(makePage(nil, false), nil)
 	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).Return(makePage(nil, false), nil)
-	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(nil, nil)
 
-	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
 	require.NoError(t, err)
+	assert.Nil(t, resp.MinUserLastSeenAt)
+
+	// omitempty must keep the field out of the JSON.
+	raw, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "minUserLastSeenAt")
+}
+
+func TestHistoryService_LoadSurroundingMessages_RoomReadError_DegradesGracefully(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).Return(makePage(nil, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).Return(makePage(nil, false), nil)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(nil, fmt.Errorf("mongo down"))
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, resp.Messages, 1) // central still returned
+	assert.Nil(t, resp.MinUserLastSeenAt)
+}
+
+func TestHistoryService_LoadSurroundingMessages_Limit1_ReturnsMinUserLastSeenAt(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	floor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(&floor, nil)
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	require.NotNil(t, resp.MinUserLastSeenAt)
+	assert.Equal(t, floor.UTC().UnixMilli(), *resp.MinUserLastSeenAt)
 }
 
 // --- LoadNextMessages ---
@@ -571,6 +669,23 @@ func TestHistoryService_GetMessageByID_NoHSS(t *testing.T) {
 	result, err := svc.GetMessageByID(c, models.GetMessageByIDRequest{MessageID: "m1"})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", result.MessageID)
+}
+
+func TestHistoryService_GetMessageByID_DecodesAttachments(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	blob, err := json.Marshal(model.Attachment{ID: "f1", Title: "a.png", Type: "file"})
+	require.NoError(t, err)
+	createdAt := joinTime.Add(1 * time.Minute)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msg := &models.Message{MessageID: "m1", RoomID: "r1", CreatedAt: createdAt, Attachments: [][]byte{blob}}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m1").Return(msg, nil)
+
+	result, err := svc.GetMessageByID(c, models.GetMessageByIDRequest{MessageID: "m1"})
+	require.NoError(t, err)
+	require.Len(t, result.DecodedAttachments, 1)
+	assert.Equal(t, "f1", result.DecodedAttachments[0].ID)
 }
 
 func TestHistoryService_LoadNextMessages_HasNextFalse(t *testing.T) {
@@ -1525,14 +1640,16 @@ func TestHistoryService_EditMessage_ThreadReply_CarriesThreadFields(t *testing.T
 	c := testContext()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	parentCreatedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 	hydrated := &models.Message{
-		MessageID:      "reply-1",
-		RoomID:         "r1",
-		Sender:         models.Participant{Account: "u1", ID: "u1-id"},
-		CreatedAt:      time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
-		Msg:            "original reply",
-		ThreadParentID: "parent-1",
-		TShow:          false,
+		MessageID:             "reply-1",
+		RoomID:                "r1",
+		Sender:                models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:             time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:                   "original reply",
+		ThreadParentID:        "parent-1",
+		ThreadParentCreatedAt: &parentCreatedAt,
+		TShow:                 false,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
@@ -1544,6 +1661,8 @@ func TestHistoryService_EditMessage_ThreadReply_CarriesThreadFields(t *testing.T
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Equal(t, "parent-1", evt.Message.ThreadParentMessageID, "edit event must carry ThreadParentMessageID for thread routing")
 			assert.False(t, evt.Message.TShow, "edit event must carry TShow")
+			require.NotNil(t, evt.Message.ThreadParentMessageCreatedAt, "edit event must carry parent createdAt for the visibility gate")
+			assert.Equal(t, parentCreatedAt.UTC(), evt.Message.ThreadParentMessageCreatedAt.UTC())
 			return nil
 		})
 
@@ -1561,14 +1680,16 @@ func TestHistoryService_DeleteMessage_ThreadReply_CarriesThreadFields(t *testing
 	c := testContext()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	parentCreatedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 	hydrated := &models.Message{
-		MessageID:      "reply-1",
-		RoomID:         "r1",
-		Sender:         models.Participant{Account: "u1", ID: "u1-id"},
-		CreatedAt:      time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
-		Msg:            "reply",
-		ThreadParentID: "parent-1",
-		TShow:          false,
+		MessageID:             "reply-1",
+		RoomID:                "r1",
+		Sender:                models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:             time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:                   "reply",
+		ThreadParentID:        "parent-1",
+		ThreadParentCreatedAt: &parentCreatedAt,
+		TShow:                 false,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().
@@ -1584,6 +1705,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_CarriesThreadFields(t *testing
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Equal(t, "parent-1", evt.Message.ThreadParentMessageID, "delete event must carry ThreadParentMessageID for thread routing")
 			assert.False(t, evt.Message.TShow, "delete event must carry TShow")
+			require.NotNil(t, evt.Message.ThreadParentMessageCreatedAt, "delete event must carry parent createdAt for the visibility gate")
+			assert.Equal(t, parentCreatedAt.UTC(), evt.Message.ThreadParentMessageCreatedAt.UTC())
 			return nil
 		})
 
@@ -2040,4 +2163,168 @@ func TestHistoryService_TShow_ThreadParentCreatedAtNil_ConservativeRedaction(t *
 	require.Len(t, resp.Messages, 1)
 	// ThreadParentCreatedAt nil → conservative redaction applied.
 	assert.Equal(t, service.UnavailableQuoteMsg, resp.Messages[0].QuotedParentMessage.Msg)
+}
+
+// --- GetMessagesByIDs ---
+
+const maxGetByIDsBatchSize = 100
+
+func TestHistoryService_GetMessagesByIDs_Success(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	m1 := models.Message{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(1 * time.Minute)}
+	m2 := models.Message{MessageID: "m2", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	m3 := models.Message{MessageID: "m3", RoomID: "r1", CreatedAt: joinTime.Add(3 * time.Minute)}
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1", "m2", "m3"}).Return([]models.Message{m1, m2, m3}, nil)
+
+	result, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1", "m2", "m3"}})
+	require.NoError(t, err)
+	require.Len(t, result.Messages, 3)
+	assert.Equal(t, "m1", result.Messages[0].MessageID)
+	assert.Equal(t, "m2", result.Messages[1].MessageID)
+	assert.Equal(t, "m3", result.Messages[2].MessageID)
+}
+
+func TestHistoryService_GetMessagesByIDs_DecodesAttachments(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	blob, err := json.Marshal(model.Attachment{ID: "f1", Title: "a.png", Type: "file"})
+	require.NoError(t, err)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	fetched := []models.Message{{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute), Attachments: [][]byte{blob}}}
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1"}).Return(fetched, nil)
+
+	resp, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	require.Len(t, resp.Messages[0].DecodedAttachments, 1)
+	assert.Equal(t, "f1", resp.Messages[0].DecodedAttachments[0].ID)
+}
+
+func TestHistoryService_GetMessagesByIDs_PartialResult_MissingIDsSilentlyOmitted(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	m1 := models.Message{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(1 * time.Minute)}
+	// m2 not found — store returns only [m1]
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1", "m2"}).Return([]models.Message{m1}, nil)
+
+	result, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1", "m2"}})
+	require.NoError(t, err)
+	require.Len(t, result.Messages, 1)
+	assert.Equal(t, "m1", result.Messages[0].MessageID)
+}
+
+func TestHistoryService_GetMessagesByIDs_EmptyMessageIDs_BadRequest(t *testing.T) {
+	svc, _, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	_, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{}})
+	require.Error(t, err)
+	assertBadRequestErr(t, err, "messageIds must not be empty")
+}
+
+func TestHistoryService_GetMessagesByIDs_OverCap_BadRequest(t *testing.T) {
+	svc, _, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	ids := make([]string, maxGetByIDsBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("m%d", i)
+	}
+	_, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: ids})
+	require.Error(t, err)
+	assertBadRequestErr(t, err, "too many messageIds")
+}
+
+func TestHistoryService_GetMessagesByIDs_DropsCrossRoomMessages(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	inRoom := models.Message{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(1 * time.Minute)}
+	crossRoom := models.Message{MessageID: "m2", RoomID: "r-other", CreatedAt: joinTime.Add(2 * time.Minute)}
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1", "m2"}).Return([]models.Message{inRoom, crossRoom}, nil)
+
+	result, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1", "m2"}})
+	require.NoError(t, err)
+	require.Len(t, result.Messages, 1)
+	assert.Equal(t, "m1", result.Messages[0].MessageID)
+}
+
+func TestHistoryService_GetMessagesByIDs_AccessWindowFiltering(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	// m1 is before the access window; m2 is within it.
+	m1 := models.Message{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(-1 * time.Hour)}
+	m2 := models.Message{MessageID: "m2", RoomID: "r1", CreatedAt: joinTime.Add(1 * time.Minute)}
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1", "m2"}).Return([]models.Message{m1, m2}, nil)
+
+	result, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1", "m2"}})
+	require.NoError(t, err)
+	// m1 silently omitted; only m2 returned.
+	require.Len(t, result.Messages, 1)
+	assert.Equal(t, "m2", result.Messages[0].MessageID)
+}
+
+func TestHistoryService_GetMessagesByIDs_StoreError_Internal(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1"}).Return(nil, fmt.Errorf("cassandra unavailable"))
+
+	_, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1"}})
+	require.Error(t, err)
+	assertInternalErr(t, err, "fetching messages by IDs")
+}
+
+func TestHistoryService_GetMessagesByIDs_NotSubscribed_Forbidden(t *testing.T) {
+	svc, _, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, false, nil)
+
+	_, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1"}})
+	require.Error(t, err)
+	assertForbiddenErr(t, err, "not subscribed to room")
+}
+
+func TestHistoryService_GetMessagesByIDs_QuoteRedaction(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	// m1 has a quoted message that falls before the access window — should be redacted.
+	m1 := models.Message{
+		MessageID: "m1",
+		RoomID:    "r1",
+		CreatedAt: joinTime.Add(1 * time.Minute),
+		QuotedParentMessage: &models.QuotedParentMessage{
+			MessageID: "q1",
+			Msg:       "secret old message",
+			CreatedAt: joinTime.Add(-1 * time.Hour), // before access window
+		},
+	}
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1"}).Return([]models.Message{m1}, nil)
+
+	result, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	require.Len(t, result.Messages, 1)
+	assert.Equal(t, service.UnavailableQuoteMsg, result.Messages[0].QuotedParentMessage.Msg)
 }

@@ -21,7 +21,7 @@ type MembersSummary struct {
 	PublishErrors               int
 	RoomServiceErrors           int
 	MissingReplies              int
-	MissingBroadcasts           int
+	MissingEvents               int
 	E1                          Percentiles
 	E2                          Percentiles
 	E1Count, E2Count            int
@@ -43,13 +43,13 @@ func PrintMembersSummary(w io.Writer, s *MembersSummary) error {
 	fmt.Fprintf(w, "  publish errors:    %d\n", s.PublishErrors)
 	fmt.Fprintf(w, "  room-service errors: %d\n", s.RoomServiceErrors)
 	fmt.Fprintf(w, "  missing replies:   %d\n", s.MissingReplies)
-	fmt.Fprintf(w, "  missing broadcasts:%d\n\n", s.MissingBroadcasts)
+	fmt.Fprintf(w, "  missing member events:%d\n\n", s.MissingEvents)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "latency (measured window only)")
 	fmt.Fprintln(tw, "metric\tcount\tp50\tp95\tp99\tmax")
 	fmt.Fprintf(tw, "E1 reply\t%d\t%s\t%s\t%s\t%s\n", s.E1Count, s.E1.P50, s.E1.P95, s.E1.P99, s.E1.Max)
-	fmt.Fprintf(tw, "E2 broadcast\t%d\t%s\t%s\t%s\t%s\n", s.E2Count, s.E2.P50, s.E2.P95, s.E2.P99, s.E2.Max)
+	fmt.Fprintf(tw, "E2 member-event\t%d\t%s\t%s\t%s\t%s\n", s.E2Count, s.E2.P50, s.E2.P95, s.E2.P99, s.E2.Max)
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("flush latency table: %w", err)
 	}

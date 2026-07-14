@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
-	"github.com/gocql/gocql"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -41,55 +40,6 @@ func setupMongo(t *testing.T) *mongo.Database {
 func setupKeyStore(t *testing.T, db *mongo.Database) roomkeystore.RoomKeyStore {
 	t.Helper()
 	return roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
-}
-
-func setupCassandra(t *testing.T) *gocql.Session {
-	t.Helper()
-	keyspace, adminSession, host := testutil.CassandraKeyspace(t, "room_service_test")
-	cql := func(format string) string { return fmt.Sprintf(format, keyspace) }
-
-	require.NoError(t, adminSession.Query(cql(`CREATE TYPE IF NOT EXISTS %s."Participant" (id TEXT, eng_name TEXT, company_name TEXT, app_id TEXT, app_name TEXT, is_bot BOOLEAN, account TEXT)`)).Exec())
-	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.messages_by_id (
-		message_id TEXT,
-		room_id TEXT,
-		sender FROZEN<"Participant">,
-		created_at TIMESTAMP,
-		PRIMARY KEY (message_id, created_at)
-	) WITH CLUSTERING ORDER BY (created_at DESC)`)).Exec())
-
-	cluster := gocql.NewCluster(host)
-	cluster.Consistency = gocql.One
-	cluster.DisableInitialHostLookup = true
-	cluster.Keyspace = keyspace
-	ksSession, err := cluster.CreateSession()
-	require.NoError(t, err)
-	t.Cleanup(func() { ksSession.Close() })
-	return ksSession
-}
-
-func TestCassMessageReader_GetMessageRoomAndCreatedAt_Integration(t *testing.T) {
-	ctx := context.Background()
-	session := setupCassandra(t)
-
-	createdAt := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender) VALUES (?, ?, ?, ?)`,
-		"m1", "r1", createdAt,
-		map[string]interface{}{"account": "alice", "id": "uA", "eng_name": "Alice"},
-	).WithContext(ctx).Exec())
-
-	reader := NewCassMessageReader(session)
-
-	roomID, ts, sender, found, err := reader.GetMessageRoomAndCreatedAt(ctx, "m1")
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, "r1", roomID)
-	require.True(t, ts.Equal(createdAt), "createdAt mismatch: got %v, want %v", ts, createdAt)
-	require.Equal(t, "alice", sender)
-
-	_, _, _, found, err = reader.GetMessageRoomAndCreatedAt(ctx, "missing")
-	require.NoError(t, err)
-	require.False(t, found)
 }
 
 func setupNATS(t *testing.T) string {
@@ -126,6 +76,98 @@ func TestMongoStore_Integration(t *testing.T) {
 	// Test not found
 	_, err = store.GetSubscription(ctx, "u2", "r1")
 	assert.Error(t, err, "expected error for missing subscription")
+}
+
+// TestMongoStore_CheckMembership_Integration verifies the projected existence
+// check: nil when subscribed, model.ErrSubscriptionNotFound when not.
+func TestMongoStore_CheckMembership_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	mustInsertSub(t, db, &model.Subscription{
+		ID:     "s1",
+		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1",
+		Roles:  []model.Role{model.RoleMember},
+	})
+
+	assert.NoError(t, store.CheckMembership(ctx, "alice", "r1"))
+
+	err := store.CheckMembership(ctx, "bob", "r1")
+	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
+
+	err = store.CheckMembership(ctx, "alice", "r2")
+	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
+}
+
+// TestMongoStore_GetRoom_ProjectionFields_Integration pins the field set that
+// GetRoom's projection must return: every Room field read by any handler call
+// site. Dropping one from the projection would silently zero it here, so this
+// test is the guard for the projected read path.
+func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	lastMsg := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	minSeen := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Millisecond)
+	lastMentionAll := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Millisecond)
+	mustInsertRoom(t, db, &model.Room{
+		ID: "rproj", Name: "proj-room", Type: model.RoomTypeChannel, SiteID: "site-a",
+		UserCount: 7, AppCount: 3, Restricted: true, ExternalAccess: true,
+		LastMsgAt: &lastMsg, MinUserLastSeenAt: &minSeen, LastMsgID: "m123",
+		LastMentionAllAt: &lastMentionAll,
+	})
+
+	got, err := store.GetRoom(ctx, "rproj")
+	require.NoError(t, err)
+	assert.Equal(t, "rproj", got.ID)
+	assert.Equal(t, "proj-room", got.Name)
+	assert.Equal(t, model.RoomTypeChannel, got.Type)
+	assert.Equal(t, 7, got.UserCount)
+	assert.Equal(t, 3, got.AppCount)
+	assert.True(t, got.Restricted)
+	assert.True(t, got.ExternalAccess)
+	require.NotNil(t, got.LastMsgAt)
+	assert.WithinDuration(t, lastMsg, *got.LastMsgAt, time.Second)
+	require.NotNil(t, got.MinUserLastSeenAt)
+	assert.WithinDuration(t, minSeen, *got.MinUserLastSeenAt, time.Second)
+	require.NotNil(t, got.LastMentionAllAt, "lastMentionAllAt must be in the projection (read event computes hasGroupMention from it)")
+	assert.WithinDuration(t, lastMentionAll, *got.LastMentionAllAt, time.Second)
+}
+
+// TestMongoStore_GetSubscription_ProjectionFields_Integration pins the field
+// set that GetSubscription's projection must return: every Subscription field
+// read by any handler call site. Same guard rationale as the GetRoom variant.
+func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	lastSeen := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Millisecond)
+	mustInsertSub(t, db, &model.Subscription{
+		ID:           "sproj",
+		User:         model.SubscriptionUser{ID: "u9", Account: "carol", IsBot: true},
+		RoomID:       "rproj",
+		SiteID:       "site-a",
+		Roles:        []model.Role{model.RoleOwner, model.RoleMember},
+		Alert:        true,
+		ThreadUnread: []string{"t1", "t2"},
+		LastSeenAt:   &lastSeen,
+	})
+
+	got, err := store.GetSubscription(ctx, "carol", "rproj")
+	require.NoError(t, err)
+	assert.Equal(t, "u9", got.User.ID)
+	assert.Equal(t, "carol", got.User.Account)
+	assert.Equal(t, "rproj", got.RoomID)
+	assert.Equal(t, "site-a", got.SiteID)
+	assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, got.Roles)
+	assert.True(t, got.Alert)
+	assert.Equal(t, []string{"t1", "t2"}, got.ThreadUnread)
+	require.NotNil(t, got.LastSeenAt)
+	assert.WithinDuration(t, lastSeen, *got.LastSeenAt, time.Second)
 }
 
 func TestMongoStore_GetSubscriptionWithMembership_Integration(t *testing.T) {
@@ -565,6 +607,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		insertUser(t, db, model.User{
 			ID: "u-alice", Account: "alice", SiteID: "site-a",
 			EngName: "Alice Wang", ChineseName: "愛麗絲",
+			SectName: "Cardiology", EmployeeID: "E10293",
 		})
 		insertSub(t, db, model.Subscription{
 			ID: "sub-alice", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -583,6 +626,8 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		assert.Equal(t, "Alice Wang", m.EngName)
 		assert.Equal(t, "愛麗絲", m.ChineseName)
 		assert.True(t, m.IsOwner)
+		assert.Equal(t, "Cardiology", m.SectName)
+		assert.Equal(t, "E10293", m.EmployeeID)
 		assert.Empty(t, m.OrgName)
 		assert.Zero(t, m.MemberCount)
 	})
@@ -641,7 +686,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		store := NewMongoStore(db)
 		base := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
 
-		insertUser(t, db, model.User{ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲"})
+		insertUser(t, db, model.User{ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲", SectName: "Cardiology", EmployeeID: "E10293"})
 		insertUser(t, db, model.User{ID: "u-bob", Account: "bob", EngName: "Bob", ChineseName: "鮑伯"})
 		insertSub(t, db, model.Subscription{
 			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -651,8 +696,8 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			ID: "sub-b", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"},
 			RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: base.Add(20 * time.Second),
 		})
-		// Note: NO room_members docs inserted — exercises the fallback path.
 
+		// NO room_members docs inserted — exercises the subscriptions fallback path.
 		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
@@ -661,9 +706,12 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		assert.Equal(t, "alice", alice.Account)
 		assert.Equal(t, "Alice Wang", alice.EngName)
 		assert.True(t, alice.IsOwner)
+		assert.Equal(t, "Cardiology", alice.SectName)
+		assert.Equal(t, "E10293", alice.EmployeeID)
 		assert.Equal(t, "bob", bob.Account)
 		assert.Equal(t, "Bob", bob.EngName)
 		assert.False(t, bob.IsOwner)
+		assert.Empty(t, bob.SectName)
 	})
 
 	t.Run("enrich=false leaves display fields zero on same seed data", func(t *testing.T) {
@@ -690,6 +738,9 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		assert.False(t, m.IsOwner)
 		assert.Empty(t, m.OrgName)
 		assert.Zero(t, m.MemberCount)
+		assert.Empty(t, m.SectName)
+		assert.Empty(t, m.EmployeeID)
+		assert.Empty(t, m.OrgDescription)
 	})
 
 	t.Run("enrich=true preserves sort and pagination", func(t *testing.T) {
@@ -903,6 +954,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 
 		bot := byAccount["weather.bot"]
 		assert.Equal(t, "Weather App", bot.Name, "bot member must have Name from apps")
+		assert.Empty(t, bot.SectName, "bot has no user doc → no sectName")
 		assert.Empty(t, bot.EngName, "bot member must NOT have EngName")
 		assert.Empty(t, bot.ChineseName, "bot member must NOT have ChineseName")
 	})
@@ -1898,6 +1950,33 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
+// Regression for #447: room read must clear hasMention (the thread mirror already did).
+// Reads the raw doc, not GetSubscription — that projection omits hasMention (would false-pass).
+func TestMongoStore_UpdateSubscriptionRead_ClearsHasMention(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	mustInsertSub(t, db, &model.Subscription{
+		ID:         "s1",
+		User:       model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID:     "r1",
+		SiteID:     "site-a",
+		JoinedAt:   time.Now().UTC().Add(-time.Hour),
+		HasMention: true,
+	})
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, false))
+
+	var raw model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&raw))
+	assert.False(t, raw.HasMention)
+	require.NotNil(t, raw.LastSeenAt)
+	assert.WithinDuration(t, now, *raw.LastSeenAt, time.Second)
+}
+
 func TestMongoStore_GetUserSiteID_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -2029,6 +2108,96 @@ func TestMongoStore_UpdateRoomMinUserLastSeenAt_Integration(t *testing.T) {
 	assert.Nil(t, r.MinUserLastSeenAt)
 }
 
+func mustInsertThreadSub(t *testing.T, db *mongo.Database, ts *model.ThreadSubscription) {
+	t.Helper()
+	_, err := db.Collection("thread_subscriptions").InsertOne(context.Background(), ts)
+	require.NoError(t, err)
+}
+
+func mustInsertThreadRoom(t *testing.T, db *mongo.Database, tr *model.ThreadRoom) {
+	t.Helper()
+	_, err := db.Collection("thread_rooms").InsertOne(context.Background(), tr)
+	require.NoError(t, err)
+}
+
+func TestMongoStore_MinThreadSubscriptionLastSeenByThreadRoomID_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	earliest := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	mid := earliest.Add(15 * time.Minute)
+	latest := earliest.Add(45 * time.Minute)
+
+	// "all-read": every subscriber has read → floor is the minimum.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts1", ThreadRoomID: "all-read", UserAccount: "alice", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts2", ThreadRoomID: "all-read", UserAccount: "bob", LastSeenAt: &latest})
+	got, err := store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "all-read")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// "one-unread": one subscriber has never read → nil.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts3", ThreadRoomID: "one-unread", UserAccount: "carol", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts4", ThreadRoomID: "one-unread", UserAccount: "dave"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "one-unread")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// "none-read": single subscriber who has never read → nil.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts5", ThreadRoomID: "none-read", UserAccount: "erin"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "none-read")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// "no-subs": no subscriptions at all → nil.
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "no-subs")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestMongoStore_UpdateThreadRoomMinUserLastSeenAt_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	mustInsertThreadRoom(t, db, &model.ThreadRoom{
+		ID: "tr1", RoomID: "r1", LastMsgAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Set the floor.
+	require.NoError(t, store.UpdateThreadRoomMinUserLastSeenAt(ctx, "tr1", &now))
+	tr, err := store.GetThreadRoomByID(ctx, "tr1")
+	require.NoError(t, err)
+	require.NotNil(t, tr)
+	require.NotNil(t, tr.MinUserLastSeenAt)
+	assert.WithinDuration(t, now, *tr.MinUserLastSeenAt, time.Second)
+
+	// Clear the floor.
+	require.NoError(t, store.UpdateThreadRoomMinUserLastSeenAt(ctx, "tr1", nil))
+	tr, err = store.GetThreadRoomByID(ctx, "tr1")
+	require.NoError(t, err)
+	require.NotNil(t, tr)
+	assert.Nil(t, tr.MinUserLastSeenAt)
+}
+
+func TestMongoStore_GetThreadRoomInfos(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db)
+
+	lastMsg := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	mustInsertThreadRoom(t, db, &model.ThreadRoom{ID: "tr1", RoomID: "room1", LastMsgAt: lastMsg})
+
+	rows, err := store.GetThreadRoomInfos(ctx, []string{"tr1", "missing"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1) // "missing" is absent, not an error
+	assert.Equal(t, "tr1", rows[0].ThreadRoomID)
+	assert.Equal(t, lastMsg.UTC().UnixMilli(), rows[0].LastMsgAt.UTC().UnixMilli())
+}
+
 func TestMongoStore_CountNewMembers_OrgOnlyUserCountsZero_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -2079,6 +2248,42 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 	require.Equal(t, "Bob", rows[0].EngName)
 
 	rows, err = store.ListReadReceipts(ctx, "r1", msgTime.Add(2*time.Hour), "alice", 100)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
+
+func TestMongoStore_ListThreadReadReceipts_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	_, err := db.Collection("users").InsertMany(ctx, []any{
+		bson.M{"_id": "uA", "account": "alice", "chineseName": "愛麗絲", "engName": "Alice"},
+		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
+		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
+	})
+	require.NoError(t, err)
+
+	// thread_subscriptions store userAccount/userId flat (no embedded "u"). Only
+	// bob's thread lastSeenAt is at/after the reply; carol's is before; alice is the sender.
+	msgTime := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "tsA", "threadRoomId": "tr1", "userId": "uA", "userAccount": "alice", "lastSeenAt": msgTime.Add(time.Hour)},
+		bson.M{"_id": "tsB", "threadRoomId": "tr1", "userId": "uB", "userAccount": "bob", "lastSeenAt": msgTime.Add(time.Minute)},
+		bson.M{"_id": "tsC", "threadRoomId": "tr1", "userId": "uC", "userAccount": "carol", "lastSeenAt": msgTime.Add(-time.Minute)},
+	})
+	require.NoError(t, err)
+
+	rows, err := store.ListThreadReadReceipts(ctx, "tr1", msgTime, "alice", 100)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "uB", rows[0].UserID)
+	require.Equal(t, "bob", rows[0].Account)
+	require.Equal(t, "鮑勃", rows[0].ChineseName)
+	require.Equal(t, "Bob", rows[0].EngName)
+
+	rows, err = store.ListThreadReadReceipts(ctx, "tr1", msgTime.Add(2*time.Hour), "alice", 100)
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }
@@ -2261,9 +2466,9 @@ func TestMongoStore_ToggleSubscriptionMute(t *testing.T) {
 	assert.Equal(t, "alice", got.User.Account)
 	assert.Equal(t, "r1", got.RoomID)
 
-	persisted, err := store.GetSubscription(ctx, "alice", "r1")
-	require.NoError(t, err)
-	assert.True(t, persisted.Muted)
+	// muted is not projected by GetSubscription (no handler reads it from a read
+	// result), so verify persistence with a direct field read.
+	assert.True(t, subBoolField(t, db, "r1", "alice", "muted"))
 	// muteUpdatedAt is stamped at the supplied instant (BSON ms precision) so the
 	// origin doc shares the federated event's high-water mark.
 	assert.Equal(t, ts1.UnixMilli(), subTimeField(t, db, "r1", "alice", "muteUpdatedAt").UnixMilli())
@@ -2296,6 +2501,22 @@ func subTimeField(t *testing.T, db *mongo.Database, roomID, account, field strin
 	return dt.Time().UTC()
 }
 
+// subBoolField reads a boolean field straight from the stored subscription
+// document. Used to assert persistence of fields (muted, favorite) that
+// GetSubscription deliberately does not project, so the read-back cannot rely
+// on the projected struct.
+func subBoolField(t *testing.T, db *mongo.Database, roomID, account, field string) bool {
+	t.Helper()
+	var doc bson.M
+	require.NoError(t, db.Collection("subscriptions").
+		FindOne(context.Background(), bson.M{"roomId": roomID, "u.account": account}).Decode(&doc))
+	v, ok := doc[field]
+	require.True(t, ok, "field %q missing on subscription", field)
+	b, ok := v.(bool)
+	require.True(t, ok, "field %q is %T, want bool", field, v)
+	return b
+}
+
 func TestMongoStore_ToggleSubscriptionFavorite(t *testing.T) {
 	db := testutil.MongoDB(t, "room-svc-fav")
 	store := NewMongoStore(db)
@@ -2325,9 +2546,9 @@ func TestMongoStore_ToggleSubscriptionFavorite(t *testing.T) {
 	assert.Equal(t, "alice", got.User.Account)
 	assert.Equal(t, "r1", got.RoomID)
 
-	persisted, err := store.GetSubscription(ctx, "alice", "r1")
-	require.NoError(t, err)
-	assert.True(t, persisted.Favorite)
+	// favorite is not projected by GetSubscription (no handler reads it from a
+	// read result), so verify persistence with a direct field read.
+	assert.True(t, subBoolField(t, db, "r1", "alice", "favorite"))
 	// favoriteUpdatedAt is stamped at the supplied instant so the origin doc
 	// shares the federated event's high-water mark.
 	assert.Equal(t, ts1.UnixMilli(), subTimeField(t, db, "r1", "alice", "favoriteUpdatedAt").UnixMilli())
@@ -2342,10 +2563,10 @@ func TestMongoStore_ToggleSubscriptionFavorite(t *testing.T) {
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
-// TestMongoStore_ApplySubscriptionVisibility_StampsTimestamp asserts the origin
-// write stamps visibilityUpdatedAt so the doc shares the federated event's
+// TestMongoStore_ApplySubscriptionRestriction_StampsTimestamp asserts the origin
+// write stamps restrictUpdatedAt so the doc shares the federated event's
 // high-water mark (inbox-worker guards remote applies against it).
-func TestMongoStore_ApplySubscriptionVisibility_StampsTimestamp(t *testing.T) {
+func TestMongoStore_ApplySubscriptionRestriction_StampsTimestamp(t *testing.T) {
 	db := testutil.MongoDB(t, "room-svc-visibility-stamp")
 	store := NewMongoStore(db)
 	ctx := context.Background()
@@ -2362,13 +2583,13 @@ func TestMongoStore_ApplySubscriptionVisibility_StampsTimestamp(t *testing.T) {
 
 	// restrict+owner branch.
 	ts1 := time.Now().UTC()
-	require.NoError(t, store.ApplySubscriptionVisibility(ctx, "r1", true, false, "alice", ts1))
-	assert.Equal(t, ts1.UnixMilli(), subTimeField(t, db, "r1", "alice", "visibilityUpdatedAt").UnixMilli())
+	require.NoError(t, store.ApplySubscriptionRestriction(ctx, "r1", true, false, "alice", ts1))
+	assert.Equal(t, ts1.UnixMilli(), subTimeField(t, db, "r1", "alice", "restrictUpdatedAt").UnixMilli())
 
 	// flags-only branch (ownerAccount empty).
 	ts2 := ts1.Add(time.Second)
-	require.NoError(t, store.ApplySubscriptionVisibility(ctx, "r1", false, false, "", ts2))
-	assert.Equal(t, ts2.UnixMilli(), subTimeField(t, db, "r1", "alice", "visibilityUpdatedAt").UnixMilli())
+	require.NoError(t, store.ApplySubscriptionRestriction(ctx, "r1", false, false, "", ts2))
+	assert.Equal(t, ts2.UnixMilli(), subTimeField(t, db, "r1", "alice", "restrictUpdatedAt").UnixMilli())
 }
 
 func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
@@ -2501,6 +2722,85 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration(t *te
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Y", got[0].Member.OrgName, "no matching users → falls back to member.id")
+}
+
+func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("dept-first description wins", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		require.NoError(t, store.EnsureIndexes(ctx))
+
+		const roomID = "room-1"
+		_, err := db.Collection("users").InsertOne(ctx, model.User{
+			ID: "u_alice", Account: "alice", SiteID: "site-a",
+			DeptID: "X", DeptName: "Engineering", DeptDescription: "Dept desc",
+		})
+		require.NoError(t, err)
+		_, err = db.Collection("users").InsertOne(ctx, model.User{
+			ID: "u_bob", Account: "bob", SiteID: "site-a",
+			SectID: "X", SectName: "Sect", SectDescription: "Sect desc",
+		})
+		require.NoError(t, err)
+		_, err = db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+			ID: idgen.GenerateUUIDv7(), RoomID: roomID,
+			Member: model.RoomMemberEntry{ID: "X", Type: model.RoomMemberOrg},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Dept desc", got[0].Member.OrgDescription)
+	})
+
+	t.Run("sect-only org uses sect description", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		require.NoError(t, store.EnsureIndexes(ctx))
+
+		const roomID = "room-2"
+		_, err := db.Collection("users").InsertOne(ctx, model.User{
+			ID: "u_c", Account: "c", SiteID: "site-a",
+			SectID: "S", SectName: "Sect", SectDescription: "Sect desc",
+		})
+		require.NoError(t, err)
+		_, err = db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+			ID: idgen.GenerateUUIDv7(), RoomID: roomID,
+			Member: model.RoomMemberEntry{ID: "S", Type: model.RoomMemberOrg},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Sect desc", got[0].Member.OrgDescription)
+	})
+
+	t.Run("missing description omitted", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		require.NoError(t, store.EnsureIndexes(ctx))
+
+		const roomID = "room-3"
+		_, err := db.Collection("users").InsertOne(ctx, model.User{
+			ID: "u_d", Account: "d", SiteID: "site-a",
+			SectID: "S2", SectName: "Sect2",
+		})
+		require.NoError(t, err)
+		_, err = db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+			ID: idgen.GenerateUUIDv7(), RoomID: roomID,
+			Member: model.RoomMemberEntry{ID: "S2", Type: model.RoomMemberOrg},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.OrgDescription)
+		assert.Equal(t, "Sect2", got[0].Member.OrgName)
+	})
 }
 
 func TestMongoStore_ListDefaultChannelTabApps(t *testing.T) {
@@ -3120,12 +3420,62 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		}, byAcct["bob"])
 	})
 
+	t.Run("members with empty statusText are excluded", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛",
+			StatusIsShow: true, StatusText: "available",
+		})
+		mustInsertUser(t, db, &model.User{
+			ID: "u-bob", Account: "bob", EngName: "Bob", ChineseName: "博", StatusText: "",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-b", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "member with empty statusText must be excluded")
+		assert.Equal(t, "alice", got[0].Account)
+	})
+
+	t.Run("member whose user doc lacks statusText is excluded", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛",
+			StatusIsShow: true, StatusText: "available",
+		})
+		// Raw insert with no statusText field at all (bypasses the model's zero value).
+		_, err := db.Collection("users").InsertOne(ctx, bson.M{"_id": "u-dave", "account": "dave", "engName": "Dave"})
+		require.NoError(t, err)
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-d", User: model.SubscriptionUser{ID: "u-dave", Account: "dave"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "member whose user doc lacks statusText must be excluded")
+		assert.Equal(t, "alice", got[0].Account)
+	})
+
 	t.Run("limit caps the result count", func(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
 		for i := 0; i < 5; i++ {
 			acct := fmt.Sprintf("user%d", i)
-			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct})
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct, StatusText: acct})
 			mustInsertSub(t, db, &model.Subscription{
 				ID: "sub-" + acct, User: model.SubscriptionUser{ID: "u-" + acct, Account: acct},
 				RoomID: "r1", SiteID: "site-a",
@@ -3176,7 +3526,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		// Then 3 live subs.
 		for i := 0; i < 3; i++ {
 			acct := fmt.Sprintf("live%d", i)
-			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct})
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, StatusText: acct})
 			mustInsertSub(t, db, &model.Subscription{
 				ID:     fmt.Sprintf("sub-live%d", i),
 				User:   model.SubscriptionUser{ID: "u-" + acct, Account: acct},
@@ -3436,102 +3786,61 @@ func TestBotAndAdminPredicate_GoAndMongoAgree_Integration(t *testing.T) {
 	}
 }
 
-func TestMongoStore_GetThreadUnreadSummary_Integration(t *testing.T) {
+// account is a user's identity, so EnsureIndexes makes users.account unique —
+// matching user-service's declaration on the shared collection. A second users
+// doc with the same account must violate the unique index.
+func TestEnsureIndexes_UsersAccountUnique_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	ctx := context.Background()
 	require.NoError(t, store.EnsureIndexes(ctx))
 
-	const account = "alice@example.com"
-	const site = "site-a"
-	seen := time.Now().UTC().Add(-time.Hour)
-	newer := time.Now().UTC()
-	older := time.Now().UTC().Add(-2 * time.Hour)
+	users := db.Collection("users")
+	_, err := users.InsertOne(ctx, bson.M{"_id": "u1", "account": "alice"})
+	require.NoError(t, err)
+	_, err = users.InsertOne(ctx, bson.M{"_id": "u2", "account": "alice"})
+	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
+}
 
-	_, err := db.Collection("rooms").InsertMany(ctx, []interface{}{
-		model.Room{ID: "room-chan", Type: model.RoomTypeChannel, SiteID: site},
-		model.Room{ID: "room-dm", Type: model.RoomTypeDM, SiteID: site},
+// Building the users.account unique index against a collection that already holds
+// duplicate accounts (a dirty pre-rollout environment) must fail at startup with
+// an actionable error pointing operators at the dedupe preflight, not a bare
+// driver error.
+func TestEnsureIndexes_UsersAccountUnique_PreexistingDuplicates_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	users := db.Collection("users")
+	_, err := users.InsertOne(ctx, bson.M{"_id": "u1", "account": "alice"})
+	require.NoError(t, err)
+	_, err = users.InsertOne(ctx, bson.M{"_id": "u2", "account": "alice"})
+	require.NoError(t, err)
+
+	err = store.EnsureIndexes(ctx)
+	require.Error(t, err)
+	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
+	require.Contains(t, err.Error(), "dedupe preflight", "error must direct operators to the dedupe preflight")
+}
+
+// A pre-existing NON-unique account_1 index conflicts with EnsureIndexes'
+// unique account_1 declaration (IndexOptionsConflict 85 / IndexKeySpecsConflict
+// 86 — the latter when the auto-generated name collides). The service must
+// surface an actionable error telling the operator to drop the old index rather
+// than a bare driver error.
+func TestEnsureIndexes_UsersAccountIndexOptionsConflict_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	// Pre-create a non-unique index named account_1 with the same key spec.
+	_, err := db.Collection("users").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "account", Value: 1}},
 	})
 	require.NoError(t, err)
 
-	_, err = db.Collection("thread_rooms").InsertMany(ctx, []interface{}{
-		model.ThreadRoom{ID: "tr1", RoomID: "room-chan", SiteID: site, LastMsgAt: newer},
-		model.ThreadRoom{ID: "tr2", RoomID: "room-dm", SiteID: site, LastMsgAt: newer},
-		model.ThreadRoom{ID: "tr3", RoomID: "room-chan", SiteID: site, LastMsgAt: older},
-	})
-	require.NoError(t, err)
-
-	seenCopy := seen
-	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []interface{}{
-		model.ThreadSubscription{ID: "ts1", ThreadRoomID: "tr1", RoomID: "room-chan", UserAccount: account, SiteID: site, LastSeenAt: &seenCopy},
-		model.ThreadSubscription{ID: "ts2", ThreadRoomID: "tr2", RoomID: "room-dm", UserAccount: account, SiteID: site, LastSeenAt: &seenCopy, HasMention: true},
-		model.ThreadSubscription{ID: "ts3", ThreadRoomID: "tr3", RoomID: "room-chan", UserAccount: account, SiteID: site, LastSeenAt: &newer},
-	})
-	require.NoError(t, err)
-
-	t.Run("rolls up unread, dm, mention, and max lastMessageAt", func(t *testing.T) {
-		got, err := store.GetThreadUnreadSummary(ctx, account, site)
-		require.NoError(t, err)
-		assert.True(t, got.Unread)
-		assert.True(t, got.UnreadDirectMessage)
-		assert.True(t, got.UnreadMention)
-		require.NotNil(t, got.LastMessageAt)
-		assert.WithinDuration(t, newer, got.LastMessageAt.UTC(), time.Millisecond)
-	})
-
-	t.Run("no subscriptions yields zero-value summary", func(t *testing.T) {
-		got, err := store.GetThreadUnreadSummary(ctx, "nobody@example.com", site)
-		require.NoError(t, err)
-		assert.False(t, got.Unread)
-		assert.False(t, got.UnreadDirectMessage)
-		assert.False(t, got.UnreadMention)
-		assert.Nil(t, got.LastMessageAt)
-	})
-
-	t.Run("other site is filtered out", func(t *testing.T) {
-		got, err := store.GetThreadUnreadSummary(ctx, account, "site-b")
-		require.NoError(t, err)
-		assert.False(t, got.Unread)
-		assert.Nil(t, got.LastMessageAt)
-	})
-
-	t.Run("never-seen subscription (nil lastSeenAt) is unread", func(t *testing.T) {
-		_, err := db.Collection("thread_rooms").InsertOne(ctx, model.ThreadRoom{ID: "tr-nil", RoomID: "room-chan", SiteID: site, LastMsgAt: newer})
-		require.NoError(t, err)
-		_, err = db.Collection("thread_subscriptions").InsertOne(ctx, model.ThreadSubscription{ID: "ts-nil", ThreadRoomID: "tr-nil", RoomID: "room-chan", UserAccount: "never@example.com", SiteID: site, LastSeenAt: nil})
-		require.NoError(t, err)
-
-		got, err := store.GetThreadUnreadSummary(ctx, "never@example.com", site)
-		require.NoError(t, err)
-		assert.True(t, got.Unread)
-		assert.False(t, got.UnreadDirectMessage)
-		assert.False(t, got.UnreadMention)
-		require.NotNil(t, got.LastMessageAt)
-	})
-
-	t.Run("all threads read yields unread false but non-nil lastMessageAt", func(t *testing.T) {
-		_, err := db.Collection("thread_rooms").InsertOne(ctx, model.ThreadRoom{ID: "tr-read", RoomID: "room-chan", SiteID: site, LastMsgAt: older})
-		require.NoError(t, err)
-		seenAfter := newer // newer > older, so this thread is fully read
-		_, err = db.Collection("thread_subscriptions").InsertOne(ctx, model.ThreadSubscription{ID: "ts-read", ThreadRoomID: "tr-read", RoomID: "room-chan", UserAccount: "read@example.com", SiteID: site, LastSeenAt: &seenAfter})
-		require.NoError(t, err)
-
-		got, err := store.GetThreadUnreadSummary(ctx, "read@example.com", site)
-		require.NoError(t, err)
-		assert.False(t, got.Unread)
-		assert.False(t, got.UnreadDirectMessage)
-		assert.False(t, got.UnreadMention)
-		require.NotNil(t, got.LastMessageAt)
-		assert.WithinDuration(t, older, got.LastMessageAt.UTC(), time.Millisecond)
-	})
-
-	t.Run("orphaned subscription (missing thread room) is dropped", func(t *testing.T) {
-		_, err := db.Collection("thread_subscriptions").InsertOne(ctx, model.ThreadSubscription{ID: "ts-orphan", ThreadRoomID: "missing-tr", RoomID: "room-chan", UserAccount: "orphan@example.com", SiteID: site, LastSeenAt: nil})
-		require.NoError(t, err)
-
-		got, err := store.GetThreadUnreadSummary(ctx, "orphan@example.com", site)
-		require.NoError(t, err)
-		assert.False(t, got.Unread)
-		assert.Nil(t, got.LastMessageAt)
-	})
+	err = store.EnsureIndexes(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "drop the old non-unique account_1 index",
+		"error must direct operators to drop the conflicting non-unique index")
 }

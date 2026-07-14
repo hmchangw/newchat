@@ -57,7 +57,6 @@ func TestRepository_FullRow_AllColumns(t *testing.T) {
 
 	sender := models.Participant{ID: "u1", EngName: "Alice", CompanyName: "Acme", AppID: "app1", AppName: "MyApp", IsBot: false, Account: "alice"}
 	mentionUser := models.Participant{ID: "u3", Account: "charlie"}
-	file := models.File{ID: "f1", Name: "doc.pdf", Type: "application/pdf"}
 	card := models.Card{Template: "approval", Data: []byte("card-data")}
 	cardAction := models.CardAction{Verb: "approve", Text: "Approve", CardID: "c1", DisplayText: "Click", HideExecLog: true, CardTmID: "tm1", Data: []byte("action-data")}
 	quotedSender := models.Participant{ID: "u5", Account: "eve"}
@@ -72,13 +71,13 @@ func TestRepository_FullRow_AllColumns(t *testing.T) {
 		{Emoji: "👍", UserAccount: "dave"}: {UserID: "u4", EngName: "Dave", Account: "dave", ReactedAt: reactedAt},
 	}
 
-	insertCQL := `INSERT INTO messages_by_id (room_id, created_at, message_id, sender, msg, mentions, attachments, file, card, card_action, tshow, thread_parent_id, thread_parent_created_at, quoted_parent_message, visible_to, reactions, deleted, type, sys_msg_data, site_id, edited_at, updated_at, thread_room_id, pinned_at, pinned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insertCQL := `INSERT INTO messages_by_id (room_id, created_at, message_id, sender, msg, mentions, attachments, card, card_action, tshow, thread_parent_id, thread_parent_created_at, quoted_parent_message, visible_to, reactions, deleted, type, sys_msg_data, site_id, edited_at, updated_at, thread_room_id, pinned_at, pinned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	insertArgs := []any{
 		"r-full", ts, "m-full",
 		sender, "hello world",
 		[]models.Participant{mentionUser},
 		[][]byte{[]byte("attach1"), []byte("attach2")},
-		file, card, cardAction,
+		card, cardAction,
 		true, "m-parent", threadParent, quotedMsg, "u1",
 		reactions,
 		true, "user_joined", []byte("sys-data"),
@@ -112,11 +111,6 @@ func TestRepository_FullRow_AllColumns(t *testing.T) {
 	require.Len(t, msg.Attachments, 2)
 	assert.Equal(t, []byte("attach1"), msg.Attachments[0])
 	assert.Equal(t, []byte("attach2"), msg.Attachments[1])
-
-	require.NotNil(t, msg.File)
-	assert.Equal(t, "f1", msg.File.ID)
-	assert.Equal(t, "doc.pdf", msg.File.Name)
-	assert.Equal(t, "application/pdf", msg.File.Type)
 
 	require.NotNil(t, msg.Card)
 	assert.Equal(t, "approval", msg.Card.Template)

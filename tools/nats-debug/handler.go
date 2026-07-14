@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // sseKeepAlive is the interval between SSE keep-alive pings, which also refresh
@@ -112,8 +114,10 @@ func (h *handler) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 }
 
 type publishRequest struct {
-	Subject string `json:"subject"`
-	Payload string `json:"payload"`
+	Subject      string `json:"subject"`
+	Payload      string `json:"payload"`
+	Debug        string `json:"debug"`
+	DebugPayload bool   `json:"debugPayload"`
 }
 
 func (h *handler) publish(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +131,7 @@ func (h *handler) publish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "subject is required", http.StatusBadRequest)
 		return
 	}
-	if err := sess.hub.Publish(req.Subject, req.Payload); err != nil {
+	if err := sess.hub.Publish(req.Subject, req.Payload, debugHeadersFor(req.Debug, req.DebugPayload)); err != nil {
 		slog.Error("publish failed", "subject", req.Subject, "error", err)
 		http.Error(w, fmt.Sprintf("publish failed: %s", err.Error()), http.StatusInternalServerError)
 		return
@@ -214,9 +218,22 @@ func (h *handler) requestDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 type natsRequestBody struct {
-	Subject   string `json:"subject"`
-	Payload   string `json:"payload"`
-	TimeoutMs int    `json:"timeoutMs"`
+	Subject      string `json:"subject"`
+	Payload      string `json:"payload"`
+	TimeoutMs    int    `json:"timeoutMs"`
+	Debug        string `json:"debug"`
+	DebugPayload bool   `json:"debugPayload"`
+}
+
+// debugHeadersFor normalizes a client-supplied X-Debug level through the same
+// strict parse the services use, so off/empty/unknown collapse to no header and
+// 1/true/on canonicalize to "debug". The dropdown only offers valid tokens; this
+// guards against a malformed body emitting a stray header.
+func debugHeadersFor(level string, payload bool) DebugHeaders {
+	return DebugHeaders{
+		Level:   natsutil.ParseDebugLevel(level).String(),
+		Payload: payload,
+	}
 }
 
 func (h *handler) request(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +252,7 @@ func (h *handler) request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reply, err := sess.hub.Request(req.Subject, req.Payload, req.TimeoutMs)
+	reply, err := sess.hub.Request(req.Subject, req.Payload, req.TimeoutMs, debugHeadersFor(req.Debug, req.DebugPayload))
 	if err != nil {
 		switch {
 		case errors.Is(err, nats.ErrNoResponders):

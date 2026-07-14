@@ -120,7 +120,8 @@ Reasons emitted today (full catalog in [`docs/client-api.md`](../docs/client-api
 - `max_room_size_reached`, `not_room_member`, `not_room_owner`, `last_owner_cannot_leave`, `bot_in_channel`, `bot_not_available`, `user_not_found`, `invalid_org`, `self_dm`, `last_member_cannot_remove`, `target_not_member`, `already_owner`, `cannot_demote_last_owner`, `promote_requires_individual` — room-service / room-worker
 - `large_room_post_restricted`, `not_subscribed`, `outside_access_window` — message-gatekeeper / history-service
 - `sso_token_expired`, `invalid_sso_token` — auth-service (drive a redirect-to-relogin)
-- `invalid_request`, `invalid_nkey`, `missing_fields` — auth-service (form-validation surface; rarely actionable by the UI today)
+- `invalid_request`, `invalid_nkey`, `missing_fields` — auth-service / portal-service (form-validation surface; rarely actionable by the UI today)
+- `account_not_ready` — portal-service lookup (account absent from the HR directory cache, or present there but not provisioned in the users collection; show "contact your administrator" copy)
 
 When adding a new client-facing branch in the UI, prefer matching a reason over a message substring. If the case you need isn't in the catalog, ask backend to add a `Reason` constant in `pkg/errcode/codes_<service>.go` rather than substring-matching the english text.
 

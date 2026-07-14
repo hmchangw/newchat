@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="login-old-vs-new">
+    <mxGraphModel dx="2000" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Bot Login — Old vs New Mechanism" style="text;html=1;align=center;verticalAlign=middle;fontSize=18;fontStyle=1;fontColor=#263238;" vertex="1" parent="1">
+          <mxGeometry x="100" y="20" width="1800" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Side-by-side: legacy RC/Meteor (hardcoded 50-cap loginTokens[] on user doc + plain SHA-256, O(n) validate scan) vs nextgen botplatform-service (passwords stay on users; sessions move to a dedicated `sessions` collection — one doc per session keyed by token hash, O(1) validate, configurable cap with FIFO eviction by issuedAt, provisioning gate, bp_ prefix, HMAC-keyed storage, permanent sessions)" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#546E7A;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="100" y="50" width="1800" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- LEFT panel: OLD -->
+        <mxCell id="old" value="OLD — Legacy Rocket.Chat / Meteor   (today, fz2/chat)" style="swimlane;startSize=36;fillColor=#FFEBEE;strokeColor=#C62828;fontSize=14;fontStyle=1;fontColor=#B71C1C;swimlaneFillColor=#FFF5F5;" vertex="1" parent="1">
+          <mxGeometry x="60" y="100" width="930" height="1050" as="geometry" />
+        </mxCell>
+
+        <mxCell id="o_step1" value="Step 1   Bot dials legacy URL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C62828;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="old">
+          <mxGeometry x="40" y="60" width="850" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="o_step1_body" value="POST /api/v1/login&#xa;body: { user, password }   (plaintext or RC digest form)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="old">
+          <mxGeometry x="60" y="85" width="810" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="o_step2" value="Step 2   Server reads users.services.password.bcrypt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C62828;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="old" parent="1">
+          <mxGeometry x="100" y="260" width="850" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="o_step2_body" value="bcrypt.compare( bcrypt_hash, sha256_hex(plaintext) )&#xa;NO provisioning gate — if creds match, login succeeds anywhere" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="old">
+          <mxGeometry x="60" y="285" width="810" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="o_step3" value="Step 3   Issue opaque random token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C62828;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="old">
+          <mxGeometry x="40" y="360" width="850" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="o_step3_body" value="raw = randomString(43 chars)&#xa;hashed = base64( sha256(raw) )                        ← plain SHA-256, public hash function&#xa;wire format = bare random string (no prefix)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="old">
+          <mxGeometry x="60" y="385" width="810" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="o_step4" value="Step 4   Append to capped loginTokens[] array" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C62828;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="old">
+          <mxGeometry x="40" y="480" width="850" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="o_step4_body" value="db.users.update( { _id }, { $push:&#xa;  { &quot;services.resume.loginTokens&quot;: { when, hashedToken } } } )&#xa;&#xa;⚠ array is CAPPED at 50 — older tokens fall off the end" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="old">
+          <mxGeometry x="60" y="505" width="810" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="o_step5" value="Step 5   Return RC envelope" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C62828;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="old">
+          <mxGeometry x="40" y="620" width="850" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="o_step5_body" value="{ status:&#x27;success&#x27;, data:{ authToken, userId, me:{ ..., roles:[&#x27;bot&#x27;] } } }&#xa;subsequent calls: X-Auth-Token + X-User-Id headers" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="old">
+          <mxGeometry x="60" y="645" width="810" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="o_problems" value="Problems with the old mechanism" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFCDD2;strokeColor=#C62828;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="old">
+          <mxGeometry x="40" y="740" width="850" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="o_problems_body" value="• Capped at 50 sessions per user — O(n) array scan per validate&#xa;• No provisioning gate — valid creds anywhere = login anywhere&#xa;• Plain SHA-256 storage — DB dump lets attacker probe hashes&#xa;• No version prefix — cannot rotate token format without DB migration&#xa;• Token leaked in logs = direct lookup key (no server-side secret)&#xa;• Single-site / monolithic — no concept of home site" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;" vertex="1" parent="old">
+          <mxGeometry x="60" y="770" width="810" height="240" as="geometry" />
+        </mxCell>
+
+        <!-- RIGHT panel: NEW -->
+        <mxCell id="new" value="NEW — botplatform-service   (nextgen, fz1/wsp)" style="swimlane;startSize=36;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=14;fontStyle=1;fontColor=#1B5E20;swimlaneFillColor=#F1F8E9;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="100" width="930" height="1050" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_step1" value="Step 1   Bot dials site-scoped URL (SAME path)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2E7D32;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="new">
+          <mxGeometry x="40" y="60" width="850" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n_step1_body" value="POST /api/v1/login   (legacy contract preserved — zero bot code changes)&#xa;body: { user: &#x27;xxx.bot&#x27;, password }   (same plaintext or RC digest form)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="new">
+          <mxGeometry x="60" y="85" width="810" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_step2" value="Step 2   Validate format + verify password + provisioning gate (one Mongo read)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2E7D32;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="new">
+          <mxGeometry x="40" y="160" width="850" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="n_step2_body" value="IsValidBotAccount(&#x27;xxx.bot&#x27;)                ← reject malformed before DB hit&#xa;u := db.users.findOne({account}) — read services.password.bcrypt (in-place; SAME legacy schema path)&#xa;bcrypt.CompareHashAndPassword(u.bcrypt, …)   constant-time + dummy compare on miss&#xa;if u.siteId != SITE_ID → 403 account_not_provisioned    ← PROVISIONING GATE (NEW; mirrors PR #295)&#xa;                                                          field check on the doc above, no extra Mongo query" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="new">
+          <mxGeometry x="60" y="185" width="810" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_step3" value="Step 3   Issue v1 token   (NEW format)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2E7D32;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="new">
+          <mxGeometry x="40" y="320" width="850" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n_step3_body" value="raw  = &quot;bp_&quot; + base64url( crypto/rand.Read(32) )        ← 256-bit entropy, per-class prefix&#xa;hash = base64( HMAC-SHA-256( TOKEN_HMAC_KEY, raw ) )   ← keyed hash, server-side secret&#xa;wire format = bp_&lt;43-char base64url&gt;    (46 chars total; ad_ for admin tokens)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="new">
+          <mxGeometry x="60" y="345" width="810" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_step4" value="Step 4   INSERT sessions row + cap enforcement (FIFO by issuedAt)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2E7D32;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="new">
+          <mxGeometry x="40" y="460" width="850" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="n_step4_body" value="db.sessions.insertOne({ _id: hash, userId, account, siteId,&#xa;                       scheme:&#x27;v1&#x27;, issuedAt: now })&#xa;over := db.sessions.countDocuments({userId}) - SESSIONS_MAX_PER_ACCOUNT&#xa;if over &gt; 0:&#xa;    victims := find({userId}).sort({issuedAt:1}).limit(over)  ← IXSCAN on {userId,issuedAt}&#xa;    deleteMany(victims._ids) + valkey.del(each)               ← explicit cache invalidation&#xa;✓ O(1) validate by _id (cap doesn&#x27;t affect read cost)" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;fontFamily=Courier New;" vertex="1" parent="new">
+          <mxGeometry x="60" y="485" width="810" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_step5" value="Step 5   Warm Valkey cache + return RC-compatible envelope" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2E7D32;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="new">
+          <mxGeometry x="40" y="620" width="850" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n_step5_body" value="SETEX valkey  hash  →  principal  (TTL 5m, hot path for validate)&#xa;{ status:&#x27;success&#x27;, data:{ authToken:&#x27;bp_…&#x27;, userId, me } }&#xa;subsequent calls: X-Auth-Token + X-User-Id  (SAME header shape)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontFamily=Courier New;" vertex="1" parent="new">
+          <mxGeometry x="60" y="645" width="810" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_wins" value="What the new mechanism wins" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="new">
+          <mxGeometry x="40" y="820" width="850" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="n_wins_body" value="✓ Configurable cap with FIFO eviction by issuedAt (default 100 vs legacy hardcoded 50)&#xa;✓ Validate = single sessions.findOne({_id: hash}) — O(1), independent of cap and session count&#xa;✓ Per-session row carries {userId, account, siteId, scheme, issuedAt} — admin revoke is one deleteOne; revoke-all is one deleteMany({userId})&#xa;✓ Sessions PERMANENT (no expiresAt / no time-based reap) — bot SDK without 401 auto-relogin stays working forever; cap eviction + admin revoke are the only removal paths&#xa;✓ Validate is pure-read (no Mongo writes; GETEX refreshes the in-memory TTL) — keeps the 1M/min hot path off the write log&#xa;✓ Provisioning gate — login only at the bot&#x27;s home site (REQUIRE_PROVISIONED=true)&#xa;✓ HMAC-keyed storage for v1 rows — DB dump is opaque without TOKEN_HMAC_KEY&#xa;✓ Per-class wire prefix (bp_ for bot, ad_ for admin) — class self-evident from X-Auth-Token; detected by standard secret scanners&#xa;✓ Bounded users-doc size — sessions don&#x27;t bloat the identity doc that every nextgen service caches via pkg/userstore&#xa;✓ Multi-site native (same users.siteId from PR #295)" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="new">
+          <mxGeometry x="60" y="850" width="810" height="170" as="geometry" />
+        </mxCell>
+
+        <!-- Bottom: backward compat callout -->
+        <mxCell id="compat" value="Backward compatibility — what stays IDENTICAL on the wire" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontSize=12;fontStyle=1;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1170" width="1880" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="compat_body" value="• Path: POST /api/v1/login   (legacy contract)         • Body shape: { user, password } plaintext or { digest, algorithm:&#x27;sha-256&#x27; }         • Response envelope: { status, data:{ authToken, userId, me:{...} } }&#xa;• Headers: X-Auth-Token + X-User-Id                    • User ID: 17-char Meteor base62 preserved verbatim         • Password storage: SAME users-doc path (services.password.bcrypt) — no credentials collection, no extraction&#xa;• Existing legacy tokens are BULK-IMPORTED once at cutover (skip PATs; verbatim hashedToken → sessions._id; scheme:&#x27;legacy&#x27;), so they validate immediately on nextgen with no re-login. New v1 logins issue scheme:&#x27;v1&#x27; rows; FIFO cap drops the oldest legacy ones first as the cap fills.&#xa;Result: bots run unchanged — no SDK redeploy, no credential reset, no URL change. Same wire surface AND password schema; sessions move to a clean dedicated collection with O(1) lookup." style="text;html=1;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="80" y="1200" width="1840" height="65" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

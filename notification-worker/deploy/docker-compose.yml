@@ -9,6 +9,9 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
+      # Dev-only pprof profiling on the health port (off by default). Flip on
+      # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - VALKEY_ADDRS=valkey:6379
@@ -23,11 +26,15 @@ services:
       - ROOM_META_CACHE_SIZE=10000
       - ROOM_META_CACHE_TTL=2m
       - PRESENCE_RPC_ENABLED=false
-      # Must match the broker's max_payload. Emitter rejects gzipped batches
-      # larger than this before publish so the failure surfaces with a clear
-      # error instead of a NATS NACK.
+      # Must match the broker's max_payload. Emitter rejects batches larger
+      # than this before publish so the failure surfaces with a clear error
+      # instead of a NATS NACK.
       - NATS_MAX_PAYLOAD_BYTES=262144
       - BOOTSTRAP_STREAMS=true
+      # /metrics (cache_*_total hit/miss/error counters); scraped by the
+      # observability Prometheus over the chat-local network. No host port
+      # mapping — search-service already owns host :9090.
+      - METRICS_ADDR=:9090
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

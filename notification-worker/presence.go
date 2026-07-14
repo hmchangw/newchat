@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/nats-io/nats.go"
 
@@ -67,7 +68,7 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			data, err := json.Marshal(model.PresenceSnapshotRequest{Accounts: ch})
+			data, err := sonic.Marshal(model.PresenceSnapshotRequest{Accounts: ch})
 			if err != nil {
 				slog.Warn("presence marshal failed", "error", err)
 				return
@@ -85,7 +86,7 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 				return
 			}
 			var reply model.PresenceSnapshotReply
-			if err := json.Unmarshal(msg.Data, &reply); err != nil {
+			if err := sonic.Unmarshal(msg.Data, &reply); err != nil {
 				slog.Warn("presence unmarshal failed", "error", err)
 				return
 			}

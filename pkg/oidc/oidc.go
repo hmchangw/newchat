@@ -27,6 +27,12 @@ type Claims struct {
 	Extra             map[string]interface{}
 }
 
+// Account returns preferred_username — the only claim trusted as a principal;
+// name is user-editable display data. Empty means callers must reject the token.
+func (c *Claims) Account() string {
+	return c.PreferredUsername
+}
+
 var (
 	ErrTokenExpired       = errors.New("oidc: token has expired")
 	ErrNoAudiences        = errors.New("oidc: at least one allowed audience is required")

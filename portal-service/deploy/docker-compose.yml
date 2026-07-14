@@ -1,0 +1,43 @@
+name: portal-service
+
+services:
+  # The demo hr_employee enrichment rows are seeded into chat.hr_employee by the
+  # shared mongo's init hook (docker-local/mongo/init/portal-hr-employee.js),
+  # which runs once when `make deps up` first creates the mongo volume — no
+  # separate seed container. The users docs (bcrypt password + roles) are owned
+  # by chat.users and seeded by tools/seed-sample-data.
+  portal-service:
+    build:
+      context: ../..
+      dockerfile: portal-service/deploy/Dockerfile
+    pull_policy: build
+    ports:
+      - "8085:8085"
+    env_file:
+      - path: ../../docker-local/.env
+        required: false
+    environment:
+      - PORT=8085
+      # Dev fallback: accounts absent from the directory resolve to the local site.
+      - DEV_MODE=${DEV_MODE:-true}
+      - PORTAL_DEV_FALLBACK_SITE_ID=site-local
+      - PORTAL_DEV_FALLBACK_NATS_URL=ws://localhost:9222
+      # Per-site URL registry (JSON): siteId -> {baseUrl, natsUrl} (see siteURL
+      # in handler.go — both required, nothing else read). baseUrl is the unified
+      # backend origin (`{baseUrl}/api/v1/...` via the Traefik gateway on :7777);
+      # natsUrl is the site's NATS WS URL.
+      - 'PORTAL_SITE_URLS={"site-local":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
+      # Single cluster-internal botplatform endpoint /api/v1/login forwards to.
+      - BOTPLATFORM_URL=http://botplatform-service:8080
+      # Served to the frontend via GET /api/settings. Both required (notEmpty) —
+      # the localhost OTEL URL is a dev placeholder; real value set per-deployment.
+      - PORTAL_API_VERSION=v2
+      - PORTAL_OTEL_BASE_URL=http://localhost:4318/v1
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

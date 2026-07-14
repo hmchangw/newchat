@@ -28,7 +28,6 @@ type EncryptedFields struct {
 	Attachments         [][]byte               `json:"attachments,omitempty"`
 	Card                *cassandra.Card        `json:"card,omitempty"`
 	CardAction          *cassandra.CardAction  `json:"cardAction,omitempty"`
-	File                *cassandra.File        `json:"file,omitempty"`
 	QuotedParentContent *QuotedParentEncrypted `json:"quotedParentContent,omitempty"`
 }
 

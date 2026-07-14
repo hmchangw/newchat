@@ -15,17 +15,17 @@ import (
 )
 
 func TestMessageCollection_TemplateName_StripsVersion(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1", time.Time{})
+	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
 	assert.Equal(t, "messages-site1_template", coll.TemplateName())
 }
 
 func TestMessageCollection_TemplateName_BareBaseFallback(t *testing.T) {
-	coll := newMessageCollection("messages-site1", time.Time{})
+	coll := newMessageCollection("messages-site1", time.Time{}, false)
 	assert.Equal(t, "messages-site1_template", coll.TemplateName())
 }
 
 func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1", time.Time{})
+	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
 	body := coll.TemplateBody()
 	require.NotNil(t, body)
 
@@ -58,18 +58,18 @@ func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 }
 
 func TestMessageCollection_StreamConfig(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{})
+	coll := newMessageCollection("msgs-v1", time.Time{}, false)
 	cfg := coll.StreamConfig("site-a")
 	assert.Equal(t, "MESSAGES_CANONICAL_site-a", cfg.Name)
 }
 
 func TestMessageCollection_ConsumerName(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{})
+	coll := newMessageCollection("msgs-v1", time.Time{}, false)
 	assert.Equal(t, "message-sync", coll.ConsumerName())
 }
 
 func TestMessageCollection_StoredScripts(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{})
+	coll := newMessageCollection("msgs-v1", time.Time{}, false)
 	assert.Empty(t, coll.StoredScripts(), "messages collection uses no stored scripts")
 }
 
@@ -278,7 +278,7 @@ func TestNewMessageSearchIndex_TShowOmittedWhenFalse(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{})
+	coll := newMessageCollection("msgs-v1", time.Time{}, false)
 	evt := model.MessageEvent{
 		Event: model.EventCreated,
 		Message: model.Message{
@@ -304,7 +304,7 @@ func TestMessageCollection_BuildAction(t *testing.T) {
 
 func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	coll := newMessageCollection("msgs-v1", cutoff)
+	coll := newMessageCollection("msgs-v1", cutoff, false)
 
 	mkEvent := func(createdAt time.Time) []byte {
 		evt := model.MessageEvent{
@@ -338,7 +338,7 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 	})
 
 	t.Run("zero cutoff disables filter — old data still indexed", func(t *testing.T) {
-		uncapped := newMessageCollection("msgs-v1", time.Time{})
+		uncapped := newMessageCollection("msgs-v1", time.Time{}, false)
 		actions, err := uncapped.BuildAction(mkEvent(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
 		require.NoError(t, err)
 		assert.Len(t, actions, 1)
@@ -346,7 +346,7 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction_ReactedSkipped(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{})
+	coll := newMessageCollection("msgs-v1", time.Time{}, false)
 	evt := model.MessageEvent{
 		Event: model.EventReacted,
 		Message: model.Message{

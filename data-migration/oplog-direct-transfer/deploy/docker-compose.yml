@@ -1,0 +1,51 @@
+name: oplog-direct-transfer
+
+# Local dev only. Stands up a source Mongo (standalone — update lookups use FindOne, no replica
+# set required), a target Mongo, a JetStream-enabled NATS, and the service.
+# Production streams/manifests are ops/IaC-owned — this service owns no streams.
+
+services:
+  source-mongo:
+    image: mongo:7
+    networks:
+      - oplog-direct-local
+
+  target-mongo:
+    image: mongo:7
+    networks:
+      - oplog-direct-local
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    networks:
+      - oplog-direct-local
+
+  oplog-direct-transfer:
+    build:
+      context: ../..
+      dockerfile: data-migration/oplog-direct-transfer/deploy/Dockerfile
+    depends_on:
+      source-mongo:
+        condition: service_started
+      target-mongo:
+        condition: service_started
+      nats:
+        condition: service_started
+    environment:
+      - SITE_ID=site-local
+      - NATS_URL=nats://nats:4222
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/
+      - SOURCE_DB=rocketchat
+      - TARGET_MONGO_URI=mongodb://target-mongo:27017/
+      - TARGET_DB=chat
+      - DIRECT_COLLECTIONS=rocketchat_avatar,company_apps_v,company_bot_cmd_men,company_tsso_tokens,rocketchat_uploads,company_bot_authorization,ufsTokens,user_devices
+      - SOURCE_READ_PREFERENCE=primaryPreferred
+      - BOOTSTRAP_STREAMS=true
+      - LOG_LEVEL=info
+    networks:
+      - oplog-direct-local
+
+networks:
+  oplog-direct-local:
+    driver: bridge

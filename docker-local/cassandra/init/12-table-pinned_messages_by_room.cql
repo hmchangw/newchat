@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS chat.pinned_messages_by_room (
   msg                   TEXT,
   mentions              SET<FROZEN<"Participant">>,
   attachments           LIST<BLOB>,
-  file                  FROZEN<"File">,
   card                  FROZEN<"Card">,
   card_action           FROZEN<"CardAction">,
   quoted_parent_message FROZEN<"QuotedParentMessage">,

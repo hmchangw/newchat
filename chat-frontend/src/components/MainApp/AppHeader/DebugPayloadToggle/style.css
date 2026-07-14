@@ -1,0 +1,21 @@
+/* Compact payload-capture checkbox that sits beside the debug level picker. */
+.debug-payload-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.debug-payload-toggle__control {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* Light up when capture is on so it's obvious payloads are being sent. */
+.debug-payload-toggle--on {
+  color: var(--accent);
+  font-weight: var(--font-medium);
+}

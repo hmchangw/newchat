@@ -207,6 +207,7 @@ func (s *HistoryService) ListPinnedMessages(c *natsrouter.Context, req models.Li
 	// Stub pre-access pins, then stub pre-access quoted parents inside survivors.
 	redactUnavailablePins(page.Data, accessSince)
 	redactUnavailableQuotes(page.Data, accessSince)
+	setDecodedAttachments(c, page.Data)
 
 	return &models.ListPinnedMessagesResponse{
 		Messages:   page.Data,
@@ -240,7 +241,7 @@ func redactUnavailablePins(pinned []models.Message, accessSince *time.Time) {
 		pinned[i].Msg = UnavailableQuoteMsg
 		pinned[i].Mentions = nil
 		pinned[i].Attachments = nil
-		pinned[i].File = nil
+		pinned[i].DecodedAttachments = nil
 		pinned[i].Card = nil
 		pinned[i].CardAction = nil
 		pinned[i].QuotedParentMessage = nil

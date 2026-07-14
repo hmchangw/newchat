@@ -1,6 +1,22 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// mentionVisible reports whether a mentionee whose subscription carries
+// historySharedSince may see a thread reply with parent createdAt parentCreatedAt.
+// nil window = full access; a set window with a missing/older parent = no access.
+func mentionVisible(historySharedSince, parentCreatedAt *time.Time) bool {
+	if historySharedSince == nil {
+		return true
+	}
+	if parentCreatedAt == nil {
+		return false
+	}
+	return !parentCreatedAt.Before(*historySharedSince)
+}
 
 // isBot returns true if account follows the bot naming convention used across
 // the codebase (suffix `.bot` or prefix `p_`). Mirrors the predicate in

@@ -5,8 +5,12 @@ services:
     build:
       context: ../..
       dockerfile: upload-service/deploy/Dockerfile
+    # Host 8086: 8085 now belongs to portal-service (unified-gateway migration,
+    # docker-local Task 5) — was a latent clash once both services ran
+    # together under compose.services.yaml. Container port (8080, used
+    # in-network by the Traefik gateway) is unchanged.
     ports:
-      - "8085:8080"
+      - "8086:8080"
     env_file:
       - path: ../../docker-local/.env
         required: false
@@ -14,16 +18,26 @@ services:
       - PORT=8080
       - DEV_MODE=${DEV_MODE:-true}
       - SITE_ID=${SITE_ID:-site-local}
-      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
-      - MAX_FILES=10
+      - MAX_IMAGES=10
+      - MAX_ATTACHMENTS=1
       - MAX_IMAGE_SIZE_BYTES=26214400
+      - FILE_UPLOAD_MAX_FILE_SIZE=104857600
+      - FILE_UPLOAD_MEDIA_TYPE_BLACKLIST=image/svg+xml
+      - FILE_DOWNLOAD_CACHE_MAX_AGE_SECONDS=31536000
       - OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
       - OIDC_AUDIENCES=nats-chat
       - TLS_SKIP_VERIFY=false
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       - DRIVE_URL=${DRIVE_URL:-http://drive-mock:9000}
       - DRIVE_API_TOKEN=${DRIVE_API_TOKEN:-dev-token}
       - DRIVE_BASE_URL_CONFIG_PATH=/etc/config/baseurls.json
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_USE_SSL=false
+      - MINIO_BUCKET=${MINIO_BUCKET:-chat-site-local}
     networks:
       - chat-local
 

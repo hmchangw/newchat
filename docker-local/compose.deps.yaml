@@ -36,6 +36,9 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+      # Auto-run once on first volume creation: seeds chat.hr_employee (portal
+      # directory enrichment). See docker-local/mongo/init/.
+      - ./mongo/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "echo 'db.runCommand({ping:1}).ok' | mongosh --quiet | grep -q 1"]
       interval: 5s
@@ -207,11 +210,75 @@ services:
     networks:
       - chat-local
 
+  vault:
+    image: hashicorp/vault:1.18
+    container_name: chat-local-vault
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=dev-only-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - chat-local
+
+  # One-shot transit setup. Same `init` profile as cassandra-init so
+  # `docker compose up --wait` skips it; the Makefile runs it explicitly
+  # after deps come up.
+  vault-init:
+    image: hashicorp/vault:1.18
+    container_name: chat-local-vault-init
+    profiles: ["init"]
+    depends_on:
+      vault:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=dev-only-token
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        vault secrets enable -path=transit transit || true
+        vault write -f transit/keys/chat-kek
+    networks:
+      - chat-local
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-18T21-56-31Z
+    container_name: chat-local-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - chat-local
+
 volumes:
   nats-data:
   mongo-data:
   cassandra-data:
   es-data:
+  minio-data:
 
 networks:
   chat-local:

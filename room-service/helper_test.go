@@ -33,24 +33,6 @@ func TestHasRole(t *testing.T) {
 	}
 }
 
-func TestIsBot(t *testing.T) {
-	tests := []struct {
-		name    string
-		account string
-		want    bool
-	}{
-		{"bot suffix", "helper.bot", true},
-		{"bot prefix", "p_scheduler", true},
-		{"normal user", "alice", false},
-		{"contains bot but not suffix", "botmaster", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isBot(tt.account))
-		})
-	}
-}
-
 func TestFilterBots(t *testing.T) {
 	input := []string{"alice", "helper.bot", "bob", "p_scheduler"}
 	got := filterBots(input)
@@ -99,7 +81,6 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 		{"thread sub not found", errThreadSubNotFound, errcode.CodeNotFound, ""},
 		{"promote requires individual", errPromoteRequiresIndividual, errcode.CodeBadRequest, errcode.RoomPromoteRequiresIndividual},
 		{"empty create request", errEmptyCreateRequest, errcode.CodeBadRequest, ""},
-		{"self dm", errSelfDM, errcode.CodeBadRequest, errcode.RoomSelfDM},
 		{"bot in channel", errBotInChannel, errcode.CodeBadRequest, errcode.RoomBotInChannel},
 		{"bot not available", errBotNotAvailable, errcode.CodeNotFound, errcode.RoomBotNotAvailable},
 		{"invalid user data", errInvalidUserData, errcode.CodeBadRequest, ""},
@@ -129,7 +110,6 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 
 func TestNewSentinelErrorsExist(t *testing.T) {
 	assert.Equal(t, "request must include at least one of users, orgs, channels, or name", errEmptyCreateRequest.Error())
-	assert.Equal(t, "cannot create a DM with yourself", errSelfDM.Error())
 	assert.Equal(t, "bots cannot be added to a channel", errBotInChannel.Error())
 	assert.Equal(t, "bot not available", errBotNotAvailable.Error())
 	assert.Equal(t, "user is missing required name fields", errInvalidUserData.Error())
@@ -155,23 +135,6 @@ func TestStripAccount(t *testing.T) {
 			got := stripAccount(tc.in, tc.account)
 			assert.Equal(t, tc.want, got)
 		})
-	}
-}
-
-func TestIsPlatformAdmin(t *testing.T) {
-	tests := []struct {
-		name string
-		user *model.User
-		want bool
-	}{
-		{"nil", nil, false},
-		{"empty roles", &model.User{Account: "alice"}, false},
-		{"user only", &model.User{Account: "a", Roles: []model.UserRole{model.UserRoleUser}}, false},
-		{"admin", &model.User{Account: "a", Roles: []model.UserRole{model.UserRoleAdmin}}, true},
-		{"mixed", &model.User{Account: "a", Roles: []model.UserRole{model.UserRoleUser, model.UserRoleAdmin}}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) { assert.Equal(t, tt.want, isPlatformAdmin(tt.user)) })
 	}
 }
 

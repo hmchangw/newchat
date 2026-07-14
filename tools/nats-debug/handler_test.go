@@ -344,16 +344,48 @@ func TestHandler_Publish(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name: "successful publish",
-			body: map[string]string{"subject": "chat.room.123", "payload": `{"msg":"hello"}`},
+			name: "successful publish without debug",
+			body: map[string]any{"subject": "chat.room.123", "payload": `{"msg":"hello"}`},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Publish("chat.room.123", `{"msg":"hello"}`).Return(nil)
+				m.EXPECT().Publish("chat.room.123", `{"msg":"hello"}`, DebugHeaders{}).Return(nil)
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "publish with debug level trace",
+			body: map[string]any{"subject": "chat.room.123", "payload": "{}", "debug": "trace"},
+			setupMock: func(m *MockHub) {
+				m.EXPECT().Publish("chat.room.123", "{}", DebugHeaders{Level: "trace"}).Return(nil)
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "publish with debug payload",
+			body: map[string]any{"subject": "chat.room.123", "payload": "{}", "debug": "flow", "debugPayload": true},
+			setupMock: func(m *MockHub) {
+				m.EXPECT().Publish("chat.room.123", "{}", DebugHeaders{Level: "flow", Payload: true}).Return(nil)
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "publish with truthy debug normalizes to debug",
+			body: map[string]any{"subject": "chat.room.123", "payload": "{}", "debug": "1"},
+			setupMock: func(m *MockHub) {
+				m.EXPECT().Publish("chat.room.123", "{}", DebugHeaders{Level: "debug"}).Return(nil)
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "publish with garbage debug emits no header",
+			body: map[string]any{"subject": "chat.room.123", "payload": "{}", "debug": "wat"},
+			setupMock: func(m *MockHub) {
+				m.EXPECT().Publish("chat.room.123", "{}", DebugHeaders{}).Return(nil)
 			},
 			wantStatus: http.StatusOK,
 		},
 		{
 			name:       "missing subject",
-			body:       map[string]string{"subject": "", "payload": "{}"},
+			body:       map[string]any{"subject": "", "payload": "{}"},
 			setupMock:  func(m *MockHub) {},
 			wantStatus: http.StatusBadRequest,
 		},
@@ -365,9 +397,9 @@ func TestHandler_Publish(t *testing.T) {
 		},
 		{
 			name: "publish error",
-			body: map[string]string{"subject": "chat.room.123", "payload": "{}"},
+			body: map[string]any{"subject": "chat.room.123", "payload": "{}"},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Publish("chat.room.123", "{}").Return(errors.New("not connected"))
+				m.EXPECT().Publish("chat.room.123", "{}", DebugHeaders{}).Return(errors.New("not connected"))
 			},
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -530,10 +562,28 @@ func TestHandler_Request(t *testing.T) {
 		wantPayload string
 	}{
 		{
-			name: "successful request",
+			name: "successful request without debug",
 			body: map[string]any{"subject": "chat.validate", "payload": `{"msg":"hi"}`, "timeoutMs": 3000},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Request("chat.validate", `{"msg":"hi"}`, 3000).Return(`{"ok":true}`, nil)
+				m.EXPECT().Request("chat.validate", `{"msg":"hi"}`, 3000, DebugHeaders{}).Return(`{"ok":true}`, nil)
+			},
+			wantStatus:  http.StatusOK,
+			wantPayload: `{"ok":true}`,
+		},
+		{
+			name: "request with debug level and payload",
+			body: map[string]any{"subject": "chat.validate", "payload": "{}", "timeoutMs": 3000, "debug": "debug", "debugPayload": true},
+			setupMock: func(m *MockHub) {
+				m.EXPECT().Request("chat.validate", "{}", 3000, DebugHeaders{Level: "debug", Payload: true}).Return(`{"ok":true}`, nil)
+			},
+			wantStatus:  http.StatusOK,
+			wantPayload: `{"ok":true}`,
+		},
+		{
+			name: "request with garbage debug emits no header",
+			body: map[string]any{"subject": "chat.validate", "payload": "{}", "timeoutMs": 3000, "debug": "off"},
+			setupMock: func(m *MockHub) {
+				m.EXPECT().Request("chat.validate", "{}", 3000, DebugHeaders{}).Return(`{"ok":true}`, nil)
 			},
 			wantStatus:  http.StatusOK,
 			wantPayload: `{"ok":true}`,
@@ -566,7 +616,7 @@ func TestHandler_Request(t *testing.T) {
 			name: "not connected",
 			body: map[string]any{"subject": "chat.validate", "payload": "{}", "timeoutMs": 1000},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Request("chat.validate", "{}", 1000).Return("", errors.New("not connected to request NATS"))
+				m.EXPECT().Request("chat.validate", "{}", 1000, DebugHeaders{}).Return("", errors.New("not connected to request NATS"))
 			},
 			wantStatus: http.StatusConflict,
 		},
@@ -574,7 +624,7 @@ func TestHandler_Request(t *testing.T) {
 			name: "no responders",
 			body: map[string]any{"subject": "chat.validate", "payload": "{}", "timeoutMs": 1000},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Request("chat.validate", "{}", 1000).Return("", errNoResponders)
+				m.EXPECT().Request("chat.validate", "{}", 1000, DebugHeaders{}).Return("", errNoResponders)
 			},
 			wantStatus: http.StatusBadGateway,
 		},
@@ -582,7 +632,7 @@ func TestHandler_Request(t *testing.T) {
 			name: "timeout error",
 			body: map[string]any{"subject": "chat.validate", "payload": "{}", "timeoutMs": 100},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Request("chat.validate", "{}", 100).Return("", errTimeout)
+				m.EXPECT().Request("chat.validate", "{}", 100, DebugHeaders{}).Return("", errTimeout)
 			},
 			wantStatus: http.StatusRequestTimeout,
 		},
@@ -590,7 +640,7 @@ func TestHandler_Request(t *testing.T) {
 			name: "generic hub error",
 			body: map[string]any{"subject": "chat.validate", "payload": "{}", "timeoutMs": 1000},
 			setupMock: func(m *MockHub) {
-				m.EXPECT().Request("chat.validate", "{}", 1000).Return("", errors.New("something broke"))
+				m.EXPECT().Request("chat.validate", "{}", 1000, DebugHeaders{}).Return("", errors.New("something broke"))
 			},
 			wantStatus: http.StatusInternalServerError,
 		},

@@ -12,6 +12,13 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+// subscriptionListRequest mirrors user-service's subscription.list wire body; local copy avoids cross-service import.
+type subscriptionListRequest struct {
+	Type              string `json:"type"`
+	Favorite          *bool  `json:"favorite,omitempty"`
+	UpdatedWithinDays *int   `json:"updatedWithinDays,omitempty"`
+}
+
 // publishFn matches the existing Publisher interface used by generator.go.
 type publishFn func(ctx context.Context, subj string, data []byte) error
 
@@ -64,16 +71,8 @@ func sendMessage(a actionCtx, u *userState, content string) error {
 	return nil
 }
 
-// markRead issues a NATS request to mark a random room as read. The wire
-// subject is "msg.read" (room-service's MessageRead handler), which
-// updates the user's subscription.lastReadAt and recomputes the room's
-// read-floor. Despite the wire name, this is the user's own act of
-// reading, not a "read receipt" notification — that's a separate
-// MessageReadReceipt handler in room-service.
-//
-// Must be a Request (not a Publish) — room-service's natsMessageRead
-// calls msg.Respond unconditionally, which fails with "nats: message
-// does not have a reply" on a fire-and-forget Publish.
+// markRead marks a random room as read via room-service's MessageRead handler. Must be a Request (not Publish)
+// because natsMessageRead calls msg.Respond unconditionally.
 func markRead(a actionCtx, u *userState, lastMsgID string) error {
 	if len(u.Rooms) == 0 {
 		return nil
@@ -91,7 +90,11 @@ func markRead(a actionCtx, u *userState, lastMsgID string) error {
 
 // refreshRoomList does a NATS request/reply for the user's subscription list.
 func refreshRoomList(a actionCtx, u *userState) error {
-	_, err := a.Request(a.Ctx, subject.UserSubscriptionGetRooms(u.Account, a.SiteID), nil, defaultRequestTimeout)
+	payload, err := json.Marshal(subscriptionListRequest{Type: "rooms"})
+	if err != nil {
+		return fmt.Errorf("marshal room-list: %w", err)
+	}
+	_, err = a.Request(a.Ctx, subject.UserSubscriptionList(u.Account, a.SiteID), payload, defaultRequestTimeout)
 	if err != nil {
 		return fmt.Errorf("request room-list: %w", err)
 	}
@@ -124,13 +127,8 @@ func muteToggle(a actionCtx, u *userState) error {
 	return nil
 }
 
-// roomCreate creates a new channel room owned by u, inviting u.Neighbor.
-// room-service rejects channel-create with no member targets via a second
-// validation pass (after the empty-request check) — `allUsers == 0 &&
-// allOrgs == 0 → errEmptyCreateRequest`. So we include one valid invitee.
-// The resulting roomID is not added to u.Rooms — deliberately leaky, since
-// the simulated user wouldn't immediately be active in a brand-new room
-// within the same hold window.
+// roomCreate creates a new channel room and invites u.Neighbor; room-service rejects channel-create with no invitees.
+// The resulting roomID is intentionally not added to u.Rooms (new room not immediately active in the same window).
 func roomCreate(a actionCtx, u *userState) error {
 	users := []string{}
 	if u.Neighbor != "" {
@@ -150,11 +148,8 @@ func roomCreate(a actionCtx, u *userState) error {
 	return nil
 }
 
-// memberAdd adds a target account to a random channel room u belongs to.
-// Picks from u.ChannelRooms (DMs excluded) — room-service rejects member-add
-// on DM rooms with "cannot add members to a non-channel room", so picking
-// from u.Rooms uniformly would generate ~45% wasted error_rate noise on
-// the daily-heavy preset (25 DMs out of 56 rooms/user).
+// memberAdd adds a target account to a random channel room; picks from u.ChannelRooms (not u.Rooms) because
+// room-service rejects member-add on DM rooms with "cannot add members to a non-channel room".
 func memberAdd(a actionCtx, u *userState, targetAccount string) error {
 	if len(u.ChannelRooms) == 0 {
 		return nil
@@ -171,9 +166,7 @@ func memberAdd(a actionCtx, u *userState, targetAccount string) error {
 	return nil
 }
 
-// threadReply publishes a SendMessageRequest with ThreadParentMessageID set,
-// on the frontdoor subject. The handler is intentionally a "send with parent
-// set" rather than a separate code path so it stresses the same pipeline.
+// threadReply publishes a SendMessageRequest with ThreadParentMessageID set; goes through the same pipeline as send.
 func threadReply(a actionCtx, u *userState, parentID, content string) error {
 	if len(u.Rooms) == 0 {
 		return nil
@@ -182,7 +175,8 @@ func threadReply(a actionCtx, u *userState, parentID, content string) error {
 	msgID := idgen.GenerateMessageID()
 	reqID := idgen.GenerateRequestID()
 	req := model.SendMessageRequest{
-		ID: msgID, Content: content, RequestID: reqID, ThreadParentMessageID: parentID,
+		ID: msgID, Content: content, RequestID: reqID,
+		ThreadParentMessageID: parentID,
 	}
 	data, err := json.Marshal(req)
 	if err != nil {

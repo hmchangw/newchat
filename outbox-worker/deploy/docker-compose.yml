@@ -1,0 +1,28 @@
+name: outbox-worker
+
+services:
+  outbox-worker:
+    build:
+      context: ../..
+      dockerfile: outbox-worker/deploy/Dockerfile
+    pull_policy: build
+    environment:
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      # Federation peers (same convention as user-service). One per-destination
+      # FIFO membership consumer is created per remote peer; single-site dev has
+      # none, so this lists only the local site.
+      - ALL_SITE_IDS=site-local
+      # Dev-only pprof profiling on the health port (off by default).
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
+      # outbox-worker owns the OUTBOX stream; create it against a fresh dev NATS.
+      - BOOTSTRAP_STREAMS=true
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

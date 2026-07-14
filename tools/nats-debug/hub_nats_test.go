@@ -45,6 +45,41 @@ func writeFakeCreds(t *testing.T) string {
 	return path
 }
 
+func TestDebugHeader(t *testing.T) {
+	tests := []struct {
+		name string
+		dbg  DebugHeaders
+		want nats.Header
+	}{
+		{
+			name: "neither set returns nil",
+			dbg:  DebugHeaders{},
+			want: nil,
+		},
+		{
+			name: "level only",
+			dbg:  DebugHeaders{Level: "flow"},
+			want: nats.Header{"X-Debug": []string{"flow"}},
+		},
+		{
+			name: "payload only",
+			dbg:  DebugHeaders{Payload: true},
+			want: nats.Header{"X-Debug-Payload": []string{"1"}},
+		},
+		{
+			name: "both set",
+			dbg:  DebugHeaders{Level: "trace", Payload: true},
+			want: nats.Header{"X-Debug": []string{"trace"}, "X-Debug-Payload": []string{"1"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, debugHeader(tt.dbg))
+		})
+	}
+}
+
 func TestBuildConnectOptions(t *testing.T) {
 	tests := []struct {
 		name          string

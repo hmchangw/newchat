@@ -40,11 +40,6 @@ func TestParticipant_JSON_Minimal(t *testing.T) {
 	assert.False(t, got.IsBot)
 }
 
-func TestFile_JSON(t *testing.T) {
-	f := File{ID: "f1", Name: "doc.pdf", Type: "application/pdf"}
-	roundTrip(t, f)
-}
-
 func TestCard_JSON(t *testing.T) {
 	c := Card{Template: "approval", Data: []byte(`{"key":"value"}`)}
 	roundTrip(t, c)
@@ -85,7 +80,7 @@ func TestQuotedParentMessage_JSON(t *testing.T) {
 		CreatedAt:             time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
 		Msg:                   "original message",
 		Mentions:              []Participant{{ID: "u2", Account: "bob"}},
-		Attachments:           [][]byte{[]byte("file1")},
+		DecodedAttachments:    []Attachment{{ID: "f1", Title: "a.png", Type: "file"}},
 		MessageLink:           "https://chat.example.com/r1/m1",
 		ThreadParentID:        "thread-parent-uuid",
 		ThreadParentCreatedAt: &threadParent,
@@ -129,6 +124,20 @@ func TestQuotedParentMessage_JSON_WithThreadParent(t *testing.T) {
 	assert.Equal(t, parentAt, *got.ThreadParentCreatedAt)
 }
 
+func TestQuotedParentMessage_JSON_TShow(t *testing.T) {
+	q := QuotedParentMessage{MessageID: "m1", RoomID: "r1", Sender: Participant{ID: "u1"}, CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), TShow: true}
+	b, err := json.Marshal(q)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"tshow":true`)
+	assert.True(t, roundTrip(t, q).TShow)
+
+	q.TShow = false // omitempty ⇒ absent when false
+	b, err = json.Marshal(q)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "tshow")
+	assert.False(t, roundTrip(t, q).TShow)
+}
+
 func TestMessage_JSON(t *testing.T) {
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	edited := now.Add(5 * time.Minute)
@@ -142,8 +151,7 @@ func TestMessage_JSON(t *testing.T) {
 		Sender:                Participant{ID: "u1", Account: "alice", IsBot: false},
 		Msg:                   "hello world",
 		Mentions:              []Participant{{ID: "u3", Account: "charlie"}},
-		Attachments:           [][]byte{[]byte("attach1")},
-		File:                  &File{ID: "f1", Name: "doc.pdf", Type: "application/pdf"},
+		DecodedAttachments:    []Attachment{{ID: "f1", Title: "a.png", Type: "file"}},
 		Card:                  &Card{Template: "approval", Data: []byte(`{"k":"v"}`)},
 		CardAction:            &CardAction{Verb: "approve", CardID: "c1"},
 		TShow:                 true,
@@ -171,8 +179,7 @@ func TestMessage_JSON(t *testing.T) {
 	assert.Equal(t, "m1", got.MessageID)
 	assert.Equal(t, "alice", got.Sender.Account)
 	assert.Len(t, got.Mentions, 1)
-	assert.Len(t, got.Attachments, 1)
-	assert.Equal(t, "doc.pdf", got.File.Name)
+	assert.Len(t, got.DecodedAttachments, 1)
 	assert.Equal(t, "approval", got.Card.Template)
 	assert.Equal(t, "approve", got.CardAction.Verb)
 	assert.True(t, got.TShow)
@@ -202,7 +209,6 @@ func TestMessage_JSON_Minimal(t *testing.T) {
 		Msg:       "hi",
 	}
 	got := roundTrip(t, msg)
-	assert.Nil(t, got.File)
 	assert.Nil(t, got.Card)
 	assert.Nil(t, got.CardAction)
 	assert.Nil(t, got.Mentions)

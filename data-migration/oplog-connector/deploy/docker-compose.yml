@@ -1,0 +1,80 @@
+name: oplog-connector
+
+# Local dev only. Stands up a single-node Mongo replica set (change streams
+# require a replica set), a JetStream-enabled NATS, and the connector.
+# Production streams/manifests are ops/IaC-owned.
+
+services:
+  source-mongo:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      # Initiate the replica set once, then report healthy.
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          'try { rs.status() } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"source-mongo:27017"}]}) }'
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    networks:
+      - oplog-local
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    networks:
+      - oplog-local
+
+  # Deployment split (spec 2026-07-09): the message pump runs alone so a fault on the
+  # collection side can't stall message CDC. Watch sets MUST stay disjoint, and exactly
+  # one service includes rocketchat_message. No host ports are published, so both keep
+  # the default METRICS_ADDR :9090 inside their own container.
+  oplog-connector-messages:
+    build:
+      context: ../..
+      dockerfile: data-migration/oplog-connector/deploy/Dockerfile
+    depends_on:
+      source-mongo:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      - SITE_ID=site-local
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
+      - SOURCE_DB=rocketchat
+      - CHECKPOINT_DB=migration
+      - NATS_URL=nats://nats:4222
+      - WATCH_COLLECTIONS=rocketchat_message
+      - READ_PREFERENCE=primaryPreferred
+      - BOOTSTRAP_STREAMS=true
+      - LOG_LEVEL=info
+    networks:
+      - oplog-local
+
+  oplog-connector-collections:
+    build:
+      context: ../..
+      dockerfile: data-migration/oplog-connector/deploy/Dockerfile
+    depends_on:
+      source-mongo:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      - SITE_ID=site-local
+      - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
+      - SOURCE_DB=rocketchat
+      - CHECKPOINT_DB=migration
+      - NATS_URL=nats://nats:4222
+      - WATCH_COLLECTIONS=rocketchat_room,rocketchat_subscription,rocketchat_uploads,company_room_members,company_thread_subscriptions,company_hr_acct_org,users,rocketchat_avatar,company_apps_v,company_bot_cmd_men,company_tsso_tokens,company_bot_authorization,ufsTokens,user_devices
+      - READ_PREFERENCE=primaryPreferred
+      - BOOTSTRAP_STREAMS=true
+      - LOG_LEVEL=info
+    networks:
+      - oplog-local
+
+networks:
+  oplog-local:
+    driver: bridge

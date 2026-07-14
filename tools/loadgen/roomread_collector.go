@@ -19,6 +19,7 @@ type RoomReadCollector struct {
 	samples    []RoomReadSample
 	errors     map[errClass]int
 	saturation int
+	underrun   int
 }
 
 // NewRoomReadCollector returns an empty collector.
@@ -54,6 +55,17 @@ func (c *RoomReadCollector) RecordSaturation() {
 	c.saturation++
 }
 
+// RecordUnderrun adds n events that the pacer could not release on schedule
+// (the load box fell behind the target cadence). n<=0 ticks are no-ops.
+func (c *RoomReadCollector) RecordUnderrun(n int) {
+	if n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.underrun += n
+}
+
 // Samples returns a defensive copy of the sample tape.
 func (c *RoomReadCollector) Samples() []RoomReadSample {
 	c.mu.Lock()
@@ -83,4 +95,11 @@ func (c *RoomReadCollector) SaturationCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.saturation
+}
+
+// UnderrunCount returns the total emit-underrun events.
+func (c *RoomReadCollector) UnderrunCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.underrun
 }

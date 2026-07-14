@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -31,17 +32,17 @@ func TestConfig_MaxWorkers(t *testing.T) {
 func TestIsMembershipSubject(t *testing.T) {
 	const siteID = "site-a"
 	t.Run("member_added is membership", func(t *testing.T) {
-		assert.True(t, isMembershipSubject(subject.InboxMemberAddedAggregate(siteID), siteID))
+		assert.True(t, isMembershipSubject(subject.InboxExternal(siteID, model.InboxMemberAdded), siteID))
 	})
 	t.Run("member_removed is membership", func(t *testing.T) {
-		assert.True(t, isMembershipSubject(subject.InboxMemberRemovedAggregate(siteID), siteID))
+		assert.True(t, isMembershipSubject(subject.InboxExternal(siteID, model.InboxMemberRemoved), siteID))
 	})
 	t.Run("read receipts are not membership", func(t *testing.T) {
-		assert.False(t, isMembershipSubject("chat.inbox.site-a.aggregate.subscription_read", siteID))
-		assert.False(t, isMembershipSubject("chat.inbox.site-a.aggregate.thread_read", siteID))
+		assert.False(t, isMembershipSubject(subject.InboxExternal(siteID, model.InboxSubscriptionRead), siteID))
+		assert.False(t, isMembershipSubject(subject.InboxExternal(siteID, model.InboxThreadRead), siteID))
 	})
 	t.Run("another site's membership subject does not match", func(t *testing.T) {
-		assert.False(t, isMembershipSubject(subject.InboxMemberAddedAggregate("site-b"), siteID))
+		assert.False(t, isMembershipSubject(subject.InboxExternal("site-b", model.InboxMemberAdded), siteID))
 	})
 }
 
@@ -58,7 +59,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 
 		assert.Equal(t, "inbox-worker", cc.Durable)
 		assert.Equal(t, 1000, cc.MaxAckPending)
-		assert.Equal(t, []string{subject.InboxAggregateAll(siteID)}, cc.FilterSubjects)
+		assert.Equal(t, []string{subject.InboxExternalAll(siteID)}, cc.FilterSubjects)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
 		assert.Equal(t, 5, cc.MaxDeliver)
@@ -76,7 +77,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 
 		assert.Equal(t, "inbox-worker", cc.Durable)
 		assert.Equal(t, 100, cc.MaxAckPending)
-		assert.Equal(t, []string{subject.InboxAggregateAll(siteID)}, cc.FilterSubjects)
+		assert.Equal(t, []string{subject.InboxExternalAll(siteID)}, cc.FilterSubjects)
 		assert.Equal(t, 45*time.Second, cc.AckWait)
 		assert.Equal(t, 3, cc.MaxDeliver)
 		assert.Equal(t, 256, cc.MaxWaiting)

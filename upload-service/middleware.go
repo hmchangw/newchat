@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +21,10 @@ import (
 )
 
 const ctxUserKey = "auth_user"
+
+// ssoTokenName is the shared header and cookie key for the SSO token. HandleSetCookie
+// writes this cookie and tokenFromRequest reads it — they must match, so keep one name.
+const ssoTokenName = "ssoToken"
 
 // TokenValidator validates a TSSO token and returns OIDC claims.
 // Satisfied by *pkg/oidc.Validator.
@@ -87,13 +93,51 @@ func otelMiddleware() gin.HandlerFunc {
 	}
 }
 
+// corsMiddleware emits credentialed CORS headers for an allowlisted Origin (wildcard is
+// illegal with credentials; a disallowed origin gets none) and answers preflight OPTIONS
+// with 204. Register at the engine level so preflight, which falls to NoRoute, reaches it.
+func corsMiddleware(allowed []string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Once an allowlist is configured the response varies by Origin, so a shared cache
+		// must key on it — set Vary even when this Origin isn't allowed, else the cache
+		// could serve a no-Allow-Origin response to a later allowed-origin request.
+		if len(allowed) > 0 {
+			c.Header("Vary", "Origin")
+		}
+		origin := c.GetHeader("Origin")
+		if origin != "" && slices.Contains(allowed, origin) {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Credentials", "true")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, "+ssoTokenName+", X-Request-ID")
+			c.Header("Access-Control-Max-Age", "300")
+		}
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
+// tokenFromRequest returns the ssoToken from the request header, falling back to
+// the ssoToken cookie. <img>-driven download requests cannot set headers, so they
+// carry the token in the cookie instead; header-first keeps existing callers exact.
+func tokenFromRequest(c *gin.Context) string {
+	if t := c.GetHeader(ssoTokenName); t != "" {
+		return t
+	}
+	t, _ := c.Cookie(ssoTokenName)
+	return t
+}
+
 // authMiddleware validates the ssoToken header and stores an AuthenticatedUser
 // in the Gin context. In dev mode the header value is treated as the account.
 func authMiddleware(v TokenValidator, devMode bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := errcode.WithLogValues(c.Request.Context(), "request_id", c.GetString("request_id"))
 
-		token := c.GetHeader("ssoToken")
+		token := tokenFromRequest(c)
 		if token == "" {
 			errhttp.Write(ctx, c, errcode.Unauthenticated("missing ssoToken",
 				errcode.WithReason(errcode.AuthMissingFields)))

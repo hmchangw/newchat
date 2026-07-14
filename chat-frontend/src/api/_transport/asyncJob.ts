@@ -112,6 +112,7 @@ const REASON_COPY: Record<string, string> = {
   pin_disabled: 'Pinning is turned off for this site.',
   pin_limit_reached: 'This room has reached its pin limit — unpin a message first.',
   pin_room_too_large: 'This room is too large for non-admins to pin.',
+  account_not_ready: "Your account isn't ready for chat yet — contact your administrator.",
 }
 
 /**
@@ -184,6 +185,49 @@ interface AsyncReplyEnvelope {
 }
 
 /**
+ * Issues a plain sync NATS request/reply and decodes the errcode envelope.
+ *
+ * Always stamps a fresh hyphenated-UUID `X-Request-ID` header (overridable
+ * via `opts.requestId`). Backend handlers that derive JetStream dedup IDs or
+ * deterministic document IDs from the request ID (`RequireRequestID`, see
+ * docs/error-handling.md §3a) reject requests without a valid one — so every
+ * sync request must carry the header, exactly as the two-phase path does.
+ *
+ * @throws {AsyncJobError} On an errcode reply, with `.kind = SyncError` and
+ *   `.code`/`.reason`/`.metadata` populated. Wire-level failures (timeout,
+ *   not connected) propagate as their native Error.
+ */
+export async function requestSync<T = unknown>(
+  nc: NatsConnection,
+  subject: string,
+  data: unknown = {},
+  {
+    requestId = uuidv7(),
+    timeout = 5000,
+    debugLevel = 'off',
+    debugPayload = false,
+  }: { requestId?: string; timeout?: number; debugLevel?: string; debugPayload?: boolean } = {},
+): Promise<T> {
+  const h = natsHeaders()
+  h.set('X-Request-ID', requestId)
+  if (debugLevel && debugLevel !== 'off') h.set('X-Debug', debugLevel)
+  if (debugPayload) h.set('X-Debug-Payload', '1')
+  const resp = await nc.request(subject, sc.encode(JSON.stringify(data)), { timeout, headers: h })
+  const parsed = JSON.parse(sc.decode(resp.data))
+  if (parsed.error) {
+    // errcode envelope {code, reason?, error, metadata?}. Legacy replies
+    // (pre-migration backend during rollout) lack code/reason — consumers
+    // fall back to err.message.
+    throw new AsyncJobError(parsed.error, ASYNC_JOB_ERROR_KINDS.SyncError, {
+      code: parsed.code,
+      reason: parsed.reason,
+      metadata: parsed.metadata,
+    })
+  }
+  return parsed as T
+}
+
+/**
  * Issues a NATS request whose handler responds in two phases: a sync reply
  * (typically `{status:"accepted"}` or `{error}`) followed by an
  * `AsyncJobResult` published to `chat.user.{account}.response.{requestID}`
@@ -209,6 +253,8 @@ export async function requestWithAsyncResult<S = unknown, A = unknown>(
     syncTimeout = DEFAULT_SYNC_TIMEOUT,
     asyncTimeout = DEFAULT_ASYNC_TIMEOUT,
     treatAsSuccess,
+    debugLevel = 'off',
+    debugPayload = false,
   } = opts
 
   const sub: NatsSubscription = nc.subscribe(userResponse(account, requestId), { max: 1 })
@@ -238,6 +284,8 @@ export async function requestWithAsyncResult<S = unknown, A = unknown>(
   try {
     const h = natsHeaders()
     h.set('X-Request-ID', requestId)
+    if (debugLevel && debugLevel !== 'off') h.set('X-Debug', debugLevel)
+    if (debugPayload) h.set('X-Debug-Payload', '1')
     const resp = await nc.request(subject, sc.encode(JSON.stringify(payload)), {
       timeout: syncTimeout,
       headers: h,

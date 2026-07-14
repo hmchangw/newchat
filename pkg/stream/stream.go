@@ -33,13 +33,6 @@ func Rooms(siteID string) Config {
 	}
 }
 
-func Outbox(siteID string) Config {
-	return Config{
-		Name:     fmt.Sprintf("OUTBOX_%s", siteID),
-		Subjects: []string{fmt.Sprintf("outbox.%s.>", siteID)},
-	}
-}
-
 // PushNotification returns the PUSH_NOTIFICATION_{siteID} stream config.
 // Owned by ops in production; notification-worker bootstraps it in dev only.
 func PushNotification(siteID string) Config {
@@ -50,39 +43,62 @@ func PushNotification(siteID string) Config {
 }
 
 // Inbox returns the canonical config for the `INBOX_{siteID}` stream that
-// carries subscription lifecycle events (member_added, member_removed)
-// plus any other aggregated events federated in from other sites.
+// carries federation events for a site.
 //
-// The stream declares TWO non-overlapping subject patterns so the local vs.
-// federated split is explicit in the stream schema itself:
+// The stream declares TWO non-overlapping subject patterns so the
+// internal (same-site) vs. external (cross-site) split is explicit in the
+// stream schema itself:
 //
-//   - `chat.inbox.{siteID}.*`
-//     Local direct publishes from same-site services (e.g., room-worker
-//     publishing `chat.inbox.{siteID}.member_added`). Single-token suffix,
-//     so it matches local event names only.
+//   - `chat.inbox.{siteID}.internal.>`
+//     Local-origin publishes from same-site services (e.g., room-worker
+//     publishing `chat.inbox.{siteID}.internal.member_added`). This is a
+//     search-indexing feed only; inbox-worker does NOT consume it because the
+//     originating service already applied the change to the local DB.
 //
-//   - `chat.inbox.{siteID}.aggregate.>`
-//     Federated events sourced from remote OUTBOX streams. These land here
-//     via a JetStream SubjectTransform that rewrites
-//     `outbox.{remote}.to.{siteID}.>` → `chat.inbox.{siteID}.aggregate.>`
-//     on the way into this stream. Multi-token-safe so the transform can
-//     preserve any event shape.
+//   - `chat.inbox.{siteID}.external.>`
+//     Remote-origin events published directly by a service at another site
+//     via a cross-supercluster JetStream publish to
+//     `chat.inbox.{siteID}.external.{eventType}`. inbox-worker consumes this
+//     lane and applies each event to the local DB.
 //
-// Together the two patterns carry exactly the four member events consumers
-// care about today — local member_added / member_removed and federated
-// aggregate.member_added / aggregate.member_removed — without an overly
-// broad catch-all that would silently accept typos.
-//
-// Cross-site Sources + SubjectTransforms themselves are a deployment-time
-// concern layered on by the service that owns stream creation, so this
-// baseline leaves Sources empty. Consumers only need Name + Subjects to
-// bind.
+// There is no Sources/SubjectTransform federation wiring: remote sites write
+// the external lane directly. Consumers only need Name + Subjects to bind.
 func Inbox(siteID string) Config {
 	return Config{
 		Name: fmt.Sprintf("INBOX_%s", siteID),
 		Subjects: []string{
-			fmt.Sprintf("chat.inbox.%s.*", siteID),
-			fmt.Sprintf("chat.inbox.%s.aggregate.>", siteID),
+			fmt.Sprintf("chat.inbox.%s.internal.>", siteID),
+			fmt.Sprintf("chat.inbox.%s.external.>", siteID),
 		},
+	}
+}
+
+// Outbox returns the OUTBOX_{siteID} stream config: the durable federation-relay
+// lane. room-service (and other same-site publishers) write OutboxEvents
+// on chat.outbox.{siteID}.{eventType}; outbox-worker consumes the stream and
+// forwards each target to the destination site's INBOX. Owned by outbox-worker
+// (dev bootstrap; ops/IaC in prod).
+func Outbox(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("OUTBOX_%s", siteID),
+		Subjects: []string{subject.OutboxWildcard(siteID)},
+	}
+}
+
+// MigrationOplog returns the MIGRATION_OPLOG_{siteID} stream config: raw CDC events from the legacy source Mongo. Owned by the oplog-connector (dev bootstrap; ops/IaC in prod).
+func MigrationOplog(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("MIGRATION_OPLOG_%s", siteID),
+		Subjects: []string{subject.MigrationOplogWildcard(siteID)},
+	}
+}
+
+// OrgSyncStream is the HR_{centralSiteID} stream populated by hr-syncer's
+// daily publishes on chat.hr.{centralSiteID}.>. hr-syncer runs at one
+// central site; every fab site's search-sync-worker consumes from it.
+func OrgSyncStream(centralSiteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("HR_%s", centralSiteID),
+		Subjects: []string{fmt.Sprintf("chat.hr.%s.>", centralSiteID)},
 	}
 }

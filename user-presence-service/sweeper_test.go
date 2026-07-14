@@ -10,6 +10,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 func TestSweeper_TickPublishesChanges(t *testing.T) {
@@ -19,7 +20,7 @@ func TestSweeper_TickPublishesChanges(t *testing.T) {
 	sw := NewSweeper(store, cap.fn(), "site-a", 0)
 	sw.now = fixedNow()
 	store.EXPECT().Sweep(gomock.Any(), gomock.Any()).
-		Return([]StatusChange{
+		Return([]presencestore.StatusChange{
 			{Account: "alice", Effective: model.StatusOffline},
 			{Account: "bob", Effective: model.StatusAway},
 		}, nil)

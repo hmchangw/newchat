@@ -131,6 +131,9 @@ type userState struct {
 	// idle/active Markov chain. Tuned in newUserState.
 	activeProb float64
 	idleProb   float64
+	// presence is non-nil only when daily runs with --presence. It carries the
+	// per-user presence state machine (hello/ping/activity).
+	presence *presenceUser
 }
 
 func newUserState(id, account string, rooms []string, _seed int64) *userState {

@@ -85,25 +85,29 @@ func TestPublishSubscriptionUpdates_TraceFanout(t *testing.T) {
 		{User: model.SubscriptionUser{ID: "u1", Account: "alice"}},
 		{User: model.SubscriptionUser{ID: "u2", Account: "bob"}},
 	}
+	users := []*model.User{
+		{ID: "u1", Account: "alice"},
+		{ID: "u2", Account: "bob"},
+	}
 	rec := installRecorder(t)
 
 	t.Run("trace: one delivery line per subscriber + the flow count", func(t *testing.T) {
 		rec.reset()
-		h.publishSubscriptionUpdates(admitRung("trace"), subs, "req-1")
+		h.publishSubscriptionUpdates(admitRung("trace"), subs, users, "req-1")
 		assert.Equal(t, 2, rec.count(logctx.LevelTrace, "room-worker subscription delivered"))
 		assert.True(t, rec.has(logctx.LevelFlow, "room-worker subscription fan-out"))
 	})
 
 	t.Run("flow: count only, no per-subscriber lines", func(t *testing.T) {
 		rec.reset()
-		h.publishSubscriptionUpdates(admitRung("flow"), subs, "req-1")
+		h.publishSubscriptionUpdates(admitRung("flow"), subs, users, "req-1")
 		assert.True(t, rec.has(logctx.LevelFlow, "room-worker subscription fan-out"))
 		assert.False(t, rec.hasLevel(logctx.LevelTrace))
 	})
 
 	t.Run("unadmitted: nothing", func(t *testing.T) {
 		rec.reset()
-		h.publishSubscriptionUpdates(context.Background(), subs, "req-1")
+		h.publishSubscriptionUpdates(context.Background(), subs, users, "req-1")
 		assert.False(t, rec.hasLevel(logctx.LevelFlow))
 		assert.False(t, rec.hasLevel(logctx.LevelTrace))
 	})

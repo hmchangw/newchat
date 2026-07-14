@@ -15,7 +15,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -92,13 +91,8 @@ func subscribePush(t *testing.T, nc *nats.Conn, siteID string) *pushCollector {
 	t.Helper()
 	c := &pushCollector{got: make(chan struct{}, 256)}
 	sub, err := nc.Subscribe(subject.PushNotification(siteID), func(msg *nats.Msg) {
-		payload, err := natsutil.DecodePayload(msg)
-		if err != nil {
-			t.Logf("decode payload: %v", err)
-			return
-		}
 		var evt model.PushNotificationEvent
-		if err := json.Unmarshal(payload, &evt); err != nil {
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
 			t.Logf("decode push: %v", err)
 			return
 		}
@@ -143,13 +137,14 @@ func (d *directNATSAsyncPub) PublishMsg(_ context.Context, msg *nats.Msg) error 
 	return d.nc.PublishMsg(msg)
 }
 
-func TestMongoThreadFollowers_Followers(t *testing.T) {
+func TestMongoThreadFollowers_Lookup(t *testing.T) {
 	db := testutil.MongoDB(t, "notification_worker_test")
 	ctx := context.Background()
 	col := db.Collection("thread_rooms")
 
+	parentCreatedAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	_, err := col.InsertMany(ctx, []any{
-		model.ThreadRoom{ID: "tr1", ParentMessageID: "parent-1", RoomID: "r1", SiteID: "site-a", ReplyAccounts: []string{"alice", "bob"}},
+		model.ThreadRoom{ID: "tr1", ParentMessageID: "parent-1", RoomID: "r1", SiteID: "site-a", ReplyAccounts: []string{"alice", "bob"}, ThreadParentCreatedAt: parentCreatedAt},
 		model.ThreadRoom{ID: "tr2", ParentMessageID: "parent-2", RoomID: "r1", SiteID: "site-a", ReplyAccounts: []string{"carol"}},
 	})
 	require.NoError(t, err)
@@ -157,24 +152,31 @@ func TestMongoThreadFollowers_Followers(t *testing.T) {
 	tf := newMongoThreadFollowers(col)
 
 	t.Run("returns replyAccounts for parent", func(t *testing.T) {
-		got, err := tf.Followers(ctx, "parent-1")
+		got, err := tf.Lookup(ctx, "parent-1")
 		require.NoError(t, err)
-		assert.Len(t, got, 2)
-		assert.Contains(t, got, "alice")
-		assert.Contains(t, got, "bob")
-		assert.NotContains(t, got, "carol")
+		assert.Len(t, got.Followers, 2)
+		assert.Contains(t, got.Followers, "alice")
+		assert.Contains(t, got.Followers, "bob")
+		assert.NotContains(t, got.Followers, "carol")
+	})
+
+	t.Run("returns replyAccounts for a thread with no parent createdAt column", func(t *testing.T) {
+		got, err := tf.Lookup(ctx, "parent-2")
+		require.NoError(t, err)
+		assert.Len(t, got.Followers, 1)
+		assert.Contains(t, got.Followers, "carol")
 	})
 
 	t.Run("empty parentMessageID returns empty set", func(t *testing.T) {
-		got, err := tf.Followers(ctx, "")
+		got, err := tf.Lookup(ctx, "")
 		require.NoError(t, err)
-		assert.Empty(t, got)
+		assert.Empty(t, got.Followers)
 	})
 
 	t.Run("unknown parent returns empty set", func(t *testing.T) {
-		got, err := tf.Followers(ctx, "no-such-parent")
+		got, err := tf.Lookup(ctx, "no-such-parent")
 		require.NoError(t, err)
-		assert.Empty(t, got)
+		assert.Empty(t, got.Followers)
 	})
 }
 

@@ -16,6 +16,17 @@ type Subscription struct {
 	Subject string `json:"subject"`
 }
 
+// DebugHeaders are the optional X-Debug headers stamped on an outbound message.
+// The zero value emits no headers, leaving the message byte-identical to a plain
+// publish/request.
+type DebugHeaders struct {
+	// Level is the canonical X-Debug token ("" | "flow" | "debug" | "trace").
+	// Empty emits no X-Debug header.
+	Level string
+	// Payload sets X-Debug-Payload: 1 when true.
+	Payload bool
+}
+
 // ConnectionStatus holds the current connection state for all three NATS connections.
 type ConnectionStatus struct {
 	SourceConnected  bool   `json:"sourceConnected"`
@@ -45,8 +56,9 @@ type Hub interface {
 	// Unsubscribe removes a subscription by ID. Returns an error if not found.
 	Unsubscribe(id string) error
 
-	// Publish sends a message payload to the given subject on the source server.
-	Publish(subject, payload string) error
+	// Publish sends a message payload to the given subject on the source server,
+	// stamping the optional X-Debug headers carried by dbg.
+	Publish(subject, payload string, dbg DebugHeaders) error
 
 	// Status returns the current connection status for all three servers.
 	Status() ConnectionStatus
@@ -69,6 +81,7 @@ type Hub interface {
 	DisconnectRequest()
 
 	// Request sends a NATS request on the given subject and waits up to timeoutMs
-	// milliseconds for a reply. Returns the reply payload as a string.
-	Request(subject, payload string, timeoutMs int) (string, error)
+	// milliseconds for a reply, stamping the optional X-Debug headers carried by
+	// dbg. Returns the reply payload as a string.
+	Request(subject, payload string, timeoutMs int, dbg DebugHeaders) (string, error)
 }

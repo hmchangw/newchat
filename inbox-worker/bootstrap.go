@@ -38,9 +38,10 @@ type streamManager interface {
 // surfaces at startup rather than at first publish.
 //
 // Ownership rule: this helper sets only the stream schema (Name + Subjects)
-// from pkg/stream.Inbox. Federation config (Sources + SubjectTransforms for
-// cross-site OUTBOX→INBOX sourcing) belongs to ops/IaC and is layered on in
-// production. App code never sets it.
+// from pkg/stream.Inbox. Cross-site delivery is direct-publish: remote sites
+// JetStream-publish onto this site's external.> lane, routed by the NATS
+// supercluster/gateway topology, which belongs to ops/IaC. App code never sets
+// any sourcing/transform config.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	inboxCfg := stream.Inbox(siteID)
 	if enabled {

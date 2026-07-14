@@ -11,7 +11,7 @@ import (
 )
 
 // MemberCollector correlates frontdoor replies (E1) and member_added
-// broadcasts (E2) with publish times. Thread-safe.
+// events (E2) with publish times. Thread-safe.
 //
 // E1 key:  corrID (assigned by publisher per request)
 // E2 key:  roomID + "|" + sortedJoin(accounts)
@@ -19,16 +19,16 @@ import (
 // E2 keying works because the candidate-pool fixture guarantees that
 // concurrent requests against the same room never share user accounts.
 type MemberCollector struct {
-	m           *Metrics
-	preset      string
-	inject      InjectMode
-	mu          sync.Mutex
-	byCorr      map[string]memberPubEntry
-	byE2Key     map[string]memberPubEntry
-	e1          []sample
-	e2          []sample
-	rsErrs      int
-	onBroadcast func(roomID string, accounts []string)
+	m             *Metrics
+	preset        string
+	inject        InjectMode
+	mu            sync.Mutex
+	byCorr        map[string]memberPubEntry
+	byE2Key       map[string]memberPubEntry
+	e1            []sample
+	e2            []sample
+	rsErrs        int
+	onMemberEvent func(roomID string, accounts []string)
 }
 
 type memberPubEntry struct {
@@ -91,8 +91,8 @@ func (c *MemberCollector) RecordReply(corrID, body string, at time.Time) {
 	}
 }
 
-// RecordBroadcast matches a member_added broadcast by (roomID, sortedAccounts).
-func (c *MemberCollector) RecordBroadcast(roomID string, accounts []string, at time.Time) {
+// RecordMemberEvent matches a member_added event by (roomID, sortedAccounts).
+func (c *MemberCollector) RecordMemberEvent(roomID string, accounts []string, at time.Time) {
 	c.mu.Lock()
 	k := e2Key(roomID, accounts)
 	e, ok := c.byE2Key[k]
@@ -104,15 +104,15 @@ func (c *MemberCollector) RecordBroadcast(roomID string, accounts []string, at t
 	d := at.Sub(e.publishedAt)
 	c.e2 = append(c.e2, sample{publishedAt: e.publishedAt, latency: d})
 	c.m.MemberE2Latency.WithLabelValues(c.preset, string(c.inject)).Observe(d.Seconds())
-	cb := c.onBroadcast
+	cb := c.onMemberEvent
 	c.mu.Unlock()
 	if cb != nil {
 		cb(roomID, accounts)
 	}
 }
 
-// Finalize returns counts of unmatched publishes — replies and broadcasts.
-func (c *MemberCollector) Finalize() (missingReplies int, missingBroadcasts int) {
+// Finalize returns counts of unmatched publishes — replies and member events.
+func (c *MemberCollector) Finalize() (missingReplies int, missingEvents int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.byCorr), len(c.byE2Key)
@@ -125,7 +125,7 @@ func (c *MemberCollector) E1Count() int {
 	return len(c.e1)
 }
 
-// E2Count returns the number of matched E2 (broadcast) samples.
+// E2Count returns the number of matched E2 (member-event) samples.
 func (c *MemberCollector) E2Count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -139,12 +139,12 @@ func (c *MemberCollector) RoomServiceErrorCount() int {
 	return c.rsErrs
 }
 
-// OnBroadcast registers a callback fired after every matched broadcast,
+// OnMemberEvent registers a callback fired after every matched member event,
 // allowing the capacity generator to step its per-room loop.
-func (c *MemberCollector) OnBroadcast(fn func(roomID string, accounts []string)) {
+func (c *MemberCollector) OnMemberEvent(fn func(roomID string, accounts []string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onBroadcast = fn
+	c.onMemberEvent = fn
 }
 
 // DiscardBefore drops samples with publishedAt < cutoff (warmup pruning).
@@ -187,10 +187,10 @@ func e2Key(roomID string, accounts []string) string {
 	return roomID + "|" + strings.Join(sorted, ",")
 }
 
-// ParseMemberAddBroadcast decodes a model.MemberAddEvent payload and returns
+// ParseMemberAddEvent decodes a model.MemberAddEvent payload and returns
 // (roomID, accounts, true) when the event is type=member_added. Returns
 // (_, _, false) on malformed input or non-added event types.
-func ParseMemberAddBroadcast(data []byte) (string, []string, bool) {
+func ParseMemberAddEvent(data []byte) (string, []string, bool) {
 	var evt model.MemberAddEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return "", nil, false

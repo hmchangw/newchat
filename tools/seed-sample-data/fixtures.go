@@ -24,9 +24,26 @@ const (
 // `JoinedAt`, `LastSeenAt`, or message timestamps.
 var seedBaseTime = time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
 
+// demoAdminPassword is the plaintext for the seeded u-admin account's
+// password login (botplatform-service POST /api/v1/login, forwarded via
+// portal-service /api/v1/login). Local dev only — NOT a real secret;
+// demoAdminBcryptHash below is bcrypt(sha256hex(demoAdminPassword)) at cost
+// 10, the legacy Rocket.Chat recipe botplatform-service's verifyPassword
+// expects (see botplatform-service/handler.go).
+const (
+	demoAdminPassword   = "AdminDev123!"
+	demoAdminBcryptHash = "$2a$10$yqCFQ.M73mHH7yoHAtvHxuc61Q3yktq1TYMyiTTYBsBGPPABSDayK"
+)
+
 // BuildUsers returns the seed roster. alice and bob match the Keycloak
-// realm in auth-service/deploy/keycloak/realm-export.json; the rest
-// populate rooms so member lists look realistic.
+// realm in auth-service/deploy/keycloak/realm-export.json; most of the rest
+// populate rooms so member lists look realistic. u-admin is a demo
+// platform-admin account (no rooms, no HR record) so local bot/admin
+// password login has something to authenticate against end-to-end; it is
+// also seeded into portal-service's own directory (portal.users, via
+// portal-seed in portal-service/deploy/docker-compose.yml) with the same
+// account/id and roles:["admin"], since portal's login role-gate reads its
+// own directory cache, not this collection.
 func BuildUsers() []model.User {
 	return []model.User{
 		{ID: "u-alice", Account: "alice", SiteID: siteLocal, SectID: "eng", SectName: "Engineering", SectTCName: "工程部", DeptID: "eng-backend", DeptName: "Backend", DeptTCName: "後端組", EngName: "Alice Engineer", ChineseName: "王小愛", EmployeeID: "E001"},
@@ -39,6 +56,14 @@ func BuildUsers() []model.User {
 		{ID: "u-heidi", Account: "heidi", SiteID: siteLocal, SectID: "ops", SectName: "Operations", SectTCName: "營運部", DeptID: "ops-sre", DeptName: "SRE", DeptTCName: "站點可靠性", EngName: "Heidi Ops", ChineseName: "周小海", EmployeeID: "E008"},
 		{ID: "u-ivan", Account: "ivan", SiteID: siteRemote, SectID: "eng", SectName: "Engineering (Remote)", SectTCName: "工程部（遠端）", DeptID: "eng-backend", DeptName: "Backend", DeptTCName: "後端組", EngName: "Ivan Remote", ChineseName: "鄭小宜", EmployeeID: "R001"},
 		{ID: "u-judy", Account: "judy", SiteID: siteRemote, SectID: "prod", SectName: "Product (Remote)", SectTCName: "產品部（遠端）", DeptID: "prod-pm", DeptName: "Product Management", DeptTCName: "產品經理", EngName: "Judy Cross", ChineseName: "高小朱", EmployeeID: "R002"},
+		{
+			ID: "u-admin", Account: "admin", SiteID: siteLocal,
+			SectID: "system", SectName: "System", SectTCName: "系統",
+			DeptID: "system-admin", DeptName: "Administration", DeptTCName: "系統管理",
+			EngName: "Site Admin", ChineseName: "系統管理員", EmployeeID: "ADMIN01",
+			Roles:    []model.UserRole{model.UserRoleAdmin},
+			Services: model.Services{Password: model.PasswordCredentials{Bcrypt: demoAdminBcryptHash}},
+		},
 	}
 }
 

@@ -1,18 +1,17 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNats } from '@/context/NatsContext'
-import { DEFAULT_SITE_ID, DEV_MODE } from '@/lib/runtimeConfig'
+import { DEV_MODE } from '@/lib/runtimeConfig'
 import { getOidcManager, isSSOTokenInvalidError, redirectToReloginOnTokenInvalid } from '@/api/auth/oidcClient'
 import { formatAsyncJobError } from '@/api'
 import './style.css'
 
 export default function LoginPage() {
   const { connect, error: natsError } = useNats()
-  const defaultSiteId = DEFAULT_SITE_ID
 
   const [account, setAccount] = useState('')
-  const [siteId, setSiteId] = useState(defaultSiteId)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const didAutoRedirect = useRef(false)
 
   const handleDevSubmit = async (e) => {
     e.preventDefault()
@@ -24,7 +23,6 @@ export default function LoginPage() {
       await connect({
         mode: 'dev',
         account: account.trim(),
-        siteId: siteId.trim(),
       })
     } catch (err) {
       if (isSSOTokenInvalidError(err)) {
@@ -41,8 +39,6 @@ export default function LoginPage() {
     setLoading(true)
     setError(null)
     try {
-      // Stash siteId so the /oidc-callback page can read it after redirect.
-      window.sessionStorage.setItem('oidc.siteId', siteId.trim())
       const manager = getOidcManager()
       await manager.signinRedirect()
       // Browser navigates away — code below this point is unreachable in prod.
@@ -55,6 +51,19 @@ export default function LoginPage() {
       setLoading(false)
     }
   }
+
+  // Production: a visitor who lands here has no live session, so send them
+  // straight to Keycloak instead of making them click. After login the browser
+  // returns via /oidc-callback and connects through the portal. Fire once per
+  // mount; the ref survives a StrictMode double-invoke. Dev mode keeps the
+  // account form (no IdP), so it never auto-redirects.
+  useEffect(() => {
+    if (DEV_MODE) return
+    if (didAutoRedirect.current) return
+    didAutoRedirect.current = true
+    handleKeycloakLogin()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   if (DEV_MODE) {
     return (
@@ -71,15 +80,6 @@ export default function LoginPage() {
             onChange={(e) => setAccount(e.target.value)}
             placeholder="e.g. alice"
             autoFocus
-            disabled={loading}
-          />
-
-          <label htmlFor="siteId">Site ID</label>
-          <input
-            id="siteId"
-            type="text"
-            value={siteId}
-            onChange={(e) => setSiteId(e.target.value)}
             disabled={loading}
           />
 
@@ -100,15 +100,6 @@ export default function LoginPage() {
       <div className="login-form">
         <h1>Chat</h1>
         <p className="login-subtitle">Sign in with Keycloak</p>
-
-        <label htmlFor="siteId">Site ID</label>
-        <input
-          id="siteId"
-          type="text"
-          value={siteId}
-          onChange={(e) => setSiteId(e.target.value)}
-          disabled={loading}
-        />
 
         <button type="button" onClick={handleKeycloakLogin} disabled={loading}>
           {loading ? 'Redirecting...' : 'Sign in with Keycloak'}

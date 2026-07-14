@@ -70,7 +70,7 @@ func (c *Collection[T]) Aggregate(ctx context.Context, pipeline bson.A) ([]T, er
 	return results, nil
 }
 
-// AggregatePaged appends a $facet stage. Watch the 16 MB BSON limit on the facet output.
+// AggregatePaged appends a $facet stage to page the aggregation results.
 func (c *Collection[T]) AggregatePaged(ctx context.Context, pipeline bson.A, req OffsetPageRequest) (OffsetPage[T], error) {
 	facet := bson.D{{Key: "$facet", Value: bson.M{
 		"data": bson.A{
@@ -114,6 +114,36 @@ type facetResult[T any] struct {
 
 type countResult struct {
 	Count int64 `bson:"count"`
+}
+
+// AggregatePagedHasMore pages an aggregation by over-fetching one row ($limit
+// req.Limit+1): it returns up to req.Limit rows plus HasMore=true when the extra
+// row existed. Unlike AggregatePaged it issues no $facet/$count — cheaper, but
+// yields no Total. Callers must pass req.Limit >= 1.
+func (c *Collection[T]) AggregatePagedHasMore(ctx context.Context, pipeline bson.A, req OffsetPageRequest) (OffsetPageHasMore[T], error) {
+	full := make(bson.A, 0, len(pipeline)+2)
+	full = append(full, pipeline...)
+	full = append(full,
+		bson.D{{Key: "$skip", Value: req.Offset}},
+		bson.D{{Key: "$limit", Value: req.Limit + 1}},
+	)
+
+	cursor, err := c.col.Aggregate(ctx, full)
+	if err != nil {
+		return OffsetPageHasMore[T]{}, fmt.Errorf("aggregating %s: %w", c.name, err)
+	}
+	var results []T
+	if err := cursor.All(ctx, &results); err != nil {
+		return OffsetPageHasMore[T]{}, fmt.Errorf("decoding %s page: %w", c.name, err)
+	}
+	hasMore := int64(len(results)) > req.Limit
+	if hasMore {
+		results = results[:req.Limit]
+	}
+	if results == nil {
+		results = []T{}
+	}
+	return OffsetPageHasMore[T]{Data: results, HasMore: hasMore}, nil
 }
 
 // BulkWrite executes models unordered. Partial failure returns (*BulkResult, err); empty input -> (nil, nil).

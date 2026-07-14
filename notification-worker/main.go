@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
@@ -17,7 +21,10 @@ import (
 
 	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -50,9 +57,12 @@ type config struct {
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
-	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any gzipped batch exceeding this
+	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr            string                  `env:"METRICS_ADDR" envDefault:":9090"`
 }
 
 type mongoMemberLoader struct {
@@ -111,6 +121,7 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	pretouchJSON()
 
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
@@ -127,6 +138,11 @@ func main() {
 	tracerShutdown, err := otelutil.InitTracer(ctx, "notification-worker")
 	if err != nil {
 		slog.Error("init tracer failed", "error", err)
+		os.Exit(1)
+	}
+	meterShutdown, err := otelutil.InitMeter("notification-worker")
+	if err != nil {
+		slog.Error("init meter failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -146,9 +162,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	metaRec := cachemetrics.For("roommeta", "l2")
 	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL,
 		func(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-			return roommetacache.ReadThrough(ctx, valkeyClient, roomsCol, roomID, cfg.RoomMetaL2TTL)
+			return roommetacache.ReadThrough(ctx, valkeyClient, roomsCol, roomID, cfg.RoomMetaL2TTL, metaRec)
 		})
 	if err != nil {
 		slog.Error("init room-meta cache failed", "error", err)
@@ -198,6 +215,7 @@ func main() {
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
+		Parent:             newHistoryParentFetcher(nc),
 		Presence:           presence,
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
@@ -244,7 +262,7 @@ func main() {
 				return
 			}
 			var evt model.CanonicalMemberEvent
-			if err := json.Unmarshal(msg.Data(), &evt); err != nil {
+			if err := sonic.Unmarshal(msg.Data(), &evt); err != nil {
 				slog.Warn("canonical member event decode failed", "error", err)
 				_ = msg.Ack()
 				continue
@@ -286,19 +304,44 @@ func main() {
 				// natsrouter's Recovery middleware, so an unrecovered panic would
 				// crash the worker and crash-loop on JetStream redelivery.
 				jobguard.Run(msg, func() {
-					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					if err := handler.HandleMessage(handlerCtx, msg.Data()); err != nil {
-						slog.Error("handle message failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-						if err := msg.Nak(); err != nil {
-							slog.Error("failed to nak message", "error", err)
+					handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+					// Migrated events carry X-Migration: live — the source already delivered them, so
+					// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
+					if natsutil.IsMigrationLiveHeader(msg.Headers()) {
+						slog.Info("skipping migrated event (no re-notify)", "subject", msg.Subject(), "request_id", reqID)
+						if err := msg.Ack(); err != nil {
+							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
 						}
 						return
 					}
-					if err := msg.Ack(); err != nil {
-						slog.Error("failed to ack message", "error", err)
-					}
+					// Transient failures retry with backoff (never drop); malformed
+					// events Ack-drop as poison.
+					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 				})
 			}()
+		}
+	}()
+
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
+		natsutil.HealthCheck(nc),
+	)
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
+
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes the cache hit-rate counters Prometheus scrapes.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
 		}
 	}()
 
@@ -342,10 +385,15 @@ func main() {
 			invalCancel() // always release the context (idempotent)
 			return nil
 		},
+		// Stop /metrics late so Prometheus can scrape the final drain-window counts,
+		// then flush the meter provider before NATS/Mongo close.
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
+		func(ctx context.Context) error { return meterShutdown(ctx) },
 		func(_ context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
+		func(ctx context.Context) error { return healthStop(ctx) },
 	)
 }
 

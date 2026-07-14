@@ -21,7 +21,8 @@ type fakeStore struct {
 	byIDCalls      int
 	byAccountCalls int
 	err            error
-	block          chan struct{} // optional: FindUserByAccount waits on receive before returning
+	block          chan struct{} // FindUserByAccount blocks (unconditionally) before returning
+	entered        chan struct{} // when non-nil (buffered), signals once when entered
 }
 
 func newFakeStore(users ...model.User) *fakeStore {
@@ -50,9 +51,18 @@ func (f *fakeStore) FindUserByID(_ context.Context, id string) (*model.User, err
 	return nil, userstore.ErrUserNotFound
 }
 
-func (f *fakeStore) FindUserByAccount(_ context.Context, account string) (*model.User, error) {
+func (f *fakeStore) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
+	if f.entered != nil {
+		select {
+		case f.entered <- struct{}{}:
+		default:
+		}
+	}
 	if f.block != nil {
 		<-f.block
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -142,8 +152,6 @@ func TestCache_FindUsersByAccounts_BatchPartialHit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, got, 2)
 	assert.Equal(t, 2, store.byAccountCalls)
-	stats := cache.Stats()
-	assert.GreaterOrEqual(t, stats.Hits, uint64(1))
 }
 
 func TestCache_FindUsersByAccounts_CrossPopulatesByID(t *testing.T) {
@@ -343,4 +351,65 @@ func TestCache_FindUserByAccount_MissDoesNotPoison(t *testing.T) {
 	assert.Equal(t, "u1", got.ID)
 	assert.Equal(t, 2, store.byAccountCalls,
 		"miss must not poison the cache; next call must re-hit the store")
+}
+
+func TestCache_FindUserByAccount_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
+	store := newFakeStore(model.User{ID: "u1", Account: "alice"})
+	store.block = make(chan struct{})
+	store.entered = make(chan struct{}, 1)
+	c, err := userstore.NewCache(store, 10, time.Minute)
+	require.NoError(t, err)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, e := c.FindUserByAccount(leaderCtx, "alice")
+		leaderDone <- e
+	}()
+	<-store.entered
+
+	waiterReady := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterReady)
+		_, e := c.FindUserByAccount(context.Background(), "alice")
+		waiterDone <- e
+	}()
+	<-waiterReady
+
+	cancelLeader()
+	require.ErrorIs(t, <-leaderDone, context.Canceled)
+	close(store.block)
+	require.NoError(t, <-waiterDone, "waiter must not be poisoned by the leader's cancel")
+
+	got, err := c.FindUserByAccount(context.Background(), "alice")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "u1", got.ID)
+	assert.Equal(t, 1, store.byAccountCalls, "shared load should have populated the cache")
+}
+
+func TestCache_FindUserByAccount_CallerCancelReturnsCtxErr(t *testing.T) {
+	store := newFakeStore(model.User{ID: "u1", Account: "alice"})
+	store.block = make(chan struct{})
+	store.entered = make(chan struct{}, 1)
+	defer close(store.block)
+	c, err := userstore.NewCache(store, 10, time.Minute)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, e := c.FindUserByAccount(ctx, "alice")
+		done <- e
+	}()
+	<-store.entered
+	cancel()
+
+	select {
+	case e := <-done:
+		require.ErrorIs(t, e, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller did not return on its own ctx cancel within 2s")
+	}
 }

@@ -18,6 +18,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/principal"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // TokenValidator validates an SSO token and returns OIDC claims.
@@ -26,12 +28,11 @@ type TokenValidator interface {
 }
 
 type authRequest struct {
-	SSOToken      string `json:"ssoToken" binding:"required"`
-	NATSPublicKey string `json:"natsPublicKey" binding:"required"`
-}
-
-type devAuthRequest struct {
-	Account       string `json:"account" binding:"required"`
+	// Exactly one of SSOToken / AuthToken must be set: SSOToken -> OIDC path,
+	// AuthToken -> botplatform-validate path (bots/admins), neither -> dev mode.
+	SSOToken      string `json:"ssoToken"`
+	AuthToken     string `json:"authToken"`
+	Account       string `json:"account"`
 	NATSPublicKey string `json:"natsPublicKey" binding:"required"`
 }
 
@@ -50,15 +51,23 @@ type userInfoResp struct {
 	DeptID      string `json:"deptId"`
 }
 
-// AuthHandler processes auth requests, validates SSO tokens via OIDC,
-// and returns signed NATS user JWTs with scoped permissions.
+// BotplatformValidator validates a session authToken against botplatform-service.
+// Returns errcode.Unauthenticated for invalid tokens, a raw wrapped error otherwise (503 upstream).
+type BotplatformValidator interface {
+	Validate(ctx context.Context, authToken string) (principal.Principal, error)
+}
+
+// AuthHandler validates SSO or botplatform session tokens and returns signed,
+// scoped NATS user JWTs.
 type AuthHandler struct {
-	validator  TokenValidator
-	signingKey nkeys.KeyPair
-	jwtExpiry  time.Duration
-	jwtJitter  float64        // fraction of jwtExpiry; 0 = fixed lifetime
-	randFloat  func() float64 // injectable [0,1) source; defaults to crypto rand
-	devMode    bool
+	validator     TokenValidator
+	bpValidator   BotplatformValidator // optional; nil disables the session-token branch
+	signingKey    nkeys.KeyPair
+	accountPubKey string
+	jwtExpiry     time.Duration
+	jwtJitter     float64        // fraction of jwtExpiry; 0 = fixed lifetime
+	randFloat     func() float64 // injectable [0,1) source; defaults to crypto rand
+	devMode       bool
 }
 
 // Option configures optional AuthHandler behavior.
@@ -83,15 +92,22 @@ func WithRandFloat(fn func() float64) Option {
 	return func(h *AuthHandler) { h.randFloat = fn }
 }
 
-// NewAuthHandler creates an AuthHandler with the given token validator,
-// NATS account signing key, and JWT expiry duration.
-func NewAuthHandler(validator TokenValidator, signingKey nkeys.KeyPair, jwtExpiry time.Duration, devMode bool, opts ...Option) *AuthHandler {
+// WithBotplatformValidator enables the session-token branch of POST /auth.
+// Without it, a request carrying an authToken is rejected as if the field
+// were unsupported.
+func WithBotplatformValidator(v BotplatformValidator) Option {
+	return func(h *AuthHandler) { h.bpValidator = v }
+}
+
+// NewAuthHandler creates an AuthHandler; accountPubKey stamps the JWT's issuer_account claim.
+func NewAuthHandler(validator TokenValidator, signingKey nkeys.KeyPair, accountPubKey string, jwtExpiry time.Duration, devMode bool, opts ...Option) *AuthHandler {
 	h := &AuthHandler{
-		validator:  validator,
-		signingKey: signingKey,
-		jwtExpiry:  jwtExpiry,
-		randFloat:  cryptoRandFloat,
-		devMode:    devMode,
+		validator:     validator,
+		signingKey:    signingKey,
+		accountPubKey: accountPubKey,
+		jwtExpiry:     jwtExpiry,
+		randFloat:     cryptoRandFloat,
+		devMode:       devMode,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -111,19 +127,16 @@ func cryptoRandFloat() float64 {
 	return float64(n.Int64()) / float64(denom)
 }
 
-// HandleAuth validates the SSO token, resolves permissions based on
-// the user account, and returns a signed NATS JWT.
+// HandleAuth routes on which of ssoToken/authToken is set (OIDC vs botplatform
+// session), both set is 400 ambiguous_token, and neither is dev-mode mint or
+// 400 missing_token in prod. A dev-mode request carrying a token still
+// validates normally — only the fully tokenless case short-circuits.
 func (h *AuthHandler) HandleAuth(c *gin.Context) {
-	if h.devMode {
-		h.handleDevAuth(c)
-		return
-	}
-
 	ctx := errcode.WithLogValues(c.Request.Context(), "request_id", c.GetString("request_id"))
 
 	var req authRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("ssoToken and natsPublicKey are required",
+		errhttp.Write(ctx, c, errcode.BadRequest("natsPublicKey is required",
 			errcode.WithReason(errcode.AuthMissingFields)))
 		return
 	}
@@ -134,6 +147,25 @@ func (h *AuthHandler) HandleAuth(c *gin.Context) {
 		return
 	}
 
+	switch {
+	case req.SSOToken != "" && req.AuthToken != "":
+		errhttp.Write(ctx, c, errcode.BadRequest("set exactly one of ssoToken / authToken",
+			errcode.WithReason(errcode.BotplatformAmbiguousToken)))
+	case req.SSOToken != "":
+		h.handleSSO(ctx, c, req)
+	case req.AuthToken != "":
+		h.handleSession(ctx, c, req)
+	case h.devMode:
+		h.handleDevAuth(ctx, c, req)
+	default:
+		errhttp.Write(ctx, c, errcode.BadRequest("set exactly one of ssoToken / authToken",
+			errcode.WithReason(errcode.BotplatformMissingToken)))
+	}
+}
+
+// handleSSO runs the existing OIDC validation + JWT mint. Behavior unchanged
+// from the pre-extension code path.
+func (h *AuthHandler) handleSSO(ctx context.Context, c *gin.Context, req authRequest) {
 	claims, err := h.validator.Validate(ctx, req.SSOToken)
 	if err != nil {
 		if errors.Is(err, pkgoidc.ErrTokenExpired) {
@@ -141,22 +173,20 @@ func (h *AuthHandler) HandleAuth(c *gin.Context) {
 				errcode.WithReason(errcode.AuthTokenExpired)))
 			return
 		}
-		// Non-expiry failures surface as "invalid SSO token"; attach the raw
-		// cause so the server log carries the actual reason.
 		errhttp.Write(ctx, c, errcode.Unauthenticated("invalid SSO token",
 			errcode.WithReason(errcode.AuthInvalidToken),
 			errcode.WithCause(err)))
 		return
 	}
 
-	account := claims.PreferredUsername
+	account := claims.Account()
 	if account == "" {
-		account = claims.Name
-	}
-	if account == "" {
-		// Blank account would mint a JWT with chat.user..> permissions — refuse.
 		errhttp.Write(ctx, c, errcode.Unauthenticated("token missing account claim",
 			errcode.WithReason(errcode.AuthInvalidToken)))
+		return
+	}
+	if !subject.IsValidAccountToken(account) {
+		errhttp.Write(ctx, c, errcode.BadRequest("account must be a single NATS subject token (no '.', '*', '>' or whitespace)"))
 		return
 	}
 	ctx = errcode.WithLogValues(ctx, "account", account)
@@ -168,10 +198,7 @@ func (h *AuthHandler) HandleAuth(c *gin.Context) {
 	}
 
 	slog.Debug("auth success", "account", account, "subject", claims.Subject)
-
-	// Parse description field: "employeeId, engName, chineseName"
 	employeeID, engName, chineseName := parseDescription(claims.Description)
-
 	c.JSON(http.StatusOK, authResponse{
 		NATSJWT: natsJWT,
 		UserInfo: userInfoResp{
@@ -186,24 +213,68 @@ func (h *AuthHandler) HandleAuth(c *gin.Context) {
 	})
 }
 
-// handleDevAuth handles auth in dev mode: accepts account name directly
-// without OIDC validation, for use during local development only.
-func (h *AuthHandler) handleDevAuth(c *gin.Context) {
-	ctx := errcode.WithLogValues(c.Request.Context(), "request_id", c.GetString("request_id"))
-
-	var req devAuthRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("account and natsPublicKey are required",
-			errcode.WithReason(errcode.AuthMissingFields)))
+// handleSession exchanges a botplatform session authToken for a NATS JWT,
+// stamped with `account:<name>` for the server-side scoped signing key template.
+func (h *AuthHandler) handleSession(ctx context.Context, c *gin.Context, req authRequest) {
+	if h.bpValidator == nil {
+		errhttp.Write(ctx, c, errcode.Unavailable("session-token auth not configured",
+			errcode.WithReason(errcode.BotplatformUpstreamUnavailable)))
 		return
 	}
 
-	if !nkeys.IsValidPublicUserKey(req.NATSPublicKey) {
-		errhttp.Write(ctx, c, errcode.BadRequest("invalid natsPublicKey format",
-			errcode.WithReason(errcode.AuthInvalidNKey)))
+	p, err := h.bpValidator.Validate(ctx, req.AuthToken)
+	if err != nil {
+		var ec *errcode.Error
+		if errors.As(err, &ec) {
+			errhttp.Write(ctx, c, ec)
+			return
+		}
+		errhttp.Write(ctx, c, errcode.Unavailable("botplatform unavailable",
+			errcode.WithReason(errcode.BotplatformUpstreamUnavailable),
+			errcode.WithCause(err)))
+		return
+	}
+	if p.Account == "" {
+		errhttp.Write(ctx, c, errcode.Unauthenticated("principal missing account",
+			errcode.WithReason(errcode.AuthInvalidToken)))
+		return
+	}
+	// NATS subject slots are single-token, so dotted bot accounts
+	// (`botname.shortsiteid.bot`) collapse to underscores; others pass through.
+	natsAccount := strings.ReplaceAll(p.Account, ".", "_")
+	if !subject.IsValidAccountToken(natsAccount) {
+		errhttp.Write(ctx, c, errcode.BadRequest("account contains invalid characters"))
+		return
+	}
+	ctx = errcode.WithLogValues(ctx, "account", p.Account, "nats_account", natsAccount)
+
+	natsJWT, err := h.signNATSJWT(req.NATSPublicKey, natsAccount)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("generating NATS token: %w", err))
 		return
 	}
 
+	slog.Debug("session auth success", "account", p.Account, "nats_account", natsAccount, "roles", p.Roles)
+	c.JSON(http.StatusOK, authResponse{
+		NATSJWT: natsJWT,
+		UserInfo: userInfoResp{
+			// Return the NATS-safe form so the client can build subject
+			// prefixes (`chat.user.<account>.>`) directly from this field.
+			Account: natsAccount,
+			// No employee fields for bot/admin sessions — botplatform's
+			// principal carries identity, not directory metadata.
+		},
+	})
+}
+
+// handleDevAuth mints a JWT directly from req.Account without OIDC/botplatform
+// validation, for local development only. Only reached from HandleAuth's
+// tokenless branch, which has already parsed and nkey-validated req.
+func (h *AuthHandler) handleDevAuth(ctx context.Context, c *gin.Context, req authRequest) {
+	if !subject.IsValidAccountToken(req.Account) {
+		errhttp.Write(ctx, c, errcode.BadRequest("account must be a single NATS subject token (no '.', '*', '>' or whitespace)"))
+		return
+	}
 	ctx = errcode.WithLogValues(ctx, "account", req.Account)
 
 	natsJWT, err := h.signNATSJWT(req.NATSPublicKey, req.Account)
@@ -224,30 +295,21 @@ func (h *AuthHandler) handleDevAuth(c *gin.Context) {
 	})
 }
 
-// signNATSJWT creates a signed NATS user JWT with permissions scoped
-// to the user's namespace and standard chat subjects.
+// signNATSJWT signs a scoped NATS user JWT; permissions come from the
+// account's scoped signing key template, not this code. IssuerAccount marks
+// which account the (non-root) signing key belongs to.
+//
+// Effective grants (kept in sync with docker-local/setup.sh and
+// docs/client-api.md §2.1 — a platform-team template change must mirror both):
+//
+//	Pub allow: chat.user.{account}.>, _INBOX.>, chat.user.presence.*.query.batch (+allow-pub-response)
+//	Sub allow: chat.user.{account}.>, chat.room.>, _INBOX.>, chat.user.presence.state.*
 func (h *AuthHandler) signNATSJWT(userPubKey, account string) (string, error) {
 	uc := jwt.NewUserClaims(userPubKey)
+	uc.IssuerAccount = h.accountPubKey
 	uc.Expires = h.jwtExpiryAt().Unix()
-
-	// Publish permissions: user's own namespace + inbox for request-reply.
-	uc.Pub.Allow.Add(fmt.Sprintf("chat.user.%s.>", account))
-	uc.Pub.Allow.Add("_INBOX.>")
-
-	// Subscribe permissions: user's own namespace, all rooms, and inbox.
-	uc.Sub.Allow.Add(fmt.Sprintf("chat.user.%s.>", account))
-	uc.Sub.Allow.Add("chat.room.>")
-	uc.Sub.Allow.Add("_INBOX.>")
-
-	// Presence: read anyone's live state and publish batch queries. The state
-	// broadcast carries only the account (no siteID), so a single-token wildcard
-	// covers it. Writes (hello/ping/activity/bye/manual) live under the user's
-	// own chat.user.{account}.> namespace already granted above. Clients can read
-	// state but never publish it — the "state" vs "query" token keeps the query
-	// pub-rule from matching the state subject, so presence can't be forged.
-	uc.Sub.Allow.Add("chat.user.presence.state.*")
-	uc.Pub.Allow.Add("chat.user.presence.*.query.batch")
-
+	uc.Tags.Add("account:" + account)
+	uc.SetScoped(true)
 	return uc.Encode(h.signingKey)
 }
 

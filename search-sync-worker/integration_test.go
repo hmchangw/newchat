@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -257,8 +258,8 @@ func TestSearchSyncIntegration(t *testing.T) {
 	// Wait for cluster to be green before creating indices.
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newMessageCollection(prefix, time.Time{})
-	err = engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(messageTemplateBody(prefix)))
+	coll := newMessageCollection(prefix, time.Time{}, true)
+	err = engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody()))
 	require.NoError(t, err, "upsert template")
 
 	// Pre-create indices so shard allocation completes before bulk indexing.
@@ -442,8 +443,8 @@ func TestCustomAnalyzer(t *testing.T) {
 
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newMessageCollection(prefix, time.Time{})
-	err = engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(messageTemplateBody(prefix)))
+	coll := newMessageCollection(prefix, time.Time{}, true)
+	err = engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody()))
 	require.NoError(t, err, "upsert template")
 
 	preCreateIndex(t, esURL, prefix+"-2026-03")
@@ -552,5 +553,111 @@ func TestCustomAnalyzer(t *testing.T) {
 		assert.Equal(t, 0, searchHits(t, esURL, indexPattern, "nonexistent_term"))
 		assert.Equal(t, 0, searchHitsWildcard(t, esURL, indexPattern, "error_parser*"),
 			"cross-compound should not match")
+	})
+}
+
+// TestSearchSyncSpotlightOrg_Integration drives the spotlight-org
+// collection end to end: publish a zstd-compressed HRSyncEvent to a
+// fresh HR stream, let the handler process the resulting message,
+// and verify the ES documents. Doc-merge is the key behavior under
+// test — a second event carrying only SectID + SectName must NOT clear
+// the other stored fields.
+func TestSearchSyncSpotlightOrg_Integration(t *testing.T) {
+	esURL := setupElasticsearch(t)
+	js, _ := setupNATSJetStream(t)
+	ctx := context.Background()
+
+	const (
+		siteID        = "site-org-int"
+		centralSiteID = "site-org-int-central"
+		indexName     = "spotlightorg-site-org-int-v1"
+	)
+
+	engine, err := searchengine.New(ctx, searchengine.Config{Backend: "elasticsearch", URL: esURL})
+	require.NoError(t, err, "create search engine")
+
+	waitForClusterGreen(t, esURL, 120*time.Second)
+
+	coll := newSpotlightOrgCollection(indexName, siteID, centralSiteID, true)
+	require.NoError(t,
+		engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody())),
+		"upsert spotlight-org template",
+	)
+	preCreateIndex(t, esURL, indexName)
+	waitForClusterGreen(t, esURL, 120*time.Second)
+
+	hrCfg := stream.OrgSyncStream(centralSiteID)
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     hrCfg.Name,
+		Subjects: hrCfg.Subjects,
+	})
+	require.NoError(t, err, "create HR stream")
+
+	subj := subject.OrgSyncEmployeesUpsert(centralSiteID)
+	publish := func(employees []SpotlightOrgIndex, ts int64) {
+		t.Helper()
+		raw := hrBatchJSON(t, ts, employees)
+		enc, encErr := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+		require.NoError(t, encErr)
+		compressed := enc.EncodeAll(raw, nil)
+		require.NoError(t, enc.Close())
+		_, err := js.PublishMsg(ctx, &nats.Msg{
+			Subject: subj,
+			Header:  nats.Header{"Nats-Encoding": []string{"zstd"}},
+			Data:    compressed,
+		})
+		require.NoError(t, err, "publish hr batch")
+	}
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, hrCfg.Name, jetstream.ConsumerConfig{
+		Durable:        "spotlight-org-sync-test",
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		FilterSubjects: coll.FilterSubjects(siteID),
+	})
+	require.NoError(t, err, "create consumer")
+	handler := NewHandler(&engineAdapter{engine: engine}, coll, 100)
+
+	publish([]SpotlightOrgIndex{
+		{SectID: "S1", SectName: "Engineering", DeptID: "D1", DeptName: "Tech"},
+		{SectID: "S2", SectName: "Sales", DeptID: "D2", DeptName: "Biz"},
+	}, time.Now().UnixMilli())
+
+	batch, err := cons.Fetch(1, jetstream.FetchMaxWait(10*time.Second))
+	require.NoError(t, err)
+	for msg := range batch.Messages() {
+		handler.Add(msg)
+	}
+	handler.Flush(ctx)
+	refreshIndex(t, esURL, indexName)
+
+	t.Run("two docs landed", func(t *testing.T) {
+		assert.Equal(t, 2, countDocs(t, esURL, indexName))
+		s1 := getDoc(t, esURL, indexName, "S1")
+		require.NotNil(t, s1)
+		assert.Equal(t, "Engineering", s1["sectName"])
+		assert.Equal(t, "Tech", s1["deptName"])
+		s2 := getDoc(t, esURL, indexName, "S2")
+		require.NotNil(t, s2)
+		assert.Equal(t, "Sales", s2["sectName"])
+	})
+
+	publish([]SpotlightOrgIndex{
+		{SectID: "S1", SectName: "Engineering Renamed"},
+	}, time.Now().UnixMilli()+1)
+
+	batch, err = cons.Fetch(1, jetstream.FetchMaxWait(10*time.Second))
+	require.NoError(t, err)
+	for msg := range batch.Messages() {
+		handler.Add(msg)
+	}
+	handler.Flush(ctx)
+	refreshIndex(t, esURL, indexName)
+
+	t.Run("doc-merge preserves untouched fields", func(t *testing.T) {
+		s1 := getDoc(t, esURL, indexName, "S1")
+		require.NotNil(t, s1)
+		assert.Equal(t, "Engineering Renamed", s1["sectName"], "renamed field updated")
+		assert.Equal(t, "D1", s1["deptId"], "deptId preserved")
+		assert.Equal(t, "Tech", s1["deptName"], "deptName preserved")
 	})
 }

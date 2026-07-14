@@ -19,14 +19,12 @@ const threadRoomsCollection = "thread_rooms"
 var threadRoomSort = bson.D{{Key: "lastMsgAt", Value: -1}, {Key: "threadParentCreatedAt", Value: 1}}
 
 type ThreadRoomRepo struct {
-	threadRooms         *mongoutil.Collection[model.ThreadRoom]
-	threadSubscriptions *mongo.Collection
+	threadRooms *mongoutil.Collection[model.ThreadRoom]
 }
 
 func NewThreadRoomRepo(db *mongo.Database) *ThreadRoomRepo {
 	return &ThreadRoomRepo{
-		threadRooms:         mongoutil.NewCollection[model.ThreadRoom](db.Collection(threadRoomsCollection)),
-		threadSubscriptions: db.Collection("thread_subscriptions"),
+		threadRooms: mongoutil.NewCollection[model.ThreadRoom](db.Collection(threadRoomsCollection)),
 	}
 }
 
@@ -53,15 +51,7 @@ func (r *ThreadRoomRepo) EnsureIndexes(ctx context.Context) error {
 	if _, err := col.CreateMany(ctx, indexes, options.CreateIndexes()); err != nil {
 		return fmt.Errorf("ensure thread_rooms indexes: %w", err)
 	}
-
-	// Idempotent: same index owned by message-worker; history-service ensures it
-	// independently so startup order doesn't affect query performance.
-	if _, err := r.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
-	}
+	// The thread_subscriptions indexes are owned by ThreadSubscriptionRepo.
 	return nil
 }
 
@@ -88,4 +78,20 @@ func (r *ThreadRoomRepo) GetUnreadThreadRooms(ctx context.Context, roomID, accou
 		return mongoutil.OffsetPage[model.ThreadRoom]{}, fmt.Errorf("querying unread thread rooms: %w", err)
 	}
 	return page, nil
+}
+
+// GetMinThreadUserLastSeenAt reads thread_rooms.minUserLastSeenAt for threadRoomID.
+// Returns (nil, nil) when the field is unset or the document is missing.
+func (r *ThreadRoomRepo) GetMinThreadUserLastSeenAt(ctx context.Context, threadRoomID string) (*time.Time, error) {
+	tr, err := r.threadRooms.FindOne(ctx,
+		bson.M{"_id": threadRoomID},
+		mongoutil.WithProjection(bson.M{"minUserLastSeenAt": 1, "_id": 0}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get thread room %s minUserLastSeenAt: %w", threadRoomID, err)
+	}
+	if tr == nil {
+		return nil, nil
+	}
+	return tr.MinUserLastSeenAt, nil
 }

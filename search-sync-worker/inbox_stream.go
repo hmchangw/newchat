@@ -43,7 +43,7 @@ func (b *inboxMemberCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
 
-// parseMemberEvent decodes an INBOX message into an OutboxEvent + its
+// parseMemberEvent decodes an INBOX message into an InboxEvent + its
 // InboxMemberEvent payload and validates the common preconditions shared by
 // all inbox-member collections.
 //
@@ -56,10 +56,10 @@ func (b *inboxMemberCollection) StoredScripts() map[string]json.RawMessage {
 //     HSS, otherwise into `rooms[]`
 //   - spotlight indexes the room regardless of HSS; HSS is a
 //     message-content access concern, not a room-name discovery one
-func parseMemberEvent(data []byte) (*model.OutboxEvent, *model.InboxMemberEvent, error) {
-	var evt model.OutboxEvent
+func parseMemberEvent(data []byte) (*model.InboxEvent, *model.InboxMemberEvent, error) {
+	var evt model.InboxEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal outbox event: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal inbox event: %w", err)
 	}
 	if evt.Timestamp <= 0 {
 		return nil, nil, fmt.Errorf("parse member event: missing timestamp")

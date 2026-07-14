@@ -13,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 type capturedPublish struct {
@@ -20,7 +21,7 @@ type capturedPublish struct {
 	payloads [][]byte
 }
 
-func (c *capturedPublish) fn() PublishFunc {
+func (c *capturedPublish) fn() presencestore.PublishFunc {
 	return func(_ context.Context, subj string, data []byte) error {
 		c.subjects = append(c.subjects, subj)
 		c.payloads = append(c.payloads, data)

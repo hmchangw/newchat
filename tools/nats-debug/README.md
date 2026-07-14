@@ -75,6 +75,24 @@ Add as many subscriptions as you need. Remove any with **×**.
 Fill in a subject and a JSON payload, then click **Publish** (or press `Ctrl+Enter`).
 Messages are sent to the **source** server.
 
+### X-Debug headers (Publish & Request)
+
+Both the Publish and Request panels can stamp the server's debug headers on the
+message they send, so you can flag a single request and exercise the verbose
+server-side logging machinery:
+
+| Control | Header | Effect |
+|---------|--------|--------|
+| **X-Debug level** | `X-Debug: flow\|debug\|trace` | Opt-in per-request verbose logging on every service the message touches, joinable by `request_id` in the log aggregator. `Off` (default) sends no header. The metadata ladder is cumulative (`flow` < `debug` < `trace`) and metadata-only — never message bodies. |
+| **X-Debug-Payload** | `X-Debug-Payload: 1` | Requests full request/reply **body** logging. |
+
+> **X-Debug-Payload is inert unless the target service opts in.** A service only
+> logs a body when its own config sets `DEBUG_LOG_PAYLOADS=true` (default off, so
+> it does nothing in production). The header alone never causes body logging.
+
+For fire-and-forget **Publish**, retrieve the trace from the server logs by
+`request_id`. For **Request**, the reply also comes back in the panel directly.
+
 ### 4. Message Feed
 
 Incoming messages appear in real time on the right panel:

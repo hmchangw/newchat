@@ -19,7 +19,6 @@ func setupCassandra(t testing.TB) *gocql.Session {
 
 	for _, stmt := range []string{
 		cql(`CREATE TYPE IF NOT EXISTS %s."Participant" (id TEXT, eng_name TEXT, company_name TEXT, app_id TEXT, app_name TEXT, is_bot BOOLEAN, account TEXT)`),
-		cql(`CREATE TYPE IF NOT EXISTS %s."File" (id TEXT, name TEXT, type TEXT)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."Card" (template TEXT, data BLOB)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."CardAction" (verb TEXT, text TEXT, card_id TEXT, display_text TEXT, hide_exec_log BOOLEAN, card_tmid TEXT, data BLOB)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."QuotedParentMessage" (message_id TEXT, room_id TEXT, sender FROZEN<"Participant">, created_at TIMESTAMP, msg TEXT, mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>, message_link TEXT, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP)`),
@@ -40,11 +39,11 @@ func setupCassandra(t testing.TB) *gocql.Session {
 		msg TEXT,
 		mentions SET<FROZEN<"Participant">>,
 		attachments LIST<BLOB>,
-		file FROZEN<"File">,
 		card FROZEN<"Card">,
 		card_action FROZEN<"CardAction">,
 		tshow BOOLEAN,
 		tcount INT,
+		thread_last_msg_at TIMESTAMP,
 		thread_parent_id TEXT,
 		thread_parent_created_at TIMESTAMP,
 		quoted_parent_message FROZEN<"QuotedParentMessage">,
@@ -70,11 +69,11 @@ func setupCassandra(t testing.TB) *gocql.Session {
 		msg TEXT,
 		mentions SET<FROZEN<"Participant">>,
 		attachments LIST<BLOB>,
-		file FROZEN<"File">,
 		card FROZEN<"Card">,
 		card_action FROZEN<"CardAction">,
 		tshow BOOLEAN,
 		tcount INT,
+		thread_last_msg_at TIMESTAMP,
 		thread_parent_id TEXT,
 		thread_parent_created_at TIMESTAMP,
 		quoted_parent_message FROZEN<"QuotedParentMessage">,
@@ -91,8 +90,8 @@ func setupCassandra(t testing.TB) *gocql.Session {
 		pinned_by FROZEN<"Participant">,
 		enc_payload BLOB,
 		enc_meta FROZEN<"EncMeta">,
-		PRIMARY KEY (message_id, created_at)
-	) WITH CLUSTERING ORDER BY (created_at DESC)`)).Exec())
+		PRIMARY KEY (message_id)
+	)`)).Exec())
 
 	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.thread_messages_by_thread (
 		thread_room_id TEXT,
@@ -103,10 +102,10 @@ func setupCassandra(t testing.TB) *gocql.Session {
 		msg TEXT,
 		mentions SET<FROZEN<"Participant">>,
 		attachments LIST<BLOB>,
-		file FROZEN<"File">,
 		card FROZEN<"Card">,
 		card_action FROZEN<"CardAction">,
 		thread_parent_id TEXT,
+		tshow BOOLEAN,
 		quoted_parent_message FROZEN<"QuotedParentMessage">,
 		visible_to TEXT,
 		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
@@ -129,12 +128,10 @@ func setupCassandra(t testing.TB) *gocql.Session {
 		msg TEXT,
 		mentions SET<FROZEN<"Participant">>,
 		attachments LIST<BLOB>,
-		file FROZEN<"File">,
 		card FROZEN<"Card">,
 		card_action FROZEN<"CardAction">,
 		quoted_parent_message FROZEN<"QuotedParentMessage">,
 		visible_to TEXT,
-		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
 		deleted BOOLEAN,
 		type TEXT,
 		sys_msg_data BLOB,

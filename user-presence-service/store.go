@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 //go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main
@@ -14,12 +15,6 @@ import (
 // which accounts to serve locally vs. fetch from a peer site.
 type UserDirectory interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
-}
-
-// StatusChange is an account whose effective status was (re)computed.
-type StatusChange struct {
-	Account   string
-	Effective model.PresenceStatus
 }
 
 // PresenceStore is the Valkey-backed presence state. All mutating methods
@@ -50,7 +45,7 @@ type PresenceStore interface {
 
 	// Sweep recomputes every account whose sweep deadline is <= now,
 	// reschedules or removes it, and returns the accounts whose status changed.
-	Sweep(ctx context.Context, now time.Time) ([]StatusChange, error)
+	Sweep(ctx context.Context, now time.Time) ([]presencestore.StatusChange, error)
 
 	Close() error
 }

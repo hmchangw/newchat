@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="chat-ns">
+    <mxGraphModel dx="2000" dy="1300" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1300" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Namespace: chat (legacy)" style="text;html=1;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#263238;" vertex="1" parent="1">
+          <mxGeometry x="100" y="20" width="1800" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Login routing during Istio VirtualService 0→100 cutover to the wsp namespace" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontColor=#546e7a;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="100" y="55" width="1800" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bot1_url" value="https://&lt;siteId&gt;.chat.&lt;domain&gt;/api/v1/login&#xa;https://&lt;siteId&gt;.chat.&lt;domain&gt;/api/v1/chat.message" style="text;html=1;align=center;fontSize=9;fontFamily=Courier New;fontColor=#37474f;" vertex="1" parent="1">
+          <mxGeometry x="980" y="100" width="460" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bot2_url" value="https://botplatform-&lt;siteId&gt;.chat.&lt;domain&gt;/api/v2/..." style="text;html=1;align=center;fontSize=9;fontFamily=Courier New;fontColor=#37474f;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="100" width="380" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bot1" value="Bot SDK" style="shape=mxgraph.kubernetes.icon;prIcon=replica_set;html=1;fillColor=#ad1457;strokeColor=#ad1457;fontColor=#ad1457;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="150" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="bot2" value="Bot SDK" style="shape=mxgraph.kubernetes.icon;prIcon=replica_set;html=1;fillColor=#ad1457;strokeColor=#ad1457;fontColor=#ad1457;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1680" y="150" width="48" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="user_actor" value="User" style="shape=umlActor;html=1;fontColor=#1565c0;strokeColor=#1565c0;fillColor=#1565c0;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="160" y="150" width="36" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="desktop_url" value="POST https://portal.&lt;domain&gt;/v1/login&#xa;{ username, password }" style="rounded=1;whiteSpace=wrap;html=1;fontSize=9;fontFamily=Courier New;fillColor=#e3f2fd;strokeColor=#1565c0;fontColor=#37474f;" vertex="1" parent="1">
+          <mxGeometry x="220" y="240" width="280" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="desktop_box" value="Desktop 2.0 Login&#xa;(username / password)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0277bd;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="220" y="310" width="260" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="decision" value="require&#xa;pass&#xa;change?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="290" y="430" width="120" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="update_pwd" value="Update pwd&#xa;page" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#f9a825;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="120" y="600" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="desktop_ok" value="Desktop&#xa;(connected)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="440" y="600" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="portal_json_title" value="portal /v1/login response (8 fields):" style="text;html=1;fontSize=11;fontStyle=1;fontColor=#0277bd;" vertex="1" parent="1">
+          <mxGeometry x="40" y="720" width="540" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="portal_json" value="{&#xa;  &quot;userId&quot;:                &quot;&lt;17-char&gt;&quot;,&#xa;  &quot;authToken&quot;:             &quot;&lt;43-char base64url&gt;&quot;,&#xa;  &quot;account&quot;:               &quot;&lt;botname&gt;.&lt;shortcode&gt;.bot&quot;,&#xa;  &quot;siteId&quot;:                &quot;&lt;siteId&gt;&quot;,&#xa;  &quot;authServiceUrl&quot;:        &quot;&lt;auth URL home site&gt;&quot;,&#xa;  &quot;baseUrl&quot;:               &quot;&lt;chat REST base URL home site&gt;&quot;,&#xa;  &quot;natsUrl&quot;:               &quot;&lt;NATS WebSocket URL home site&gt;&quot;,&#xa;  &quot;requirePasswordChange&quot;: false&#xa;}" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontSize=9;fontFamily=Courier New;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="745" width="560" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="portal_svc" value="portal-service&#xa;(global, GDNS-routed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="320" width="240" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gateway" value="tchat-gateway&#xa;(Istio ingress)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3949ab;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1320" y="280" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vs_yaml_1" value="match:&#xa;  uri: { exact: /api/v1/login }&#xa;route:&#xa;  - destination:&#xa;      host: svc-&lt;siteId&gt;-botplatform.chat.svc.cluster.local&#xa;      weight: 0           # legacy off&#xa;  - destination:&#xa;      host: svc-&lt;siteId&gt;-botplatform.wsp.svc.cluster.local&#xa;      weight: 100         # nextgen on" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#f57f17;fontSize=9;fontFamily=Courier New;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="450" width="540" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="vs_yaml_2" value="match:&#xa;  uri: { prefix: /api/v2 }&#xa;route:&#xa;  - destination:&#xa;      host: svc-&lt;siteId&gt;-botplatform.chat.svc.cluster.local&#xa;      weight: 0&#xa;  - destination:&#xa;      host: svc-&lt;siteId&gt;-botplatform.wsp.svc.cluster.local&#xa;      weight: 100" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#f57f17;fontSize=9;fontFamily=Courier New;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="450" width="540" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legacy_svc" value="tchat 1.0 server&#xa;(legacy — weight 0)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#c62828;fontSize=10;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="780" y="720" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="mongo" value="MongoDB&#xa;(legacy)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;fontSize=9;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="820" y="830" width="140" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bp_box" value="botplatform&#xa;(nextgen — weight 100)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="720" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_note" value="deployed in wsp namespace&#xa;see wsp-ns diagram →" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#2e7d32;" vertex="1" parent="1">
+          <mxGeometry x="1430" y="800" width="280" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="caption" value="Cutover policy: 0→100 direct switch on the VirtualService weight — no canary, no header-based routing.&#xa;Token wire-format is identical to legacy tchat (opaque base64url, no bp_ prefix), so existing bot SDKs need no code changes." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;fontSize=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="350" y="1030" width="1300" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_bot1_gw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;" edge="1" parent="1" source="bot1" target="gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_bot2_gw" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;" edge="1" parent="1" source="bot2" target="gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_actor_url" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565c0;" edge="1" parent="1" source="user_actor" target="desktop_url">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_url_box" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565c0;" edge="1" parent="1" source="desktop_url" target="desktop_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_box_portal" value="POST /v1/login" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1565c0;fontSize=9;fontFamily=Courier New;" edge="1" parent="1" source="desktop_box" target="portal_svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_box_decision" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#0277bd;" edge="1" parent="1" source="desktop_box" target="decision">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_yes" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;fontSize=10;fontStyle=1;" edge="1" parent="1" source="decision" target="update_pwd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_no" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#ef6c00;fontSize=10;fontStyle=1;" edge="1" parent="1" source="decision" target="desktop_ok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_gw_yaml1" value="match&#xa;/api/v1/login" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;fontSize=9;" edge="1" parent="1" source="gateway" target="vs_yaml_1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_gw_yaml2" value="match&#xa;/api/v2/*" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#37474f;fontSize=9;" edge="1" parent="1" source="gateway" target="vs_yaml_2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_yaml1_legacy" value="weight 0" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#c62828;dashed=1;fontSize=9;" edge="1" parent="1" source="vs_yaml_1" target="legacy_svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_yaml1_bp" value="weight 100" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#2e7d32;strokeWidth=2;fontSize=9;fontStyle=1;" edge="1" parent="1" source="vs_yaml_1" target="bp_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_yaml2_bp" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="vs_yaml_2" target="bp_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_legacy_mongo" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#c62828;dashed=1;" edge="1" parent="1" source="legacy_svc" target="mongo">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_portal_bp" value="forwards {username, password}&#xa;east-west to home-site botplatform" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#2e7d32;dashed=8 8;fontSize=9;" edge="1" parent="1" source="portal_svc" target="bp_box">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1100" y="345" />
+              <mxPoint x="1100" y="750" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

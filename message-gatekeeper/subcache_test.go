@@ -164,6 +164,97 @@ func TestCachedSubStore_GetRoomMetaPassesThrough(t *testing.T) {
 	_, _ = cached.GetRoomMeta(context.Background(), "r1")
 }
 
+func TestCachedSubStore_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	inner := NewMockStore(ctrl)
+
+	want := &model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, Roles: []model.Role{model.RoleMember}}
+	entered := make(chan struct{}, 1)
+	block := make(chan struct{})
+	inner.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").DoAndReturn(
+		func(ctx context.Context, _, _ string) (*model.Subscription, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-block
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return want, nil
+		}).Times(1)
+
+	cached, err := newCachedSubStore(inner, 10, time.Minute)
+	require.NoError(t, err)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, e := cached.GetSubscription(leaderCtx, "alice", "r1")
+		leaderDone <- e
+	}()
+	<-entered
+
+	waiterReady := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterReady)
+		_, e := cached.GetSubscription(context.Background(), "alice", "r1")
+		waiterDone <- e
+	}()
+	<-waiterReady
+
+	cancelLeader()
+	require.ErrorIs(t, <-leaderDone, context.Canceled)
+	close(block)
+	require.NoError(t, <-waiterDone, "waiter must not be poisoned by the leader's cancel")
+
+	// Cache populated: a fresh hit does not call inner again (Times(1) enforces this).
+	got, err := cached.GetSubscription(context.Background(), "alice", "r1")
+	require.NoError(t, err)
+	assert.Equal(t, "u1", got.User.ID)
+}
+
+func TestCachedSubStore_CallerCancelReturnsCtxErr(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	inner := NewMockStore(ctrl)
+
+	block := make(chan struct{})
+	defer close(block)
+	entered := make(chan struct{}, 1)
+	inner.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").DoAndReturn(
+		func(ctx context.Context, _, _ string) (*model.Subscription, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-block
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return &model.Subscription{User: model.SubscriptionUser{Account: "alice"}}, nil
+		}).Times(1)
+
+	cached, err := newCachedSubStore(inner, 10, time.Minute)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, e := cached.GetSubscription(ctx, "alice", "r1")
+		done <- e
+	}()
+	<-entered
+	cancel()
+
+	select {
+	case e := <-done:
+		require.ErrorIs(t, e, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller did not return on its own ctx cancel within 2s")
+	}
+}
+
 func TestNewCachedSubStore_RejectsInvalidArgs(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	inner := NewMockStore(ctrl)
@@ -188,22 +279,4 @@ func TestNewCachedSubStore_RejectsInvalidArgs(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
-}
-
-func TestCachedSubStore_StatsTrackHitsAndMisses(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	inner := NewMockStore(ctrl)
-	want := &model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}}
-	inner.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(want, nil).Times(1)
-
-	cached, err := newCachedSubStore(inner, 10, time.Minute)
-	require.NoError(t, err)
-
-	_, _ = cached.GetSubscription(context.Background(), "alice", "r1") // miss
-	_, _ = cached.GetSubscription(context.Background(), "alice", "r1") // hit
-	_, _ = cached.GetSubscription(context.Background(), "alice", "r1") // hit
-
-	stats := cached.Stats()
-	assert.Equal(t, uint64(2), stats.Hits)
-	assert.Equal(t, uint64(1), stats.Misses)
 }

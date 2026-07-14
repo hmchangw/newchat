@@ -13,13 +13,15 @@ import (
 type mongoStore struct {
 	subscriptions *mongo.Collection
 	rooms         *mongo.Collection
+	uploads       *mongo.Collection
 }
 
-// NewMongoStore returns a Store backed by the subscriptions and rooms collections.
+// NewMongoStore returns a Store backed by the subscriptions, rooms, and uploads collections.
 func NewMongoStore(db *mongo.Database) *mongoStore {
 	return &mongoStore{
 		subscriptions: db.Collection("subscriptions"),
 		rooms:         db.Collection("rooms"),
+		uploads:       db.Collection("uploads"),
 	}
 }
 
@@ -54,4 +56,21 @@ func (s *mongoStore) GetRoomSiteID(ctx context.Context, roomID string) (string, 
 		return "", fmt.Errorf("get room %s: %w", roomID, err)
 	}
 	return room.SiteID, nil
+}
+
+func (s *mongoStore) GetUpload(ctx context.Context, fileID string) (*upload, error) {
+	var up upload
+	err := s.uploads.FindOne(ctx,
+		bson.M{"_id": fileID},
+		options.FindOne().SetProjection(bson.M{
+			"userId": 1, "rid": 1, "name": 1, "type": 1, "size": 1, "AmazonS3.path": 1,
+		}),
+	).Decode(&up)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("get upload %s: %w", fileID, ErrUploadNotFound)
+		}
+		return nil, fmt.Errorf("get upload %s: %w", fileID, err)
+	}
+	return &up, nil
 }

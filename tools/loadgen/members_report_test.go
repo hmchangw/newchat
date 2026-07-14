@@ -17,7 +17,7 @@ func TestPrintMembersSummary_IncludesAllSections(t *testing.T) {
 		Duration: 60 * time.Second, Warmup: 10 * time.Second,
 		UsersPerAdd: 10, Sent: 6000, SentMeasured: 5000,
 		PublishErrors: 0, RoomServiceErrors: 2,
-		MissingReplies: 1, MissingBroadcasts: 0,
+		MissingReplies: 1, MissingEvents: 0,
 		E1:      Percentiles{P50: 4 * time.Millisecond, P95: 12 * time.Millisecond, P99: 28 * time.Millisecond, Max: 50 * time.Millisecond},
 		E2:      Percentiles{P50: 10 * time.Millisecond, P95: 31 * time.Millisecond, P99: 78 * time.Millisecond, Max: 90 * time.Millisecond},
 		E1Count: 5000, E2Count: 4999,
@@ -32,7 +32,7 @@ func TestPrintMembersSummary_IncludesAllSections(t *testing.T) {
 		"users per add:    10",
 		"publish errors:    0",
 		"room-service errors:", "2",
-		"E1 reply", "E2 broadcast",
+		"E1 reply", "E2 member-event",
 		"ROOMS_site-A", "room-worker",
 	} {
 		assert.True(t, strings.Contains(out, want), "summary missing %q\n--- output ---\n%s", want, out)

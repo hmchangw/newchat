@@ -10,12 +10,12 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/models"
 )
 
-// Subset of columns present in thread_messages_by_thread (no tshow, thread_parent_created_at, or pinned_* columns).
+// Subset of columns present in thread_messages_by_thread (no thread_parent_created_at or pinned_* columns).
 const threadMessageColumns = "room_id, thread_room_id, created_at, message_id, thread_parent_id, " +
-	"sender, msg, mentions, attachments, file, card, card_action, " +
+	"sender, msg, mentions, attachments, card, card_action, " +
 	"quoted_parent_message, visible_to, reactions, deleted, " +
 	"type, sys_msg_data, site_id, edited_at, updated_at, " +
-	"enc_payload, enc_meta"
+	"tshow, enc_payload, enc_meta"
 
 // Cross-room safety lives in the service layer (findMessage's msg.RoomID check) —
 // the table partitions by thread_room_id alone so room_id never enters the query.

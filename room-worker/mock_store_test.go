@@ -43,6 +43,21 @@ func (m *MockSubscriptionStore) EXPECT() *MockSubscriptionStoreMockRecorder {
 	return m.recorder
 }
 
+// ApplyMemberCountDelta mocks base method.
+func (m *MockSubscriptionStore) ApplyMemberCountDelta(ctx context.Context, roomID string, userDelta, appDelta int, ttl time.Duration) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ApplyMemberCountDelta", ctx, roomID, userDelta, appDelta, ttl)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ApplyMemberCountDelta indicates an expected call of ApplyMemberCountDelta.
+func (mr *MockSubscriptionStoreMockRecorder) ApplyMemberCountDelta(ctx, roomID, userDelta, appDelta, ttl any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyMemberCountDelta", reflect.TypeOf((*MockSubscriptionStore)(nil).ApplyMemberCountDelta), ctx, roomID, userDelta, appDelta, ttl)
+}
+
 // BulkCreateRoomMembers mocks base method.
 func (m *MockSubscriptionStore) BulkCreateRoomMembers(ctx context.Context, members []*model.RoomMember) error {
 	m.ctrl.T.Helper()
@@ -161,6 +176,21 @@ func (mr *MockSubscriptionStoreMockRecorder) FindUsersByAccounts(ctx, accounts a
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUsersByAccounts", reflect.TypeOf((*MockSubscriptionStore)(nil).FindUsersByAccounts), ctx, accounts)
 }
 
+// GetApp mocks base method.
+func (m *MockSubscriptionStore) GetApp(ctx context.Context, botAccount string) (*model.App, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetApp", ctx, botAccount)
+	ret0, _ := ret[0].(*model.App)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetApp indicates an expected call of GetApp.
+func (mr *MockSubscriptionStoreMockRecorder) GetApp(ctx, botAccount any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetApp", reflect.TypeOf((*MockSubscriptionStore)(nil).GetApp), ctx, botAccount)
+}
+
 // GetOrgMembersWithIndividualStatus mocks base method.
 func (m *MockSubscriptionStore) GetOrgMembersWithIndividualStatus(ctx context.Context, roomID, orgID string) ([]OrgMemberStatus, error) {
 	m.ctrl.T.Helper()
@@ -189,6 +219,21 @@ func (m *MockSubscriptionStore) GetRoom(ctx context.Context, roomID string) (*mo
 func (mr *MockSubscriptionStoreMockRecorder) GetRoom(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoom", reflect.TypeOf((*MockSubscriptionStore)(nil).GetRoom), ctx, roomID)
+}
+
+// GetRoomMeta mocks base method.
+func (m *MockSubscriptionStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Room, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRoomMeta", ctx, roomID)
+	ret0, _ := ret[0].(*model.Room)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetRoomMeta indicates an expected call of GetRoomMeta.
+func (mr *MockSubscriptionStoreMockRecorder) GetRoomMeta(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomMeta", reflect.TypeOf((*MockSubscriptionStore)(nil).GetRoomMeta), ctx, roomID)
 }
 
 // GetSubscription mocks base method.

@@ -19,10 +19,12 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -66,6 +68,10 @@ type Handler struct {
 	// after authoritative writes. nil disables invalidation (best-effort).
 	valkey           valkeyutil.Client
 	keyFanoutWorkers int
+	// reconcileTTL bounds how often the add-member hot path runs a full
+	// O(room) member-count recompute; see config.MemberCountReconcileTTL.
+	// Zero means recompute on every add (the pre-optimisation behaviour).
+	reconcileTTL time.Duration
 }
 
 func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender) *Handler {
@@ -225,34 +231,9 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	default:
 		slog.WarnContext(ctx, "unknown member operation", "subject", subj)
 	}
-	if err != nil {
-		// NB: do NOT slog.Error here — fillAsyncError → errcode.Classify already
-		// logs the failure exactly once at a category-aware level (internal/
-		// unavailable → ERROR, expected client errors → INFO). An extra ERROR
-		// line here would double-log every failure and force ERROR on client-
-		// category permanent errors (e.g. NotFound for missing user), defeating
-		// the category-aware level the migration shipped.
-		//
-		// Permanent failures must Ack so JetStream stops redelivering. The async-job
-		// error event has already been published to the requester via the per-handler
-		// defer in processCreateRoom / processAddMembers / processRemove*. Permanence
-		// is explicit (the errcode.Permanent marker), never inferred from the errcode
-		// category — many permanent errors classify to internal and would otherwise
-		// be Nak'd forever.
-		if _, ok := errcode.IsPermanent(err); ok {
-			if ackErr := msg.Ack(); ackErr != nil {
-				slog.ErrorContext(ctx, "failed to ack permanent-error message", "error", ackErr)
-			}
-			return
-		}
-		if nakErr := msg.Nak(); nakErr != nil {
-			slog.ErrorContext(ctx, "failed to nak message", "error", nakErr)
-		}
-		return
-	}
-	if err := msg.Ack(); err != nil {
-		slog.ErrorContext(ctx, "failed to ack message", "error", err)
-	}
+	// SettleQuiet, not Settle: fillAsyncError → errcode.Classify already logged
+	// this error once at a category-aware level, so re-logging would double-log.
+	jsretry.SettleQuiet(ctx, msg, jsretry.DefaultBackoff, err)
 }
 
 func (h *Handler) processRemoveMember(ctx context.Context, data []byte) (err error) {
@@ -304,6 +285,19 @@ func (h *Handler) processRemoveMember(ctx context.Context, data []byte) (err err
 		return h.processRemoveOrg(ctx, &req, currentPair)
 	}
 	return h.processRemoveIndividual(ctx, &req, currentPair)
+}
+
+// federate durably relays one cross-site event onto the local OUTBOX stream;
+// outbox-worker forwards it to destSiteID's INBOX with retry-forever, so a
+// destination outage delays — never drops — the event. Order-sensitive event
+// types (membership, room rename) ride a per-destination FIFO lane and cannot
+// overtake each other. payload is the pre-marshaled inner event; outbox.Publish
+// builds the InboxEvent envelope (byte-identical to the previous direct INBOX
+// publish). dedupID is the OUTBOX publish's Nats-Msg-Id (a JetStream redelivery
+// of the ROOMS message can't double-enqueue) and the forward's Nats-Msg-Id at
+// the destination.
+func (h *Handler) federate(ctx context.Context, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64) error {
+	return outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
 // rotateAndFanOut generates v+1, fans it out to survivors, then commits via Rotate.
@@ -432,16 +426,16 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 
 	// Wrapper Type collapses to member_removed even for self-leave so
 	// search-sync-worker dispatches on one MV op; inner Type is preserved.
-	inboxOutbox := model.OutboxEvent{
-		Type:       model.OutboxMemberRemoved,
+	internalEvt := model.InboxEvent{
+		Type:       model.InboxMemberRemoved,
 		SiteID:     h.siteID,
 		DestSiteID: h.siteID,
 		Payload:    memberEvtData,
 		Timestamp:  now.UnixMilli(),
 	}
-	inboxData, _ := json.Marshal(inboxOutbox)
+	internalData, _ := json.Marshal(internalEvt)
 	inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
-	if err := h.publish(ctx, subject.InboxMemberRemoved(h.siteID), inboxData, natsutil.OutboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
 		slog.ErrorContext(ctx, "local inbox member_removed publish failed", "error", err, "room_id", req.RoomID)
 	}
 
@@ -473,7 +467,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	if isSelfLeave {
 		content = formatLeft(&user.User)
 	} else {
-		content = formatRemovedUser(&user.User)
+		content = formatRemovedUser(requester, &user.User)
 	}
 	sysMsg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(seed, "rmindiv"),
@@ -496,20 +490,15 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return fmt.Errorf("publish individual removal system message: %w", err)
 	}
 
-	// Cross-site outbox for federated users
-	if user.SiteID != h.siteID {
-		outbox := model.OutboxEvent{
-			Type:       model.OutboxMemberRemoved,
-			SiteID:     h.siteID,
-			DestSiteID: user.SiteID,
-			Payload:    memberEvtData,
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, _ := json.Marshal(outbox)
+	// Cross-site membership relay for federated users, via the durable OUTBOX
+	// (per-destination FIFO in outbox-worker). Skip blank destination sites
+	// (missing/legacy metadata) so we never build an invalid subject path,
+	// matching the add/create/DM paths.
+	if user.SiteID != "" && user.SiteID != h.siteID {
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
-		dedupID := natsutil.OutboxDedupID(ctx, user.SiteID, payloadSeed)
-		if err := h.publish(ctx, subject.Outbox(h.siteID, user.SiteID, model.OutboxMemberRemoved), outboxData, dedupID); err != nil {
-			return fmt.Errorf("outbox publish to %s: %w", user.SiteID, err)
+		dedupID := natsutil.InboxDedupID(ctx, user.SiteID, payloadSeed)
+		if err := h.federate(ctx, req.RoomID, user.SiteID, model.InboxMemberRemoved, memberEvtData, dedupID, now.UnixMilli()); err != nil {
+			return err
 		}
 	}
 
@@ -627,7 +616,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	// Member change event with all removed accounts
 	if len(accounts) > 0 {
 		memberEvt := model.MemberRemoveEvent{
-			Type:      model.OutboxMemberRemoved,
+			Type:      model.InboxMemberRemoved,
 			RoomID:    req.RoomID,
 			Accounts:  accounts,
 			SiteID:    h.siteID,
@@ -639,16 +628,16 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 			slog.ErrorContext(ctx, "member event publish failed", "error", err, "room_id", req.RoomID)
 		}
 
-		inboxOutbox := model.OutboxEvent{
-			Type:       model.OutboxMemberRemoved,
+		internalEvt := model.InboxEvent{
+			Type:       model.InboxMemberRemoved,
 			SiteID:     h.siteID,
 			DestSiteID: h.siteID,
 			Payload:    memberEvtData,
 			Timestamp:  now.UnixMilli(),
 		}
-		inboxData, _ := json.Marshal(inboxOutbox)
+		internalData, _ := json.Marshal(internalEvt)
 		inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
-		if err := h.publish(ctx, subject.InboxMemberRemoved(h.siteID), inboxData, natsutil.OutboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
+		if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
 			slog.ErrorContext(ctx, "local inbox member_removed publish failed", "error", err, "room_id", req.RoomID)
 		}
 	}
@@ -674,7 +663,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeMemberRemoved,
-		Content:     formatRemovedOrg(name, tcName, req.OrgID),
+		Content:     formatRemovedOrg(requester, name, tcName, req.OrgID),
 		SysMsgData:  sysMsgPayload,
 		CreatedAt:   now,
 	}
@@ -689,34 +678,29 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		return fmt.Errorf("publish org removal system message: %w", err)
 	}
 
-	// Cross-site outbox grouped by destination site
+	// Cross-site membership relay grouped by destination site, via the durable
+	// OUTBOX (per-destination FIFO in outbox-worker). Skip blank destination
+	// sites (missing/legacy metadata) so an empty SiteID never becomes a map
+	// key and an invalid subject path.
 	siteAccounts := make(map[string][]string)
 	for _, m := range toRemove {
-		if m.SiteID != h.siteID {
+		if m.SiteID != "" && m.SiteID != h.siteID {
 			siteAccounts[m.SiteID] = append(siteAccounts[m.SiteID], m.Account)
 		}
 	}
 	for destSiteID, accounts := range siteAccounts {
 		evt := model.MemberRemoveEvent{
-			Type:      model.OutboxMemberRemoved,
+			Type:      model.InboxMemberRemoved,
 			RoomID:    req.RoomID,
 			Accounts:  accounts,
 			SiteID:    h.siteID,
 			OrgID:     req.OrgID,
 			Timestamp: now.UnixMilli(),
 		}
-		outbox := model.OutboxEvent{
-			Type:       model.OutboxMemberRemoved,
-			SiteID:     h.siteID,
-			DestSiteID: destSiteID,
-			Payload:    mustMarshal(evt),
-			Timestamp:  now.UnixMilli(),
-		}
-		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
-		dedupID := natsutil.OutboxDedupID(ctx, destSiteID, payloadSeed)
-		if err := h.publish(ctx, subject.Outbox(h.siteID, destSiteID, model.OutboxMemberRemoved), outboxData, dedupID); err != nil {
-			return fmt.Errorf("outbox publish to %s: %w", destSiteID, err)
+		dedupID := natsutil.InboxDedupID(ctx, destSiteID, payloadSeed)
+		if err := h.federate(ctx, req.RoomID, destSiteID, model.InboxMemberRemoved, mustMarshal(evt), dedupID, now.UnixMilli()); err != nil {
+			return err
 		}
 	}
 
@@ -732,7 +716,7 @@ type addMemberInputs struct {
 	hadOrgsBefore bool
 }
 
-// loadAddMemberInputs runs GetRoom, ListAddMemberCandidates, and
+// loadAddMemberInputs runs GetRoomMeta, ListAddMemberCandidates, and
 // HasOrgRoomMembers concurrently, collapsing three serial Mongo round trips into
 // one. A plain errgroup.Group (not WithContext) is used deliberately: these are
 // independent reads, so a failure in one need not cancel the others — matching
@@ -746,7 +730,7 @@ func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembers
 		g   errgroup.Group
 	)
 	g.Go(func() error {
-		room, err := h.store.GetRoom(ctx, req.RoomID)
+		room, err := h.store.GetRoomMeta(ctx, req.RoomID)
 		if err != nil {
 			return fmt.Errorf("get room: %w", err)
 		}
@@ -1015,20 +999,39 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 	}
 
-	// 6. Reconcile userCount. Idempotent $set converges to the correct value
-	// even under JetStream redelivery; an upstream log-and-continue would
-	// leave the counter drifted forever, so we propagate the error.
-	if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
-		return fmt.Errorf("reconcile member counts: %w", err)
+	// 6. Update member counts. The hot path applies the delta incrementally
+	// ($inc, O(1)); a full O(room) recompute runs only once the per-room TTL
+	// elapses (drift safety net). subs is exactly the net-new subscriptions
+	// (needSub, recomputed from live state each delivery), so the delta is
+	// redelivery-safe. Errors propagate — log-and-continue would drift the
+	// counter.
+	var userDelta, appDelta int
+	for _, sub := range subs {
+		if sub.User.IsBot {
+			appDelta++
+		} else {
+			userDelta++
+		}
+	}
+	reconcileDue, err := h.store.ApplyMemberCountDelta(ctx, req.RoomID, userDelta, appDelta, h.reconcileTTL)
+	if err != nil {
+		return fmt.Errorf("apply member count delta: %w", err)
+	}
+	if reconcileDue {
+		if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
+			return fmt.Errorf("reconcile member counts: %w", err)
+		}
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
 	// Publish subscription.update BEFORE room.key so clients have a sub entry to store the key under.
+	// Channel-only handler: roomName is the already-fetched channel name.
 	for _, sub := range subs {
 		subEvt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: *sub,
 			Action:       "added",
+			RoomName:     room.Name,
 			Timestamp:    now.UnixMilli(),
 		}
 		subEvtData, _ := json.Marshal(subEvt)
@@ -1060,12 +1063,12 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	// (actualAccounts) or new org rows (req.Orgs). The org→individual upgrade
 	// path (only needIRM populated) writes the missing individual room_members
 	// row silently — no membership state changed for the room itself, so
-	// emitting an empty MemberAddEvent and a "added members to the channel"
-	// sys-msg with no actual members listed would mislead end users.
+	// emitting an empty MemberAddEvent and a members_added sys-msg with no
+	// actual members listed would mislead end users.
 	historySharedSince := historySharedSincePtr(req.History, req.Timestamp, req.RoomID)
 	if len(actualAccounts) > 0 || len(req.Orgs) > 0 {
 		memberAddEvt := model.MemberAddEvent{
-			Type:               model.OutboxMemberAdded,
+			Type:               model.InboxMemberAdded,
 			RoomID:             req.RoomID,
 			RoomName:           room.Name,
 			RoomType:           room.Type,
@@ -1086,16 +1089,16 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 
 		if len(actualAccounts) > 0 {
-			inboxOutbox := model.OutboxEvent{
-				Type:       model.OutboxMemberAdded,
+			internalEvt := model.InboxEvent{
+				Type:       model.InboxMemberAdded,
 				SiteID:     room.SiteID,
 				DestSiteID: room.SiteID,
 				Payload:    memberAddData,
 				Timestamp:  now.UnixMilli(),
 			}
-			inboxData, _ := json.Marshal(inboxOutbox)
+			internalData, _ := json.Marshal(internalEvt)
 			inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp)
-			if err := h.publish(ctx, subject.InboxMemberAdded(room.SiteID), inboxData, natsutil.OutboxDedupID(ctx, room.SiteID, inboxSeed)); err != nil {
+			if err := h.publish(ctx, subject.InboxInternal(room.SiteID, model.InboxMemberAdded), internalData, natsutil.InboxDedupID(ctx, room.SiteID, inboxSeed)); err != nil {
 				slog.ErrorContext(ctx, "local inbox member_added publish failed",
 					"error", err,
 					"room_id", req.RoomID,
@@ -1104,21 +1107,24 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			}
 		}
 
+		// Individuals = req.Users (direct + channel individuals, merged by
+		// room-service) minus the requester — mirrors create's creator strip.
+		sysIndividuals := withoutAccount(req.Users, req.RequesterAccount)
 		membersAdded := model.MembersAdded{
-			Individuals:     actualAccounts,
-			Orgs:            req.Orgs,
-			Channels:        req.Channels,
+			Individuals:     sysIndividuals,
+			Orgs:            nonNil(req.Orgs),
+			Channels:        nonNil(req.Channels),
 			AddedUsersCount: len(subs),
 		}
 		sysMsgData, _ := json.Marshal(membersAdded)
 		seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
 			fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-		// Single form only for direct 1-user adds; org-bearing adds always use multi.
-		content := formatAddedMulti(requester)
-		if len(subs) == 1 && len(req.Orgs) == 0 {
-			onlyUser := userMap[subs[0].User.Account]
-			content = formatAddedSingle(requester, &onlyUser)
-		}
+		content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
+			if u, ok := userMap[a]; ok {
+				return &u
+			}
+			return nil
+		})
 		sysMsg := model.Message{
 			ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
 			RoomID:      req.RoomID,
@@ -1141,7 +1147,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 	}
 
-	// 10. Outbox for cross-site members — one event per destination site.
+	// 10. Inbox for cross-site members — one event per destination site.
 	// Single-pass bucket: accounts → home site, skipping the local site. The map
 	// keys are the distinct remote sites; each entry already carries the
 	// per-site filtered account list, so the downstream loop is O(sites) not
@@ -1158,7 +1164,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	for destSiteID, siteAccounts := range accountsBySite {
 		siteEvt := model.MemberAddEvent{
-			Type:               model.OutboxMemberAdded,
+			Type:               model.InboxMemberAdded,
 			RoomID:             req.RoomID,
 			RoomName:           room.Name,
 			RoomType:           room.Type,
@@ -1170,15 +1176,10 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			Timestamp:          now.UnixMilli(),
 		}
 		siteEvtData, _ := json.Marshal(siteEvt)
-		outbox := model.OutboxEvent{
-			Type: model.OutboxMemberAdded, SiteID: room.SiteID, DestSiteID: destSiteID,
-			Payload: siteEvtData, Timestamp: now.UnixMilli(),
-		}
-		outboxData, _ := json.Marshal(outbox)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp)
-		dedupID := natsutil.OutboxDedupID(ctx, destSiteID, payloadSeed)
-		if err := h.publish(ctx, subject.Outbox(room.SiteID, destSiteID, model.OutboxMemberAdded), outboxData, dedupID); err != nil {
-			return fmt.Errorf("outbox publish to %s failed: %w", destSiteID, err)
+		dedupID := natsutil.InboxDedupID(ctx, destSiteID, payloadSeed)
+		if err := h.federate(ctx, req.RoomID, destSiteID, model.InboxMemberAdded, siteEvtData, dedupID, now.UnixMilli()); err != nil {
+			return err
 		}
 	}
 
@@ -1224,12 +1225,62 @@ func buildSelfDMSub(user *model.User, room *model.Room, joinedAt time.Time) *mod
 	return sub
 }
 
+// createSelfDM builds the caller's single-member self-DM (note-to-self): one
+// favorited subscription in a single-member dm room, no inbox. Reached only from
+// processCreateRoom (the async room.create path) when the counterpart is the
+// requester. The room id is the deterministic id room-service supplied, so a
+// JetStream redelivery hits the same room and the upserts are idempotent.
+// createSelfDM builds the caller's single-member self-DM room + favorited
+// subscription, provisions its at-rest DEK, and publishes the subscription
+// update; it returns the persisted subscription. Shared by both create paths:
+// the async room.create worker (which ignores the returned sub) and the
+// server-server RPC (which returns it in the reply). roomID is the deterministic
+// self-DM id (BuildDMRoomID(uid, uid)), so a JetStream redelivery hits the same
+// room and the upserts stay idempotent.
+func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *model.User, requestID string, acceptedAt time.Time) (*model.Subscription, error) {
+	room := &model.Room{
+		ID:        roomID,
+		Type:      model.RoomTypeDM,
+		SiteID:    h.siteID,
+		UserCount: 1,
+		UIDs:      []string{requester.ID},
+		Accounts:  []string{requester.Account},
+		CreatedAt: acceptedAt,
+		UpdatedAt: acceptedAt,
+	}
+	// Provision the room's at-rest DEK before persisting it (same as the 2-party DM
+	// path): self-DM messages are stored encrypted in Cassandra, so a Vault outage
+	// must fail creation rather than persist a room whose DEK is absent. Idempotent
+	// on JetStream redelivery.
+	if h.dekProvisioner != nil {
+		if err := h.dekProvisioner.EnsureDEK(ctx, room.ID); err != nil {
+			return nil, fmt.Errorf("provision at-rest DEK for self-DM room %s: %w", room.ID, err)
+		}
+	}
+	// Self-DM rooms fan out to a per-user subject only, so they are never encrypted
+	// and carry no room key (nil).
+	if _, err := h.store.CreateRoom(ctx, room, nil); err != nil {
+		return nil, fmt.Errorf("create self-DM room: %w", err)
+	}
+	if err := h.store.BulkCreateSubscriptions(ctx, []*model.Subscription{buildSelfDMSub(requester, room, acceptedAt)}); err != nil {
+		return nil, fmt.Errorf("create self-DM subscription: %w", err)
+	}
+	// Re-read the canonical sub: the deterministic id lets a redelivery hit the same
+	// room, so the upserted sub's _id/JoinedAt may differ from the in-memory one.
+	sub, err := h.store.GetSubscription(ctx, requester.Account, room.ID)
+	if err != nil {
+		return nil, fmt.Errorf("re-read self-DM sub after write: %w", err)
+	}
+	h.publishSubscriptionUpdates(ctx, []*model.Subscription{sub}, []*model.User{requester}, requestID)
+	return sub, nil
+}
+
 // newSub constructs a Subscription from its constituent parts.
 func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
 	name string, isSubscribed bool, joinedAt time.Time) *model.Subscription {
 	return &model.Subscription{
 		ID:           id,
-		User:         model.SubscriptionUser{ID: user.ID, Account: user.Account, IsBot: model.IsBotAccount(user.Account)},
+		User:         model.SubscriptionUser{ID: user.ID, Account: user.Account, IsBot: model.IsBot(user.Account) || model.IsPlatformAdminAccount(user.Account)},
 		RoomID:       room.ID,
 		SiteID:       room.SiteID,
 		Roles:        roles,
@@ -1278,6 +1329,18 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 	// debug: the classified room type that drives the create path below.
 	slog.DebugContext(ctx, "room-worker create room",
 		"request_id", requestID, "room_id", req.RoomID, "type", roomType)
+
+	// Validate the DM/botDM payload shape before indexing req.Users below — this is
+	// a deserialization boundary, so don't rely on the classify invariant alone.
+	if (roomType == model.RoomTypeDM || roomType == model.RoomTypeBotDM) && len(req.Users) != 1 {
+		return permanent(errcode.BadRequest("invalid create-room DM payload"))
+	}
+
+	// Self-DM (counterpart is the requester): its own single-member build path.
+	if roomType == model.RoomTypeDM && req.Users[0] == req.RequesterAccount {
+		_, err := h.createSelfDM(ctx, req.RoomID, requester, requestID, acceptedAt)
+		return err
+	}
 
 	room := &model.Room{
 		ID:        req.RoomID,
@@ -1397,12 +1460,11 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
 }
 
-// determineRoomTypeFromPayload mirrors room-service's determineRoomType on the
-// canonical payload. model.IsBotAccount classifies webhook-style bots (".bot"
-// suffix or "p_" prefix) consistently with room-service/helper.go and pkg/pipelines.
+// determineRoomTypeFromPayload mirrors room-service's determineRoomType: a single
+// ".bot"/"p_" counterpart is a botDM (consistent with room-service + pkg/pipelines).
 func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBotAccount(req.Users[0]) {
+		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
 			return model.RoomTypeBotDM
 		}
 		return model.RoomTypeDM
@@ -1500,11 +1562,16 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	h.bustRoomMeta(ctx, room.ID)
 
 	// Task 35: subscription.update fan-out per sub
+	userByAccount := make(map[string]*model.User, len(allUsers))
+	for i := range allUsers {
+		userByAccount[allUsers[i].Account] = &allUsers[i]
+	}
 	for _, sub := range subs {
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: *sub,
 			Action:       "added",
+			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
 			Timestamp:    now.UnixMilli(),
 		}
 		data, err := json.Marshal(evt)
@@ -1517,7 +1584,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 
 	// Task 36: channel-only sys-messages
 	if room.Type == model.RoomTypeChannel {
-		if err := h.publishChannelSysMessages(ctx, req, room, requester, len(subs)-1, requestID, now); err != nil {
+		if err := h.publishChannelSysMessages(ctx, req, room, requester, userByAccount, len(subs)-1, requestID, now); err != nil {
 			return fmt.Errorf("publish sys messages: %w", err)
 		}
 	}
@@ -1527,7 +1594,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		accounts = append(accounts, sub.User.Account)
 	}
 	inner := model.MemberAddEvent{
-		Type:               model.OutboxMemberAdded,
+		Type:               model.InboxMemberAdded,
 		RoomID:             room.ID,
 		RoomName:           room.Name,
 		RoomType:           room.Type,
@@ -1539,20 +1606,20 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		Timestamp:          now.UnixMilli(),
 	}
 	innerData, _ := json.Marshal(inner)
-	outbox := model.OutboxEvent{
-		Type:       model.OutboxMemberAdded,
+	internalEvt := model.InboxEvent{
+		Type:       model.InboxMemberAdded,
 		SiteID:     room.SiteID,
 		DestSiteID: room.SiteID,
 		Payload:    innerData,
 		Timestamp:  now.UnixMilli(),
 	}
-	outboxData, _ := json.Marshal(outbox)
+	internalData, _ := json.Marshal(internalEvt)
 	payloadSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
-	if err := h.publish(ctx, subject.InboxMemberAdded(room.SiteID), outboxData, natsutil.OutboxDedupID(ctx, room.SiteID, payloadSeed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(room.SiteID, model.InboxMemberAdded), internalData, natsutil.InboxDedupID(ctx, room.SiteID, payloadSeed)); err != nil {
 		slog.ErrorContext(ctx, "local inbox member_added publish failed", "error", err, "room_id", room.ID, "request_id", requestID)
 	}
 
-	// Task 37: outbox per remote site
+	// Task 37: inbox per remote site
 	remoteSiteAccounts := map[string][]string{}
 	for i := range allUsers {
 		u := &allUsers[i]
@@ -1563,7 +1630,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	}
 	for destSiteID, accounts := range remoteSiteAccounts {
 		memberEvt := model.MemberAddEvent{
-			Type:               model.OutboxMemberAdded,
+			Type:               model.InboxMemberAdded,
 			RoomID:             room.ID,
 			RoomName:           room.Name,
 			RoomType:           room.Type,
@@ -1575,17 +1642,9 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 			Timestamp:          now.UnixMilli(),
 		}
 		memberData, _ := json.Marshal(memberEvt)
-		memberEnvelope := model.OutboxEvent{
-			Type:       model.OutboxMemberAdded,
-			SiteID:     room.SiteID,
-			DestSiteID: destSiteID,
-			Payload:    memberData,
-			Timestamp:  now.UnixMilli(),
-		}
-		memberOutboxData, _ := json.Marshal(memberEnvelope)
 		memberSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
-		if err := h.publish(ctx, subject.Outbox(room.SiteID, destSiteID, model.OutboxMemberAdded), memberOutboxData, natsutil.OutboxDedupID(ctx, destSiteID, memberSeed)); err != nil {
-			return fmt.Errorf("publish member_added outbox to %s: %w", destSiteID, err)
+		if err := h.federate(ctx, room.ID, destSiteID, model.InboxMemberAdded, memberData, natsutil.InboxDedupID(ctx, destSiteID, memberSeed), now.UnixMilli()); err != nil {
+			return err
 		}
 	}
 
@@ -1603,7 +1662,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	return nil
 }
 
-func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, addedUsersCount int, requestID string, now time.Time) error {
+func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, userByAccount map[string]*model.User, addedUsersCount int, requestID string, now time.Time) error {
 	acceptedAt := time.UnixMilli(req.Timestamp).UTC()
 
 	sysData1, err := json.Marshal(model.RoomCreated{
@@ -1630,22 +1689,32 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		return fmt.Errorf("publish room_created: %w", err)
 	}
 
+	// ResolvedUsers = resolved individuals, already creator-stripped and
+	// org-member-free by room-service; Orgs counted as orgs, not expanded.
+	if len(req.ResolvedUsers) == 0 && len(req.ResolvedOrgs) == 0 {
+		// Nothing added beyond the creator (e.g. an empty channel); room_created
+		// already fired, so do not emit a degenerate "added 0 people" message.
+		return nil
+	}
 	sysData2, err := json.Marshal(model.MembersAdded{
-		Individuals:     req.Users,
-		Orgs:            req.Orgs,
-		Channels:        req.Channels,
+		Individuals:     nonNil(req.ResolvedUsers),
+		Orgs:            nonNil(req.ResolvedOrgs),
+		Channels:        nonNil(req.Channels),
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal members_added sys data: %w", err)
 	}
+	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) *model.User {
+		return userByAccount[a]
+	})
 	msg2 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "members_added"),
 		RoomID:      room.ID,
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeMembersAdded,
-		Content:     formatAddedMulti(requester),
+		Content:     content,
 		SysMsgData:  sysData2,
 		CreatedAt:   acceptedAt.Add(time.Millisecond),
 	}
@@ -1713,9 +1782,11 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		return nil, errCrossSiteRequester
 	}
 
-	// Self-DM (requester == counterpart): a single-member room.
+	// Self-DM (requester == counterpart): a single-member room. Server-server is a
+	// distinct create path from the client room.create flow, so it builds the
+	// self-DM room here rather than routing through the async worker.
 	if req.RequesterAccount == req.OtherAccount {
-		return h.createSelfDM(ctx, requester, requestID)
+		return h.serverCreateSelfDM(ctx, requester, requestID)
 	}
 
 	other, ok := byAccount[req.OtherAccount]
@@ -1723,7 +1794,7 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		return nil, errUserLookupFailed
 	}
 
-	// roomCreatedAt drives the room doc and the outbox dedup seed (must stay
+	// roomCreatedAt drives the room doc and the inbox dedup seed (must stay
 	// stable across NATS retries). joinedAt drives the subscription's JoinedAt
 	// field — on a dup-key retry it tracks the room's original creation time
 	// so JetStream redelivery is idempotent (user-service guards against
@@ -1806,49 +1877,28 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		return nil, fmt.Errorf("re-read DM subs after write: %w", err)
 	}
 
-	h.publishSubscriptionUpdates(ctx, []*model.Subscription{requesterSub, otherSub}, requestID)
+	h.publishSubscriptionUpdates(ctx, []*model.Subscription{requesterSub, otherSub}, []*model.User{requester, other}, requestID)
 
-	// Outbox failure means the remote site won't learn about the room; fail the request.
-	if err := h.publishSyncDMOutbox(ctx, room, requester, other, requesterSub.JoinedAt); err != nil {
-		return nil, fmt.Errorf("publish room_created outbox: %w", err)
+	// Inbox failure means the remote site won't learn about the room; fail the request.
+	if err := h.publishSyncDMInbox(ctx, room, requester, other, requesterSub.JoinedAt); err != nil {
+		return nil, fmt.Errorf("publish room_created inbox: %w", err)
 	}
 
 	return &model.SyncCreateDMReply{Success: true, Subscription: *requesterSub}, nil
 }
 
-// createSelfDM creates a single-member self-DM: one favorited subscription in a
-// channel-id dm room, no outbox. "One per user" is enforced by the caller.
-func (h *Handler) createSelfDM(ctx context.Context, requester *model.User, requestID string) (*model.SyncCreateDMReply, error) {
-	now := time.Now().UTC() // one stamp for room + sub; random id means no retry-idempotency concern.
-	room := &model.Room{
-		ID:        idgen.GenerateID(),
-		Type:      model.RoomTypeDM,
-		SiteID:    h.siteID,
-		UserCount: 1,
-		UIDs:      []string{requester.ID},
-		Accounts:  []string{requester.Account},
-		CreatedAt: now,
-		UpdatedAt: now,
+// serverCreateSelfDM creates a single-member self-DM (note-to-self) for the
+// server-server path: one favorited subscription in a single-member dm room, no
+// inbox. "One per user" is enforced by the caller. Mirrors serverCreateDM's
+// at-rest DEK provisioning so a Vault outage fails creation rather than leaving a
+// DEK-less room.
+func (h *Handler) serverCreateSelfDM(ctx context.Context, requester *model.User, requestID string) (*model.SyncCreateDMReply, error) {
+	// Same deterministic self-DM id and build path as the async room.create flow.
+	roomID := idgen.BuildDMRoomID(requester.ID, requester.ID)
+	sub, err := h.createSelfDM(ctx, roomID, requester, requestID, time.Now().UTC())
+	if err != nil {
+		return nil, err
 	}
-	// Provision the at-rest DEK before persisting the room (see serverCreateDM).
-	if h.dekProvisioner != nil {
-		if err := h.dekProvisioner.EnsureDEK(ctx, room.ID); err != nil {
-			return nil, fmt.Errorf("provision at-rest DEK for self-DM room %s: %w", room.ID, err)
-		}
-	}
-	// Self-DM rooms fan out to a per-user subject only, so they are never
-	// encrypted and carry no room key (nil). Fresh random id means a pure insert.
-	if _, err := h.store.CreateRoom(ctx, room, nil); err != nil {
-		return nil, fmt.Errorf("create self-DM room %s for %s: %w", room.ID, requester.Account, err)
-	}
-
-	sub := buildSelfDMSub(requester, room, now)
-	if err := h.store.BulkCreateSubscriptions(ctx, []*model.Subscription{sub}); err != nil {
-		return nil, fmt.Errorf("create self-DM subscription: %w", err)
-	}
-
-	// No read-back: a fresh room id means a pure insert, so sub is what persisted.
-	h.publishSubscriptionUpdates(ctx, []*model.Subscription{sub}, requestID)
 	return &model.SyncCreateDMReply{Success: true, Subscription: *sub}, nil
 }
 
@@ -1868,12 +1918,44 @@ func validateSyncCreateDMShape(req *model.SyncCreateDMRequest) error {
 	return nil
 }
 
-func (h *Handler) publishSubscriptionUpdates(ctx context.Context, subs []*model.Subscription, requestID string) {
+// resolveSubUpdateRoomName computes a subscription.update's roomName: the room name for
+// channels; for dm/botDM, app.Name when the counterpart is a bot account, else its display name.
+func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) string {
+	switch sub.RoomType {
+	case model.RoomTypeDM, model.RoomTypeBotDM:
+		cp := sub.Name
+		// Platform-admin (p_) accounts are users, not bots, for naming — only .bot takes the app path.
+		if model.IsBot(cp) {
+			app, err := h.store.GetApp(ctx, cp)
+			if err == nil && app.Name != "" {
+				return app.Name
+			}
+			if err != nil && !errors.Is(err, ErrAppNotFound) {
+				slog.WarnContext(ctx, "resolve roomName: GetApp failed, using account fallback",
+					"request_id", natsutil.RequestIDFromContext(ctx), "botAccount", cp, "error", err)
+			}
+			return cp
+		}
+		if u, ok := userByAccount[cp]; ok {
+			return displayName(u)
+		}
+		return cp
+	default:
+		return sub.Name
+	}
+}
+
+func (h *Handler) publishSubscriptionUpdates(ctx context.Context, subs []*model.Subscription, users []*model.User, requestID string) {
+	userByAccount := make(map[string]*model.User, len(users))
+	for _, u := range users {
+		userByAccount[u.Account] = u
+	}
 	for _, sub := range subs {
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: *sub,
 			Action:       "added",
+			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
 			Timestamp:    time.Now().UTC().UnixMilli(),
 		}
 		data, err := json.Marshal(evt)
@@ -1997,39 +2079,58 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	remoteSites, err := h.findRemoteSitesForAccounts(ctx, accounts)
 	if err != nil {
-		return fmt.Errorf("find remote sites for outbox fan-out: %w", err)
+		return fmt.Errorf("find remote sites for inbox fan-out: %w", err)
 	}
-	renamedPayload, err := json.Marshal(model.RoomRenamedOutboxPayload{
+	renamedPayload, err := json.Marshal(model.RoomRenamedInboxPayload{
 		RoomID: req.RoomID, NewName: req.NewName, Timestamp: req.Timestamp,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal rename outbox payload: %w", err)
+		return fmt.Errorf("marshal rename inbox payload: %w", err)
 	}
+	// Relay room_renamed through the OUTBOX ordered lane (not a direct INBOX
+	// publish) so it shares the per-destination FIFO consumer with member_added
+	// and cannot overtake the add that creates a new member's subscription — a
+	// direct rename would apply to zero docs and be lost. NOTE: this removes the
+	// transport-latency skew but not the producer-side race — room-worker has no
+	// per-room ordering, so member.add and room.rename (separate ROOMS messages,
+	// concurrent workers) can still enqueue out of causal order. Full ordering
+	// awaits producer per-room lanes / reconciliation (design doc §5, §7).
+	now := time.Now().UTC().UnixMilli()
 	for _, remoteSiteID := range remoteSites {
-		evt := model.OutboxEvent{
-			Type: model.OutboxRoomRenamed, SiteID: h.siteID, DestSiteID: remoteSiteID,
-			Payload: renamedPayload, Timestamp: time.Now().UTC().UnixMilli(),
+		if err := h.federate(ctx, req.RoomID, remoteSiteID, model.InboxRoomRenamed,
+			renamedPayload, natsutil.InboxDedupID(ctx, remoteSiteID, requestID), now); err != nil {
+			return err
 		}
-		evtData, mErr := json.Marshal(evt)
-		if mErr != nil {
-			return fmt.Errorf("marshal rename outbox event: %w", mErr)
-		}
-		if err = h.publish(ctx, subject.Outbox(h.siteID, remoteSiteID, model.OutboxRoomRenamed),
-			evtData, natsutil.OutboxDedupID(ctx, remoteSiteID, requestID)); err != nil {
-			return fmt.Errorf("publish rename outbox to %s: %w", remoteSiteID, err)
-		}
+	}
+
+	// Best-effort live event so connected clients update the channel name
+	// without a re-fetch; a failure here must not fail the rename RPC, whose
+	// DB writes have already committed.
+	roomEvt := model.RoomRenamedRoomEvent{
+		Type:      model.RoomEventRoomRenamed,
+		RoomID:    req.RoomID,
+		SiteID:    h.siteID,
+		Timestamp: time.Now().UTC().UnixMilli(),
+		NewName:   req.NewName,
+		ByAccount: req.Account,
+		RenamedAt: time.UnixMilli(req.Timestamp).UTC(),
+	}
+	if payload, mErr := json.Marshal(roomEvt); mErr != nil {
+		slog.Error("marshal room_renamed event failed", "error", mErr, "room_id", req.RoomID)
+	} else if pErr := h.publish(ctx, subject.RoomEvent(req.RoomID), payload, ""); pErr != nil {
+		slog.Error("publish room_renamed event failed", "error", pErr, "room_id", req.RoomID)
 	}
 	return nil
 }
 
-func (h *Handler) publishSyncDMOutbox(ctx context.Context, room *model.Room, requester, other *model.User, joinedAt time.Time) error {
+func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requester, other *model.User, joinedAt time.Time) error {
 	if other.SiteID == "" || other.SiteID == h.siteID {
 		return nil
 	}
 
 	now := time.Now().UTC().UnixMilli()
 	memberEvt := model.MemberAddEvent{
-		Type:             model.OutboxMemberAdded,
+		Type:             model.InboxMemberAdded,
 		RoomID:           room.ID,
 		RoomName:         "",
 		RoomType:         room.Type,
@@ -2041,18 +2142,7 @@ func (h *Handler) publishSyncDMOutbox(ctx context.Context, room *model.Room, req
 	}
 	pData, err := json.Marshal(memberEvt)
 	if err != nil {
-		return fmt.Errorf("marshal member_added outbox payload: %w", err)
-	}
-	envelope := model.OutboxEvent{
-		Type:       model.OutboxMemberAdded,
-		SiteID:     room.SiteID,
-		DestSiteID: other.SiteID,
-		Payload:    pData,
-		Timestamp:  now,
-	}
-	eData, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("marshal outbox envelope: %w", err)
+		return fmt.Errorf("marshal member_added inbox payload: %w", err)
 	}
 	// Dedup keys on intrinsic room identity (stable across retries and
 	// re-subscribes) plus the destination site, NOT the request ID — the router
@@ -2061,11 +2151,7 @@ func (h *Handler) publishSyncDMOutbox(ctx context.Context, room *model.Room, req
 	// duplicate-key reconcile path resolves room to the existing record); using
 	// joinedAt would break dedup because botDM re-subscribes carry a fresh value.
 	payloadSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, room.CreatedAt.UnixMilli())
-	return h.publish(ctx,
-		subject.Outbox(room.SiteID, other.SiteID, model.OutboxMemberAdded),
-		eData,
-		payloadSeed+":"+other.SiteID,
-	)
+	return h.federate(ctx, room.ID, other.SiteID, model.InboxMemberAdded, pData, payloadSeed+":"+other.SiteID, now)
 }
 
 // fanOutRoomKeyToSurvivors sends the already-fetched room key to every survivor

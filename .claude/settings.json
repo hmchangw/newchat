@@ -23,7 +23,17 @@
       }
     ]
   },
+  "extraKnownMarketplaces": {
+    "365-skills": {
+      "source": {
+        "source": "github",
+        "repo": "Agents365-ai/365-skills",
+        "sha": "f95022884300554178d63f993a7f5c22416fb6bf"
+      }
+    }
+  },
   "enabledPlugins": {
-    "superpowers@superpowers-marketplace": true
+    "superpowers@superpowers-marketplace": true,
+    "drawio@365-skills": true
   }
 }

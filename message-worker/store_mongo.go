@@ -21,6 +21,7 @@ var (
 type threadStoreMongo struct {
 	threadRooms         *mongo.Collection
 	threadSubscriptions *mongo.Collection
+	subscriptions       *mongo.Collection
 }
 
 // Compile-time assertion that *threadStoreMongo satisfies ThreadStore.
@@ -30,6 +31,7 @@ func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
 	return &threadStoreMongo{
 		threadRooms:         db.Collection("thread_rooms"),
 		threadSubscriptions: db.Collection("thread_subscriptions"),
+		subscriptions:       db.Collection("subscriptions"),
 	}
 }
 
@@ -101,12 +103,13 @@ func (s *threadStoreMongo) UpsertThreadSubscription(ctx context.Context, sub *mo
 	return nil
 }
 
-// MarkThreadSubscriptionMention sets hasMention=true on the (threadRoomId, userAccount)
-// subscription. $setOnInsert / $set split: on insert all fields are written; on update
-// only hasMention and updatedAt change so existing subscription state is preserved.
+// MarkThreadSubscriptionMention sets hasMention=true, skipping subs that already
+// read past sub.CreatedAt (else this async write clobbers a read-clear, #467).
+// New subs go via $setOnInsert on the upsert; existing ones get a separate
+// guarded, non-upsert update, so an already-read sub can't be upserted twice.
 func (s *threadStoreMongo) MarkThreadSubscriptionMention(ctx context.Context, sub *model.ThreadSubscription) error {
 	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
-	update := bson.M{
+	upsert := bson.M{
 		"$setOnInsert": bson.M{
 			"_id":             sub.ID,
 			"parentMessageId": sub.ParentMessageID,
@@ -116,15 +119,25 @@ func (s *threadStoreMongo) MarkThreadSubscriptionMention(ctx context.Context, su
 			"userAccount":     sub.UserAccount,
 			"siteId":          sub.SiteID,
 			"lastSeenAt":      sub.LastSeenAt,
+			"hasMention":      true,
 			"createdAt":       sub.CreatedAt,
-		},
-		"$set": bson.M{
-			"hasMention": true,
-			"updatedAt":  sub.UpdatedAt,
+			"updatedAt":       sub.UpdatedAt,
 		},
 	}
-	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
+	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, upsert, options.UpdateOne().SetUpsert(true)); err != nil {
 		return fmt.Errorf("mark thread subscription mention: %w", err)
+	}
+
+	guardedFilter := bson.M{
+		"threadRoomId": sub.ThreadRoomID,
+		"userAccount":  sub.UserAccount,
+		// $not/$gte (not $lt): $lt is type-bracketed and won't match a null
+		// lastSeenAt (never-read sub), which must still be flagged.
+		"lastSeenAt": bson.M{"$not": bson.M{"$gte": sub.CreatedAt}},
+	}
+	guardedSet := bson.M{"$set": bson.M{"hasMention": true, "updatedAt": sub.UpdatedAt}}
+	if _, err := s.threadSubscriptions.UpdateOne(ctx, guardedFilter, guardedSet); err != nil {
+		return fmt.Errorf("mark thread subscription mention (existing): %w", err)
 	}
 	return nil
 }
@@ -146,6 +159,18 @@ func (s *threadStoreMongo) UpdateThreadRoomLastMessage(ctx context.Context, thre
 	return nil
 }
 
+// AdvanceThreadSubscriptionLastSeen advances the replier's lastSeenAt via $max so it
+// never regresses a replier who already read later; missing sub is a best-effort no-op.
+func (s *threadStoreMongo) AdvanceThreadSubscriptionLastSeen(ctx context.Context, threadRoomID, account string, at time.Time) error {
+	if _, err := s.threadSubscriptions.UpdateOne(ctx,
+		bson.M{"threadRoomId": threadRoomID, "userAccount": account},
+		bson.M{"$max": bson.M{"lastSeenAt": at}},
+	); err != nil {
+		return fmt.Errorf("advance thread lastSeenAt for %q in thread room %q: %w", account, threadRoomID, err)
+	}
+	return nil
+}
+
 func (s *threadStoreMongo) AddReplyAccounts(ctx context.Context, threadRoomID string, accounts []string) error {
 	if len(accounts) == 0 {
 		return nil
@@ -157,4 +182,34 @@ func (s *threadStoreMongo) AddReplyAccounts(ctx context.Context, threadRoomID st
 		return fmt.Errorf("add reply accounts to thread room %s: %w", threadRoomID, err)
 	}
 	return nil
+}
+
+func (s *threadStoreMongo) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
+	out := make(map[string]*time.Time, len(accounts))
+	if len(accounts) == 0 {
+		return out, nil
+	}
+	filter := bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}}
+	opts := options.Find().SetProjection(bson.M{"u.account": 1, "historySharedSince": 1, "_id": 0})
+	cursor, err := s.subscriptions.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("query history windows for room %s: %w", roomID, err)
+	}
+	defer cursor.Close(ctx)
+	// Minimal decode shape: the projection returns only u.account + historySharedSince,
+	// so decode just those rather than the full model.SubscriptionUser (whose other
+	// fields would silently be zero-valued).
+	var rows []struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
+		HistorySharedSince *time.Time `bson:"historySharedSince"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode history windows: %w", err)
+	}
+	for i := range rows {
+		out[rows[i].User.Account] = rows[i].HistorySharedSince
+	}
+	return out, nil
 }

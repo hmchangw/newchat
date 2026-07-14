@@ -7,7 +7,6 @@ import (
 
 type Message = cassandra.Message
 type Participant = cassandra.Participant
-type File = cassandra.File
 type Card = cassandra.Card
 type CardAction = cassandra.CardAction
 type QuotedParentMessage = cassandra.QuotedParentMessage
@@ -41,9 +40,10 @@ type LoadNextMessagesRequest struct {
 }
 
 type LoadNextMessagesResponse struct {
-	Messages   []Message `json:"messages"`
-	NextCursor string    `json:"nextCursor,omitempty"`
-	HasNext    bool      `json:"hasNext"`
+	Messages          []Message `json:"messages"`
+	NextCursor        string    `json:"nextCursor,omitempty"`
+	HasNext           bool      `json:"hasNext"`
+	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
 }
 
 type LoadSurroundingMessagesRequest struct {
@@ -53,13 +53,24 @@ type LoadSurroundingMessagesRequest struct {
 }
 
 type LoadSurroundingMessagesResponse struct {
-	Messages   []Message `json:"messages"`
-	MoreBefore bool      `json:"moreBefore"`
-	MoreAfter  bool      `json:"moreAfter"`
+	Messages          []Message `json:"messages"`
+	MoreBefore        bool      `json:"moreBefore"`
+	MoreAfter         bool      `json:"moreAfter"`
+	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
 }
 
 type GetMessageByIDRequest struct {
 	MessageID string `json:"messageId"`
+}
+
+// GetMessagesByIDsRequest is the request body for the msg.get.ids batch RPC.
+type GetMessagesByIDsRequest struct {
+	MessageIDs []string `json:"messageIds"`
+}
+
+// GetMessagesByIDsResponse is the response body for the msg.get.ids batch RPC.
+type GetMessagesByIDsResponse struct {
+	Messages []Message `json:"messages"`
 }
 
 type EditMessageRequest struct {
@@ -130,7 +141,9 @@ type GetThreadMessagesRequest struct {
 }
 
 type GetThreadMessagesResponse struct {
-	Messages   []Message `json:"messages"`
-	NextCursor string    `json:"nextCursor,omitempty"`
-	HasNext    bool      `json:"hasNext"`
+	Messages          []Message `json:"messages"`
+	NextCursor        string    `json:"nextCursor,omitempty"`
+	HasNext           bool      `json:"hasNext"`
+	ParentMessage     *Message  `json:"parentMessage,omitempty"`
+	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"`
 }

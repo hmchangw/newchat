@@ -48,7 +48,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		sender FROZEN<"Participant">, msg TEXT,
 		mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>,
 		file FROZEN<"File">, card FROZEN<"Card">, card_action FROZEN<"CardAction">,
-		tshow BOOLEAN, tcount INT, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP,
+		tshow BOOLEAN, tcount INT, thread_last_msg_at TIMESTAMP, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP,
 		quoted_parent_message FROZEN<"QuotedParentMessage">, visible_to TEXT,
 		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
 		deleted BOOLEAN,
@@ -62,15 +62,15 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		sender FROZEN<"Participant">, msg TEXT,
 		mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>,
 		file FROZEN<"File">, card FROZEN<"Card">, card_action FROZEN<"CardAction">,
-		tshow BOOLEAN, tcount INT, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP,
+		tshow BOOLEAN, tcount INT, thread_last_msg_at TIMESTAMP, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP,
 		quoted_parent_message FROZEN<"QuotedParentMessage">, visible_to TEXT,
 		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
 		deleted BOOLEAN,
 		type TEXT, sys_msg_data BLOB, site_id TEXT, edited_at TIMESTAMP, created_at TIMESTAMP,
 		updated_at TIMESTAMP, pinned_at TIMESTAMP, pinned_by FROZEN<"Participant">,
 		enc_payload BLOB, enc_meta FROZEN<"EncMeta">,
-		PRIMARY KEY (message_id, created_at)
-	) WITH CLUSTERING ORDER BY (created_at DESC)`)).Exec())
+		PRIMARY KEY (message_id)
+	)`)).Exec())
 
 	// thread_messages_by_thread — needed by TestDeleteMessage_ParentWithReplies_NoCascade
 	require.NoError(t, adminSession.Query(cql(`CREATE TABLE IF NOT EXISTS %s.thread_messages_by_thread (
@@ -79,6 +79,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>,
 		file FROZEN<"File">, card FROZEN<"Card">, card_action FROZEN<"CardAction">,
 		thread_parent_id TEXT,
+		tshow BOOLEAN,
 		quoted_parent_message FROZEN<"QuotedParentMessage">, visible_to TEXT,
 		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
 		deleted BOOLEAN,
@@ -120,6 +121,12 @@ func (p *recordingPublisher) Publish(_ context.Context, subj string, data []byte
 	return nil
 }
 
+// PublishMigration records like Publish (the X-Migration header is a wire concern the
+// real publisher stamps; the fake only needs to satisfy EventPublisher and capture sends).
+func (p *recordingPublisher) PublishMigration(ctx context.Context, subj string, data []byte, msgID string) error {
+	return p.Publish(ctx, subj, data, msgID)
+}
+
 // alwaysSubscribedRepo stubs SubscriptionRepository so the subscription gate passes.
 type alwaysSubscribedRepo struct{}
 
@@ -151,7 +158,7 @@ func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -183,8 +190,8 @@ func TestEditMessage_Integration(t *testing.T) {
 
 	var gotMsg string
 	require.NoError(t, session.Query(
-		`SELECT msg FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT msg FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotMsg))
 	assert.Equal(t, "edited via integration test", gotMsg)
 
@@ -215,7 +222,7 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -245,8 +252,8 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	var gotDeleted bool
 	var gotMsg string
 	require.NoError(t, session.Query(
-		`SELECT deleted, msg FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		msgID, createdAt,
+		`SELECT deleted, msg FROM messages_by_id WHERE message_id = ?`,
+		msgID,
 	).Scan(&gotDeleted, &gotMsg))
 	assert.True(t, gotDeleted)
 	assert.Equal(t, "content", gotMsg, "msg content must be retained on soft-delete")
@@ -277,7 +284,7 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -317,14 +324,14 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 
 	var gotDeleted bool
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		parentID, parentCreatedAt,
+		`SELECT deleted FROM messages_by_id WHERE message_id = ?`,
+		parentID,
 	).Scan(&gotDeleted))
 	assert.True(t, gotDeleted, "parent should be deleted")
 
 	require.NoError(t, session.Query(
-		`SELECT deleted FROM messages_by_id WHERE message_id = ? AND created_at = ?`,
-		replyID, replyCreatedAt,
+		`SELECT deleted FROM messages_by_id WHERE message_id = ?`,
+		replyID,
 	).Scan(&gotDeleted))
 	assert.False(t, gotDeleted, "thread reply must survive parent deletion (no cascade)")
 
@@ -346,7 +353,7 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, &config.Config{
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,

@@ -316,7 +316,7 @@ All client publishes are under `chat.user.{account}.>`:
 
 **Dependencies**: NATS
 **Key Interface**: `TokenVerifier` — `Verify(token string) (account string, err error)`
-**Config**: `NATS_URL`, `NATS_CREDS`, `AUTH_SIGNING_KEY` (required)
+**Config**: `NATS_URL`, `NATS_CREDS`, `AUTH_SCOPED_SIGNING_KEY`, `AUTH_ACCOUNT_PUB_KEY` (required)
 
 ### 7.2 Message Worker (`message-worker/`)
 

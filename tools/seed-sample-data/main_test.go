@@ -33,7 +33,7 @@ func TestParseConfig_OverridesFromEnv(t *testing.T) {
 func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
 	got := dryRunSummary()
 	for _, want := range []string{
-		"users 10",
+		"users 11",
 		"rooms 6",
 		"subscriptions 23",
 		"room_members 19",

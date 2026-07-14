@@ -33,6 +33,14 @@ func TestBuildRoomReadInputs_MapsCollector(t *testing.T) {
 	assert.Len(t, in.Latencies[0].Samples, 2)
 }
 
+func TestBuildRoomReadInputs_PopulatesEmitUnderrun(t *testing.T) {
+	c := NewRoomReadCollector()
+	c.RecordUnderrun(7)
+	c.RecordUnderrun(3)
+	in := buildRoomReadInputs(2000, 30*time.Second, c)
+	assert.Equal(t, 10, in.EmitUnderrun)
+}
+
 func TestRoomReadWorkload_Label(t *testing.T) {
 	w := &roomReadWorkload{}
 	assert.Equal(t, "room-read", w.Label())

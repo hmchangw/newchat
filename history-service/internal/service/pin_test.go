@@ -45,8 +45,9 @@ func newPinTestService(t *testing.T) (*service.HistoryService, *mocks.MockMessag
 	rooms := mocks.NewMockRoomRepository(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
-	customEmojis := mocks.NewMockCustomEmojiStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
 	rooms.EXPECT().
 		GetRoomTimes(gomock.Any(), gomock.Any()).
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
@@ -58,7 +59,7 @@ func newPinTestService(t *testing.T) (*service.HistoryService, *mocks.MockMessag
 		MaxPinnedPerRoom:        testMaxPinnedPerRoom,
 		PinEnabled:              true,
 	}
-	return service.New(msgs, subs, rooms, pub, threadRooms, users, customEmojis, cfg), msgs, subs, rooms, pub, threadRooms
+	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg), msgs, subs, rooms, pub, threadRooms
 }
 
 // testMaxPinnedPerRoom: kept small (3) so fixtures stay short.
@@ -107,14 +108,15 @@ func TestPinMessage_KillSwitchDisabled(t *testing.T) {
 	rooms := mocks.NewMockRoomRepository(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
-	customEmojis := mocks.NewMockCustomEmojiStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
 	rooms.EXPECT().
 		GetRoomTimes(gomock.Any(), gomock.Any()).
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
 		MinTimes(0)
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, users, customEmojis, &config.Config{
+	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, &config.Config{
 		MessageHistoryFloorDays: 90,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        testMaxPinnedPerRoom,

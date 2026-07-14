@@ -28,3 +28,14 @@ func (p *Publisher) Publish(ctx context.Context, subj string, data []byte, msgID
 	}
 	return nil
 }
+
+// PublishMigration behaves like Publish but stamps the X-Migration: live header so
+// live-delivery consumers skip re-delivery while persistence/index consumers ingest it.
+func (p *Publisher) PublishMigration(ctx context.Context, subj string, data []byte, msgID string) error {
+	msg := natsutil.NewMsg(ctx, subj, data)
+	natsutil.SetMigrationLive(msg)
+	if _, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
+		return fmt.Errorf("publishing migration to %q: %w", subj, err)
+	}
+	return nil
+}

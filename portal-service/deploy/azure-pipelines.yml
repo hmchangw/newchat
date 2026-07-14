@@ -1,0 +1,79 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - portal-service/
+      - pkg/
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - portal-service/
+      - pkg/
+
+variables:
+  GO_VERSION: '1.25.12'
+  SERVICE_NAME: portal-service
+  REGISTRY: '$(containerRegistry)'
+  # Repo-wide 80% minimum, gated like search-service's pipeline. main.go is
+  # excluded: it's the startup harness, covered by integration tests only.
+  MIN_COVERAGE_SERVICE: '80'
+
+stages:
+  - stage: Validate
+    displayName: 'Lint & Test'
+    jobs:
+      - job: LintAndTest
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: GoTool@0
+            inputs:
+              version: '$(GO_VERSION)'
+            displayName: 'Install Go $(GO_VERSION)'
+
+          - script: go vet ./$(SERVICE_NAME)/... ./pkg/...
+            displayName: 'Go Vet'
+
+          - script: go test ./pkg/... -v -race -coverprofile=coverage-pkg.out
+            displayName: 'Test shared packages'
+
+          - script: |
+              set -euo pipefail
+              go test ./$(SERVICE_NAME)/... -v -race -coverprofile=coverage-$(SERVICE_NAME)-raw.out
+              # The first line of a cover profile is `mode: ...` — keep it verbatim.
+              awk 'NR==1 || $0 !~ "/main\\.go:"' coverage-$(SERVICE_NAME)-raw.out > coverage-$(SERVICE_NAME).out
+              cov="$(go tool cover -func=coverage-$(SERVICE_NAME).out | awk '/^total:/ {gsub("%","",$3); print $3}')"
+              echo "$(SERVICE_NAME) coverage (excl. main.go): ${cov}% (threshold ${MIN_COVERAGE_SERVICE}%)"
+              awk -v c="$cov" -v t="$MIN_COVERAGE_SERVICE" 'BEGIN { exit (c >= t ? 0 : 1) }'
+            displayName: 'Test $(SERVICE_NAME) (with coverage gate)'
+
+          - script: go build -o /dev/null ./$(SERVICE_NAME)/
+            displayName: 'Build $(SERVICE_NAME)'
+
+  - stage: Build
+    displayName: 'Build & Push Image'
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: BuildImage
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: 'chat/$(SERVICE_NAME)'
+              command: 'buildAndPush'
+              Dockerfile: '$(SERVICE_NAME)/deploy/Dockerfile'
+              buildContext: '.'
+              tags: |
+                $(Build.BuildId)
+                latest
+            displayName: 'Build & push $(SERVICE_NAME)'

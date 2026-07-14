@@ -55,6 +55,21 @@ func (mr *MockStoreMockRecorder) GetRoomSiteID(ctx, roomID any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomSiteID", reflect.TypeOf((*MockStore)(nil).GetRoomSiteID), ctx, roomID)
 }
 
+// GetUpload mocks base method.
+func (m *MockStore) GetUpload(ctx context.Context, fileID string) (*upload, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUpload", ctx, fileID)
+	ret0, _ := ret[0].(*upload)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUpload indicates an expected call of GetUpload.
+func (mr *MockStoreMockRecorder) GetUpload(ctx, fileID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUpload", reflect.TypeOf((*MockStore)(nil).GetUpload), ctx, fileID)
+}
+
 // IsMember mocks base method.
 func (m *MockStore) IsMember(ctx context.Context, roomID, account string) (bool, error) {
 	m.ctrl.T.Helper()

@@ -1,0 +1,24 @@
+name: user-service
+
+services:
+  user-service:
+    build:
+      context: ../..
+      dockerfile: user-service/deploy/Dockerfile
+    pull_policy: build
+    environment:
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      - ALL_SITE_IDS=site-local
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - MAX_SUBSCRIPTION_LIMIT=1000
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

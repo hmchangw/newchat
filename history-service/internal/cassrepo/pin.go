@@ -11,26 +11,28 @@ import (
 )
 
 const (
-	pinMsgByID   = `UPDATE messages_by_id SET pinned_at = ?, pinned_by = ? WHERE message_id = ? AND created_at = ?`
-	unpinMsgByID = `UPDATE messages_by_id SET pinned_at = null, pinned_by = null WHERE message_id = ? AND created_at = ?`
+	pinMsgByID   = `UPDATE messages_by_id SET pinned_at = ?, pinned_by = ? WHERE message_id = ?`
+	unpinMsgByID = `UPDATE messages_by_id SET pinned_at = null, pinned_by = null WHERE message_id = ?`
 
 	// messages_by_room mirrors pinned_at only (the timeline indicator needs no
 	// more); pinned_by stays a point lookup on messages_by_id.
 	pinMsgByRoom   = `UPDATE messages_by_room SET pinned_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
 	unpinMsgByRoom = `UPDATE messages_by_room SET pinned_at = null WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
 
+	// reactions is intentionally absent: the pinned panel does not render reactions;
+	// callers that need them side-fetch from messages_by_id.
 	insertPinnedMsg = `INSERT INTO pinned_messages_by_room (
 		room_id, pinned_at, message_id, sender, msg, mentions,
-		attachments, file, card, card_action, quoted_parent_message, visible_to,
-		reactions, deleted, type, sys_msg_data, site_id, edited_at, updated_at, pinned_by,
+		attachments, card, card_action, quoted_parent_message, visible_to,
+		deleted, type, sys_msg_data, site_id, edited_at, updated_at, pinned_by,
 		created_at, tshow, thread_parent_id, thread_parent_created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	deletePinnedRow = `DELETE FROM pinned_messages_by_room WHERE room_id = ? AND pinned_at = ? AND message_id = ?`
 
 	pinnedColumns = "room_id, pinned_at, message_id, sender, " +
-		"msg, mentions, attachments, file, card, card_action, quoted_parent_message, " +
-		"visible_to, reactions, deleted, type, sys_msg_data, site_id, edited_at, " +
+		"msg, mentions, attachments, card, card_action, quoted_parent_message, " +
+		"visible_to, deleted, type, sys_msg_data, site_id, edited_at, " +
 		"updated_at, pinned_by, created_at, tshow, thread_parent_id, thread_parent_created_at"
 
 	pinnedByRoomQuery = "SELECT " + pinnedColumns + " FROM pinned_messages_by_room WHERE room_id = ?"
@@ -62,11 +64,11 @@ func pinBatchTables(withRoomRow bool) string {
 // service/pin.go).
 func (r *Repository) PinMessage(ctx context.Context, msg *models.Message, pinnedAt time.Time, pinnedBy models.Participant) error { //nolint:gocritic // hugeParam: Participant is passed by value to match the service.MessageWriter interface
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-	batch.Query(pinMsgByID, pinnedAt, pinnedBy, msg.MessageID, msg.CreatedAt)
+	batch.Query(pinMsgByID, pinnedAt, pinnedBy, msg.MessageID)
 	batch.Query(insertPinnedMsg,
 		msg.RoomID, pinnedAt, msg.MessageID, msg.Sender, msg.Msg, msg.Mentions,
-		msg.Attachments, msg.File, msg.Card, msg.CardAction, msg.QuotedParentMessage, msg.VisibleTo,
-		msg.Reactions, msg.Deleted, msg.Type, msg.SysMsgData, msg.SiteID, msg.EditedAt, msg.UpdatedAt, pinnedBy,
+		msg.Attachments, msg.Card, msg.CardAction, msg.QuotedParentMessage, msg.VisibleTo,
+		msg.Deleted, msg.Type, msg.SysMsgData, msg.SiteID, msg.EditedAt, msg.UpdatedAt, pinnedBy,
 		msg.CreatedAt, msg.TShow, msg.ThreadParentID, msg.ThreadParentCreatedAt,
 	)
 	withRoomRow := hasRoomTimelineRow(msg)
@@ -85,7 +87,7 @@ func (r *Repository) UnpinMessage(ctx context.Context, msg *models.Message) erro
 		return fmt.Errorf("unpin message %s: PinnedAt is nil", msg.MessageID)
 	}
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-	batch.Query(unpinMsgByID, msg.MessageID, msg.CreatedAt)
+	batch.Query(unpinMsgByID, msg.MessageID)
 	batch.Query(deletePinnedRow, msg.RoomID, *msg.PinnedAt, msg.MessageID)
 	withRoomRow := hasRoomTimelineRow(msg)
 	if withRoomRow {

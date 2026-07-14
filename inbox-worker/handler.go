@@ -34,34 +34,39 @@ type InboxStore interface {
 	// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
 	// keyed by (roomID, account). Idempotent and order-safe: the write
 	// only applies when the stored lastSeenAt is missing or strictly
-	// earlier than the supplied value. Older or duplicate events are
-	// silent no-ops. Missing-subscription is also a silent no-op.
+	// earlier than the supplied value. Older or duplicate events are silent no-ops.
+	// A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead writes ThreadSubscription under a $lt lastSeenAt guard, then the Subscription only if the guard accepted.
 	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
-	// are silent no-ops. Missing-sub is also a silent no-op for federation races.
+	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionMute(ctx context.Context, roomID, account string, muted bool, muteUpdatedAt time.Time) error
 	// UpdateSubscriptionFavorite sets favorite by (roomID, account), guarded by
 	// favoriteUpdatedAt (the source event's publish time): older/duplicate events
-	// are silent no-ops. Missing-sub is also a silent no-op for federation races.
+	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error
 	// UpdateSubscriptionNamesForRoom sets name on every subscription in the room,
 	// each guarded by its own nameUpdatedAt so an out-of-order rename cannot regress
 	// a sub to a stale name. Used when a channel is renamed — replicated via the
-	// outbox to remote sites.
+	// cross-site inbox to remote sites.
 	UpdateSubscriptionNamesForRoom(ctx context.Context, roomID, newName string, nameUpdatedAt time.Time) error
-	// ApplySubscriptionVisibility writes {restricted, externalAccess, roles} to all subs
-	// in the room, each guarded by its own visibilityUpdatedAt so an out-of-order
+	// ApplySubscriptionRestriction writes {restricted, externalAccess, roles} to all subs
+	// in the room, each guarded by its own restrictUpdatedAt so an out-of-order
 	// visibility change cannot regress the flags/roles. When restricted=true and
 	// ownerAccount is non-empty, a $cond pipeline demotes all accounts except
 	// ownerAccount to RoleMember.
-	ApplySubscriptionVisibility(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, visibilityUpdatedAt time.Time) error
+	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error
+	// UpdateUserStatus replicates a cross-site status change onto the local users doc keyed by
+	// account, guarded by statusUpdatedAt (the event publish time): an older/equal high-water
+	// mark is a no-op so out-of-order multi-site delivery can't regress the status. statusIsShow
+	// is written only when non-nil. A missing user (no doc on this site) is a logged no-op.
+	UpdateUserStatus(ctx context.Context, account, statusText string, statusIsShow *bool, statusUpdatedAt time.Time) error
 }
 
-// Handler processes cross-site OutboxEvent messages; replicates only subscription/room metadata, never room keys.
+// Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
 type Handler struct {
 	store InboxStore
 }
@@ -73,9 +78,9 @@ func NewHandler(store InboxStore) *Handler {
 
 // HandleEvent processes a single JetStream message payload.
 func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
-	var evt model.OutboxEvent
+	var evt model.InboxEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
-		return fmt.Errorf("unmarshal outbox event: %w", err)
+		return fmt.Errorf("unmarshal inbox event: %w", err)
 	}
 
 	switch evt.Type {
@@ -97,17 +102,19 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleThreadSubscriptionUpserted(ctx, &evt)
 	case "thread_read":
 		return h.handleThreadRead(ctx, &evt)
-	case model.OutboxRoomRenamed:
+	case model.InboxRoomRenamed:
 		return h.handleRoomRenamed(ctx, &evt)
-	case model.OutboxRoomRestricted:
+	case model.InboxRoomRestricted:
 		return h.handleRoomVisibilityChanged(ctx, &evt)
+	case model.InboxUserStatusUpdated:
+		return h.handleUserStatusUpdated(ctx, &evt)
 	default:
 		slog.Warn("unknown event type, skipping", "type", evt.Type)
 		return nil
 	}
 }
 
-func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) error {
 	var event model.MemberAddEvent
 	if err := json.Unmarshal(evt.Payload, &event); err != nil {
 		return fmt.Errorf("unmarshal member_added payload: %w", err)
@@ -135,10 +142,11 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.OutboxEvent)
 	}
 
 	subs := make([]*model.Subscription, 0, len(event.Accounts))
+	var missing []string
 	for _, account := range event.Accounts {
 		user, ok := userMap[account]
 		if !ok {
-			slog.Warn("user not found for account", "account", account)
+			missing = append(missing, account)
 			continue
 		}
 		sub := &model.Subscription{
@@ -156,13 +164,20 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.OutboxEvent)
 		subs = append(subs, sub)
 	}
 
-	if len(subs) == 0 {
-		return nil
-	}
-	if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
-		if !mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("bulk create subscriptions: %w", err)
+	if len(subs) > 0 {
+		if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
+			if !mongo.IsDuplicateKeyError(err) {
+				return fmt.Errorf("bulk create subscriptions: %w", err)
+			}
 		}
+	}
+
+	// A referenced user that isn't present yet is a federation/migration race, not a
+	// permanent failure: return a (transient) error so JetStream redelivers the event
+	// until the user lands. The resolvable subscriptions above are created first to make
+	// progress; redelivery re-upserts them idempotently (guarded by the unique index).
+	if len(missing) > 0 {
+		return fmt.Errorf("member_added references unknown users %v in room %s", missing, event.RoomID)
 	}
 
 	// No SubscriptionUpdateEvent is published here — room-worker already publishes
@@ -177,7 +192,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.OutboxEvent)
 // SubscriptionUpdateEvent is published here — room-worker already publishes
 // to the user's subject and the NATS supercluster routes it to the user's
 // home site.
-func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent) error {
 	var memberEvt model.MemberRemoveEvent
 	if err := json.Unmarshal(evt.Payload, &memberEvt); err != nil {
 		return fmt.Errorf("unmarshal member removed payload: %w", err)
@@ -191,7 +206,7 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.OutboxEven
 	return nil
 }
 
-func (h *Handler) handleRoomSync(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleRoomSync(ctx context.Context, evt *model.InboxEvent) error {
 	var room model.Room
 	if err := json.Unmarshal(evt.Payload, &room); err != nil {
 		return fmt.Errorf("unmarshal room_sync payload: %w", err)
@@ -207,7 +222,7 @@ func (h *Handler) handleRoomSync(ctx context.Context, evt *model.OutboxEvent) er
 // handleRoleUpdated updates the local subscription roles.
 // No SubscriptionUpdateEvent is published here — room-worker already publishes to
 // the user's subject, and NATS supercluster routes it to the user's site.
-func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.InboxEvent) error {
 	var subEvt model.SubscriptionUpdateEvent
 	if err := json.Unmarshal(evt.Payload, &subEvt); err != nil {
 		return fmt.Errorf("unmarshal role_updated payload: %w", err)
@@ -231,7 +246,7 @@ func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.OutboxEvent)
 // handleSubscriptionRead is idempotent and order-safe — the store's $lt
 // guard rejects writes whose lastSeenAt is not strictly later than the
 // stored one, so out-of-order federated delivery cannot regress read state.
-func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionReadEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return fmt.Errorf("unmarshal subscription_read payload: %w", err)
@@ -244,7 +259,7 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.OutboxE
 }
 
 // handleSubscriptionMuteToggled mirrors a room-side mute toggle onto the user's home-site subscription.
-func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionMuteToggledEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return fmt.Errorf("unmarshal subscription_mute_toggled payload: %w", err)
@@ -256,7 +271,7 @@ func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.
 }
 
 // handleSubscriptionFavoriteToggled mirrors a room-side favorite toggle onto the user's home-site subscription.
-func (h *Handler) handleSubscriptionFavoriteToggled(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleSubscriptionFavoriteToggled(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionFavoriteToggledEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return fmt.Errorf("unmarshal subscription_favorite_toggled payload: %w", err)
@@ -271,7 +286,7 @@ func (h *Handler) handleSubscriptionFavoriteToggled(ctx context.Context, evt *mo
 // site when message-worker on another site reports that a user (parent author,
 // replier, or mentionee) is participating in a thread. The Mongo store layer
 // is responsible for the monotonic hasMention merge — see store impl.
-func (h *Handler) handleThreadSubscriptionUpserted(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleThreadSubscriptionUpserted(ctx context.Context, evt *model.InboxEvent) error {
 	var sub model.ThreadSubscription
 	if err := json.Unmarshal(evt.Payload, &sub); err != nil {
 		return fmt.Errorf("unmarshal thread_subscription_upserted payload: %w", err)
@@ -283,7 +298,7 @@ func (h *Handler) handleThreadSubscriptionUpserted(ctx context.Context, evt *mod
 	return nil
 }
 
-func (h *Handler) handleThreadRead(ctx context.Context, evt *model.OutboxEvent) error {
+func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.ThreadReadEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return fmt.Errorf("unmarshal thread_read payload: %w", err)
@@ -296,8 +311,8 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.OutboxEvent) 
 	return nil
 }
 
-func (h *Handler) handleRoomRenamed(ctx context.Context, evt *model.OutboxEvent) error {
-	var p model.RoomRenamedOutboxPayload
+func (h *Handler) handleRoomRenamed(ctx context.Context, evt *model.InboxEvent) error {
+	var p model.RoomRenamedInboxPayload
 	if err := json.Unmarshal(evt.Payload, &p); err != nil {
 		return errcode.Permanent(errcode.BadRequest("unmarshal room_renamed payload"))
 	}
@@ -307,13 +322,26 @@ func (h *Handler) handleRoomRenamed(ctx context.Context, evt *model.OutboxEvent)
 	return nil
 }
 
-func (h *Handler) handleRoomVisibilityChanged(ctx context.Context, evt *model.OutboxEvent) error {
-	var p model.RoomRestrictedOutboxPayload
+func (h *Handler) handleRoomVisibilityChanged(ctx context.Context, evt *model.InboxEvent) error {
+	var p model.RoomRestrictedInboxPayload
 	if err := json.Unmarshal(evt.Payload, &p); err != nil {
 		return errcode.Permanent(errcode.BadRequest("unmarshal room_restricted payload"))
 	}
-	if err := h.store.ApplySubscriptionVisibility(ctx, p.RoomID, p.Restricted, p.ExternalAccess, p.OwnerAccount, time.UnixMilli(p.Timestamp).UTC()); err != nil {
+	if err := h.store.ApplySubscriptionRestriction(ctx, p.RoomID, p.Restricted, p.ExternalAccess, p.OwnerAccount, time.UnixMilli(p.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("apply subscription visibility for room %s: %w", p.RoomID, err)
+	}
+	return nil
+}
+
+// handleUserStatusUpdated mirrors a cross-site status change onto the local users doc, guarded by
+// the event Timestamp so an out-of-order or duplicate fan-out delivery can't regress the status.
+func (h *Handler) handleUserStatusUpdated(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.UserStatusUpdated
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal user_status_updated payload: %w", err)
+	}
+	if err := h.store.UpdateUserStatus(ctx, e.Account, e.StatusText, e.StatusIsShow, time.UnixMilli(e.Timestamp).UTC()); err != nil {
+		return fmt.Errorf("update user status for %q: %w", e.Account, err)
 	}
 	return nil
 }

@@ -27,9 +27,10 @@ func TestClient_GetBaseURLFromRoomOrigin(t *testing.T) {
 }
 
 func TestClient_UploadGroupImages(t *testing.T) {
-	var gotPath, gotToken, gotUserID, gotFileName, gotMode string
+	var gotPath, gotBypass, gotToken, gotUserID, gotFileName, gotMode string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotBypass = r.URL.Query().Get("bypass")
 		gotToken = r.Header.Get("api-token")
 		// #nosec G120 -- test httptest server with a fixed 10MiB bound; not exposed to untrusted traffic
 		_ = r.ParseMultipartForm(10 << 20)
@@ -52,6 +53,9 @@ func TestClient_UploadGroupImages(t *testing.T) {
 	}
 	if gotPath != "/api/v1/groups/r1/files/bulk" {
 		t.Fatalf("path = %q", gotPath)
+	}
+	if gotBypass != "true" {
+		t.Fatalf("bypass query param = %q, want %q", gotBypass, "true")
 	}
 	if gotToken != "tok" || gotUserID != "alice" || gotFileName != "a.png" || gotMode != "Normal" {
 		t.Fatalf("token=%q userId=%q fileName=%q mode=%q", gotToken, gotUserID, gotFileName, gotMode)

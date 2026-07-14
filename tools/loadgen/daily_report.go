@@ -43,6 +43,11 @@ func renderConsole(w io.Writer, results []StepResult) {
 		if len(r.ActionLatencies) > 0 {
 			fmt.Fprintf(w, "    actions: %s\n", formatActionLatencies(r.ActionLatencies))
 		}
+		if r.Presence != nil {
+			p := r.Presence
+			fmt.Fprintf(w, "    presence: p50=%.0f p95=%.0f p99=%.0f err%%=%.3f (attempted=%d failed=%d)\n",
+				p.P50Ms, p.P95Ms, p.P99Ms, p.ErrorRate*100, p.Attempted, p.Failed)
+		}
 	}
 	fmt.Fprintln(w)
 	if lastPass > 0 {
@@ -120,6 +125,9 @@ func writeDailyCSV(path string, results []StepResult) error {
 		header = append(header,
 			name+"_count", name+"_p50_ms", name+"_p95_ms", name+"_p99_ms")
 	}
+	header = append(header,
+		"presence_p50_ms", "presence_p95_ms", "presence_p99_ms",
+		"presence_attempted", "presence_failed", "presence_error_rate")
 	if err := w.Write(header); err != nil {
 		return fmt.Errorf("write csv header: %w", err)
 	}
@@ -160,6 +168,15 @@ func writeDailyCSV(path string, results []StepResult) error {
 				fmt.Sprintf("%.0f", s.P99Ms),
 			)
 		}
+		var pP50, pP95, pP99, pErr float64
+		var pAtt, pFail int64
+		if r.Presence != nil {
+			pP50, pP95, pP99 = r.Presence.P50Ms, r.Presence.P95Ms, r.Presence.P99Ms
+			pAtt, pFail, pErr = r.Presence.Attempted, r.Presence.Failed, r.Presence.ErrorRate
+		}
+		row = append(row,
+			fmt.Sprintf("%.0f", pP50), fmt.Sprintf("%.0f", pP95), fmt.Sprintf("%.0f", pP99),
+			strconv.FormatInt(pAtt, 10), strconv.FormatInt(pFail, 10), fmt.Sprintf("%.6f", pErr))
 		if err := w.Write(row); err != nil {
 			return fmt.Errorf("write csv row: %w", err)
 		}

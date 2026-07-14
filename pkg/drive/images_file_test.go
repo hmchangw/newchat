@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestGroupImageObject_FileSizeJSON(t *testing.T) {
+	const body = `{"objectId":"f1","groupId":"g1","fileName":"a.pdf","fileSize":4096}`
+	var obj GroupImageObject
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if obj.FileID != "f1" {
+		t.Fatalf("FileID = %q, want f1", obj.FileID)
+	}
+	if obj.FileSize != 4096 {
+		t.Fatalf("FileSize = %d, want 4096", obj.FileSize)
+	}
+}
+
 func TestImagesFormData_AddCountClearFiles(t *testing.T) {
 	f := NewImagesForm()
 	if f.FileCount() != 0 {

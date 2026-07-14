@@ -62,6 +62,11 @@ type RoomMemberEntry struct {
 	IsOwner     bool   `json:"isOwner,omitempty"     bson:"-"`
 	OrgName     string `json:"orgName,omitempty"     bson:"-"`
 	MemberCount int    `json:"memberCount,omitempty" bson:"-"`
+	// Individual extras (enrich=true): section name and employee id.
+	SectName   string `json:"sectName,omitempty"   bson:"-"`
+	EmployeeID string `json:"employeeId,omitempty" bson:"-"`
+	// Org extra (enrich=true): description, dept-first.
+	OrgDescription string `json:"orgDescription,omitempty" bson:"-"`
 }
 
 type RemoveMemberRequest struct {
@@ -201,8 +206,9 @@ type MentionableSubscriptionsResponse struct {
 
 // CreateRoomRequest is the canonical event payload (X-Request-ID rides on the NATS header).
 // Users/Orgs/Channels are the literal client request; ResolvedUsers/ResolvedOrgs carry the
-// post-expansion (channel-ref-merged, requester-stripped, dedup'd) sets the worker uses for
-// member materialization. Sys-message payloads use the literal lists.
+// post-expansion (channel-ref-merged, requester-stripped, dedup'd) sets. The worker uses the
+// resolved sets for member materialization and the members_added sys-message; room_created
+// uses the literal lists.
 type CreateRoomRequest struct {
 	Name     string       `json:"name"     bson:"name"`
 	Users    []string     `json:"users"    bson:"users"`

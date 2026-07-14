@@ -4,6 +4,7 @@ package cassrepo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/model"
 	cassmodel "github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -334,4 +336,39 @@ func TestGetMessages_DecryptErrorHaltsWalk(t *testing.T) {
 	assert.Empty(t, page.Data, "no rows must be returned on decrypt failure")
 	assert.ErrorIs(t, walkErr, atrest.ErrPayloadMalformed,
 		"walk must halt on the day-1 malformed-nonce error; surfacing ErrAuthFailed means the walk continued past day1 and let day2 overwrite scanErr")
+}
+
+func TestGetMessagesBefore_SysMsgDataRoundTrips(t *testing.T) {
+	session := setupCassandra(t)
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, nil)
+	ctx := context.Background()
+
+	roomID := "room-sysmsg"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+	sender := models.Participant{ID: "u_a", Account: "alice"}
+
+	payload, err := json.Marshal(model.MembersAdded{Individuals: []string{"u1", "u2"}, Orgs: []string{"o1"}, AddedUsersCount: 3})
+	require.NoError(t, err)
+
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, type, sys_msg_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(createdAt), createdAt, "m-sys", sender,
+		`"alice" added 2 people and 1 organization to the chatroom`,
+		model.MessageTypeMembersAdded, payload,
+	).Exec())
+
+	page, err := repo.GetMessagesBefore(ctx, roomID, createdAt.Add(time.Second), time.Time{}, PageRequest{PageSize: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+
+	got := page.Data[0]
+	assert.Equal(t, model.MessageTypeMembersAdded, got.Type)
+	require.NotEmpty(t, got.SysMsgData, "sysMsgData must survive the load-history round-trip")
+
+	var decoded model.MembersAdded
+	require.NoError(t, json.Unmarshal(got.SysMsgData, &decoded))
+	assert.Equal(t, []string{"u1", "u2"}, decoded.Individuals)
+	assert.Equal(t, []string{"o1"}, decoded.Orgs)
+	assert.Equal(t, 3, decoded.AddedUsersCount, "whole payload (not just the slices) must survive")
 }

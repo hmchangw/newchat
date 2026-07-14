@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -285,4 +286,9 @@ func TestDispatch_DailySubcommand(t *testing.T) {
 	cfg := &config{NatsURL: "nats://x", MongoURI: "mongodb://x"}
 	rc := dispatch(context.Background(), cfg)
 	require.Equal(t, 2, rc)
+}
+
+func TestParseCapacityConfig_HelpReturnsErrHelp(t *testing.T) {
+	_, err := parseCapacityConfig([]string{"-h"})
+	require.ErrorIs(t, err, flag.ErrHelp)
 }

@@ -54,6 +54,10 @@ type GeneratorConfig struct {
 	// Set to 0 to publish serially on the ticker goroutine (legacy behavior,
 	// useful for bisection).
 	MaxInFlight int
+	// ParentsByRoom, when non-nil, switches the frontdoor path into thread-reply
+	// mode: each send sets ThreadParentMessageID to a random seeded parent of the
+	// target room. nil = plain sends. Keyed by room ID.
+	ParentsByRoom map[string][]threadParent
 }
 
 // Generator is the open-loop publisher.
@@ -167,6 +171,14 @@ func (g *Generator) publishOne(ctx context.Context) {
 	default:
 		reqID = idgen.GenerateRequestID()
 		req := model.SendMessageRequest{ID: msgID, Content: content, RequestID: reqID}
+		if g.cfg.ParentsByRoom != nil {
+			parents := g.cfg.ParentsByRoom[sub.RoomID]
+			if len(parents) == 0 {
+				// Room has no seeded parents — cannot form a valid thread reply.
+				return
+			}
+			req.ThreadParentMessageID = parents[g.intn(len(parents))].MessageID
+		}
 		data, err = json.Marshal(req)
 		subj = subject.MsgSend(sub.User.Account, sub.RoomID, g.cfg.SiteID)
 		g.cfg.Collector.RecordPublish(reqID, msgID, publishTime)

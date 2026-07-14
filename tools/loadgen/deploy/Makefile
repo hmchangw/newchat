@@ -1,6 +1,4 @@
 ROOT             := ../../..
-DEPS_COMPOSE     := $(ROOT)/docker-local/compose.deps.yaml
-SERVICES_COMPOSE := $(ROOT)/docker-local/compose.services.yaml
 OVERLAY          := docker-compose.yml
 COMPOSE          := docker compose -f $(OVERLAY)
 WORKLOAD         ?= messages
@@ -15,10 +13,12 @@ export ENCRYPTION_ENABLED ?= true
 
 up: stack-up overlay-up
 
-# Bring up the shared docker-local stack: third-party deps, then microservices.
+# Bring up the shared docker-local stack via the root Makefile, so the services
+# bring-up lives in exactly one place (root `up-detached`) and never drifts from
+# `make up`. Third-party deps first, then the microservices (detached).
 stack-up:
 	$(MAKE) -C $(ROOT) deps-up
-	docker compose -f $(SERVICES_COMPOSE) up -d --build
+	$(MAKE) -C $(ROOT) up-detached
 
 overlay-up:
 	$(COMPOSE) up -d --build
@@ -83,7 +83,7 @@ run-dashboards:
 	$(COMPOSE) --profile dashboards up -d
 	$(MAKE) run PRESET=$(PRESET) RATE=$(RATE) DURATION=$(DURATION)
 
-run-max-rps: ## Ramp RPS to find the max under SLO (WORKLOAD=messages|history|room-read PRESET=.. STEPS=..)
+run-max-rps: ## Ramp RPS to find the max under SLO (WORKLOAD=messages|thread|history|room-read|read-receipt PRESET=.. STEPS=..)
 	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
 	$(COMPOSE) --profile dashboards up -d cadvisor prometheus
 	$(COMPOSE) exec -T loadgen /loadgen max-rps \
@@ -102,7 +102,7 @@ run-daily:
 
 down:
 	$(COMPOSE) --profile dashboards down -v
-	docker compose -f $(SERVICES_COMPOSE) down
+	$(MAKE) -C $(ROOT) down
 	$(MAKE) -C $(ROOT) deps-down
 
 seed-botroom:

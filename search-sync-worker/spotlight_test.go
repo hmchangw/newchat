@@ -18,7 +18,7 @@ func makeInboxMemberEvent(t *testing.T, typ string, payload *model.InboxMemberEv
 	t.Helper()
 	payloadData, err := json.Marshal(payload)
 	require.NoError(t, err)
-	evt := model.OutboxEvent{
+	evt := model.InboxEvent{
 		Type:       typ,
 		SiteID:     "site-a",
 		DestSiteID: "site-a",
@@ -46,39 +46,39 @@ func baseInboxMemberEvent() *model.InboxMemberEvent {
 }
 
 func TestSpotlightCollection_Metadata(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 
 	assert.Equal(t, "spotlight-sync", coll.ConsumerName())
 
 	cfg := coll.StreamConfig("site-a")
 	assert.Equal(t, "INBOX_site-a", cfg.Name)
 	assert.Equal(t, []string{
-		"chat.inbox.site-a.*",
-		"chat.inbox.site-a.aggregate.>",
+		"chat.inbox.site-a.internal.>",
+		"chat.inbox.site-a.external.>",
 	}, cfg.Subjects)
 	assert.Empty(t, cfg.Sources)
 
 	filters := coll.FilterSubjects("site-a")
 	assert.ElementsMatch(t, []string{
-		"chat.inbox.site-a.member_added",
-		"chat.inbox.site-a.member_removed",
-		"chat.inbox.site-a.aggregate.member_added",
-		"chat.inbox.site-a.aggregate.member_removed",
+		"chat.inbox.site-a.internal.member_added",
+		"chat.inbox.site-a.internal.member_removed",
+		"chat.inbox.site-a.external.member_added",
+		"chat.inbox.site-a.external.member_removed",
 	}, filters)
 }
 
 func TestSpotlightCollection_StoredScripts(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1")
+	coll := newSpotlightCollection("spotlight-site-a-v1", false)
 	assert.Empty(t, coll.StoredScripts(), "spotlight collection uses no stored scripts")
 }
 
 func TestSpotlightCollection_TemplateName_StripsVersion(t *testing.T) {
-	c := newSpotlightCollection("spotlight-site-a-v1")
+	c := newSpotlightCollection("spotlight-site-a-v1", false)
 	assert.Equal(t, "spotlight-site-a_template", c.TemplateName())
 }
 
 func TestSpotlightCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
-	c := newSpotlightCollection("spotlight-site-a-v1")
+	c := newSpotlightCollection("spotlight-site-a-v1", false)
 	body := c.TemplateBody()
 	require.NotNil(t, body)
 
@@ -124,9 +124,9 @@ func TestSpotlightTemplateProperties_MatchesStruct(t *testing.T) {
 }
 
 func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 1000)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -151,9 +151,9 @@ func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
 }
 
 func TestSpotlightCollection_BuildAction_MemberRemoved(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
-	data := makeInboxMemberEvent(t, model.OutboxMemberRemoved, payload, 2000)
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, 2000)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -170,13 +170,13 @@ func TestSpotlightCollection_BuildAction_MemberRemoved(t *testing.T) {
 func TestSpotlightCollection_BuildAction_RestrictedRoomIndexedLikeAnyOther(t *testing.T) {
 	// See spotlightCollection.BuildAction docstring for the room-name
 	// vs message-content access boundary.
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob"}
 	hss := int64(1735689500000)
 	payload.HistorySharedSince = &hss
 
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -205,16 +205,16 @@ func TestSpotlightCollection_BuildAction_RestrictedRoomIndexedLikeAnyOther(t *te
 }
 
 func TestSpotlightCollection_BuildAction_Errors(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 
-	t.Run("malformed outbox event", func(t *testing.T) {
+	t.Run("malformed inbox event", func(t *testing.T) {
 		_, err := coll.BuildAction([]byte("{invalid"))
 		assert.Error(t, err)
 	})
 
 	t.Run("malformed payload", func(t *testing.T) {
-		evt := model.OutboxEvent{
-			Type:      model.OutboxMemberAdded,
+		evt := model.InboxEvent{
+			Type:      model.InboxMemberAdded,
 			Payload:   []byte("not json"),
 			Timestamp: 100,
 		}
@@ -226,7 +226,7 @@ func TestSpotlightCollection_BuildAction_Errors(t *testing.T) {
 	t.Run("empty accounts", func(t *testing.T) {
 		payload := baseInboxMemberEvent()
 		payload.Accounts = nil
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
@@ -234,7 +234,7 @@ func TestSpotlightCollection_BuildAction_Errors(t *testing.T) {
 	t.Run("empty account in list", func(t *testing.T) {
 		payload := baseInboxMemberEvent()
 		payload.Accounts = []string{"alice", ""}
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
@@ -242,13 +242,13 @@ func TestSpotlightCollection_BuildAction_Errors(t *testing.T) {
 	t.Run("missing roomId", func(t *testing.T) {
 		payload := baseInboxMemberEvent()
 		payload.RoomID = ""
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 100)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 100)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
 
 	t.Run("missing timestamp", func(t *testing.T) {
-		data := makeInboxMemberEvent(t, model.OutboxMemberAdded, baseInboxMemberEvent(), 0)
+		data := makeInboxMemberEvent(t, model.InboxMemberAdded, baseInboxMemberEvent(), 0)
 		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
@@ -264,10 +264,10 @@ func TestSpotlightCollection_BuildAction_Errors(t *testing.T) {
 // event carrying N accounts produces N index actions, all sharing the same
 // external Version (event timestamp).
 func TestSpotlightCollection_BuildAction_BulkInvite(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob", "carol"}
-	data := makeInboxMemberEvent(t, model.OutboxMemberAdded, payload, 12345)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 12345)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -291,10 +291,10 @@ func TestSpotlightCollection_BuildAction_BulkInvite(t *testing.T) {
 // TestSpotlightCollection_BuildAction_BulkRemove verifies fan-out on remove:
 // N accounts → N delete actions.
 func TestSpotlightCollection_BuildAction_BulkRemove(t *testing.T) {
-	coll := newSpotlightCollection("spotlight-site-a-v1-chat")
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob"}
-	data := makeInboxMemberEvent(t, model.OutboxMemberRemoved, payload, 67890)
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, 67890)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)

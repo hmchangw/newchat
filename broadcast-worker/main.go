@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -14,7 +17,9 @@ import (
 	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -48,10 +53,13 @@ type config struct {
 	RoomKeyGracePeriod   time.Duration           `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	RoomKeyCacheTTL      time.Duration           `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
 	RoomKeyCacheSize     int                     `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
-	RoomKeyCacheStats    time.Duration           `env:"ROOM_KEY_CACHE_STATS_INTERVAL" envDefault:"0"`
 	RoomMetaL2TTL        time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
 	ValkeyAddrs          []string                `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword       string                  `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyKeyGracePeriod time.Duration           `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
+	HealthAddr           string                  `env:"HEALTH_ADDR"              envDefault:":8081"`
+	PProfEnabled         bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr          string                  `env:"METRICS_ADDR"             envDefault:":9090"`
 	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
@@ -60,6 +68,7 @@ type config struct {
 
 func main() {
 	logctx.SetupDefault(os.Stdout)
+	pretouchJSON()
 
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
@@ -73,6 +82,11 @@ func main() {
 	tracerShutdown, err := otelutil.InitTracer(ctx, "broadcast-worker")
 	if err != nil {
 		slog.Error("init tracer failed", "error", err)
+		os.Exit(1)
+	}
+	meterShutdown, err := otelutil.InitMeter("broadcast-worker")
+	if err != nil {
+		slog.Error("init meter failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -172,13 +186,8 @@ func main() {
 		slog.Info("room-key cache enabled", "size", cfg.RoomKeyCacheSize, "ttl", cfg.RoomKeyCacheTTL)
 	}
 
-	statsCtx, stopStats := context.WithCancel(ctx)
-	if keyCache != nil && cfg.RoomKeyCacheStats > 0 {
-		go keyCache.RunStatsLogger(statsCtx, cfg.RoomKeyCacheStats)
-		slog.Info("room-key cache stats logger started", "interval", cfg.RoomKeyCacheStats)
-	}
-
-	handler := NewHandler(coalescer, us, publisher, keyProvider, cfg.Encryption.Enabled)
+	parentFetcher := newHistoryParentFetcher(nc)
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -202,6 +211,29 @@ func main() {
 
 	var wg sync.WaitGroup
 	go consumeLoop(iter, broadcastProcessor(handler), cfg.MaxWorkers, &wg)
+
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
+		natsutil.HealthCheck(nc),
+	)
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
+
+	// Bind synchronously so a port conflict fails startup loudly rather than
+	// running blind — /metrics exposes the cache hit-rate counters Prometheus scrapes.
+	metricsServer := otelutil.MetricsServer()
+	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
 
 	slog.Info("broadcast-worker started", "site", cfg.SiteID, "encryption", cfg.Encryption.Enabled)
 
@@ -229,8 +261,11 @@ func main() {
 			flushCancel()
 			return nil
 		},
-		func(_ context.Context) error { stopStats(); return nil },
+		// Stop /metrics late so Prometheus can scrape the final drain-window counts,
+		// then flush the meter provider before NATS/Mongo close.
+		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
+		func(ctx context.Context) error { return meterShutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 	}
 	if keyStore != nil {
@@ -238,6 +273,7 @@ func main() {
 	}
 	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error { return healthStop(ctx) },
 		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
 	)
 
@@ -267,11 +303,21 @@ type messageIterator interface {
 }
 
 // broadcastProcessor builds the per-message processing closure for the
-// canonical consumer: stamp the request ID, run the handler, Ack on success or
-// Nak on error.
+// canonical consumer: stamp the request ID, run the handler, then settle via
+// jsretry. Fan-out is latency-sensitive — short first retry; malformed events
+// Ack-drop.
 func broadcastProcessor(handler *Handler) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
-		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+		handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+		// Migrated events carry X-Migration: live — the source already delivered them, so this
+		// live-delivery worker must not re-fan them out. Ack and drop without invoking the handler.
+		if natsutil.IsMigrationLiveHeader(msg.Headers()) {
+			slog.Info("skipping migrated event (no re-broadcast)", "subject", msg.Subject(), "request_id", reqID)
+			if err := msg.Ack(); err != nil {
+				slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
+			}
+			return
+		}
 		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 		// flow: hop entry with the stream-wait latency time-diffing can't see.
@@ -286,16 +332,8 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 				"phase", "received", "request_id", natsutil.RequestIDFromContext(handlerCtx),
 				"subject", msg.Subject(), "bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
 		}
-		if err := handler.HandleMessage(handlerCtx, msg.Data()); err != nil {
-			slog.Error("handle message failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-			if err := msg.Nak(); err != nil {
-				slog.Error("failed to nak message", "error", err)
-			}
-			return
-		}
-		if err := msg.Ack(); err != nil {
-			slog.Error("failed to ack message", "error", err)
-		}
+		// Fan-out is latency-sensitive — short first retry; malformed events Ack-drop.
+		jsretry.Settle(handlerCtx, msg, jsretry.LowLatencyBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 	}
 }
 

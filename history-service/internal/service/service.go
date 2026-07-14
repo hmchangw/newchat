@@ -8,14 +8,13 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
-	"github.com/hmchangw/chat/pkg/emoji"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . MessageReader,MessageWriter,MessageRepository,SubscriptionRepository,RoomRepository,EventPublisher,ThreadRoomRepository,UserStore,CustomEmojiStore
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . MessageReader,MessageWriter,MessageRepository,SubscriptionRepository,RoomRepository,EventPublisher,ThreadRoomRepository,ThreadSubscriptionRepository,UserStore,AppStore
 
 type MessageReader interface {
 	GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
@@ -69,12 +68,24 @@ type RoomRepository interface {
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.
 type EventPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte, msgID string) error
+	// PublishMigration publishes like Publish but stamps X-Migration: live.
+	PublishMigration(ctx context.Context, subject string, data []byte, msgID string) error
 }
 
 type ThreadRoomRepository interface {
 	GetThreadRooms(ctx context.Context, roomID string, accessSince *time.Time, req mongoutil.OffsetPageRequest) (mongoutil.OffsetPage[pkgmodel.ThreadRoom], error)
 	GetFollowingThreadRooms(ctx context.Context, roomID, account string, accessSince *time.Time, req mongoutil.OffsetPageRequest) (mongoutil.OffsetPage[pkgmodel.ThreadRoom], error)
 	GetUnreadThreadRooms(ctx context.Context, roomID, account string, accessSince *time.Time, req mongoutil.OffsetPageRequest) (mongoutil.OffsetPage[pkgmodel.ThreadRoom], error)
+	// GetMinThreadUserLastSeenAt returns thread_rooms.minUserLastSeenAt for
+	// threadRoomID. Returns (nil, nil) when the field is unset or the document
+	// is missing — both mean "not everyone has read yet".
+	GetMinThreadUserLastSeenAt(ctx context.Context, threadRoomID string) (*time.Time, error)
+}
+
+// ThreadSubscriptionRepository lists a user's thread subscriptions on this site,
+// the per-site leaf of the cross-site thread inbox.
+type ThreadSubscriptionRepository interface {
+	ListUserThreadSubscriptions(ctx context.Context, account string, cursorLastMsgAt *time.Time, cursorThreadRoomID string, limit int) ([]mongorepo.ThreadSubRow, bool, error)
 }
 
 // UserStore resolves the calling user's full profile for ReactorInfo and the Participant on the canonical event.
@@ -82,9 +93,10 @@ type UserStore interface {
 	FindUserByAccount(ctx context.Context, account string) (*pkgmodel.User, error)
 }
 
-// CustomEmojiStore reports whether a custom emoji shortcode is registered for the site.
-type CustomEmojiStore interface {
-	CustomEmojiExists(ctx context.Context, siteID, shortcode string) (bool, error)
+// AppStore resolves a bot account's app display name for reaction Actor rendering.
+type AppStore interface {
+	// AppNameByAccount returns ("", nil) when no app matches botAccount.
+	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
 }
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
@@ -95,9 +107,10 @@ type HistoryService struct {
 	rooms              RoomRepository
 	publisher          EventPublisher
 	threadRooms        ThreadRoomRepository
+	threadSubs         ThreadSubscriptionRepository
 	users              UserStore
-	emojiValidator     *emoji.Validator // owns the CustomEmojiStore lookup; reused per request
-	historyFloor       time.Duration    // from MESSAGE_HISTORY_FLOOR_DAYS
+	apps               AppStore
+	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
 	largeRoomThreshold int
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
@@ -109,8 +122,9 @@ func New(
 	rooms RoomRepository,
 	pub EventPublisher,
 	threadRooms ThreadRoomRepository,
+	threadSubs ThreadSubscriptionRepository,
 	users UserStore,
-	customEmojis CustomEmojiStore,
+	apps AppStore,
 	cfg *config.Config,
 ) *HistoryService {
 	return &HistoryService{
@@ -120,8 +134,9 @@ func New(
 		rooms:              rooms,
 		publisher:          pub,
 		threadRooms:        threadRooms,
+		threadSubs:         threadSubs,
 		users:              users,
-		emojiValidator:     emoji.NewValidator(customEmojis),
+		apps:               apps,
 		historyFloor:       time.Duration(cfg.MessageHistoryFloorDays) * 24 * time.Hour,
 		largeRoomThreshold: cfg.LargeRoomThreshold,
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
@@ -135,6 +150,7 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	natsrouter.Register(r, subject.MsgNextPattern(siteID), s.LoadNextMessages)
 	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), s.LoadSurroundingMessages)
 	natsrouter.Register(r, subject.MsgGetPattern(siteID), s.GetMessageByID)
+	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), s.GetMessagesByIDs)
 	natsrouter.Register(r, subject.MsgEditPattern(siteID), func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
 		return s.EditMessage(c, siteID, req)
 	})
@@ -153,9 +169,17 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	})
 	natsrouter.Register(r, subject.MsgThreadPattern(siteID), s.GetThreadMessages)
 	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), s.GetThreadParentMessages)
+	natsrouter.Register(r, subject.MigrationInternalMsgEdit(siteID), func(c *natsrouter.Context, req pkgmodel.MigrationEditRequest) (*pkgmodel.MigrationAck, error) {
+		return s.MigrationEditMessage(c, siteID, req)
+	})
+	natsrouter.Register(r, subject.MigrationInternalMsgDelete(siteID), func(c *natsrouter.Context, req pkgmodel.MigrationDeleteRequest) (*pkgmodel.MigrationAck, error) {
+		return s.MigrationDeleteMessage(c, siteID, req)
+	})
+	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), s.ListThreadSubscriptions)
 }
 
 // Compile-time checks.
 var _ MessageRepository = (*cassrepo.Repository)(nil)
 var _ SubscriptionRepository = (*mongorepo.SubscriptionRepo)(nil)
 var _ RoomRepository = (*mongorepo.RoomRepo)(nil)
+var _ ThreadSubscriptionRepository = (*mongorepo.ThreadSubscriptionRepo)(nil)

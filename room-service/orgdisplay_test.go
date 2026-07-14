@@ -122,6 +122,28 @@ func TestBuildOrgDisplay(t *testing.T) {
 		got := buildOrgDisplay([]string{""}, users)
 		assert.Nil(t, got[""], "empty org id must not be matched even if requested")
 	})
+
+	t.Run("descriptions roll up alongside names", func(t *testing.T) {
+		users := []orgDisplayUser{
+			{DeptID: "X", DeptName: "Eng Dept", DeptDescription: "Dept desc"},
+			{SectID: "X", SectName: "Eng Sect", SectDescription: "Sect desc"},
+		}
+		got := buildOrgDisplay([]string{"X"}, users)
+		a := got["X"]
+		require.NotNil(t, a)
+		assert.Equal(t, "Dept desc", a.deptDescription)
+		assert.Equal(t, "Sect desc", a.sectDescription)
+	})
+
+	t.Run("description uses lexicographic max within a branch", func(t *testing.T) {
+		users := []orgDisplayUser{
+			{SectID: "X", SectDescription: "Alpha"},
+			{SectID: "X", SectDescription: "Zeta"},
+		}
+		got := buildOrgDisplay([]string{"X"}, users)
+		require.NotNil(t, got["X"])
+		assert.Equal(t, "Zeta", got["X"].sectDescription)
+	})
 }
 
 // orgDisplaySectName renders the member.sectName display string from the
@@ -155,5 +177,41 @@ func TestOrgDisplaySectName(t *testing.T) {
 	t.Run("all names empty falls back to orgID", func(t *testing.T) {
 		a := &orgDisplayAgg{isDept: true}
 		assert.Equal(t, "X", orgDisplaySectName(a, "X"))
+	})
+}
+
+func TestOrgDisplayDescription(t *testing.T) {
+	t.Run("nil aggregate yields empty", func(t *testing.T) {
+		assert.Empty(t, orgDisplayDescription(nil))
+	})
+
+	t.Run("dept description wins when the dept supplies the name", func(t *testing.T) {
+		a := &orgDisplayAgg{isDept: true, deptName: "Eng", deptDescription: "Dept desc", sectDescription: "Sect desc"}
+		assert.Equal(t, "Dept desc", orgDisplayDescription(a))
+	})
+
+	t.Run("dept name but empty dept description yields empty, not the sect's", func(t *testing.T) {
+		a := &orgDisplayAgg{isDept: true, deptName: "Eng", deptDescription: "", sectDescription: "Sect desc"}
+		assert.Empty(t, orgDisplayDescription(a))
+	})
+
+	t.Run("dept match without a name falls to the sect branch", func(t *testing.T) {
+		a := &orgDisplayAgg{isDept: true, deptName: "", sectName: "Sect", deptDescription: "Dept desc", sectDescription: "Sect desc"}
+		assert.Equal(t, "Sect desc", orgDisplayDescription(a))
+	})
+
+	t.Run("sect-only org uses sect description", func(t *testing.T) {
+		a := &orgDisplayAgg{isDept: false, sectName: "Sect", sectDescription: "Sect desc"}
+		assert.Equal(t, "Sect desc", orgDisplayDescription(a))
+	})
+
+	t.Run("sect description without a name yields empty (name fell back to orgID)", func(t *testing.T) {
+		a := &orgDisplayAgg{isDept: false, sectDescription: "Orphan desc"}
+		assert.Empty(t, orgDisplayDescription(a))
+	})
+
+	t.Run("all empty yields empty (no orgID fallback)", func(t *testing.T) {
+		a := &orgDisplayAgg{isDept: true}
+		assert.Empty(t, orgDisplayDescription(a))
 	})
 }
