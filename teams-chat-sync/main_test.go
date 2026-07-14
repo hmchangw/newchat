@@ -26,6 +26,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
 	assert.Equal(t, "2026-04-01T00:00:00Z", cfg.DefaultFrom)
 	assert.Equal(t, "", cfg.DefaultSiteID, "no default siteID unless configured")
+	assert.Equal(t, 50, cfg.GraphChatsPageSize, "default $top is Graph's max for list chats")
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 
 	from, err := time.Parse(time.RFC3339, cfg.DefaultFrom)
@@ -43,10 +44,11 @@ func baseConfig() Config {
 	return Config{
 		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
 		MaxWorkers: 8, RunTimeout: 30 * time.Minute,
-		DefaultFrom:       "2026-04-01T00:00:00Z",
-		GraphTenantID:     "tenant",
-		GraphClientID:     "client",
-		GraphClientSecret: "secret",
+		DefaultFrom:        "2026-04-01T00:00:00Z",
+		GraphTenantID:      "tenant",
+		GraphClientID:      "client",
+		GraphClientSecret:  "secret",
+		GraphChatsPageSize: 50,
 	}
 }
 
@@ -80,6 +82,16 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name:    "negative run timeout",
 			mutate:  func(c *Config) { c.RunTimeout = -time.Second },
+			wantErr: true,
+		},
+		{
+			name:    "zero chats page size",
+			mutate:  func(c *Config) { c.GraphChatsPageSize = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "negative chats page size",
+			mutate:  func(c *Config) { c.GraphChatsPageSize = -1 },
 			wantErr: true,
 		},
 		{

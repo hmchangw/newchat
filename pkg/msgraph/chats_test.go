@@ -46,6 +46,7 @@ func TestListUserChats_Success_QueryShape(t *testing.T) {
 			q.Get("$filter"))
 		assert.Equal(t, "members", q.Get("$expand"))
 		assert.Equal(t, "id,chatType,topic,createdDateTime,lastUpdatedDateTime", q.Get("$select"))
+		assert.Equal(t, "50", q.Get("$top"), "default page size")
 		_, _ = w.Write([]byte(`{"value":[{
 			"id":"19:chat1@thread.v2","chatType":"group","topic":"Project X",
 			"createdDateTime":"2026-04-02T08:00:00Z","lastUpdatedDateTime":"2026-07-01T09:00:00Z",
@@ -67,6 +68,22 @@ func TestListUserChats_Success_QueryShape(t *testing.T) {
 	require.Len(t, chats[0].Members, 2)
 	assert.Equal(t, "aad-user-1", chats[0].Members[0].UserID)
 	assert.Equal(t, "aad-user-2", chats[0].Members[1].UserID)
+}
+
+func TestListUserChats_CustomPageSize(t *testing.T) {
+	tokenSrv := newChatsTokenServer(t)
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "10", r.URL.Query().Get("$top"))
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	defer graphSrv.Close()
+
+	c := NewChatsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL), WithChatsPageSize(10),
+	)
+	_, err := c.ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
+	require.NoError(t, err)
 }
 
 func TestListUserChats_NullTopicBecomesEmpty(t *testing.T) {

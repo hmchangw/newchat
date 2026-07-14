@@ -82,6 +82,7 @@ GET /v1.0/users/{uid}/chats
   ?$filter=lastUpdatedDateTime ge {from RFC3339} and lastUpdatedDateTime lt {to RFC3339}
   &$expand=members
   &$select=id,chatType,topic,createdDateTime,lastUpdatedDateTime
+  &$top={GRAPH_CHATS_PAGE_SIZE, default 50}
 ```
 
 ## Data models
@@ -172,6 +173,7 @@ required vars.
 | `MAX_WORKERS` | `8` | Worker pool size |
 | `SYNC_DEFAULT_FROM` | `2026-04-01T00:00:00Z` | RFC3339 watermark for users with no `from` |
 | `SYNC_DEFAULT_SITE_ID` | *(empty)* | Fallback siteID for chats whose member vote is empty; when unset those chats are skipped with a warning |
+| `GRAPH_CHATS_PAGE_SIZE` | `50` | `$top` page size for Graph list-chats requests (50 = Graph's documented max) |
 | `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |

@@ -133,6 +133,9 @@ type graphClient struct {
 	httpClient *http.Client
 	baseURL    string
 	tokenURL   string
+	// chatsPageSize is the $top for ListUserChats first-page requests;
+	// <= 0 means defaultChatsPageSize. Set via WithChatsPageSize.
+	chatsPageSize int
 
 	mu      sync.Mutex
 	token   string

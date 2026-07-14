@@ -58,6 +58,18 @@ const (
 	chatsMaxThrottleWait  = 5 * time.Minute
 )
 
+// defaultChatsPageSize is the $top sent on the first list-chats request when
+// no override is configured. 50 is Graph's documented maximum for this
+// endpoint; later pages follow @odata.nextLink, which carries Graph's own
+// paging parameters.
+const defaultChatsPageSize = 50
+
+// WithChatsPageSize overrides the $top page size ListUserChats requests.
+// Values <= 0 fall back to defaultChatsPageSize.
+func WithChatsPageSize(n int) Option {
+	return func(g *graphClient) { g.chatsPageSize = n }
+}
+
 func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to time.Time) ([]Chat, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("list user chats: userID is required")
@@ -74,6 +86,11 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 	))
 	q.Set("$expand", "members")
 	q.Set("$select", "id,chatType,topic,createdDateTime,lastUpdatedDateTime")
+	pageSize := g.chatsPageSize
+	if pageSize <= 0 {
+		pageSize = defaultChatsPageSize
+	}
+	q.Set("$top", strconv.Itoa(pageSize))
 	next := fmt.Sprintf("%s/users/%s/chats?%s", g.baseURL, url.PathEscape(userID), q.Encode())
 
 	var chats []Chat
