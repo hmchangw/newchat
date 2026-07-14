@@ -13,14 +13,11 @@ import (
 )
 
 // mongoStore implements TeamsUserStore and TeamsChatStore.
-//
-//nolint:unused // used by integration_test.go (//go:build integration)
 type mongoStore struct {
 	users *mongoutil.Collection[model.TeamsUser]
 	chats *mongoutil.Collection[model.TeamsChat]
 }
 
-//nolint:unused // used by integration_test.go (//go:build integration)
 func newMongoStore(db *mongo.Database) *mongoStore {
 	return &mongoStore{
 		users: mongoutil.NewCollection[model.TeamsUser](db.Collection("teams_user")),
@@ -28,7 +25,6 @@ func newMongoStore(db *mongo.Database) *mongoStore {
 	}
 }
 
-//nolint:unused // used by integration_test.go (//go:build integration)
 func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 	users, err := s.users.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
 		"_id": 1, "siteID": 1, "account": 1, "from": 1,
@@ -39,7 +35,6 @@ func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 	return users, nil
 }
 
-//nolint:unused // used by integration_test.go (//go:build integration)
 func (s *mongoStore) SetFrom(ctx context.Context, userID string, from time.Time) error {
 	if _, err := s.users.Raw().UpdateByID(ctx, userID, bson.M{"$set": bson.M{"from": from}}); err != nil {
 		return fmt.Errorf("set teams user watermark: %w", err)
@@ -47,7 +42,6 @@ func (s *mongoStore) SetFrom(ctx context.Context, userID string, from time.Time)
 	return nil
 }
 
-//nolint:unused // used by integration_test.go (//go:build integration)
 func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat, now time.Time) error {
 	models := make([]mongo.WriteModel, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
