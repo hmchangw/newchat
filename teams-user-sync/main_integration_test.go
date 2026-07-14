@@ -65,10 +65,15 @@ func TestRun_GraphFailureReturnsError(t *testing.T) {
 	}))
 	t.Cleanup(graphSrv.Close)
 
+	// Per-test isolated database even though the run fails before writing —
+	// no test may point at the shared default DB name.
+	db := testutil.MongoDB(t, "teams_user_sync_err")
 	uri := testutil.MongoURI(t)
 	setRequiredEnv(t)
 	t.Setenv("MONGO_READ_URI", uri)
 	t.Setenv("MONGO_WRITE_URI", uri)
+	t.Setenv("MONGO_READ_DB", db.Name())
+	t.Setenv("MONGO_WRITE_DB", db.Name())
 	t.Setenv("GRAPH_BASE_URL", graphSrv.URL)
 	t.Setenv("GRAPH_TOKEN_URL", tokenSrv.URL)
 
