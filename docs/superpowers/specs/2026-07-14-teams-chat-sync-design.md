@@ -136,7 +136,11 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
 5. **siteID vote.** Among the chat's members, those present in the user cache
    vote with their `siteID`; majority wins; ties break to the lexicographically
    smallest siteID (deterministic across runs). The fetching user is always a
-   member and always in the cache, so there is always ≥ 1 voter.
+   member and always in the cache, so there is normally ≥ 1 voter. If the vote
+   is nonetheless empty (e.g. Graph returns a truncated/empty member list), the
+   chat is **skipped with a warning** — never upserted with `siteID: ""` (which
+   `$setOnInsert` would lock in forever) — and the user is marked failed so the
+   watermark holds and the window is retried next run.
 6. **Upsert** (one `BulkWrite` of upserts per Graph page, keyed on `_id`):
    - `oneOnOne`: **all** fields under `$setOnInsert` — an existing doc is never
      modified (oneOnOne chats never change after insert).
