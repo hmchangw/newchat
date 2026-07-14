@@ -29,6 +29,18 @@ func TestUserJSON(t *testing.T) {
 	roundTrip(t, &u, &model.User{})
 }
 
+// AC-1.1: populated settings preserve every field across a JSON round trip.
+func TestUserSettingsJSON(t *testing.T) {
+	settings := model.UserSettings{
+		Account:   "alice",
+		SiteID:    "site-a",
+		Data:      json.RawMessage(`{"theme":"dark","notifications":{"mentions":true}}`),
+		Version:   3,
+		UpdatedAt: time.Date(2026, 7, 10, 12, 30, 0, 0, time.UTC),
+	}
+	roundTrip(t, &settings, &model.UserSettings{})
+}
+
 func TestUserJSON_WithSectAndDept(t *testing.T) {
 	u := model.User{
 		ID: "u1", Account: "alice", SiteID: "site-a",

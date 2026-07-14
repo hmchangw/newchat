@@ -983,6 +983,14 @@ func UserAppsCategories(account, siteID string) string {
 
 // --- natsrouter pattern builders (siteID baked in, account left as {account} placeholder) ---
 
+func UserSettingsGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.get", siteID)
+}
+
+func UserSettingsSetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
+}
+
 func UserStatusGetByNamePattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.status.getByName", siteID)
 }

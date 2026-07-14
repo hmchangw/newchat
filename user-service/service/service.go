@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -11,7 +12,7 @@ import (
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository,SettingsRepository
 
 // SubscriptionRepository is the consumer-defined interface for subscription persistence (botDM app-subscription rows included).
 type SubscriptionRepository interface {
@@ -23,6 +24,12 @@ type SubscriptionRepository interface {
 	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error
+}
+
+// SettingsRepository is the consumer-defined interface for opaque user-settings persistence.
+type SettingsRepository interface {
+	GetUserSettings(ctx context.Context, account, siteID string) (*model.UserSettings, error)
+	SetUserSettings(ctx context.Context, account, siteID string, data json.RawMessage, ifVersion *int64) (*model.UserSettings, error)
 }
 
 // UserRepository is the consumer-defined interface for user status persistence.
@@ -74,41 +81,49 @@ type EventPublisher interface {
 
 // UserService handles all user-related NATS request/reply endpoints.
 type UserService struct {
-	subs            SubscriptionRepository
-	users           UserRepository
-	apps            AppRepository
-	threadSubs      ThreadSubscriptionRepository
-	rooms           RoomClient
-	history         HistoryClient
-	presence        PresenceClient
-	pub             EventPublisher
-	siteID          string
-	allSiteIDs      []string
-	maxSubs         int
-	defaultLimit    int
-	maxApps         int
-	defaultApps     int
-	maxAccountNames int
+	subs             SubscriptionRepository
+	users            UserRepository
+	apps             AppRepository
+	threadSubs       ThreadSubscriptionRepository
+	rooms            RoomClient
+	history          HistoryClient
+	presence         PresenceClient
+	pub              EventPublisher
+	settings         SettingsRepository
+	siteID           string
+	allSiteIDs       []string
+	maxSubs          int
+	defaultLimit     int
+	maxApps          int
+	defaultApps      int
+	maxAccountNames  int
+	maxSettingsBytes int
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub EventPublisher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, settings SettingsRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub EventPublisher, cfg *config.Config) *UserService {
+	maxSettingsBytes := cfg.MaxSettingsBytes
+	if maxSettingsBytes < 1 {
+		maxSettingsBytes = defaultMaxSettingsBytes
+	}
 	return &UserService{
-		subs:            subs,
-		users:           users,
-		apps:            apps,
-		threadSubs:      threadSubs,
-		rooms:           rooms,
-		history:         history,
-		presence:        presence,
-		pub:             pub,
-		siteID:          cfg.SiteID,
-		allSiteIDs:      cfg.AllSiteIDs,
-		maxSubs:         cfg.MaxSubscriptionLimit,
-		defaultLimit:    cfg.DefaultSubscriptionLimit,
-		maxApps:         cfg.MaxAppsLimit,
-		defaultApps:     cfg.DefaultAppsLimit,
-		maxAccountNames: cfg.MaxAccountNames,
+		subs:             subs,
+		users:            users,
+		apps:             apps,
+		threadSubs:       threadSubs,
+		settings:         settings,
+		rooms:            rooms,
+		history:          history,
+		presence:         presence,
+		pub:              pub,
+		siteID:           cfg.SiteID,
+		allSiteIDs:       cfg.AllSiteIDs,
+		maxSubs:          cfg.MaxSubscriptionLimit,
+		defaultLimit:     cfg.DefaultSubscriptionLimit,
+		maxApps:          cfg.MaxAppsLimit,
+		defaultApps:      cfg.DefaultAppsLimit,
+		maxAccountNames:  cfg.MaxAccountNames,
+		maxSettingsBytes: maxSettingsBytes,
 	}
 }
 
@@ -116,6 +131,8 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 // siteID is a literal token in each pattern — this instance only subscribes to its own siteID subjects.
 func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.UserMePattern(s.siteID), s.Me)
+	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), s.GetUserSettings)
+	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), s.SetUserSettings)
 	natsrouter.Register(r, subject.UserStatusGetByNamePattern(s.siteID), s.GetStatusByName)
 	natsrouter.Register(r, subject.UserProfileGetByNamePattern(s.siteID), s.GetProfileByName)
 	natsrouter.Register(r, subject.UserStatusSetPattern(s.siteID), s.SetStatus)

@@ -30,8 +30,9 @@ type Config struct {
 	DefaultSubscriptionLimit int           `env:"SUBSCRIPTION_DEFAULT_LIMIT" envDefault:"40"`
 	MaxAppsLimit             int           `env:"APPS_MAX_LIMIT" envDefault:"100"`
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
-	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
-	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"             envDefault:"100"`
+	MaxSettingsBytes         int           `env:"USER_SERVICE_MAX_SETTINGS_BYTES" envDefault:"65536"`
+	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"               envDefault:"15s"`
 	Mongo                    MongoConfig   `envPrefix:"MONGO_"`
 	NATS                     NATSConfig    `envPrefix:"NATS_"`
 }
@@ -50,6 +51,9 @@ func Load() (Config, error) {
 	}
 	if cfg.DefaultSubscriptionLimit > cfg.MaxSubscriptionLimit {
 		return Config{}, fmt.Errorf("SUBSCRIPTION_DEFAULT_LIMIT (%d) must be <= MAX_SUBSCRIPTION_LIMIT (%d)", cfg.DefaultSubscriptionLimit, cfg.MaxSubscriptionLimit)
+	}
+	if cfg.MaxSettingsBytes < 1 {
+		return Config{}, fmt.Errorf("USER_SERVICE_MAX_SETTINGS_BYTES must be >= 1, got %d", cfg.MaxSettingsBytes)
 	}
 	if cfg.MaxAppsLimit < 1 {
 		return Config{}, fmt.Errorf("APPS_MAX_LIMIT must be >= 1, got %d", cfg.MaxAppsLimit)

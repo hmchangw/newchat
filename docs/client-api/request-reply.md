@@ -1319,6 +1319,8 @@ No client-facing events are emitted.
 | RPC subject | Method |
 |---|---|
 | `chat.user.{account}.request.user.{siteID}.me` | [me](#me) |
+| `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
 | `chat.user.{account}.request.user.{siteID}.status.getByName` | [status.getByName](#statusgetbyname) |
 | `chat.user.{account}.request.user.{siteID}.profile.getByName` | [profile.getByName](#profilegetbyname) |
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
@@ -1360,6 +1362,118 @@ empty strings). `presence` is one of `online` / `away` / `busy` / `offline` /
 `not_found` (user not found), `internal` (user-status read failed — the only
 `internal` source). A failed presence lookup never errors; it degrades to
 `presence: "offline"` in a success response.
+
+**Emits:** None.
+
+---
+
+<!-- AC-5.1: mirrors the canonical settings.get contract. -->
+### settings.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
+
+Returns the calling user's opaque client-owned settings document for `{siteID}`.
+The request body is ignored.
+
+#### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | Calling account. |
+| `siteId` | string | Requested home site. |
+| `data` | UserSettingsData | Client-owned settings JSON. |
+| `version` | integer | Monotonically increasing version. |
+| `updatedAt` | string (RFC 3339) | Server-set latest-write timestamp. |
+
+`UserSettingsData` is a client-defined JSON object. The backend stores it
+verbatim and does not validate nested fields. A channel-section grouping can use
+`channelSections.order` (string[]), `channelSections.collapsed` (string[]), and
+`channelSections.sections` (`map<string, ChannelSection>`), where each
+`ChannelSection` has `name` (string), `channelIds` (string[]), and `order`
+(string[]).
+
+```json
+{
+  "account": "alice",
+  "siteId": "site-a",
+  "data": {
+    "channelSections": {
+      "order": ["favorites"],
+      "collapsed": [],
+      "sections": {
+        "favorites": {
+          "name": "Favorites",
+          "channelIds": ["room_abc123"],
+          "order": ["room_abc123"]
+        }
+      }
+    }
+  },
+  "version": 7,
+  "updatedAt": "2026-07-10T12:00:00Z"
+}
+```
+
+#### Errors
+
+`not_found` (no settings document), `internal` (storage failure).
+
+**Emits:** None.
+
+---
+
+<!-- AC-5.2 and AC-5.3: mirrors the canonical set contract and retry protocol. -->
+### settings.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.set`
+
+Writes the calling user's complete settings document. `data` is required and
+must be a JSON object no larger than `USER_SERVICE_MAX_SETTINGS_BYTES` (default
+65,536 bytes). `ifVersion` is optional; when supplied, it performs an atomic
+compare-and-set against the version returned by `settings.get`.
+
+#### Request body
+
+```json
+{
+  "data": {
+    "channelSections": {
+      "order": ["favorites"],
+      "collapsed": [],
+      "sections": {}
+    }
+  },
+  "ifVersion": 7
+}
+```
+
+#### Success response
+
+Same shape as `settings.get`, with `version` incremented.
+
+```json
+{
+  "account": "alice",
+  "siteId": "site-a",
+  "data": {
+    "channelSections": {
+      "order": ["favorites"],
+      "collapsed": [],
+      "sections": {}
+    }
+  },
+  "version": 8,
+  "updatedAt": "2026-07-10T12:05:00Z"
+}
+```
+
+#### Errors
+
+`bad_request` (missing/non-object/oversized `data`), `conflict` (stale
+`ifVersion`), `internal` (storage failure).
+
+On `conflict`, clients must read the latest document, merge or reapply their
+client-owned change, then retry using the newly returned `version`.
 
 **Emits:** None.
 

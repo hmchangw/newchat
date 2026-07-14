@@ -43,6 +43,31 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, 15*time.Second, cfg.HandlerTimeout)
 }
 
+// AC-4.3: the settings payload limit defaults to the documented 64 KiB cap.
+func TestLoad_AC_4_3_DefaultSettingsLimit(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	require.Equal(t, 64*1024, cfg.MaxSettingsBytes)
+}
+
+// AC-4.3: USER_SERVICE_MAX_SETTINGS_BYTES overrides the default used by handlers.
+func TestLoad_AC_4_3_CustomSettingsLimit(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("USER_SERVICE_MAX_SETTINGS_BYTES", "32768")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	require.Equal(t, 32768, cfg.MaxSettingsBytes)
+}
+
 func TestLoad_MissingRequired(t *testing.T) {
 	// notEmpty fires when a required value is unset OR set-but-empty;
 	// each required field is exercised independently.
@@ -127,6 +152,19 @@ func TestLoad_InvalidDefaultAppsLimit(t *testing.T) {
 			t.Setenv("NATS_URL", "nats://x")
 			t.Setenv("SITE_ID", "site-a")
 			t.Setenv("APPS_DEFAULT_LIMIT", v)
+			_, err := Load()
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoad_InvalidMaxSettingsBytes(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run("limit="+v, func(t *testing.T) {
+			t.Setenv("MONGO_URI", "mongodb://x")
+			t.Setenv("NATS_URL", "nats://x")
+			t.Setenv("SITE_ID", "site-a")
+			t.Setenv("USER_SERVICE_MAX_SETTINGS_BYTES", v)
 			_, err := Load()
 			require.Error(t, err)
 		})
