@@ -49,6 +49,22 @@ func main() {
 	}
 }
 
+// validateConfig checks the parsed Config for internal consistency and
+// parses DefaultFrom into a time.Time. It isolates run()'s pure logic so it
+// is unit testable without wiring any real dependency.
+//
+//nolint:gocritic // hugeParam: cfg is passed by value once at startup; not a hot path
+func validateConfig(cfg Config) (time.Time, error) {
+	if cfg.MaxWorkers <= 0 || cfg.RunTimeout <= 0 {
+		return time.Time{}, fmt.Errorf("invalid config: MAX_WORKERS and RUN_TIMEOUT must be positive")
+	}
+	defaultFrom, err := time.Parse(time.RFC3339, cfg.DefaultFrom)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse SYNC_DEFAULT_FROM: %w", err)
+	}
+	return defaultFrom, nil
+}
+
 // run wires dependencies and performs one sync. It returns an error rather
 // than calling os.Exit so deferred cleanup always runs.
 func run() error {
@@ -56,12 +72,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.MaxWorkers <= 0 || cfg.RunTimeout <= 0 {
-		return fmt.Errorf("invalid config: MAX_WORKERS and RUN_TIMEOUT must be positive")
-	}
-	defaultFrom, err := time.Parse(time.RFC3339, cfg.DefaultFrom)
+	defaultFrom, err := validateConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("parse SYNC_DEFAULT_FROM: %w", err)
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
