@@ -53,7 +53,11 @@ func TestRun_HappyPath_AdvancesWatermarkAndUsesDefaultFrom(t *testing.T) {
 	}, nil)
 	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).
 		Return([]msgraph.Chat{graphChat("19:g1", "u1")}, nil)
-	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Len(1), wtNow).Return(nil)
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Len(1)).DoAndReturn(
+		func(_ context.Context, batch []model.TeamsChat) error {
+			assert.True(t, batch[0].UpdatedAt.Equal(wtNow), "chats carry the build-time UpdatedAt stamp")
+			return nil
+		})
 	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
 
 	require.NoError(t, s.run(context.Background()))
@@ -95,8 +99,8 @@ func TestRun_SharedChatUpsertedOnce(t *testing.T) {
 
 	var mu sync.Mutex
 	var upserted []string
-	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any(), wtNow).DoAndReturn(
-		func(_ context.Context, batch []model.TeamsChat, _ time.Time) error {
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, batch []model.TeamsChat) error {
 			mu.Lock()
 			defer mu.Unlock()
 			for _, c := range batch {
@@ -121,7 +125,7 @@ func TestRun_GraphFailureHoldsWatermarkAndFailsRun(t *testing.T) {
 		Return(nil, fmt.Errorf("graph returned status 429"))
 	graph.EXPECT().ListUserChats(gomock.Any(), "u2", wtDefaultFrom, wtTo).
 		Return([]msgraph.Chat{graphChat("19:g2", "u2")}, nil)
-	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Len(1), wtNow).Return(nil)
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Len(1)).Return(nil)
 	users.EXPECT().SetFrom(gomock.Any(), "u2", wtTo).Return(nil)
 	// No SetFrom for u1: its watermark must hold so next run retries the window.
 
@@ -137,7 +141,7 @@ func TestRun_UpsertFailureHoldsWatermark(t *testing.T) {
 	}, nil)
 	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).
 		Return([]msgraph.Chat{graphChat("19:g1", "u1")}, nil)
-	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any(), wtNow).Return(fmt.Errorf("mongo down"))
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any()).Return(fmt.Errorf("mongo down"))
 	// No SetFrom expected.
 
 	require.Error(t, s.run(context.Background()))
@@ -180,8 +184,8 @@ func TestRun_EmptySiteIDVote_MixedWithGoodChat_UpsertsOnlyGoodAndFailsUser(t *te
 			graphChat("19:good", "u1"),
 			graphChat("19:unknown", "unknown-user"),
 		}, nil)
-	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any(), wtNow).DoAndReturn(
-		func(_ context.Context, batch []model.TeamsChat, _ time.Time) error {
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, batch []model.TeamsChat) error {
 			require.Len(t, batch, 1)
 			assert.Equal(t, "19:good", batch[0].ID)
 			return nil

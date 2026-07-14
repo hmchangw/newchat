@@ -70,12 +70,14 @@ func TestBuildChat(t *testing.T) {
 			{UserID: "ghost", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 	}
-	c := buildChat(gc, cache)
+	buildNow := time.Date(2026, 7, 14, 9, 30, 0, 0, time.UTC)
+	c := buildChat(gc, cache, buildNow)
 	assert.Equal(t, "19:g1", c.ID)
 	assert.Equal(t, "Project X", c.Name)
 	assert.Equal(t, "group", c.ChatType)
 	assert.Equal(t, "site-a", c.SiteID)
-	assert.True(t, c.NeedUserSync)
+	assert.True(t, c.UpdatedAt.Equal(buildNow), "UpdatedAt stamped with now at build time")
+	assert.True(t, c.NeedMemberSync)
 	assert.Equal(t, []model.TeamsChatMember{
 		{ID: "a1", Account: "alice", VisibleHistoryStartDateTime: gc.Members[0].VisibleHistoryStartDateTime},
 		{ID: "ghost", Account: "", VisibleHistoryStartDateTime: gc.Members[1].VisibleHistoryStartDateTime},
@@ -83,9 +85,9 @@ func TestBuildChat(t *testing.T) {
 }
 
 func TestBuildChat_OneOnOne(t *testing.T) {
-	c := buildChat(msgraph.Chat{ID: "19:one1", ChatType: model.TeamsChatTypeOneOnOne, Topic: ""}, nil)
+	c := buildChat(msgraph.Chat{ID: "19:one1", ChatType: model.TeamsChatTypeOneOnOne, Topic: ""}, nil, time.Now())
 	assert.Equal(t, "", c.Name)
-	assert.False(t, c.NeedUserSync, "oneOnOne never needs user sync")
+	assert.False(t, c.NeedMemberSync, "oneOnOne never needs member sync")
 }
 
 func TestSyncerClaim_FirstWinsConcurrently(t *testing.T) {

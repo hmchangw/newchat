@@ -42,11 +42,11 @@ func (s *mongoStore) SetFrom(ctx context.Context, userID string, from time.Time)
 	return nil
 }
 
-func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat, now time.Time) error {
+func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) error {
 	models := make([]mongo.WriteModel, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
 	for _, c := range chats {
-		models = append(models, chatUpsertModel(c, now))
+		models = append(models, chatUpsertModel(c))
 	}
 	if _, err := s.chats.BulkWrite(ctx, models); err != nil {
 		return fmt.Errorf("upsert teams chats: %w", err)
@@ -61,7 +61,7 @@ func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat, n
 // rule enforced atomically, without a read).
 //
 //nolint:gocritic // hugeParam: c is heavy but unavoidable in this builder pattern
-func chatUpsertModel(c model.TeamsChat, now time.Time) mongo.WriteModel {
+func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 	filter := bson.M{"_id": c.ID}
 	if c.ChatType == model.TeamsChatTypeOneOnOne {
 		return mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": bson.M{
@@ -71,8 +71,8 @@ func chatUpsertModel(c model.TeamsChat, now time.Time) mongo.WriteModel {
 			"lastUpdatedDateTime": c.LastUpdatedDateTime,
 			"members":             c.Members,
 			"siteID":              c.SiteID,
-			"updatedAt":           now,
-			"needUserSync":        c.NeedUserSync,
+			"updatedAt":           c.UpdatedAt,
+			"needMemberSync":      c.NeedMemberSync,
 		}})
 	}
 	return mongoutil.UpsertModel(filter, bson.M{
@@ -85,8 +85,8 @@ func chatUpsertModel(c model.TeamsChat, now time.Time) mongo.WriteModel {
 			"chatType":            c.ChatType,
 			"lastUpdatedDateTime": c.LastUpdatedDateTime,
 			"members":             c.Members,
-			"updatedAt":           now,
-			"needUserSync":        c.NeedUserSync,
+			"updatedAt":           c.UpdatedAt,
+			"needMemberSync":      c.NeedMemberSync,
 		},
 	})
 }

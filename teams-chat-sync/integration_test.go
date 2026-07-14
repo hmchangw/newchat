@@ -62,14 +62,15 @@ func TestMongoStore_SetFrom(t *testing.T) {
 	assert.True(t, got.From.Equal(to))
 }
 
-func groupChat(id, name, siteID string) model.TeamsChat {
+func groupChat(id, name, siteID string, updatedAt time.Time) model.TeamsChat {
 	return model.TeamsChat{
 		ID: id, Name: name, ChatType: "group",
 		CreatedDateTime:     time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}},
 		SiteID:              siteID,
-		NeedUserSync:        true,
+		UpdatedAt:           updatedAt,
+		NeedMemberSync:      true,
 	}
 }
 
@@ -80,17 +81,17 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
 
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g1", "First", "site-a")}, now1))
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g1", "First", "site-a", now1)}))
 	// Second sync computes a different majority and a new name.
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g1", "Renamed", "site-b")}, now2))
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g1", "Renamed", "site-b", now2)}))
 
 	got, err := store.chats.FindByID(ctx, "19:g1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "site-a", got.SiteID, "siteID must never change after insert")
 	assert.Equal(t, "Renamed", got.Name, "mutable fields must refresh")
-	assert.True(t, got.UpdatedAt.Equal(now2))
-	assert.True(t, got.NeedUserSync)
+	assert.True(t, got.UpdatedAt.Equal(now2), "updatedAt refreshes to the second write's stamp")
+	assert.True(t, got.NeedMemberSync)
 }
 
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
@@ -106,13 +107,16 @@ func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}, {ID: "u2", Account: "bob"}},
 		SiteID:              "site-a",
+		UpdatedAt:           now1,
 	}
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{one}, now1))
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{one}))
 
 	changed := one
 	changed.SiteID = "site-b"
 	changed.LastUpdatedDateTime = time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{changed}, now2))
+	changed.UpdatedAt = now2
+	changed.NeedMemberSync = true // must NOT stick: oneOnOne re-upsert never modifies the doc
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{changed}))
 
 	got, err := store.chats.FindByID(ctx, "19:one1")
 	require.NoError(t, err)
@@ -120,7 +124,7 @@ func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	assert.Equal(t, "site-a", got.SiteID)
 	assert.True(t, got.LastUpdatedDateTime.Equal(one.LastUpdatedDateTime), "oneOnOne doc must be untouched by re-upsert")
 	assert.True(t, got.UpdatedAt.Equal(now1))
-	assert.False(t, got.NeedUserSync)
+	assert.False(t, got.NeedMemberSync)
 }
 
 func TestMongoStore_UpsertChats_MixedBatchAndEmpty(t *testing.T) {
@@ -129,11 +133,12 @@ func TestMongoStore_UpsertChats_MixedBatchAndEmpty(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 
-	require.NoError(t, store.UpsertChats(ctx, nil, now), "empty batch is a no-op")
+	require.NoError(t, store.UpsertChats(ctx, nil), "empty batch is a no-op")
 
 	one := model.TeamsChat{ID: "19:one2", ChatType: model.TeamsChatTypeOneOnOne, SiteID: "site-a",
-		CreatedDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g2", "G", "site-a"), one}, now))
+		CreatedDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		UpdatedAt: now}
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g2", "G", "site-a", now), one}))
 
 	n, err := store.chats.Raw().CountDocuments(ctx, bson.M{})
 	require.NoError(t, err)

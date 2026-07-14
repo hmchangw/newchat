@@ -83,11 +83,11 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser) strin
 
 // buildChat maps a Graph chat to the teams_chat model, resolving member
 // accounts and the owning site from the user cache. Unknown members are kept
-// with an empty account. UpdatedAt is intentionally left zero — the store
-// stamps it at write time.
+// with an empty account. UpdatedAt is stamped with now; the store writes it
+// verbatim on every upsert.
 //
 //nolint:gocritic // hugeParam: gc is consumed once per chat on a batch path; passing by value keeps the mapper pure.
-func buildChat(gc msgraph.Chat, cache map[string]cachedUser) model.TeamsChat {
+func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time) model.TeamsChat {
 	members := make([]model.TeamsChatMember, 0, len(gc.Members))
 	for _, m := range gc.Members {
 		members = append(members, model.TeamsChatMember{
@@ -104,7 +104,8 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser) model.TeamsChat {
 		LastUpdatedDateTime: gc.LastUpdatedDateTime,
 		Members:             members,
 		SiteID:              voteSiteID(gc.Members, cache),
-		NeedUserSync:        gc.ChatType != model.TeamsChatTypeOneOnOne,
+		UpdatedAt:           now,
+		NeedMemberSync:      gc.ChatType != model.TeamsChatTypeOneOnOne,
 	}
 }
 
@@ -189,13 +190,14 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 		return fmt.Errorf("list user chats: %w", err)
 	}
 	batch := make([]model.TeamsChat, 0, len(graphChats))
+	now := s.cfg.Now()
 	var skippedEmptyVote int
 	for _, gc := range graphChats {
 		if !s.claim(gc.ID) {
 			sum.Deduped.Add(1)
 			continue
 		}
-		built := buildChat(gc, cache)
+		built := buildChat(gc, cache, now)
 		if built.SiteID == "" {
 			slog.Warn("teams chat sync: siteID vote empty, skipping chat", "chatID", gc.ID, "userID", u.ID)
 			skippedEmptyVote++
@@ -204,7 +206,7 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 		batch = append(batch, built)
 	}
 	if len(batch) > 0 {
-		if err := s.chats.UpsertChats(ctx, batch, s.cfg.Now()); err != nil {
+		if err := s.chats.UpsertChats(ctx, batch); err != nil {
 			return fmt.Errorf("upsert chats: %w", err)
 		}
 		sum.Upserted.Add(int64(len(batch)))

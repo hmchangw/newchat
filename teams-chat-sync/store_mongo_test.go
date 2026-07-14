@@ -30,9 +30,10 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}},
 		SiteID:              "site-a",
-		NeedUserSync:        true,
+		UpdatedAt:           upsertNow,
+		NeedMemberSync:      true,
 	}
-	u := asUpdateOne(t, chatUpsertModel(c, upsertNow))
+	u := asUpdateOne(t, chatUpsertModel(c))
 	assert.Equal(t, bson.M{"_id": "19:g1"}, u.Filter)
 
 	update, ok := u.Update.(bson.M)
@@ -50,8 +51,8 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 	assert.Equal(t, "group", set["chatType"])
 	assert.Equal(t, c.LastUpdatedDateTime, set["lastUpdatedDateTime"])
 	assert.Equal(t, c.Members, set["members"])
-	assert.Equal(t, true, set["needUserSync"])
-	assert.Equal(t, upsertNow, set["updatedAt"])
+	assert.Equal(t, true, set["needMemberSync"])
+	assert.Equal(t, upsertNow, set["updatedAt"], "$set writes the chat's build-time UpdatedAt stamp")
 	assert.NotContains(t, set, "siteID", "$set must never touch siteID")
 	assert.NotContains(t, set, "createdDateTime")
 }
@@ -63,9 +64,10 @@ func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}, {ID: "u2", Account: "bob"}},
 		SiteID:              "site-b",
-		NeedUserSync:        false,
+		UpdatedAt:           upsertNow,
+		NeedMemberSync:      false,
 	}
-	u := asUpdateOne(t, chatUpsertModel(c, upsertNow))
+	u := asUpdateOne(t, chatUpsertModel(c))
 	update, ok := u.Update.(bson.M)
 	require.True(t, ok)
 	assert.NotContains(t, update, "$set", "oneOnOne must never modify an existing doc")
@@ -79,6 +81,6 @@ func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 		"members":             c.Members,
 		"siteID":              "site-b",
 		"updatedAt":           upsertNow,
-		"needUserSync":        false,
+		"needMemberSync":      false,
 	}, soi)
 }

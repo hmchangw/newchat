@@ -4365,9 +4365,9 @@ func TestTeamsChatJSON(t *testing.T) {
 			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
 			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
-		SiteID:       "site-a",
-		UpdatedAt:    time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
-		NeedUserSync: true,
+		SiteID:         "site-a",
+		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync: true,
 	}
 	roundTrip(t, &c, &model.TeamsChat{})
 }
@@ -4425,9 +4425,9 @@ func TestTeamsChatBSON(t *testing.T) {
 			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
 			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
-		SiteID:       "site-a",
-		UpdatedAt:    time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
-		NeedUserSync: true,
+		SiteID:         "site-a",
+		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync: true,
 	}
 	data, err := bson.Marshal(&c)
 	require.NoError(t, err)
@@ -4437,11 +4437,11 @@ func TestTeamsChatBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &rawDoc))
 	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
 	assert.Contains(t, rawDoc, "siteID", "BSON doc must have siteID key")
-	assert.Contains(t, rawDoc, "needUserSync", "BSON doc must have needUserSync key")
+	assert.Contains(t, rawDoc, "needMemberSync", "BSON doc must have needMemberSync key")
 	assert.Contains(t, rawDoc, "members", "BSON doc must have members key")
 	assert.Equal(t, "19:meeting_abc@thread.v2", rawDoc["_id"])
 	assert.Equal(t, "site-a", rawDoc["siteID"])
-	assert.Equal(t, true, rawDoc["needUserSync"])
+	assert.Equal(t, true, rawDoc["needMemberSync"])
 
 	// Round-trip to struct and verify equality
 	var dst model.TeamsChat
@@ -4453,7 +4453,7 @@ func TestTeamsChatBSON(t *testing.T) {
 	assert.True(t, c.LastUpdatedDateTime.UTC().Equal(dst.LastUpdatedDateTime.UTC()), "LastUpdatedDateTime must match")
 	assert.Equal(t, c.SiteID, dst.SiteID)
 	assert.True(t, c.UpdatedAt.UTC().Equal(dst.UpdatedAt.UTC()), "UpdatedAt must match")
-	assert.Equal(t, c.NeedUserSync, dst.NeedUserSync)
+	assert.Equal(t, c.NeedMemberSync, dst.NeedMemberSync)
 	require.Equal(t, len(c.Members), len(dst.Members), "Members count must match")
 	for i, member := range c.Members {
 		assert.Equal(t, member.ID, dst.Members[i].ID)

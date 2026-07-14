@@ -79,6 +79,6 @@ type TeamsChat struct {
 	LastUpdatedDateTime time.Time         `json:"lastUpdatedDateTime" bson:"lastUpdatedDateTime"`
 	Members             []TeamsChatMember `json:"members" bson:"members"`
 	SiteID              string            `json:"siteID" bson:"siteID"`
-	UpdatedAt           time.Time         `json:"updatedAt" bson:"updatedAt"`
-	NeedUserSync        bool              `json:"needUserSync" bson:"needUserSync"`
+	UpdatedAt           time.Time         `json:"updatedAt" bson:"updatedAt"` // stamped now at build time; written on every upsert
+	NeedMemberSync      bool              `json:"needMemberSync" bson:"needMemberSync"`
 }

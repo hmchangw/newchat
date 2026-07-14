@@ -10,7 +10,7 @@ Teams chats into MongoDB. It reads the externally-populated `teams_user`
 collection, fetches each user's chats from the Graph API within a per-user
 watermark window, resolves each chat's owning site by member-majority vote, and
 upserts the result into `teams_chat`. Downstream consumers use `teams_chat`
-(notably its `needUserSync` flag) to drive further sync work.
+(notably its `needMemberSync` flag) to drive further sync work.
 
 ## Topology & auth (decided)
 
@@ -108,7 +108,7 @@ GET /v1.0/users/{uid}/chats
 | Members | `members` | array | `{id, account, visibleHistoryStartDateTime}` per member |
 | SiteID | `siteID` | string | **`$setOnInsert` only — never changes after insert** |
 | UpdatedAt | `updatedAt` | date | Set to now on every write |
-| NeedUserSync | `needUserSync` | bool | `chatType != "oneOnOne"` |
+| NeedMemberSync | `needMemberSync` | bool | `chatType != "oneOnOne"` |
 
 Model structs carry both `json` and `bson` tags (camelCase). Date-times are
 `time.Time` (BSON dates) — they round-trip directly with Graph's ISO-8601.
@@ -145,7 +145,7 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    - `oneOnOne`: **all** fields under `$setOnInsert` — an existing doc is never
      modified (oneOnOne chats never change after insert).
    - group/meeting: `$setOnInsert: {createdDateTime, siteID}`,
-     `$set: {name, chatType, lastUpdatedDateTime, members, needUserSync: true,
+     `$set: {name, chatType, lastUpdatedDateTime, members, needMemberSync: true,
      updatedAt: now}`.
    - siteID immutability is thus enforced at the DB layer; the in-memory dedup
      is an optimization, not a correctness mechanism.
@@ -205,7 +205,7 @@ required vars.
   table-driven):
   - siteID vote: clear majority, tie → lexicographic, unknown members excluded.
   - Cross-worker dedup: same chat from two users → one upsert.
-  - Update-document construction: oneOnOne all-setOnInsert vs group set/setOnInsert split; `needUserSync` per chatType; `name` empty on null topic.
+  - Update-document construction: oneOnOne all-setOnInsert vs group set/setOnInsert split; `needMemberSync` per chatType; `name` empty on null topic.
   - Watermark: advanced on success, held on Graph failure and on upsert failure, skipped when `from >= to`, default-from fallback.
   - Job exit: non-zero when any user fails.
 - **Unit — `pkg/msgraph`** (httptest stubs, existing style): query encoding
@@ -221,7 +221,7 @@ required vars.
 ## Out of scope
 
 - Populating `teams_user` (external).
-- Consuming `needUserSync` (downstream job).
+- Consuming `needMemberSync` (downstream job).
 - Kubernetes CronJob manifests (ops/IaC; `deploy/docker-compose.yml` covers
   local runs).
 - Message/history sync — this job syncs chat metadata only.

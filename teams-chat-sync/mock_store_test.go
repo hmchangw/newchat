@@ -97,17 +97,17 @@ func (m *MockTeamsChatStore) EXPECT() *MockTeamsChatStoreMockRecorder {
 }
 
 // UpsertChats mocks base method.
-func (m *MockTeamsChatStore) UpsertChats(ctx context.Context, chats []model.TeamsChat, now time.Time) error {
+func (m *MockTeamsChatStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpsertChats", ctx, chats, now)
+	ret := m.ctrl.Call(m, "UpsertChats", ctx, chats)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpsertChats indicates an expected call of UpsertChats.
-func (mr *MockTeamsChatStoreMockRecorder) UpsertChats(ctx, chats, now any) *gomock.Call {
+func (mr *MockTeamsChatStoreMockRecorder) UpsertChats(ctx, chats any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertChats", reflect.TypeOf((*MockTeamsChatStore)(nil).UpsertChats), ctx, chats, now)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertChats", reflect.TypeOf((*MockTeamsChatStore)(nil).UpsertChats), ctx, chats)
 }
 
 // MockchatsFetcher is a mock of chatsFetcher interface.
