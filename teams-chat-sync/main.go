@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/teamsstore"
 )
 
 // Config is the job's environment configuration.
@@ -105,7 +106,7 @@ func run() error {
 		return fmt.Errorf("mongo connect: %w", err)
 	}
 	defer mongoutil.Disconnect(context.Background(), client)
-	store := newMongoStore(client.Database(cfg.MongoDB))
+	store := teamsstore.New(client.Database(cfg.MongoDB))
 
 	graph := msgraph.NewChatsClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,

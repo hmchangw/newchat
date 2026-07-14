@@ -32,16 +32,25 @@ context, tracer init, deferred cleanup, `os.Exit(1)` on failure):
 ```
 teams-chat-sync/
 ├── main.go              # Config parse, dependency wiring, run() error
-├── syncer.go            # Orchestrator: load user cache → worker pool → summary
-├── worker.go            # Per-user: fetch chats, dedup, vote siteID, upsert, advance watermark
+├── syncer.go            # Orchestrator + per-user worker: cache, vote, dedup, upsert, watermark
 ├── store.go             # TeamsUserStore + TeamsChatStore interfaces + go:generate mockgen
-├── store_mongo.go       # Mongo implementation (mongoutil.Connect, BulkWrite)
 ├── syncer_test.go       # Unit tests (mocked Graph + mocked store)
 ├── worker_test.go
 ├── mock_store_test.go   # Generated
-├── integration_test.go  # testutil.MongoDB, //go:build integration
 └── deploy/              # Dockerfile, docker-compose.yml, azure-pipelines.yml
+
+pkg/teamsstore/          # SHARED Mongo store for teams_user/teams_chat
+├── teamsstore.go        # Store (ListUsers/SetFrom/UpsertChats), upsert semantics
+├── teamsstore_test.go   # Upsert-document unit tests
+└── integration_test.go  # testutil.MongoDB, //go:build integration
 ```
+
+The Mongo layer is a shared package (`pkg/teamsstore`, same pattern as
+`pkg/userstore`) so downstream consumers — e.g. the member-sync job reading
+`needMemberSync` — reuse the collection names, projections, and the
+$setOnInsert/$set upsert semantics instead of re-implementing them. Models
+stay in `pkg/model`; each consumer defines its own narrow store interfaces
+satisfied by `*teamsstore.Store`.
 
 No NATS connection and no `SITE_ID` env — the job is global and talks only to
 MongoDB and Graph.

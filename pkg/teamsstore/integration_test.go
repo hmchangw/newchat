@@ -1,6 +1,6 @@
 //go:build integration
 
-package main
+package teamsstore
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-func seedUsers(t *testing.T, store *mongoStore, users ...model.TeamsUser) {
+func seedUsers(t *testing.T, store *Store, users ...model.TeamsUser) {
 	t.Helper()
 	docs := make([]any, 0, len(users))
 	for _, u := range users {
@@ -28,8 +28,8 @@ func seedUsers(t *testing.T, store *mongoStore, users ...model.TeamsUser) {
 }
 
 func TestMongoStore_ListUsers(t *testing.T) {
-	db := testutil.MongoDB(t, "teamssync")
-	store := newMongoStore(db)
+	db := testutil.MongoDB(t, "teamsstore")
+	store := New(db)
 	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	seedUsers(t, store,
 		model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice", From: &from},
@@ -48,8 +48,8 @@ func TestMongoStore_ListUsers(t *testing.T) {
 }
 
 func TestMongoStore_SetFrom(t *testing.T) {
-	db := testutil.MongoDB(t, "teamssync")
-	store := newMongoStore(db)
+	db := testutil.MongoDB(t, "teamsstore")
+	store := New(db)
 	seedUsers(t, store, model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice"})
 
 	to := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
@@ -75,8 +75,8 @@ func groupChat(id, name, siteID string, updatedAt time.Time) model.TeamsChat {
 }
 
 func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
-	db := testutil.MongoDB(t, "teamssync")
-	store := newMongoStore(db)
+	db := testutil.MongoDB(t, "teamsstore")
+	store := New(db)
 	ctx := context.Background()
 	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
@@ -95,8 +95,8 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 }
 
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
-	db := testutil.MongoDB(t, "teamssync")
-	store := newMongoStore(db)
+	db := testutil.MongoDB(t, "teamsstore")
+	store := New(db)
 	ctx := context.Background()
 	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
@@ -128,8 +128,8 @@ func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 }
 
 func TestMongoStore_UpsertChats_MixedBatchAndEmpty(t *testing.T) {
-	db := testutil.MongoDB(t, "teamssync")
-	store := newMongoStore(db)
+	db := testutil.MongoDB(t, "teamsstore")
+	store := New(db)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 
