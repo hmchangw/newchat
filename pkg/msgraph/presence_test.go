@@ -42,7 +42,7 @@ func TestGetPresencesByUserId_ROPC(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	pc := NewPresenceClient(
+	pc, err := NewPresenceClient(
 		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
@@ -74,7 +74,7 @@ func TestGetPresencesByUserId_UserAgentOverride(t *testing.T) {
 	defer graphSrv.Close()
 
 	pc, err := NewPresenceClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", UserAgent: custom},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s", UserAgent: custom},
 		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
@@ -85,7 +85,8 @@ func TestGetPresencesByUserId_UserAgentOverride(t *testing.T) {
 }
 
 func TestGetPresencesByUserId_Empty(t *testing.T) {
-	pc := NewPresenceClient(&Config{TenantID: "t"}, ROPCCredentials{})
+	pc, err := NewPresenceClient(&Config{TenantID: "t"}, ROPCCredentials{})
+	require.NoError(t, err)
 	res, err := pc.GetPresencesByUserId(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, res)
@@ -114,7 +115,7 @@ func TestGetPresencesByUserId_ThroughProxy(t *testing.T) {
 	defer proxy.Close()
 
 	pc, err := NewPresenceClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy.URL},
+		&Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy.URL},
 		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
 		WithTokenURL("http://login.example.test/token"), WithBaseURL("http://graph.example.test"),
 	)
@@ -141,7 +142,7 @@ func TestNewPresenceClient_InvalidProxyURL(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			pc, err := NewPresenceClient(
-				Config{TenantID: "t", ProxyURL: tc.proxy},
+				&Config{TenantID: "t", ProxyURL: tc.proxy},
 				ROPCCredentials{},
 			)
 			require.Error(t, err)
