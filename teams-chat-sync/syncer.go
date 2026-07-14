@@ -85,6 +85,8 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser) strin
 // accounts and the owning site from the user cache. Unknown members are kept
 // with an empty account. UpdatedAt is intentionally left zero — the store
 // stamps it at write time.
+//
+//nolint:gocritic // hugeParam: gc is consumed once per chat on a batch path; passing by value keeps the mapper pure.
 func buildChat(gc msgraph.Chat, cache map[string]cachedUser) model.TeamsChat {
 	members := make([]model.TeamsChatMember, 0, len(gc.Members))
 	for _, m := range gc.Members {
