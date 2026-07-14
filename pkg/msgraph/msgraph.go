@@ -137,6 +137,9 @@ type graphClient struct {
 	mu      sync.Mutex
 	token   string
 	tokenAt time.Time // when the cached token expires
+
+	throttleMu    sync.Mutex
+	throttleUntil time.Time // tenant-wide gate: no request is sent before this instant
 }
 
 // Option customizes the client (used in tests to point at an httptest server).
