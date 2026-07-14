@@ -1818,27 +1818,6 @@ func TestThreadFanOutAccounts(t *testing.T) {
 			memberMentions: map[string]struct{}{"bob": {}},
 			want:           []string{"alice", "bob"},
 		},
-		{
-			name:         "parent sender always included, even without a thread_rooms row yet",
-			sender:       "alice",
-			parentSender: "carol",
-			followers:    map[string]struct{}{},
-			want:         []string{"alice", "carol"},
-		},
-		{
-			name:         "parent sender deduped against sender and followers",
-			sender:       "alice",
-			parentSender: "alice",
-			followers:    map[string]struct{}{"bob": {}},
-			want:         []string{"alice", "bob"},
-		},
-		{
-			name:         "bot parent sender skipped",
-			sender:       "alice",
-			parentSender: "system.bot",
-			followers:    map[string]struct{}{"bob": {}},
-			want:         []string{"alice", "bob"},
-		},
 	}
 
 	for _, tc := range tests {
@@ -2158,7 +2137,7 @@ func TestHandleThreadCreated_ChannelRoom_FiltersNonMemberMentions(t *testing.T) 
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, false)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	subjects := map[string]bool{}
@@ -2209,56 +2188,6 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 	// No other followers → sender still receives their own echo (multi-device parity).
 	require.Len(t, pub.records, 1)
 	assert.Equal(t, subject.UserRoomEvent("alice"), pub.records[0].subject)
-}
-
-// Race regression guard: on the first reply thread_rooms may not exist yet, so
-// GetThreadFollowers returns empty and replyAccounts is unavailable. The parent
-// author (fetched from history-service) must still receive the reply — they are
-// never in replyAccounts on the first reply, so an empty follower set must not drop
-// them.
-func TestHandleThreadCreated_ChannelRoom_ParentAuthorFannedOutBeforeThreadRoomExists(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
-	parentAt := msgTime.Add(-time.Hour)
-
-	// thread_rooms not created yet → no followers; parent authored by carol.
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
-	parentFetcher := stubParentFetcher{info: &ParentMessageInfo{SenderAccount: "carol", CreatedAt: parentAt}}
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: msgTime.UnixMilli(),
-		Message: model.Message{
-			ID:                    "reply-1",
-			RoomID:                "r1",
-			UserID:                "u-alice",
-			UserAccount:           "alice",
-			Content:               "a plain thread reply with no mentions",
-			CreatedAt:             msgTime,
-			ThreadParentMessageID: "parent-1",
-			TShow:                 false,
-		},
-	}
-	data, _ := json.Marshal(evt)
-
-	h := NewHandler(store, us, pub, keyStore, parentFetcher, false)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	got := map[string]bool{}
-	for _, r := range pub.records {
-		got[r.subject] = true
-	}
-	require.Len(t, pub.records, 2)
-	assert.True(t, got[subject.UserRoomEvent("alice")], "reply sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("carol")], "parent author receives the reply despite empty replyAccounts")
 }
 
 func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
@@ -2342,164 +2271,6 @@ func TestHandleThreadCreated_DMRoom_WithMention_NoSubscriptionWrite(t *testing.T
 	require.Len(t, pub.records, 2)
 }
 
-func TestHandleThreadCreated_ChannelExcludesRestrictedAndNonMemberMentions(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	parentAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	joinedAfter := parentAt.Add(time.Hour)
-	msgTime := parentAt.Add(2 * time.Hour)
-
-	// bob: member, full access → included. carol: member, joined after parent → excluded.
-	// dave: absent from the map → non-member → excluded.
-	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetHistorySharedSince(gomock.Any(), "room-1", gomock.Any()).
-		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(testUsers, nil)
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: msgTime.UnixMilli(),
-		Message: model.Message{
-			ID:                    "reply-1",
-			RoomID:                "room-1",
-			UserID:                "u-alice",
-			UserAccount:           "alice",
-			Content:               "@bob @carol @dave hi",
-			CreatedAt:             msgTime,
-			ThreadParentMessageID: "parent-1",
-			TShow:                 false,
-		},
-	}
-	data, _ := json.Marshal(evt)
-
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	got := map[string]bool{}
-	for _, r := range pub.records {
-		got[r.subject] = true
-	}
-	assert.True(t, got[subject.UserRoomEvent("alice")], "sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("bob")], "unrestricted member mentionee receives the reply")
-	assert.False(t, got[subject.UserRoomEvent("carol")], "member who joined after the parent is excluded")
-	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded")
-}
-
-// When the gatekeeper already resolved the parent, the event carries both the
-// parent createdAt and the parent sender account. broadcast-worker must use them
-// directly and skip the history-service FetchParent round-trip — while still
-// delivering to the parent author (race-free) and gating mentions by the event's
-// createdAt. The MockParentFetcher registers no EXPECT, so any FetchParent call
-// fails the test.
-func TestHandleThreadCreated_ChannelRoom_UsesEventParent_SkipsFetch(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-	parentFetcher := NewMockParentFetcher(ctrl) // no EXPECT → FetchParent must NOT be called
-
-	parentAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	joinedAfter := parentAt.Add(time.Hour)
-	msgTime := parentAt.Add(2 * time.Hour)
-
-	// bob: unrestricted member → included. carol: joined after the parent → excluded
-	// (proves the gate ran against the event-carried createdAt, not a fetched value).
-	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetHistorySharedSince(gomock.Any(), "room-1", gomock.Any()).
-		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(testUsers, nil)
-
-	evt := model.MessageEvent{
-		Event:                     model.EventCreated,
-		SiteID:                    "site-a",
-		Timestamp:                 msgTime.UnixMilli(),
-		ThreadParentSenderAccount: "zoe", // gatekeeper-resolved parent author
-		Message: model.Message{
-			ID:                           "reply-1",
-			RoomID:                       "room-1",
-			UserID:                       "u-alice",
-			UserAccount:                  "alice",
-			Content:                      "@bob @carol hi",
-			CreatedAt:                    msgTime,
-			ThreadParentMessageID:        "parent-1",
-			ThreadParentMessageCreatedAt: &parentAt, // gatekeeper-resolved createdAt
-			TShow:                        false,
-		},
-	}
-	data, _ := json.Marshal(evt)
-
-	h := NewHandler(store, us, pub, keyStore, parentFetcher, false)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	got := map[string]bool{}
-	for _, r := range pub.records {
-		got[r.subject] = true
-	}
-	assert.True(t, got[subject.UserRoomEvent("alice")], "sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("zoe")], "parent author (from event) receives the reply race-free")
-	assert.True(t, got[subject.UserRoomEvent("bob")], "unrestricted member mentionee receives the reply")
-	assert.False(t, got[subject.UserRoomEvent("carol")], "member who joined after the event-carried parent createdAt is excluded")
-}
-
-// When the event lacks the parent sender account (e.g. gatekeeper soft-fail),
-// broadcast-worker must fall back to FetchParent even if createdAt is present —
-// both values come from the same fetch.
-func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_FallsBackToFetch(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-	parentFetcher := NewMockParentFetcher(ctrl)
-
-	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
-	parentAt := msgTime.Add(-time.Hour)
-
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
-	// createdAt present but no sender account → must fetch (returns the parent author).
-	parentFetcher.EXPECT().
-		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
-		Return(&ParentMessageInfo{SenderAccount: "carol", CreatedAt: parentAt}, nil)
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: msgTime.UnixMilli(),
-		Message: model.Message{
-			ID:                           "reply-1",
-			RoomID:                       "r1",
-			UserID:                       "u-alice",
-			UserAccount:                  "alice",
-			Content:                      "a plain thread reply",
-			CreatedAt:                    msgTime,
-			ThreadParentMessageID:        "parent-1",
-			ThreadParentMessageCreatedAt: &parentAt,
-			TShow:                        false,
-		},
-	}
-	data, _ := json.Marshal(evt)
-
-	h := NewHandler(store, us, pub, keyStore, parentFetcher, false)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	got := map[string]bool{}
-	for _, r := range pub.records {
-		got[r.subject] = true
-	}
-	assert.True(t, got[subject.UserRoomEvent("alice")], "reply sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("carol")], "parent author (from fetch fallback) receives the reply")
-}
-
 func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -2558,25 +2329,22 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	assert.True(t, subjects[subject.UserRoomEvent("carol")])
 }
 
-func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *testing.T) {
+func TestHandleThreadUpdated_ChannelExcludesNonMemberMentions(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	parentAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	joinedAfter := parentAt.Add(time.Hour)
-	msgTime := parentAt.Add(2 * time.Hour)
+	msgTime := time.Date(2026, 6, 1, 14, 0, 0, 0, time.UTC)
 	editedAt := msgTime.Add(time.Minute)
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	// bob: member full access → included. carol: joined after parent → excluded.
-	// dave: absent → non-member → excluded.
-	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).
-		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	// Only the mentioned accounts are queried (#309); bob is a member, carol and dave are not.
+	store.EXPECT().FilterRoomMembers(gomock.Any(), "r1", gomock.InAnyOrder([]string{"bob", "carol", "dave"})).
+		Return(map[string]struct{}{"bob": {}}, nil)
 
 	evt := model.MessageEvent{
 		Event:     model.EventUpdated,
@@ -2596,7 +2364,7 @@ func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2604,28 +2372,27 @@ func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 		got[r.subject] = true
 	}
 	assert.True(t, got[subject.UserRoomEvent("alice")], "sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("bob")], "unrestricted member mentionee receives the edit")
-	assert.False(t, got[subject.UserRoomEvent("carol")], "member who joined after the parent is excluded")
-	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded")
+	assert.True(t, got[subject.UserRoomEvent("bob")], "member mentionee receives the edit")
+	assert.False(t, got[subject.UserRoomEvent("carol")], "non-member mentionee is excluded (#309)")
+	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded (#309)")
 }
 
-func TestHandleThreadDeleted_ChannelExcludesRestrictedAndNonMemberMentions(t *testing.T) {
+func TestHandleThreadDeleted_ChannelExcludesNonMemberMentions(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	parentAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	joinedAfter := parentAt.Add(time.Hour)
-	msgTime := parentAt.Add(2 * time.Hour)
+	msgTime := time.Date(2026, 6, 1, 14, 0, 0, 0, time.UTC)
 	deletedAt := msgTime.Add(time.Minute)
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).
-		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	// Only the mentioned accounts are queried (#309); bob is a member, carol and dave are not.
+	store.EXPECT().FilterRoomMembers(gomock.Any(), "r1", gomock.InAnyOrder([]string{"bob", "carol", "dave"})).
+		Return(map[string]struct{}{"bob": {}}, nil)
 
 	evt := model.MessageEvent{
 		Event:     model.EventDeleted,
@@ -2644,7 +2411,7 @@ func TestHandleThreadDeleted_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	}
 	data, _ := json.Marshal(evt)
 
-	h := NewHandler(store, us, pub, keyStore, stubParentFetcher{info: &ParentMessageInfo{CreatedAt: parentAt}}, false)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	got := map[string]bool{}
@@ -2652,9 +2419,9 @@ func TestHandleThreadDeleted_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 		got[r.subject] = true
 	}
 	assert.True(t, got[subject.UserRoomEvent("alice")], "sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("bob")], "unrestricted member mentionee receives the delete")
-	assert.False(t, got[subject.UserRoomEvent("carol")], "member who joined after the parent is excluded")
-	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded")
+	assert.True(t, got[subject.UserRoomEvent("bob")], "member mentionee receives the delete")
+	assert.False(t, got[subject.UserRoomEvent("carol")], "non-member mentionee is excluded (#309)")
+	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded (#309)")
 }
 
 func TestHandleThreadUpdated_ChannelRoom_GetThreadFollowersError(t *testing.T) {
