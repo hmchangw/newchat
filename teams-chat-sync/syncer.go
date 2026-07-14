@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -100,4 +104,104 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser) model.TeamsChat {
 		SiteID:              voteSiteID(gc.Members, cache),
 		NeedUserSync:        gc.ChatType != model.TeamsChatTypeOneOnOne,
 	}
+}
+
+// summary is the per-run outcome reported in the final log line. Total and
+// Skipped are written only by the dispatching goroutine; the atomics are
+// updated by workers.
+type summary struct {
+	Total, Skipped    int
+	Succeeded, Failed atomic.Int64
+	Upserted, Deduped atomic.Int64
+}
+
+// run executes one full sync: load the user cache, fan eligible users out to
+// MaxWorkers workers, wait, and report. It returns an error when any user
+// failed so main exits non-zero and the CronJob records the failure.
+func (s *syncer) run(ctx context.Context) error {
+	users, err := s.users.ListUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("load teams users: %w", err)
+	}
+	cache := make(map[string]cachedUser, len(users))
+	for _, u := range users {
+		cache[u.ID] = cachedUser{siteID: u.SiteID, account: u.Account}
+	}
+
+	to := startOfDayUTC(s.cfg.Now())
+	var sum summary
+	sum.Total = len(users)
+
+	jobs := make(chan model.TeamsUser)
+	var wg sync.WaitGroup
+	for i := 0; i < s.cfg.MaxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for u := range jobs {
+				if err := s.syncUser(ctx, u, to, cache, &sum); err != nil {
+					sum.Failed.Add(1)
+					slog.Error("teams chat sync: user failed", "userID", u.ID, "error", err)
+					continue
+				}
+				sum.Succeeded.Add(1)
+			}
+		}()
+	}
+	for _, u := range users {
+		if !s.effectiveFrom(u).Before(to) {
+			sum.Skipped++
+			continue
+		}
+		jobs <- u
+	}
+	close(jobs)
+	wg.Wait()
+
+	slog.Info("teams chat sync: run complete",
+		"usersTotal", sum.Total, "usersSucceeded", sum.Succeeded.Load(),
+		"usersFailed", sum.Failed.Load(), "usersSkipped", sum.Skipped,
+		"chatsUpserted", sum.Upserted.Load(), "chatsDeduped", sum.Deduped.Load())
+
+	if failed := sum.Failed.Load(); failed > 0 {
+		return fmt.Errorf("%d of %d users failed", failed, sum.Total)
+	}
+	return nil
+}
+
+// effectiveFrom is the user's watermark, falling back to the configured
+// default for users that have never synced.
+func (s *syncer) effectiveFrom(u model.TeamsUser) time.Time {
+	if u.From != nil {
+		return *u.From
+	}
+	return s.cfg.DefaultFrom
+}
+
+// syncUser fetches one user's chat window, upserts the chats this worker
+// claimed first, and advances the user's watermark only after everything
+// succeeded — a failed user keeps its old watermark and is retried next run.
+func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, cache map[string]cachedUser, sum *summary) error {
+	graphChats, err := s.graph.ListUserChats(ctx, u.ID, s.effectiveFrom(u), to)
+	if err != nil {
+		return fmt.Errorf("list user chats: %w", err)
+	}
+	batch := make([]model.TeamsChat, 0, len(graphChats))
+	for _, gc := range graphChats {
+		if !s.claim(gc.ID) {
+			sum.Deduped.Add(1)
+			continue
+		}
+		batch = append(batch, buildChat(gc, cache))
+	}
+	if len(batch) > 0 {
+		if err := s.chats.UpsertChats(ctx, batch, s.cfg.Now()); err != nil {
+			return fmt.Errorf("upsert chats: %w", err)
+		}
+		sum.Upserted.Add(int64(len(batch)))
+	}
+	if err := s.users.SetFrom(ctx, u.ID, to); err != nil {
+		return fmt.Errorf("advance watermark: %w", err)
+	}
+	return nil
 }
