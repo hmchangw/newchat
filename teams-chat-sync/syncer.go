@@ -24,6 +24,10 @@ type syncConfig struct {
 	MaxWorkers  int
 	DefaultFrom time.Time
 	Now         func() time.Time
+	// DefaultSiteID is assigned to a chat whose siteID vote is empty (no member
+	// found in the user cache). When empty, empty-vote chats are skipped with a
+	// warning and the user is failed so the window retries next run.
+	DefaultSiteID string
 }
 
 // syncer runs one full teams-chat sync. processed is the cross-worker claimed
@@ -62,10 +66,11 @@ func (s *syncer) claim(chatID string) bool {
 
 // voteSiteID returns the majority siteID among the members present in the
 // cache; ties break to the lexicographically smallest siteID so the result is
-// deterministic across runs and map iteration orders. Returns "" when no
-// member is known (not expected in practice: the fetching user is always a
-// member and always cached).
-func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser) string {
+// deterministic across runs and map iteration orders. When no member is known
+// (not expected in practice: the fetching user is always a member and always
+// cached) it falls back to defaultSiteID — which may itself be empty when no
+// default is configured; the caller treats "" as unresolvable.
+func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defaultSiteID string) string {
 	counts := make(map[string]int)
 	for _, m := range members {
 		if cu, ok := cache[m.UserID]; ok {
@@ -78,6 +83,9 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser) strin
 			best, bestN = site, n
 		}
 	}
+	if best == "" {
+		return defaultSiteID
+	}
 	return best
 }
 
@@ -87,7 +95,7 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser) strin
 // verbatim on every upsert.
 //
 //nolint:gocritic // hugeParam: gc is consumed once per chat on a batch path; passing by value keeps the mapper pure.
-func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time) model.TeamsChat {
+func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defaultSiteID string) model.TeamsChat {
 	members := make([]model.TeamsChatMember, 0, len(gc.Members))
 	for _, m := range gc.Members {
 		members = append(members, model.TeamsChatMember{
@@ -103,7 +111,7 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time) mode
 		CreatedDateTime:     gc.CreatedDateTime,
 		LastUpdatedDateTime: gc.LastUpdatedDateTime,
 		Members:             members,
-		SiteID:              voteSiteID(gc.Members, cache),
+		SiteID:              voteSiteID(gc.Members, cache, defaultSiteID),
 		UpdatedAt:           now,
 		NeedMemberSync:      gc.ChatType != model.TeamsChatTypeOneOnOne,
 	}
@@ -197,7 +205,7 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 			sum.Deduped.Add(1)
 			continue
 		}
-		built := buildChat(gc, cache, now)
+		built := buildChat(gc, cache, now, s.cfg.DefaultSiteID)
 		if built.SiteID == "" {
 			slog.Warn("teams chat sync: siteID vote empty, skipping chat", "chatID", gc.ID, "userID", u.ID)
 			skippedEmptyVote++

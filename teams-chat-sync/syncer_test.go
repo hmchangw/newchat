@@ -38,20 +38,24 @@ func TestVoteSiteID(t *testing.T) {
 		"c1": {siteID: "site-c", account: "carl"},
 	}
 	tests := []struct {
-		name    string
-		members []msgraph.ChatMember
-		want    string
+		name          string
+		members       []msgraph.ChatMember
+		defaultSiteID string
+		want          string
 	}{
-		{"clear majority", []msgraph.ChatMember{member("a1"), member("a2"), member("b1")}, "site-a"},
-		{"tie breaks lexicographically", []msgraph.ChatMember{member("a1"), member("b1")}, "site-a"},
-		{"tie c vs b picks b", []msgraph.ChatMember{member("c1"), member("b1")}, "site-b"},
-		{"unknown members do not vote", []msgraph.ChatMember{member("ghost"), member("b1")}, "site-b"},
-		{"all unknown yields empty", []msgraph.ChatMember{member("ghost")}, ""},
-		{"no members yields empty", nil, ""},
+		{"clear majority", []msgraph.ChatMember{member("a1"), member("a2"), member("b1")}, "", "site-a"},
+		{"tie breaks lexicographically", []msgraph.ChatMember{member("a1"), member("b1")}, "", "site-a"},
+		{"tie c vs b picks b", []msgraph.ChatMember{member("c1"), member("b1")}, "", "site-b"},
+		{"unknown members do not vote", []msgraph.ChatMember{member("ghost"), member("b1")}, "", "site-b"},
+		{"all unknown yields empty", []msgraph.ChatMember{member("ghost")}, "", ""},
+		{"no members yields empty", nil, "", ""},
+		{"all unknown falls back to default", []msgraph.ChatMember{member("ghost")}, "site-default", "site-default"},
+		{"no members falls back to default", nil, "site-default", "site-default"},
+		{"default never overrides a real vote", []msgraph.ChatMember{member("b1")}, "site-default", "site-b"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, voteSiteID(tc.members, cache))
+			assert.Equal(t, tc.want, voteSiteID(tc.members, cache, tc.defaultSiteID))
 		})
 	}
 }
@@ -71,7 +75,7 @@ func TestBuildChat(t *testing.T) {
 		},
 	}
 	buildNow := time.Date(2026, 7, 14, 9, 30, 0, 0, time.UTC)
-	c := buildChat(gc, cache, buildNow)
+	c := buildChat(gc, cache, buildNow, "")
 	assert.Equal(t, "19:g1", c.ID)
 	assert.Equal(t, "Project X", c.Name)
 	assert.Equal(t, "group", c.ChatType)
@@ -85,9 +89,15 @@ func TestBuildChat(t *testing.T) {
 }
 
 func TestBuildChat_OneOnOne(t *testing.T) {
-	c := buildChat(msgraph.Chat{ID: "19:one1", ChatType: model.TeamsChatTypeOneOnOne, Topic: ""}, nil, time.Now())
+	c := buildChat(msgraph.Chat{ID: "19:one1", ChatType: model.TeamsChatTypeOneOnOne, Topic: ""}, nil, time.Now(), "")
 	assert.Equal(t, "", c.Name)
 	assert.False(t, c.NeedMemberSync, "oneOnOne never needs member sync")
+}
+
+func TestBuildChat_UnknownMembersUseDefaultSiteID(t *testing.T) {
+	gc := msgraph.Chat{ID: "19:g9", ChatType: "group", Members: []msgraph.ChatMember{{UserID: "ghost"}}}
+	c := buildChat(gc, nil, time.Now(), "site-default")
+	assert.Equal(t, "site-default", c.SiteID)
 }
 
 func TestSyncerClaim_FirstWinsConcurrently(t *testing.T) {

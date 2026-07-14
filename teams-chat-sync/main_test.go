@@ -25,6 +25,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 8, cfg.MaxWorkers)
 	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
 	assert.Equal(t, "2026-04-01T00:00:00Z", cfg.DefaultFrom)
+	assert.Equal(t, "", cfg.DefaultSiteID, "no default siteID unless configured")
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 
 	from, err := time.Parse(time.RFC3339, cfg.DefaultFrom)

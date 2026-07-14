@@ -138,9 +138,10 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    smallest siteID (deterministic across runs). The fetching user is always a
    member and always in the cache, so there is normally ≥ 1 voter. If the vote
    is nonetheless empty (e.g. Graph returns a truncated/empty member list), the
-   chat is **skipped with a warning** — never upserted with `siteID: ""` (which
-   `$setOnInsert` would lock in forever) — and the user is marked failed so the
-   watermark holds and the window is retried next run.
+   chat falls back to the configured `SYNC_DEFAULT_SITE_ID`; when that is unset
+   too, the chat is **skipped with a warning** — never upserted with
+   `siteID: ""` (which `$setOnInsert` would lock in forever) — and the user is
+   marked failed so the watermark holds and the window is retried next run.
 6. **Upsert** (one `BulkWrite` of upserts per Graph page, keyed on `_id`):
    - `oneOnOne`: **all** fields under `$setOnInsert` — an existing doc is never
      modified (oneOnOne chats never change after insert).
@@ -170,6 +171,7 @@ required vars.
 | `MONGO_DB` | `chat` | Database name |
 | `MAX_WORKERS` | `8` | Worker pool size |
 | `SYNC_DEFAULT_FROM` | `2026-04-01T00:00:00Z` | RFC3339 watermark for users with no `from` |
+| `SYNC_DEFAULT_SITE_ID` | *(empty)* | Fallback siteID for chats whose member vote is empty; when unset those chats are skipped with a warning |
 | `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |

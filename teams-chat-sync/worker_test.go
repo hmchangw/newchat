@@ -197,6 +197,32 @@ func TestRun_EmptySiteIDVote_MixedWithGoodChat_UpsertsOnlyGoodAndFailsUser(t *te
 	assert.Contains(t, err.Error(), "1 of 1 users failed")
 }
 
+func TestRun_EmptySiteIDVote_ConfiguredDefaultIsUsed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := NewMockTeamsUserStore(ctrl)
+	chats := NewMockTeamsChatStore(ctrl)
+	graph := NewMockchatsFetcher(ctrl)
+	s := newSyncer(users, chats, graph, syncConfig{
+		MaxWorkers: 1, DefaultFrom: wtDefaultFrom, Now: fixedNow, DefaultSiteID: "site-default",
+	})
+
+	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
+		{ID: "u1", SiteID: "site-a", Account: "alice"},
+	}, nil)
+	// The only member is unknown, but a default siteID is configured: the chat
+	// is upserted with the default instead of being skipped, and the user succeeds.
+	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).
+		Return([]msgraph.Chat{graphChat("19:unknown", "unknown-user")}, nil)
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Len(1)).DoAndReturn(
+		func(_ context.Context, batch []model.TeamsChat) error {
+			assert.Equal(t, "site-default", batch[0].SiteID)
+			return nil
+		})
+	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
+
+	require.NoError(t, s.run(context.Background()))
+}
+
 func TestRun_ListUsersFailure(t *testing.T) {
 	s, users, _, _ := newTestSyncer(t, 1)
 	users.EXPECT().ListUsers(gomock.Any()).Return(nil, fmt.Errorf("mongo down"))
