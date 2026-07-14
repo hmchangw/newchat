@@ -201,6 +201,21 @@ func (mr *MockThreadStoreMockRecorder) EnsureThreadRoom(ctx, room any) *gomock.C
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureThreadRoom", reflect.TypeOf((*MockThreadStore)(nil).EnsureThreadRoom), ctx, room)
 }
 
+// GetHistorySharedSince mocks base method.
+func (m *MockThreadStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetHistorySharedSince", ctx, roomID, accounts)
+	ret0, _ := ret[0].(map[string]*time.Time)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetHistorySharedSince indicates an expected call of GetHistorySharedSince.
+func (mr *MockThreadStoreMockRecorder) GetHistorySharedSince(ctx, roomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHistorySharedSince", reflect.TypeOf((*MockThreadStore)(nil).GetHistorySharedSince), ctx, roomID, accounts)
+}
+
 // InsertThreadSubscription mocks base method.
 func (m *MockThreadStore) InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
 	m.ctrl.T.Helper()

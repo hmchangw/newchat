@@ -592,7 +592,8 @@ func TestHandler_ProcessMessage_MigratedThreadReply_SuppressesBadgeAndOutbox(t *
 	mockThreadStore.EXPECT().AddReplyAccounts(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	mockUserStore.EXPECT().FindUserByID(gomock.Any(), "u-1").Return(user, nil)
-	mockStore.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(parentCreatedAt, true, nil)
+	// Event carries the parent createdAt, so the handler skips the re-resolve; tolerate 0 calls.
+	mockStore.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(parentCreatedAt, true, nil).AnyTimes()
 	mockThreadStore.EXPECT().EnsureThreadRoom(gomock.Any(), gomock.Any()).Return(&model.ThreadRoom{ID: "tr-99"}, false, nil)
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
@@ -2321,19 +2322,14 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 	mockUserStore := NewMockUserStore(ctrl)
 	mockThreadStore := NewMockThreadStore(ctrl)
 
+	// No GetMessageCreatedAt expectation is registered: the event carries the parent
+	// createdAt, so the handler must not re-resolve it from Cassandra. Any call fails the test.
 	mockUserStore.EXPECT().FindUserByID(gomock.Any(), "u-1").Return(user, nil)
-	mockThreadStore.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(errThreadRoomExists)
-	mockThreadStore.EXPECT().GetThreadRoomByParentMessageID(gomock.Any(), "msg-parent").
-		Return(&model.ThreadRoom{ID: "tr-99"}, nil)
+	mockThreadStore.EXPECT().EnsureThreadRoom(gomock.Any(), gomock.Any()).Return(&model.ThreadRoom{ID: "tr-99"}, false, nil)
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-	mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
-	mockUserStore.EXPECT().FindUserByID(gomock.Any(), "u-parent").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
-	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
-	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
+	mockThreadStore.EXPECT().UpsertThreadSubscriptionAdvancingLastSeen(gomock.Any(), gomock.Any(), now).Return(nil)
 	mockThreadStore.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
-	mockThreadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-99", "alice", now).Return(nil)
 	mockStore.EXPECT().SaveThreadMessage(gomock.Any(), &threadMsg, &expectedSender, "site-a", "tr-99").
 		Return(&expectedTcount, nil)
 
