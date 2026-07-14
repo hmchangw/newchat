@@ -106,9 +106,9 @@ func TestHistoryMessageReader_GetMessageReadMeta(t *testing.T) {
 			Sender:         cassandra.Participant{ID: "u-alice", Account: account},
 			ThreadParentID: "parent-1", ThreadRoomID: "thread-room-1", TShow: false,
 		}
-		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(msg)
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 
@@ -127,9 +127,9 @@ func TestHistoryMessageReader_GetMessageReadMeta(t *testing.T) {
 			Sender:         cassandra.Participant{ID: "u-alice", Account: account},
 			ThreadParentID: "parent-1", ThreadRoomID: "thread-room-1", TShow: true,
 		}
-		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(msg)
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 
