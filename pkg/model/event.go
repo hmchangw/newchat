@@ -227,7 +227,10 @@ type MemberAddEvent struct {
 	RequesterAccount   string   `json:"requesterAccount,omitempty" bson:"requesterAccount,omitempty"`
 	JoinedAt           int64    `json:"joinedAt"           bson:"joinedAt"`
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
-	Timestamp          int64    `json:"timestamp"          bson:"timestamp"`
+	// Members mirrors member.list (enrich=true); org-expanded accounts ride Accounts only.
+	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
+	Members   []RoomMember `json:"members,omitempty" bson:"members,omitempty"`
+	Timestamp int64        `json:"timestamp"         bson:"timestamp"`
 }
 
 // Participant represents a user with display name info for client rendering.

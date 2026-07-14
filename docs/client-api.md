@@ -1215,6 +1215,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
 | `accounts` | string[] | The newly added accounts. |
+| `members` | [RoomMember](#roommember)[] | The created memberships in the same enriched shape as [List Members](#list-members) (`enrich: true`): org entries first (`orgName`, `memberCount`, `orgDescription`), then one individual entry per newly subscribed direct add (`engName`, `chineseName`, `sectName`, `employeeId`). Accounts joined via org expansion appear in `accounts` only — their org entry represents them, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |

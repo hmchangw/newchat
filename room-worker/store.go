@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 )
 
@@ -108,6 +109,10 @@ type SubscriptionStore interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 	HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error)
 	GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error)
+	// FetchOrgDisplayUsers returns the dept/sect display rows feeding the pkg/orgdisplay rollup.
+	FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error)
+	// ListOrgRoomMembers returns the room's existing org rows among orgIDs so re-adds/redeliveries reuse the persisted envelope.
+	ListOrgRoomMembers(ctx context.Context, roomID string, orgIDs []string) ([]model.RoomMember, error)
 
 	// ListAddMemberCandidates: per-user {hasSub, hasIndividualRow} flags so the worker splits into needSub vs needIRM (org→individual upgrade).
 	ListAddMemberCandidates(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]AddMemberCandidate, error)

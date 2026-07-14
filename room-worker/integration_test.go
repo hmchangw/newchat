@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -1082,6 +1083,209 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 	assert.Equal(t, "alice", sysEvt.Message.UserAccount, "sender is the requester")
 	assert.Equal(t, `"Alice 爱丽丝" added 2 people to the chatroom`, sysEvt.Message.Content,
 		"multi-add Content uses formatAddedCounts(requester, 2, 0)")
+}
+
+func TestMongoStore_FetchOrgDisplayUsers(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	mustInsertUser(t, db, &model.User{ID: "u1", Account: "carol", SiteID: "site-A",
+		SectID: "eng", SectName: "Engineering", SectTCName: "工程", SectDescription: "Builds the product"})
+	mustInsertUser(t, db, &model.User{ID: "u2", Account: "dave", SiteID: "site-A",
+		DeptID: "eng", DeptName: "Engineering Dept", DeptDescription: "The whole department"})
+	mustInsertUser(t, db, &model.User{ID: "u3", Account: "erin", SiteID: "site-A",
+		SectID: "ops", SectName: "Operations"})
+
+	rows, err := store.FetchOrgDisplayUsers(ctx, []string{"eng"})
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "only users whose deptId or sectId matches the org")
+
+	bySect := map[string]orgdisplay.User{}
+	for _, r := range rows {
+		key := r.SectID
+		if key == "" {
+			key = r.DeptID
+		}
+		bySect[key+":"+r.SectName+r.DeptName] = r
+	}
+	require.Contains(t, bySect, "eng:Engineering")
+	sect := bySect["eng:Engineering"]
+	assert.Equal(t, "工程", sect.SectTCName)
+	assert.Equal(t, "Builds the product", sect.SectDescription)
+	require.Contains(t, bySect, "eng:Engineering Dept")
+	dept := bySect["eng:Engineering Dept"]
+	assert.Equal(t, "The whole department", dept.DeptDescription)
+
+	empty, err := store.FetchOrgDisplayUsers(ctx, []string{"ghost"})
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+func TestMongoStore_ListOrgRoomMembers(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	ts := time.Now().UTC().Truncate(time.Millisecond)
+	_, err := db.Collection("room_members").InsertMany(ctx, []any{
+		model.RoomMember{ID: "rm-org-eng", RoomID: "r1", Ts: ts,
+			Member: model.RoomMemberEntry{ID: "eng", Type: model.RoomMemberOrg}},
+		model.RoomMember{ID: "rm-org-ops", RoomID: "r1", Ts: ts,
+			Member: model.RoomMemberEntry{ID: "ops", Type: model.RoomMemberOrg}},
+		// Individual row with a colliding id must not match the org-typed query.
+		model.RoomMember{ID: "rm-indiv", RoomID: "r1", Ts: ts,
+			Member: model.RoomMemberEntry{ID: "eng", Type: model.RoomMemberIndividual, Account: "eng"}},
+		model.RoomMember{ID: "rm-other-room", RoomID: "r2", Ts: ts,
+			Member: model.RoomMemberEntry{ID: "eng", Type: model.RoomMemberOrg}},
+	})
+	require.NoError(t, err)
+
+	got, err := store.ListOrgRoomMembers(ctx, "r1", []string{"eng", "ghost"})
+	require.NoError(t, err)
+	require.Len(t, got, 1, "only r1's org-typed row for a requested org")
+	assert.Equal(t, "rm-org-eng", got[0].ID)
+	assert.Equal(t, "r1", got[0].RoomID)
+	assert.True(t, got[0].Ts.Equal(ts))
+	assert.Equal(t, model.RoomMemberOrg, got[0].Member.Type)
+
+	empty, err := store.ListOrgRoomMembers(ctx, "r1", nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty, "empty orgIDs must not query")
+}
+
+// Mixed direct+org add on real Mongo: the room event carries the enriched
+// members while both federation copies stay accounts-only.
+func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	mustInsertUser(t, db, &model.User{ID: "u_alice", Account: "alice", SiteID: "site-A",
+		EngName: "Alice", ChineseName: "爱丽丝"})
+	mustInsertUser(t, db, &model.User{ID: "u_bob", Account: "bob", SiteID: "site-A",
+		EngName: "Bob", ChineseName: "鲍勃", SectID: "ops", SectName: "Operations", EmployeeID: "E-100"})
+	// carol joins via org expansion only; her remote site exercises the cross-site lane.
+	mustInsertUser(t, db, &model.User{ID: "u_carol", Account: "carol", SiteID: "site-B",
+		EngName: "Carol", ChineseName: "卡罗", SectID: "eng", SectName: "Engineering",
+		SectTCName: "工程", SectDescription: "Builds the product", EmployeeID: "E-200"})
+
+	roomID := idgen.GenerateID()
+	mustInsertRoom(t, db, &model.Room{
+		ID: roomID, Name: "enrich-room", Type: model.RoomTypeChannel, SiteID: "site-A",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID:     idgen.GenerateUUIDv7(),
+		User:   model.SubscriptionUser{ID: "u_alice", Account: "alice"},
+		RoomID: roomID, SiteID: "site-A", Name: "enrich-room", RoomType: model.RoomTypeChannel,
+		Roles:    []model.Role{model.RoleOwner},
+		JoinedAt: time.Now().UTC(),
+	})
+
+	cap := &publishCapture{}
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	ctx = natsutil.WithRequestID(ctx, "0193abcd-0193-7abc-89ab-aaaa00000002")
+
+	acceptedMs := time.Now().UTC().UnixMilli()
+	body, err := json.Marshal(model.AddMembersRequest{
+		RoomID:           roomID,
+		Users:            []string{"bob"},
+		Orgs:             []string{"eng"},
+		RequesterID:      "u_alice",
+		RequesterAccount: "alice",
+		History:          model.HistoryConfig{Mode: model.HistoryModeAll},
+		Timestamp:        acceptedMs,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.processAddMembers(ctx, body))
+
+	roomPubs := cap.publishesOnPrefix(subject.RoomMemberEvent(roomID))
+	require.Len(t, roomPubs, 1, "exactly one room-scoped member_added event")
+	var evt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(roomPubs[0].data, &evt))
+	assert.ElementsMatch(t, []string{"bob", "carol"}, evt.Accounts)
+	require.Len(t, evt.Members, 2, "org entry + direct individual; org-expanded carol rides accounts only")
+
+	org := evt.Members[0]
+	assert.Equal(t, model.RoomMemberOrg, org.Member.Type, "org entries come first, mirroring member.list")
+	assert.Equal(t, "eng", org.Member.ID)
+	assert.Equal(t, "Engineering 工程", org.Member.OrgName)
+	assert.Equal(t, "Builds the product", org.Member.OrgDescription)
+	assert.Equal(t, 1, org.Member.MemberCount)
+
+	indiv := evt.Members[1]
+	assert.Equal(t, model.RoomMemberIndividual, indiv.Member.Type)
+	assert.Equal(t, "bob", indiv.Member.Account)
+	assert.Equal(t, "u_bob", indiv.Member.ID)
+	assert.Equal(t, "Bob", indiv.Member.EngName)
+	assert.Equal(t, "鲍勃", indiv.Member.ChineseName)
+	assert.Equal(t, "Operations", indiv.Member.SectName)
+	assert.Equal(t, "E-100", indiv.Member.EmployeeID)
+	assert.Equal(t, roomID, indiv.RoomID)
+
+	// The envelope must equal the persisted room_members doc id — what member.list returns for bob.
+	var bobDoc model.RoomMember
+	require.NoError(t, db.Collection("room_members").FindOne(ctx,
+		bson.M{"rid": roomID, "member.account": "bob"}).Decode(&bobDoc))
+	assert.Equal(t, bobDoc.ID, indiv.ID)
+
+	// Both federation lanes stay accounts-only: InboxEvent on INBOX; the OUTBOX copy
+	// wraps that InboxEvent in an OutboxEvent (unwrap both to check).
+	assertLeanMemberAddPayload := func(t *testing.T, payload []byte, where string) {
+		t.Helper()
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(payload, &raw))
+		_, has := raw["members"]
+		assert.False(t, has, "%s must not carry members", where)
+	}
+
+	internalPubs := cap.publishesOnPrefix(subject.InboxInternal("site-A", model.InboxMemberAdded))
+	require.Len(t, internalPubs, 1, "expected one same-site INBOX publish")
+	var internalEnv model.InboxEvent
+	require.NoError(t, json.Unmarshal(internalPubs[0].data, &internalEnv))
+	assertLeanMemberAddPayload(t, internalEnv.Payload, "internal INBOX member_added payload")
+
+	outboxPubs := cap.publishesOnPrefix(subject.Outbox("site-A", "site-B", model.InboxMemberAdded))
+	require.Len(t, outboxPubs, 1, "expected one cross-site OUTBOX relay publish")
+	var outboxEvt model.OutboxEvent
+	require.NoError(t, json.Unmarshal(outboxPubs[0].data, &outboxEvt))
+	var relayEnv model.InboxEvent
+	require.NoError(t, json.Unmarshal(outboxEvt.Envelope, &relayEnv))
+	assert.Equal(t, "site-B", relayEnv.DestSiteID)
+	assertLeanMemberAddPayload(t, relayEnv.Payload, "cross-site OUTBOX member_added payload")
+
+	// A re-add must reuse the persisted room_members envelope — member.list returns that doc.
+	var persistedOrg model.RoomMember
+	require.NoError(t, db.Collection("room_members").FindOne(ctx,
+		bson.M{"rid": roomID, "member.type": "org", "member.id": "eng"}).Decode(&persistedOrg))
+
+	cap2 := &publishCapture{}
+	h2 := NewHandler(store, "site-A", cap2.fn(), testKeyStore, testKeySender)
+	body2, err := json.Marshal(model.AddMembersRequest{
+		RoomID:           roomID,
+		Orgs:             []string{"eng"},
+		RequesterID:      "u_alice",
+		RequesterAccount: "alice",
+		History:          model.HistoryConfig{Mode: model.HistoryModeAll},
+		Timestamp:        time.Now().UTC().UnixMilli(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, h2.processAddMembers(
+		natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-aaaa00000003"), body2))
+
+	rePubs := cap2.publishesOnPrefix(subject.RoomMemberEvent(roomID))
+	require.Len(t, rePubs, 1)
+	var reEvt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(rePubs[0].data, &reEvt))
+	require.Len(t, reEvt.Members, 1)
+	assert.Equal(t, persistedOrg.ID, reEvt.Members[0].ID)
+	assert.True(t, reEvt.Members[0].Ts.Equal(persistedOrg.Ts))
+
+	count, err := db.Collection("room_members").CountDocuments(ctx,
+		bson.M{"rid": roomID, "member.type": "org", "member.id": "eng"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "re-add must not insert a second org row")
 }
 
 func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {

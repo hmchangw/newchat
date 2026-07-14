@@ -24,6 +24,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
@@ -707,23 +708,19 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	return nil
 }
 
-// addMemberInputs bundles the three independent up-front reads processAddMembers
-// needs. None depends on another, so loadAddMemberInputs fetches them
-// concurrently to collapse three serial Mongo round trips into one.
+// addMemberInputs bundles processAddMembers' independent up-front reads (fetched concurrently).
 type addMemberInputs struct {
 	room          *model.Room
 	candidates    []AddMemberCandidate
 	hadOrgsBefore bool
+	// Org-add extras, read only when req.Orgs is non-empty and BEFORE any write:
+	// a transient failure Naks a still-clean delivery (post-write, redelivery would announce nothing).
+	orgDisplayRows  []orgdisplay.User
+	existingOrgDocs []model.RoomMember
 }
 
-// loadAddMemberInputs runs GetRoomMeta, ListAddMemberCandidates, and
-// HasOrgRoomMembers concurrently, collapsing three serial Mongo round trips into
-// one. A plain errgroup.Group (not WithContext) is used deliberately: these are
-// independent reads, so a failure in one need not cancel the others — matching
-// the prior serial code, which returned the first error without cancellation.
-// g.Wait returns the first error; each is wrapped exactly as the serial code
-// did. Each goroutine writes a distinct field of out (no race) and g.Wait
-// establishes the happens-before for the reads of out below.
+// loadAddMemberInputs runs the reads concurrently. Plain errgroup (not WithContext)
+// deliberately: independent reads, first error wins, no cancellation — like the prior serial code.
 func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembersRequest) (addMemberInputs, error) {
 	var (
 		out addMemberInputs
@@ -754,6 +751,24 @@ func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembers
 		out.hadOrgsBefore = hadOrgsBefore
 		return nil
 	})
+	if len(req.Orgs) > 0 {
+		g.Go(func() error {
+			rows, err := h.store.FetchOrgDisplayUsers(ctx, req.Orgs)
+			if err != nil {
+				return fmt.Errorf("fetch org display users: %w", err)
+			}
+			out.orgDisplayRows = rows
+			return nil
+		})
+		g.Go(func() error {
+			docs, err := h.store.ListOrgRoomMembers(ctx, req.RoomID, req.Orgs)
+			if err != nil {
+				return fmt.Errorf("list existing org room members: %w", err)
+			}
+			out.existingOrgDocs = docs
+			return nil
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return addMemberInputs{}, err
 	}
@@ -917,10 +932,12 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	for _, c := range needSub {
 		processedAccounts[c.Account] = struct{}{}
 	}
+	// irmByAccount/orgDocs capture the docs so the event envelope mirrors what member.list will read.
+	irmByAccount := make(map[string]*model.RoomMember, len(needIRM))
 	for _, c := range needIRM {
 		processedAccounts[c.Account] = struct{}{}
 		user := userMap[c.Account]
-		roomMembers = append(roomMembers, &model.RoomMember{
+		doc := &model.RoomMember{
 			ID:     idgen.GenerateUUIDv7(),
 			RoomID: req.RoomID,
 			Ts:     acceptedAt,
@@ -929,15 +946,29 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 				Type:    model.RoomMemberIndividual,
 				Account: user.Account,
 			},
-		})
+		}
+		irmByAccount[c.Account] = doc
+		roomMembers = append(roomMembers, doc)
 	}
+	existingOrgByID := make(map[string]*model.RoomMember, len(inputs.existingOrgDocs))
+	for i := range inputs.existingOrgDocs {
+		existingOrgByID[inputs.existingOrgDocs[i].Member.ID] = &inputs.existingOrgDocs[i]
+	}
+	orgDocs := make([]*model.RoomMember, 0, len(req.Orgs))
 	for _, org := range req.Orgs {
-		roomMembers = append(roomMembers, &model.RoomMember{
+		// Re-add/redelivery: reuse the persisted envelope (member.list returns that doc); a fresh insert would be index-discarded.
+		if doc := existingOrgByID[org]; doc != nil {
+			orgDocs = append(orgDocs, doc)
+			continue
+		}
+		doc := &model.RoomMember{
 			ID:     idgen.GenerateUUIDv7(),
 			RoomID: req.RoomID,
 			Ts:     acceptedAt,
 			Member: model.RoomMemberEntry{ID: org, Type: model.RoomMemberOrg},
-		})
+		}
+		orgDocs = append(orgDocs, doc)
+		roomMembers = append(roomMembers, doc)
 	}
 
 	// Backfill existing subscribers into room_members only when orgs are
@@ -1079,6 +1110,10 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			HistorySharedSince: historySharedSince,
 			Timestamp:          now.UnixMilli(),
 		}
+		// Marshalled BEFORE Members is attached — INBOX payloads must omit it (see model.MemberAddEvent.Members).
+		inboxPayload, _ := json.Marshal(memberAddEvt)
+
+		memberAddEvt.Members = buildAddedMembers(&req, subs, allowedIndividual, irmByAccount, orgDocs, inputs.orgDisplayRows, userMap)
 		memberAddData, _ := json.Marshal(memberAddEvt)
 		if err := h.publish(ctx, subject.RoomMemberEvent(req.RoomID), memberAddData, ""); err != nil {
 			slog.ErrorContext(ctx, "member add event publish failed",
@@ -1093,7 +1128,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 				Type:       model.InboxMemberAdded,
 				SiteID:     room.SiteID,
 				DestSiteID: room.SiteID,
-				Payload:    memberAddData,
+				Payload:    inboxPayload,
 				Timestamp:  now.UnixMilli(),
 			}
 			internalData, _ := json.Marshal(internalEvt)
@@ -1184,6 +1219,53 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 
 	return nil
+}
+
+// buildAddedMembers assembles the member.list-shaped entries (contract: model.MemberAddEvent.Members),
+// org rows first; envelope id/ts = the room_members doc when one exists, else the new subscription.
+func buildAddedMembers(req *model.AddMembersRequest, subs []*model.Subscription,
+	allowedIndividual map[string]struct{}, irmByAccount map[string]*model.RoomMember,
+	orgDocs []*model.RoomMember, orgDisplayRows []orgdisplay.User, userMap map[string]model.User) []model.RoomMember {
+	members := make([]model.RoomMember, 0, len(orgDocs)+len(subs))
+	if len(orgDocs) > 0 {
+		agg := orgdisplay.Build(req.Orgs, orgDisplayRows)
+		for _, doc := range orgDocs {
+			entry := *doc
+			orgID := entry.Member.ID
+			if a := agg[orgID]; a != nil {
+				entry.Member.MemberCount = a.MemberCount
+			}
+			entry.Member.OrgName = orgdisplay.Name(agg[orgID], orgID)
+			entry.Member.OrgDescription = orgdisplay.Description(agg[orgID])
+			members = append(members, entry)
+		}
+	}
+	for _, sub := range subs {
+		account := sub.User.Account
+		if _, ok := allowedIndividual[account]; !ok {
+			continue // org-expanded: member.list shows these via the org row only
+		}
+		user := userMap[account]
+		entry := model.RoomMember{
+			ID:     sub.ID,
+			RoomID: req.RoomID,
+			Ts:     sub.JoinedAt,
+			Member: model.RoomMemberEntry{
+				ID:          user.ID,
+				Type:        model.RoomMemberIndividual,
+				Account:     account,
+				EngName:     user.EngName,
+				ChineseName: user.ChineseName,
+				SectName:    user.SectName,
+				EmployeeID:  user.EmployeeID,
+			},
+		}
+		if irm := irmByAccount[account]; irm != nil {
+			entry.ID, entry.Ts = irm.ID, irm.Ts
+		}
+		members = append(members, entry)
+	}
+	return members
 }
 
 func mustMarshal(v any) []byte {
