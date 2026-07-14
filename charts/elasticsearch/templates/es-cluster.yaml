@@ -60,6 +60,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         spec:
+          {{- include "pod-scheduling" $ctx | nindent 10 }}
           {{- include "node-resource-config" (dict
               "ESJavaOpts" $ctx.Values.cluster.masterNodeResources.esJavaOpts
               "RequestsMemory" $ctx.Values.cluster.masterNodeResources.requests.memory
@@ -81,6 +82,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         spec:
+          {{- include "pod-scheduling" $ctx | nindent 10 }}
           {{- include "node-resource-config" (dict
               "ESJavaOpts" $ctx.Values.cluster.dataNodeResources.esJavaOpts
               "RequestsMemory" $ctx.Values.cluster.dataNodeResources.requests.memory
@@ -110,6 +112,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         spec:
+          {{- include "pod-scheduling" $ctx | nindent 10 }}
           {{- include "node-resource-config" (dict
               "ESJavaOpts" $ctx.Values.cluster.coordNodeResources.esJavaOpts
               "RequestsMemory" $ctx.Values.cluster.coordNodeResources.requests.memory
@@ -131,6 +134,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         spec:
+          {{- include "pod-scheduling" $ctx | nindent 10 }}
           {{- include "node-resource-config" (dict
               "ESJavaOpts" $ctx.Values.cluster.additionalNodeResources.esJavaOpts
               "RequestsMemory" $ctx.Values.cluster.additionalNodeResources.requests.memory

@@ -186,3 +186,28 @@ site so all clusters reference one CA and mutually trust.
 {{- "elasticsearch/transport-ca" -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Pod scheduling for cross-cluster (CCS) routability. Output is sibling PodSpec
+fields, placed directly under podTemplate.spec.
+
+When ccs.nodeRoutable is true, pins ES pods to nodes labelled
+node-routable=true — the nodes that can egress to peer sites' ingress LBs on 443
+(CCS is pod→peer-LB, so pods on non-routable nodes silently time out) — AND adds
+the matching toleration so the pods schedule even if those nodes are tainted.
+Emitting both together avoids the "nodeSelector matches but node is tainted →
+Pending" footgun. Set false where every node is routable (e.g. the kind harness).
+
+Called with the root context ($) so it can read .Values.ccs.nodeRoutable.
+*/}}
+{{- define "pod-scheduling" -}}
+{{- if .Values.ccs.nodeRoutable }}
+nodeSelector:
+  node-routable: "true"
+tolerations:
+- key: node-routable
+  operator: Equal
+  value: "true"
+  effect: NoSchedule
+{{- end }}
+{{- end -}}

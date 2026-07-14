@@ -103,6 +103,13 @@ ccs:
   publicEndpoint:
     enabled: false
 
+  # Schedule ES pods onto cross-cluster-routable nodes (labelled node-routable=true,
+  # able to reach peer sites' ingress LBs on 443). CCS is pod→peer-LB, so pods on
+  # non-routable nodes silently time out (handshake never completes, no cert error).
+  # Emits BOTH a nodeSelector AND the matching toleration. Set false where every
+  # node is routable (e.g. the kind harness).
+  nodeRoutable: true
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Container images. Final image string is composed as
 #   "<imageRegistry>/<image>:<cluster.version>"

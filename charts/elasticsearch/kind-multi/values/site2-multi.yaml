@@ -54,6 +54,7 @@ ccs:
     enabled: true
   publicEndpoint:
     enabled: true
+  nodeRoutable: false            # kind nodes all reachable on the docker network — no routable split
 
 authorizationPolicy:
   sourceCidrs:
