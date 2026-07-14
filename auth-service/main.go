@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/ginutil"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
