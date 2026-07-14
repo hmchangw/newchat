@@ -4332,12 +4332,42 @@ func TestOutboxEvent_RoundTrip(t *testing.T) {
 }
 
 func TestTeamsUserJSON(t *testing.T) {
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	src := model.TeamsUser{
 		ID:      "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
 		UPN:     "Alice@corp.example",
 		Account: "alice",
 		SiteID:  "site-a",
+		From:    &from,
 	}
 	var dst model.TeamsUser
 	roundTrip(t, &src, &dst)
+}
+
+func TestTeamsUserJSON_NoFrom(t *testing.T) {
+	u := model.TeamsUser{ID: "aad-user-2", UPN: "bob@corp.example", SiteID: "site-b", Account: "bob"}
+	data, err := json.Marshal(&u)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, has := raw["from"]
+	assert.False(t, has, "nil From must be omitted from JSON")
+}
+
+func TestTeamsChatJSON(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:meeting_abc@thread.v2",
+		Name:                "Project X",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
+		Members: []model.TeamsChatMember{
+			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		SiteID:       "site-a",
+		UpdatedAt:    time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedUserSync: true,
+	}
+	roundTrip(t, &c, &model.TeamsChat{})
 }
