@@ -26,6 +26,9 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 // messaging model; continuity is the span link from the consumer span back to
 // the upstream producer span, not a shared trace ID.
 func TestPipelineTraceContinuity(t *testing.T) {
+	// Observability is disabled by default; this gate test must explicitly opt in.
+	t.Setenv("O11Y_ENABLED", "true")
+
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
