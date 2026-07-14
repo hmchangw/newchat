@@ -713,12 +713,11 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 type addMemberInputs struct {
 	room              *model.Room
 	candidates        []AddMemberCandidate
-	hadOrgsBefore     bool
 	hasAnyRoomMembers bool
 }
 
-// loadAddMemberInputs runs GetRoomMeta, ListAddMemberCandidates,
-// HasOrgRoomMembers, and HasAnyRoomMembers concurrently, collapsing the serial
+// loadAddMemberInputs runs GetRoomMeta, ListAddMemberCandidates, and
+// HasAnyRoomMembers concurrently, collapsing the serial
 // Mongo round trips into one. A plain errgroup.Group (not WithContext) is used deliberately: these are
 // independent reads, so a failure in one need not cancel the others — matching
 // the prior serial code, which returned the first error without cancellation.
@@ -744,15 +743,6 @@ func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembers
 			return fmt.Errorf("list add-member candidates: %w", err)
 		}
 		out.candidates = candidates
-		return nil
-	})
-	g.Go(func() error {
-		// Fail closed: defaulting hadOrgsBefore=false on error would trigger spurious first-org backfill.
-		hadOrgsBefore, err := h.store.HasOrgRoomMembers(ctx, req.RoomID)
-		if err != nil {
-			return fmt.Errorf("check existing org room members: %w", err)
-		}
-		out.hadOrgsBefore = hadOrgsBefore
 		return nil
 	})
 	g.Go(func() error {
@@ -805,7 +795,6 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		return permanent(errcode.BadRequest(fmt.Sprintf("add-member only valid on channel rooms, got %s", room.Type)))
 	}
 	candidates := inputs.candidates
-	hadOrgsBefore := inputs.hadOrgsBefore
 	// Align the write-gate to member.list's read-source: write individual rows whenever room_members already holds any row, not only when orgs are present.
 	writeIndividuals := len(req.Orgs) > 0 || inputs.hasAnyRoomMembers
 
@@ -951,13 +940,13 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		})
 	}
 
-	// Backfill existing subscribers into room_members only when orgs are
-	// joining for the first time and we're starting to track individuals.
-	// Backfill errors propagate: log-and-continue would silently corrupt
-	// room_members (existing subs would never get IRM rows). Retry is safe —
-	// subs are already written so needSub is empty, hadOrgsBefore stays false
-	// until BulkCreateRoomMembers commits, and the backfill re-runs cleanly.
-	if len(req.Orgs) > 0 && !hadOrgsBefore {
+	// Backfill existing subscribers into room_members on the first org add,
+	// i.e. while the table is still empty — that's when individual tracking begins.
+	// Errors propagate: log-and-continue would silently corrupt room_members
+	// (existing subs would never get IRM rows). Retry is safe — subs are already
+	// written so needSub is empty, the table stays empty until BulkCreateRoomMembers
+	// commits, and the backfill re-runs cleanly.
+	if len(req.Orgs) > 0 && !inputs.hasAnyRoomMembers {
 		existingAccounts, err := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 		if err != nil {
 			return fmt.Errorf("get subscription accounts for backfill: %w", err)
@@ -974,10 +963,9 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 				return fmt.Errorf("find users for backfill: %w", err)
 			}
 			// Fail-hard if any requested account is missing. A partial result
-			// would commit some IRM rows + flip hadOrgsBefore=true (once
-			// BulkCreateRoomMembers writes the org row), after which no future
-			// redelivery can repair the missing rows — backfill only fires on
-			// the first-org transition. Better to halt and surface the stale
+			// would commit some IRM rows (making the table non-empty), after which
+			// no future redelivery can repair the missing rows — backfill only fires
+			// while room_members is still empty. Better to halt and surface the stale
 			// sub via the async-job error than to bake permanent divergence
 			// between subscriptions and room_members.
 			found := make(map[string]struct{}, len(backfillUsers))

@@ -325,7 +325,6 @@ func TestHandler_ProcessAddMembers_FallsBackToNowOnInvalidTimestamp(t *testing.T
 	// The three up-front reads now run concurrently, so candidates/has-orgs are
 	// issued alongside GetRoom; their results are discarded once GetRoom errors.
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil).AnyTimes()
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil).AnyTimes()
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil).AnyTimes()
 	h := NewHandler(store, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
@@ -384,7 +383,6 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 	// path: the full ReconcileMemberCounts must follow the incremental $inc.
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 2, 0, gomock.Any()).Return(true, nil)
 	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "r1").Return(nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	req := model.AddMembersRequest{
@@ -420,7 +418,7 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 // TestHandler_ProcessAddMembers_WritesIndividualWhenTableNonEmpty is the #499
 // regression: an org was added then removed, leaving individual rows but no org
 // rows. A direct member add must still write a room_members row (member.list
-// reads room_members once it holds any row), even though hadOrgsBefore is false.
+// reads room_members once it holds any row), gated on hasAnyRoomMembers.
 func TestHandler_ProcessAddMembers_WritesIndividualWhenTableNonEmpty(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -429,7 +427,6 @@ func TestHandler_ProcessAddMembers_WritesIndividualWhenTableNonEmpty(t *testing.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"x"}, "r1").
 		Return([]AddMemberCandidate{{Account: "x", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil) // table non-empty (org removed, individuals remain)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"x"}).Return([]model.User{
 		{ID: "u2", Account: "x", SiteID: "site-a", EngName: "X"},
@@ -462,7 +459,6 @@ func TestHandler_ProcessAddMembers_SubscriptionOnlyWhenTableEmpty(t *testing.T) 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"x"}, "r1").
 		Return([]AddMemberCandidate{{Account: "x", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil) // empty table → lite mode
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"x"}).Return([]model.User{
 		{ID: "u2", Account: "x", SiteID: "site-a", EngName: "X"},
@@ -508,7 +504,6 @@ func TestHandler_ProcessAddMembers_PublishesSubscriptionUpdateBeforeRoomKey(t *t
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	req := model.AddMembersRequest{
@@ -564,7 +559,6 @@ func TestHandler_ProcessAddMembers_HistoryAll(t *testing.T) {
 			return nil
 		})
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	req := model.AddMembersRequest{
@@ -627,7 +621,6 @@ func TestHandler_ProcessAddMembers_RestrictedPropagatesPointer(t *testing.T) {
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	const reqTS int64 = 1744300000000
@@ -690,7 +683,6 @@ func TestHandler_ProcessAddMembers_UnrestrictedOmitsFieldFromWire(t *testing.T) 
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	req := model.AddMembersRequest{
@@ -730,9 +722,7 @@ func TestHandler_ProcessAddMembers_WithOrgs(t *testing.T) {
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	// HasOrgRoomMembers is now called unconditionally (Task 2). Return false to
-	// preserve this test's first-org-transition semantics so backfill fires.
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
+	// Empty table so the first-org backfill fires.
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	// With orgs: BulkCreateRoomMembers called once with individual "bob" + org "eng" + backfill "alice"
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).DoAndReturn(
@@ -766,9 +756,9 @@ func TestHandler_ProcessAddMembers_WithOrgs(t *testing.T) {
 // account whose user document is gone (e.g. directory delete that didn't
 // cascade), FindUsersByAccounts returns fewer rows than requested. Without a
 // guard, the worker would silently commit room_members for the rows it got,
-// flip hadOrgsBefore=true via BulkCreateRoomMembers, and leave the stale
+// making the table non-empty via BulkCreateRoomMembers, and leave the stale
 // account with a sub but no individual room_members row that no future retry
-// can ever repair (subsequent deliveries see hadOrgsBefore=true and skip
+// can ever repair (later deliveries see a non-empty table and skip
 // backfill entirely). Fail hard with errPermanent so the operator sees it
 // before partial state is committed.
 func TestHandler_ProcessAddMembers_BackfillUserMissing(t *testing.T) {
@@ -782,7 +772,6 @@ func TestHandler_ProcessAddMembers_BackfillUserMissing(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string{"eng"}, nil, "r1").
 		Return([]AddMemberCandidate{}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
 		ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
@@ -825,7 +814,6 @@ func TestHandler_ProcessAddMembers_UserNotFound(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob", "ghost"}, "r1").
 		Return([]AddMemberCandidate{{Account: "bob"}, {Account: "ghost"}}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "ghost"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a"},
@@ -876,7 +864,6 @@ func TestHandler_ProcessAddMembers_MultipleSiteInbox(t *testing.T) {
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	req := model.AddMembersRequest{
@@ -1187,7 +1174,6 @@ func TestHandler_ProcessAddMembers_ExistingOrgsWritesIndividuals(t *testing.T) {
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(true, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil)
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, members []*model.RoomMember) error {
@@ -1234,7 +1220,6 @@ func TestHandler_ProcessAddMembers_OrgToIndividualUpgrade(t *testing.T) {
 	store.EXPECT().ListAddMemberCandidates(ctx, []string(nil), []string{"alice"}, roomID).Return([]AddMemberCandidate{
 		{Account: "alice", HasSubscription: true, HasIndividualRoomMember: false},
 	}, nil)
-	store.EXPECT().HasOrgRoomMembers(ctx, roomID).Return(true, nil)
 	store.EXPECT().HasAnyRoomMembers(ctx, roomID).Return(true, nil)
 	store.EXPECT().FindUsersByAccounts(ctx, []string{"alice"}).Return([]model.User{
 		{ID: "u_alice", Account: "alice", EngName: "Alice", ChineseName: "爱丽丝", SiteID: "site-a"},
@@ -1397,7 +1382,6 @@ func TestHandler_processAddMembers_PublishesSuccessEventToRequesterSubject(t *te
 	}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 
 	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
@@ -1440,7 +1424,6 @@ func TestHandler_processAddMembers_PublishesFailureEventOnError(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site1"}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), []string{"bob"}, "r1").
 		Return([]AddMemberCandidate{{Account: "bob"}}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return(nil, fmt.Errorf("database connection failed"))
 
@@ -1548,7 +1531,7 @@ func newAddMembersTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, f
 }
 
 // setupAddMembersHappyPath sets up the standard happy-path mock expectations.
-// All users are on site-A (no cross-site inbox). HasOrgRoomMembers returns false.
+// All users are on site-A (no cross-site inbox). HasAnyRoomMembers returns false.
 func setupAddMembersHappyPath(t *testing.T, mockStore *MockSubscriptionStore, accounts []string) {
 	t.Helper()
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
@@ -1569,7 +1552,6 @@ func setupAddMembersHappyPath(t *testing.T, mockStore *MockSubscriptionStore, ac
 		ID: "u_alice", Account: "alice", SiteID: "site-A", EngName: "Alice", ChineseName: "愛麗絲",
 	}, nil)
 	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 }
@@ -1626,7 +1608,6 @@ func TestProcessAddMembers_PopulatesSubName(t *testing.T) {
 			capturedSubs = subs
 			return nil
 		})
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 
@@ -1667,7 +1648,6 @@ func TestProcessAddMembers_HistoryNone_NoTimestamp(t *testing.T) {
 			capturedSubs = subs
 			return nil
 		})
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 
@@ -1708,7 +1688,6 @@ func TestProcessAddMembers_NoHistoryConfig_LeavesNil(t *testing.T) {
 			capturedSubs = subs
 			return nil
 		})
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 
@@ -1744,7 +1723,6 @@ func TestProcessAddMembers_InboxCarriesRoomName(t *testing.T) {
 		ID: "u_alice", Account: "alice", SiteID: "site-A", EngName: "Alice", ChineseName: "愛麗絲",
 	}, nil)
 	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 
@@ -3738,7 +3716,6 @@ func TestProcessAddMembers_FansOutKeyToNewAccountsOnly(t *testing.T) {
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
 	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 
@@ -3781,7 +3758,6 @@ func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
 	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil) // key missing
@@ -3818,7 +3794,6 @@ func TestProcessAddMembers_TransientErrorWhenValkeyFails(t *testing.T) {
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
 	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, fmt.Errorf("valkey timeout"))
@@ -3845,7 +3820,6 @@ func TestProcessAddMembers_RejectsNonChannel(t *testing.T) {
 	// The up-front reads run concurrently, so candidates/has-orgs fire before the
 	// channel guard rejects the non-channel room; their results are discarded.
 	mockStore.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil).AnyTimes()
-	mockStore.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil).AnyTimes()
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil).AnyTimes()
 
 	h := NewHandler(mockStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
@@ -3896,9 +3870,8 @@ func TestFanOutRoomKeyToSurvivors_SendsToAllSurvivorsIncludingRemoteSite(t *test
 	}, pub.subjects)
 }
 
-// Task 2: Backfill must fire only on the first-org transition. The
-// restructured handler calls HasOrgRoomMembers unconditionally and gates the
-// backfill on `len(req.Orgs) > 0 && !hadOrgsBefore`.
+// Backfill must fire only on the first-org transition, i.e. while the table is
+// still empty — gated on `len(req.Orgs) > 0 && !hasAnyRoomMembers`.
 func TestHandler_ProcessAddMembers_BackfillRunsOnFirstOrgTransition(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -3912,7 +3885,6 @@ func TestHandler_ProcessAddMembers_BackfillRunsOnFirstOrgTransition(t *testing.T
 		Return([]model.User{{ID: "u_new", Account: "u_new", SiteID: "site-a", EngName: "New", ChineseName: "新"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil) // first org
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
@@ -3936,9 +3908,9 @@ func TestHandler_ProcessAddMembers_BackfillRunsOnFirstOrgTransition(t *testing.T
 	require.NoError(t, h.processAddMembers(ctx, data))
 }
 
-// Backfill failure must fail-ha. JetStream redelivery is
-// safe because subs were written but the org row isn't until
-// BulkCreateRoomMembers, so hadOrgsBefore stays false on retry.
+// Backfill failure must fail-hard. JetStream redelivery is
+// safe because subs were written but the room_members rows aren't until
+// BulkCreateRoomMembers, so the table stays empty on retry.
 func TestHandler_ProcessAddMembers_BackfillSubscriptionAccountsErrorFailsHard(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -3952,7 +3924,6 @@ func TestHandler_ProcessAddMembers_BackfillSubscriptionAccountsErrorFailsHard(t 
 		Return([]model.User{{ID: "u_new", Account: "u_new", SiteID: "site-a", EngName: "New", ChineseName: "新"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
@@ -3984,7 +3955,6 @@ func TestHandler_ProcessAddMembers_BackfillFindUsersErrorFailsHard(t *testing.T)
 		Return([]model.User{{ID: "u_new", Account: "u_new", SiteID: "site-a", EngName: "New", ChineseName: "新"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
@@ -4017,8 +3987,7 @@ func TestHandler_ProcessAddMembers_BackfillSkippedWhenRoomAlreadyHasOrgs(t *test
 		Return([]model.User{{ID: "u_new", Account: "u_new", SiteID: "site-a", EngName: "New", ChineseName: "新"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	// Restructured code calls HasOrgRoomMembers unconditionally.
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(true, nil)
+	// Table already non-empty → backfill is skipped.
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(true, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
@@ -4059,7 +4028,6 @@ func TestHandler_ProcessAddMembers_IndividualFilter_DirectAndOrgOverlap(t *testi
 		}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
@@ -4111,7 +4079,6 @@ func TestHandler_ProcessAddMembers_IndividualFilter_OrgOnly(t *testing.T) {
 		Return([]model.User{{ID: "u1_id", Account: "u1", SiteID: "site-a", EngName: "U1", ChineseName: "一"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
@@ -4204,7 +4171,6 @@ func TestHandler_ProcessAddMembers_RequesterNotFound(t *testing.T) {
 		Return(&model.Room{ID: roomID, Name: "Chan", SiteID: "site-a", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string(nil), []string{"u1"}, roomID).
 		Return([]AddMemberCandidate{{Account: "u1"}}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"u1"}).
 		Return([]model.User{{ID: "u1_id", Account: "u1", SiteID: "site-a", EngName: "U1", ChineseName: "一"}}, nil)
@@ -4269,7 +4235,6 @@ func TestHandler_ProcessAddMembers_Content_Single(t *testing.T) {
 		Return([]model.User{{ID: "u1_id", Account: "u1", SiteID: "site-a", EngName: "U1", ChineseName: "一"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
@@ -4310,7 +4275,6 @@ func TestHandler_ProcessAddMembers_Content_Multi(t *testing.T) {
 		}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
@@ -4355,7 +4319,6 @@ func TestHandler_ProcessAddMembers_RequesterExcludedFromSysMsg(t *testing.T) {
 		}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
@@ -4404,7 +4367,6 @@ func TestHandler_ProcessAddMembers_RequesterExcluded_SingleNamed(t *testing.T) {
 		Return([]model.User{{ID: "u1_id", Account: "u1", SiteID: "site-a", EngName: "U1", ChineseName: "一"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
@@ -4884,7 +4846,6 @@ func TestHandler_ProcessAddMembers_Content_OrgAddWithOneMember_UsesMulti(t *test
 		Return([]model.User{{ID: "u1_id", Account: "u1", SiteID: "site-a", EngName: "U1", ChineseName: "一"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).Return(nil)
@@ -4910,8 +4871,8 @@ func TestHandler_ProcessAddMembers_Content_OrgAddWithOneMember_UsesMulti(t *test
 		"an org's expanded member is counted as an org, not as a person")
 }
 
-// HasOrgRoomMembers error must surface as non-permanent so JetStream retries.
-func TestHandler_ProcessAddMembers_HasOrgRoomMembersError_FailsClosed(t *testing.T) {
+// HasAnyRoomMembers error must surface as non-permanent so JetStream retries.
+func TestHandler_ProcessAddMembers_HasAnyRoomMembersError_FailsClosed(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 
@@ -4920,12 +4881,10 @@ func TestHandler_ProcessAddMembers_HasOrgRoomMembersError_FailsClosed(t *testing
 		Return(&model.Room{ID: roomID, Name: "Chan", SiteID: "site-a", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string(nil), []string{"u1"}, roomID).
 		Return([]AddMemberCandidate{{Account: "u1"}}, nil)
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), roomID).
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).
 		Return(false, fmt.Errorf("transient mongo error"))
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil).AnyTimes()
 	// No FindUsersByAccounts / GetUser / BulkCreateSubscriptions / BulkCreateRoomMembers /
-	// ReconcileMemberCounts — must short-circuit on the HasOrgRoomMembers error,
-	// which is now checked immediately after ListAddMemberCandidates.
+	// ReconcileMemberCounts — the loadAddMemberInputs read error must short-circuit the handler.
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore: testKeyStore, keySender: testKeySender}
 	req := model.AddMembersRequest{
@@ -4938,7 +4897,7 @@ func TestHandler_ProcessAddMembers_HasOrgRoomMembersError_FailsClosed(t *testing
 	err := h.processAddMembers(ctx, data)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errPermanent, "Mongo errors must NOT be permanent — JetStream should retry")
-	assert.Contains(t, err.Error(), "check existing org room members")
+	assert.Contains(t, err.Error(), "check existing room members")
 }
 
 // TestRequireDedupRequestID retired — the strict X-Request-ID gate now lives in
