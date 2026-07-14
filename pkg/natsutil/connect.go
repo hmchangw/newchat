@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	o11ynats "github.com/flywindy/o11y/nats"
@@ -81,7 +83,16 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 // gates unless an operator already set them. Both must be truthy for traceparent
 // to flow across NATS; there is no programmatic override, so this is the single
 // enforcement point for every entrypoint (services, dev, tools, tests).
+//
+// It is itself gated on the O11Y_ENABLED master switch (default off, matching
+// pkg/obs): when observability is off we deliberately leave the gates unset so
+// otelnats skips per-message header inject/extract and span work — the NATS hot
+// path runs at ~native cost. An operator can still set either gate env
+// explicitly to override in either direction.
 func enableNATSTracing() {
+	if !o11yEnabled() {
+		return
+	}
 	for _, k := range []string{
 		"OTEL_INSTRUMENTATION_GO_TRACING_ENABLED",
 		"OTEL_NATS_TRACING_ENABLED",
@@ -90,4 +101,15 @@ func enableNATSTracing() {
 			_ = os.Setenv(k, "true")
 		}
 	}
+}
+
+// o11yEnabled reports the O11Y_ENABLED master switch (default false), kept in
+// sync with pkg/obs so NATS tracing follows the same on/off as the SDK.
+func o11yEnabled() bool {
+	v, ok := os.LookupEnv("O11Y_ENABLED")
+	if !ok {
+		return false
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	return err == nil && b
 }

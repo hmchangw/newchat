@@ -29,6 +29,16 @@ import (
 // sampler IS read here (OTEL_TRACES_SAMPLER[_ARG]) and mapped to an o11y option,
 // because the SDK does not read those env vars itself — see samplerOptions.
 type Config struct {
+	// Enabled is the master switch. It defaults to FALSE so a service with no
+	// observability env ships zero-impact: all pillars off, no exporters, no
+	// Prometheus listener, no runtime-metrics goroutine, and (via natsutil) the
+	// NATS per-message trace machinery stays gated off — the hot path runs at
+	// ~native cost. stdout JSON logging is always retained. Set O11Y_ENABLED=true
+	// (plus a reachable collector) to turn observability on; the individual
+	// O11Y_*_ENABLED pillar toggles then apply. When Enabled is false those
+	// per-pillar toggles are ignored (the master switch wins).
+	Enabled bool `env:"O11Y_ENABLED" envDefault:"false"`
+
 	// ServiceName drives service.name on every span/metric/log. It defaults to a
 	// visible placeholder rather than being required so a missing env degrades to
 	// mislabeled telemetry, not a startup crash-loop; production deploys MUST set
@@ -78,6 +88,18 @@ func (c *Config) options() []o11y.Option {
 	}
 	if len(c.OTLPHeaders) > 0 {
 		opts = append(opts, o11y.WithOTLPHeaders(c.OTLPHeaders))
+	}
+	if !c.Enabled {
+		// Master switch off: force every pillar off regardless of the individual
+		// O11Y_*_ENABLED env defaults (which are true in the SDK). o11y.Init then
+		// builds only noop providers + a stdout logger — no exporters, no
+		// listener, no goroutines. See natsutil for the matching NATS-gate skip.
+		return append(opts,
+			o11y.WithTraceEnabled(false),
+			o11y.WithMetricsEnabled(false),
+			o11y.WithLogEnabled(false),
+			o11y.WithProfilingEnabled(false),
+		)
 	}
 	opts = append(opts, c.samplerOptions()...)
 	return opts

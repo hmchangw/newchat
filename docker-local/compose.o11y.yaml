@@ -10,9 +10,12 @@
 #   UI      : Grafana (http://localhost:3001, anonymous admin) with all three
 #             datasources + trace↔log correlation pre-provisioned.
 #
-# Services default OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, so no
-# per-service change is needed — just have this stack up. Joins the external
-# chat-local network owned by compose.deps.yaml.
+# Services default OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, so
+# they reach this stack without endpoint changes. BUT observability is OFF by
+# default (O11Y_ENABLED=false, zero-impact) — a service only exports once it sets
+# O11Y_ENABLED=true. `make dev` opts in automatically; for a service's own
+# docker-compose, add `- O11Y_ENABLED=true` (or export it) or you'll see no
+# telemetry. Joins the external chat-local network owned by compose.deps.yaml.
 name: chat-local-o11y
 
 services:

@@ -21,6 +21,43 @@ func TestConnect_MissingCredsFileFailsFast(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+// unsetForTest removes an env var for the duration of the test and restores the
+// original value on cleanup (t.Setenv snapshots it), so a Connect that mutates
+// the NATS-gate env can't leak into sibling tests.
+func unsetForTest(t *testing.T, k string) {
+	t.Helper()
+	t.Setenv(k, "")
+	_ = os.Unsetenv(k)
+}
+
+// enableNATSTracing runs at the top of Connect, before the connect attempt — so
+// a Connect that fails to dial still exercises the gate logic. With the master
+// switch off (default), the NATS trace gate must be left unset so otelnats
+// skips per-message span work (native hot-path cost).
+func TestConnect_NATSGate_MasterOff_LeavesGateUnset(t *testing.T) {
+	unsetForTest(t, "OTEL_NATS_TRACING_ENABLED")
+	unsetForTest(t, "OTEL_INSTRUMENTATION_GO_TRACING_ENABLED")
+	t.Setenv("O11Y_ENABLED", "false")
+
+	_, _ = natsutil.Connect(context.Background(), "nats://127.0.0.1:1", "",
+		noop.NewTracerProvider(), propagation.TraceContext{})
+
+	_, ok := os.LookupEnv("OTEL_NATS_TRACING_ENABLED")
+	require.False(t, ok, "master off must not force the NATS trace gate on")
+}
+
+func TestConnect_NATSGate_MasterOn_SetsGate(t *testing.T) {
+	unsetForTest(t, "OTEL_NATS_TRACING_ENABLED")
+	unsetForTest(t, "OTEL_INSTRUMENTATION_GO_TRACING_ENABLED")
+	t.Setenv("O11Y_ENABLED", "true")
+
+	_, _ = natsutil.Connect(context.Background(), "nats://127.0.0.1:1", "",
+		noop.NewTracerProvider(), propagation.TraceContext{})
+
+	require.Equal(t, "true", os.Getenv("OTEL_NATS_TRACING_ENABLED"))
+	require.Equal(t, "true", os.Getenv("OTEL_INSTRUMENTATION_GO_TRACING_ENABLED"))
+}
+
 func TestConnect_PresentCredsFilePassesPrecheck(t *testing.T) {
 	// A real connect would still fail (invalid creds content, bogus URL), but
 	// the pre-check must succeed when the file exists. We assert by checking

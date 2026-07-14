@@ -13,7 +13,10 @@ production load.
 
 ## 1. TL;DR
 
-- **Latency is not the risk.** Per-hop tracing cost is ~2µs; against real
+- **Off by default — zero application impact (§1a).** `O11Y_ENABLED` defaults
+  `false`: no exporters, no `:2112`, no goroutines, NATS hot path at native cost;
+  stdout logs still flow. Opt in with `O11Y_ENABLED=true`.
+- **Latency is not the risk** (once on). Per-hop tracing cost is ~2µs; against real
   NATS + Mongo/Cassandra round-trips (ms) it disappears. o11y does **not** make
   requests slower for this workload.
 - **The risks are volume and allocations:** with **no sampler set, everything is
@@ -24,6 +27,44 @@ production load.
 - **Action:** set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` +
   `OTEL_TRACES_SAMPLER_ARG` in deploy before production scale (§3). Everything
   else (probe-span filtering, `WithRequireParentSpan`) is already done in code.
+
+---
+
+## 1a. Zero-impact default — the `O11Y_ENABLED` master switch
+
+**Observability is OFF by default.** `pkg/obs` reads `O11Y_ENABLED` (default
+`false`); a service with no observability env ships with **zero application
+impact**:
+
+- `obs.Init` still runs once at startup but, with the master switch off, forces
+  every pillar off (`WithTraceEnabled(false)` / metrics / logs / profiling), so
+  the SDK builds **only noop providers + a stdout logger** — **no exporters, no
+  Prometheus `:2112` listener, no runtime-metrics goroutine, no OTLP
+  connections**.
+- `pkg/natsutil.Connect` leaves the NATS trace gate **unset** when
+  `O11Y_ENABLED` is off, so `otelnats` **skips per-message header
+  inject/extract and span work** — the NATS hot path runs at ~native cost (the
+  "off" row in §4 is the noop-tracer cost; master-off is cheaper still because
+  the machinery is bypassed, not just pointed at a noop).
+- **stdout JSON logging is always retained** — turning observability off does
+  not silence application logs, it only stops OTLP/metrics export.
+
+Net: with the default, o11y is effectively "not running" for the application —
+no goroutines, no listeners, no network, no measurable per-request overhead.
+A literal skip of `obs.Init` was considered but rejected: it would require
+changing the return type from `*o11y.SDK` to an interface across all services to
+save only microseconds of one-time startup work.
+
+### Staged enablement (recommended rollout)
+1. **Launch off** (default) — no env, zero impact. stdout logs still flow.
+2. Stand up the collector/Tempo/Prometheus/Loki stack.
+3. `O11Y_ENABLED=true` — turns the pillars on (individual `O11Y_TRACE_ENABLED` /
+   `O11Y_METRICS_ENABLED` / `O11Y_LOG_ENABLED` toggles then fine-tune per pillar).
+4. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at the real collector.
+5. Set the sampler (§3) before production-scale load.
+
+Kill switch works in reverse: `O11Y_ENABLED=false` (env-only, no redeploy of
+code) returns any service to zero-impact.
 
 ---
 

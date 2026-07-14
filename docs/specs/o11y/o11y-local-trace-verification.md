@@ -15,9 +15,14 @@ as the repeatable local smoke procedure.
   ```
   (see `docker-local/compose.o11y.yaml` — collector on `:4318`, so services'
   default `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` just works).
+- **`O11Y_ENABLED=true` on every backend service** — observability is OFF by
+  default (zero-impact). `make dev` sets this automatically; for docker-compose
+  add `- O11Y_ENABLED=true`. Without it, services export nothing and Tempo/Loki
+  stay empty.
 - `OTEL_ENABLED=true` for `chat-frontend`.
 - Backend services use `pkg/obs.Init` and `pkg/natsutil.Connect`.
-- NATS tracing gates are enabled by `pkg/natsutil.Connect`.
+- NATS tracing gate is enabled by `pkg/natsutil.Connect` **only when
+  `O11Y_ENABLED=true`** (otherwise the hot path stays native-cost).
 
 Useful local endpoints:
 

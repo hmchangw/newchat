@@ -34,11 +34,13 @@ if [ -f "$SERVICE/.env.dev" ]; then
   set +a
 fi
 
-# obs.Init requires OTEL_SERVICE_NAME (fail-fast) — default it from the service
-# name so `make dev` works without an .env.dev. Default the OTLP endpoint for
-# host dev, and disable the SDK's Prometheus listener so running several
-# `make dev` services on the host don't collide on :2112. Anything already set
+# Observability is OFF by default in the code (O11Y_ENABLED defaults false) so a
+# service ships zero-impact; `make dev` opts IN so a developer running the local
+# o11y stack actually sees traces/logs. Metrics stay off so several `make dev`
+# services on the host don't collide on :2112. Default OTEL_SERVICE_NAME from the
+# service name and the OTLP endpoint for host dev. Anything already set
 # (environment or .env.dev) wins.
+export O11Y_ENABLED="${O11Y_ENABLED:-true}"
 export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-$SERVICE}"
 export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}"
 export O11Y_METRICS_ENABLED="${O11Y_METRICS_ENABLED:-false}"

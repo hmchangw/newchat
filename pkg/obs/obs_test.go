@@ -23,6 +23,7 @@ func clearEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_EXPORTER_PROMETHEUS_HOST", "OTEL_EXPORTER_PROMETHEUS_PORT",
 		"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		"O11Y_ENABLED",
 		"O11Y_TRACE_ENABLED", "O11Y_METRICS_ENABLED", "O11Y_LOG_ENABLED", "O11Y_PROFILING_ENABLED",
 	} {
 		t.Setenv(k, "")
@@ -44,8 +45,7 @@ func TestParseConfig_Sampler(t *testing.T) {
 
 // Default (no OTEL_TRACES_SAMPLER) samples every root span (100%).
 func TestInit_SamplerDefaultSamples(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("OTEL_SERVICE_NAME", "sampler-default-svc")
+	testEnv(t, "sampler-default-svc") // o11y enabled
 
 	sdk, shutdown, err := Init(context.Background())
 	require.NoError(t, err)
@@ -59,8 +59,7 @@ func TestInit_SamplerDefaultSamples(t *testing.T) {
 // OTEL_TRACES_SAMPLER=always_off drops every span (the env now actually wires
 // the SDK sampler through pkg/obs).
 func TestInit_SamplerAlwaysOff(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("OTEL_SERVICE_NAME", "sampler-off-svc")
+	testEnv(t, "sampler-off-svc") // o11y enabled
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
 
 	sdk, shutdown, err := Init(context.Background())
@@ -74,8 +73,7 @@ func TestInit_SamplerAlwaysOff(t *testing.T) {
 
 // A parentbased_traceidratio of 0 drops every root span.
 func TestInit_SamplerRatioZero(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("OTEL_SERVICE_NAME", "sampler-ratio0-svc")
+	testEnv(t, "sampler-ratio0-svc") // o11y enabled
 	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
 	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
 
@@ -103,6 +101,35 @@ func TestParseConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "2112", cfg.PrometheusPort)
 	assert.Empty(t, cfg.PrometheusHost)
 	assert.Empty(t, cfg.OTLPHeaders)
+	assert.False(t, cfg.Enabled, "O11Y_ENABLED must default to false (zero-impact master switch)")
+}
+
+// With the master switch off (default, no env), Init still succeeds and returns
+// a usable SDK, but everything is a no-op: spans are not recorded/sampled. This
+// is the zero-impact default — o11y builds only noop providers + a stdout logger.
+func TestInit_MasterSwitchDisabledIsNoop(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "disabled-svc")
+	// O11Y_ENABLED deliberately unset → defaults to false.
+
+	sdk, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, sdk)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	_, span := sdk.Tracer("t").Start(context.Background(), "root")
+	defer span.End()
+	assert.False(t, span.IsRecording(), "master-off must produce non-recording (noop) spans")
+	assert.False(t, span.SpanContext().IsSampled(), "master-off must not sample")
+}
+
+// options() force-disables all four pillars when the master switch is off.
+func TestOptions_MasterOffDisablesPillars(t *testing.T) {
+	off := Config{ServiceName: "svc", PrometheusPort: "2112", Enabled: false}
+	on := Config{ServiceName: "svc", PrometheusPort: "2112", Enabled: true}
+	// 6 base opts + 4 pillar-disable opts when off; on adds none (sampler empty).
+	assert.Len(t, off.options(), 10, "master-off must append the four WithXxxEnabled(false) opts")
+	assert.Len(t, on.options(), 6, "master-on with no sampler/headers adds no extra opts")
 }
 
 func TestParseConfig_DefaultsServiceName(t *testing.T) {
@@ -174,6 +201,7 @@ func TestConfig_Options_HeadersOptional(t *testing.T) {
 	base := Config{
 		ServiceName: "svc", ServiceVersion: "dev", Environment: "development",
 		Namespace: "chat", OTLPEndpoint: "http://localhost:4318", PrometheusPort: "2112",
+		Enabled: true, // isolate the headers behavior from the master-off pillar opts
 	}
 	withoutHeaders := base.options()
 
@@ -191,6 +219,7 @@ func testEnv(t *testing.T, name string) {
 	clearEnv(t)
 	t.Setenv("OTEL_SERVICE_NAME", name)
 	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
+	t.Setenv("O11Y_ENABLED", "true") // master switch: tests that assert real SDK behavior
 }
 
 func TestInit_InstallsGlobals(t *testing.T) {
