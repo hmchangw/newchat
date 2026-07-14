@@ -6,6 +6,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
+	"github.com/hmchangw/chat/pkg/rpcmetrics"
 )
 
 // Register subscribes a typed handler to a subject pattern.
@@ -22,17 +23,13 @@ func Register[Req, Resp any](
 			// Cause preserves the parse-error chain for the Classify server log
 			// without echoing it to the client (errcode.Error.cause is unexported,
 			// never JSON-serialized). The user-facing message stays generic.
+			c.SetStatus(string(errcode.CodeBadRequest))
 			replyErr(c, errcode.BadRequest("invalid request payload", errcode.WithCause(err)))
 			return
 		}
 
 		resp, err := fn(c, req)
-		if err != nil {
-			replyErr(c, err)
-			return
-		}
-
-		c.ReplyJSON(resp)
+		replyResult(c, resp, err)
 	})
 
 	r.addRoute(pattern, []HandlerFunc{handler})
@@ -46,12 +43,7 @@ func RegisterNoBody[Resp any](
 ) {
 	handler := HandlerFunc(func(c *Context) {
 		resp, err := fn(c)
-		if err != nil {
-			replyErr(c, err)
-			return
-		}
-
-		c.ReplyJSON(resp)
+		replyResult(c, resp, err)
 	})
 
 	r.addRoute(pattern, []HandlerFunc{handler})
@@ -66,13 +58,18 @@ func RegisterVoid[Req any](
 	handler := HandlerFunc(func(c *Context) {
 		var req Req
 		if err := json.Unmarshal(c.Msg.Data, &req); err != nil {
+			c.SetStatus(string(errcode.CodeBadRequest))
 			slog.Error("invalid payload in void handler", "error", err, "subject", c.Msg.Subject)
 			return
 		}
 
 		if err := fn(c, req); err != nil {
+			c.SetStatus(rpcmetrics.StatusLabel(err))
 			slog.Error("void handler error", "error", err, "subject", c.Msg.Subject)
+			return
 		}
+
+		c.SetStatus("ok")
 	})
 
 	r.addRoute(pattern, []HandlerFunc{handler})
@@ -81,4 +78,16 @@ func RegisterVoid[Req any](
 // replyErr classifies err and sends the errcode envelope on the reply subject.
 func replyErr(c *Context, err error) {
 	errnats.Reply(c, c.Msg, err)
+}
+
+// replyResult stamps the terminal metrics status and sends the reply: the
+// classified status + error envelope on failure, "ok" + JSON body on success.
+func replyResult[Resp any](c *Context, resp *Resp, err error) {
+	if err != nil {
+		c.SetStatus(rpcmetrics.StatusLabel(err))
+		replyErr(c, err)
+		return
+	}
+	c.SetStatus("ok")
+	c.ReplyJSON(resp)
 }

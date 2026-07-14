@@ -49,6 +49,7 @@ type Config struct {
 	SiteID        string         `env:"SITE_ID,required"`
 	UserCacheSize int            `env:"USER_CACHE_SIZE" envDefault:"10000"`
 	UserCacheTTL  time.Duration  `env:"USER_CACHE_TTL"  envDefault:"5m"`
+	MetricsAddr   string         `env:"METRICS_ADDR" envDefault:":9090"`
 	NATS          NATSConfig     `envPrefix:"NATS_"`
 	Valkey        ValkeyConfig   `envPrefix:"VALKEY_"`
 	Mongo         MongoConfig    `envPrefix:"MONGO_"`
@@ -131,6 +132,11 @@ func main() {
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
 	router := natsrouter.Default(nc, "user-presence-service")
+	// Installed after natsrouter.Default's chain, so this Metrics window excludes
+	// Default's RequestID/Recovery/Logging — its latency series is marginally
+	// narrower than peers that install Metrics before Logging. Status stamping is
+	// unaffected (the Register wrapper runs inside this Metrics c.Next()).
+	router.Use(natsrouter.Metrics("user-presence-service"))
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
 	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
@@ -147,6 +153,12 @@ func main() {
 		sweeper.Run(sweepCtx)
 	}()
 
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics server setup failed", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("user-presence-service running", "site", cfg.SiteID, "valkey", cfg.Valkey.Addrs)
 
 	shutdown.Wait(ctx, 25*time.Second,
@@ -162,6 +174,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return stopMetrics(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(_ context.Context) error { return store.Close() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

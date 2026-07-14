@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/ginutil"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -25,6 +26,7 @@ type config struct {
 	AuthAccountPubKey    string        `env:"AUTH_ACCOUNT_PUB_KEY,required"`
 	NATSJWTExpiry        time.Duration `env:"NATS_JWT_EXPIRY"           envDefault:"2h"`
 	NATSJWTExpiryJitter  float64       `env:"NATS_JWT_EXPIRY_JITTER"    envDefault:"0.1"`
+	MetricsAddr          string        `env:"METRICS_ADDR"              envDefault:":9090"`
 
 	// OIDC settings — required when DEV_MODE is false.
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
@@ -102,9 +104,16 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
+	r.Use(ginutil.Metrics("auth-service"))
 	r.Use(ginutil.AccessLog())
 	r.Use(ginutil.CORS())
 	registerRoutes(r, handler)
+
+	// /metrics on a separate port so scrapes don't hit the public API listener.
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
+	if err != nil {
+		return err
+	}
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -123,10 +132,13 @@ func run() error {
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		shutdown.Wait(ctx, 25*time.Second, func(ctx context.Context) error {
-			slog.Info("shutting down auth service")
-			return srv.Shutdown(ctx)
-		})
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error {
+				slog.Info("shutting down auth service")
+				return srv.Shutdown(ctx)
+			},
+			func(ctx context.Context) error { return stopMetrics(ctx) },
+		)
 	}()
 
 	err = <-srvErr

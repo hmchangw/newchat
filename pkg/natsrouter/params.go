@@ -49,6 +49,7 @@ func (p Params) Require(key string) (string, error) {
 // It holds the converted NATS wildcard subject and the position-to-name
 // mapping for param extraction.
 type route struct {
+	pattern     string         // original pattern with {name} placeholders — the metrics `route` label
 	natsSubject string         // "chat.user.*.request.room.*.*.msg.history"
 	params      map[int]string // {2: "account", 5: "roomID", 6: "siteID"}
 }
@@ -80,6 +81,7 @@ func parsePattern(pattern string) route {
 	}
 
 	return route{
+		pattern:     pattern,
 		natsSubject: strings.Join(nats, "."),
 		params:      params,
 	}

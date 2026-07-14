@@ -98,6 +98,7 @@ func main() {
 	// RequestID must precede any handler that reads request_id from ctx —
 	// otherwise Classify's log line records an empty value.
 	router.Use(natsrouter.RequestID())
+	router.Use(natsrouter.Metrics("user-service"))
 	router.Use(natsrouter.Logging())
 	// After Logging so the timeout wraps the handler chain; bounds the Mongo
 	// aggregations from hanging past the configured deadline.
@@ -105,10 +106,17 @@ func main() {
 
 	svc.RegisterHandlers(router)
 
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics server setup failed", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("user-service running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return stopMetrics(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

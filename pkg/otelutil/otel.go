@@ -2,7 +2,10 @@ package otelutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -79,4 +82,23 @@ func MetricsServer() *http.Server {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+// ServeMetrics binds a /metrics server on addr and serves it in a background
+// goroutine. It binds synchronously, so a port conflict surfaces as a returned
+// error at startup rather than in a goroutine. The returned stop func shuts the
+// server down; wire it into the service's graceful-shutdown sequence.
+func ServeMetrics(addr string) (func(context.Context) error, error) {
+	srv := MetricsServer()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("metrics listen on %s: %w", addr, err)
+	}
+	go func() {
+		slog.Info("metrics server listening", "addr", addr)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", "error", err)
+		}
+	}()
+	return srv.Shutdown, nil
 }

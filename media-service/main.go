@@ -12,10 +12,12 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -73,9 +75,16 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
+	r.Use(ginutil.Metrics("media-service"))
 	r.Use(accessLogMiddleware())
 	r.Use(corsMiddleware())
 	registerRoutes(r, h)
+
+	// /metrics on a separate port so scrapes don't hit the public API listener.
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
@@ -85,12 +94,11 @@ func run() error {
 	}
 
 	go shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(_ context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error {
 			slog.Info("shutting down media-service")
 			return srv.Shutdown(ctx)
 		},
+		func(ctx context.Context) error { return stopMetrics(ctx) },
 	)
 
 	slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)

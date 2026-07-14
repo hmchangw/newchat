@@ -40,6 +40,7 @@ type config struct {
 	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr              string          `env:"METRICS_ADDR" envDefault:":9090"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
@@ -205,7 +206,7 @@ func main() {
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
 	router := natsrouter.New(nc, "room-service")
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Metrics("room-service"), natsrouter.Logging())
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -216,10 +217,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	stopMetrics, err := otelutil.ServeMetrics(cfg.MetricsAddr)
+	if err != nil {
+		slog.Error("metrics server setup failed", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("room-service running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return stopMetrics(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error {

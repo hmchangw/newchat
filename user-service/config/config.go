@@ -32,6 +32,7 @@ type Config struct {
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
 	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
 	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	MetricsAddr              string        `env:"METRICS_ADDR"           envDefault:":9090"`
 	Mongo                    MongoConfig   `envPrefix:"MONGO_"`
 	NATS                     NATSConfig    `envPrefix:"NATS_"`
 }
