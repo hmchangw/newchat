@@ -16,7 +16,7 @@ import (
 // depend on the chats surface. App-only (Chat.Read.All).
 type ChatsReader interface {
 	// ListUserChats returns the user's chats whose lastUpdatedDateTime falls in
-	// the exclusive window (from, to), with members expanded. It follows
+	// the half-open window [from, to), with members expanded. It follows
 	// @odata.nextLink pagination. Throttled (429/503) responses are retried
 	// per Retry-After AND arm a tenant-wide gate shared by all goroutines on
 	// this client, since Graph throttles per app+tenant.
@@ -69,7 +69,7 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 
 	q := url.Values{}
 	q.Set("$filter", fmt.Sprintf(
-		"lastUpdatedDateTime gt %s and lastUpdatedDateTime lt %s",
+		"lastUpdatedDateTime ge %s and lastUpdatedDateTime lt %s",
 		from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339),
 	))
 	q.Set("$expand", "members")

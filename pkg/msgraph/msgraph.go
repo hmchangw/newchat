@@ -138,8 +138,12 @@ type graphClient struct {
 	token   string
 	tokenAt time.Time // when the cached token expires
 
-	throttleMu    sync.Mutex
-	throttleUntil time.Time // tenant-wide gate: no request is sent before this instant
+	throttleMu sync.Mutex
+	// throttleUntil is the tenant-wide throttle gate: no request is sent
+	// before this instant. Only the chats path (ListUserChats/getThrottled)
+	// arms and consults this gate; meetings/directory/presence calls are not
+	// gated by it.
+	throttleUntil time.Time
 }
 
 // Option customizes the client (used in tests to point at an httptest server).

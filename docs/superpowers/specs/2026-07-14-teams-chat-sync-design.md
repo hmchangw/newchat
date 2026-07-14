@@ -53,9 +53,10 @@ A new `ChatsReader` surface on the existing app-only client (same pattern as
 
 ```go
 type ChatsReader interface {
-    // ListUserChats returns the user's chats with lastUpdatedDateTime in
-    // (from, to), members expanded. Follows @odata.nextLink pagination
-    // internally and honors 429 Retry-After with a small bounded retry.
+    // ListUserChats returns the user's chats with lastUpdatedDateTime in the
+    // half-open window [from, to), members expanded. Follows @odata.nextLink
+    // pagination internally and honors 429 Retry-After with a small bounded
+    // retry.
     ListUserChats(ctx context.Context, userID string, from, to time.Time) ([]Chat, error)
 }
 
@@ -78,7 +79,7 @@ Request shape:
 
 ```
 GET /v1.0/users/{uid}/chats
-  ?$filter=lastUpdatedDateTime gt {from RFC3339} and lastUpdatedDateTime lt {to RFC3339}
+  ?$filter=lastUpdatedDateTime ge {from RFC3339} and lastUpdatedDateTime lt {to RFC3339}
   &$expand=members
   &$select=id,chatType,topic,createdDateTime,lastUpdatedDateTime
 ```
@@ -120,8 +121,10 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    account, from`) into an in-memory `map[userID]cachedUser`. This map serves
    both as the work list and as the member→siteID/account lookup.
 2. **Window.** `to = startOfDay(now, UTC)`. Per user, `from` = their watermark
-   or `SYNC_DEFAULT_FROM`. Users with `from >= to` are **skipped** (empty
-   window — e.g. a second run the same day); no Graph call, no watermark write.
+   or `SYNC_DEFAULT_FROM`. The Graph filter is half-open `[from, to)`: a chat
+   updated exactly at a boundary lands in exactly one run. Users with
+   `from >= to` are **skipped** (empty window — e.g. a second run the same
+   day); no Graph call, no watermark write.
 3. **Fan-out.** Users are sent down a channel consumed by `MAX_WORKERS`
    goroutines (default 8 — Graph throttling makes large pools
    counterproductive), tracked by `sync.WaitGroup`. No `time.Sleep`

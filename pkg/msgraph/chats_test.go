@@ -42,7 +42,7 @@ func TestListUserChats_Success_QueryShape(t *testing.T) {
 		assert.Equal(t, "/users/aad-user-1/chats", r.URL.Path)
 		q := r.URL.Query()
 		assert.Equal(t,
-			"lastUpdatedDateTime gt 2026-04-01T00:00:00Z and lastUpdatedDateTime lt 2026-07-14T00:00:00Z",
+			"lastUpdatedDateTime ge 2026-04-01T00:00:00Z and lastUpdatedDateTime lt 2026-07-14T00:00:00Z",
 			q.Get("$filter"))
 		assert.Equal(t, "members", q.Get("$expand"))
 		assert.Equal(t, "id,chatType,topic,createdDateTime,lastUpdatedDateTime", q.Get("$select"))

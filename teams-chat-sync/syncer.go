@@ -189,18 +189,28 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 		return fmt.Errorf("list user chats: %w", err)
 	}
 	batch := make([]model.TeamsChat, 0, len(graphChats))
+	var skippedEmptyVote int
 	for _, gc := range graphChats {
 		if !s.claim(gc.ID) {
 			sum.Deduped.Add(1)
 			continue
 		}
-		batch = append(batch, buildChat(gc, cache))
+		built := buildChat(gc, cache)
+		if built.SiteID == "" {
+			slog.Warn("teams chat sync: siteID vote empty, skipping chat", "chatID", gc.ID, "userID", u.ID)
+			skippedEmptyVote++
+			continue
+		}
+		batch = append(batch, built)
 	}
 	if len(batch) > 0 {
 		if err := s.chats.UpsertChats(ctx, batch, s.cfg.Now()); err != nil {
 			return fmt.Errorf("upsert chats: %w", err)
 		}
 		sum.Upserted.Add(int64(len(batch)))
+	}
+	if skippedEmptyVote > 0 {
+		return fmt.Errorf("%d chats skipped: siteID vote empty", skippedEmptyVote)
 	}
 	if err := s.users.SetFrom(ctx, u.ID, to); err != nil {
 		return fmt.Errorf("advance watermark: %w", err)

@@ -154,6 +154,45 @@ func TestRun_SetFromFailureFailsUser(t *testing.T) {
 	require.Error(t, s.run(context.Background()))
 }
 
+func TestRun_EmptySiteIDVote_SkipsChatAndFailsUser(t *testing.T) {
+	s, users, chats, graph := newTestSyncer(t, 1)
+	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
+		{ID: "u1", SiteID: "site-a", Account: "alice"},
+	}, nil)
+	// The only member is unknown to the user cache, so voteSiteID returns "".
+	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).
+		Return([]msgraph.Chat{graphChat("19:unknown", "unknown-user")}, nil)
+	// No UpsertChats, no SetFrom expected: the batch is empty and the run fails.
+	_ = chats
+
+	err := s.run(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 of 1 users failed")
+}
+
+func TestRun_EmptySiteIDVote_MixedWithGoodChat_UpsertsOnlyGoodAndFailsUser(t *testing.T) {
+	s, users, chats, graph := newTestSyncer(t, 1)
+	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
+		{ID: "u1", SiteID: "site-a", Account: "alice"},
+	}, nil)
+	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).
+		Return([]msgraph.Chat{
+			graphChat("19:good", "u1"),
+			graphChat("19:unknown", "unknown-user"),
+		}, nil)
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any(), wtNow).DoAndReturn(
+		func(_ context.Context, batch []model.TeamsChat, _ time.Time) error {
+			require.Len(t, batch, 1)
+			assert.Equal(t, "19:good", batch[0].ID)
+			return nil
+		})
+	// No SetFrom expected: the skipped chat fails the user despite the good upsert.
+
+	err := s.run(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 of 1 users failed")
+}
+
 func TestRun_ListUsersFailure(t *testing.T) {
 	s, users, _, _ := newTestSyncer(t, 1)
 	users.EXPECT().ListUsers(gomock.Any()).Return(nil, fmt.Errorf("mongo down"))
