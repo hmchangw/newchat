@@ -33,7 +33,7 @@ func TestListChatMembers_Success_QueryShape(t *testing.T) {
 		assert.Equal(t, "/chats/19:abc@thread.v2/members", r.URL.Path)
 		q := r.URL.Query()
 		assert.Equal(t, "userId,userPrincipalName,visibleHistoryStartDateTime", q.Get("$select"))
-		assert.Equal(t, "50", q.Get("$top"), "default page size")
+		assert.Empty(t, q.Get("$top"), "members endpoint uses server-driven paging, no $top")
 		_, _ = w.Write([]byte(`{"value":[
 			{"userId":"u1","userPrincipalName":"Alice@corp.example","visibleHistoryStartDateTime":"2026-04-02T08:00:00Z"},
 			{"userId":"u2","userPrincipalName":null,"visibleHistoryStartDateTime":"0001-01-01T00:00:00Z"}
@@ -50,19 +50,6 @@ func TestListChatMembers_Success_QueryShape(t *testing.T) {
 	assert.Equal(t, "u2", members[1].UserID)
 	assert.Equal(t, "", members[1].UserPrincipalName, "null UPN decodes to empty")
 	assert.True(t, members[1].VisibleHistoryStartDateTime.IsZero())
-}
-
-func TestListChatMembers_CustomPageSize(t *testing.T) {
-	tokenSrv := newMembersTokenServer(t)
-	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "10", r.URL.Query().Get("$top"))
-		_, _ = w.Write([]byte(`{"value":[]}`))
-	}))
-	defer graphSrv.Close()
-
-	_, err := newTestMembers(tokenSrv.URL, graphSrv.URL, WithMembersPageSize(10)).
-		ListChatMembers(context.Background(), "19:abc@thread.v2")
-	require.NoError(t, err)
 }
 
 func TestListChatMembers_FollowsNextLink(t *testing.T) {

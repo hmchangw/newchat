@@ -88,14 +88,14 @@ Request shape:
 ```
 GET /v1.0/chats/{chatId}/members
   ?$select=userId,userPrincipalName,visibleHistoryStartDateTime
-  &$top={GRAPH_MEMBERS_PAGE_SIZE, default 50}
 ```
 
-Implemented on the shared `graphClient` via the existing `getThrottled` /
-`waitThrottle` (per-request Retry-After retry + tenant-wide throttle gate) and
-`WithChatsPageSize`-style option `WithMembersPageSize`. **Assumption:** the
-member resource carries `userPrincipalName`; only the UPN is consulted for the
-account (the `email` field is intentionally ignored).
+The endpoint uses server-driven paging (`@odata.nextLink`) and does not accept
+`$top`, so no page-size knob is exposed. Implemented on the shared `graphClient`
+via the existing `getThrottled` / `waitThrottle` (per-request Retry-After retry
++ tenant-wide throttle gate). **Assumption:** the member resource carries
+`userPrincipalName`; only the UPN is consulted for the account (the `email`
+field is intentionally ignored).
 
 ## Data model (read + written)
 
@@ -179,7 +179,6 @@ group chats commonly share members, so most fallback lookups hit the cache.
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |
 | `GRAPH_CLIENT_SECRET` | required | App registration secret |
-| `GRAPH_MEMBERS_PAGE_SIZE` | `50` | `$top` page size for `/chats/{id}/members` |
 | `GRAPH_TLS_INSECURE_SKIP_VERIFY` | `false` | Dev/on-prem TLS interception only |
 
 Optional `MONGO_READ_USERNAME`/`PASSWORD` and write equivalents default to

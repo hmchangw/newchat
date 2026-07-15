@@ -26,7 +26,6 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "chat", cfg.MongoWriteDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
 	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
-	assert.Equal(t, 50, cfg.GraphMembersPageSize)
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 }
 
@@ -43,7 +42,6 @@ func baseConfig() Config {
 		MongoWriteURI: "mongodb://localhost:27017", MongoWriteDB: "chat",
 		MaxWorkers: 8, RunTimeout: 30 * time.Minute,
 		GraphTenantID: "tenant", GraphClientID: "client", GraphClientSecret: "secret",
-		GraphMembersPageSize: 50,
 	}
 }
 
@@ -56,7 +54,6 @@ func TestValidateConfig(t *testing.T) {
 		{"valid", func(c *Config) {}, false},
 		{"zero max workers", func(c *Config) { c.MaxWorkers = 0 }, true},
 		{"negative run timeout", func(c *Config) { c.RunTimeout = -time.Second }, true},
-		{"zero page size", func(c *Config) { c.GraphMembersPageSize = 0 }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

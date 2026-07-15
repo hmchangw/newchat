@@ -38,8 +38,6 @@ type Config struct {
 	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
 	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`
 	GraphClientSecret string `env:"GRAPH_CLIENT_SECRET,required"`
-	// GraphMembersPageSize is the $top page size for GET /chats/{id}/members.
-	GraphMembersPageSize int `env:"GRAPH_MEMBERS_PAGE_SIZE" envDefault:"50"`
 	// GraphTLSInsecureSkipVerify disables Graph TLS verification (opt-in,
 	// default false) for dev/on-prem environments behind a TLS-intercepting
 	// proxy. The proxy is taken from HTTPS_PROXY/HTTP_PROXY.
@@ -61,9 +59,6 @@ func main() {
 func validateConfig(cfg Config) error {
 	if cfg.MaxWorkers <= 0 || cfg.RunTimeout <= 0 {
 		return fmt.Errorf("invalid config: MAX_WORKERS and RUN_TIMEOUT must be positive")
-	}
-	if cfg.GraphMembersPageSize <= 0 {
-		return fmt.Errorf("invalid config: GRAPH_MEMBERS_PAGE_SIZE must be positive")
 	}
 	return nil
 }
@@ -101,7 +96,7 @@ func run() error {
 		ClientID:              cfg.GraphClientID,
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
-	}, msgraph.WithMembersPageSize(cfg.GraphMembersPageSize))
+	})
 
 	s := newSyncer(store, store, graph, syncConfig{
 		MaxWorkers: cfg.MaxWorkers,

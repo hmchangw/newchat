@@ -136,9 +136,6 @@ type graphClient struct {
 	// chatsPageSize is the $top for ListUserChats first-page requests;
 	// <= 0 means defaultChatsPageSize. Set via WithChatsPageSize.
 	chatsPageSize int
-	// membersPageSize is the $top for ListChatMembers first-page requests;
-	// <= 0 means defaultMembersPageSize. Set via WithMembersPageSize.
-	membersPageSize int
 
 	mu      sync.Mutex
 	token   string

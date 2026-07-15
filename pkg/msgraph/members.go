@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strconv"
 	"time"
 )
 
@@ -36,16 +35,6 @@ type ChatMemberDetail struct {
 	VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime"`
 }
 
-// defaultMembersPageSize is the $top sent on the first members request when no
-// override is configured. Later pages follow @odata.nextLink.
-const defaultMembersPageSize = 50
-
-// WithMembersPageSize overrides the $top page size ListChatMembers requests.
-// Values <= 0 fall back to defaultMembersPageSize.
-func WithMembersPageSize(n int) Option {
-	return func(g *graphClient) { g.membersPageSize = n }
-}
-
 func (g *graphClient) ListChatMembers(ctx context.Context, chatID string) ([]ChatMemberDetail, error) {
 	if chatID == "" {
 		return nil, fmt.Errorf("list chat members: chatID is required")
@@ -55,13 +44,10 @@ func (g *graphClient) ListChatMembers(ctx context.Context, chatID string) ([]Cha
 		return nil, fmt.Errorf("acquire graph token: %w", err)
 	}
 
+	// GET /chats/{id}/members uses server-driven paging (@odata.nextLink) and
+	// does not accept $top, so we only $select the fields we need.
 	q := url.Values{}
 	q.Set("$select", "userId,userPrincipalName,visibleHistoryStartDateTime")
-	pageSize := g.membersPageSize
-	if pageSize <= 0 {
-		pageSize = defaultMembersPageSize
-	}
-	q.Set("$top", strconv.Itoa(pageSize))
 	next := fmt.Sprintf("%s/chats/%s/members?%s", g.baseURL, url.PathEscape(chatID), q.Encode())
 
 	var members []ChatMemberDetail
