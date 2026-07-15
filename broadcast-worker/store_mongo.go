@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -75,11 +76,14 @@ func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetaca
 	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec)
 }
 
-func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
+func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, preview *model.LastMessagePreview) error {
 	fields := bson.M{
 		"lastMsgAt": msgAt,
 		"lastMsgId": msgID,
 		"updatedAt": msgAt,
+	}
+	if preview != nil {
+		fields["lastMsg"] = preview
 	}
 	if mentionAll {
 		fields["lastMentionAllAt"] = msgAt
@@ -112,6 +116,9 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 			"lastMsgId": u.msgID,
 			"updatedAt": u.at,
 		}
+		if u.preview != nil {
+			fields["lastMsg"] = u.preview
+		}
 		if !u.lastMentionAllAt.IsZero() {
 			fields["lastMentionAllAt"] = u.lastMentionAllAt
 		}
@@ -121,6 +128,59 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	}
 	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
 		return fmt.Errorf("bulk update room last message (%d rooms): %w", len(updates), err)
+	}
+	return nil
+}
+
+// RewindRoomLastMessage rewinds rooms.{lastMsgId,lastMsgAt,lastMsg} after a
+// delete, guarded on the room still pointing at the deleted message so a
+// concurrent newer message is never clobbered (MatchedCount==0 is a benign
+// no-op, not an error).
+//
+// Known benign race: the create-path lastMsg write is coalesced (~250ms
+// flush), so a delete arriving before the create flush of the same message
+// can leave the old pointer in place; the next event on the room self-heals it.
+func (m *mongoStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+	filter := bson.M{"_id": roomID, "lastMsgId": deletedMsgID}
+	var update bson.M
+	if survivor != nil {
+		update = bson.M{"$set": bson.M{
+			"lastMsgAt": survivor.CreatedAt,
+			"lastMsgId": survivor.MessageID,
+			"lastMsg":   survivor,
+			"updatedAt": updatedAt,
+		}}
+	} else {
+		// No surviving message: mirror a fresh room (lastMsgId empty string,
+		// lastMsgAt/lastMsg absent). lastMentionAllAt is deliberately untouched.
+		update = bson.M{
+			"$set":   bson.M{"lastMsgId": "", "updatedAt": updatedAt},
+			"$unset": bson.M{"lastMsgAt": "", "lastMsg": ""},
+		}
+	}
+	if _, err := m.roomCol.UpdateOne(ctx, filter, update); err != nil {
+		return fmt.Errorf("rewind room last message %s: %w", roomID, err)
+	}
+	return nil
+}
+
+// SetRoomLastMessageEdited patches the denormalized lastMsg preview after an
+// edit, guarded on the room still pointing at the edited message
+// (MatchedCount==0 is a benign no-op — the edited message is not the latest).
+// encMsg != nil (encrypted room) $sets lastMsg.encMsg with newMsg==""; encMsg
+// == nil (plaintext room / content-less edit) $unsets lastMsg.encMsg so a
+// stale ciphertext never survives a plaintext patch.
+func (m *mongoStore) SetRoomLastMessageEdited(ctx context.Context, roomID, editedMsgID, newMsg string, encMsg json.RawMessage, editedAt time.Time) error {
+	filter := bson.M{"_id": roomID, "lastMsgId": editedMsgID}
+	set := bson.M{"lastMsg.msg": newMsg, "lastMsg.editedAt": editedAt}
+	update := bson.M{"$set": set}
+	if encMsg != nil {
+		set["lastMsg.encMsg"] = encMsg
+	} else {
+		update["$unset"] = bson.M{"lastMsg.encMsg": ""}
+	}
+	if _, err := m.roomCol.UpdateOne(ctx, filter, update); err != nil {
+		return fmt.Errorf("set room last message edited %s: %w", roomID, err)
 	}
 	return nil
 }

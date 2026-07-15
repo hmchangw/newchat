@@ -182,7 +182,8 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled)
+	lastMsgFetcher := newHistoryLastMessageFetcher(nc, cfg.SiteID)
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, lastMsgFetcher, cfg.Encryption.Enabled)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.

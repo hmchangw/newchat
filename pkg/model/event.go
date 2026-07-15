@@ -353,17 +353,23 @@ type EditRoomEvent struct {
 }
 
 // DeleteRoomEvent is the live event published when a message is deleted. Fields
-// are flat (no zero-valued RoomEvent base fields).
+// are flat (no zero-valued RoomEvent base fields). LastMessage carries the
+// room's newest non-deleted, non-system message AFTER this delete, so clients
+// can refresh the room-list preview without a history fetch; it is absent on
+// hidden thread-reply deletes, where the room preview cannot change. In
+// encrypted rooms lastMessage is still present, carrying encMsg instead of
+// msg.
 type DeleteRoomEvent struct {
-	Type           RoomEventType `json:"type" bson:"type"`
-	RoomID         string        `json:"roomId" bson:"roomId"`
-	SiteID         string        `json:"siteId" bson:"siteId"`
-	Timestamp      int64         `json:"timestamp" bson:"timestamp"`
-	EventTimestamp int64         `json:"eventTimestamp,omitempty" bson:"eventTimestamp,omitempty"`
-	MessageID      string        `json:"messageId" bson:"messageId"`
-	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
-	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
-	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
+	Type           RoomEventType       `json:"type" bson:"type"`
+	RoomID         string              `json:"roomId" bson:"roomId"`
+	SiteID         string              `json:"siteId" bson:"siteId"`
+	Timestamp      int64               `json:"timestamp" bson:"timestamp"`
+	EventTimestamp int64               `json:"eventTimestamp,omitempty" bson:"eventTimestamp,omitempty"`
+	MessageID      string              `json:"messageId" bson:"messageId"`
+	DeletedBy      string              `json:"deletedBy" bson:"deletedBy"`
+	DeletedAt      time.Time           `json:"deletedAt" bson:"deletedAt"`
+	UpdatedAt      time.Time           `json:"updatedAt" bson:"updatedAt"`
+	LastMessage    *LastMessagePreview `json:"lastMessage,omitempty" bson:"lastMessage,omitempty"`
 }
 
 // PinStateRoomEvent is the live event published when a message is pinned or

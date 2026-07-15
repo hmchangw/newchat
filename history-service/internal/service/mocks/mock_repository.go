@@ -76,6 +76,21 @@ func (mr *MockMessageReaderMockRecorder) GetAllPinnedMessages(ctx, roomID any) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllPinnedMessages", reflect.TypeOf((*MockMessageReader)(nil).GetAllPinnedMessages), ctx, roomID)
 }
 
+// GetLastRoomMessage mocks base method.
+func (m *MockMessageReader) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLastRoomMessage", ctx, roomID, before, floor)
+	ret0, _ := ret[0].(*models.Message)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetLastRoomMessage indicates an expected call of GetLastRoomMessage.
+func (mr *MockMessageReaderMockRecorder) GetLastRoomMessage(ctx, roomID, before, floor any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLastRoomMessage", reflect.TypeOf((*MockMessageReader)(nil).GetLastRoomMessage), ctx, roomID, before, floor)
+}
+
 // GetMessageByID mocks base method.
 func (m *MockMessageReader) GetMessageByID(ctx context.Context, messageID string) (*models.Message, error) {
 	m.ctrl.T.Helper()
@@ -248,14 +263,15 @@ func (mr *MockMessageWriterMockRecorder) RemoveReaction(ctx, msg, key any) *gomo
 }
 
 // SoftDeleteMessage mocks base method.
-func (m *MockMessageWriter) SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
+func (m *MockMessageWriter) SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SoftDeleteMessage", ctx, msg, deletedAt)
 	ret0, _ := ret[0].(time.Time)
 	ret1, _ := ret[1].(bool)
 	ret2, _ := ret[2].(*int)
-	ret3, _ := ret[3].(error)
-	return ret0, ret1, ret2, ret3
+	ret3, _ := ret[3].(*time.Time)
+	ret4, _ := ret[4].(error)
+	return ret0, ret1, ret2, ret3, ret4
 }
 
 // SoftDeleteMessage indicates an expected call of SoftDeleteMessage.
@@ -358,6 +374,21 @@ func (m *MockMessageRepository) GetAllPinnedMessages(ctx context.Context, roomID
 func (mr *MockMessageRepositoryMockRecorder) GetAllPinnedMessages(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllPinnedMessages", reflect.TypeOf((*MockMessageRepository)(nil).GetAllPinnedMessages), ctx, roomID)
+}
+
+// GetLastRoomMessage mocks base method.
+func (m *MockMessageRepository) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLastRoomMessage", ctx, roomID, before, floor)
+	ret0, _ := ret[0].(*models.Message)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetLastRoomMessage indicates an expected call of GetLastRoomMessage.
+func (mr *MockMessageRepositoryMockRecorder) GetLastRoomMessage(ctx, roomID, before, floor any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLastRoomMessage", reflect.TypeOf((*MockMessageRepository)(nil).GetLastRoomMessage), ctx, roomID, before, floor)
 }
 
 // GetMessageByID mocks base method.
@@ -494,14 +525,15 @@ func (mr *MockMessageRepositoryMockRecorder) RemoveReaction(ctx, msg, key any) *
 }
 
 // SoftDeleteMessage mocks base method.
-func (m *MockMessageRepository) SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
+func (m *MockMessageRepository) SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SoftDeleteMessage", ctx, msg, deletedAt)
 	ret0, _ := ret[0].(time.Time)
 	ret1, _ := ret[1].(bool)
 	ret2, _ := ret[2].(*int)
-	ret3, _ := ret[3].(error)
-	return ret0, ret1, ret2, ret3
+	ret3, _ := ret[3].(*time.Time)
+	ret4, _ := ret[4].(error)
+	return ret0, ret1, ret2, ret3, ret4
 }
 
 // SoftDeleteMessage indicates an expected call of SoftDeleteMessage.

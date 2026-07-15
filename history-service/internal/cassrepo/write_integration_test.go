@@ -222,7 +222,7 @@ func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 		ThreadParentID: "",
 	}
 	deletedAt := createdAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied, "first delete should apply")
 
@@ -297,7 +297,7 @@ func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 		ThreadRoomID:          threadRoomID,
 	}
 	deletedAt := replyCreatedAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied, "first delete should apply")
 
@@ -369,7 +369,7 @@ func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 		PinnedAt:       &pinnedAt,
 	}
 	deletedAt := createdAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied, "first delete should apply")
 
@@ -450,7 +450,7 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 		ThreadParentCreatedAt: &parentCreatedAtPtr,
 		ThreadRoomID:          threadRoomID,
 	}
-	_, applied, newTcount, err := repo.SoftDeleteMessage(ctx, msg, replyCreatedAt.Add(time.Minute))
+	_, applied, newTcount, _, err := repo.SoftDeleteMessage(ctx, msg, replyCreatedAt.Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, applied, "first delete should apply")
 	// SoftDeleteMessage returns the COUNT of non-deleted thread replies so the
@@ -520,9 +520,11 @@ func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {
 		ThreadParentCreatedAt: &parentCreatedAtPtr,
 		ThreadRoomID:          threadRoomID,
 	}
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
+	_, applied, _, newTlm, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, applied)
+	require.NotNil(t, newTlm, "SoftDeleteMessage must return the recomputed tlm so DeleteMessage can stamp the canonical event")
+	assert.True(t, newTlm.Equal(survivorAt), "returned tlm must equal the newest surviving reply's createdAt")
 
 	// tlm must equal survivorAt (the max created_at among surviving replies).
 	var gotTlm *time.Time
@@ -584,11 +586,12 @@ func TestRepository_SoftDeleteMessage_ClearsTlmOnLastReplyDelete(t *testing.T) {
 		ThreadParentCreatedAt: &parentCreatedAtPtr,
 		ThreadRoomID:          threadRoomID,
 	}
-	_, applied, newTcount, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
+	_, applied, newTcount, newTlm, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, applied)
 	require.NotNil(t, newTcount)
 	assert.Equal(t, 0, *newTcount, "tcount must be 0 after deleting last reply")
+	assert.Nil(t, newTlm, "returned tlm must be nil when the last reply is deleted")
 
 	// tlm must be NULL on the parent.
 	var gotTlm *time.Time
@@ -633,7 +636,7 @@ func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
 		Sender:         sender,
 		ThreadParentID: "",
 	}
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, createdAt.Add(time.Minute))
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, createdAt.Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, applied, "first delete should apply")
 
@@ -700,7 +703,7 @@ func TestRepository_SoftDeleteMessage_MissingThreadRoomID_ReturnsError(t *testin
 		ThreadParentID: "m-parent",
 		ThreadRoomID:   "",
 	}
-	_, _, _, err := repo.SoftDeleteMessage(ctx, msg, createdAt.Add(time.Minute))
+	_, _, _, _, err := repo.SoftDeleteMessage(ctx, msg, createdAt.Add(time.Minute))
 	require.Error(t, err, "expected error when ThreadRoomID is empty for a thread reply")
 
 	// Validation must fire before any DB write — messages_by_id must be unchanged.
@@ -767,7 +770,7 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 
 	// First delete: LWT applies (deleted was NULL → matches != true).
 	firstAt := replyCreatedAt.Add(time.Minute)
-	gotAt1, applied1, _, err := repo.SoftDeleteMessage(ctx, msg, firstAt)
+	gotAt1, applied1, _, _, err := repo.SoftDeleteMessage(ctx, msg, firstAt)
 	require.NoError(t, err)
 	require.True(t, applied1, "first delete must apply (deleted was NULL)")
 	assert.Equal(t, firstAt.UnixMilli(), gotAt1.UnixMilli())
@@ -790,7 +793,7 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	// hydrated msg (Deleted=false) to simulate a stale read; the repo's CAS
 	// is authoritative.
 	secondAt := firstAt.Add(time.Second)
-	gotAt2, applied2, _, err := repo.SoftDeleteMessage(ctx, msg, secondAt)
+	gotAt2, applied2, _, _, err := repo.SoftDeleteMessage(ctx, msg, secondAt)
 	require.NoError(t, err)
 	require.False(t, applied2, "second delete must NOT apply — deleted is already true")
 	assert.Equal(t, firstAt.UnixMilli(), gotAt2.UnixMilli(), "actualDeletedAt should reflect the winning goroutine's timestamp")
@@ -878,7 +881,7 @@ func TestRepository_SoftDeleteMessage_RoundTrip(t *testing.T) {
 		ThreadParentID: "",
 	}
 	deletedAt := createdAt.Add(time.Minute)
-	gotAt, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	gotAt, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied)
 	assert.Equal(t, deletedAt.UnixMilli(), gotAt.UnixMilli())
@@ -908,7 +911,7 @@ func TestRepository_SoftDeleteMessage_RowCreatedByLWT(t *testing.T) {
 	}
 	deletedAt := msg.CreatedAt.Add(time.Minute)
 
-	_, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, _, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err, "SoftDeleteMessage must not return an error on a non-existent row")
 }
 
@@ -947,7 +950,7 @@ func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T)
 	}
 
 	deletedAt := createdAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied)
 
@@ -1001,7 +1004,7 @@ func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T)
 	}
 
 	deletedAt := createdAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied)
 
@@ -1055,7 +1058,7 @@ func TestRepository_SoftDeleteMessage_ReplyThreadParent_SetsTypeRemoved(t *testi
 	}
 
 	deletedAt := createdAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied)
 
@@ -1269,7 +1272,7 @@ func TestDeleteMessage_NullsEncryptedColumns(t *testing.T) {
 		"m1", now, roomID, payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, "site-a",
 	).Exec())
 
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, &models.Message{
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m1", CreatedAt: now,
 	}, now.Add(time.Minute))
 	require.NoError(t, err)
@@ -1717,7 +1720,7 @@ func TestRepository_SoftDeleteMessage_TShowThreadReply(t *testing.T) {
 		TShow:                 true,
 	}
 	deletedAt := replyCreatedAt.Add(time.Minute)
-	_, applied, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt)
 	require.NoError(t, err)
 	require.True(t, applied, "first delete should apply")
 

@@ -1,0 +1,239 @@
+//go:build integration
+
+package cassrepo
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/gocql/gocql"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/model"
+	cassmodel "github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/msgbucket"
+)
+
+// seedLastMsgRow inserts one messages_by_room row with explicit deleted/type
+// values so tests can build mixed survivor/tombstone/system partitions.
+func seedLastMsgRow(t *testing.T, session *gocql.Session, roomID, messageID string, createdAt time.Time, deleted bool, msgType, msg string) {
+	t.Helper()
+	sizer := msgbucket.New(24 * time.Hour)
+	sender := models.Participant{ID: "u1", Account: "alice", EngName: "Alice"}
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, deleted, type, site_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(createdAt), createdAt, messageID, sender, msg, deleted, msgType, "site-a",
+	).Exec())
+}
+
+func TestRepository_GetLastRoomMessage_DeletedLastFallsBackToPriorSurvivor(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-deleted"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "still here")
+	seedLastMsgRow(t, session, roomID, "m-deleted", base.Add(time.Minute), true, "", "gone")
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-survivor", got.MessageID)
+	assert.Equal(t, "still here", got.Msg)
+}
+
+func TestRepository_GetLastRoomMessage_EditedLastCarriesCurrentContentAndEditedAt(t *testing.T) {
+	session := setupCassandra(t)
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-edited"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	editedAt := base.Add(5 * time.Minute)
+	sender := models.Participant{ID: "u1", Account: "alice", EngName: "Alice"}
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, edited_at, site_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(base), base, "m-edited", sender, "edited body", editedAt, "site-a",
+	).Exec())
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-edited", got.MessageID)
+	assert.Equal(t, "edited body", got.Msg, "preview must carry the post-edit content")
+	require.NotNil(t, got.EditedAt)
+	assert.Equal(t, editedAt, got.EditedAt.UTC())
+}
+
+func TestRepository_GetLastRoomMessage_AllDeletedReturnsNil(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-all-deleted"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m%d", i), base.Add(time.Duration(i)*time.Minute), true, "", "gone")
+	}
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestRepository_GetLastRoomMessage_SystemMessageNewestIsSkipped(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-system"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-user", base, false, "", "user message")
+	seedLastMsgRow(t, session, roomID, "m-sys-1", base.Add(time.Minute), false, model.MessageTypeMembersAdded, "alice added bob")
+	seedLastMsgRow(t, session, roomID, "m-sys-2", base.Add(2*time.Minute), false, model.MessageTypeRoomRenamed, "renamed")
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-user", got.MessageID)
+}
+
+func TestRepository_GetLastRoomMessage_OnlySystemAndDeletedReturnsNil(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-sys-deleted"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-sys", base, false, model.MessageTypeRoomCreated, "created")
+	seedLastMsgRow(t, session, roomID, "m-del", base.Add(time.Minute), true, "", "gone")
+	// A removed thread parent carries the placeholder type AND deleted=true; seed
+	// one with deleted=false anyway to prove the type alone disqualifies it.
+	seedLastMsgRow(t, session, roomID, "m-removed", base.Add(2*time.Minute), false, MessageTypeRemoved, "")
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// A run of tombstones at least one fetch-page deep must not stop the scan:
+// the survivor behind them is still found within the same bucket.
+func TestRepository_GetLastRoomMessage_TombstoneDensePartition(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-tombstones"
+	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "buried alive")
+	for i := 0; i < lastMessageScanPageSize+20; i++ {
+		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%03d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
+	}
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-survivor", got.MessageID)
+}
+
+// The survivor may sit buckets below the tombstones — the walk must cross
+// bucket boundaries (including an empty middle bucket) to reach it.
+func TestRepository_GetLastRoomMessage_SurvivorInOlderBucket(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-older-bucket"
+	newest := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+	survivorAt := newest.AddDate(0, 0, -2) // two buckets down; day -1 stays empty
+	seedLastMsgRow(t, session, roomID, "m-survivor", survivorAt, false, "", "old but alive")
+	for i := 0; i < 5; i++ {
+		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%d", i), newest.Add(time.Duration(i)*time.Minute), true, "", "gone")
+	}
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, newest.Add(time.Hour), newest.AddDate(0, 0, -10))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-survivor", got.MessageID)
+}
+
+// messages_by_room only holds main-timeline rows (thread replies live in
+// thread_messages_by_thread; only TShow replies are dual-written), so a
+// thread-only reply must never surface as the room's last message.
+func TestRepository_GetLastRoomMessage_ThreadOnlyReplyDoesNotSurface(t *testing.T) {
+	session := setupCassandra(t)
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-thread-only"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-main", base, false, "", "main timeline")
+
+	// Newer reply written ONLY to the thread table — as message-worker does for
+	// a non-TShow reply.
+	replyAt := base.Add(time.Minute)
+	sender := models.Participant{ID: "u2", Account: "bob"}
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, site_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"tr-1", replyAt, "m-reply", roomID, sender, "thread reply", "m-main", "site-a",
+	).Exec())
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, replyAt.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-main", got.MessageID, "a thread-only reply must not win the room preview")
+}
+
+// An at-rest-encrypted survivor must come back decrypted, exactly like the
+// paginated read paths.
+func TestRepository_GetLastRoomMessage_DecryptsEncryptedSurvivor(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, cipher)
+
+	roomID := "r-last-encrypted"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	payload, meta, err := cipher.Encrypt(ctx, roomID, atrest.EncryptedFields{Msg: "secret body"})
+	require.NoError(t, err)
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, enc_payload, enc_meta, site_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(base), base, "m-enc", payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, "site-a",
+	).Exec())
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "secret body", got.Msg)
+	assert.Empty(t, got.EncPayload, "enc_* must never leak above the repo layer")
+	assert.Nil(t, got.EncMeta)
+}
+
+func TestRepository_GetLastRoomMessage_EmptyRoomReturnsNil(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	got, err := repo.GetLastRoomMessage(ctx, "r-last-empty", base, base.AddDate(0, 0, -5))
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}

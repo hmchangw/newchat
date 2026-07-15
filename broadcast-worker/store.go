@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -12,6 +13,7 @@ import (
 //go:generate mockgen -destination=mock_userstore_test.go -package=main github.com/hmchangw/chat/pkg/userstore UserStore
 //go:generate mockgen -destination=mock_keystore_test.go -package=main . RoomKeyProvider
 //go:generate mockgen -destination=mock_parentfetcher_test.go -package=main . ParentFetcher
+//go:generate mockgen -destination=mock_lastmsgfetcher_test.go -package=main . LastMessageFetcher
 
 // Store defines data access operations for the broadcast worker.
 type Store interface {
@@ -19,7 +21,22 @@ type Store interface {
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
 	ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error)
 	GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error)
-	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error
+	// UpdateRoomLastMessage advances the room's lastMsgId/lastMsgAt/lastMsg
+	// pointer to a newly created message. preview is the denormalized lastMsg
+	// document (Msg already blanked by the caller for encrypted rooms).
+	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, preview *model.LastMessagePreview) error
+	// RewindRoomLastMessage rewinds the room's last-message pointer after a
+	// delete, but ONLY if the room still points at deletedMsgID (guarded
+	// UpdateOne). survivor == nil clears the fields like a fresh room. A
+	// non-matching pointer is a benign no-op (a concurrent newer message won).
+	RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error
+	// SetRoomLastMessageEdited patches lastMsg.msg/lastMsg.encMsg/lastMsg.editedAt
+	// after an edit, but ONLY if the room still points at editedMsgID (guarded
+	// UpdateOne; non-matching pointer is a benign no-op). Exactly one of
+	// newMsg/encMsg is set: encrypted rooms pass the content ciphertext with
+	// newMsg=="", plaintext rooms pass encMsg==nil, which $unsets lastMsg.encMsg
+	// so a stale ciphertext never survives a plaintext patch.
+	SetRoomLastMessageEdited(ctx context.Context, roomID, editedMsgID, newMsg string, encMsg json.RawMessage, editedAt time.Time) error
 	// SetSubscriptionMentions flags accounts as mentioned, unless a given account
 	// already read past msgCreatedAt (lastSeenAt >= msgCreatedAt) — otherwise an
 	// async mention write can clobber a read-clear that happened first (#467).

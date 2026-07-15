@@ -82,7 +82,7 @@ func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -128,7 +128,7 @@ func TestBroadcastWorker_ChannelRoom_MentionAll_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -168,7 +168,7 @@ func TestBroadcastWorker_ChannelRoom_IndividualMention_Integration(t *testing.T)
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -218,7 +218,7 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	keyStore := &fakeRoomKeyProvider{pair: nil}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -280,7 +280,7 @@ func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T
 	pub := &recordingPublisher{}
 
 	// nil keyStore — encryption is disabled, handler must not consult it
-	handler := NewHandler(store, us, pub, nil, defaultParentFetcher, false)
+	handler := NewHandler(store, us, pub, nil, defaultParentFetcher, defaultLastMsgFetcher, false)
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -331,7 +331,7 @@ func TestBroadcastWorker_PersistsLastMessage_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	pub := &recordingPublisher{}
-	h := NewHandler(cached, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, false)
+	h := NewHandler(cached, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, defaultLastMsgFetcher, false)
 
 	msgTime := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 	evt := model.MessageEvent{
@@ -396,6 +396,196 @@ func TestBroadcastWorker_BulkUpdateRoomLastMessage_Integration(t *testing.T) {
 	assert.Equal(t, "msg-b", b.LastMsgID)
 	assert.WithinDuration(t, t2, b.LastMsgAt, time.Millisecond)
 	assert.WithinDuration(t, t2, b.LastMentionAllAt, time.Millisecond)
+}
+
+func TestBroadcastWorker_RewindRoomLastMessage_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	lastAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	mentionAt := lastAt.Add(-time.Hour)
+	deletedAt := lastAt.Add(time.Minute)
+	seedRoom := func(t *testing.T, id string) {
+		t.Helper()
+		_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+			"_id": id, "type": model.RoomTypeChannel, "siteId": "site-a",
+			"lastMsgId": "m-deleted", "lastMsgAt": lastAt, "lastMentionAllAt": mentionAt,
+			"lastMsg": model.LastMessagePreview{MessageID: "m-deleted", SenderAccount: "alice", Msg: "bye", CreatedAt: lastAt},
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("matching pointer with survivor rewinds all three fields", func(t *testing.T) {
+		seedRoom(t, "r-rw-1")
+		survivorAt := lastAt.Add(-2 * time.Hour)
+		survivor := &model.LastMessagePreview{MessageID: "m-prev", SenderAccount: "bob", SenderName: "Bob Chen", Msg: "still here", CreatedAt: survivorAt}
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-1", "m-deleted", survivor, deletedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-rw-1"}).Decode(&room))
+		assert.Equal(t, "m-prev", room.LastMsgID)
+		require.NotNil(t, room.LastMsgAt)
+		assert.WithinDuration(t, survivorAt, *room.LastMsgAt, time.Millisecond)
+		require.NotNil(t, room.LastMsg)
+		assert.Equal(t, "m-prev", room.LastMsg.MessageID)
+		assert.Equal(t, "still here", room.LastMsg.Msg)
+	})
+
+	t.Run("matching pointer with nil survivor clears fields like a fresh room", func(t *testing.T) {
+		seedRoom(t, "r-rw-2")
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-2", "m-deleted", nil, deletedAt))
+
+		var raw bson.M
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-rw-2"}).Decode(&raw))
+		assert.Equal(t, "", raw["lastMsgId"], "lastMsgId resets to empty string like a fresh room")
+		_, hasAt := raw["lastMsgAt"]
+		assert.False(t, hasAt, "lastMsgAt must be unset")
+		_, hasPreview := raw["lastMsg"]
+		assert.False(t, hasPreview, "lastMsg must be unset")
+		_, hasMention := raw["lastMentionAllAt"]
+		assert.True(t, hasMention, "lastMentionAllAt must not be touched")
+	})
+
+	t.Run("non-matching pointer is a benign no-op", func(t *testing.T) {
+		seedRoom(t, "r-rw-3")
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-3", "m-other", nil, deletedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-rw-3"}).Decode(&room))
+		assert.Equal(t, "m-deleted", room.LastMsgID, "a concurrent newer message won — nothing rewound")
+		require.NotNil(t, room.LastMsg)
+		assert.Equal(t, "bye", room.LastMsg.Msg)
+	})
+}
+
+func TestBroadcastWorker_SetRoomLastMessageEdited_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	lastAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	editedAt := lastAt.Add(time.Minute)
+	seedRoom := func(t *testing.T, id string) {
+		t.Helper()
+		_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+			"_id": id, "type": model.RoomTypeChannel, "siteId": "site-a",
+			"lastMsgId": "m-last", "lastMsgAt": lastAt,
+			"lastMsg": model.LastMessagePreview{MessageID: "m-last", SenderAccount: "alice", Msg: "original", CreatedAt: lastAt},
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("matching lastMsgId patches msg and editedAt", func(t *testing.T) {
+		seedRoom(t, "r-ed-1")
+
+		require.NoError(t, store.SetRoomLastMessageEdited(ctx, "r-ed-1", "m-last", "rewritten", nil, editedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-ed-1"}).Decode(&room))
+		require.NotNil(t, room.LastMsg)
+		assert.Equal(t, "rewritten", room.LastMsg.Msg)
+		require.NotNil(t, room.LastMsg.EditedAt)
+		assert.WithinDuration(t, editedAt, *room.LastMsg.EditedAt, time.Millisecond)
+		assert.Equal(t, "m-last", room.LastMsg.MessageID, "other preview fields untouched")
+	})
+
+	t.Run("non-matching lastMsgId is a benign no-op", func(t *testing.T) {
+		seedRoom(t, "r-ed-2")
+
+		require.NoError(t, store.SetRoomLastMessageEdited(ctx, "r-ed-2", "m-other", "rewritten", nil, editedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-ed-2"}).Decode(&room))
+		require.NotNil(t, room.LastMsg)
+		assert.Equal(t, "original", room.LastMsg.Msg, "an edit of a non-latest message must not touch the preview")
+		assert.Nil(t, room.LastMsg.EditedAt)
+	})
+
+	t.Run("encMsg patch stores ciphertext and blanks msg", func(t *testing.T) {
+		seedRoom(t, "r-ed-3")
+		enc := json.RawMessage(`{"version":3,"nonce":"bm9uY2U=","ciphertext":"Y2lwaGVy"}`)
+
+		require.NoError(t, store.SetRoomLastMessageEdited(ctx, "r-ed-3", "m-last", "", enc, editedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-ed-3"}).Decode(&room))
+		require.NotNil(t, room.LastMsg)
+		assert.Empty(t, room.LastMsg.Msg, "encrypted patch must blank the plaintext")
+		assert.Equal(t, string(enc), string(room.LastMsg.EncMsg), "encMsg round-trips byte-identical")
+		require.NotNil(t, room.LastMsg.EditedAt)
+		assert.WithinDuration(t, editedAt, *room.LastMsg.EditedAt, time.Millisecond)
+	})
+
+	t.Run("plaintext patch unsets stale encMsg", func(t *testing.T) {
+		_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+			"_id": "r-ed-4", "type": model.RoomTypeChannel, "siteId": "site-a",
+			"lastMsgId": "m-last", "lastMsgAt": lastAt,
+			"lastMsg": model.LastMessagePreview{
+				MessageID: "m-last", SenderAccount: "alice", CreatedAt: lastAt,
+				EncMsg: json.RawMessage(`{"version":1,"nonce":"eA==","ciphertext":"eQ=="}`),
+			},
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, store.SetRoomLastMessageEdited(ctx, "r-ed-4", "m-last", "now plaintext", nil, editedAt))
+
+		// Decode lastMsg into an explicitly typed bson.M: nested documents
+		// inside a plain bson.M decode as bson.D in mongo-driver v2, which
+		// would make key-presence checks silently miss.
+		var raw struct {
+			LastMsg bson.M `bson:"lastMsg"`
+		}
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-ed-4"}).Decode(&raw))
+		require.NotNil(t, raw.LastMsg)
+		assert.Equal(t, "now plaintext", raw.LastMsg["msg"])
+		_, hasEnc := raw.LastMsg["encMsg"]
+		assert.False(t, hasEnc, "a plaintext patch must never leave a stale ciphertext behind")
+	})
+}
+
+func TestBroadcastWorker_UpdateRoomLastMessage_PersistsPreview_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{ID: "r-prev", Name: "p", Type: model.RoomTypeChannel, SiteID: "site-a"})
+	require.NoError(t, err)
+
+	at := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p := &model.LastMessagePreview{MessageID: "m-new", SenderAccount: "alice", SenderName: "Alice Wang", Msg: "hello", CreatedAt: at}
+	require.NoError(t, store.UpdateRoomLastMessage(ctx, "r-prev", "m-new", at, false, p))
+
+	var room model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-prev"}).Decode(&room))
+	assert.Equal(t, "m-new", room.LastMsgID)
+	require.NotNil(t, room.LastMsg)
+	assert.Equal(t, "hello", room.LastMsg.Msg)
+	assert.Equal(t, "Alice Wang", room.LastMsg.SenderName)
+}
+
+func TestBroadcastWorker_BulkUpdateRoomLastMessage_PersistsPreview_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{ID: "r-bulk-p", Name: "p", Type: model.RoomTypeChannel, SiteID: "site-a"})
+	require.NoError(t, err)
+
+	at := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	updates := map[string]roomLastMsgUpdate{
+		"r-bulk-p": {msgID: "m-bulk", at: at, preview: &model.LastMessagePreview{MessageID: "m-bulk", SenderAccount: "bob", Msg: "bulk hello", CreatedAt: at}},
+	}
+	require.NoError(t, store.BulkUpdateRoomLastMessage(ctx, updates))
+
+	var room model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-bulk-p"}).Decode(&room))
+	assert.Equal(t, "m-bulk", room.LastMsgID)
+	require.NotNil(t, room.LastMsg)
+	assert.Equal(t, "bulk hello", room.LastMsg.Msg)
 }
 
 func TestBroadcastWorker_BulkUpdateRoomLastMessage_EmptyIsNoOp_Integration(t *testing.T) {

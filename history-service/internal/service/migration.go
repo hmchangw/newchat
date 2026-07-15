@@ -86,7 +86,7 @@ func (s *HistoryService) MigrationDeleteMessage(c *natsrouter.Context, siteID st
 		return &model.MigrationAck{OK: true}, nil
 	}
 
-	if _, _, _, err := s.msgWriter.SoftDeleteMessage(c, msg, req.DeletedAt); err != nil {
+	if _, _, _, _, err := s.msgWriter.SoftDeleteMessage(c, msg, req.DeletedAt); err != nil {
 		return nil, fmt.Errorf("migration delete message %s: %w", req.MessageID, err)
 	}
 

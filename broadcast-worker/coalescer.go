@@ -5,12 +5,15 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // roomLastMsgUpdate is the per-room state buffered between flushes.
 //
 // Coalescing semantics:
-//   - msgID/at carry the LATEST observed message for the room (max by createdAt).
+//   - msgID/at/preview carry the LATEST observed message for the room (max by
+//     createdAt); preview is the denormalized lastMsg document for that message.
 //   - lastMentionAllAt carries the latest createdAt among messages whose
 //     mentionAll flag was true; it sticks across subsequent non-mention-all
 //     messages until a newer mention-all arrives.
@@ -18,6 +21,7 @@ type roomLastMsgUpdate struct {
 	msgID            string
 	at               time.Time
 	lastMentionAllAt time.Time
+	preview          *model.LastMessagePreview
 }
 
 // bulkRoomLastMsgWriter is the persistence boundary the coalescer flushes to.
@@ -58,13 +62,14 @@ func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStor
 
 // UpdateRoomLastMessage buffers the update. Always returns nil; the buffered
 // write is performed asynchronously by Flush.
-func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool) error {
+func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool, preview *model.LastMessagePreview) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cur := c.pending[roomID]
 	if at.After(cur.at) {
 		cur.msgID = msgID
 		cur.at = at
+		cur.preview = preview
 	}
 	if mentionAll && at.After(cur.lastMentionAllAt) {
 		cur.lastMentionAllAt = at

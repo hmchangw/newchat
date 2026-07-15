@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 type fakeBulkWriter struct {
@@ -63,7 +65,7 @@ func TestCoalescingStore_UpdateRoomLastMessage_BuffersWithoutFlush(t *testing.T)
 	bulk := &fakeBulkWriter{}
 	c := newCoalescer(bulk)
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false, nil))
 	assert.Equal(t, 0, bulk.callCount(), "buffered updates must not hit Mongo until Flush")
 }
 
@@ -72,8 +74,8 @@ func TestCoalescingStore_Flush_WritesPendingBatch(t *testing.T) {
 	c := newCoalescer(bulk)
 
 	t0 := time.Unix(1700000000, 0).UTC()
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-a", "msg-a", t0, false))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-b", "msg-b", t0.Add(time.Second), true))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-a", "msg-a", t0, false, nil))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-b", "msg-b", t0.Add(time.Second), true, nil))
 
 	require.NoError(t, c.Flush(context.Background()))
 
@@ -96,9 +98,9 @@ func TestCoalescingStore_Update_LatestMessageWinsPerRoom(t *testing.T) {
 	t3 := t2.Add(500 * time.Millisecond)
 
 	// Send in order: t1, t3, t2. Latest (t3) must win regardless of arrival order.
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "msg-1", t1, false))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "msg-3", t3, false))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "msg-2", t2, false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "msg-1", t1, false, nil))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "msg-3", t3, false, nil))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "msg-2", t2, false, nil))
 
 	require.NoError(t, c.Flush(context.Background()))
 
@@ -118,9 +120,9 @@ func TestCoalescingStore_Update_MentionAllStickyOnLatestMentionAll(t *testing.T)
 
 	// t1: mentionAll=true. t2: mentionAll=false (later). t3: mentionAll=true (latest).
 	// Expected lastMentionAllAt == t3 (latest among mention-all messages).
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m1", t1, true))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m2", t2, false))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m3", t3, true))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m1", t1, true, nil))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m2", t2, false, nil))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m3", t3, true, nil))
 
 	require.NoError(t, c.Flush(context.Background()))
 
@@ -137,8 +139,8 @@ func TestCoalescingStore_Update_MentionAllPreservedWhenLaterMessageHasNone(t *te
 	t1 := time.Unix(1700000000, 0).UTC()
 	t2 := t1.Add(time.Second)
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m1", t1, true))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m2", t2, false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m1", t1, true, nil))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m2", t2, false, nil))
 
 	require.NoError(t, c.Flush(context.Background()))
 
@@ -159,7 +161,7 @@ func TestCoalescingStore_Flush_ClearsPendingAfterWrite(t *testing.T) {
 	bulk := &fakeBulkWriter{}
 	c := newCoalescer(bulk)
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false, nil))
 	require.NoError(t, c.Flush(context.Background()))
 	require.NoError(t, c.Flush(context.Background()))
 
@@ -171,7 +173,7 @@ func TestCoalescingStore_Flush_PropagatesBulkError(t *testing.T) {
 	bulk := &fakeBulkWriter{err: wantErr}
 	c := newCoalescer(bulk)
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false, nil))
 
 	err := c.Flush(context.Background())
 	assert.ErrorIs(t, err, wantErr)
@@ -190,7 +192,7 @@ func TestCoalescingStore_ConcurrentUpdatesAreThreadSafe(t *testing.T) {
 			defer wg.Done()
 			base := time.Unix(1700000000, 0).UTC()
 			for i := 0; i < perGoroutine; i++ {
-				_ = c.UpdateRoomLastMessage(context.Background(), "room-shared", "msg", base.Add(time.Duration(g*1000+i)*time.Millisecond), false)
+				_ = c.UpdateRoomLastMessage(context.Background(), "room-shared", "msg", base.Add(time.Duration(g*1000+i)*time.Millisecond), false, nil)
 			}
 		}(g)
 	}
@@ -200,6 +202,44 @@ func TestCoalescingStore_ConcurrentUpdatesAreThreadSafe(t *testing.T) {
 	require.Equal(t, 1, bulk.callCount())
 	got := bulk.lastCall()
 	require.Len(t, got, 1, "all writes coalesced into a single room entry")
+}
+
+func TestCoalescingStore_Update_PreviewCarriedToBulk(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+
+	t0 := time.Unix(1700000000, 0).UTC()
+	p := &model.LastMessagePreview{MessageID: "msg-a", SenderAccount: "alice", SenderName: "Alice Wang", Msg: "hi", CreatedAt: t0}
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-a", "msg-a", t0, false, p))
+
+	require.NoError(t, c.Flush(context.Background()))
+
+	got := bulk.lastCall()["room-a"]
+	require.NotNil(t, got.preview, "the buffered update must carry the preview to the bulk write")
+	assert.Equal(t, "msg-a", got.preview.MessageID)
+	assert.Equal(t, "hi", got.preview.Msg)
+}
+
+func TestCoalescingStore_Update_LatestPreviewWinsPerRoom(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+
+	t1 := time.Unix(1700000000, 0).UTC()
+	t2 := t1.Add(time.Second)
+	p1 := &model.LastMessagePreview{MessageID: "m1", SenderAccount: "alice", CreatedAt: t1}
+	p2 := &model.LastMessagePreview{MessageID: "m2", SenderAccount: "bob", CreatedAt: t2}
+
+	// Out-of-order arrival: the later message's preview must win, and the
+	// stale arrival must not clobber it.
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m2", t2, false, p2))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-x", "m1", t1, false, p1))
+
+	require.NoError(t, c.Flush(context.Background()))
+
+	got := bulk.lastCall()["room-x"]
+	assert.Equal(t, "m2", got.msgID)
+	require.NotNil(t, got.preview)
+	assert.Equal(t, "m2", got.preview.MessageID, "preview must track the latest message, not the latest arrival")
 }
 
 func TestCoalescingStore_Run_FlushesPeriodicallyUntilCancel(t *testing.T) {
@@ -213,7 +253,7 @@ func TestCoalescingStore_Run_FlushesPeriodicallyUntilCancel(t *testing.T) {
 		close(done)
 	}()
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false, nil))
 
 	select {
 	case <-bulk.signal:
@@ -241,7 +281,7 @@ func TestCoalescingStore_Run_FinalFlushOnShutdown(t *testing.T) {
 		close(done)
 	}()
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "room-1", "msg-1", time.Now(), false, nil))
 	cancel()
 
 	select {

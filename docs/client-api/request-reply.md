@@ -1002,7 +1002,7 @@ Soft-delete (row preserved for audit). Only the original sender may delete. Idem
 
 `"only the sender can delete"` (`forbidden`), `"message not found"` (`not_found`).
 
-**Emits:** [`message_deleted`](events.md#message_deleted-deleteroomevent), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
+**Emits:** [`message_deleted`](events.md#message_deleted-deleteroomevent) (on visible deletes, enriched with the room's surviving last-message preview — `lastMessage`), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 
 ---
 

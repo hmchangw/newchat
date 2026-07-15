@@ -286,6 +286,14 @@ func ThreadRoomInfoBatch(siteID string) string {
 	return fmt.Sprintf("chat.server.request.room.%s.thread.info.batch", siteID)
 }
 
+// MsgRoomLast is the server-to-server request subject for the last-room-message
+// lookup RPC: callers send a LastRoomMessageRequest and receive a
+// LastRoomMessageResponse with the room's newest non-deleted, non-system
+// message. Mirrors RoomsInfoBatch.
+func MsgRoomLast(siteID string) string {
+	return fmt.Sprintf("chat.server.request.msg.%s.room.last", siteID)
+}
+
 // ThreadSubscriptionList is the server-to-server request subject for the per-site
 // leaf of the cross-site thread inbox: the user-service aggregator fans out one
 // request per candidate site to history-service, which subscribes on the same

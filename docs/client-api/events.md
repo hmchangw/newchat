@@ -201,7 +201,8 @@ after the live event was delivered), call
 
 **Client decryption:** `AES-GCM-Decrypt(privateKey, nonce, ciphertext, aad=empty)`.
 `encryptedMessage` decrypts to a UTF-8-encoded JSON `ClientMessage`;
-`encryptedNewContent` (edit) decrypts to a plain UTF-8 content string.
+`encryptedNewContent` (edit) and `lastMessage.encMsg` (last-message preview)
+decrypt to a plain UTF-8 content string.
 Retain past versions for history scrolling (server grace window: at least 24h).
 
 ---
@@ -384,6 +385,11 @@ Flat event. Triggered by [Delete Message](request-reply.md#delete-message).
 Thread-reply deletes **additionally** emit a
 [`thread_metadata_updated`](#thread_metadata_updated-threadmetadataupdatedevent) event.
 
+On the visible-delete lanes (everything except the hidden `tshow=false` thread-reply
+lane) the event carries the room's **surviving last-message preview** (`lastMessage`)
+so clients can refresh the room-list preview without a history fetch. In encrypted
+rooms the preview carries `encMsg` instead of `msg`.
+
 | Field | Type | Notes |
 |---|---|---|
 | `type` | string | Always `"message_deleted"`. |
@@ -395,6 +401,7 @@ Thread-reply deletes **additionally** emit a
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `lastMessage` | [LastMessagePreview](../client-api.md#lastmessagepreview) | Optional. The room's newest surviving non-deleted, non-system message **after** this delete; in encrypted rooms it carries `encMsg` instead of `msg`. Absent on hidden thread-reply deletes (`tshow=false` — the room preview is unchanged, keep the current one). After a **visible** delete, absent `lastMessage` means no previewable message remains — clear the preview. |
 
 ```json
 {
@@ -405,8 +412,27 @@ Thread-reply deletes **additionally** emit a
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "lastMessage": {
+    "messageId": "01970a4f8c2d7c9aMNOP",
+    "senderAccount": "bob",
+    "senderName": "Bob 鮑伯",
+    "msg": "see you at standup",
+    "createdAt": "2026-05-06T07:50:00Z"
+  }
 }
+```
+
+In an encrypted channel room the preview carries `encMsg` instead of `msg`:
+
+```json
+  "lastMessage": {
+    "messageId": "01970a4f8c2d7c9aMNOP",
+    "senderAccount": "bob",
+    "senderName": "Bob 鮑伯",
+    "encMsg": { "version": 3, "nonce": "…", "ciphertext": "…" },
+    "createdAt": "2026-05-06T07:50:00Z"
+  }
 ```
 
 ---
@@ -518,7 +544,7 @@ independently.
 | `parentMessageId` | string | The thread parent message's ID. Use to locate the message in your cache and update its badge. |
 | `replyMessageId` | string | The reply that was added or deleted. |
 | `newTcount` | number | Authoritative reply count for the parent message, capped at 99 (99 means "99 or more"). Apply directly — do not delta. |
-| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0. |
+| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply — populated on both `reply_added` and `reply_deleted` (the newest reply that remains after the operation). Absent when `newTcount` is 0. |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 
 ```json

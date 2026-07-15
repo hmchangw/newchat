@@ -54,6 +54,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.msg.canonical.site-a.deleted"},
 		{"RoomsInfoBatch", subject.RoomsInfoBatch("site-a"),
 			"chat.server.request.room.site-a.info.batch"},
+		{"MsgRoomLast", subject.MsgRoomLast("site-a"),
+			"chat.server.request.msg.site-a.room.last"},
 		{"RoomEvent", subject.RoomEvent("r1"), "chat.room.r1.event"},
 		{"UserRoomEvent", subject.UserRoomEvent("alice"), "chat.user.alice.event.room"},
 		{"RoomKeyUpdate", subject.RoomKeyUpdate("alice"),

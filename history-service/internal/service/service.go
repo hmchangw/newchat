@@ -26,6 +26,9 @@ type MessageReader interface {
 	GetMessagesByIDs(ctx context.Context, messageIDs []string) ([]models.Message, error)
 	GetPinnedMessages(ctx context.Context, roomID string, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetAllPinnedMessages(ctx context.Context, roomID string) ([]models.Message, error)
+	// GetLastRoomMessage returns the room's newest non-deleted, non-system
+	// message within [floor, before), or (nil, nil) when none qualifies.
+	GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error)
 }
 
 type MessageWriter interface {
@@ -36,7 +39,10 @@ type MessageWriter interface {
 	// applied; the existing value when a concurrent delete won the race).
 	// newTcount is non-nil when the parent's tcount was decremented via CAS;
 	// nil means the CAS was skipped (e.g. parent row not found, or msg is not a thread reply).
-	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, newTcount *int, err error)
+	// newThreadLastMsgAt is the recomputed thread_last_msg_at written alongside
+	// tcount: the surviving newest reply's created_at, nil when no replies
+	// remain or the recompute was skipped (same cases as newTcount nil).
+	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, newTcount *int, newThreadLastMsgAt *time.Time, err error)
 	PinMessage(ctx context.Context, msg *models.Message, pinnedAt time.Time, pinnedBy models.Participant) error
 	UnpinMessage(ctx context.Context, msg *models.Message) error
 	// AddReaction writes one (emoji, user_account) map-cell to every mirror; idempotent.
@@ -177,6 +183,7 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 		return s.MigrationDeleteMessage(c, siteID, req)
 	})
 	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), s.ListThreadSubscriptions)
+	natsrouter.Register(r, subject.MsgRoomLast(siteID), s.GetLastRoomMessage)
 }
 
 // Compile-time checks.

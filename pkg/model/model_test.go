@@ -4331,6 +4331,282 @@ func TestOutboxEvent_RoundTrip(t *testing.T) {
 	require.Equal(t, evt, got)
 }
 
+func TestLastMessagePreviewJSON(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	edited := ts.Add(time.Minute)
+	p := model.LastMessagePreview{
+		MessageID:       "m1",
+		Type:            "text",
+		SenderAccount:   "alice",
+		SenderName:      "Alice Wang",
+		Msg:             "hello",
+		CreatedAt:       ts,
+		EditedAt:        &edited,
+		AttachmentCount: 2,
+	}
+	roundTrip(t, &p, &model.LastMessagePreview{})
+}
+
+func TestLastMessagePreview_OmitemptyFields(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p := model.LastMessagePreview{MessageID: "m1", SenderAccount: "alice", CreatedAt: ts}
+	data, err := json.Marshal(p)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	for _, key := range []string{"type", "senderName", "msg", "encMsg", "editedAt", "attachmentCount"} {
+		_, present := raw[key]
+		assert.False(t, present, "zero %s must be omitted from JSON", key)
+	}
+	for _, key := range []string{"messageId", "senderAccount", "createdAt"} {
+		_, present := raw[key]
+		assert.True(t, present, "%s must always be present in JSON", key)
+	}
+}
+
+func TestLastMessagePreview_EncMsg(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("EncMsg round-trips JSON", func(t *testing.T) {
+		p := model.LastMessagePreview{
+			MessageID:     "m1",
+			SenderAccount: "alice",
+			CreatedAt:     ts,
+			EncMsg:        json.RawMessage(`{"ciphertext":"abc"}`),
+		}
+		data, err := json.Marshal(p)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["encMsg"]
+		assert.True(t, present, "non-empty EncMsg must appear in JSON as encMsg")
+		var dst model.LastMessagePreview
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.JSONEq(t, `{"ciphertext":"abc"}`, string(dst.EncMsg))
+	})
+
+	t.Run("EncMsg round-trips BSON", func(t *testing.T) {
+		p := model.LastMessagePreview{
+			MessageID:     "m1",
+			SenderAccount: "alice",
+			CreatedAt:     ts,
+			EncMsg:        json.RawMessage(`{"ciphertext":"abc"}`),
+		}
+		data, err := bson.Marshal(p)
+		require.NoError(t, err)
+		var raw bson.M
+		require.NoError(t, bson.Unmarshal(data, &raw))
+		_, present := raw["encMsg"]
+		assert.True(t, present, "non-empty EncMsg must be present in BSON as encMsg")
+		var dst model.LastMessagePreview
+		require.NoError(t, bson.Unmarshal(data, &dst))
+		assert.JSONEq(t, `{"ciphertext":"abc"}`, string(dst.EncMsg))
+	})
+
+	t.Run("nil EncMsg omitted from JSON and BSON", func(t *testing.T) {
+		p := model.LastMessagePreview{MessageID: "m1", SenderAccount: "alice", CreatedAt: ts}
+		data, err := json.Marshal(p)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["encMsg"]
+		assert.False(t, present, "nil EncMsg must be omitted from JSON")
+
+		bdata, err := bson.Marshal(p)
+		require.NoError(t, err)
+		var braw bson.M
+		require.NoError(t, bson.Unmarshal(bdata, &braw))
+		_, present = braw["encMsg"]
+		assert.False(t, present, "nil EncMsg must be omitted from BSON")
+	})
+}
+
+func TestLastRoomMessageRequestJSON(t *testing.T) {
+	r := model.LastRoomMessageRequest{RoomID: "r1"}
+	roundTrip(t, &r, &model.LastRoomMessageRequest{})
+}
+
+func TestLastRoomMessageResponseJSON(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("with last message round-trips", func(t *testing.T) {
+		r := model.LastRoomMessageResponse{LastMessage: &model.LastMessagePreview{
+			MessageID: "m1", SenderAccount: "alice", Msg: "hello", CreatedAt: ts,
+		}}
+		roundTrip(t, &r, &model.LastRoomMessageResponse{})
+	})
+
+	t.Run("nil last message omitted from JSON", func(t *testing.T) {
+		data, err := json.Marshal(model.LastRoomMessageResponse{})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["lastMessage"]
+		assert.False(t, present, "nil LastMessage must be omitted from JSON")
+	})
+}
+
+func TestDeleteRoomEvent_LastMessage(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("nil LastMessage omitted from JSON", func(t *testing.T) {
+		e := model.DeleteRoomEvent{
+			Type:      model.RoomEventMessageDeleted,
+			RoomID:    "r1",
+			SiteID:    "site-a",
+			MessageID: "m1",
+			DeletedBy: "alice",
+			DeletedAt: ts,
+			Timestamp: ts.UnixMilli(),
+		}
+		data, err := json.Marshal(e)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["lastMessage"]
+		assert.False(t, present, "nil LastMessage must be omitted from JSON")
+	})
+
+	t.Run("non-nil LastMessage round-trips JSON", func(t *testing.T) {
+		e := model.DeleteRoomEvent{
+			Type:      model.RoomEventMessageDeleted,
+			RoomID:    "r1",
+			SiteID:    "site-a",
+			MessageID: "m1",
+			DeletedBy: "alice",
+			DeletedAt: ts,
+			Timestamp: ts.UnixMilli(),
+			LastMessage: &model.LastMessagePreview{
+				MessageID: "m0", SenderAccount: "bob", Msg: "previous", CreatedAt: ts,
+			},
+		}
+		data, err := json.Marshal(e)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["lastMessage"]
+		assert.True(t, present, "non-nil LastMessage must appear in JSON as lastMessage")
+		var dst model.DeleteRoomEvent
+		require.NoError(t, json.Unmarshal(data, &dst))
+		require.NotNil(t, dst.LastMessage)
+		assert.Equal(t, "m0", dst.LastMessage.MessageID)
+		assert.Equal(t, "bob", dst.LastMessage.SenderAccount)
+	})
+
+	t.Run("encrypted LastMessage carries EncMsg through JSON", func(t *testing.T) {
+		e := model.DeleteRoomEvent{
+			Type:      model.RoomEventMessageDeleted,
+			RoomID:    "r1",
+			SiteID:    "site-a",
+			MessageID: "m1",
+			DeletedBy: "alice",
+			DeletedAt: ts,
+			Timestamp: ts.UnixMilli(),
+			LastMessage: &model.LastMessagePreview{
+				MessageID:     "m0",
+				SenderAccount: "bob",
+				CreatedAt:     ts,
+				EncMsg:        json.RawMessage(`{"ciphertext":"abc"}`),
+			},
+		}
+		data, err := json.Marshal(e)
+		require.NoError(t, err)
+		var dst model.DeleteRoomEvent
+		require.NoError(t, json.Unmarshal(data, &dst))
+		require.NotNil(t, dst.LastMessage)
+		assert.Empty(t, dst.LastMessage.Msg, "encrypted preview must not carry plaintext Msg")
+		assert.JSONEq(t, `{"ciphertext":"abc"}`, string(dst.LastMessage.EncMsg))
+	})
+
+	t.Run("non-nil LastMessage present in BSON", func(t *testing.T) {
+		e := model.DeleteRoomEvent{
+			Type:      model.RoomEventMessageDeleted,
+			RoomID:    "r1",
+			MessageID: "m1",
+			Timestamp: ts.UnixMilli(),
+			LastMessage: &model.LastMessagePreview{
+				MessageID: "m0", SenderAccount: "bob", CreatedAt: ts,
+			},
+		}
+		data, err := bson.Marshal(e)
+		require.NoError(t, err)
+		var raw bson.M
+		require.NoError(t, bson.Unmarshal(data, &raw))
+		_, present := raw["lastMessage"]
+		assert.True(t, present, "non-nil LastMessage must be present in BSON as lastMessage")
+	})
+
+	t.Run("nil LastMessage omitted from BSON", func(t *testing.T) {
+		e := model.DeleteRoomEvent{
+			Type:      model.RoomEventMessageDeleted,
+			RoomID:    "r1",
+			MessageID: "m1",
+			Timestamp: ts.UnixMilli(),
+		}
+		data, err := bson.Marshal(e)
+		require.NoError(t, err)
+		var raw bson.M
+		require.NoError(t, bson.Unmarshal(data, &raw))
+		_, present := raw["lastMessage"]
+		assert.False(t, present, "nil LastMessage must be omitted from BSON")
+	})
+}
+
+func TestRoom_LastMsg(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("nil LastMsg omitted from JSON and BSON", func(t *testing.T) {
+		r := model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a"}
+		data, err := json.Marshal(r)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["lastMsg"]
+		assert.False(t, present, "nil LastMsg must be omitted from JSON")
+
+		bdata, err := bson.Marshal(r)
+		require.NoError(t, err)
+		var braw bson.M
+		require.NoError(t, bson.Unmarshal(bdata, &braw))
+		_, present = braw["lastMsg"]
+		assert.False(t, present, "nil LastMsg must be omitted from BSON")
+	})
+
+	t.Run("non-nil LastMsg round-trips JSON", func(t *testing.T) {
+		r := model.Room{
+			ID: "r1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a",
+			LastMsgID: "m1",
+			LastMsg: &model.LastMessagePreview{
+				MessageID: "m1", SenderAccount: "alice", Msg: "hello", CreatedAt: ts,
+			},
+		}
+		data, err := json.Marshal(r)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["lastMsg"]
+		assert.True(t, present, "non-nil LastMsg must appear in JSON as lastMsg")
+		var dst model.Room
+		require.NoError(t, json.Unmarshal(data, &dst))
+		require.NotNil(t, dst.LastMsg)
+		assert.Equal(t, "m1", dst.LastMsg.MessageID)
+		assert.True(t, dst.LastMsg.CreatedAt.Equal(ts))
+	})
+
+	t.Run("non-nil LastMsg present in BSON", func(t *testing.T) {
+		r := model.Room{
+			ID: "r1", Type: model.RoomTypeChannel,
+			LastMsg: &model.LastMessagePreview{MessageID: "m1", SenderAccount: "alice", CreatedAt: ts},
+		}
+		data, err := bson.Marshal(r)
+		require.NoError(t, err)
+		var raw bson.M
+		require.NoError(t, bson.Unmarshal(data, &raw))
+		_, present := raw["lastMsg"]
+		assert.True(t, present, "non-nil LastMsg must be present in BSON as lastMsg")
+	})
+}
+
 func TestTeamsUserJSON(t *testing.T) {
 	src := model.TeamsUser{
 		ID:      "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
