@@ -11,8 +11,7 @@ import (
 
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("MONGO_READ_URI", "mongodb://localhost:27017")
-	t.Setenv("MONGO_WRITE_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 	t.Setenv("GRAPH_TENANT_ID", "tenant")
 	t.Setenv("GRAPH_CLIENT_ID", "client")
 	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
@@ -22,8 +21,7 @@ func TestConfig_Defaults(t *testing.T) {
 	setRequiredEnv(t)
 	cfg, err := env.ParseAs[Config]()
 	require.NoError(t, err)
-	assert.Equal(t, "chat", cfg.MongoReadDB)
-	assert.Equal(t, "chat", cfg.MongoWriteDB)
+	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
 	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
@@ -31,15 +29,14 @@ func TestConfig_Defaults(t *testing.T) {
 
 func TestConfig_MissingRequired(t *testing.T) {
 	setRequiredEnv(t)
-	t.Setenv("MONGO_WRITE_URI", "") // required,notEmpty
+	t.Setenv("MONGO_URI", "") // required,notEmpty
 	_, err := env.ParseAs[Config]()
 	require.Error(t, err)
 }
 
 func baseConfig() Config {
 	return Config{
-		MongoReadURI: "mongodb://localhost:27017", MongoReadDB: "chat",
-		MongoWriteURI: "mongodb://localhost:27017", MongoWriteDB: "chat",
+		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
 		MaxWorkers: 8, RunTimeout: 30 * time.Minute,
 		GraphTenantID: "tenant", GraphClientID: "client", GraphClientSecret: "secret",
 	}

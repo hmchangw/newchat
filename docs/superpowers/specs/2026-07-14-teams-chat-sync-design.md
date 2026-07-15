@@ -53,7 +53,8 @@ interface per the consumer-owns-the-interface rule rather than sharing a store
 package.
 
 No NATS connection and no `SITE_ID` env — the job is global and talks only to
-MongoDB and Graph. Mongo traffic is split into a **read client**
+MongoDB and Graph. One replica set serves both lanes via a shared
+`MONGO_URI`/`MONGO_DB`/credentials (like `room-worker`): a **read client**
 (`mongoutil.ConnectRead`, secondary-preferred — serves the `teams_user` scan)
 and a **write client** (`mongoutil.Connect` — the watermark update and
 `teams_chat` upserts), mirroring the sibling `teams-user-sync` job.
@@ -182,10 +183,9 @@ required vars.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `MONGO_READ_URI` | required | Read client (secondary-preferred) for the teams_user scan |
-| `MONGO_READ_DB` | `chat` | Read database name |
-| `MONGO_WRITE_URI` | required | Write client for the watermark update + teams_chat upserts |
-| `MONGO_WRITE_DB` | `chat` | Write database name |
+| `MONGO_URI` | required | Replica set URI; reads use a secondary-preferred client, writes a primary client |
+| `MONGO_DB` | `chat` | Database name |
+| `MONGO_USERNAME` / `MONGO_PASSWORD` | *(empty)* | Optional shared credentials for both clients |
 | `MAX_WORKERS` | `8` | Worker pool size |
 | `SYNC_DEFAULT_FROM` | `2026-04-01T00:00:00Z` | RFC3339 watermark for users with no `from` |
 | `SYNC_DEFAULT_SITE_ID` | *(empty)* | Fallback siteID for chats whose member vote is empty; when unset those chats are skipped with a warning |

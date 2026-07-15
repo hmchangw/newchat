@@ -6,10 +6,8 @@ services:
       context: ../..
       dockerfile: teams-chat-member-sync/deploy/Dockerfile
     environment:
-      - MONGO_READ_URI=${MONGO_READ_URI:-mongodb://mongo:27017}
-      - MONGO_READ_DB=${MONGO_READ_DB:-chat}
-      - MONGO_WRITE_URI=${MONGO_WRITE_URI:-mongodb://mongo:27017}
-      - MONGO_WRITE_DB=${MONGO_WRITE_DB:-chat}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       - MAX_WORKERS=${MAX_WORKERS:-8}
       - RUN_TIMEOUT=${RUN_TIMEOUT:-30m}
       - GRAPH_TENANT_ID=${GRAPH_TENANT_ID}

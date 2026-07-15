@@ -24,10 +24,12 @@ Pipeline position: `teams-user-sync` → `teams-chat-sync` (sets
 - **App-only Graph auth** (client-credentials), reusing `pkg/msgraph`. Requires
   the `Chat.Read.All` (or `ChatMember.Read.All`) **application** permission,
   admin-consented.
-- **Separate read/write Mongo clients** — a secondary-preferred read client
-  (`mongoutil.ConnectRead`) for the `teams_chat` scan and `teams_user`
-  resolution, a write client (`mongoutil.Connect`) for the `teams_chat`
-  updates. Mirrors `teams-chat-sync` and `teams-user-sync`.
+- **Two Mongo clients over one replica set** — a secondary-preferred read
+  client (`mongoutil.ConnectRead`) for the `teams_chat` scan and `teams_user`
+  resolution, and a primary write client (`mongoutil.Connect`) for the
+  `teams_chat` updates. Both share one `MONGO_URI`/`MONGO_DB`/credential pair
+  (like `room-worker`) — only the read preference differs. Mirrors
+  `teams-chat-sync`.
 
 ## Service layout
 
@@ -170,10 +172,8 @@ group chats commonly share members, so most fallback lookups hit the cache.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `MONGO_READ_URI` | required | Read client (secondary-preferred): teams_chat scan + teams_user resolution |
-| `MONGO_READ_DB` | `chat` | Read database name |
-| `MONGO_WRITE_URI` | required | Write client: teams_chat member updates |
-| `MONGO_WRITE_DB` | `chat` | Write database name |
+| `MONGO_URI` | required | Replica set URI; reads use a secondary-preferred client, writes a primary client |
+| `MONGO_DB` | `chat` | Database name |
 | `MAX_WORKERS` | `8` | Worker pool size |
 | `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
@@ -181,7 +181,7 @@ group chats commonly share members, so most fallback lookups hit the cache.
 | `GRAPH_CLIENT_SECRET` | required | App registration secret |
 | `GRAPH_TLS_INSECURE_SKIP_VERIFY` | `false` | Dev/on-prem TLS interception only |
 
-Optional `MONGO_READ_USERNAME`/`PASSWORD` and write equivalents default to
+Optional `MONGO_USERNAME`/`MONGO_PASSWORD` (shared by both clients) default to
 empty, per repo convention.
 
 ## Testing (TDD, ≥ 80% business-logic coverage)
