@@ -193,6 +193,8 @@ ccs:
   enabled: true
   peers: [site2]                      # peers visible from this cluster
   mode: internal                      # in-cluster transport Service
+  registrationJob:
+    enabled: true                     # default
 ```
 
 ```yaml
@@ -201,6 +203,8 @@ ccs:
   enabled: true
   peers: [site2, site3, site4, site5, site6, site7, site8, site9, site10, site11, site12]
   mode: public
+  registrationJob:
+    enabled: true
 ```
 
 What the Job does: waits for local ES `/_cluster/health` to be yellow/green,
@@ -221,9 +225,10 @@ for cases where you don't want to `helm upgrade`:
 - Interactive iteration while debugging connectivity
 - Recovering from a Job failure mid-rollout
 
-The chart-owned Job always renders when `ccs.enabled` and `ccs.peers` is
-non-empty — the script is a purely additional tool for interactive ops, not
-a substitute.
+Set `ccs.registrationJob.enabled: false` in a release's values to suppress
+the Job — useful in resource-constrained clusters, or when you want to
+register peers out-of-band via `register-remotes.sh` on an existing
+release without re-running the Job.
 
 ---
 

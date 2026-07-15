@@ -48,6 +48,7 @@ ccs:
   peers: [site1]
   mode: public                   # public Istio passthrough endpoint (NodePort 30443)
   registrationJob:
+    enabled: true                # post-install Job auto-registers site1
     publicPort: "30443"          # multi-kind exposes Istio LB on NodePort 30443
   publicEndpoint:
     enabled: true

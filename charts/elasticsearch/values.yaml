@@ -35,10 +35,10 @@ enableApps:
 #                            from values.peers.
 #
 #   ccs.peers                List of peer site identifiers (e.g. [site2, site3]).
-#                            When non-empty, renders a post-install/upgrade Job
-#                            that calls PUT /_cluster/settings to register every
-#                            peer. Idempotent — safe to re-run on every helm
-#                            upgrade.
+#                            When non-empty AND ccs.registrationJob.enabled,
+#                            renders a post-install/upgrade Job that calls
+#                            PUT /_cluster/settings to register every peer.
+#                            Idempotent — safe to re-run on every helm upgrade.
 #
 #   ccs.mode                 internal | public — OUTBOUND choice: drives how
 #                            THIS cluster's registration Job builds
@@ -53,10 +53,14 @@ enableApps:
 #                            is also enabled (which only controls the INBOUND
 #                            wiring — see below).
 #
-#   ccs.registrationJob      Tunables for the registration Job (image,
-#                            backoffLimit, healthTimeoutSeconds, publicPort).
-#                            The Job itself always renders when ccs.enabled AND
-#                            ccs.peers is non-empty.
+#   ccs.registrationJob      The post-install Job that PUTs the
+#                            cluster.remote.* settings. Set enabled=false to
+#                            skip rendering it (e.g. in resource-constrained
+#                            clusters where you register peers out-of-band
+#                            via register-remotes.sh, or on subsequent
+#                            re-installs where you don't want the Job to
+#                            re-run). Tunables: image, backoffLimit,
+#                            healthTimeoutSeconds, publicPort.
 #
 #   ccs.transport            Shared transport CA wiring. Always rendered when
 #                            ccs.enabled — every cluster references caSecretName
@@ -99,6 +103,7 @@ ccs:
     hostname: ""
 
   registrationJob:
+    enabled: true
     # The shipped Job only needs `curl` (health is parsed with grep, the PUT
     # body is built in shell) — so the official curlimages/curl is enough. If
     # you customise the Job to parse JSON, point this at an image that also has

@@ -41,6 +41,8 @@ ccs:
   enabled: true
   peers: [site1]                 # one peer for Phase 1
   mode: internal                 # in-cluster transport Service
+  registrationJob:
+    enabled: true                # post-install Job auto-registers site1
   publicEndpoint:
     enabled: false
 
