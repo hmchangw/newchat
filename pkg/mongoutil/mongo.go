@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sync"
 
 	o11ymongo "github.com/flywindy/o11y/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 	"go.opentelemetry.io/otel"
 )
 
@@ -18,8 +20,19 @@ import (
 var cleanups sync.Map // *mongo.Client -> func(context.Context) error
 
 func Connect(ctx context.Context, uri, username, password string, opts ...Option) (*mongo.Client, error) {
+	return connect(ctx, buildClientOptions(uri, username, password), uri, opts...)
+}
+
+// ConnectRead connects a read-oriented client: the same instrumented
+// connect/ping flow as Connect with ReadPreference=secondaryPreferred, so reads
+// can be served by secondaries. For services that split Mongo traffic into
+// separate read and write clients (e.g. teams-user-sync).
+func ConnectRead(ctx context.Context, uri, username, password string, opts ...Option) (*mongo.Client, error) {
+	return connect(ctx, buildReadClientOptions(uri, username, password), uri, opts...)
+}
+
+func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string, opts ...Option) (*mongo.Client, error) {
 	cfg := newConnectConfig(opts...)
-	clientOpts := buildClientOptions(uri, username, password)
 
 	var cleanup func(context.Context) error
 	if cfg.obs != nil {
@@ -47,8 +60,23 @@ func Connect(ctx context.Context, uri, username, password string, opts ...Option
 	if cleanup != nil {
 		cleanups.Store(client, cleanup)
 	}
-	slog.Info("connected to MongoDB", "uri", uri)
+	slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
 	return client, nil
+}
+
+// sanitizeURI reduces a connection string to scheme://host/path so it is safe
+// to log: userinfo (user:pass@) may embed credentials, and query options can
+// carry secrets too (e.g. authMechanismProperties session tokens,
+// proxyPassword).
+func sanitizeURI(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return "invalid-uri"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.Redacted()
 }
 
 func Disconnect(ctx context.Context, client *mongo.Client) {
@@ -79,4 +107,8 @@ func buildClientOptions(uri, username, password string) *options.ClientOptions {
 		})
 	}
 	return opts
+}
+
+func buildReadClientOptions(uri, username, password string) *options.ClientOptions {
+	return buildClientOptions(uri, username, password).SetReadPreference(readpref.SecondaryPreferred())
 }
