@@ -29,8 +29,7 @@ type config struct {
 	// DeleteMaxDeliver: shorter cap for hard-delete ops — a foreign-origin one carries no doc, can't be recognised, and would Nak to the global cap.
 	// The local delete-before-insert race converges in seconds. Tune up if insert-persist lag can exceed DeleteMaxDeliver×2s.
 	DeleteMaxDeliver int    `env:"DELETE_MAX_DELIVER" envDefault:"60"`
-	MetricsAddr      string `env:"METRICS_ADDR" envDefault:":9090"`
-	LogLevel         string `env:"LOG_LEVEL" envDefault:"info"`
+	HealthAddr       string `env:"HEALTH_ADDR" envDefault:":9090"`
 }
 
 func parseConfig() (config, error) {

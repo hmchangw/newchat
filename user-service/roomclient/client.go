@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -18,12 +18,12 @@ const roomRPCTimeout = 5 * time.Second
 
 // Client implements service.RoomClient via NATS request/reply RPCs to room-service and room-worker.
 type Client struct {
-	nc     *otelnats.Conn
+	nc     *o11ynats.Conn
 	siteID string
 }
 
 // New returns a Client wired to nc and scoped to siteID.
-func New(nc *otelnats.Conn, siteID string) *Client { return &Client{nc: nc, siteID: siteID} }
+func New(nc *o11ynats.Conn, siteID string) *Client { return &Client{nc: nc, siteID: siteID} }
 
 // GetRoomsInfo issues a batch room-info RPC; non-OK reply envelopes are relayed via errcode.Parse to preserve the remote classification.
 func (c *Client) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {

@@ -252,6 +252,29 @@ services:
     networks:
       - chat-local
 
+  # Local-dev only: Vault dev mode is in-memory, while MongoDB persists across
+  # Docker Desktop restarts. When Vault recreates the transit key, previously
+  # wrapped room DEKs can no longer be unwrapped, so reset the derivative DEK
+  # cache and let services lazily recreate entries under the fresh key.
+  vault-dek-reset:
+    # DESTRUCTIVE: wipes every room_data_keys doc so services re-provision DEKs
+    # after a Vault reset. Opt-in only — never runs on a plain `deps-up`; enable
+    # with `docker compose -f docker-local/compose.deps.yaml --profile dek-reset
+    # run --rm vault-dek-reset`.
+    profiles: ["dek-reset"]
+    image: mongo:8.2.9
+    container_name: chat-local-vault-dek-reset
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint: ["mongosh", "mongodb://mongodb:27017/chat", "--quiet", "--eval"]
+    command:
+      - |
+        const result = db.getCollection('room_data_keys').deleteMany({});
+        printjson({ roomDataKeysDeleted: result.deletedCount });
+    networks:
+      - chat-local
+
   minio:
     image: minio/minio:RELEASE.2025-07-18T21-56-31Z
     container_name: chat-local-minio
@@ -265,7 +288,7 @@ services:
     volumes:
       - minio-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "curl -fs http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 3s
       retries: 10

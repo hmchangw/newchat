@@ -7,6 +7,9 @@ vi.mock('@/context/NatsContext', () => ({
 
 vi.mock('@/lib/runtimeConfig', () => ({
   DEV_MODE: true,
+  OTEL_ENABLED: true,
+  OTEL_EXPORTER_OTLP_TRACES_URL: 'http://localhost:4318/v1/traces',
+  OTEL_SERVICE_NAME: 'chat-frontend',
 }))
 
 vi.mock('@/api/auth/oidcClient', () => ({

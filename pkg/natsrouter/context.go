@@ -3,19 +3,24 @@ package natsrouter
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/logctx"
-	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // HandlerFunc is the function type for handlers and middleware.
 // Middleware calls c.Next() to continue the chain.
 type HandlerFunc func(c *Context)
+
+type responder interface {
+	Respond(context.Context, *nats.Msg, []byte) error
+}
 
 // Context carries request state through the middleware chain. It implements
 // context.Context and is safe to pass anywhere a context.Context is expected,
@@ -30,6 +35,7 @@ type Context struct {
 	ctx    context.Context
 	Msg    *nats.Msg
 	Params Params
+	reply  responder
 	keys   map[string]any
 	mu     sync.RWMutex
 
@@ -49,7 +55,7 @@ var chainPool = sync.Pool{
 	New: func() any { return &chainState{} },
 }
 
-func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers []HandlerFunc) *Context {
+func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers []HandlerFunc, reply responder) *Context {
 	cs := chainPool.Get().(*chainState)
 	cs.handlers = handlers
 	cs.index = -1
@@ -57,6 +63,7 @@ func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers 
 		ctx:    ctx,
 		Msg:    msg,
 		Params: params,
+		reply:  reply,
 		chain:  cs,
 	}
 }
@@ -220,5 +227,44 @@ func (c *Context) ReplyJSON(v any) {
 			logctx.CapturePayload(c, "reply", c.Msg.Subject, b)
 		}
 	}
-	natsutil.ReplyJSON(c.Msg, v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		slog.ErrorContext(c, "marshal response failed", "error", err, "subject", c.subject())
+		c.respond([]byte(`{"code":"internal","error":"internal error"}`))
+		return
+	}
+	c.respond(data)
+}
+
+// ReplyError classifies err, logs it once, and sends the errcode envelope.
+func (c *Context) ReplyError(err error) {
+	c.respond(errnats.Marshal(c, err))
+}
+
+// ReplyErrorQuiet sends an errcode envelope without logging classification.
+func (c *Context) ReplyErrorQuiet(err error) {
+	c.respond(errnats.MarshalQuiet(err))
+}
+
+func (c *Context) respond(data []byte) {
+	if c.Msg == nil {
+		slog.ErrorContext(c, "reply failed", "error", "nil NATS message")
+		return
+	}
+	var err error
+	if c.reply != nil {
+		err = c.reply.Respond(c, c.Msg, data)
+	} else {
+		err = c.Msg.Respond(data)
+	}
+	if err != nil {
+		slog.ErrorContext(c, "reply failed", "error", err, "subject", c.Msg.Subject)
+	}
+}
+
+func (c *Context) subject() string {
+	if c.Msg == nil {
+		return ""
+	}
+	return c.Msg.Subject
 }

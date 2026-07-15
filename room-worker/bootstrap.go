@@ -6,7 +6,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/stream"
 )
@@ -27,8 +27,8 @@ type bootstrapConfig struct {
 // Kept service-local so we don't pollute pkg/ with a multi-method type and so
 // tests can inject a fake without mockgen.
 type streamManager interface {
-	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error)
-	Stream(ctx context.Context, name string) (oteljetstream.Stream, error)
+	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (o11ynats.Stream, error)
+	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
 // bootstrapStreams handles the JetStream ROOMS stream this service uses. When

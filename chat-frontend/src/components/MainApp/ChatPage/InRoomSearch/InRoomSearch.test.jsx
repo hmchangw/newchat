@@ -16,7 +16,7 @@ describe('InRoomSearch', () => {
   it('does not fetch on typing; fetches on Enter scoped to roomIds: [roomId]', async () => {
     const request = vi.fn().mockResolvedValue({ messages: [], total: 0 })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -37,7 +37,7 @@ describe('InRoomSearch', () => {
 
     await waitFor(() => {
       expect(request).toHaveBeenCalledWith(
-        'chat.user.alice.request.search.messages',
+        'chat.user.alice.request.search.site-A.messages',
         { query: 'hi', roomIds: ['r1'], size: 50 }
       )
     })
@@ -53,7 +53,7 @@ describe('InRoomSearch', () => {
       total: 1,
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -82,7 +82,7 @@ describe('InRoomSearch', () => {
   it('X button calls onClose', () => {
     const onClose = vi.fn()
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request: vi.fn().mockResolvedValue({ messages: [], total: 0 }),
     })
 

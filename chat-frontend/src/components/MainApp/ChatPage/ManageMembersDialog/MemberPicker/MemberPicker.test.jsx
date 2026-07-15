@@ -224,7 +224,7 @@ describe('MemberPicker', () => {
     vi.advanceTimersByTime(250)
     await waitFor(() => {
       expect(request).toHaveBeenCalledWith(
-        'chat.user.alice.request.search.rooms',
+        'chat.user.alice.request.search.site-A.rooms',
         expect.objectContaining({ query: 'pro' })
       )
     })

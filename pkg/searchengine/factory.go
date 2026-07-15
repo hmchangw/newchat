@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
+	o11yes "github.com/flywindy/o11y/elasticsearch"
 )
 
 // Config bundles every connection-time knob for the search backend.
@@ -24,7 +25,8 @@ type Config struct {
 // New creates a SearchEngine for the configured backend
 // ("elasticsearch" or "opensearch") and verifies connectivity via Ping
 // before returning.
-func New(ctx context.Context, cfg Config) (SearchEngine, error) {
+func New(ctx context.Context, cfg Config, opts ...Option) (SearchEngine, error) {
+	cc := newConnectConfig(opts...)
 	var transport Transporter
 	switch cfg.Backend {
 	case "elasticsearch":
@@ -46,7 +48,11 @@ func New(ctx context.Context, cfg Config) (SearchEngine, error) {
 			}
 			esCfg.Transport = httpTransport
 		}
-		client, err := elasticsearch.NewClient(esCfg)
+		// o11yes.NewClient wires the first-party OTel instrumentation into the
+		// transport and returns the standard *elasticsearch.Client; the adapter
+		// then drives that instrumentation around its raw requests. A plain
+		// client (instrumentation absent) takes the adapter's no-op path.
+		client, err := newESClient(&esCfg, cc.obs)
 		if err != nil {
 			return nil, fmt.Errorf("create elasticsearch client: %w", err)
 		}
@@ -64,4 +70,13 @@ func New(ctx context.Context, cfg Config) (SearchEngine, error) {
 	}
 
 	return adapter, nil
+}
+
+// newESClient builds the Elasticsearch client, instrumented via
+// o11y/elasticsearch when observability is configured, otherwise plain.
+func newESClient(esCfg *elasticsearch.Config, obs Observability) (*elasticsearch.Client, error) {
+	if obs != nil {
+		return o11yes.NewClient(*esCfg, obs.TracerProvider())
+	}
+	return elasticsearch.NewClient(*esCfg)
 }

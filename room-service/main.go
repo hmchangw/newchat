@@ -10,7 +10,6 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
@@ -20,7 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -89,24 +88,24 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "room-service")
+	sdk, obsShutdown, err := obs.InitWithLoggerHandler(ctx, logctx.LevelTrace, logctx.NewHandler)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -221,7 +220,6 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error {
 			if closer, ok := keyStore.(interface{ Close() error }); ok {
 				return closer.Close()
@@ -236,5 +234,6 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return healthStop(ctx) },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

@@ -51,11 +51,11 @@ describe('subjects', () => {
   })
 
   it('searchRooms builds the search rooms request subject', () => {
-    expect(searchRooms('alice')).toBe('chat.user.alice.request.search.rooms')
+    expect(searchRooms('alice', 'site-a')).toBe('chat.user.alice.request.search.site-a.rooms')
   })
 
   it('searchMessages builds the search messages request subject', () => {
-    expect(searchMessages('alice')).toBe('chat.user.alice.request.search.messages')
+    expect(searchMessages('alice', 'site-a')).toBe('chat.user.alice.request.search.site-a.messages')
   })
 
   it('msgSurrounding builds the surrounding-messages request subject', () => {

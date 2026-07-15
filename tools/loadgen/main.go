@@ -22,6 +22,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	dto "github.com/prometheus/client_model/go"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
+
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -30,6 +34,13 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// dialNATS opens a NATS connection for the load generator. The tool emits no
+// telemetry of its own, so it wires noop trace providers — the connection is
+// still the o11y/nats Conn used everywhere else.
+func dialNATS(url, credsFile string) (*o11ynats.Conn, error) {
+	return natsutil.Connect(context.Background(), url, credsFile, noop.NewTracerProvider(), propagation.TraceContext{})
+}
 
 // bottleneckConfig tunes the max-rps(messages) bottleneck attribution. It is
 // additive: when Enabled is false (or PromURL is empty) the run behaves exactly
@@ -462,7 +473,7 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -673,7 +684,7 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -874,7 +885,7 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -1246,7 +1257,7 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 
 	_, layout := BuildBotRoomFixtures(&p, *seed, cfg.SiteID)
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1

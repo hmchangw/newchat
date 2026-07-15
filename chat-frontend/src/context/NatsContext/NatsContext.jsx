@@ -1,7 +1,9 @@
 import { createContext, useContext, useRef, useState, useCallback, useEffect, useMemo } from 'react'
+import { SpanKind } from '@opentelemetry/api'
 import { connect as natsConnect, StringCodec, headers as natsHeaders } from 'nats.ws'
 import { createUser } from 'nkeys.js'
 import { PORTAL_URL } from '@/lib/runtimeConfig'
+import { injectTraceHeaders, natsSpanName, withLinkedSpan, withSpan } from '@/lib/telemetry'
 import { useDebug } from '@/context/DebugContext'
 import { useJwtRefresh } from './useJwtRefresh'
 import {
@@ -39,6 +41,25 @@ async function throwEnvelopeError(resp, fallbackMsg) {
     errBody.error || `${fallbackMsg}: ${resp.status}`,
     ASYNC_JOB_ERROR_KINDS.SyncError,
     { code: errBody.code, reason: errBody.reason, metadata: errBody.metadata },
+  )
+}
+
+function tracedFetch(method, url, init = {}) {
+  const parsed = new URL(url)
+  return withSpan(
+    'http.client',
+    {
+      'http.request.method': method,
+      'server.address': parsed.hostname,
+      'server.port': parsed.port ? Number(parsed.port) : undefined,
+      'url.scheme': parsed.protocol.replace(':', ''),
+      'url.path': parsed.pathname,
+    },
+    async () => {
+      const headers = new Headers(init.headers ?? {})
+      injectTraceHeaders(headers)
+      return fetch(url, { ...init, method, headers })
+    },
   )
 }
 
@@ -122,16 +143,19 @@ export function NatsProvider({ children }) {
     if (mode === 'session') {
       portal = bundle
     } else {
-      const lookupResp = await fetch(`${PORTAL_URL}/api/userInfo?account=${encodeURIComponent(account ?? '')}`)
+      const lookupResp = await tracedFetch(
+        'GET',
+        `${PORTAL_URL}/api/userInfo?account=${encodeURIComponent(account ?? '')}`,
+      )
       if (!lookupResp.ok) {
         await throwEnvelopeError(lookupResp, 'Portal lookup failed')
       }
       portal = await lookupResp.json()
     }
     // baseUrl is the site's unified API gateway; auth lives at /api/v1/auth
-    // behind it (the fetch below appends `/auth`). This backend consolidated
-    // the former separate authServiceUrl into that single baseUrl endpoint.
-    const nextAuthUrl = `${portal.baseUrl}/api/v1`
+    // behind it. This backend consolidated the former separate authServiceUrl
+    // into that single baseUrl endpoint.
+    const nextAuthUrl = portal.baseUrl
 
     // 2) Mint the NATS JWT at the resolved site's auth-service.
     const nkey = createUser()
@@ -144,8 +168,7 @@ export function NatsProvider({ children }) {
           ? { authToken: bundle.authToken, natsPublicKey }
           : { account, natsPublicKey }
 
-    const authResp = await fetch(`${nextAuthUrl}/auth`, {
-      method: 'POST',
+    const authResp = await tracedFetch('POST', `${nextAuthUrl}/api/v1/auth`, {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
@@ -275,9 +298,20 @@ export function NatsProvider({ children }) {
    */
   const publish = useCallback((subject, data = {}) => {
     if (!ncRef.current) throw new Error('Not connected')
-    const payload = sc.encode(JSON.stringify(data))
-    const h = buildHeaders()
-    ncRef.current.publish(subject, payload, h ? { headers: h } : undefined)
+    return withSpan(
+      natsSpanName('publish', subject),
+      {
+        'messaging.system': 'nats',
+        'messaging.operation.name': 'publish',
+        'messaging.destination.name': subject,
+      },
+      () => {
+        const payload = sc.encode(JSON.stringify(data))
+        const h = buildHeaders() ?? natsHeaders()
+        injectTraceHeaders(h)
+        ncRef.current.publish(subject, payload, { headers: h })
+      },
+    )
   }, [buildHeaders])
 
   /**
@@ -297,12 +331,26 @@ export function NatsProvider({ children }) {
     const sub = ncRef.current.subscribe(subject)
     ;(async () => {
       for await (const msg of sub) {
-        try {
-          const data = JSON.parse(sc.decode(msg.data))
-          callback(data)
-        } catch {
-          // skip malformed messages
-        }
+        const msgSubject = msg.subject || subject
+        withLinkedSpan(
+          natsSpanName('receive', msgSubject),
+          {
+            'messaging.system': 'nats',
+            'messaging.operation.name': 'receive',
+            'messaging.destination.name': msgSubject,
+            'messaging.subscription.name': subject,
+          },
+          msg.headers,
+          () => {
+            try {
+              const data = JSON.parse(sc.decode(msg.data))
+              callback(data)
+            } catch {
+              // skip malformed messages
+            }
+          },
+          SpanKind.CONSUMER,
+        )
       }
     })()
     return sub

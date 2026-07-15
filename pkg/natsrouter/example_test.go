@@ -1,15 +1,17 @@
 package natsrouter_test
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
@@ -23,7 +25,7 @@ type GreetResponse struct {
 
 // Example_basicUsage demonstrates registering a handler with params.
 func Example_basicUsage() {
-	nc, _ := otelnats.Connect(nats.DefaultURL)
+	nc, _ := o11ynats.Connect(context.Background(), nats.DefaultURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	router := natsrouter.New(nc, "my-service")
 
 	// Register a handler — {account} and {roomID} are extracted from the subject.
@@ -46,7 +48,7 @@ func Example_basicUsage() {
 // gin.Default()'s shape. Add HandlerTimeout (or any other middleware)
 // via r.Use after Default returns.
 func Example_withMiddleware() {
-	nc, _ := otelnats.Connect(nats.DefaultURL)
+	nc, _ := o11ynats.Connect(context.Background(), nats.DefaultURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	router := natsrouter.Default(nc, "my-service")
 	router.Use(natsrouter.HandlerTimeout(5 * time.Second))
 
@@ -66,7 +68,7 @@ type Room struct {
 
 // Example_noBodyHandler demonstrates RegisterNoBody for GET-style endpoints.
 func Example_noBodyHandler() {
-	nc, _ := otelnats.Connect(nats.DefaultURL)
+	nc, _ := o11ynats.Connect(context.Background(), nats.DefaultURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	router := natsrouter.New(nc, "room-service")
 
 	// No request body needed — the roomID comes from the subject.
@@ -82,7 +84,7 @@ func Example_noBodyHandler() {
 
 // Example_errorHandling demonstrates user-facing vs internal errors.
 func Example_errorHandling() {
-	nc, _ := otelnats.Connect(nats.DefaultURL)
+	nc, _ := o11ynats.Connect(context.Background(), nats.DefaultURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	router := natsrouter.New(nc, "room-service")
 
 	natsrouter.Register(
@@ -110,7 +112,7 @@ type TypingEvent struct {
 
 // Example_fireAndForget demonstrates RegisterVoid for events with no response.
 func Example_fireAndForget() {
-	nc, _ := otelnats.Connect(nats.DefaultURL)
+	nc, _ := o11ynats.Connect(context.Background(), nats.DefaultURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	router := natsrouter.New(nc, "chat-service")
 
 	// No response sent — the sender publishes and moves on.
@@ -126,15 +128,15 @@ func Example_fireAndForget() {
 
 // Example_customMiddleware demonstrates writing custom middleware.
 func Example_customMiddleware() {
-	nc, _ := otelnats.Connect(nats.DefaultURL)
+	nc, _ := o11ynats.Connect(context.Background(), nats.DefaultURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	router := natsrouter.New(nc, "my-service")
 
 	// Custom middleware that rejects requests with empty payloads. Middleware
 	// can't return an error like a handler, so it replies with a typed errcode
-	// envelope directly via errnats.Reply.
+	// envelope directly through the router context.
 	requireBody := natsrouter.HandlerFunc(func(c *natsrouter.Context) {
 		if len(c.Msg.Data) == 0 {
-			errnats.Reply(c, c.Msg, errcode.BadRequest("request body required"))
+			c.ReplyError(errcode.BadRequest("request body required"))
 			return
 		}
 		c.Next()

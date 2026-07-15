@@ -226,10 +226,11 @@ func (c *Context) Abort()
 func (c *Context) IsAborted() bool
 
 // Reply helpers. For errors prefer returning a typed *errcode.Error from
-// the handler — the router calls errnats.Reply automatically. ReplyError is
-// kept for the request-payload-deserialize path.
+// the handler; the router calls ReplyError automatically and replies through
+// the traced o11y/nats responder when available.
 func (c *Context) ReplyJSON(v any)
-func (c *Context) ReplyError(msg string) // emits {"code":"bad_request","error":msg}
+func (c *Context) ReplyError(err error)
+func (c *Context) ReplyErrorQuiet(err error)
 
 // WithLogValues enriches the ctx logger so the centralized errcode.Classify
 // log line carries the given attrs. Cycle-safe (derives from the inner ctx).
@@ -270,7 +271,7 @@ type Middleware = HandlerFunc
 
 ### Error replies — owned by `pkg/errcode`
 
-Client-facing errors live in `pkg/errcode` (not in this package). natsrouter is the transport: when a handler returns any error, the router invokes `errnats.Reply(ctx, msg, err)`, which calls `errcode.Classify` and writes the JSON envelope. The full developer guide is `docs/error-handling.md`; the wire-side reference is `docs/client-api.md` §6.
+Client-facing errors live in `pkg/errcode` (not in this package). natsrouter is the transport: when a handler returns any error, the router invokes `Context.ReplyError(err)`, which calls `errcode.Classify` and writes the JSON envelope through the traced responder. The full developer guide is `docs/error-handling.md`; the wire-side reference is `docs/client-api.md` §6.
 
 Quick reference for handler authors:
 
@@ -448,7 +449,7 @@ func AuthMiddleware() natsrouter.HandlerFunc {
         token := c.Msg.Header.Get("Authorization")
         user, err := validateToken(token)
         if err != nil {
-            c.ReplyError("unauthorized")
+            c.ReplyError(errcode.Forbidden("unauthorized"))
             c.Abort()
             return
         }
@@ -536,7 +537,7 @@ Don't call `c.Next()` (and optionally call `c.Abort()`) to stop the chain:
 func RateLimiter() natsrouter.HandlerFunc {
     return func(c *natsrouter.Context) {
         if isRateLimited(c.Param("account")) {
-            c.ReplyError("rate limited")
+            c.ReplyError(errcode.Unavailable("rate limited"))
             c.Abort()
             return
         }

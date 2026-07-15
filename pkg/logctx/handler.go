@@ -53,7 +53,7 @@ type Handler struct {
 }
 
 // NewHandler wraps base with per-request verbose admission.
-func NewHandler(base slog.Handler) *Handler {
+func NewHandler(base slog.Handler) slog.Handler {
 	return &Handler{base: base}
 }
 

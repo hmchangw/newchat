@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -25,11 +28,11 @@ var _ service.RoomClient = (*Client)(nil)
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-// dial returns a connected *otelnats.Conn backed by the shared test NATS
+// dial returns a connected *o11ynats.Conn backed by the shared test NATS
 // server. The connection is drained on test cleanup.
-func dial(t *testing.T) *otelnats.Conn {
+func dial(t *testing.T) *o11ynats.Conn {
 	t.Helper()
-	nc, err := otelnats.Connect(testutil.NATS(t))
+	nc, err := o11ynats.Connect(context.Background(), testutil.NATS(t), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 	return nc
@@ -40,11 +43,11 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		nc := dial(t)
 
 		// Stand up a stub responder on the exact subject the client should publish on.
-		sub, err := nc.Subscribe(subject.RoomsInfoBatch("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.RoomsInfoBatchResponse{
 				Rooms: []model.RoomInfo{{RoomID: "r1", Found: true, Name: "Eng"}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -58,9 +61,9 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 	t.Run("errcode reply — returns typed errcode error", func(t *testing.T) {
 		nc := dial(t)
 
-		sub, err := nc.Subscribe(subject.RoomsInfoBatch("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(errcode.NotFound("room not found"))
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -88,11 +91,11 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		nc := dial(t)
 
 		// Responder on "site-b" subject proves the method routes on siteID param, not c.siteID.
-		sub, err := nc.Subscribe(subject.RoomsInfoBatch("site-b"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-b"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.RoomsInfoBatchResponse{
 				Rooms: []model.RoomInfo{{RoomID: "r2", Found: true, Name: "Remote"}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -108,8 +111,8 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 
 		// A well-formed error envelope whose code is outside our closed set must be
 		// relayed, not silently re-decoded as an empty success.
-		sub, err := nc.Subscribe(subject.RoomsInfoBatch("site-a"), func(m otelnats.Msg) {
-			_ = m.Msg.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -125,11 +128,11 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 	t.Run("happy path", func(t *testing.T) {
 		nc := dial(t)
-		sub, err := nc.Subscribe(subject.ThreadRoomInfoBatch("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.ThreadRoomInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.ThreadRoomInfoBatchResponse{
 				Threads: []model.ThreadRoomInfo{{ThreadRoomID: "tr1", Found: true, LastMsgAt: 42}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -142,9 +145,9 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 
 	t.Run("errcode reply relayed", func(t *testing.T) {
 		nc := dial(t)
-		sub, err := nc.Subscribe(subject.ThreadRoomInfoBatch("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.ThreadRoomInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(errcode.BadRequest("bad"))
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -171,11 +174,11 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 		nc := dial(t)
 
 		// Responder on "site-b" subject proves the method routes on siteID param, not c.siteID.
-		sub, err := nc.Subscribe(subject.ThreadRoomInfoBatch("site-b"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.ThreadRoomInfoBatch("site-b"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.ThreadRoomInfoBatchResponse{
 				Threads: []model.ThreadRoomInfo{{ThreadRoomID: "tr2", Found: true, LastMsgAt: 99}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -191,12 +194,12 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 		nc := dial(t)
 
 		// Stand up a stub responder on the exact subject the client should publish on.
-		sub, err := nc.Subscribe(subject.RoomCreateDMSync("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.RoomCreateDMSync("site-a"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.SyncCreateDMReply{
 				Success:      true,
 				Subscription: model.Subscription{ID: "new"},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -209,9 +212,9 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 	t.Run("errcode reply — returns typed errcode error", func(t *testing.T) {
 		nc := dial(t)
 
-		sub, err := nc.Subscribe(subject.RoomCreateDMSync("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.RoomCreateDMSync("site-a"), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(errcode.Conflict("DM room already exists"))
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -237,9 +240,9 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 
 	t.Run("success=false reply — returns error", func(t *testing.T) {
 		nc := dial(t)
-		sub, err := nc.Subscribe(subject.RoomCreateDMSync("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.RoomCreateDMSync("site-a"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.SyncCreateDMReply{Success: false}) // explicit not-success, no errcode envelope
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -256,8 +259,8 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 
 		// A foreign-code error envelope must surface as the original error rather
 		// than collapse to the generic create-dm-failure backstop.
-		sub, err := nc.Subscribe(subject.RoomCreateDMSync("site-a"), func(m otelnats.Msg) {
-			_ = m.Msg.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+		sub, err := nc.Subscribe(context.Background(), subject.RoomCreateDMSync("site-a"), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })

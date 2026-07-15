@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -20,11 +20,11 @@ const historyRPCTimeout = 5 * time.Second
 // history-service. The destination site is passed per call, so one Client fans
 // out across sites.
 type Client struct {
-	nc *otelnats.Conn
+	nc *o11ynats.Conn
 }
 
 // New returns a Client wired to nc.
-func New(nc *otelnats.Conn) *Client { return &Client{nc: nc} }
+func New(nc *o11ynats.Conn) *Client { return &Client{nc: nc} }
 
 // GetThreadList issues the per-site thread-list RPC to history-service at
 // siteID; non-OK reply envelopes are relayed via errcode.Parse to preserve the

@@ -2,6 +2,15 @@ import { describe, it, expect, vi } from 'vitest'
 import { StringCodec } from 'nats.ws'
 import { requestWithAsyncResult, requestSync, ASYNC_JOB_ERROR_KINDS, formatAsyncJobError, AsyncJobError } from './asyncJob'
 
+vi.mock('@/lib/telemetry', () => ({
+  injectTraceHeaders: vi.fn((headers) => headers.set('traceparent', '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01')),
+  withSpan: vi.fn((_name, _attrs, fn) => fn({ setStatus: vi.fn(), recordException: vi.fn() })),
+  withLinkedSpan: vi.fn((_name, _attrs, _headers, fn) => fn({ setStatus: vi.fn(), recordException: vi.fn() })),
+  natsSpanName: vi.fn((operation, subject) => `nats ${operation} ${subject}`),
+}))
+
+import * as telemetry from '@/lib/telemetry'
+
 const HYPHENATED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const sc = StringCodec()
@@ -43,8 +52,8 @@ function makeFakeSub() {
   }
 }
 
-function encode(obj) {
-  return { data: sc.encode(JSON.stringify(obj)) }
+function encode(obj, opts = {}) {
+  return { data: sc.encode(JSON.stringify(obj)), ...opts }
 }
 
 function makeNc({ syncReply, subFactory } = {}) {
@@ -81,6 +90,48 @@ describe('requestWithAsyncResult', () => {
     const opts = nc.request.mock.calls[0][2]
     expect(opts.headers).toBeDefined()
     expect(opts.headers.get('X-Request-ID')).toBe('req-1')
+  })
+
+  it('injects traceparent on the underlying request', async () => {
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1' })
+    nc.sub.push(encode({ requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 }))
+    await p
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('traceparent')).toBe('00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01')
+    expect(telemetry.withSpan).toHaveBeenCalledWith(
+      'nats request_async_result subj',
+      expect.objectContaining({
+        'messaging.operation.name': 'request',
+        'messaging.destination.name': 'subj',
+        'chat.request_id': 'req-1',
+      }),
+      expect.any(Function),
+    )
+  })
+
+  it('wraps async result delivery in a linked receive span', async () => {
+    telemetry.withLinkedSpan.mockClear()
+    const headers = { get: vi.fn((key) => (key.toLowerCase() === 'traceparent' ? '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' : '')) }
+    const nc = makeNc()
+    const p = requestWithAsyncResult(nc, 'alice', 'subj', {}, { requestId: 'req-1' })
+    nc.sub.push(encode(
+      { requestId: 'req-1', operation: 'room.create', status: 'ok', timestamp: 1 },
+      { subject: 'chat.user.alice.response.req-1', headers },
+    ))
+    await p
+
+    expect(telemetry.withLinkedSpan).toHaveBeenCalledWith(
+      'nats receive chat.user.alice.response.req-1',
+      expect.objectContaining({
+        'messaging.operation.name': 'receive',
+        'messaging.destination.name': 'chat.user.alice.response.req-1',
+        'messaging.subscription.name': 'chat.user.alice.response.req-1',
+        'chat.request_id': 'req-1',
+      }),
+      headers,
+      expect.any(Function),
+    )
   })
 
   it('sends the X-Debug header with the level when opts.debugLevel is set', async () => {
@@ -378,6 +429,22 @@ describe('requestSync', () => {
     await requestSync(nc, 'subj', {}, { requestId: '01970a4f-8c2d-7c9a-abcd-e0123456789f' })
     const opts = nc.request.mock.calls[0][2]
     expect(opts.headers.get('X-Request-ID')).toBe('01970a4f-8c2d-7c9a-abcd-e0123456789f')
+  })
+
+  it('injects traceparent when sending sync requests', async () => {
+    const nc = makeNc({ syncReply: { count: 0 } })
+    await requestSync(nc, 'subj', {}, { requestId: '01970a4f-8c2d-7c9a-abcd-e0123456789f' })
+    const opts = nc.request.mock.calls[0][2]
+    expect(opts.headers.get('traceparent')).toBe('00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01')
+    expect(telemetry.withSpan).toHaveBeenCalledWith(
+      'nats request subj',
+      expect.objectContaining({
+        'messaging.operation.name': 'request',
+        'messaging.destination.name': 'subj',
+        'chat.request_id': '01970a4f-8c2d-7c9a-abcd-e0123456789f',
+      }),
+      expect.any(Function),
+    )
   })
 
   it('returns the decoded reply on success', async () => {

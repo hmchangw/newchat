@@ -11,8 +11,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	o11ygin "github.com/flywindy/o11y/gin"
+
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -24,7 +27,6 @@ func main() {
 }
 
 func run() error {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	ctx := context.Background()
 
 	cfg, err := loadConfig()
@@ -32,11 +34,15 @@ func run() error {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	sdk, obsShutdown, err := obs.Init(ctx)
+	if err != nil {
+		return fmt.Errorf("init observability: %w", err)
+	}
+
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
-	defer mongoutil.Disconnect(ctx, mongoClient)
 
 	st := newStoreMongo(mongoClient.Database(cfg.MongoDB))
 	if err := st.EnsureIndexes(ctx); err != nil {
@@ -47,10 +53,11 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.Use(ginutil.CORS())
+	r.Use(o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
-	r.Use(ginutil.CORS())
 	registerRoutes(r, h, st, cfg.SiteID)
 
 	srv := &http.Server{
@@ -69,10 +76,15 @@ func run() error {
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		shutdown.Wait(ctx, 25*time.Second, func(ctx context.Context) error {
-			slog.Info("shutting down admin-service")
-			return srv.Shutdown(ctx)
-		})
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error {
+				slog.Info("shutting down admin-service")
+				err := srv.Shutdown(ctx)
+				mongoutil.Disconnect(ctx, mongoClient)
+				return err
+			},
+			func(ctx context.Context) error { return obsShutdown(ctx) },
+		)
 	}()
 
 	if err := <-srvErr; err != nil && !errors.Is(err, http.ErrServerClosed) {

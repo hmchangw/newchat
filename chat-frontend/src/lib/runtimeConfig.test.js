@@ -50,4 +50,41 @@ describe('runtimeConfig', () => {
     expect(mod.NATS_URL).toBeUndefined()
     expect(mod.DEFAULT_SITE_ID).toBeUndefined()
   })
+
+  it('frontend telemetry is enabled by default', async () => {
+    const { OTEL_ENABLED } = await import('./runtimeConfig.js')
+    expect(OTEL_ENABLED).toBe(true)
+  })
+
+  it('OTEL_EXPORTER_OTLP_TRACES_URL defaults to the local collector traces endpoint', async () => {
+    const { OTEL_EXPORTER_OTLP_TRACES_URL } = await import('./runtimeConfig.js')
+    expect(OTEL_EXPORTER_OTLP_TRACES_URL).toBe('http://localhost:4318/v1/traces')
+  })
+
+  it('OTEL_SERVICE_NAME defaults to chat-frontend', async () => {
+    const { OTEL_SERVICE_NAME } = await import('./runtimeConfig.js')
+    expect(OTEL_SERVICE_NAME).toBe('chat-frontend')
+  })
+
+  it('telemetry resource metadata has local development defaults', async () => {
+    const mod = await import('./runtimeConfig.js')
+    expect(mod.OTEL_SERVICE_VERSION).toBe('0.0.1')
+    expect(mod.OTEL_DEPLOYMENT_ENVIRONMENT).toBe('local')
+  })
+
+  it('telemetry settings read from window.__APP_CONFIG__', async () => {
+    window.__APP_CONFIG__ = {
+      OTEL_ENABLED: 'false',
+      OTEL_EXPORTER_OTLP_TRACES_URL: 'https://collector.example.com/v1/traces',
+      OTEL_SERVICE_NAME: 'custom-frontend',
+      OTEL_SERVICE_VERSION: '1.2.3',
+      OTEL_DEPLOYMENT_ENVIRONMENT: 'staging',
+    }
+    const mod = await import('./runtimeConfig.js')
+    expect(mod.OTEL_ENABLED).toBe(false)
+    expect(mod.OTEL_EXPORTER_OTLP_TRACES_URL).toBe('https://collector.example.com/v1/traces')
+    expect(mod.OTEL_SERVICE_NAME).toBe('custom-frontend')
+    expect(mod.OTEL_SERVICE_VERSION).toBe('1.2.3')
+    expect(mod.OTEL_DEPLOYMENT_ENVIRONMENT).toBe('staging')
+  })
 })

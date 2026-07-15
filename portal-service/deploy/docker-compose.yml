@@ -17,6 +17,8 @@ services:
       - path: ../../docker-local/.env
         required: false
     environment:
+      - OTEL_SERVICE_NAME=portal-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - PORT=8085
       # Dev fallback: accounts absent from the directory resolve to the local site.
       - DEV_MODE=${DEV_MODE:-true}

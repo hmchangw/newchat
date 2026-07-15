@@ -6,6 +6,8 @@ services:
       context: ../..
       dockerfile: message-gatekeeper/deploy/Dockerfile
     environment:
+      - OTEL_SERVICE_NAME=message-gatekeeper
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
@@ -28,10 +30,6 @@ services:
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
       - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
-      # /metrics (cache_*_total hit/miss/error counters); scraped by the
-      # observability Prometheus over the chat-local network. No host port
-      # mapping — search-service already owns host :9090.
-      - METRICS_ADDR=:9090
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

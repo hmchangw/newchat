@@ -24,6 +24,9 @@ var (
 	minioOnce      sync.Once
 	minioClient    *minio.Client
 	minioContainer testcontainers.Container
+	minioEndpoint  string
+	minioAccessKey string
+	minioSecretKey string
 	minioInitErr   error
 )
 
@@ -58,6 +61,9 @@ func ensureMinIOClient() (*minio.Client, error) {
 		}
 		minioClient = c
 		minioContainer = container
+		minioEndpoint = endpoint
+		minioAccessKey = container.Username
+		minioSecretKey = container.Password
 	})
 	return minioClient, minioInitErr
 }
@@ -78,6 +84,17 @@ func TerminateMinIO() {
 // EnsureMinIO starts the shared MinIO container if not already started.
 // No-t variant intended for TestMain pre-warming.
 func EnsureMinIO() error { _, err := ensureMinIOClient(); return err }
+
+// MinIOEndpoint returns the endpoint and credentials of the shared MinIO
+// container, for tests that build their own (e.g. instrumented) client via
+// minioutil.Connect rather than using the shared client from MinIO.
+func MinIOEndpoint(t *testing.T) (endpoint, accessKey, secretKey string) {
+	t.Helper()
+	if _, err := ensureMinIOClient(); err != nil {
+		t.Fatalf("testutil.MinIOEndpoint: %v", err)
+	}
+	return minioEndpoint, minioAccessKey, minioSecretKey
+}
 
 // MinIO returns a shared client + per-test bucket (fnv-hashed from t.Name(); cleaned up via t.Cleanup).
 // Prefix must be S3-valid (3-46 lowercase chars/digits/hyphens, no leading/trailing hyphen); not validated.

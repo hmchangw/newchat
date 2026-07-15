@@ -7,7 +7,7 @@ import (
 
 	"github.com/bytedance/sonic"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -20,10 +20,10 @@ const parentFetchTimeout = 2 * time.Second
 // history-service's GetMessageByID handler, reading the author + createdAt the
 // channel thread fan-out needs.
 type historyParentFetcher struct {
-	nc *otelnats.Conn
+	nc *o11ynats.Conn
 }
 
-func newHistoryParentFetcher(nc *otelnats.Conn) *historyParentFetcher {
+func newHistoryParentFetcher(nc *o11ynats.Conn) *historyParentFetcher {
 	return &historyParentFetcher{nc: nc}
 }
 

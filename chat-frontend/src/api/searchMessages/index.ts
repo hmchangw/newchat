@@ -37,5 +37,5 @@ export async function searchMessages(
     size,
   }
   if (roomIds) payload.roomIds = roomIds
-  return request<SearchMessagesResponse>(searchMessagesSubject(user.account), payload)
+  return request<SearchMessagesResponse>(searchMessagesSubject(user.account, user.siteId), payload)
 }

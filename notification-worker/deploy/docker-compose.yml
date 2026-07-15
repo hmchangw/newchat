@@ -6,6 +6,8 @@ services:
       context: ../..
       dockerfile: notification-worker/deploy/Dockerfile
     environment:
+      - OTEL_SERVICE_NAME=notification-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
@@ -31,10 +33,6 @@ services:
       # instead of a NATS NACK.
       - NATS_MAX_PAYLOAD_BYTES=262144
       - BOOTSTRAP_STREAMS=true
-      # /metrics (cache_*_total hit/miss/error counters); scraped by the
-      # observability Prometheus over the chat-local network. No host port
-      # mapping — search-service already owns host :9090.
-      - METRICS_ADDR=:9090
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:

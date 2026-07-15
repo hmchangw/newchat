@@ -13,7 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// publishFunc is the minimal JetStream publish surface (oteljetstream.JetStream.PublishMsg).
+// publishFunc is the minimal JetStream publish surface used by canonicalPublisher.
 type publishFunc func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 
 // canonicalPublisher emits migrated inserts onto the canonical .created subject.

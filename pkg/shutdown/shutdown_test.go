@@ -2,7 +2,8 @@ package shutdown_test
 
 import (
 	"context"
-	"syscall"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 func TestWaitCallsCleanup(t *testing.T) {
+	skipOnWindows(t)
 	called := false
 	cleanup := func(ctx context.Context) error {
 		called = true
@@ -20,7 +22,7 @@ func TestWaitCallsCleanup(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+		signalSelf(t)
 	}()
 
 	shutdown.Wait(context.Background(), 5*time.Second, cleanup)
@@ -31,6 +33,7 @@ func TestWaitCallsCleanup(t *testing.T) {
 }
 
 func TestWaitTimesOutWhenCleanupHangs(t *testing.T) {
+	skipOnWindows(t)
 	hangingCleanup := func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -38,7 +41,7 @@ func TestWaitTimesOutWhenCleanupHangs(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+		signalSelf(t)
 	}()
 
 	start := time.Now()
@@ -51,6 +54,7 @@ func TestWaitTimesOutWhenCleanupHangs(t *testing.T) {
 }
 
 func TestWaitCompletesBeforeTimeout(t *testing.T) {
+	skipOnWindows(t)
 	var order []string
 	first := func(ctx context.Context) error {
 		order = append(order, "first")
@@ -63,10 +67,29 @@ func TestWaitCompletesBeforeTimeout(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+		signalSelf(t)
 	}()
 
 	shutdown.Wait(context.Background(), 5*time.Second, first, second)
 
 	assert.Equal(t, []string{"first", "second"}, order)
+}
+
+func skipOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("signal delivery test uses syscall.Kill, which is Unix-only")
+	}
+}
+
+func signalSelf(t *testing.T) {
+	t.Helper()
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Errorf("find self: %v", err)
+		return
+	}
+	if err := p.Signal(os.Interrupt); err != nil {
+		t.Errorf("signal self: %v", err)
+	}
 }

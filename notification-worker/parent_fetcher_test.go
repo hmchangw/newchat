@@ -7,17 +7,20 @@ import (
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-func startTestNATS(t *testing.T) *otelnats.Conn {
+func startTestNATS(t *testing.T) *o11ynats.Conn {
 	t.Helper()
 	opts := &natsserver.Options{Port: -1}
 	ns, err := natsserver.NewServer(opts)
@@ -26,7 +29,7 @@ func startTestNATS(t *testing.T) *otelnats.Conn {
 	require.True(t, ns.ReadyForConnections(5*time.Second), "nats server did not become ready")
 	t.Cleanup(ns.Shutdown)
 
-	nc, err := otelnats.Connect(ns.ClientURL())
+	nc, err := o11ynats.Connect(context.Background(), ns.ClientURL(), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
 	return nc
@@ -51,9 +54,9 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 			CreatedAt: parentCreatedAt,
 			Msg:       "the thread's root message",
 		}
-		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(parent)
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 
@@ -68,9 +71,9 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 	t.Run("history returns errcode error envelope — returns typed error", func(t *testing.T) {
 		nc := startTestNATS(t)
 
-		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(errcode.NotFound("message not found"))
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 
@@ -96,8 +99,8 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 	t.Run("malformed response body — returns unmarshal error", func(t *testing.T) {
 		nc := startTestNATS(t)
 
-		_, err := nc.Subscribe(subject.MsgGet(account, roomID, siteID), func(m otelnats.Msg) {
-			_ = m.Msg.Respond([]byte("not json"))
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, roomID, siteID), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte("not json"))
 		})
 		require.NoError(t, err)
 

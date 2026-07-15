@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -13,10 +13,10 @@ import (
 
 // Publisher publishes byte payloads to NATS JetStream with dedup support.
 type Publisher struct {
-	js oteljetstream.JetStream
+	js o11ynats.JetStream
 }
 
-func New(js oteljetstream.JetStream) *Publisher {
+func New(js o11ynats.JetStream) *Publisher {
 	return &Publisher{js: js}
 }
 

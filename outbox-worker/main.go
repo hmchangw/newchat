@@ -10,16 +10,15 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
-
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -44,8 +43,6 @@ type config struct {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
@@ -61,19 +58,19 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "outbox-worker")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
@@ -102,10 +99,10 @@ func main() {
 	// natsrouter's Recovery middleware, so an unrecovered panic would crash the
 	// worker and crash-loop on JetStream redelivery — and jsretry Ack-drops
 	// permanent errors and Naks transient ones with backoff.
-	process := func(m oteljetstream.Msg) {
-		jobguard.Run(m.Msg, func() {
-			handlerCtx, _ := natsutil.StampRequestID(m.Context(), m.Headers(), m.Subject())
-			jsretry.Settle(handlerCtx, m, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, m.Subject(), m.Data()))
+	process := func(msgCtx context.Context, msg jetstream.Msg) {
+		jobguard.Run(msg, func() {
+			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Subject(), msg.Data()))
 		})
 	}
 
@@ -127,15 +124,15 @@ func main() {
 		slog.Warn("no remote peers in ALL_SITE_IDS — federation events published to OUTBOX would sit unconsumed",
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
-	iters := make([]oteljetstream.MessagesContext, 0, len(peers))
-	orderedCtxs := make([]oteljetstream.ConsumeContext, 0, len(peers))
+	iters := make([]o11ynats.MessagesContext, 0, len(peers))
+	orderedCtxs := make([]o11ynats.ConsumeContext, 0, len(peers))
 	for _, dest := range peers {
 		ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
 		if err != nil {
 			slog.Error("create concurrent consumer failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
 		}
-		iter, err := ccons.Messages(jetstream.PullMaxMessages(2 * cfg.MaxWorkers))
+		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 		if err != nil {
 			slog.Error("concurrent messages failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
@@ -148,7 +145,7 @@ func main() {
 			slog.Error("create ordered consumer failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
 		}
-		cc, err := ocons.Consume(process)
+		cc, err := ocons.Consume(ctx, process)
 		if err != nil {
 			slog.Error("ordered consume failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
@@ -187,8 +184,9 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
 		func(ctx context.Context) error { return healthStop(ctx) },
+		// obsShutdown LAST so all prior teardown telemetry is exported.
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
 
@@ -201,7 +199,7 @@ func main() {
 // also cover the pump, or a message received between Next() and the
 // per-message Add(1) could slip past the wait and race nc.Drain(). The pump
 // exits when the iterator is Stop()'d on shutdown.
-func drainPool(ctx context.Context, iter oteljetstream.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(oteljetstream.Msg)) {
+func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -215,16 +213,15 @@ func drainPool(ctx context.Context, iter oteljetstream.MessagesContext, sem chan
 				}
 				return
 			}
-			m := oteljetstream.Msg{Msg: msg, Ctx: msgCtx}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
+			go func(msgCtx context.Context, msg jetstream.Msg) {
 				defer func() {
 					<-sem
 					wg.Done()
 				}()
-				process(m)
-			}()
+				process(msgCtx, msg)
+			}(msgCtx, msg)
 		}
 	}()
 }

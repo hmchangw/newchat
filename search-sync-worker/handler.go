@@ -6,6 +6,9 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
@@ -16,6 +19,7 @@ import (
 // actions. The message is acked once ALL of its actions succeed; if any action
 // fails the whole message is nakked for redelivery.
 type pendingMsg struct {
+	ctx         context.Context
 	jsMsg       jetstream.Msg
 	actionStart int // starting index into Handler.actions
 	actionCount int // number of actions contributed by this message
@@ -41,6 +45,7 @@ type Handler struct {
 	store      Store
 	collection Collection
 	bulkSize   int // soft cap on buffered actions; callers drive flush via ActionCount()
+	tracer     trace.Tracer
 	mu         sync.Mutex
 	pending    []pendingMsg
 	actions    []searchengine.BulkAction
@@ -50,11 +55,16 @@ type Handler struct {
 // batch size. `bulkSize` is the soft cap on buffered actions before a flush
 // is triggered — the consumer loop compares it against `ActionCount()` to
 // decide when to call `Flush`.
-func NewHandler(store Store, collection Collection, bulkSize int) *Handler {
+func NewHandler(store Store, collection Collection, bulkSize int, tracers ...trace.Tracer) *Handler {
+	tracer := otel.Tracer("search-sync-worker")
+	if len(tracers) > 0 && tracers[0] != nil {
+		tracer = tracers[0]
+	}
 	return &Handler{
 		store:      store,
 		collection: collection,
 		bulkSize:   bulkSize,
+		tracer:     tracer,
 		pending:    make([]pendingMsg, 0, bulkSize),
 		actions:    make([]searchengine.BulkAction, 0, bulkSize),
 	}
@@ -64,6 +74,13 @@ func NewHandler(store Store, collection Collection, bulkSize int) *Handler {
 // to the buffer. If the collection produces zero actions, the message is
 // acked without touching the buffer.
 func (h *Handler) Add(msg jetstream.Msg) {
+	h.AddWithContext(context.Background(), msg)
+}
+
+// AddWithContext is Add plus the consumer span context carried by the o11y
+// JetStream facade. Flush uses it as a span link source because one ES bulk
+// request can contain actions from multiple source messages.
+func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 	data, err := decodePayload(msg)
 	if err != nil {
 		slog.Error("decode payload", "error", err)
@@ -84,6 +101,7 @@ func (h *Handler) Add(msg jetstream.Msg) {
 
 	h.mu.Lock()
 	h.pending = append(h.pending, pendingMsg{
+		ctx:         ctx,
 		jsMsg:       msg,
 		actionStart: len(h.actions),
 		actionCount: len(actions),
@@ -105,7 +123,10 @@ func (h *Handler) Flush(ctx context.Context) {
 	h.actions = make([]searchengine.BulkAction, 0, h.bulkSize)
 	h.mu.Unlock()
 
-	results, err := h.store.Bulk(ctx, actions)
+	bulkCtx, span := h.startFlushSpan(ctx, pending, len(actions))
+	defer span.End()
+
+	results, err := h.store.Bulk(bulkCtx, actions)
 	if err != nil {
 		slog.Error("bulk request failed", "error", err, "actions", len(actions))
 		nakAll(pending, "bulk request failed")
@@ -150,6 +171,32 @@ func (h *Handler) Flush(ctx context.Context) {
 			natsutil.Nak(p.jsMsg, "bulk action failed")
 		}
 	}
+}
+
+func (h *Handler) startFlushSpan(ctx context.Context, pending []pendingMsg, actionCount int) (context.Context, trace.Span) {
+	links := make([]trace.Link, 0, len(pending))
+	seen := make(map[string]struct{}, len(pending))
+	for _, p := range pending {
+		sc := trace.SpanContextFromContext(p.ctx)
+		if !sc.IsValid() {
+			continue
+		}
+		key := sc.TraceID().String() + "/" + sc.SpanID().String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		links = append(links, trace.Link{SpanContext: sc})
+	}
+
+	return h.tracer.Start(ctx, "search-sync bulk flush",
+		trace.WithAttributes(
+			attribute.String("chat.search.collection", h.collection.ConsumerName()),
+			attribute.Int("chat.search.bulk.messages", len(pending)),
+			attribute.Int("chat.search.bulk.actions", actionCount),
+		),
+		trace.WithLinks(links...),
+	)
 }
 
 // esErrDocumentMissing is the Elasticsearch `_bulk` response `error.type`

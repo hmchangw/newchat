@@ -17,6 +17,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -72,7 +74,7 @@ func TestMain(m *testing.M) {
 func setupRouter(t *testing.T, queueGroup string, register func(*natsrouter.Router)) *nats.Conn {
 	t.Helper()
 	natsURL := testutil.NATS(t)
-	serverNC, err := natsutil.Connect(natsURL, "")
+	serverNC, err := natsutil.Connect(context.Background(), natsURL, "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err, "connect nats (server side)")
 	t.Cleanup(func() { _ = serverNC.Drain() })
 

@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // roomReadLatencies extracts the latency tape from a sample slice.
@@ -60,7 +58,7 @@ func (w *roomReadWorkload) Label() string { return "room-read" }
 // read from the fixtures (both deterministic on seed), so selection stays
 // consistent with whatever `loadgen seed --workload=room-read` wrote earlier.
 func newRoomReadWorkload(ctx context.Context, cfg *config, preset *Preset, seed int64, requestTimeout time.Duration) (*roomReadWorkload, func(), error) {
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
 	}
