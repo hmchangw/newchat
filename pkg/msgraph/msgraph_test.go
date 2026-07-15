@@ -405,3 +405,38 @@ func TestListUsers_Non200IsError(t *testing.T) {
 	err := lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
 	require.ErrorContains(t, err, "status 403")
 }
+
+func TestListUsers_RejectsCrossOriginNextLink(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	var attackerHit bool
+	attackerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attackerHit = true
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	defer attackerSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Point the next page at a foreign origin — a tampered/intercepted nextLink.
+		_, _ = w.Write([]byte(`{"value":[{"id":"u1","userPrincipalName":"a@x"}],` +
+			`"@odata.nextLink":"` + attackerSrv.URL + `/users?page=2"}`))
+	}))
+	defer graphSrv.Close()
+
+	lister := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+
+	var pages [][]GraphUser
+	err := lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
+		pages = append(pages, users)
+		return nil
+	})
+	require.ErrorContains(t, err, "deviates from configured graph origin")
+	assert.False(t, attackerHit, "must not forward the bearer token to a foreign origin")
+	assert.Len(t, pages, 1, "first (valid) page is still delivered before the walk aborts")
+}
