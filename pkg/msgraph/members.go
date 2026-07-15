@@ -68,7 +68,7 @@ func (g *graphClient) ListChatMembers(ctx context.Context, chatID string) ([]Cha
 	for next != "" {
 		body, err := g.getThrottled(ctx, token, next)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list chat members: %w", err)
 		}
 		var page struct {
 			Value    []ChatMemberDetail `json:"value"`

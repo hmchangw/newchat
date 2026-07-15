@@ -29,27 +29,34 @@ func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 	}
 }
 
-// ListChatsToSync returns the _id of every teams_chat with needMemberSync=true.
-// Served by the read client. FindMany decodes into TeamsChat with only _id
-// projected (other fields zero); we read just the ID.
-func (s *mongoStore) ListChatsToSync(ctx context.Context) ([]string, error) {
+// ListChatsToSync returns the id and updatedAt of every teams_chat with
+// needMemberSync=true. Served by the read client. updatedAt is carried
+// forward as the optimistic-concurrency token for SetMembersSynced.
+func (s *mongoStore) ListChatsToSync(ctx context.Context) ([]ChatToSync, error) {
 	chats, err := s.readChats.FindMany(ctx, bson.M{"needMemberSync": true},
-		mongoutil.WithProjection(bson.M{"_id": 1}))
+		mongoutil.WithProjection(bson.M{"_id": 1, "updatedAt": 1}))
 	if err != nil {
 		return nil, fmt.Errorf("find chats needing member sync: %w", err)
 	}
-	ids := make([]string, 0, len(chats))
+	out := make([]ChatToSync, 0, len(chats))
 	for i := range chats {
-		ids = append(ids, chats[i].ID)
+		out = append(out, ChatToSync{ID: chats[i].ID, UpdatedAt: chats[i].UpdatedAt})
 	}
-	return ids, nil
+	return out, nil
 }
 
-// SetMembersSynced writes the resolved member list and advances the chat to the
-// room-creation stage. Written by the write client.
-func (s *mongoStore) SetMembersSynced(ctx context.Context, chatID string, members []model.TeamsChatMember, now time.Time) error {
-	if _, err := s.writeChats.Raw().UpdateByID(ctx, chatID, setMembersSyncedUpdate(members, now)); err != nil {
+// SetMembersSynced writes the resolved member list and advances the chat to
+// the room-creation stage, but only if the chat's updatedAt still equals
+// seenUpdatedAt (optimistic conditional write). Written by the write client.
+func (s *mongoStore) SetMembersSynced(ctx context.Context, chatID string, seenUpdatedAt time.Time, members []model.TeamsChatMember, now time.Time) error {
+	res, err := s.writeChats.Raw().UpdateOne(ctx,
+		bson.M{"_id": chatID, "updatedAt": seenUpdatedAt},
+		setMembersSyncedUpdate(members, now))
+	if err != nil {
 		return fmt.Errorf("set chat members synced: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return errSuperseded
 	}
 	return nil
 }

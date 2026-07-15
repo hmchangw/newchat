@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -130,48 +131,56 @@ func (s *syncer) buildMembers(ctx context.Context, raw []msgraph.ChatMemberDetai
 // summary is the per-run outcome. Total is written only by the dispatching
 // goroutine; the atomics are updated by workers.
 type summary struct {
-	Total             int
-	Succeeded, Failed atomic.Int64
-	MembersWritten    atomic.Int64
+	Total                         int
+	Succeeded, Failed, Superseded atomic.Int64
+	MembersWritten                atomic.Int64
 }
 
 // run executes one full member sync: load the flagged chats, fan them out to
 // MaxWorkers workers, wait, and report. It returns an error when any chat
 // failed so main exits non-zero and the CronJob records the failure.
+// Superseded chats (concurrent teams-chat-sync rewrite) are benign — they keep
+// needMemberSync=true and retry next run — and do not fail the run.
 func (s *syncer) run(ctx context.Context) error {
-	ids, err := s.chats.ListChatsToSync(ctx)
+	chats, err := s.chats.ListChatsToSync(ctx)
 	if err != nil {
 		return fmt.Errorf("load chats needing member sync: %w", err)
 	}
 
 	var sum summary
-	sum.Total = len(ids)
+	sum.Total = len(chats)
 
-	jobs := make(chan string)
+	jobs := make(chan ChatToSync)
 	var wg sync.WaitGroup
 	for i := 0; i < s.cfg.MaxWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for chatID := range jobs {
-				if err := s.syncChat(ctx, chatID, &sum); err != nil {
+			for chat := range jobs {
+				err := s.syncChat(ctx, chat, &sum)
+				switch {
+				case err == nil:
+					sum.Succeeded.Add(1)
+				case errors.Is(err, errSuperseded):
+					sum.Superseded.Add(1)
+					slog.Warn("teams chat member sync: chat superseded by concurrent update, will retry next run", "chatID", chat.ID)
+				default:
 					sum.Failed.Add(1)
-					slog.Error("teams chat member sync: chat failed", "chatID", chatID, "error", err)
-					continue
+					slog.Error("teams chat member sync: chat failed", "chatID", chat.ID, "error", err)
 				}
-				sum.Succeeded.Add(1)
 			}
 		}()
 	}
-	for _, id := range ids {
-		jobs <- id
+	for _, chat := range chats {
+		jobs <- chat
 	}
 	close(jobs)
 	wg.Wait()
 
 	slog.Info("teams chat member sync: run complete",
 		"chatsTotal", sum.Total, "chatsSucceeded", sum.Succeeded.Load(),
-		"chatsFailed", sum.Failed.Load(), "membersWritten", sum.MembersWritten.Load())
+		"chatsFailed", sum.Failed.Load(), "chatsSuperseded", sum.Superseded.Load(),
+		"membersWritten", sum.MembersWritten.Load())
 
 	if failed := sum.Failed.Load(); failed > 0 {
 		return fmt.Errorf("%d of %d chats failed", failed, sum.Total)
@@ -181,9 +190,10 @@ func (s *syncer) run(ctx context.Context) error {
 
 // syncChat fetches one chat's members, resolves accounts, and writes the list
 // back. On any error the chat's needMemberSync is left true (no SetMembersSynced)
-// so it is retried next run.
-func (s *syncer) syncChat(ctx context.Context, chatID string, sum *summary) error {
-	raw, err := s.graph.ListChatMembers(ctx, chatID)
+// so it is retried next run. A superseded write (errSuperseded) is likewise
+// left for retry but is not a failure — see run.
+func (s *syncer) syncChat(ctx context.Context, chat ChatToSync, sum *summary) error {
+	raw, err := s.graph.ListChatMembers(ctx, chat.ID)
 	if err != nil {
 		return fmt.Errorf("list chat members: %w", err)
 	}
@@ -191,7 +201,7 @@ func (s *syncer) syncChat(ctx context.Context, chatID string, sum *summary) erro
 	if err != nil {
 		return fmt.Errorf("build members: %w", err)
 	}
-	if err := s.chats.SetMembersSynced(ctx, chatID, members, s.cfg.Now()); err != nil {
+	if err := s.chats.SetMembersSynced(ctx, chat.ID, chat.UpdatedAt, members, s.cfg.Now()); err != nil {
 		return fmt.Errorf("set members synced: %w", err)
 	}
 	sum.MembersWritten.Add(int64(len(members)))

@@ -44,10 +44,10 @@ func (m *MockTeamsChatStore) EXPECT() *MockTeamsChatStoreMockRecorder {
 }
 
 // ListChatsToSync mocks base method.
-func (m *MockTeamsChatStore) ListChatsToSync(ctx context.Context) ([]string, error) {
+func (m *MockTeamsChatStore) ListChatsToSync(ctx context.Context) ([]ChatToSync, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListChatsToSync", ctx)
-	ret0, _ := ret[0].([]string)
+	ret0, _ := ret[0].([]ChatToSync)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -59,17 +59,17 @@ func (mr *MockTeamsChatStoreMockRecorder) ListChatsToSync(ctx any) *gomock.Call 
 }
 
 // SetMembersSynced mocks base method.
-func (m *MockTeamsChatStore) SetMembersSynced(ctx context.Context, chatID string, members []model.TeamsChatMember, now time.Time) error {
+func (m *MockTeamsChatStore) SetMembersSynced(ctx context.Context, chatID string, seenUpdatedAt time.Time, members []model.TeamsChatMember, now time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetMembersSynced", ctx, chatID, members, now)
+	ret := m.ctrl.Call(m, "SetMembersSynced", ctx, chatID, seenUpdatedAt, members, now)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // SetMembersSynced indicates an expected call of SetMembersSynced.
-func (mr *MockTeamsChatStoreMockRecorder) SetMembersSynced(ctx, chatID, members, now any) *gomock.Call {
+func (mr *MockTeamsChatStoreMockRecorder) SetMembersSynced(ctx, chatID, seenUpdatedAt, members, now any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMembersSynced", reflect.TypeOf((*MockTeamsChatStore)(nil).SetMembersSynced), ctx, chatID, members, now)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMembersSynced", reflect.TypeOf((*MockTeamsChatStore)(nil).SetMembersSynced), ctx, chatID, seenUpdatedAt, members, now)
 }
 
 // MockTeamsUserStore is a mock of TeamsUserStore interface.
