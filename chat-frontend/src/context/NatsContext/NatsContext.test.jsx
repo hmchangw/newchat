@@ -80,6 +80,26 @@ describe('NatsProvider connect wiring', () => {
     expect(lastGetAuthUrl()()).toBe('http://site-a/api/v1')
   })
 
+  it('does not double /api/v1 when the portal baseUrl already carries the gateway path', async () => {
+    // A portal/site registry that hands back a baseUrl already ending in
+    // /api/v1 (or with a trailing slash) must still yield a single
+    // /api/v1/auth — never the doubled /api/v1/api/v1/auth.
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/api/userInfo')) {
+        return { ok: true, json: async () => ({ ...PORTAL_RESP, baseUrl: 'http://site-a/api/v1' }) }
+      }
+      return { ok: true, json: async () => ({ natsJwt: 'JWT123', user: { account: 'alice' } }) }
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    expect(global.fetch).toHaveBeenNthCalledWith(2, 'http://site-a/api/v1/auth', expect.anything())
+    expect(lastGetAuthUrl()()).toBe('http://site-a/api/v1')
+  })
+
   it('drops a stale nc.closed() callback from a superseded connection (generation guard)', async () => {
     let closeFirst
     const firstClosed = new Promise((res) => { closeFirst = res })

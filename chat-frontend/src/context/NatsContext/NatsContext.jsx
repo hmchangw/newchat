@@ -128,10 +128,13 @@ export function NatsProvider({ children }) {
       }
       portal = await lookupResp.json()
     }
-    // baseUrl is the site's unified API gateway; auth lives at /api/v1/auth
-    // behind it (the fetch below appends `/auth`). This backend consolidated
-    // the former separate authServiceUrl into that single baseUrl endpoint.
-    const nextAuthUrl = `${portal.baseUrl}/api/v1`
+    // baseUrl is the site's unified API gateway origin; the /api/v1 prefix and
+    // the /auth suffix (appended by the fetch below) are owned here. Normalize
+    // first: strip any trailing slash and an already-present /api/v1 so a
+    // registry that hands back either `http://host` or `http://host/api/v1`
+    // yields a single /api/v1/auth, never a doubled /api/v1/api/v1/auth.
+    const baseOrigin = portal.baseUrl.replace(/\/+$/, '').replace(/\/api\/v1$/, '')
+    const nextAuthUrl = `${baseOrigin}/api/v1`
 
     // 2) Mint the NATS JWT at the resolved site's auth-service.
     const nkey = createUser()
