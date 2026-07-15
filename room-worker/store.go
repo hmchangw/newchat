@@ -106,7 +106,8 @@ type SubscriptionStore interface {
 	// --- add-member flow ---
 	BulkCreateRoomMembers(ctx context.Context, members []*model.RoomMember) error
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
-	HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error)
+	// member.list reads room_members whenever it holds any row, so a direct add must write there too once the table is non-empty (not only for orgs).
+	HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error)
 	GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error)
 
 	// ListAddMemberCandidates: per-user {hasSub, hasIndividualRow} flags so the worker splits into needSub vs needIRM (org→individual upgrade).

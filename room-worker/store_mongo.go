@@ -515,8 +515,9 @@ func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string)
 	return s.userReader.FindUsersByAccounts(ctx, accounts)
 }
 
-func (s *MongoStore) HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error) {
-	count, err := s.roomMembers.CountDocuments(ctx, bson.M{"rid": roomID, "member.type": model.RoomMemberOrg})
+func (s *MongoStore) HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error) {
+	// Existence check only — cap at 1 so it short-circuits instead of counting every member row.
+	count, err := s.roomMembers.CountDocuments(ctx, bson.M{"rid": roomID}, options.Count().SetLimit(1))
 	if err != nil {
 		return false, fmt.Errorf("count room members for %q: %w", roomID, err)
 	}

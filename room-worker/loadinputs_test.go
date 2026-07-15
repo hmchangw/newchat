@@ -13,9 +13,9 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// TestLoadAddMemberInputs_RunsReadsConcurrently proves the three independent
-// up-front reads (GetRoomMeta, ListAddMemberCandidates, HasOrgRoomMembers) are
-// issued concurrently: each mock blocks on a shared release channel after
+// TestLoadAddMemberInputs_RunsReadsConcurrently proves the independent up-front
+// reads (GetRoomMeta, ListAddMemberCandidates, HasAnyRoomMembers) are issued
+// concurrently: each mock blocks on a shared release channel after
 // signalling arrival, so serial execution would only ever reach one before the
 // others are unblocked and the test would time out.
 func TestLoadAddMemberInputs_RunsReadsConcurrently(t *testing.T) {
@@ -37,7 +37,7 @@ func TestLoadAddMemberInputs_RunsReadsConcurrently(t *testing.T) {
 			block()
 			return []AddMemberCandidate{{Account: "bob"}}, nil
 		})
-	store.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").DoAndReturn(
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").DoAndReturn(
 		func(_ context.Context, _ string) (bool, error) {
 			block()
 			return true, nil
@@ -68,7 +68,7 @@ func TestLoadAddMemberInputs_RunsReadsConcurrently(t *testing.T) {
 	r := <-done
 	require.NoError(t, r.err)
 	assert.Equal(t, "r1", r.in.room.ID)
-	assert.True(t, r.in.hadOrgsBefore)
+	assert.True(t, r.in.hasAnyRoomMembers)
 	require.Len(t, r.in.candidates, 1)
 	assert.Equal(t, "bob", r.in.candidates[0].Account)
 }
@@ -88,7 +88,7 @@ func TestLoadAddMemberInputs_PropagatesErrors(t *testing.T) {
 			setup: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(nil, sentinel)
 				s.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil)
-				s.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
+				s.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 			},
 			wantMsg: "get room: boom",
 		},
@@ -97,18 +97,18 @@ func TestLoadAddMemberInputs_PropagatesErrors(t *testing.T) {
 			setup: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 				s.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, sentinel)
-				s.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, nil)
+				s.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 			},
 			wantMsg: "list add-member candidates: boom",
 		},
 		{
-			name: "has-org-members fails",
+			name: "has-any-members fails",
 			setup: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 				s.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").Return(nil, nil)
-				s.EXPECT().HasOrgRoomMembers(gomock.Any(), "r1").Return(false, sentinel)
+				s.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, sentinel)
 			},
-			wantMsg: "check existing org room members: boom",
+			wantMsg: "check existing room members: boom",
 		},
 	}
 	for _, tt := range tests {
