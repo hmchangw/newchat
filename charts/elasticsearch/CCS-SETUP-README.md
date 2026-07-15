@@ -151,19 +151,17 @@ helm upgrade --install es-chat-site2 ./charts/elasticsearch \
   -f charts/elasticsearch/kind/values/site2-kind.yaml
 ```
 
-The key bit in the values files is just enabling transport CCS — every cluster
-is symmetric:
+The key bit in the values files is just enabling CCS — every cluster is
+symmetric, and shared-transport-CA wiring is rendered automatically:
 
 ```yaml
-# site1-kind.yaml AND site2-kind.yaml — identical transport block
+# site1-kind.yaml AND site2-kind.yaml
 ccs:
   enabled: true
-  transport:
-    enabled: true
-    # caSecretName is auto-derived as <cluster.name>-<division>-transport-ca
-    # (unique per cluster). Each cluster always creates its own copy of the
-    # shared CA from Vault path vault.paths.transportCA — same CONTENT, local
-    # NAME. No manageCASecret / "who owns the shared Secret" flag exists.
+  # caSecretName is auto-derived as <cluster.name>-<division>-transport-ca
+  # (unique per cluster). Each cluster always creates its own copy of the
+  # shared CA from Vault path vault.paths.transportCA — same CONTENT, local
+  # NAME. No manageCASecret / "who owns the shared Secret" flag exists.
 ```
 
 > Historical note: earlier versions used a single shared-name Secret guarded by
@@ -195,8 +193,6 @@ ccs:
   enabled: true
   peers: [site2]                      # peers visible from this cluster
   mode: internal                      # in-cluster transport Service
-  registrationJob:
-    enabled: true                     # default
 ```
 
 ```yaml
@@ -205,8 +201,6 @@ ccs:
   enabled: true
   peers: [site2, site3, site4, site5, site6, site7, site8, site9, site10, site11, site12]
   mode: public
-  registrationJob:
-    enabled: true
 ```
 
 What the Job does: waits for local ES `/_cluster/health` to be yellow/green,
@@ -227,8 +221,9 @@ for cases where you don't want to `helm upgrade`:
 - Interactive iteration while debugging connectivity
 - Recovering from a Job failure mid-rollout
 
-Set `ccs.registrationJob.enabled: false` in a release's values to suppress
-the Job and use the script exclusively.
+The chart-owned Job always renders when `ccs.enabled` and `ccs.peers` is
+non-empty — the script is a purely additional tool for interactive ops, not
+a substitute.
 
 ---
 

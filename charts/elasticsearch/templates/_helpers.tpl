@@ -149,8 +149,8 @@ when not explicitly set in values.hosts.
 {{- end -}}
 
 {{- define "chat.hosts.esRemote" -}}
-{{- if .Values.hosts.esRemote -}}
-{{- .Values.hosts.esRemote -}}
+{{- if .Values.ccs.publicEndpoint.hostname -}}
+{{- .Values.ccs.publicEndpoint.hostname -}}
 {{- else -}}
 {{- printf "es-remote-%s.%s" .Values.properties.site .Values.properties.publicDomain -}}
 {{- end -}}

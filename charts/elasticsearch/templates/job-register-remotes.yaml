@@ -6,15 +6,15 @@
    no-op when values are unchanged, so adding/removing peers via values just
    works.
 
-   Gated on ccs.peers being non-empty AND ccs.registrationJob.enabled, so the
-   default is "render nothing" until you opt in by declaring peers. The
-   external register-remotes.sh script remains a valid alternative for ad-hoc
-   ops; both call the same API and produce identical state in ES.
+   Gated on ccs.enabled AND ccs.peers being non-empty, so the default is
+   "render nothing" until you opt in by declaring peers. The external
+   register-remotes.sh script remains a valid alternative for ad-hoc ops;
+   both call the same API and produce identical state in ES.
 
    See docs/superpowers/specs/2026-05-04-elasticsearch-ccs-mesh-design.md §6
    and CCS-SETUP-README.md §3 Step D for context.
 */ -}}
-{{- if and .Values.ccs.enabled .Values.ccs.peers .Values.ccs.registrationJob.enabled }}
+{{- if and .Values.ccs.enabled .Values.ccs.peers }}
 apiVersion: batch/v1
 kind: Job
 metadata:

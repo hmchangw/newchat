@@ -227,8 +227,9 @@ When staging hangs but dev/test worked, walk these in order:
    `nc -zv -w5 es-remote-<peer>.<domain> 443` (network/firewall — the #1
    real-cluster cause a kind harness never shows).
 4. If `handshake was in progress`: check peer `gateway,virtualservice,destinationrule | grep remote` (§3).
-5. Confirm `mode: public`, `publicEndpoint.enabled: true`, `transport.enabled: true`
-   in the site's values, and that `server_name` is set on the remote (SNI +
+5. Confirm `ccs.mode: public` and `ccs.publicEndpoint.enabled: true` in the
+   site's values (the shared-transport-CA wiring is always rendered when
+   `ccs.enabled: true`), and that `server_name` is set on the remote (SNI +
    cert SAN both depend on it).
 
 ---

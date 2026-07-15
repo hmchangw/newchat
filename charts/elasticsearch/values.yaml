@@ -35,30 +35,39 @@ enableApps:
 #                            from values.peers.
 #
 #   ccs.peers                List of peer site identifiers (e.g. [site2, site3]).
-#                            When non-empty AND ccs.registrationJob.enabled,
-#                            renders a post-install/upgrade Job that calls
-#                            PUT /_cluster/settings to register every peer.
-#                            Idempotent — safe to re-run on every helm upgrade.
-#                            Leave empty if you prefer running register-remotes.sh
-#                            manually instead.
+#                            When non-empty, renders a post-install/upgrade Job
+#                            that calls PUT /_cluster/settings to register every
+#                            peer. Idempotent — safe to re-run on every helm
+#                            upgrade.
 #
-#   ccs.mode                 internal | public — drives how the Job builds
+#   ccs.mode                 internal | public — OUTBOUND choice: drives how
+#                            THIS cluster's registration Job builds
 #                            cluster.remote.<peer>.proxy_address:
 #                              internal → <peer>-es-transport.<ns>.svc:9300
 #                                         (same-K8s, Phase 1)
 #                              public   → es-remote-<peer>.<publicDomain>:443
 #                                         (cross-K8s, Phase 2)
+#                            Independent of ccs.publicEndpoint.enabled — with
+#                            mode=internal, peers are ALWAYS reached via the
+#                            in-cluster Service FQDN, even if publicEndpoint
+#                            is also enabled (which only controls the INBOUND
+#                            wiring — see below).
 #
-#   ccs.registrationJob      Tunables for the Job. Set enabled=false to skip
-#                            rendering it (e.g. if you prefer the script-based
-#                            workflow for ad-hoc ops).
+#   ccs.registrationJob      Tunables for the registration Job (image,
+#                            backoffLimit, healthTimeoutSeconds, publicPort).
+#                            The Job itself always renders when ccs.enabled AND
+#                            ccs.peers is non-empty.
 #
-#   ccs.transport            Shared transport CA wiring. When enabled, every
-#                            cluster references caSecretName so ECK signs
-#                            node transport certs from a common root and
-#                            clusters mutually trust each other automatically.
+#   ccs.transport            Shared transport CA wiring. Always rendered when
+#                            ccs.enabled — every cluster references caSecretName
+#                            so ECK signs node transport certs from a common
+#                            root and clusters mutually trust each other
+#                            automatically. Only `caSecretName` is tunable.
 #
-#   ccs.publicEndpoint       Phase 2 / cross-K8s only. Renders:
+#   ccs.publicEndpoint       INBOUND wiring — controls whether THIS cluster
+#                            exposes a public transport endpoint so other
+#                            clusters can connect to us. When enabled=true,
+#                            renders:
 #                              - subjectAltNames on spec.transport.tls so
 #                                cross-K8s peers can validate against the
 #                                public hostname
@@ -66,6 +75,10 @@ enableApps:
 #                              - chat-es-remote-<site>-vs (SNI route to 9300)
 #                            Leave disabled for Phase 1 — peers live in the
 #                            same K8s and use the in-cluster transport Service.
+#                            `hostname` optionally overrides the public
+#                            hostname; auto-derived as
+#                            es-remote-<properties.site>.<properties.publicDomain>
+#                            when blank.
 # ──────────────────────────────────────────────────────────────────────────────
 ccs:
   enabled: false
@@ -77,8 +90,15 @@ ccs:
 
   mode: internal
 
+  publicEndpoint:
+    enabled: false
+    # Optional override for the public transport hostname (used as the SAN
+    # on spec.transport.tls, the Istio Gateway host, and the SNI match).
+    # Only consulted when publicEndpoint.enabled=true. Leave blank to
+    # auto-derive as es-remote-<properties.site>.<properties.publicDomain>.
+    hostname: ""
+
   registrationJob:
-    enabled: true
     # The shipped Job only needs `curl` (health is parsed with grep, the PUT
     # body is built in shell) — so the official curlimages/curl is enough. If
     # you customise the Job to parse JSON, point this at an image that also has
@@ -89,7 +109,6 @@ ccs:
     publicPort: "443"          # override to "30443" for multi-kind harness
 
   transport:
-    enabled: false
     # Local K8s Secret (kind: tls) holding this cluster's copy of the shared
     # transport CA cert+key. Each cluster always creates its own copy from the
     # shared Vault path (vault.paths.transportCA) — the CONTENT is identical
@@ -99,9 +118,6 @@ ccs:
     # so two releases in one namespace never collide). Leave unset; only
     # override if you must pin a specific name.
     # caSecretName: ""
-
-  publicEndpoint:
-    enabled: false
 
   # Schedule ES pods onto cross-cluster-routable nodes (labelled node-routable=true,
   # able to reach peer sites' ingress LBs on 443). CCS is pod→peer-LB, so pods on
@@ -265,12 +281,12 @@ kibana:
 # Public hostnames. Leave blank to auto-derive from properties.site / publicDomain:
 #   esHttp:    es-<site>.<publicDomain>
 #   kibana:    kibana-<site>.<publicDomain>
-#   esRemote:  es-remote-<site>.<publicDomain>
+# (The public transport hostname lives at ccs.publicEndpoint.hostname —
+#  CCS concern, only used when ccs.publicEndpoint.enabled=true.)
 # ──────────────────────────────────────────────────────────────────────────────
 hosts:
   esHttp: ""
   kibana: ""
-  esRemote: ""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Istio.

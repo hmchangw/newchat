@@ -111,7 +111,7 @@ and CCS go `connected:true` immediately.
 > fresh handshake (post-teardown) exposes the RST. The original chart's wildcard
 > `*.<ns>.svc` host happened to cover both services; when splitting to per-host
 > rules, you must render **both** es-http and es-transport (the chart now does,
-> gated on `ccs.transport.enabled` for the transport one).
+> gated on `ccs.enabled` for the transport one).
 
 ---
 

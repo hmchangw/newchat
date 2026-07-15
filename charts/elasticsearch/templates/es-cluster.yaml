@@ -29,7 +29,7 @@ spec:
      mutually trust. In Phase 2, subjectAltNames also include the public host
      so cross-K8s peers can validate against `cluster.remote.<peer>.server_name`.
   */}}
-  {{- if .Values.ccs.transport.enabled }}
+  {{- if .Values.ccs.enabled }}
   transport:
     tls:
       certificate:

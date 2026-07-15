@@ -54,10 +54,7 @@ ccs:
   peers: [site2]
   mode: public                   # public Istio passthrough endpoint (NodePort 30443)
   registrationJob:
-    enabled: true                # post-install Job auto-registers site2
     publicPort: "30443"          # multi-kind exposes Istio LB on NodePort 30443
-  transport:
-    enabled: true
   publicEndpoint:
     enabled: true                # render Gateway+VS for es-remote-site1.chat.com → transport 9300
   nodeRoutable: false            # kind nodes all reachable on the docker network — no routable split

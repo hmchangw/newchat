@@ -522,8 +522,7 @@ platform team installs these — same setup as sites 1-3).
 helm upgrade --install es-chat-site<N> ./charts/elasticsearch \
   -n chat --force-conflicts \
   -f charts/elasticsearch/values/site<N>.yaml
-# values: ccs.enabled=true, ccs.transport.enabled=true,
-#         ccs.transport.manageCASecret=true (each cluster owns its own ns Secret),
+# values: ccs.enabled=true (renders the shared transport CA wiring + per-cluster CA Secret automatically),
 #         ccs.publicEndpoint.enabled=true (renders es-remote-site<N>.chat.com Gateway+VS)
 ```
 
