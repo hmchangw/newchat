@@ -20,10 +20,18 @@ import (
 
 // Config is the job's environment configuration.
 type Config struct {
-	MongoURI      string `env:"MONGO_URI,required"`
-	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// Mongo traffic is split into a read client (the teams_user scan,
+	// secondary-preferred) and a write client (watermark update + teams_chat
+	// upserts), mirroring the sibling teams-user-sync job.
+	MongoReadURI      string `env:"MONGO_READ_URI,required,notEmpty"`
+	MongoReadUsername string `env:"MONGO_READ_USERNAME" envDefault:""`
+	MongoReadPassword string `env:"MONGO_READ_PASSWORD" envDefault:""`
+	MongoReadDB       string `env:"MONGO_READ_DB" envDefault:"chat"`
+
+	MongoWriteURI      string `env:"MONGO_WRITE_URI,required,notEmpty"`
+	MongoWriteUsername string `env:"MONGO_WRITE_USERNAME" envDefault:""`
+	MongoWritePassword string `env:"MONGO_WRITE_PASSWORD" envDefault:""`
+	MongoWriteDB       string `env:"MONGO_WRITE_DB" envDefault:"chat"`
 
 	MaxWorkers int           `env:"MAX_WORKERS" envDefault:"8"`
 	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"30m"`
@@ -89,12 +97,19 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
 	defer cancel()
 
-	client, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword)
 	if err != nil {
-		return fmt.Errorf("mongo connect: %w", err)
+		return fmt.Errorf("mongo read connect: %w", err)
 	}
-	defer mongoutil.Disconnect(context.Background(), client)
-	store := newMongoStore(client.Database(cfg.MongoDB))
+	defer mongoutil.Disconnect(context.Background(), readClient)
+
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWriteURI, cfg.MongoWriteUsername, cfg.MongoWritePassword)
+	if err != nil {
+		return fmt.Errorf("mongo write connect: %w", err)
+	}
+	defer mongoutil.Disconnect(context.Background(), writeClient)
+
+	store := newMongoStore(readClient.Database(cfg.MongoReadDB), writeClient.Database(cfg.MongoWriteDB))
 
 	graph := msgraph.NewChatsClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,

@@ -23,13 +23,13 @@ func seedUsers(t *testing.T, store *mongoStore, users ...model.TeamsUser) {
 	for _, u := range users {
 		docs = append(docs, u)
 	}
-	_, err := store.users.Raw().InsertMany(context.Background(), docs)
+	_, err := store.writeUsers.Raw().InsertMany(context.Background(), docs)
 	require.NoError(t, err)
 }
 
 func TestMongoStore_ListUsers(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
-	store := newMongoStore(db)
+	store := newMongoStore(db, db)
 	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	seedUsers(t, store,
 		model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice", From: &from},
@@ -49,13 +49,13 @@ func TestMongoStore_ListUsers(t *testing.T) {
 
 func TestMongoStore_SetFrom(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
-	store := newMongoStore(db)
+	store := newMongoStore(db, db)
 	seedUsers(t, store, model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice"})
 
 	to := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, store.SetFrom(context.Background(), "u1", to))
 
-	got, err := store.users.FindByID(context.Background(), "u1")
+	got, err := store.writeUsers.FindByID(context.Background(), "u1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.NotNil(t, got.From)
@@ -76,7 +76,7 @@ func groupChat(id, name, siteID string, updatedAt time.Time) model.TeamsChat {
 
 func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
-	store := newMongoStore(db)
+	store := newMongoStore(db, db)
 	ctx := context.Background()
 	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
@@ -85,7 +85,7 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 	// Second sync computes a different majority and a new name.
 	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g1", "Renamed", "site-b", now2)}))
 
-	got, err := store.chats.FindByID(ctx, "19:g1")
+	got, err := store.writeChats.FindByID(ctx, "19:g1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "site-a", got.SiteID, "siteID must never change after insert")
@@ -96,7 +96,7 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
-	store := newMongoStore(db)
+	store := newMongoStore(db, db)
 	ctx := context.Background()
 	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
@@ -118,7 +118,7 @@ func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	changed.NeedMemberSync = true // must NOT stick: oneOnOne re-upsert never modifies the doc
 	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{changed}))
 
-	got, err := store.chats.FindByID(ctx, "19:one1")
+	got, err := store.writeChats.FindByID(ctx, "19:one1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "site-a", got.SiteID)
@@ -129,7 +129,7 @@ func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 
 func TestMongoStore_UpsertChats_MixedBatchAndEmpty(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
-	store := newMongoStore(db)
+	store := newMongoStore(db, db)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 
@@ -140,7 +140,7 @@ func TestMongoStore_UpsertChats_MixedBatchAndEmpty(t *testing.T) {
 		UpdatedAt: now}
 	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g2", "G", "site-a", now), one}))
 
-	n, err := store.chats.Raw().CountDocuments(ctx, bson.M{})
+	n, err := store.writeChats.Raw().CountDocuments(ctx, bson.M{})
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, n)
 }
