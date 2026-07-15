@@ -47,3 +47,26 @@ func (c *Client) GetThreadList(ctx context.Context, siteID string, req model.Thr
 	}
 	return out, nil
 }
+
+// RoomsGet issues the per-site rooms.get batch RPC to history-service, returning
+// the resolvable last message for each requested room; rooms with no message, or
+// that degraded, are simply absent from the map (mirrors the server's own
+// per-room best-effort degrade).
+func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error) {
+	body, err := json.Marshal(model.RoomsGetRequest{RoomIDs: roomIDs})
+	if err != nil {
+		return nil, fmt.Errorf("marshal rooms-get request: %w", err)
+	}
+	msg, err := c.nc.Request(ctx, subject.RoomsGet(siteID), body, historyRPCTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("rooms-get rpc: %w", err)
+	}
+	if e, ok := errcode.Parse(msg.Data); ok {
+		return nil, e
+	}
+	var out model.RoomsGetResponse
+	if err := json.Unmarshal(msg.Data, &out); err != nil {
+		return nil, fmt.Errorf("decode rooms-get response: %w", err)
+	}
+	return out.Rooms, nil
+}

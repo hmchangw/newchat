@@ -423,6 +423,21 @@ func (mr *MockHistoryClientMockRecorder) GetThreadList(ctx, siteID, req any) *go
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetThreadList", reflect.TypeOf((*MockHistoryClient)(nil).GetThreadList), ctx, siteID, req)
 }
 
+// RoomsGet mocks base method.
+func (m *MockHistoryClient) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RoomsGet", ctx, siteID, roomIDs)
+	ret0, _ := ret[0].(map[string]model.LastMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RoomsGet indicates an expected call of RoomsGet.
+func (mr *MockHistoryClientMockRecorder) RoomsGet(ctx, siteID, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RoomsGet", reflect.TypeOf((*MockHistoryClient)(nil).RoomsGet), ctx, siteID, roomIDs)
+}
+
 // MockPresenceClient is a mock of PresenceClient interface.
 type MockPresenceClient struct {
 	ctrl     *gomock.Controller

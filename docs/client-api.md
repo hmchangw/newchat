@@ -906,6 +906,20 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
+| `lastMessage` | [LastMessage](#lastmessage) | Optional. The room's latest non-deleted message, resolved server-side at read time. Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+
+##### LastMessage
+
+A room's most-recent **non-deleted** message, resolved at read time and preview-trimmed.
+Soft-deleted messages are skipped (walked back to an earlier survivor); a room with only
+deleted messages omits `lastMessage`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `messageId` | string | |
+| `sender` | [Participant](#participant) | |
+| `content` | string | Preview-trimmed to 256 runes. |
+| `createdAt` | int64 | UTC milliseconds. |
 
 #### AppSubscription
 
@@ -4251,6 +4265,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 | `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (botDM rooms). |
 | `favorite`          | boolean | no       | When `true`, filters to favorited subscriptions only **and** moves the self-DM to the front of the list. |
 | `updatedWithinDays` | number  | no       | When set, filters **`rooms`-type** results to rooms **whose last message (`room.lastMsgAt`) is within the last N days** — room activity, not the subscription's update time. Cross-site rooms (no local `lastMsgAt`) fall outside the window. **Ignored for `current`** (always returns the full active set) and for `apps`. Omit for no age filter — the server applies no default; the client supplies any default it wants. Must be non-negative; a negative value is rejected with `bad_request`. |
+| `includeLastMessage` | boolean | no      | Whether to embed each room's [`lastMessage`](#subscriptionroom). Omitted ⇒ include (backward-compatible default); `false` ⇒ skip the per-room last-message resolve (a client that renders no room-list snippet can send `false` to save the server-side work). |
 | `offset`            | integer | no       | Zero-based index of the first record to return. Negative ⇒ `0`. Default `0`. |
 | `limit`             | integer | no       | Page size. Omitted or ≤ 0 ⇒ the server default `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); values above `MAX_SUBSCRIPTION_LIMIT` (default `1000`) are capped to it. |
 
@@ -4324,7 +4339,13 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
         "lastMentionAllAt": "2026-05-30T08:00:00Z",
         "minUserLastSeenAt": "2026-05-30T07:55:00Z",
         "privateKey": "bDM4dGZ5...base64...JjT0g9PQ==",
-        "keyVersion": 3
+        "keyVersion": 3,
+        "lastMessage": {
+          "messageId": "01970a4f8c2d7c9aBB",
+          "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+          "content": "morning team",
+          "createdAt": 1780308000000
+        }
       }
     },
     {

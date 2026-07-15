@@ -73,6 +73,14 @@ func MsgGetIDs(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.get.ids", account, roomID, siteID)
 }
 
+// RoomsGet is the server-to-server request subject for the rooms.get batch RPC:
+// user-service asks history-service for each room's last message. Account-agnostic
+// (roomIds batch in the body); the publish and subscribe forms are identical, like
+// ThreadRoomInfoBatch.
+func RoomsGet(siteID string) string {
+	return fmt.Sprintf("chat.server.request.history.%s.rooms.get", siteID)
+}
+
 func UserResponse(account, requestID string) string {
 	return fmt.Sprintf("chat.user.%s.response.%s", account, requestID)
 }

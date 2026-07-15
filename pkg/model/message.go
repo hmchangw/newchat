@@ -91,3 +91,26 @@ func (m *Message) SenderDisplayName() string {
 	}
 	return m.UserAccount
 }
+
+// RoomsGetRequest is the request body for the rooms.get batch RPC: the rooms whose
+// last message the caller wants. The site is taken from the subject.
+type RoomsGetRequest struct {
+	RoomIDs []string `json:"roomIds"`
+}
+
+// LastMessage is a room's most-recent NON-deleted message, resolved at read time.
+// Content is preview-trimmed. Shared wire type: history-service's rooms.get RPC
+// produces it, user-service's subscription.list embeds it (SubscriptionRoom.LastMessage).
+type LastMessage struct {
+	MessageID string                `json:"messageId"`
+	Sender    cassandra.Participant `json:"sender"`
+	Content   string                `json:"content"`
+	CreatedAt int64                 `json:"createdAt"` // UTC millis
+}
+
+// RoomsGetResponse maps each requested roomId that has a resolvable last message to
+// it. Rooms with no non-deleted message, or that degraded, are omitted (best-effort)
+// rather than failing the whole batch.
+type RoomsGetResponse struct {
+	Rooms map[string]LastMessage `json:"rooms"`
+}

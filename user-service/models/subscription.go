@@ -5,12 +5,15 @@ import "github.com/hmchangw/chat/pkg/model"
 // SubscriptionListRequest is the body of subscription.list.
 // Type ∈ {current, rooms, apps}. UpdatedWithinDays nil ⇒ no age filter.
 // Offset/Limit page the result; omitted (0) ⇒ first page at the server default size.
+// IncludeLastMessage nil/absent ⇒ include (backward-compatible); false ⇒ skip the
+// last-message enrichment.
 type SubscriptionListRequest struct {
-	Type              string `json:"type"`
-	Favorite          *bool  `json:"favorite,omitempty"`
-	UpdatedWithinDays *int   `json:"updatedWithinDays,omitempty"`
-	Offset            int    `json:"offset,omitempty"`
-	Limit             int    `json:"limit,omitempty"`
+	Type               string `json:"type"`
+	Favorite           *bool  `json:"favorite,omitempty"`
+	UpdatedWithinDays  *int   `json:"updatedWithinDays,omitempty"`
+	IncludeLastMessage *bool  `json:"includeLastMessage,omitempty"`
+	Offset             int    `json:"offset,omitempty"`
+	Limit              int    `json:"limit,omitempty"`
 }
 
 // SubscriptionListResponse is returned by subscription.getByRoomID (a 0-or-1 point

@@ -117,6 +117,10 @@ type SubscriptionRoom struct {
 	// on subscription.list (same payload as the room.key.get RPC).
 	PrivateKey *string `json:"privateKey,omitempty" bson:"-"`
 	KeyVersion *int    `json:"keyVersion,omitempty" bson:"-"`
+	// LastMessage is resolved at read time via history-service's rooms.get RPC
+	// (A2 — no denormalized write path). Omitted when the room has no message,
+	// the enriching site RPC degraded, or the room is soft-deleted (Room==nil).
+	LastMessage *LastMessage `json:"lastMessage,omitempty" bson:"-"`
 }
 
 // SubscriptionHRInfo carries the counterpart's HR-directory record on a DM subscription for sidebar/header rendering.

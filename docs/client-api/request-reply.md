@@ -1436,6 +1436,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 | `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (botDM). |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
 | `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` is within N days. Non-negative. |
+| `includeLastMessage` | boolean | no | Embed each room's `lastMessage`. Omitted ⇒ include (default); `false` ⇒ skip the last-message resolve. |
 | `offset` | integer | no | Zero-based index of first record. Negative ⇒ `0`. Default `0`. |
 | `limit` | integer | no | Page size. Omitted/≤0 ⇒ `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); capped at `MAX_SUBSCRIPTION_LIMIT` (default `1000`). |
 
