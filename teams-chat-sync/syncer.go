@@ -70,7 +70,7 @@ func (s *syncer) claim(chatID string) bool {
 	return true
 }
 
-// voteSiteID returns the majority siteID among the members present in the
+// voteSiteID returns the plurality siteID among the members present in the
 // cache with a non-empty siteID; ties break to the lexicographically smallest
 // siteID so the result is deterministic across runs and map iteration orders.
 // Members with an empty siteID (no HR assignment) do not vote, so the empty
@@ -206,7 +206,6 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 	}
 	batch := make([]model.TeamsChat, 0, len(graphChats))
 	now := s.cfg.Now()
-	var skippedEmptyVote int
 	for _, gc := range graphChats {
 		if !s.claim(gc.ID) {
 			sum.Deduped.Add(1)
@@ -215,7 +214,6 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 		built := buildChat(gc, cache, now, s.cfg.DefaultSiteID)
 		if built.SiteID == "" {
 			slog.Warn("teams chat sync: siteID vote empty, skipping chat", "chatID", gc.ID, "userID", u.ID)
-			skippedEmptyVote++
 			continue
 		}
 		batch = append(batch, built)
@@ -225,9 +223,6 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 			return fmt.Errorf("upsert chats: %w", err)
 		}
 		sum.Upserted.Add(int64(len(batch)))
-	}
-	if skippedEmptyVote > 0 {
-		return fmt.Errorf("%d chats skipped: siteID vote empty", skippedEmptyVote)
 	}
 	if err := s.users.SetFrom(ctx, u.ID, to); err != nil {
 		return fmt.Errorf("advance watermark: %w", err)
