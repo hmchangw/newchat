@@ -36,6 +36,8 @@ func TestVoteSiteID(t *testing.T) {
 		"a2": {siteID: "site-a", account: "amy"},
 		"b1": {siteID: "site-b", account: "bob"},
 		"c1": {siteID: "site-c", account: "carl"},
+		"e1": {siteID: "", account: "eve"},  // no HR site assignment
+		"e2": {siteID: "", account: "erin"}, // no HR site assignment
 	}
 	tests := []struct {
 		name          string
@@ -52,6 +54,9 @@ func TestVoteSiteID(t *testing.T) {
 		{"all unknown falls back to default", []msgraph.ChatMember{member("ghost")}, "site-default", "site-default"},
 		{"no members falls back to default", nil, "site-default", "site-default"},
 		{"default never overrides a real vote", []msgraph.ChatMember{member("b1")}, "site-default", "site-b"},
+		{"empty siteID does not vote", []msgraph.ChatMember{member("e1"), member("e2"), member("b1")}, "", "site-b"},
+		{"only empty siteIDs yields empty", []msgraph.ChatMember{member("e1"), member("e2")}, "", ""},
+		{"only empty siteIDs falls back to default", []msgraph.ChatMember{member("e1")}, "site-default", "site-default"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

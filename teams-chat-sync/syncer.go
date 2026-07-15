@@ -71,15 +71,16 @@ func (s *syncer) claim(chatID string) bool {
 }
 
 // voteSiteID returns the majority siteID among the members present in the
-// cache; ties break to the lexicographically smallest siteID so the result is
-// deterministic across runs and map iteration orders. When no member is known
-// (not expected in practice: the fetching user is always a member and always
-// cached) it falls back to defaultSiteID — which may itself be empty when no
-// default is configured; the caller treats "" as unresolvable.
+// cache with a non-empty siteID; ties break to the lexicographically smallest
+// siteID so the result is deterministic across runs and map iteration orders.
+// Members with an empty siteID (no HR assignment) do not vote, so the empty
+// string never wins. When no member casts a real vote it falls back to
+// defaultSiteID — which may itself be empty when no default is configured; the
+// caller treats "" as unresolvable.
 func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defaultSiteID string) string {
 	counts := make(map[string]int)
 	for _, m := range members {
-		if cu, ok := cache[m.UserID]; ok {
+		if cu, ok := cache[m.UserID]; ok && cu.siteID != "" {
 			counts[cu.siteID]++
 		}
 	}
