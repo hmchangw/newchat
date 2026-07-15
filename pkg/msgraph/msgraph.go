@@ -463,17 +463,32 @@ type usersPage struct {
 
 // ListUsers walks GET /users page by page, invoking fn per page. The first
 // request carries $select/$top; subsequent pages follow Graph's opaque
-// @odata.nextLink verbatim (it embeds the paging state).
+// @odata.nextLink (it embeds the paging state), but only after confirming the
+// link's scheme+host still match the configured Graph origin.
 func (g *graphClient) ListUsers(ctx context.Context, pageSize int, fn func([]GraphUser) error) error {
 	token, err := g.accessToken(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire graph token: %w", err)
+	}
+	base, err := url.Parse(g.baseURL)
+	if err != nil {
+		return fmt.Errorf("parse graph base URL: %w", err)
 	}
 	q := url.Values{}
 	q.Set("$select", "id,userPrincipalName")
 	q.Set("$top", strconv.Itoa(pageSize))
 	next := g.baseURL + "/users?" + q.Encode()
 	for next != "" {
+		// The bearer token rides on every page request, so never follow a
+		// nextLink that Graph's response steered off the configured origin —
+		// a tampered link would exfiltrate the token (SSRF).
+		nextURL, err := url.Parse(next)
+		if err != nil {
+			return fmt.Errorf("parse users nextLink: %w", err)
+		}
+		if nextURL.Scheme != base.Scheme || nextURL.Host != base.Host {
+			return fmt.Errorf("users nextLink origin %q does not match configured graph origin", nextURL.Scheme+"://"+nextURL.Host)
+		}
 		page, err := g.fetchUsersPage(ctx, token, next)
 		if err != nil {
 			return err

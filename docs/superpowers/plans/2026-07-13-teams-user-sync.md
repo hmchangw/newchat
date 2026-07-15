@@ -16,11 +16,11 @@
 > Affected snippets below have been corrected where reviewers flagged them; the
 > repository code is authoritative.
 
-**Goal:** A cron-scheduled batch service that populates the MongoDB `teams_user` collection from Microsoft Graph `/users` pages joined with the `hr` collection's `siteID`, using separate Mongo read/write clients.
+**Goal:** A batch job that populates the MongoDB `teams_user` collection from Microsoft Graph `/users` pages joined with the `hr` collection's `siteID`, using separate Mongo read/write clients.
 
-**Architecture:** Page-streaming sync: each Graph page (≤500 users) is immediately diffed against `teams_user` by `_id` (read client), missing users are resolved to a `siteID` via the `hr` collection (read client), and the merged records are bulk-upserted (write client). robfig/cron/v3 schedules runs; `cron.SkipIfStillRunning` drops overlapping fires. Spec: `docs/superpowers/specs/2026-07-13-teams-user-sync-design.md`.
+**Architecture:** Page-streaming sync: each Graph page (≤500 users) is immediately diffed against `teams_user` by `_id` (read client), missing users are resolved to a `siteID` via the `hr` collection (read client), and the merged records are bulk-upserted (write client). Scheduling is external — an ops-owned Kubernetes CronJob triggers a one-shot `run()` that performs exactly one sync and exits, with `concurrencyPolicy: Forbid` providing skip-if-still-running semantics (superseding the obsolete in-process robfig/cron scheduler this plan originally prescribed; see the revision note above). Spec: `docs/superpowers/specs/2026-07-13-teams-user-sync-design.md`.
 
-**Tech Stack:** Go 1.25, robfig/cron/v3 (new dependency, user-approved), `pkg/msgraph` (extended), `pkg/mongoutil` (extended), `pkg/health`, `pkg/shutdown`, `pkg/idgen`, mockgen + testify, testcontainers via `pkg/testutil`.
+**Tech Stack:** Go 1.25, `pkg/msgraph` (extended), `pkg/mongoutil` (extended), `pkg/shutdown`, `pkg/idgen`, mockgen + testify, testcontainers via `pkg/testutil`. (The originally planned robfig/cron/v3 dependency and `pkg/health` listener were dropped in the one-shot CronJob conversion.)
 
 ## Global Constraints
 

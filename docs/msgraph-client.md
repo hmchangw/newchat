@@ -55,9 +55,11 @@ empty value.
 
 `UserLister.ListUsers(ctx, pageSize, fn)` walks `GET /users` with
 `$select=id,userPrincipalName&$top={pageSize}`, following `@odata.nextLink`
-and invoking `fn` once per page. Used by `teams-user-sync` to enumerate the
-tenant. Requires the **`User.Read.All`** application permission. Construct
-via `NewUserListerClient(cfg)`.
+and invoking `fn` once per page. Each `@odata.nextLink` is followed only after
+its scheme and host are validated against the configured Graph origin, so a
+tampered link can never redirect the bearer token off-origin (SSRF). Used by
+`teams-user-sync` to enumerate the tenant. Requires the **`User.Read.All`**
+application permission. Construct via `NewUserListerClient(cfg)`.
 
 ## Production requirement (the live gate)
 
