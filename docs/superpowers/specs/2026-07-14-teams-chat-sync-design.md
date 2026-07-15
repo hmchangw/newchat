@@ -34,23 +34,23 @@ teams-chat-sync/
 ├── main.go              # Config parse, dependency wiring, run() error
 ├── syncer.go            # Orchestrator + per-user worker: cache, vote, dedup, upsert, watermark
 ├── store.go             # TeamsUserStore + TeamsChatStore interfaces + go:generate mockgen
+├── store_mongo.go       # mongoStore (ListUsers/SetFrom/UpsertChats) + upsert semantics
 ├── syncer_test.go       # Unit tests (mocked Graph + mocked store)
 ├── worker_test.go
+├── store_mongo_test.go  # Upsert-document unit tests
 ├── mock_store_test.go   # Generated
+├── integration_test.go  # testutil.MongoDB, //go:build integration
 └── deploy/              # Dockerfile, docker-compose.yml, azure-pipelines.yml
-
-pkg/teamsstore/          # SHARED Mongo store for teams_user/teams_chat
-├── teamsstore.go        # Store (ListUsers/SetFrom/UpsertChats), upsert semantics
-├── teamsstore_test.go   # Upsert-document unit tests
-└── integration_test.go  # testutil.MongoDB, //go:build integration
 ```
 
-The Mongo layer is a shared package (`pkg/teamsstore`, same pattern as
-`pkg/userstore`) so downstream consumers — e.g. the member-sync job reading
-`needMemberSync` — reuse the collection names, projections, and the
-$setOnInsert/$set upsert semantics instead of re-implementing them. Models
-stay in `pkg/model`; each consumer defines its own narrow store interfaces
-satisfied by `*teamsstore.Store`.
+The Mongo store lives in the service directory (`store.go` interface +
+`store_mongo.go` impl), matching the sibling `teams-user-sync` cronjob that
+writes the same `teams_user` collection with its own service-local store.
+Models stay in `pkg/model`. The two jobs need different store methods on the
+shared collections (`teams-user-sync`: ExistingIDs/HRSiteIDs/UpsertTeamsUsers;
+this job: ListUsers/SetFrom/UpsertChats), so each defines its own narrow
+interface per the consumer-owns-the-interface rule rather than sharing a store
+package.
 
 No NATS connection and no `SITE_ID` env — the job is global and talks only to
 MongoDB and Graph.

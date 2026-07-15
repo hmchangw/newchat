@@ -1,11 +1,4 @@
-// Package teamsstore is the shared Mongo store for the Teams-sync collections
-// (teams_user, teams_chat). teams-chat-sync writes through it; downstream
-// consumers (e.g. a member-sync job reading needMemberSync) reuse it instead
-// of re-implementing the collection names, projections, and the
-// $setOnInsert/$set upsert semantics. Models live in pkg/model (TeamsUser,
-// TeamsChat); consumers define their own narrow interfaces satisfied by
-// *Store, per repo convention.
-package teamsstore
+package main
 
 import (
 	"context"
@@ -19,24 +12,23 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-// Store is the Mongo-backed access layer for teams_user and teams_chat.
-type Store struct {
+// mongoStore implements TeamsUserStore and TeamsChatStore over the teams_user
+// and teams_chat collections.
+type mongoStore struct {
 	users *mongoutil.Collection[model.TeamsUser]
 	chats *mongoutil.Collection[model.TeamsChat]
 }
 
-// New wires the store onto the given database's teams_user / teams_chat
-// collections.
-func New(db *mongo.Database) *Store {
-	return &Store{
+func newMongoStore(db *mongo.Database) *mongoStore {
+	return &mongoStore{
 		users: mongoutil.NewCollection[model.TeamsUser](db.Collection("teams_user")),
 		chats: mongoutil.NewCollection[model.TeamsChat](db.Collection("teams_chat")),
 	}
 }
 
 // ListUsers returns every teams_user projected to the sync fields
-// (_id, siteID, account, from).
-func (s *Store) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
+// (_id, siteId, account, from).
+func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 	users, err := s.users.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
 		"_id": 1, "siteId": 1, "account": 1, "from": 1,
 	}))
@@ -47,7 +39,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 }
 
 // SetFrom advances one user's sync watermark.
-func (s *Store) SetFrom(ctx context.Context, userID string, from time.Time) error {
+func (s *mongoStore) SetFrom(ctx context.Context, userID string, from time.Time) error {
 	if _, err := s.users.Raw().UpdateByID(ctx, userID, bson.M{"$set": bson.M{"from": from}}); err != nil {
 		return fmt.Errorf("set teams user watermark: %w", err)
 	}
@@ -57,7 +49,7 @@ func (s *Store) SetFrom(ctx context.Context, userID string, from time.Time) erro
 // UpsertChats bulk-upserts chats keyed on _id. oneOnOne chats are insert-only
 // (all fields $setOnInsert); other chat types keep createdDateTime and siteID
 // $setOnInsert-only while the mutable fields refresh.
-func (s *Store) UpsertChats(ctx context.Context, chats []model.TeamsChat) error {
+func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) error {
 	models := make([]mongo.WriteModel, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
 	for _, c := range chats {

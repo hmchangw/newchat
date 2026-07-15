@@ -1,4 +1,4 @@
-package teamsstore
+package main
 
 import (
 	"testing"
