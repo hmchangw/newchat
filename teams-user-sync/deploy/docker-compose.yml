@@ -1,0 +1,26 @@
+name: teams-user-sync
+
+# One invocation = one sync run. In production this image is triggered by a
+# Kubernetes CronJob (schedule + concurrencyPolicy: Forbid are owned by
+# ops/IaC); this compose file runs a single ad-hoc sync against local deps.
+services:
+  teams-user-sync:
+    build:
+      context: ../..
+      dockerfile: teams-user-sync/deploy/Dockerfile
+    restart: "no"
+    environment:
+      - TEAMS_TENANT_ID=${TEAMS_TENANT_ID}
+      - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
+      - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
+      - GRAPH_PAGE_SIZE=500
+      - MONGO_READ_URI=mongodb://mongodb:27017
+      - MONGO_WRITE_URI=mongodb://mongodb:27017
+      - MONGO_READ_DB=chat
+      - MONGO_WRITE_DB=chat
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

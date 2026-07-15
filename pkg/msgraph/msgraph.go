@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,25 @@ type DirectoryReader interface {
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewDirectoryClient(cfg Config, opts ...Option) DirectoryReader {
+	return New(cfg, opts...).(*graphClient)
+}
+
+// UserLister walks the tenant's user directory page by page. Kept separate
+// from Client/DirectoryReader so consumers depend only on the surface they
+// use. App-only (User.Read.All).
+type UserLister interface {
+	// ListUsers calls fn once per page of up to pageSize users
+	// (GET /users?$select=id,userPrincipalName&$top={pageSize}), following
+	// @odata.nextLink until the directory is exhausted. A non-nil error from
+	// fn aborts the walk.
+	ListUsers(ctx context.Context, pageSize int, fn func([]GraphUser) error) error
+}
+
+// NewUserListerClient returns an app-only user lister (shares the graph
+// client used for meetings; New always returns a *graphClient).
+//
+//nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
+func NewUserListerClient(cfg Config, opts ...Option) UserLister {
 	return New(cfg, opts...).(*graphClient)
 }
 
@@ -439,4 +459,75 @@ func (g *graphClient) CreateOnlineMeeting(ctx context.Context, req CreateOnlineM
 		return nil, fmt.Errorf("create onlineMeeting: graph response missing joinWebUrl")
 	}
 	return &meeting, nil
+}
+
+// usersPage is one page of the /users walk.
+type usersPage struct {
+	Value    []GraphUser `json:"value"`
+	NextLink string      `json:"@odata.nextLink"`
+}
+
+// ListUsers walks GET /users page by page, invoking fn per page. The first
+// request carries $select/$top; subsequent pages follow Graph's opaque
+// @odata.nextLink verbatim (it embeds the paging state).
+func (g *graphClient) ListUsers(ctx context.Context, pageSize int, fn func([]GraphUser) error) error {
+	token, err := g.accessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire graph token: %w", err)
+	}
+	q := url.Values{}
+	q.Set("$select", "id,userPrincipalName")
+	q.Set("$top", strconv.Itoa(pageSize))
+	origin, err := url.Parse(g.baseURL)
+	if err != nil {
+		return fmt.Errorf("parse graph base URL: %w", err)
+	}
+	next := g.baseURL + "/users?" + q.Encode()
+	for next != "" {
+		// Graph's @odata.nextLink is server-provided and we forward the bearer
+		// token to it, so pin every page to the configured Graph origin — a
+		// tampered nextLink must not exfiltrate the token to another host.
+		nextURL, err := url.Parse(next)
+		if err != nil {
+			return fmt.Errorf("parse nextLink: %w", err)
+		}
+		if nextURL.Scheme != origin.Scheme || nextURL.Host != origin.Host {
+			return fmt.Errorf("nextLink %q deviates from configured graph origin %q", next, g.baseURL)
+		}
+		page, err := g.fetchUsersPage(ctx, token, next)
+		if err != nil {
+			return err
+		}
+		if err := fn(page.Value); err != nil {
+			return fmt.Errorf("process users page: %w", err)
+		}
+		next = page.NextLink
+	}
+	return nil
+}
+
+func (g *graphClient) fetchUsersPage(ctx context.Context, token, endpoint string) (*usersPage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build list-users request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
+	if err != nil {
+		return nil, fmt.Errorf("read list-users response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		// Never wrap the response body — surface the status only.
+		return nil, fmt.Errorf("list users: graph returned status %d", resp.StatusCode)
+	}
+	var page usersPage
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("decode list-users response: %w", err)
+	}
+	return &page, nil
 }
