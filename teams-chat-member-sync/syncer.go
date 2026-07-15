@@ -42,8 +42,9 @@ func accountFromUPN(upn string) string {
 }
 
 // accountCache is a process-wide userId->account cache shared by all workers.
-// It batches uncached ids into a single AccountsByIDs query and caches misses
-// (as "") so each userId is resolved at most once per run.
+// It batches uncached ids into a single AccountsByIDs query and caches misses (as "").
+// Under concurrency, two goroutines racing on the same uncached id may each issue
+// a lookup — harmless and self-healing (the map write is mutex-guarded, resolved value is identical).
 type accountCache struct {
 	users TeamsUserStore
 	mu    sync.Mutex
@@ -59,13 +60,15 @@ func newAccountCache(users TeamsUserStore) *accountCache {
 func (c *accountCache) resolve(ctx context.Context, ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	var missing []string
+	seen := make(map[string]struct{}) // dedup within this call
 
 	c.mu.Lock()
 	for _, id := range ids {
 		if acct, ok := c.cache[id]; ok {
 			out[id] = acct
-		} else {
+		} else if _, alreadySeen := seen[id]; !alreadySeen {
 			missing = append(missing, id)
+			seen[id] = struct{}{}
 		}
 	}
 	c.mu.Unlock()
