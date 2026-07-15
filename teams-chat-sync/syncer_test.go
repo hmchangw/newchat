@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sync"
 	"testing"
 	"time"
 
@@ -104,27 +103,4 @@ func TestBuildChat_UnknownMembersUseDefaultSiteID(t *testing.T) {
 	gc := msgraph.Chat{ID: "19:g9", ChatType: "group", Members: []msgraph.ChatMember{{UserID: "ghost"}}}
 	c := buildChat(gc, nil, time.Now(), "site-default")
 	assert.Equal(t, "site-default", c.SiteID)
-}
-
-func TestSyncerClaim_FirstWinsConcurrently(t *testing.T) {
-	s := newSyncer(nil, nil, nil, syncConfig{MaxWorkers: 1, Now: time.Now})
-	const goroutines = 32
-	var wins int
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if s.claim("19:shared") {
-				mu.Lock()
-				wins++
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	assert.Equal(t, 1, wins, "exactly one goroutine claims a chat id")
-	assert.False(t, s.claim("19:shared"))
-	assert.True(t, s.claim("19:other"))
 }

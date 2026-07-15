@@ -30,44 +30,29 @@ type syncConfig struct {
 	DefaultSiteID string
 }
 
-// syncer runs one full teams-chat sync. The CronJob sets
-// concurrencyPolicy: Forbid, so at most one sync process runs at a time and
-// no other writer inserts teams_chat (member-sync only updates existing docs);
-// processed therefore only has to dedup across this process's worker
-// goroutines. It is the mutex-guarded claimed set: the first worker to claim a
-// chat id processes it, later workers skip — a write-reduction cache, since
-// many users share chats. siteId is assigned once and never changes: it is
-// written via $setOnInsert at the DB layer, so even a redundant upsert cannot
-// alter it.
+// syncer runs one full teams-chat sync. Each worker persists every chat it
+// lists, including chats shared with other users: a shared chat is upserted
+// once per member rather than claimed by a single worker. Redundant writes are
+// safe because siteId is assigned once via $setOnInsert at the DB layer, so a
+// repeated upsert cannot alter an existing doc. This keeps each user's
+// durability self-contained — a user advances its watermark only after its own
+// chats persist — so one member's failure can never strand a chat that a
+// surviving member would otherwise have written.
 type syncer struct {
 	users TeamsUserStore
 	chats TeamsChatStore
 	graph chatsFetcher
 	cfg   syncConfig
-
-	mu        sync.Mutex
-	processed map[string]struct{}
 }
 
 func newSyncer(users TeamsUserStore, chats TeamsChatStore, graph chatsFetcher, cfg syncConfig) *syncer {
-	return &syncer{users: users, chats: chats, graph: graph, cfg: cfg, processed: make(map[string]struct{})}
+	return &syncer{users: users, chats: chats, graph: graph, cfg: cfg}
 }
 
 // startOfDayUTC truncates t to 00:00:00 UTC of the same UTC day.
 func startOfDayUTC(t time.Time) time.Time {
 	u := t.UTC()
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
-}
-
-// claim atomically claims a chat id, returning true only for the first caller.
-func (s *syncer) claim(chatID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, done := s.processed[chatID]; done {
-		return false
-	}
-	s.processed[chatID] = struct{}{}
-	return true
 }
 
 // voteSiteID returns the plurality siteID among the members present in the
@@ -133,7 +118,7 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defa
 type summary struct {
 	Total, Skipped    int
 	Succeeded, Failed atomic.Int64
-	Upserted, Deduped atomic.Int64
+	Upserted          atomic.Int64
 }
 
 // run executes one full sync: load the user cache, fan eligible users out to
@@ -182,7 +167,7 @@ func (s *syncer) run(ctx context.Context) error {
 	slog.Info("teams chat sync: run complete",
 		"usersTotal", sum.Total, "usersSucceeded", sum.Succeeded.Load(),
 		"usersFailed", sum.Failed.Load(), "usersSkipped", sum.Skipped,
-		"chatsUpserted", sum.Upserted.Load(), "chatsDeduped", sum.Deduped.Load())
+		"chatsUpserted", sum.Upserted.Load())
 
 	if failed := sum.Failed.Load(); failed > 0 {
 		return fmt.Errorf("%d of %d users failed", failed, sum.Total)
@@ -199,9 +184,9 @@ func (s *syncer) effectiveFrom(u model.TeamsUser) time.Time {
 	return s.cfg.DefaultFrom
 }
 
-// syncUser fetches one user's chat window, upserts the chats this worker
-// claimed first, and advances the user's watermark only after everything
-// succeeded — a failed user keeps its old watermark and is retried next run.
+// syncUser fetches one user's chat window, upserts every chat it lists, and
+// advances the user's watermark only after everything succeeded — a failed user
+// keeps its old watermark and is retried next run.
 func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, cache map[string]cachedUser, sum *summary) error {
 	graphChats, err := s.graph.ListUserChats(ctx, u.ID, s.effectiveFrom(u), to)
 	if err != nil {
@@ -210,10 +195,6 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 	batch := make([]model.TeamsChat, 0, len(graphChats))
 	now := s.cfg.Now()
 	for _, gc := range graphChats {
-		if !s.claim(gc.ID) {
-			sum.Deduped.Add(1)
-			continue
-		}
 		built := buildChat(gc, cache, now, s.cfg.DefaultSiteID)
 		if built.SiteID == "" {
 			slog.Warn("teams chat sync: siteID vote empty, skipping chat", "chatID", gc.ID, "userID", u.ID)

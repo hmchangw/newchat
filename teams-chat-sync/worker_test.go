@@ -87,7 +87,7 @@ func TestRun_SkipsUserWithEmptyWindow(t *testing.T) {
 	require.NoError(t, s.run(context.Background()))
 }
 
-func TestRun_SharedChatUpsertedOnce(t *testing.T) {
+func TestRun_SharedChatUpsertedByEachMember(t *testing.T) {
 	s, users, chats, graph := newTestSyncer(t, 4)
 	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
 		{ID: "u1", SiteID: "site-a", Account: "alice"},
@@ -107,12 +107,53 @@ func TestRun_SharedChatUpsertedOnce(t *testing.T) {
 				upserted = append(upserted, c.ID)
 			}
 			return nil
-		}).MaxTimes(2) // the loser's batch may be empty and skip the call entirely
+		}).Times(2) // each member persists the chat; the idempotent upsert makes redundancy safe
 	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
 	users.EXPECT().SetFrom(gomock.Any(), "u2", wtTo).Return(nil)
 
 	require.NoError(t, s.run(context.Background()))
-	assert.Equal(t, []string{"19:shared"}, upserted, "a chat shared by two users is upserted exactly once")
+	assert.ElementsMatch(t, []string{"19:shared", "19:shared"}, upserted,
+		"a chat shared by two users is persisted by each member, not claimed by one")
+}
+
+// TestRun_SharedChat_MemberFailureStillPersistsViaOther is the regression guard
+// for the cross-worker-claim data loss: when one member's sync fails, a shared
+// chat must still be persisted through another member that succeeds, rather than
+// being skipped as "already claimed" by the failing worker.
+func TestRun_SharedChat_MemberFailureStillPersistsViaOther(t *testing.T) {
+	s, users, chats, graph := newTestSyncer(t, 1) // one worker => u1 processed before u2
+	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
+		{ID: "u1", SiteID: "site-a", Account: "alice"},
+		{ID: "u2", SiteID: "site-b", Account: "bob"},
+	}, nil)
+	shared := graphChat("19:shared", "u1", "u2")
+	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).Return([]msgraph.Chat{shared}, nil)
+	graph.EXPECT().ListUserChats(gomock.Any(), "u2", wtDefaultFrom, wtTo).Return([]msgraph.Chat{shared}, nil)
+
+	var mu sync.Mutex
+	var upserted []string
+	call := 0
+	chats.EXPECT().UpsertChats(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, batch []model.TeamsChat) error {
+			mu.Lock()
+			defer mu.Unlock()
+			call++
+			if call == 1 { // u1's upsert fails
+				return fmt.Errorf("mongo down")
+			}
+			for _, c := range batch { // u2 still persists the shared chat
+				upserted = append(upserted, c.ID)
+			}
+			return nil
+		}).Times(2)
+	// u1 fails and holds its watermark; u2 succeeds and advances.
+	users.EXPECT().SetFrom(gomock.Any(), "u2", wtTo).Return(nil)
+
+	err := s.run(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 of 2 users failed")
+	assert.Equal(t, []string{"19:shared"}, upserted,
+		"a failing member must not strand a shared chat claimed by no surviving writer")
 }
 
 func TestRun_GraphFailureHoldsWatermarkAndFailsRun(t *testing.T) {
