@@ -86,7 +86,10 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defau
 	}
 	best, bestN := "", 0
 	for site, n := range counts {
-		if n > bestN || (n == bestN && n > 0 && site < best) {
+		if site == "" {
+			continue // empty siteIDs never win, even if one slipped into counts
+		}
+		if n > bestN || (n == bestN && site < best) {
 			best, bestN = site, n
 		}
 	}

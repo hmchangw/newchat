@@ -158,7 +158,7 @@ func TestRun_SetFromFailureFailsUser(t *testing.T) {
 	require.Error(t, s.run(context.Background()))
 }
 
-func TestRun_EmptySiteIDVote_SkipsChatAndFailsUser(t *testing.T) {
+func TestRun_EmptySiteIDVote_SkipsChatAndAdvancesWatermark(t *testing.T) {
 	s, users, chats, graph := newTestSyncer(t, 1)
 	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
 		{ID: "u1", SiteID: "site-a", Account: "alice"},
@@ -166,15 +166,15 @@ func TestRun_EmptySiteIDVote_SkipsChatAndFailsUser(t *testing.T) {
 	// The only member is unknown to the user cache, so voteSiteID returns "".
 	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).
 		Return([]msgraph.Chat{graphChat("19:unknown", "unknown-user")}, nil)
-	// No UpsertChats, no SetFrom expected: the batch is empty and the run fails.
+	// The chat is skipped (empty batch, no UpsertChats), but the user still
+	// succeeds and its watermark advances.
 	_ = chats
+	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
 
-	err := s.run(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "1 of 1 users failed")
+	require.NoError(t, s.run(context.Background()))
 }
 
-func TestRun_EmptySiteIDVote_MixedWithGoodChat_UpsertsOnlyGoodAndFailsUser(t *testing.T) {
+func TestRun_EmptySiteIDVote_MixedWithGoodChat_UpsertsOnlyGood(t *testing.T) {
 	s, users, chats, graph := newTestSyncer(t, 1)
 	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
 		{ID: "u1", SiteID: "site-a", Account: "alice"},
@@ -190,11 +190,11 @@ func TestRun_EmptySiteIDVote_MixedWithGoodChat_UpsertsOnlyGoodAndFailsUser(t *te
 			assert.Equal(t, "19:good", batch[0].ID)
 			return nil
 		})
-	// No SetFrom expected: the skipped chat fails the user despite the good upsert.
+	// The good chat is upserted, the skipped chat is dropped, and the user
+	// succeeds with its watermark advanced.
+	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
 
-	err := s.run(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "1 of 1 users failed")
+	require.NoError(t, s.run(context.Background()))
 }
 
 func TestRun_EmptySiteIDVote_ConfiguredDefaultIsUsed(t *testing.T) {

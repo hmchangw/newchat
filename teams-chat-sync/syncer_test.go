@@ -55,6 +55,7 @@ func TestVoteSiteID(t *testing.T) {
 		{"no members falls back to default", nil, "site-default", "site-default"},
 		{"default never overrides a real vote", []msgraph.ChatMember{member("b1")}, "site-default", "site-b"},
 		{"empty siteID does not vote", []msgraph.ChatMember{member("e1"), member("e2"), member("b1")}, "", "site-b"},
+		{"empties do not break a real tie", []msgraph.ChatMember{member("e1"), member("c1"), member("b1")}, "", "site-b"},
 		{"only empty siteIDs yields empty", []msgraph.ChatMember{member("e1"), member("e2")}, "", ""},
 		{"only empty siteIDs falls back to default", []msgraph.ChatMember{member("e1")}, "site-default", "site-default"},
 	}
