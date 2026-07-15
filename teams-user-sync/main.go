@@ -46,12 +46,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
 		return fmt.Errorf("connect mongo read client: %w", err)
 	}
 	defer disconnect(readClient)
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWriteURI, cfg.MongoWriteUsername, cfg.MongoWritePassword)
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
 		return fmt.Errorf("connect mongo write client: %w", err)
 	}
@@ -69,7 +69,7 @@ func run() error {
 		ClientID:     cfg.TeamsClientID,
 		ClientSecret: cfg.TeamsClientSecret,
 	}, opts...)
-	store := newMongoStore(readClient.Database(cfg.MongoReadDB), writeClient.Database(cfg.MongoWriteDB))
+	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
 	syncer := NewSyncer(store, lister, cfg.GraphPageSize)
 
 	logger := slog.With("requestId", idgen.GenerateRequestID())

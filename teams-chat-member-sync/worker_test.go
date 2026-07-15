@@ -17,16 +17,18 @@ import (
 
 var wtNow = time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 
-func upnMember(id, upn string) msgraph.ChatMemberDetail {
-	return msgraph.ChatMemberDetail{UserID: id, UserPrincipalName: upn}
+func member(id string) msgraph.ChatMemberDetail {
+	return msgraph.ChatMemberDetail{UserID: id}
 }
 
 func TestRun_HappyPath(t *testing.T) {
-	s, chats, _, graph := newTestSyncer(t, 2)
+	s, chats, users, graph := newTestSyncer(t, 2)
 	seenAt := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: seenAt}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
-		Return([]msgraph.ChatMemberDetail{upnMember("u1", "alice@x"), upnMember("u2", "bob@x")}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u1"), member("u2")}, nil)
+	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]string{"u1": "alice", "u2": "bob"}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", seenAt, gomock.Len(2), wtNow).DoAndReturn(
 		func(_ context.Context, _ string, _ time.Time, members []model.TeamsChatMember, _ time.Time) error {
 			assert.Equal(t, "alice", members[0].Account)
@@ -44,12 +46,13 @@ func TestRun_NoChatsIsNoOp(t *testing.T) {
 }
 
 func TestRun_GraphFailureKeepsFlagAndFailsRun(t *testing.T) {
-	s, chats, _, graph := newTestSyncer(t, 1)
+	s, chats, users, graph := newTestSyncer(t, 1)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:bad", UpdatedAt: wtNow}, {ID: "19:ok", UpdatedAt: wtNow}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:bad").
 		Return(nil, fmt.Errorf("graph returned status 429"))
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:ok").
-		Return([]msgraph.ChatMemberDetail{upnMember("u1", "a@x")}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u1")}, nil)
+	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).Return(map[string]string{"u1": "a"}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:ok", gomock.Any(), gomock.Len(1), wtNow).Return(nil)
 	// No SetMembersSynced for 19:bad: its needMemberSync must stay true.
 
@@ -59,10 +62,11 @@ func TestRun_GraphFailureKeepsFlagAndFailsRun(t *testing.T) {
 }
 
 func TestRun_WriteFailureFailsChat(t *testing.T) {
-	s, chats, _, graph := newTestSyncer(t, 1)
+	s, chats, users, graph := newTestSyncer(t, 1)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: wtNow}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
-		Return([]msgraph.ChatMemberDetail{upnMember("u1", "a@x")}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u1")}, nil)
+	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).Return(map[string]string{"u1": "a"}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", gomock.Any(), gomock.Any(), wtNow).
 		Return(fmt.Errorf("mongo down"))
 
@@ -70,12 +74,14 @@ func TestRun_WriteFailureFailsChat(t *testing.T) {
 }
 
 func TestRun_SupersededChatIsBenign(t *testing.T) {
-	s, chats, _, graph := newTestSyncer(t, 2)
+	s, chats, users, graph := newTestSyncer(t, 2)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: wtNow}, {ID: "19:g2", UpdatedAt: wtNow}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
-		Return([]msgraph.ChatMemberDetail{upnMember("u1", "a@x")}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u1")}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g2").
-		Return([]msgraph.ChatMemberDetail{upnMember("u2", "b@x")}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u2")}, nil)
+	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]string{"u1": "a", "u2": "b"}, nil).AnyTimes()
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", gomock.Any(), gomock.Any(), wtNow).Return(errSuperseded)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g2", gomock.Any(), gomock.Any(), wtNow).Return(nil)
 
@@ -93,11 +99,11 @@ func TestRun_ListChatsFailure(t *testing.T) {
 func TestRun_SharedMemberResolvedOncePerRun(t *testing.T) {
 	s, chats, users, graph := newTestSyncer(t, 4)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:a", UpdatedAt: wtNow}, {ID: "19:b", UpdatedAt: wtNow}}, nil)
-	// Both chats contain the same UPN-less member u9.
+	// Both chats contain the same member u9; the account cache resolves it once.
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:a").
-		Return([]msgraph.ChatMemberDetail{{UserID: "u9"}}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u9")}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:b").
-		Return([]msgraph.ChatMemberDetail{{UserID: "u9"}}, nil)
+		Return([]msgraph.ChatMemberDetail{member("u9")}, nil)
 	var calls int
 	var mu sync.Mutex
 	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).DoAndReturn(

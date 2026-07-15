@@ -9,9 +9,9 @@ A run-to-completion job, triggered by a Kubernetes CronJob, that resolves the
 authoritative member list for Teams chats flagged by `teams-chat-sync`. It
 reads `teams_chat` documents where `needMemberSync=true`, fetches each chat's
 members from the Graph `/chats/{id}/members` endpoint, resolves each member's
-account (from the member's UPN, or a `teams_user` fallback), writes the member
-list back, and hands the chat off to the next stage by setting
-`needCreateRoom=true` and `needMemberSync=false`.
+account from `teams_user` by userId (batched + cached), writes the member list
+back, and hands the chat off to the next stage by setting `needCreateRoom=true`
+and `needMemberSync=false`.
 
 Pipeline position: `teams-user-sync` → `teams-chat-sync` (sets
 `needMemberSync=true`) → **`teams-chat-member-sync`** (sets
@@ -80,24 +80,21 @@ type ChatMembersReader interface {
 
 type ChatMemberDetail struct {
     UserID                      string    `json:"userId"`
-    UserPrincipalName           string    `json:"userPrincipalName"`
     VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime"`
 }
 ```
 
-Request shape:
+Request shape — a plain GET, no OData query options:
 
 ```
 GET /v1.0/chats/{chatId}/members
-  ?$select=userId,userPrincipalName,visibleHistoryStartDateTime
 ```
 
-The endpoint uses server-driven paging (`@odata.nextLink`) and does not accept
-`$top`, so no page-size knob is exposed. Implemented on the shared `graphClient`
-via the existing `getThrottled` / `waitThrottle` (per-request Retry-After retry
-+ tenant-wide throttle gate). **Assumption:** the member resource carries
-`userPrincipalName`; only the UPN is consulted for the account (the `email`
-field is intentionally ignored).
+The endpoint uses server-driven paging (`@odata.nextLink`), followed
+internally. Implemented on the shared `graphClient` via the existing
+`getThrottled` / `waitThrottle` (per-request Retry-After retry + tenant-wide
+throttle gate). The account is resolved downstream from `userId` via
+`teams_user`, so no UPN/email is read from the member resource.
 
 ## Data model (read + written)
 
@@ -124,13 +121,11 @@ subset and **writes** `members`, `needCreateRoom`, `needMemberSync`,
    goroutines (default 8), tracked by `sync.WaitGroup`. No `time.Sleep`.
 3. **Per chat** (`syncChat`):
    1. `ListChatMembers(chatID)` (paginated).
-   2. For each member: if `UserPrincipalName != ""`, `account =
-      localPart(UserPrincipalName)` lowercased; otherwise record the `userId`
-      for fallback.
-   3. Resolve fallback userIds through the **shared account cache** (see below)
-      → `map[userId]account`.
-   4. Build `[]TeamsChatMember{ID: userId, Account: account,
-      VisibleHistoryStartDateTime}`; unknown members keep `account: ""`.
+   2. Resolve every member's `userId` to an account through the **shared
+      account cache** (see below) → `map[userId]account`.
+   3. Build `[]TeamsChatMember{ID: userId, Account: account,
+      VisibleHistoryStartDateTime}`; members absent from `teams_user` keep
+      `account: ""`.
    5. `SetMembersSynced(chatID, seenUpdatedAt, members, now)` — an **optimistic
       conditional** `$set` of `{members, needCreateRoom:true,
       needMemberSync:false, updatedAt:now}`, filtered on
@@ -188,8 +183,8 @@ empty, per repo convention.
 
 - **Unit — `teams-chat-member-sync`** (mocked `ChatMembersReader`, mockgen
   stores):
-  - Member mapping: UPN present → `localPart` account; UPN absent → fallback
-    lookup used; userId absent from `teams_user` → `account: ""`.
+  - Member mapping: every member resolved via `AccountsByIDs`; userId absent
+    from `teams_user` → `account: ""`.
   - Account cache: uncached IDs batched into one `AccountsByIDs` call; hits and
     misses both cached (a repeat resolve issues no query); cross-worker dedup
     under `-race`.
@@ -200,8 +195,8 @@ empty, per repo convention.
     a failure).
   - `SetMembersSynced` update document: `$set` contains exactly `members`,
     `needCreateRoom:true`, `needMemberSync:false`, `updatedAt`.
-- **Unit — `pkg/msgraph`** (httptest): `ListChatMembers` query shape
-  (`$select`, `$top`), nextLink pagination, 429 gate/retry, Graph error
+- **Unit — `pkg/msgraph`** (httptest): `ListChatMembers` plain-GET request
+  shape (no OData query), nextLink pagination, 429 gate/retry, Graph error
   sanitization (no raw body), empty result.
 - **Integration** (`testutil.MongoDB`, `//go:build integration`): a
   `needMemberSync=true` doc gets members replaced, `needCreateRoom=true`,

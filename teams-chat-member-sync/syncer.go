@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,17 +30,6 @@ type syncer struct {
 
 func newSyncer(chats TeamsChatStore, users TeamsUserStore, graph membersFetcher, cfg syncConfig) *syncer {
 	return &syncer{chats: chats, users: users, graph: graph, cfg: cfg, cache: newAccountCache(users)}
-}
-
-// accountFromUPN returns the lowercased local part of a UPN (text before '@'),
-// or "" when the UPN is empty or has no local part. Matches teams-user-sync's
-// account derivation.
-func accountFromUPN(upn string) string {
-	at := strings.Index(upn, "@")
-	if at <= 0 {
-		return ""
-	}
-	return strings.ToLower(upn[:at])
 }
 
 // accountCache is a process-wide userId->account cache shared by all workers.
@@ -94,27 +82,17 @@ func (c *accountCache) resolve(ctx context.Context, ids []string) (map[string]st
 	return out, nil
 }
 
-// buildMembers maps Graph members to stored members. UPN-carrying members
-// resolve locally; the rest are resolved in one batched, cached teams_user
-// lookup. Unknown members keep account "".
+// buildMembers maps Graph members to stored members, resolving every member's
+// account from teams_user by userId through the batched, cached lookup.
+// Members absent from teams_user keep account "".
 func (s *syncer) buildMembers(ctx context.Context, raw []msgraph.ChatMemberDetail) ([]model.TeamsChatMember, error) {
-	accounts := make(map[string]string, len(raw)) // userID -> account, for UPN-less members
-	var needLookup []string
+	ids := make([]string, 0, len(raw))
 	for _, m := range raw {
-		if acct := accountFromUPN(m.UserPrincipalName); acct != "" {
-			accounts[m.UserID] = acct
-			continue
-		}
-		needLookup = append(needLookup, m.UserID)
+		ids = append(ids, m.UserID)
 	}
-	if len(needLookup) > 0 {
-		resolved, err := s.cache.resolve(ctx, needLookup)
-		if err != nil {
-			return nil, err
-		}
-		for id, acct := range resolved {
-			accounts[id] = acct
-		}
+	accounts, err := s.cache.resolve(ctx, ids)
+	if err != nil {
+		return nil, err
 	}
 
 	members := make([]model.TeamsChatMember, 0, len(raw))

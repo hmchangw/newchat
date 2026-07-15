@@ -31,12 +31,10 @@ func TestListChatMembers_Success_QueryShape(t *testing.T) {
 	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer tok-mem", r.Header.Get("Authorization"))
 		assert.Equal(t, "/chats/19:abc@thread.v2/members", r.URL.Path)
-		q := r.URL.Query()
-		assert.Equal(t, "userId,userPrincipalName,visibleHistoryStartDateTime", q.Get("$select"))
-		assert.Empty(t, q.Get("$top"), "members endpoint uses server-driven paging, no $top")
+		assert.Empty(t, r.URL.RawQuery, "plain GET — no OData query options")
 		_, _ = w.Write([]byte(`{"value":[
-			{"userId":"u1","userPrincipalName":"Alice@corp.example","visibleHistoryStartDateTime":"2026-04-02T08:00:00Z"},
-			{"userId":"u2","userPrincipalName":null,"visibleHistoryStartDateTime":"0001-01-01T00:00:00Z"}
+			{"userId":"u1","visibleHistoryStartDateTime":"2026-04-02T08:00:00Z"},
+			{"userId":"u2","visibleHistoryStartDateTime":"0001-01-01T00:00:00Z"}
 		]}`))
 	}))
 	defer graphSrv.Close()
@@ -46,9 +44,7 @@ func TestListChatMembers_Success_QueryShape(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, members, 2)
 	assert.Equal(t, "u1", members[0].UserID)
-	assert.Equal(t, "Alice@corp.example", members[0].UserPrincipalName)
 	assert.Equal(t, "u2", members[1].UserID)
-	assert.Equal(t, "", members[1].UserPrincipalName, "null UPN decodes to empty")
 	assert.True(t, members[1].VisibleHistoryStartDateTime.IsZero())
 }
 
@@ -59,11 +55,11 @@ func TestListChatMembers_FollowsNextLink(t *testing.T) {
 	graphSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.URL.Query().Get("$skiptoken") == "" {
-			_, _ = fmt.Fprintf(w, `{"value":[{"userId":"u1","userPrincipalName":"a@x","visibleHistoryStartDateTime":"2026-04-02T08:00:00Z"}],
+			_, _ = fmt.Fprintf(w, `{"value":[{"userId":"u1","visibleHistoryStartDateTime":"2026-04-02T08:00:00Z"}],
 				"@odata.nextLink":"%s/chats/19:abc@thread.v2/members?$skiptoken=page2"}`, graphSrv.URL)
 			return
 		}
-		_, _ = w.Write([]byte(`{"value":[{"userId":"u2","userPrincipalName":"b@x","visibleHistoryStartDateTime":"2026-04-03T08:00:00Z"}]}`))
+		_, _ = w.Write([]byte(`{"value":[{"userId":"u2","visibleHistoryStartDateTime":"2026-04-03T08:00:00Z"}]}`))
 	}))
 	defer graphSrv.Close()
 
