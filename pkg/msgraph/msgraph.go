@@ -478,8 +478,22 @@ func (g *graphClient) ListUsers(ctx context.Context, pageSize int, fn func([]Gra
 	q := url.Values{}
 	q.Set("$select", "id,userPrincipalName")
 	q.Set("$top", strconv.Itoa(pageSize))
+	origin, err := url.Parse(g.baseURL)
+	if err != nil {
+		return fmt.Errorf("parse graph base URL: %w", err)
+	}
 	next := g.baseURL + "/users?" + q.Encode()
 	for next != "" {
+		// Graph's @odata.nextLink is server-provided and we forward the bearer
+		// token to it, so pin every page to the configured Graph origin — a
+		// tampered nextLink must not exfiltrate the token to another host.
+		nextURL, err := url.Parse(next)
+		if err != nil {
+			return fmt.Errorf("parse nextLink: %w", err)
+		}
+		if nextURL.Scheme != origin.Scheme || nextURL.Host != origin.Host {
+			return fmt.Errorf("nextLink %q deviates from configured graph origin %q", next, g.baseURL)
+		}
 		page, err := g.fetchUsersPage(ctx, token, next)
 		if err != nil {
 			return err
