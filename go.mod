@@ -1,6 +1,6 @@
 module github.com/hmchangw/chat
 
-go 1.25.12
+go 1.26.5
 
 require (
 	github.com/bytedance/sonic v1.15.0

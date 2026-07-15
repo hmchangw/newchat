@@ -122,7 +122,7 @@ func cqlFieldIndex(rt reflect.Type) map[string]int {
 // Separated from structScan so the column-matching logic is unit-testable without a live gocql iterator.
 func buildScanValues(dest any, colNames []string) (values []any, missingCol string, ok bool) {
 	rv := reflect.ValueOf(dest)
-	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Struct {
+	if rv.Kind() != reflect.Pointer || rv.Elem().Kind() != reflect.Struct {
 		return nil, "", false
 	}
 	rv = rv.Elem()
@@ -144,7 +144,7 @@ func buildScanValues(dest any, colNames []string) (values []any, missingCol stri
 func structScan(iter *gocql.Iter, dest any) (bool, error) {
 	// Validate dest shape before touching the iterator (iter may be nil in tests).
 	rv := reflect.ValueOf(dest)
-	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Struct {
+	if rv.Kind() != reflect.Pointer || rv.Elem().Kind() != reflect.Struct {
 		return false, nil
 	}
 

@@ -58,12 +58,11 @@ permissions:
   contents: read
 
 env:
-  # Bumped to 1.25.12 for the July 2026 security release (govulncheck
-  # flagged a reachable crypto/tls (GO-2026-5856) stdlib advisory fixed
-  # in 1.25.12; 1.25.11 had covered the June GO-2026-5039/GO-2026-5037
-  # advisories).
-  GO_VERSION: "1.25.12"
-  GOLANGCI_LINT_VERSION: "v2.11.4"
+  # 1.26.5: move to the Go 1.26 minor line at its July 2026 security
+  # patch — the crypto/tls GO-2026-5856 advisory affects 1.26.0–1.26.4
+  # and is fixed in 1.26.5 (1.25.12 had the same fix on the 1.25 line).
+  GO_VERSION: "1.26.5"
+  GOLANGCI_LINT_VERSION: "v2.12.2"
 
 jobs:
   prewarm:
