@@ -81,4 +81,5 @@ type TeamsChat struct {
 	SiteID              string            `json:"siteId" bson:"siteId"`
 	UpdatedAt           time.Time         `json:"updatedAt" bson:"updatedAt"` // stamped now at build time; written on every upsert
 	NeedMemberSync      bool              `json:"needMemberSync" bson:"needMemberSync"`
+	NeedCreateRoom      bool              `json:"needCreateRoom" bson:"needCreateRoom"` // set true by teams-chat-member-sync; consumed by room creation
 }

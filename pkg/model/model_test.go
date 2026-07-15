@@ -4462,3 +4462,25 @@ func TestTeamsChatBSON(t *testing.T) {
 		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
 	}
 }
+
+func TestTeamsChatJSON_NeedCreateRoom(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:g1@thread.v2",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}},
+		SiteID:              "site-a",
+		UpdatedAt:           time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync:      false,
+		NeedCreateRoom:      true,
+	}
+	roundTrip(t, &c, &model.TeamsChat{})
+
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+	var raw bson.M
+	require.NoError(t, bson.Unmarshal(data, &raw))
+	assert.Contains(t, raw, "needCreateRoom", "BSON doc must have needCreateRoom key")
+	assert.Equal(t, true, raw["needCreateRoom"])
+}
