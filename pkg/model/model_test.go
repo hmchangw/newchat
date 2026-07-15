@@ -4374,19 +4374,20 @@ func TestTeamsChatJSON(t *testing.T) {
 
 func TestTeamsUserBSON(t *testing.T) {
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
-	u := model.TeamsUser{ID: "aad-user-1", SiteID: "site-a", Account: "alice", From: &from}
+	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", From: &from}
 	data, err := bson.Marshal(&u)
 	require.NoError(t, err)
 
-	// Check raw BSON keys
+	// Check raw BSON keys — these are the on-disk contract with teams-user-sync.
 	var rawDoc bson.M
 	require.NoError(t, bson.Unmarshal(data, &rawDoc))
 	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
-	assert.Contains(t, rawDoc, "siteID", "BSON doc must have siteID key")
+	assert.Contains(t, rawDoc, "siteId", "BSON doc must have siteId key")
+	assert.Contains(t, rawDoc, "upn", "BSON doc must have upn key")
 	assert.Contains(t, rawDoc, "account", "BSON doc must have account key")
 	assert.Contains(t, rawDoc, "from", "BSON doc must have from key when From is non-nil")
 	assert.Equal(t, "aad-user-1", rawDoc["_id"])
-	assert.Equal(t, "site-a", rawDoc["siteID"])
+	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, "alice", rawDoc["account"])
 
 	// Round-trip to struct and verify equality
@@ -4410,7 +4411,7 @@ func TestTeamsUserBSON_NoFrom(t *testing.T) {
 	_, has := rawDoc["from"]
 	assert.False(t, has, "BSON doc must not have from key when From is nil (omitempty)")
 	assert.Equal(t, "aad-user-2", rawDoc["_id"])
-	assert.Equal(t, "site-b", rawDoc["siteID"])
+	assert.Equal(t, "site-b", rawDoc["siteId"])
 	assert.Equal(t, "bob", rawDoc["account"])
 }
 
@@ -4436,11 +4437,11 @@ func TestTeamsChatBSON(t *testing.T) {
 	var rawDoc bson.M
 	require.NoError(t, bson.Unmarshal(data, &rawDoc))
 	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
-	assert.Contains(t, rawDoc, "siteID", "BSON doc must have siteID key")
+	assert.Contains(t, rawDoc, "siteId", "BSON doc must have siteID key")
 	assert.Contains(t, rawDoc, "needMemberSync", "BSON doc must have needMemberSync key")
 	assert.Contains(t, rawDoc, "members", "BSON doc must have members key")
 	assert.Equal(t, "19:meeting_abc@thread.v2", rawDoc["_id"])
-	assert.Equal(t, "site-a", rawDoc["siteID"])
+	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, true, rawDoc["needMemberSync"])
 
 	// Round-trip to struct and verify equality

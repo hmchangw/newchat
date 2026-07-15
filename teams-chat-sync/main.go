@@ -16,7 +16,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgraph"
-	"github.com/hmchangw/chat/pkg/otelutil"
 	"github.com/hmchangw/chat/pkg/teamsstore"
 )
 
@@ -90,16 +89,6 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
 	defer cancel()
-
-	tracerShutdown, err := otelutil.InitTracer(ctx, "teams-chat-sync")
-	if err != nil {
-		return fmt.Errorf("init tracer: %w", err)
-	}
-	defer func() {
-		if err := tracerShutdown(context.Background()); err != nil {
-			slog.Warn("tracer shutdown", "error", err)
-		}
-	}()
 
 	client, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {

@@ -38,7 +38,7 @@ func New(db *mongo.Database) *Store {
 // (_id, siteID, account, from).
 func (s *Store) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 	users, err := s.users.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
-		"_id": 1, "siteID": 1, "account": 1, "from": 1,
+		"_id": 1, "siteId": 1, "account": 1, "from": 1,
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("list teams users: %w", err)
@@ -85,7 +85,7 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 			"createdDateTime":     c.CreatedDateTime,
 			"lastUpdatedDateTime": c.LastUpdatedDateTime,
 			"members":             c.Members,
-			"siteID":              c.SiteID,
+			"siteId":              c.SiteID,
 			"updatedAt":           c.UpdatedAt,
 			"needMemberSync":      c.NeedMemberSync,
 		}})
@@ -93,7 +93,7 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 	return mongoutil.UpsertModel(filter, bson.M{
 		"$setOnInsert": bson.M{
 			"createdDateTime": c.CreatedDateTime,
-			"siteID":          c.SiteID,
+			"siteId":          c.SiteID,
 		},
 		"$set": bson.M{
 			"name":                c.Name,

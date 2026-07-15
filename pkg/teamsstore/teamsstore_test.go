@@ -42,7 +42,7 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, bson.M{
 		"createdDateTime": c.CreatedDateTime,
-		"siteID":          "site-a",
+		"siteId":          "site-a",
 	}, soi, "siteID and createdDateTime are insert-only")
 
 	set, ok := update["$set"].(bson.M)
@@ -53,7 +53,7 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 	assert.Equal(t, c.Members, set["members"])
 	assert.Equal(t, true, set["needMemberSync"])
 	assert.Equal(t, upsertNow, set["updatedAt"], "$set writes the chat's build-time UpdatedAt stamp")
-	assert.NotContains(t, set, "siteID", "$set must never touch siteID")
+	assert.NotContains(t, set, "siteId", "$set must never touch siteID")
 	assert.NotContains(t, set, "createdDateTime")
 }
 
@@ -79,7 +79,7 @@ func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 		"createdDateTime":     c.CreatedDateTime,
 		"lastUpdatedDateTime": c.LastUpdatedDateTime,
 		"members":             c.Members,
-		"siteID":              "site-b",
+		"siteId":              "site-b",
 		"updatedAt":           upsertNow,
 		"needMemberSync":      false,
 	}, soi)

@@ -27,7 +27,7 @@ upserts the result into `teams_chat`. Downstream consumers use `teams_chat`
 
 New top-level flat service `teams-chat-sync/` (repo convention), modeled on the
 `user-presence-service/sync` run-to-completion job (`run() error`, `RUN_TIMEOUT`
-context, tracer init, deferred cleanup, `os.Exit(1)` on failure):
+context, deferred cleanup, `os.Exit(1)` on failure):
 
 ```
 teams-chat-sync/
@@ -96,13 +96,15 @@ GET /v1.0/users/{uid}/chats
 
 ## Data models
 
-`teams_user` — externally populated; this job **reads** it and **writes only
-`from`**:
+`teams_user` — owned by `teams-user-sync` (which populates id/upn/account/siteId
+from Graph + HR); this job **reads** it and **writes only `from`**. The shared
+struct lives in `pkg/model/teamsuser.go`:
 
 | Field | BSON | Type | Notes |
 |---|---|---|---|
 | ID | `_id` | string | Teams (AAD) user object id |
-| SiteID | `siteID` | string | Owning site |
+| UPN | `upn` | string | userPrincipalName (written by teams-user-sync) |
+| SiteID | `siteId` | string | Owning site (HR assignment, written by teams-user-sync) |
 | Account | `account` | string | Chat-system account |
 | From | `from` | date (optional) | Watermark; absent until first successful sync |
 
@@ -116,7 +118,7 @@ GET /v1.0/users/{uid}/chats
 | CreatedDateTime | `createdDateTime` | date | Immutable (`$setOnInsert`) |
 | LastUpdatedDateTime | `lastUpdatedDateTime` | date | |
 | Members | `members` | array | `{id, account, visibleHistoryStartDateTime}` per member |
-| SiteID | `siteID` | string | **`$setOnInsert` only — never changes after insert** |
+| SiteID | `siteId` | string | **`$setOnInsert` only — never changes after insert** |
 | UpdatedAt | `updatedAt` | date | Set to now on every write |
 | NeedMemberSync | `needMemberSync` | bool | `chatType != "oneOnOne"` |
 
@@ -127,7 +129,7 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
 
 ## Sync flow
 
-1. **Load cache.** Read all `teams_user` docs (projection: `_id, siteID,
+1. **Load cache.** Read all `teams_user` docs (projection: `_id, siteId,
    account, from`) into an in-memory `map[userID]cachedUser`. This map serves
    both as the work list and as the member→siteID/account lookup.
 2. **Window.** `to = startOfDay(now, UTC)`. Per user, `from` = their watermark
@@ -155,7 +157,7 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
 6. **Upsert** (one `BulkWrite` of upserts per Graph page, keyed on `_id`):
    - `oneOnOne`: **all** fields under `$setOnInsert` — an existing doc is never
      modified (oneOnOne chats never change after insert).
-   - group/meeting: `$setOnInsert: {createdDateTime, siteID}`,
+   - group/meeting: `$setOnInsert: {createdDateTime, siteId}`,
      `$set: {name, chatType, lastUpdatedDateTime, members, needMemberSync: true,
      updatedAt: now}`.
    - siteID immutability is thus enforced at the DB layer; the in-memory dedup
@@ -196,7 +198,7 @@ required vars.
 - `log/slog` JSON. Per-run summary line: users total / succeeded / failed /
   skipped, chats upserted / deduped. Per-user failures logged at error level
   with user id (never the client secret or token).
-- OTel tracer init via `otelutil.InitTracer("teams-chat-sync")`, mirroring the
+- No tracer: matches the sibling `teams-user-sync` cronjob (plain slog); unlike the
   presence sync.
 - **Graph throttling (429/503) is handled inside `pkg/msgraph` at two levels:**
   1. **Per-request retry:** each request retries up to 4 attempts, honoring the
