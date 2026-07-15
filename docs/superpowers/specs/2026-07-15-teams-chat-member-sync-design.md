@@ -129,14 +129,23 @@ subset and **writes** `members`, `needCreateRoom`, `needMemberSync`,
       → `map[userId]account`.
    4. Build `[]TeamsChatMember{ID: userId, Account: account,
       VisibleHistoryStartDateTime}`; unknown members keep `account: ""`.
-   5. `SetMembersSynced(chatID, members, now)` — one `$set` of
-      `{members, needCreateRoom:true, needMemberSync:false, updatedAt:now}`.
+   5. `SetMembersSynced(chatID, seenUpdatedAt, members, now)` — an **optimistic
+      conditional** `$set` of `{members, needCreateRoom:true,
+      needMemberSync:false, updatedAt:now}`, filtered on
+      `{_id: chatID, updatedAt: seenUpdatedAt}` where `seenUpdatedAt` is the
+      value read in step 1. This closes a lost-update race: `teams-chat-sync`
+      re-sets `needMemberSync=true` (and advances `updatedAt`) on every group
+      refresh, so if it rewrote the chat concurrently, the filter no longer
+      matches — the write no-ops (`MatchedCount==0`) and the chat is reported
+      **superseded**, leaving `needMemberSync=true` for a fresh sync next run.
    6. On any error (Graph, resolution, write): log, **skip the `$set`** so the
       chat keeps `needMemberSync=true` and is retried next run; mark the chat
       failed.
-4. **Summary + exit.** Log totals (chats total / succeeded / failed, members
-   written, account-cache hits/misses). If any chat failed, return an error so
-   the job exits non-zero and the CronJob records the failure.
+4. **Summary + exit.** Log totals (chats total / succeeded / failed /
+   superseded, members written). **Superseded is benign** — the chat is
+   correctly re-flagged by the concurrent writer and retries next run, so it
+   does NOT fail the job. Only a genuine per-chat failure makes the job exit
+   non-zero (so the CronJob records it).
 
 ### Shared account cache
 
@@ -186,7 +195,10 @@ empty, per repo convention.
     misses both cached (a repeat resolve issues no query); cross-worker dedup
     under `-race`.
   - Per-chat failure: Graph error and write error each keep `needMemberSync`
-    (no `SetMembersSynced`) and fail the run; happy path clears it.
+    (no `$set` applied) and fail the run; happy path clears it.
+  - Superseded write: `SetMembersSynced` returns the superseded sentinel when
+    `updatedAt` changed under it → run reports it and returns nil (benign, not
+    a failure).
   - `SetMembersSynced` update document: `$set` contains exactly `members`,
     `needCreateRoom:true`, `needMemberSync:false`, `updatedAt`.
 - **Unit — `pkg/msgraph`** (httptest): `ListChatMembers` query shape
@@ -194,8 +206,10 @@ empty, per repo convention.
   sanitization (no raw body), empty result.
 - **Integration** (`testutil.MongoDB`, `//go:build integration`): a
   `needMemberSync=true` doc gets members replaced, `needCreateRoom=true`,
-  `needMemberSync=false`, `updatedAt` set; `ListChatsToSync` returns only
-  flagged chats; `AccountsByIDs` projection and `$in`.
+  `needMemberSync=false`, `updatedAt` set when `seenUpdatedAt` matches; a
+  **stale `seenUpdatedAt` leaves the doc untouched** (superseded);
+  `ListChatsToSync` returns only flagged chats with their `updatedAt`;
+  `AccountsByIDs` projection and `$in`.
 
 ## Out of scope
 
