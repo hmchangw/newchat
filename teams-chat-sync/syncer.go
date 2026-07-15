@@ -30,9 +30,15 @@ type syncConfig struct {
 	DefaultSiteID string
 }
 
-// syncer runs one full teams-chat sync. processed is the cross-worker claimed
-// set: the first worker to claim a chat id processes it, later workers skip —
-// which doubles as the write-reduction cache since many users share chats.
+// syncer runs one full teams-chat sync. The CronJob sets
+// concurrencyPolicy: Forbid, so at most one sync process runs at a time and
+// no other writer inserts teams_chat (member-sync only updates existing docs);
+// processed therefore only has to dedup across this process's worker
+// goroutines. It is the mutex-guarded claimed set: the first worker to claim a
+// chat id processes it, later workers skip — a write-reduction cache, since
+// many users share chats. siteId is assigned once and never changes: it is
+// written via $setOnInsert at the DB layer, so even a redundant upsert cannot
+// alter it.
 type syncer struct {
 	users TeamsUserStore
 	chats TeamsChatStore
