@@ -125,17 +125,18 @@ func TestRepository_GetLastRoomMessage_OnlySystemAndDeletedReturnsNil(t *testing
 	assert.Nil(t, got)
 }
 
-// A run of tombstones at least one fetch-page deep must not stop the scan:
-// the survivor behind them is still found within the same bucket.
-func TestRepository_GetLastRoomMessage_TombstoneDensePartition(t *testing.T) {
+// Budget boundary, inclusive side: a survivor sitting right AT the lookback
+// edge (lastMessageScanMaxRows-1 tombstones above it) is still found — the
+// budget covers the tombstones plus the survivor row itself.
+func TestRepository_GetLastRoomMessage_SurvivorAtBudgetEdgeFound(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	ctx := context.Background()
 
-	roomID := "r-last-tombstones"
+	roomID := "r-last-budget-edge"
 	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
-	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "buried alive")
-	for i := 0; i < lastMessageScanPageSize+20; i++ {
+	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "just in reach")
+	for i := 0; i < lastMessageScanMaxRows-1; i++ {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%03d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
 	}
 
@@ -143,6 +144,27 @@ func TestRepository_GetLastRoomMessage_TombstoneDensePartition(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-survivor", got.MessageID)
+}
+
+// Budget boundary, exclusive side: exactly lastMessageScanMaxRows tombstones
+// exhaust the lookback before the survivor — empty preview, and that's the
+// deal (the next real message self-heals it).
+func TestRepository_GetLastRoomMessage_TombstonesFillBudgetReturnsNil(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-budget-full"
+	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "one row too deep")
+	for i := 0; i < lastMessageScanMaxRows; i++ {
+		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%03d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
+	}
+
+	ptr, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Nil(t, got, "all lookback rows deleted ⇒ empty preview")
+	assert.Nil(t, ptr)
 }
 
 // The survivor may sit buckets below the tombstones — the walk must cross

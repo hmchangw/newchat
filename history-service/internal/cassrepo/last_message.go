@@ -11,17 +11,13 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// lastMessageScanPageSize keeps each Cassandra round-trip generous: the walk
-// wants a single row, but a naive PageSize(1) would degenerate into one
-// round-trip per tombstone across a run of deleted/system rows.
-const lastMessageScanPageSize = 100
-
 // lastMessageScanMaxRows bounds the TOTAL rows examined per walk (across
-// buckets): a deleted tail deeper than this degrades to "no preview" — the
-// same ponytail trade-off as rooms.get (5 pages × 50). Without it a
-// mass-deleted busy room would drain arbitrarily deep partitions on every
-// delete fan-out.
-const lastMessageScanMaxRows = 250
+// buckets). Product decision: the preview looks back at most 10 rows — if
+// the 10 newest candidate rows are all deleted/system, the room simply shows
+// no preview (the next real message self-heals it). Deliberately tiny: it
+// keeps the per-delete Cassandra cost near-constant, and doubles as the
+// fetch page size so a walk never transfers rows it won't examine.
+const lastMessageScanMaxRows = 10
 
 // lastMessageSkipTypes are the type values that never qualify as a room's
 // last-message preview: the canonical system set (model.SystemMessageTypes)
@@ -75,7 +71,7 @@ func (r *Repository) GetLastRoomMessage(ctx context.Context, roomID string, befo
 			)
 		}
 
-		iter := q.WithContext(ctx).PageSize(lastMessageScanPageSize).Iter()
+		iter := q.WithContext(ctx).PageSize(remaining).Iter()
 		ptr, found, stop, err := r.scanBucket(ctx, iter, floor, &remaining, pointer == nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("get last room message: scan bucket %d: %w", bucket, err)
