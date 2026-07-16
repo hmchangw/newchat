@@ -985,6 +985,28 @@ func TestUserThreadUnreadSummary_PanicsOnWildcardAccount(t *testing.T) {
 	assert.Panics(t, func() { subject.UserThreadUnreadSummary("a.*", "site-a") })
 }
 
+func TestUserThreadReadAll(t *testing.T) {
+	assert.Equal(t,
+		"chat.user.alice.request.user.site-a.thread.read.all",
+		subject.UserThreadReadAll("alice", "site-a"))
+	assert.Equal(t,
+		"chat.user.{account}.request.user.site-a.thread.read.all",
+		subject.UserThreadReadAllPattern("site-a"))
+}
+
+func TestUserThreadReadAll_PanicsOnWildcardAccount(t *testing.T) {
+	assert.Panics(t, func() { subject.UserThreadReadAll("a.*", "site-a") })
+}
+
+func TestRoomThreadReadAll(t *testing.T) {
+	assert.Equal(t,
+		"chat.server.request.room.site-a.thread.read.all",
+		subject.RoomThreadReadAll("site-a"))
+	assert.Equal(t,
+		subject.RoomThreadReadAll("site-a"),
+		subject.RoomThreadReadAllSubscribe("site-a"))
+}
+
 func TestThreadRoomInfoBatch(t *testing.T) {
 	assert.Equal(t,
 		"chat.server.request.room.site-a.thread.info.batch",

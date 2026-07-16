@@ -286,6 +286,18 @@ func ThreadRoomInfoBatch(siteID string) string {
 	return fmt.Sprintf("chat.server.request.room.%s.thread.info.batch", siteID)
 }
 
+// RoomThreadReadAll is the internal server-to-server subject user-service uses to
+// ask a site's room-service to clear all of an account's thread-unread state.
+func RoomThreadReadAll(siteID string) string {
+	return fmt.Sprintf("chat.server.request.room.%s.thread.read.all", siteID)
+}
+
+// RoomThreadReadAllSubscribe is room-service's registration subject — the same
+// concrete subject, mirroring the RoomsInfoBatch/RoomsInfoBatchSubscribe pair.
+func RoomThreadReadAllSubscribe(siteID string) string {
+	return fmt.Sprintf("chat.server.request.room.%s.thread.read.all", siteID)
+}
+
 // ThreadSubscriptionList is the server-to-server request subject for the per-site
 // leaf of the cross-site thread inbox: the user-service aggregator fans out one
 // request per candidate site to history-service, which subscribes on the same
@@ -1078,6 +1090,23 @@ func UserThreadUnreadSummary(account, siteID string) string {
 // UserThreadUnreadSummaryPattern is the natsrouter pattern user-service registers.
 func UserThreadUnreadSummaryPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.thread.unread.summary", siteID)
+}
+
+// UserThreadReadAll is the client-facing subject for the cross-site
+// clear-all-thread-unread RPC. siteID is the CALLER's own home site — the site
+// holding the user's federated thread-subscription replicas and running the
+// aggregator. Pair with UserThreadReadAllPattern for user-service registration.
+func UserThreadReadAll(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.thread.read.all", account, siteID)
+}
+
+// UserThreadReadAllPattern is the natsrouter pattern user-service registers for
+// the clear-all-thread-unread RPC (siteID baked in, account left as {account}).
+func UserThreadReadAllPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.thread.read.all", siteID)
 }
 
 func UserSubscriptionSetAppSubscription(account, siteID string) string {

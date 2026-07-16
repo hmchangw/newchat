@@ -52,6 +52,30 @@ type ThreadUnreadSummaryResponse struct {
 	UnavailableSites    []string `json:"unavailableSites,omitempty"`
 }
 
+// ThreadReadAllRequest is the client-facing clear-all-thread-unread request. The
+// account rides the subject; no body fields.
+type ThreadReadAllRequest struct{}
+
+// ThreadReadAllResponse is the cross-site clear-all-thread-unread result.
+// ClearedThreads sums the thread subscriptions cleared on each responding site.
+// UnavailableSites lists sites whose bulk-clear RPC failed (their threads may
+// remain unread); the overall call still succeeds.
+type ThreadReadAllResponse struct {
+	ClearedThreads   int      `json:"clearedThreads"`
+	UnavailableSites []string `json:"unavailableSites,omitempty"`
+}
+
+// RoomThreadReadAllRequest is the server-to-server request user-service sends to a
+// site's room-service to clear all of an account's thread-unread state.
+type RoomThreadReadAllRequest struct {
+	Account string `json:"account"`
+}
+
+// RoomThreadReadAllResponse reports how many thread subscriptions the site cleared.
+type RoomThreadReadAllResponse struct {
+	ClearedThreads int `json:"clearedThreads"`
+}
+
 // ThreadRoomInfoBatchRequest asks room-service for a batch of thread rooms' info.
 type ThreadRoomInfoBatchRequest struct {
 	ThreadRoomIDs []string `json:"threadRoomIds"`
