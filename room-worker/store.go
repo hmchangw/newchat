@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 )
 
@@ -104,11 +105,14 @@ type SubscriptionStore interface {
 	DeleteRoomMember(ctx context.Context, roomID string, memberType model.RoomMemberType, memberID string) error
 
 	// --- add-member flow ---
+	// BulkCreateRoomMembers upserts each row on the (rid, member.type, member.id) unique key — a re-add/redelivery is an idempotent no-op.
 	BulkCreateRoomMembers(ctx context.Context, members []*model.RoomMember) error
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 	// member.list reads room_members whenever it holds any row, so a direct add must write there too once the table is non-empty (not only for orgs).
 	HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error)
 	GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error)
+	// FetchOrgDisplayUsers returns the dept/sect display rows feeding the pkg/orgdisplay rollup.
+	FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error)
 
 	// ListAddMemberCandidates: per-user {hasSub, hasIndividualRow} flags so the worker splits into needSub vs needIRM (org→individual upgrade).
 	ListAddMemberCandidates(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]AddMemberCandidate, error)

@@ -15,6 +15,7 @@ import (
 	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
+	orgdisplay "github.com/hmchangw/chat/pkg/orgdisplay"
 	roomkeystore "github.com/hmchangw/chat/pkg/roomkeystore"
 	gomock "go.uber.org/mock/gomock"
 )
@@ -143,6 +144,21 @@ func (m *MockSubscriptionStore) DeleteSubscriptionsByAccounts(ctx context.Contex
 func (mr *MockSubscriptionStoreMockRecorder) DeleteSubscriptionsByAccounts(ctx, roomID, accounts any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSubscriptionsByAccounts", reflect.TypeOf((*MockSubscriptionStore)(nil).DeleteSubscriptionsByAccounts), ctx, roomID, accounts)
+}
+
+// FetchOrgDisplayUsers mocks base method.
+func (m *MockSubscriptionStore) FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FetchOrgDisplayUsers", ctx, orgIDs)
+	ret0, _ := ret[0].([]orgdisplay.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FetchOrgDisplayUsers indicates an expected call of FetchOrgDisplayUsers.
+func (mr *MockSubscriptionStoreMockRecorder) FetchOrgDisplayUsers(ctx, orgIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchOrgDisplayUsers", reflect.TypeOf((*MockSubscriptionStore)(nil).FetchOrgDisplayUsers), ctx, orgIDs)
 }
 
 // FindDMSubscriptionPair mocks base method.

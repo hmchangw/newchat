@@ -24,6 +24,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
@@ -707,23 +708,18 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	return nil
 }
 
-// addMemberInputs bundles the independent up-front reads processAddMembers
-// needs. None depends on another, so loadAddMemberInputs fetches them
-// concurrently to collapse the serial Mongo round trips into one.
+// addMemberInputs bundles processAddMembers' independent up-front reads (fetched concurrently).
 type addMemberInputs struct {
 	room              *model.Room
 	candidates        []AddMemberCandidate
 	hasAnyRoomMembers bool
+	// orgDisplayRows feeds the event's org entries; read only when req.Orgs is non-empty and BEFORE any
+	// write, so a transient failure Naks a still-clean delivery (post-write, redelivery would announce nothing).
+	orgDisplayRows []orgdisplay.User
 }
 
-// loadAddMemberInputs runs GetRoomMeta, ListAddMemberCandidates, and
-// HasAnyRoomMembers concurrently, collapsing the serial
-// Mongo round trips into one. A plain errgroup.Group (not WithContext) is used deliberately: these are
-// independent reads, so a failure in one need not cancel the others — matching
-// the prior serial code, which returned the first error without cancellation.
-// g.Wait returns the first error; each is wrapped exactly as the serial code
-// did. Each goroutine writes a distinct field of out (no race) and g.Wait
-// establishes the happens-before for the reads of out below.
+// loadAddMemberInputs runs the reads concurrently. Plain errgroup (not WithContext)
+// deliberately: independent reads, first error wins, no cancellation — like the prior serial code.
 func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembersRequest) (addMemberInputs, error) {
 	var (
 		out addMemberInputs
@@ -754,6 +750,16 @@ func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembers
 		out.hasAnyRoomMembers = hasAny
 		return nil
 	})
+	if len(req.Orgs) > 0 {
+		g.Go(func() error {
+			rows, err := h.store.FetchOrgDisplayUsers(ctx, req.Orgs)
+			if err != nil {
+				return fmt.Errorf("fetch org display users: %w", err)
+			}
+			out.orgDisplayRows = rows
+			return nil
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return addMemberInputs{}, err
 	}
@@ -931,6 +937,8 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			},
 		})
 	}
+	// Org rows are upserted on the (rid, member.type, member.id) unique key, so a re-add/redelivery
+	// is an idempotent no-op — no pre-read of existing rows needed.
 	for _, org := range req.Orgs {
 		roomMembers = append(roomMembers, &model.RoomMember{
 			ID:     idgen.GenerateUUIDv7(),
@@ -1078,6 +1086,10 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			HistorySharedSince: historySharedSince,
 			Timestamp:          now.UnixMilli(),
 		}
+		// Marshalled BEFORE Members is attached — INBOX payloads must omit it (see model.MemberAddEvent.Members).
+		inboxPayload, _ := json.Marshal(memberAddEvt)
+
+		memberAddEvt.Members = buildAddedMembers(&req, subs, allowedIndividual, inputs.orgDisplayRows, userMap)
 		memberAddData, _ := json.Marshal(memberAddEvt)
 		if err := h.publish(ctx, subject.RoomMemberEvent(req.RoomID), memberAddData, ""); err != nil {
 			slog.ErrorContext(ctx, "member add event publish failed",
@@ -1092,7 +1104,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 				Type:       model.InboxMemberAdded,
 				SiteID:     room.SiteID,
 				DestSiteID: room.SiteID,
-				Payload:    memberAddData,
+				Payload:    inboxPayload,
 				Timestamp:  now.UnixMilli(),
 			}
 			internalData, _ := json.Marshal(internalEvt)
@@ -1183,6 +1195,42 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 
 	return nil
+}
+
+// buildAddedMembers assembles the member.list-shaped display entries (contract: model.MemberAddEvent.Members),
+// org entries first. Entries are the RoomMemberEntry payload only — no membership envelope (id/rid/ts).
+func buildAddedMembers(req *model.AddMembersRequest, subs []*model.Subscription,
+	allowedIndividual map[string]struct{}, orgDisplayRows []orgdisplay.User, userMap map[string]model.User) []model.RoomMemberEntry {
+	members := make([]model.RoomMemberEntry, 0, len(req.Orgs)+len(subs))
+	if len(req.Orgs) > 0 {
+		agg := orgdisplay.Build(req.Orgs, orgDisplayRows)
+		for _, orgID := range req.Orgs {
+			entry := model.RoomMemberEntry{ID: orgID, Type: model.RoomMemberOrg}
+			if a := agg[orgID]; a != nil {
+				entry.MemberCount = a.MemberCount
+			}
+			entry.OrgName = orgdisplay.Name(agg[orgID], orgID)
+			entry.OrgDescription = orgdisplay.Description(agg[orgID])
+			members = append(members, entry)
+		}
+	}
+	for _, sub := range subs {
+		account := sub.User.Account
+		if _, ok := allowedIndividual[account]; !ok {
+			continue // org-expanded: member.list shows these via the org row only
+		}
+		user := userMap[account]
+		members = append(members, model.RoomMemberEntry{
+			ID:          user.ID,
+			Type:        model.RoomMemberIndividual,
+			Account:     account,
+			EngName:     user.EngName,
+			ChineseName: user.ChineseName,
+			SectName:    user.SectName,
+			EmployeeID:  user.EmployeeID,
+		})
+	}
+	return members
 }
 
 func mustMarshal(v any) []byte {

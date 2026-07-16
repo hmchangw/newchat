@@ -665,15 +665,18 @@ the event on the same room stream they already subscribe to.
 
 ### member_added (MemberAddEvent)
 
-Published once when at least one new account or org was added. Triggered by
+Published once when at least one new account or org is added, or an already-present org is
+re-added (see the no-op note below for what does **not** fire). Triggered by
 [Add Members](request-reply.md#add-members) and indirectly by
 [Create Room](request-reply.md#create-room).
 
 A `members_added` system message also flows through the message pipeline as a
 `new_message` room event.
 
-> **No-op:** if every requested account is already a member (or the add only upgrades an
-> existing org member to individual membership), no `member_added` event fires.
+> **No-op:** if no org is requested and every requested account is already a member, or the add
+> only upgrades an existing org member to individual membership, no `member_added` event fires.
+> Re-adding an org that is already present is **not** a no-op: `member_added` still fires, carrying
+> the org's entry with `accounts: []`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -682,6 +685,7 @@ A `members_added` system message also flows through the message pipeline as a
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
 | `accounts` | string[] | The newly added accounts. |
+| `members` | [RoomMemberEntry](../client-api.md#roommemberentry)[] | The member.list-shaped display entries (the [RoomMemberEntry](../client-api.md#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): org entries first (`orgName`, `memberCount`, `orgDescription`), then one individual entry per newly subscribed direct add (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](request-reply.md#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined via org expansion appear in `accounts` only — their org entry represents them, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |

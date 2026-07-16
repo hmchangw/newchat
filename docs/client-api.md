@@ -1220,7 +1220,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 
 **3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed account (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once when at least one new account or org was added. Delivered to clients subscribed to `chat.room.>` for the room.
+**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once when at least one new account or org is added, or an already-present org is re-added (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1229,6 +1229,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
 | `accounts` | string[] | The newly added accounts. |
+| `members` | [RoomMemberEntry](#roommemberentry)[] | The member.list-shaped display entries (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): org entries first (`orgName`, `memberCount`, `orgDescription`), then one individual entry per newly subscribed direct add (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined via org expansion appear in `accounts` only — their org entry represents them, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
@@ -1238,7 +1239,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 A `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event.
 
 > [!NOTE]
-> **No-op:** if every requested account is already a member (and no new orgs), or the add only upgrades an existing org member to an individual membership, the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow.
+> **No-op:** if no org is requested and every requested account is already a member, or the add only upgrades an existing org member to an individual membership, the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow. (Re-adding an org that is already present is **not** a no-op: `member_added` still fires, carrying the org's entry with `accounts: []`.)
 
 ##### Triggered events — error path
 
