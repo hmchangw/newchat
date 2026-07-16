@@ -65,15 +65,14 @@ func startOfDayUTC(t time.Time) time.Time {
 func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defaultSiteID string) string {
 	counts := make(map[string]int)
 	for _, m := range members {
+		// Skip members with an empty siteID (no HR assignment): not counting them
+		// is what keeps an empty siteID out of counts, so it can never win.
 		if cu, ok := cache[m.UserID]; ok && cu.siteID != "" {
 			counts[cu.siteID]++
 		}
 	}
 	best, bestN := "", 0
 	for site, n := range counts {
-		if site == "" {
-			continue // empty siteIDs never win, even if one slipped into counts
-		}
 		if n > bestN || (n == bestN && site < best) {
 			best, bestN = site, n
 		}
