@@ -331,17 +331,24 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	// The event carries the FULL edited content (clients replace the message
 	// body); the stored preview carries the trimmed snippet. Encrypted rooms
 	// seal each form — when the trim is a no-op (content within the cap, the
-	// common case) the ciphertext is computed once and reused for both.
-	// Encryption failure Naks before the store write or publish.
+	// common case) the ciphertext is computed once and reused for both. The
+	// event envelope is produced even for EMPTY content (an attachment-only
+	// edit clears the text; clients need the envelope to apply that), while a
+	// content-less preview carries no envelope at all ($unset in the store
+	// patch). Encryption failure Naks before the store write or publish.
 	newPreviewMsg := model.TrimPreview(msg.Content)
 	var encMsg, encPreviewMsg json.RawMessage
 	if h.roomEncrypted(room.Type) {
-		encMsg, err = h.encryptPreviewContent(ctx, room.ID, msg.Content)
+		encMsg, err = h.encryptContent(ctx, room.ID, msg.Content)
 		if err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
 		}
-		encPreviewMsg = encMsg
-		if newPreviewMsg != msg.Content {
+		switch newPreviewMsg {
+		case "":
+			encPreviewMsg = nil
+		case msg.Content:
+			encPreviewMsg = encMsg
+		default:
 			encPreviewMsg, err = h.encryptPreviewContent(ctx, room.ID, newPreviewMsg)
 			if err != nil {
 				return fmt.Errorf("encrypt edit preview for room %s: %w", room.ID, err)
@@ -553,19 +560,28 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	// Resolve the surviving preview BEFORE any publish: an error Naks the
-	// whole event (deliberate — every delivered delete event carries the
-	// preview). A nil survivor is the valid "room has no messages left"
-	// signal. The history RPC is skipped when the stored preview already
-	// identifies the survivor: neither pointer targets the deleted message,
-	// so the preview cannot change and IS the survivor (already trimmed, and
-	// already in wire form — EncMsg — for encrypted rooms). Legacy rooms
-	// (lastMsgId set pre-feature, no lastMsg subdoc) fall back to the fetch.
+	// Resolve the surviving last-message state BEFORE any publish: an error
+	// Naks the whole event (deliberate — every delivered delete event carries
+	// the preview). survivor is the newest surviving non-system message (the
+	// preview); pointer the newest surviving message of ANY type, system
+	// notices included (what room sorting tracks) — they differ when a system
+	// notice sits on top. A nil pointer is the valid "room has no messages
+	// left" signal. The history RPC is skipped when the stored preview
+	// already identifies the survivor: neither identity targets the deleted
+	// message, so the preview cannot change and IS the survivor (already
+	// trimmed, and already in wire form — EncMsg — for encrypted rooms); the
+	// guarded rewinds then no-op, so the stored-preview-derived pointer is
+	// never written. Legacy rooms (lastMsgId set pre-feature, no lastMsg
+	// subdoc) fall back to the fetch, whose ceiling is the delete-event time
+	// so survivors newer than the coalescer-lagged stored lastMsgAt stay in
+	// the walk window.
 	var survivor *model.LastMessagePreview
+	var pointer *model.LastMessagePointer
 	if room.LastMsg != nil && room.LastMsgID != msg.ID && room.LastMsg.MessageID != msg.ID {
 		survivor = room.LastMsg
+		pointer = &model.LastMessagePointer{MessageID: room.LastMsg.MessageID, CreatedAt: room.LastMsg.CreatedAt}
 	} else {
-		survivor, err = h.lastMsgFetcher.FetchLastMessage(ctx, msg.RoomID)
+		survivor, pointer, err = h.lastMsgFetcher.FetchLastMessage(ctx, msg.RoomID, *msg.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("fetch last message for room %s: %w", msg.RoomID, err)
 		}
@@ -583,7 +599,7 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 
 	// Rewind rooms.lastMsg* before the publishes so a Mongo failure Naks
 	// before clients saw the delete.
-	if err := h.store.RewindRoomLastMessage(ctx, msg.RoomID, msg.ID, survivor, *msg.UpdatedAt); err != nil {
+	if err := h.store.RewindRoomLastMessage(ctx, msg.RoomID, msg.ID, pointer, survivor, *msg.UpdatedAt); err != nil {
 		return fmt.Errorf("rewind room last message %s: %w", msg.RoomID, err)
 	}
 
@@ -821,15 +837,12 @@ func buildDeleteRoomEvent(room *model.Room, evt *model.MessageEvent) model.Delet
 	}
 }
 
-// encryptPreviewContent encrypts message content with the room's current key
-// and returns the roomcrypto envelope as raw JSON — the same envelope clients
-// decrypt for EditRoomEvent.EncryptedNewContent and LastMessagePreview.EncMsg.
-// Empty content returns (nil, nil): there is nothing to encrypt, so
-// attachment-only messages keep Msg=="" and EncMsg==nil without a key fetch.
-func (h *Handler) encryptPreviewContent(ctx context.Context, roomID, content string) (json.RawMessage, error) {
-	if content == "" {
-		return nil, nil
-	}
+// encryptContent encrypts message content — INCLUDING empty content — with
+// the room's current key and returns the roomcrypto envelope as raw JSON, the
+// same envelope clients decrypt for EditRoomEvent.EncryptedNewContent and
+// LastMessagePreview.EncMsg. Edit events always carry an envelope so clients
+// can distinguish "text cleared" from "no encrypted payload".
+func (h *Handler) encryptContent(ctx context.Context, roomID, content string) (json.RawMessage, error) {
 	key, err := h.currentRoomKey(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("get encryption key for room %s: %w", roomID, err)
@@ -843,6 +856,16 @@ func (h *Handler) encryptPreviewContent(ctx context.Context, roomID, content str
 		return nil, fmt.Errorf("marshal encrypted content: %w", err)
 	}
 	return json.RawMessage(encJSON), nil
+}
+
+// encryptPreviewContent is encryptContent for PREVIEW destinations: empty
+// content returns (nil, nil) — a content-less preview keeps Msg=="" and
+// EncMsg==nil without a key fetch (attachment-only messages).
+func (h *Handler) encryptPreviewContent(ctx context.Context, roomID, content string) (json.RawMessage, error) {
+	if content == "" {
+		return nil, nil
+	}
+	return h.encryptContent(ctx, roomID, content)
 }
 
 // encryptPreview transforms a plaintext lastMsg preview into its encrypted

@@ -421,7 +421,7 @@ func TestBroadcastWorker_RewindRoomLastMessage_Integration(t *testing.T) {
 		survivorAt := lastAt.Add(-2 * time.Hour)
 		survivor := &model.LastMessagePreview{MessageID: "m-prev", SenderAccount: "bob", SenderName: "Bob Chen", Msg: "still here", CreatedAt: survivorAt}
 
-		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-1", "m-deleted", survivor, deletedAt))
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-1", "m-deleted", &model.LastMessagePointer{MessageID: survivor.MessageID, CreatedAt: survivor.CreatedAt}, survivor, deletedAt))
 
 		var room model.Room
 		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-rw-1"}).Decode(&room))
@@ -436,7 +436,7 @@ func TestBroadcastWorker_RewindRoomLastMessage_Integration(t *testing.T) {
 	t.Run("matching pointer with nil survivor clears fields like a fresh room", func(t *testing.T) {
 		seedRoom(t, "r-rw-2")
 
-		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-2", "m-deleted", nil, deletedAt))
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-2", "m-deleted", nil, nil, deletedAt))
 
 		var raw bson.M
 		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-rw-2"}).Decode(&raw))
@@ -452,7 +452,7 @@ func TestBroadcastWorker_RewindRoomLastMessage_Integration(t *testing.T) {
 	t.Run("non-matching pointer is a benign no-op", func(t *testing.T) {
 		seedRoom(t, "r-rw-3")
 
-		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-3", "m-other", nil, deletedAt))
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-rw-3", "m-other", nil, nil, deletedAt))
 
 		var room model.Room
 		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-rw-3"}).Decode(&room))
@@ -789,7 +789,7 @@ func TestBroadcastWorker_RewindRoomLastMessage_DriftPreviewOnly_Integration(t *t
 		survivorAt := userAt.Add(-time.Hour)
 		survivor := &model.LastMessagePreview{MessageID: "m-prev", SenderAccount: "bob", Msg: "still here", CreatedAt: survivorAt}
 
-		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-drift-1", "m-user", survivor, deletedAt))
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-drift-1", "m-user", &model.LastMessagePointer{MessageID: "m-sys", CreatedAt: sysAt}, survivor, deletedAt))
 
 		var room model.Room
 		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-drift-1"}).Decode(&room))
@@ -803,7 +803,7 @@ func TestBroadcastWorker_RewindRoomLastMessage_DriftPreviewOnly_Integration(t *t
 	t.Run("nil survivor unsets the preview, pointer untouched", func(t *testing.T) {
 		seedDriftRoom(t, "r-drift-2")
 
-		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-drift-2", "m-user", nil, deletedAt))
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-drift-2", "m-user", &model.LastMessagePointer{MessageID: "m-sys", CreatedAt: sysAt}, nil, deletedAt))
 
 		var raw bson.M
 		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-drift-2"}).Decode(&raw))
@@ -864,4 +864,81 @@ func TestBroadcastWorker_SetRoomLastMessageEdited_DriftPreviewPatched_Integratio
 	assert.Equal(t, "rewritten", room.LastMsg.Msg)
 	require.NotNil(t, room.LastMsg.EditedAt)
 	assert.WithinDuration(t, editedAt, *room.LastMsg.EditedAt, time.Millisecond)
+}
+
+// #6 phase-1 with a system pointer: deleting the newest message rewinds
+// lastMsgId/lastMsgAt to the surviving system notice while lastMsg previews
+// the older user message.
+func TestBroadcastWorker_RewindRoomLastMessage_SystemPointerUserPreview_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	lastAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	sysAt := lastAt.Add(-time.Minute)
+	userAt := lastAt.Add(-time.Hour)
+	deletedAt := lastAt.Add(time.Minute)
+	seed := func(t *testing.T, id string) {
+		t.Helper()
+		_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+			"_id": id, "type": model.RoomTypeChannel, "siteId": "site-a",
+			"lastMsgId": "m-deleted", "lastMsgAt": lastAt,
+			"lastMsg": model.LastMessagePreview{MessageID: "m-deleted", SenderAccount: "alice", Msg: "bye", CreatedAt: lastAt},
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("system pointer + user survivor", func(t *testing.T) {
+		seed(t, "r-sysptr-1")
+		pointer := &model.LastMessagePointer{MessageID: "m-sys", CreatedAt: sysAt}
+		survivor := &model.LastMessagePreview{MessageID: "m-user", SenderAccount: "bob", Msg: "older", CreatedAt: userAt}
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-sysptr-1", "m-deleted", pointer, survivor, deletedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-sysptr-1"}).Decode(&room))
+		assert.Equal(t, "m-sys", room.LastMsgID, "room sorting follows the system notice")
+		require.NotNil(t, room.LastMsgAt)
+		assert.WithinDuration(t, sysAt, *room.LastMsgAt, time.Millisecond)
+		require.NotNil(t, room.LastMsg)
+		assert.Equal(t, "m-user", room.LastMsg.MessageID, "the preview follows the user message")
+	})
+
+	t.Run("system pointer, no user survivor — preview clears, pointer moves", func(t *testing.T) {
+		seed(t, "r-sysptr-2")
+		pointer := &model.LastMessagePointer{MessageID: "m-sys", CreatedAt: sysAt}
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-sysptr-2", "m-deleted", pointer, nil, deletedAt))
+
+		var raw bson.M
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-sysptr-2"}).Decode(&raw))
+		assert.Equal(t, "m-sys", raw["lastMsgId"])
+		_, hasPreview := raw["lastMsg"]
+		assert.False(t, hasPreview, "no user survivor ⇒ no preview")
+	})
+}
+
+// #8: the bulk flush writes updatedAt from the mutation time (touchedAt),
+// never the (possibly rewound) pointer time.
+func TestBroadcastWorker_BulkUpdate_UpdatedAtUsesTouchedAt_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r-touched", "type": model.RoomTypeChannel, "siteId": "site-a"})
+	require.NoError(t, err)
+
+	pointerAt := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	touchedAt := pointerAt.Add(2 * time.Hour)
+	require.NoError(t, store.BulkUpdateRoomLastMessage(ctx, map[string]roomLastMsgUpdate{
+		"r-touched": {msgID: "m-old", at: pointerAt, touchedAt: touchedAt},
+	}))
+
+	var raw struct {
+		LastMsgAt time.Time `bson:"lastMsgAt"`
+		UpdatedAt time.Time `bson:"updatedAt"`
+	}
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-touched"}).Decode(&raw))
+	assert.WithinDuration(t, pointerAt, raw.LastMsgAt, time.Millisecond)
+	assert.WithinDuration(t, touchedAt, raw.UpdatedAt, time.Millisecond, "updatedAt must not regress to the rewound pointer time")
 }

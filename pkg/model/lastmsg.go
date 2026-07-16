@@ -45,15 +45,37 @@ type LastMessagePreview struct {
 	AttachmentCount int             `json:"attachmentCount,omitempty" bson:"attachmentCount,omitempty"`
 }
 
+// LastMessagePointer identifies the room's newest surviving message of ANY
+// type — system notices included, removed-parent placeholders and deleted
+// rows excluded. It is the value rooms.{lastMsgId,lastMsgAt} track for room
+// sorting, distinct from the non-system preview (a system message can own
+// the pointer while an older user message owns the preview).
+type LastMessagePointer struct {
+	MessageID string    `json:"messageId" bson:"messageId"`
+	CreatedAt time.Time `json:"createdAt" bson:"createdAt"`
+}
+
 // LastRoomMessageRequest is the NATS request body for the last-room-message
 // RPC (subject.MsgRoomLast).
+//
+// Before (unix ms, optional) is a caller-supplied walk ceiling: the
+// denormalized rooms.lastMsgAt can lag behind coalesced create writes, so the
+// delete fan-out passes the delete-event time to guarantee buffered-but-
+// unflushed survivors are still inside the walk window. Zero means "trust
+// the stored lastMsgAt" (pre-Before callers).
 type LastRoomMessageRequest struct {
 	RoomID string `json:"roomId"`
+	Before int64  `json:"before,omitempty"`
 }
 
 // LastRoomMessageResponse is the reply for the last-room-message RPC.
-// LastMessage is nil when the room has no remaining non-deleted,
-// non-system message.
+// LastMessage is nil when the room has no remaining non-deleted, non-system
+// message. Pointer is nil only when the room has no surviving message of any
+// kind; it can be non-nil with a nil LastMessage when only system messages
+// survive. Pointer absent with LastMessage present means the reply came from
+// a pre-Pointer server (rolling deploy) — callers derive the pointer from
+// the preview.
 type LastRoomMessageResponse struct {
 	LastMessage *LastMessagePreview `json:"lastMessage,omitempty"`
+	Pointer     *LastMessagePointer `json:"pointer,omitempty"`
 }

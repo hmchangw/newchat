@@ -21,27 +21,44 @@ import (
 // whose test does not assert on the delete-preview fetch (nil preview, no error).
 type nopLastMsgFetcher struct{}
 
-func (nopLastMsgFetcher) FetchLastMessage(context.Context, string) (*model.LastMessagePreview, error) {
-	return nil, nil
+func (nopLastMsgFetcher) FetchLastMessage(context.Context, string, time.Time) (*model.LastMessagePreview, *model.LastMessagePointer, error) {
+	return nil, nil, nil
 }
 
 var defaultLastMsgFetcher = nopLastMsgFetcher{}
 
-// stubLastMsgFetcher is a LastMessageFetcher test double returning a fixed
-// preview (or error) and counting calls, so tests can assert whether the
-// delete path fetched the room preview.
-type stubLastMsgFetcher struct {
-	preview *model.LastMessagePreview
-	err     error
-	calls   int
+// ptrOf derives the pointer a preview implies — what the production fetcher
+// does when the server reply carries no explicit pointer.
+func ptrOf(p *model.LastMessagePreview) *model.LastMessagePointer {
+	if p == nil {
+		return nil
+	}
+	return &model.LastMessagePointer{MessageID: p.MessageID, CreatedAt: p.CreatedAt}
 }
 
-func (s *stubLastMsgFetcher) FetchLastMessage(context.Context, string) (*model.LastMessagePreview, error) {
+// stubLastMsgFetcher is a LastMessageFetcher test double returning a fixed
+// preview/pointer (or error) and counting calls, so tests can assert whether
+// the delete path fetched the room preview and what ceiling it passed.
+// pointer nil derives from preview, mirroring the production fetcher.
+type stubLastMsgFetcher struct {
+	preview    *model.LastMessagePreview
+	pointer    *model.LastMessagePointer
+	err        error
+	calls      int
+	lastBefore time.Time
+}
+
+func (s *stubLastMsgFetcher) FetchLastMessage(_ context.Context, _ string, before time.Time) (*model.LastMessagePreview, *model.LastMessagePointer, error) {
 	s.calls++
+	s.lastBefore = before
 	if s.err != nil {
-		return nil, s.err
+		return nil, nil, s.err
 	}
-	return s.preview, nil
+	ptr := s.pointer
+	if ptr == nil {
+		ptr = ptrOf(s.preview)
+	}
+	return s.preview, ptr, nil
 }
 
 func survivorPreview(at time.Time) *model.LastMessagePreview {
@@ -86,7 +103,7 @@ func TestHandleDeleted_EmbedsLastMessagePreview(t *testing.T) {
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
@@ -117,7 +134,7 @@ func TestHandleDeleted_NilPreview_NoPreviewFields(t *testing.T) {
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", nil, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", nil, nil, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
@@ -163,7 +180,7 @@ func TestHandleDeleted_RewindError_ReturnsError_NoPublish(t *testing.T) {
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(survivor), survivor, deletedAt).
 		Return(errors.New("mongo down"))
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
@@ -235,7 +252,7 @@ func TestHandleDeleted_DMRoom_PreviewInEachMemberEvent(t *testing.T) {
 		Accounts: []string{"alice", "bob"},
 	}
 	store.EXPECT().GetRoom(gomock.Any(), "dm-alice-bob").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "dm-alice-bob", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "dm-alice-bob", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("dm-alice-bob", deletedAt)))
@@ -272,8 +289,8 @@ func TestHandleDeleted_EncryptedChannel_EncryptsPreview(t *testing.T) {
 	// Mongo must never see plaintext content for an encrypted room: the stored
 	// preview carries EncMsg (content ciphertext) with Msg blanked.
 	var stored *model.LastMessagePreview
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", gomock.Any(), deletedAt).
-		DoAndReturn(func(_ context.Context, _, _ string, p *model.LastMessagePreview, _ time.Time) error {
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", gomock.Any(), gomock.Any(), deletedAt).
+		DoAndReturn(func(_ context.Context, _, _ string, _ *model.LastMessagePointer, p *model.LastMessagePreview, _ time.Time) error {
 			stored = p
 			return nil
 		})
@@ -320,7 +337,7 @@ func TestHandleDeleted_EncryptedChannel_AttachmentOnlySurvivor_NoEncrypt(t *test
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 	// No keyStore expectation: empty content must not trigger a key fetch.
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, true)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
@@ -375,7 +392,7 @@ func TestHandleDeleted_EncryptedDM_StaysPlaintext(t *testing.T) {
 	}
 	store.EXPECT().GetRoom(gomock.Any(), "dm-alice-bob").Return(room, nil)
 	// No keyStore expectation: DM rooms are never encrypted, even with the flag on.
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "dm-alice-bob", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "dm-alice-bob", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, true)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("dm-alice-bob", deletedAt)))
@@ -402,7 +419,7 @@ func TestHandleDeleted_EncryptedChannel_NilPreview_SkipsKeyFetch(t *testing.T) {
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", nil, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", nil, nil, deletedAt).Return(nil)
 	// No keyStore expectation: nothing to encrypt.
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, true)
@@ -1013,7 +1030,7 @@ func TestHandleDeleted_StoredPreviewIdentifiesSurvivor_SkipsFetch(t *testing.T) 
 	fetcher := &stubLastMsgFetcher{}
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", stored, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(stored), stored, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
@@ -1045,7 +1062,7 @@ func TestHandleDeleted_DriftPreviewIsDeleted_Fetches(t *testing.T) {
 	}
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
@@ -1073,7 +1090,7 @@ func TestHandleDeleted_LegacyRoomNoStoredPreview_Fetches(t *testing.T) {
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "m-other"}
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
 	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
@@ -1097,7 +1114,7 @@ func TestHandleDeleted_EncryptedRoom_StoredPreviewServedAsIs(t *testing.T) {
 	fetcher := &stubLastMsgFetcher{}
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", stored, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(stored), stored, deletedAt).Return(nil)
 	// No keyStore expectations: the stored ciphertext is reused, never re-sealed.
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, true)
@@ -1130,7 +1147,7 @@ func TestHandleDeleted_VisibleThreadReply_CarriesPreviewAndBadge(t *testing.T) {
 	newTlm := deletedAt.Add(-30 * time.Minute)
 
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", ptrOf(survivor), survivor, deletedAt).Return(nil)
 
 	evt := model.MessageEvent{
 		Event:              model.EventDeleted,
@@ -1168,4 +1185,105 @@ func TestHandleDeleted_VisibleThreadReply_CarriesPreviewAndBadge(t *testing.T) {
 	assert.Equal(t, "m-parent", badge.ParentMessageID)
 	require.NotNil(t, badge.NewThreadLastMsgAt)
 	assert.True(t, badge.NewThreadLastMsgAt.Equal(newTlm))
+}
+
+// #6: when the newest survivor is a system notice, the rewind receives the
+// system POINTER and the user-message PREVIEW separately — room sorting must
+// not skip past the system message, while the event still previews the user
+// message.
+func TestHandleDeleted_SystemPointerAndUserSurvivorRewindSeparately(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	survivor := survivorPreview(deletedAt.Add(-2 * time.Hour))
+	sysPointer := &model.LastMessagePointer{MessageID: "m-sys", CreatedAt: deletedAt.Add(-time.Hour)}
+	fetcher := &stubLastMsgFetcher{preview: survivor, pointer: sysPointer}
+
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "msg-1"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", sysPointer, survivor, deletedAt).Return(nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.DeleteRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotNil(t, roomEvt.LastMessage)
+	assert.Equal(t, "m-prev", roomEvt.LastMessage.MessageID, "the EVENT previews the user survivor, never the system notice")
+}
+
+// #7: the fetch ceiling is the delete-event time — the stored lastMsgAt can
+// lag behind coalesced creates, and a survivor created in that window must
+// stay findable.
+func TestHandleDeleted_PassesDeleteTimeAsFetchCeiling(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	fetcher := &stubLastMsgFetcher{}
+
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", nil, nil, deletedAt).Return(nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
+
+	assert.True(t, fetcher.lastBefore.Equal(deletedAt), "walk ceiling = delete-event time, not the stored lastMsgAt")
+}
+
+// #10: an encrypted-room edit that CLEARS the text (attachment-only edit)
+// still publishes an envelope — clients need it to apply the clear — while
+// the store patch carries no preview ciphertext at all.
+func TestHandleUpdated_EncryptedChannel_EmptyContent_EventCarriesEnvelope_PatchUnsets(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	key := testRoomKey(t)
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
+	keyStore.EXPECT().Get(gomock.Any(), roomID).Return(key, nil)
+
+	edited := time.Date(2026, 7, 1, 12, 5, 0, 0, time.UTC)
+	store.EXPECT().SetRoomLastMessageEdited(gomock.Any(), roomID, "msg-1", "", gomock.Nil(), edited).Return(nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventUpdated,
+		SiteID:    "site-a",
+		Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content:   "",
+			CreatedAt: edited.Add(-time.Hour),
+			EditedAt:  &edited, UpdatedAt: &edited,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	assert.Empty(t, roomEvt.NewContent)
+	require.NotEmpty(t, roomEvt.EncryptedNewContent, "empty-content edits still seal an envelope")
+	var env roomcrypto.EncryptedMessage
+	require.NoError(t, json.Unmarshal(roomEvt.EncryptedNewContent, &env))
+	plaintext, err := decryptForTest(&env, key.KeyPair.PrivateKey)
+	require.NoError(t, err)
+	assert.Empty(t, plaintext, "the envelope decrypts to the cleared (empty) text")
 }

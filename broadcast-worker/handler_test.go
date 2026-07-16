@@ -920,7 +920,7 @@ func TestHandleDeleted_ChannelRoomScopedPublish(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
 
 	deletedAt := time.Date(2026, 5, 14, 12, 10, 0, 0, time.UTC)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), roomID, "msg-1", nil, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), roomID, "msg-1", nil, nil, deletedAt).Return(nil)
 	evt := model.MessageEvent{
 		Event:     model.EventDeleted,
 		SiteID:    "site-a",
@@ -1053,7 +1053,7 @@ func TestHandleDeleted_DMRoom_FansOutToBothMembers(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
 
 	deletedAt := time.Date(2026, 5, 14, 12, 10, 0, 0, time.UTC)
-	store.EXPECT().RewindRoomLastMessage(gomock.Any(), roomID, "msg-1", nil, deletedAt).Return(nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), roomID, "msg-1", nil, nil, deletedAt).Return(nil)
 	evt := model.MessageEvent{
 		Event:     model.EventDeleted,
 		SiteID:    "site-a",

@@ -77,12 +77,13 @@ func (mr *MockMessageReaderMockRecorder) GetAllPinnedMessages(ctx, roomID any) *
 }
 
 // GetLastRoomMessage mocks base method.
-func (m *MockMessageReader) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error) {
+func (m *MockMessageReader) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*model.LastMessagePointer, *models.Message, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetLastRoomMessage", ctx, roomID, before, floor)
-	ret0, _ := ret[0].(*models.Message)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret0, _ := ret[0].(*model.LastMessagePointer)
+	ret1, _ := ret[1].(*models.Message)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // GetLastRoomMessage indicates an expected call of GetLastRoomMessage.
@@ -377,12 +378,13 @@ func (mr *MockMessageRepositoryMockRecorder) GetAllPinnedMessages(ctx, roomID an
 }
 
 // GetLastRoomMessage mocks base method.
-func (m *MockMessageRepository) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error) {
+func (m *MockMessageRepository) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*model.LastMessagePointer, *models.Message, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetLastRoomMessage", ctx, roomID, before, floor)
-	ret0, _ := ret[0].(*models.Message)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret0, _ := ret[0].(*model.LastMessagePointer)
+	ret1, _ := ret[1].(*models.Message)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // GetLastRoomMessage indicates an expected call of GetLastRoomMessage.

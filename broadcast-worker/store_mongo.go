@@ -111,10 +111,16 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	}
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for roomID, u := range updates {
+		// updatedAt reflects the newest MUTATION, not the pointer time — a
+		// rewind can move the pointer backwards without regressing updatedAt.
+		updatedAt := u.touchedAt
+		if updatedAt.IsZero() {
+			updatedAt = u.at
+		}
 		fields := bson.M{
 			"lastMsgAt": u.at,
 			"lastMsgId": u.msgID,
-			"updatedAt": u.at,
+			"updatedAt": updatedAt,
 		}
 		if u.preview != nil {
 			fields["lastMsg"] = u.preview
@@ -137,7 +143,11 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 // concurrent newer message won):
 //
 //  1. The deleted message was the room's newest overall (lastMsgId matches):
-//     rewind the full trio {lastMsgId,lastMsgAt,lastMsg}.
+//     rewind lastMsgId/lastMsgAt to pointer (the newest surviving message of
+//     ANY type, system notices included — room sorting must not skip past a
+//     system message) and lastMsg to survivor (the newest surviving
+//     non-system message). pointer == nil means nothing survives: mirror a
+//     fresh room.
 //  2. Drift state — a newer system message owns lastMsgId but lastMsg still
 //     previews the deleted message (system messages advance the pointer
 //     without replacing the preview): replace ONLY lastMsg; the pointer pair
@@ -150,16 +160,29 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 // the pointer. A created-event redelivered AFTER its delete can still
 // re-buffer the dead message — unchanged from the pre-preview behavior of
 // lastMsgId/lastMsgAt.
-func (m *mongoStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+func (m *mongoStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, pointer *model.LastMessagePointer, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+	// Defensive: the pointer set is a superset of the preview set, so a
+	// non-nil survivor implies a pointer exists — derive it when a caller
+	// (e.g. a pre-pointer peer during a rolling deploy) omitted it.
+	if pointer == nil && survivor != nil {
+		pointer = &model.LastMessagePointer{MessageID: survivor.MessageID, CreatedAt: survivor.CreatedAt}
+	}
 	filter := bson.M{"_id": roomID, "lastMsgId": deletedMsgID}
 	var update bson.M
-	if survivor != nil {
-		update = bson.M{"$set": bson.M{
-			"lastMsgAt": survivor.CreatedAt,
-			"lastMsgId": survivor.MessageID,
-			"lastMsg":   survivor,
+	if pointer != nil {
+		set := bson.M{
+			"lastMsgAt": pointer.CreatedAt,
+			"lastMsgId": pointer.MessageID,
 			"updatedAt": updatedAt,
-		}}
+		}
+		if survivor != nil {
+			set["lastMsg"] = survivor
+			update = bson.M{"$set": set}
+		} else {
+			// Only system messages survive: the pointer moves to the system
+			// notice, the preview clears.
+			update = bson.M{"$set": set, "$unset": bson.M{"lastMsg": ""}}
+		}
 	} else {
 		// No surviving message: mirror a fresh room (lastMsgId empty string,
 		// lastMsgAt/lastMsg absent). lastMentionAllAt is deliberately untouched.

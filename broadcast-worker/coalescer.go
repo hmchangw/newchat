@@ -13,14 +13,23 @@ import (
 // roomLastMsgUpdate is the per-room state buffered between flushes.
 //
 // Coalescing semantics:
-//   - msgID/at/preview carry the LATEST observed message for the room (max by
-//     createdAt); preview is the denormalized lastMsg document for that message.
+//   - msgID/at carry the LATEST observed message of any type (system notices
+//     included) — the pointer pair rooms.{lastMsgId,lastMsgAt} track.
+//   - preview/previewAt carry the latest observed message that CARRIED a
+//     preview (user messages; system messages pass nil). Tracked separately
+//     from the pointer so an out-of-order user message behind a newer system
+//     notice still wins the preview.
+//   - touchedAt is the newest mutation time seen (create/rewind/edit) and is
+//     what the flush writes as rooms.updatedAt — never the pointer time,
+//     which a rewind can legitimately move backwards.
 //   - lastMentionAllAt carries the latest createdAt among messages whose
 //     mentionAll flag was true; it sticks across subsequent non-mention-all
 //     messages until a newer mention-all arrives.
 type roomLastMsgUpdate struct {
 	msgID            string
 	at               time.Time
+	previewAt        time.Time
+	touchedAt        time.Time
 	lastMentionAllAt time.Time
 	preview          *model.LastMessagePreview
 }
@@ -64,8 +73,10 @@ func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStor
 // UpdateRoomLastMessage buffers the update. Always returns nil; the buffered
 // write is performed asynchronously by Flush.
 //
-// A nil preview (system message) advances the pointer but must NOT clobber a
-// buffered user preview: the flush then lands the drift state
+// The pointer (msgID/at) and the preview advance INDEPENDENTLY: a nil
+// preview (system message) advances only the pointer, and a user message
+// arriving out of order behind a newer system notice still advances the
+// preview — the flush then lands the drift state
 // {lastMsgId: system, lastMsg: newest user message}, mirroring what the
 // direct (non-coalesced) writes produce.
 func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool, preview *model.LastMessagePreview) error {
@@ -75,9 +86,13 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID
 	if at.After(cur.at) {
 		cur.msgID = msgID
 		cur.at = at
-		if preview != nil {
-			cur.preview = preview
-		}
+	}
+	if preview != nil && at.After(cur.previewAt) {
+		cur.preview = preview
+		cur.previewAt = at
+	}
+	if at.After(cur.touchedAt) {
+		cur.touchedAt = at
 	}
 	if mentionAll && at.After(cur.lastMentionAllAt) {
 		cur.lastMentionAllAt = at
@@ -90,16 +105,21 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID
 // delegating the guarded Mongo rewind: the flush write is unguarded, so a
 // buffered create of the deleted message would otherwise resurrect its
 // preview (full content) right after the rewind removed it.
-func (c *coalescingStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+func (c *coalescingStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, pointer *model.LastMessagePointer, survivor *model.LastMessagePreview, updatedAt time.Time) error {
 	c.mu.Lock()
 	if cur, ok := c.pending[roomID]; ok {
+		touched := false
 		switch {
 		case cur.msgID == deletedMsgID:
-			if survivor != nil {
-				cur.msgID = survivor.MessageID
-				cur.at = survivor.CreatedAt
+			if pointer != nil {
+				cur.msgID = pointer.MessageID
+				cur.at = pointer.CreatedAt
 				cur.preview = survivor
-				c.pending[roomID] = cur
+				cur.previewAt = time.Time{}
+				if survivor != nil {
+					cur.previewAt = survivor.CreatedAt
+				}
+				touched = true
 			} else {
 				// Room emptied: drop the entry. A pending lastMentionAllAt is
 				// dropped with it — decorative, and the delegate clears the
@@ -112,11 +132,24 @@ func (c *coalescingStore) RewindRoomLastMessage(ctx context.Context, roomID, del
 			// survivor instead (nil leaves the delegate's preview rewind in
 			// place — the flush then writes no lastMsg field at all).
 			cur.preview = survivor
+			cur.previewAt = time.Time{}
+			if survivor != nil {
+				cur.previewAt = survivor.CreatedAt
+			}
+			touched = true
+		}
+		if touched {
+			// The rewind is a mutation NOW even though the pointer moved
+			// backwards — rooms.updatedAt must never regress to the
+			// survivor's create time.
+			if updatedAt.After(cur.touchedAt) {
+				cur.touchedAt = updatedAt
+			}
 			c.pending[roomID] = cur
 		}
 	}
 	c.mu.Unlock()
-	return c.Store.RewindRoomLastMessage(ctx, roomID, deletedMsgID, survivor, updatedAt)
+	return c.Store.RewindRoomLastMessage(ctx, roomID, deletedMsgID, pointer, survivor, updatedAt)
 }
 
 // SetRoomLastMessageEdited patches a buffered preview of the edited message
@@ -133,6 +166,9 @@ func (c *coalescingStore) SetRoomLastMessageEdited(ctx context.Context, roomID, 
 		at := editedAt
 		patched.EditedAt = &at
 		cur.preview = &patched
+		if editedAt.After(cur.touchedAt) {
+			cur.touchedAt = editedAt
+		}
 		c.pending[roomID] = cur
 	}
 	c.mu.Unlock()

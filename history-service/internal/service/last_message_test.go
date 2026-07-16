@@ -59,7 +59,7 @@ func TestHistoryService_GetLastRoomMessage_Success(t *testing.T) {
 	// floor = createdAt (inside the 90-day history floor).
 	msgs.EXPECT().
 		GetLastRoomMessage(gomock.Any(), "r1", lastMsgAt.Add(time.Millisecond), createdAt).
-		Return(row, nil)
+		Return(nil, row, nil)
 
 	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestHistoryService_GetLastRoomMessage_SenderNameFallbacks(t *testing.T) {
 			rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
 			msgs.EXPECT().
 				GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
-				Return(&models.Message{MessageID: "m1", RoomID: "r1", Sender: tc.sender, CreatedAt: lastMsgAt}, nil)
+				Return(nil, &models.Message{MessageID: "m1", RoomID: "r1", Sender: tc.sender, CreatedAt: lastMsgAt}, nil)
 
 			resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
 			require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestHistoryService_GetLastRoomMessage_NoQualifyingMessage(t *testing.T) {
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
 	msgs.EXPECT().
 		GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
-		Return(nil, nil)
+		Return(nil, nil, nil)
 
 	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
 	require.NoError(t, err)
@@ -132,7 +132,7 @@ func TestHistoryService_GetLastRoomMessage_RepoError(t *testing.T) {
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
 	msgs.EXPECT().
 		GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
-		Return(nil, fmt.Errorf("cassandra timeout"))
+		Return(nil, nil, fmt.Errorf("cassandra timeout"))
 
 	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
 	assert.Nil(t, resp)
@@ -178,7 +178,7 @@ func TestHistoryService_GetLastRoomMessage_TrimsPreviewContent(t *testing.T) {
 	long := strings.Repeat("測", pkgmodel.LastMessagePreviewMaxRunes+44)
 	msgs.EXPECT().
 		GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
-		Return(&models.Message{
+		Return(nil, &models.Message{
 			MessageID: "m1", RoomID: "r1",
 			Sender:    models.Participant{Account: "alice", EngName: "Alice"},
 			Msg:       long,
@@ -191,4 +191,92 @@ func TestHistoryService_GetLastRoomMessage_TrimsPreviewContent(t *testing.T) {
 	got := resp.LastMessage.Msg
 	assert.Equal(t, pkgmodel.LastMessagePreviewMaxRunes, len([]rune(got)), "preview trimmed to the rune cap")
 	assert.Equal(t, strings.Repeat("測", pkgmodel.LastMessagePreviewMaxRunes), got, "trim must cut on rune boundaries")
+}
+
+// #7: the denormalized lastMsgAt can lag behind coalesced creates — a
+// caller-supplied Before must widen the walk ceiling so buffered-but-
+// unflushed survivors stay in the window.
+func TestHistoryService_GetLastRoomMessage_BeforeWidensStaleCeiling(t *testing.T) {
+	svc, msgs, rooms := newLastMsgService(t)
+
+	staleLastMsgAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	createdAt := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Millisecond)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(staleLastMsgAt, createdAt, nil)
+
+	// Delete-event time 30m after the stale pointer: the walk must start there.
+	deleteAt := staleLastMsgAt.Add(30 * time.Minute)
+	msgs.EXPECT().
+		GetLastRoomMessage(gomock.Any(), "r1", deleteAt.Add(time.Millisecond), createdAt).
+		Return(nil, nil, nil)
+
+	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1", Before: deleteAt.UnixMilli()})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+}
+
+// An OLDER Before must never shrink the ceiling below the stored lastMsgAt.
+func TestHistoryService_GetLastRoomMessage_OlderBeforeDoesNotShrinkCeiling(t *testing.T) {
+	svc, msgs, rooms := newLastMsgService(t)
+
+	lastMsgAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	createdAt := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Millisecond)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
+
+	msgs.EXPECT().
+		GetLastRoomMessage(gomock.Any(), "r1", lastMsgAt.Add(time.Millisecond), createdAt).
+		Return(nil, nil, nil)
+
+	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{
+		RoomID: "r1", Before: lastMsgAt.Add(-2 * time.Hour).UnixMilli(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+}
+
+// #6: the repo's pointer rides the response so the caller can rewind
+// lastMsgId/lastMsgAt to a system notice while the preview shows the newest
+// user message.
+func TestHistoryService_GetLastRoomMessage_PointerRidesResponse(t *testing.T) {
+	svc, msgs, rooms := newLastMsgService(t)
+
+	lastMsgAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	createdAt := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Millisecond)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
+
+	ptr := &pkgmodel.LastMessagePointer{MessageID: "m-sys", CreatedAt: lastMsgAt}
+	msgs.EXPECT().
+		GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
+		Return(ptr, &models.Message{
+			MessageID: "m-user", RoomID: "r1",
+			Sender:    models.Participant{Account: "alice", EngName: "Alice"},
+			Msg:       "hello",
+			CreatedAt: lastMsgAt.Add(-time.Minute),
+		}, nil)
+
+	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Pointer)
+	assert.Equal(t, "m-sys", resp.Pointer.MessageID)
+	require.NotNil(t, resp.LastMessage)
+	assert.Equal(t, "m-user", resp.LastMessage.MessageID)
+}
+
+// Pointer without preview: only system messages survive — the response says
+// so instead of pretending the room is empty.
+func TestHistoryService_GetLastRoomMessage_PointerOnlyWhenOnlySystemSurvives(t *testing.T) {
+	svc, msgs, rooms := newLastMsgService(t)
+
+	lastMsgAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	createdAt := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Millisecond)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
+
+	ptr := &pkgmodel.LastMessagePointer{MessageID: "m-sys", CreatedAt: lastMsgAt}
+	msgs.EXPECT().
+		GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
+		Return(ptr, nil, nil)
+
+	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Pointer)
+	assert.Nil(t, resp.LastMessage)
 }

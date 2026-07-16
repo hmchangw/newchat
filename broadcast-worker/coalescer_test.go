@@ -334,8 +334,8 @@ func TestCoalescingStore_Rewind_ReplacesBufferedDeleteTargetWithSurvivor(t *test
 		&model.LastMessagePreview{MessageID: "m-del", Msg: "bye", CreatedAt: t0}))
 
 	survivor := &model.LastMessagePreview{MessageID: "m-old", Msg: "still here", CreatedAt: t0.Add(-time.Minute)}
-	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", survivor, deletedAt).Return(nil)
-	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", survivor, deletedAt))
+	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", ptrOf(survivor), survivor, deletedAt).Return(nil)
+	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", ptrOf(survivor), survivor, deletedAt))
 	require.NoError(t, c.Flush(ctx))
 
 	got, ok := bulk.lastCall()["r1"]
@@ -356,8 +356,8 @@ func TestCoalescingStore_Rewind_NoSurvivorDropsBufferedEntry(t *testing.T) {
 	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m-del", t0, false,
 		&model.LastMessagePreview{MessageID: "m-del", Msg: "bye", CreatedAt: t0}))
 
-	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", nil, deletedAt).Return(nil)
-	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", nil, deletedAt))
+	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", nil, nil, deletedAt).Return(nil)
+	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", nil, nil, deletedAt))
 	require.NoError(t, c.Flush(ctx))
 
 	assert.Equal(t, 0, bulk.callCount(), "an emptied room has nothing left to flush")
@@ -376,8 +376,8 @@ func TestCoalescingStore_Rewind_DriftReplacesPreviewKeepsPointer(t *testing.T) {
 		&model.LastMessagePreview{MessageID: "m-del", Msg: "bye", CreatedAt: t0}))
 	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m-sys", t0.Add(time.Second), false, nil))
 
-	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", nil, deletedAt).Return(nil)
-	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", nil, deletedAt))
+	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", nil, nil, deletedAt).Return(nil)
+	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", nil, nil, deletedAt))
 	require.NoError(t, c.Flush(ctx))
 
 	got, ok := bulk.lastCall()["r1"]
@@ -396,8 +396,8 @@ func TestCoalescingStore_Rewind_UnrelatedBufferedEntryUntouched(t *testing.T) {
 	newer := &model.LastMessagePreview{MessageID: "m-newer", Msg: "unrelated", CreatedAt: t0}
 	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m-newer", t0, false, newer))
 
-	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-old-del", nil, deletedAt).Return(nil)
-	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-old-del", nil, deletedAt))
+	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-old-del", nil, nil, deletedAt).Return(nil)
+	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-old-del", nil, nil, deletedAt))
 	require.NoError(t, c.Flush(ctx))
 
 	got, ok := bulk.lastCall()["r1"]
@@ -449,4 +449,80 @@ func TestCoalescingStore_SetEdited_UnrelatedBufferedPreviewUntouched(t *testing.
 	require.NotNil(t, got.preview)
 	assert.Equal(t, "original", got.preview.Msg)
 	assert.Nil(t, got.preview.EditedAt)
+}
+
+// #5: a user message arriving OUT OF ORDER behind a newer system notice must
+// still win the preview — the pointer and the preview advance independently.
+func TestCoalescingStore_Update_OutOfOrderUserPreviewStillWins(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+	ctx := context.Background()
+	t1 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Second)
+	t3 := t1.Add(2 * time.Second)
+
+	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m1", t1, false,
+		&model.LastMessagePreview{MessageID: "m1", Msg: "first", CreatedAt: t1}))
+	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m-sys", t3, false, nil))
+	// m2 (t2) arrives after the system notice (t3): pointer stays at t3, but
+	// m2 is the newest USER message and must own the preview.
+	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m2", t2, false,
+		&model.LastMessagePreview{MessageID: "m2", Msg: "second", CreatedAt: t2}))
+	require.NoError(t, c.Flush(ctx))
+
+	got, ok := bulk.lastCall()["r1"]
+	require.True(t, ok)
+	assert.Equal(t, "m-sys", got.msgID, "pointer keeps the newest message incl. system")
+	assert.True(t, got.at.Equal(t3))
+	require.NotNil(t, got.preview)
+	assert.Equal(t, "m2", got.preview.MessageID, "out-of-order user message still wins the preview")
+}
+
+// #8: a rewind legitimately moves the pointer time backwards, but the flush's
+// updatedAt must reflect the mutation time (the delete), never the survivor's
+// old create time.
+func TestCoalescingStore_Rewind_TouchedAtNotRegressedBySurvivor(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c, inner := newCoalescerWithStore(t, bulk)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	deletedAt := t0.Add(time.Second)
+
+	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m-del", t0, false,
+		&model.LastMessagePreview{MessageID: "m-del", Msg: "bye", CreatedAt: t0}))
+
+	survivor := &model.LastMessagePreview{MessageID: "m-old", Msg: "old", CreatedAt: t0.Add(-time.Hour)}
+	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", ptrOf(survivor), survivor, deletedAt).Return(nil)
+	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", ptrOf(survivor), survivor, deletedAt))
+	require.NoError(t, c.Flush(ctx))
+
+	got, ok := bulk.lastCall()["r1"]
+	require.True(t, ok)
+	assert.True(t, got.at.Equal(survivor.CreatedAt), "pointer time rewinds to the survivor")
+	assert.True(t, got.touchedAt.Equal(deletedAt), "updatedAt source is the delete time, not the survivor's create time")
+}
+
+// #6: the rewound buffer entry carries the POINTER (which may be a system
+// notice) while the preview carries the survivor — they differ under drift.
+func TestCoalescingStore_Rewind_SystemPointerUserSurvivor(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c, inner := newCoalescerWithStore(t, bulk)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	deletedAt := t0.Add(time.Second)
+
+	require.NoError(t, c.UpdateRoomLastMessage(ctx, "r1", "m-del", t0, false,
+		&model.LastMessagePreview{MessageID: "m-del", Msg: "bye", CreatedAt: t0}))
+
+	pointer := &model.LastMessagePointer{MessageID: "m-sys", CreatedAt: t0.Add(-time.Minute)}
+	survivor := &model.LastMessagePreview{MessageID: "m-user", Msg: "older user", CreatedAt: t0.Add(-time.Hour)}
+	inner.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "m-del", pointer, survivor, deletedAt).Return(nil)
+	require.NoError(t, c.RewindRoomLastMessage(ctx, "r1", "m-del", pointer, survivor, deletedAt))
+	require.NoError(t, c.Flush(ctx))
+
+	got, ok := bulk.lastCall()["r1"]
+	require.True(t, ok)
+	assert.Equal(t, "m-sys", got.msgID, "buffered pointer follows the system survivor")
+	require.NotNil(t, got.preview)
+	assert.Equal(t, "m-user", got.preview.MessageID, "buffered preview follows the user survivor")
 }

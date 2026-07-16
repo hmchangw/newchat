@@ -42,7 +42,7 @@ func TestRepository_GetLastRoomMessage_DeletedLastFallsBackToPriorSurvivor(t *te
 	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "still here")
 	seedLastMsgRow(t, session, roomID, "m-deleted", base.Add(time.Minute), true, "", "gone")
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-survivor", got.MessageID)
@@ -65,7 +65,7 @@ func TestRepository_GetLastRoomMessage_EditedLastCarriesCurrentContentAndEditedA
 		roomID, sizer.Of(base), base, "m-edited", sender, "edited body", editedAt, "site-a",
 	).Exec())
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-edited", got.MessageID)
@@ -85,7 +85,7 @@ func TestRepository_GetLastRoomMessage_AllDeletedReturnsNil(t *testing.T) {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m%d", i), base.Add(time.Duration(i)*time.Minute), true, "", "gone")
 	}
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -101,7 +101,7 @@ func TestRepository_GetLastRoomMessage_SystemMessageNewestIsSkipped(t *testing.T
 	seedLastMsgRow(t, session, roomID, "m-sys-1", base.Add(time.Minute), false, model.MessageTypeMembersAdded, "alice added bob")
 	seedLastMsgRow(t, session, roomID, "m-sys-2", base.Add(2*time.Minute), false, model.MessageTypeRoomRenamed, "renamed")
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-user", got.MessageID)
@@ -120,7 +120,7 @@ func TestRepository_GetLastRoomMessage_OnlySystemAndDeletedReturnsNil(t *testing
 	// one with deleted=false anyway to prove the type alone disqualifies it.
 	seedLastMsgRow(t, session, roomID, "m-removed", base.Add(2*time.Minute), false, MessageTypeRemoved, "")
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -139,7 +139,7 @@ func TestRepository_GetLastRoomMessage_TombstoneDensePartition(t *testing.T) {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%03d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
 	}
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-survivor", got.MessageID)
@@ -160,7 +160,7 @@ func TestRepository_GetLastRoomMessage_SurvivorInOlderBucket(t *testing.T) {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%d", i), newest.Add(time.Duration(i)*time.Minute), true, "", "gone")
 	}
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, newest.Add(time.Hour), newest.AddDate(0, 0, -10))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, newest.Add(time.Hour), newest.AddDate(0, 0, -10))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-survivor", got.MessageID)
@@ -189,7 +189,7 @@ func TestRepository_GetLastRoomMessage_ThreadOnlyReplyDoesNotSurface(t *testing.
 		"tr-1", replyAt, "m-reply", roomID, sender, "thread reply", "m-main", "site-a",
 	).Exec())
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, replyAt.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, replyAt.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-main", got.MessageID, "a thread-only reply must not win the room preview")
@@ -219,7 +219,7 @@ func TestRepository_GetLastRoomMessage_DecryptsEncryptedSurvivor(t *testing.T) {
 		roomID, sizer.Of(base), base, "m-enc", payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, "site-a",
 	).Exec())
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "secret body", got.Msg)
@@ -233,7 +233,7 @@ func TestRepository_GetLastRoomMessage_EmptyRoomReturnsNil(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	got, err := repo.GetLastRoomMessage(ctx, "r-last-empty", base, base.AddDate(0, 0, -5))
+	_, got, err := repo.GetLastRoomMessage(ctx, "r-last-empty", base, base.AddDate(0, 0, -5))
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -254,7 +254,89 @@ func TestRepository_GetLastRoomMessage_RowScanCapAbortsDeepTombstoneTail(t *test
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%04d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
 	}
 
-	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	_, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
 	require.NoError(t, err)
 	assert.Nil(t, got, "row budget exhausted must degrade to no preview, never keep scanning")
+}
+
+// #4: a qualifying row OLDER than floor inside the floor bucket must not
+// leak out — DESC order proves nothing newer survives, so the walk answers
+// "no preview".
+func TestRepository_GetLastRoomMessage_RowBelowFloorNeverLeaks(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-floor-leak"
+	floor := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	// Same bucket as floor, but 30s older — outside the [floor, before) window.
+	seedLastMsgRow(t, session, roomID, "m-too-old", floor.Add(-30*time.Second), false, "", "before the window")
+	seedLastMsgRow(t, session, roomID, "m-deleted", floor.Add(time.Minute), true, "", "gone")
+
+	ptr, got, err := repo.GetLastRoomMessage(ctx, roomID, floor.Add(time.Hour), floor)
+	require.NoError(t, err)
+	assert.Nil(t, got, "a row below floor must never be returned as the preview")
+	assert.Nil(t, ptr, "nor as the pointer")
+}
+
+// #6: the pointer tracks the newest surviving row of ANY type (system
+// included), while the preview skips system types — one walk, two answers.
+func TestRepository_GetLastRoomMessage_PointerIncludesSystemPreviewSkips(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-pointer"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-user", base, false, "", "user message")
+	seedLastMsgRow(t, session, roomID, "m-sys", base.Add(time.Minute), false, model.MessageTypeMembersAdded, "alice added bob")
+	seedLastMsgRow(t, session, roomID, "m-del", base.Add(2*time.Minute), true, "", "gone")
+
+	ptr, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, ptr)
+	assert.Equal(t, "m-sys", ptr.MessageID, "pointer = newest surviving row incl. system")
+	assert.True(t, ptr.CreatedAt.Equal(base.Add(time.Minute)))
+	require.NotNil(t, got)
+	assert.Equal(t, "m-user", got.MessageID, "preview = newest surviving non-system row")
+}
+
+// Only system messages survive: pointer set, preview nil — the room still
+// sorts by the system notice but shows no snippet.
+func TestRepository_GetLastRoomMessage_OnlySystemSurvives_PointerWithoutPreview(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-sys-only"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-del", base, true, "", "gone")
+	seedLastMsgRow(t, session, roomID, "m-sys", base.Add(time.Minute), false, model.MessageTypeRoomCreated, "created")
+
+	ptr, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, ptr)
+	assert.Equal(t, "m-sys", ptr.MessageID)
+	assert.Nil(t, got)
+}
+
+// The removed-parent placeholder qualifies for NEITHER pointer nor preview:
+// re-pointing lastMsgId at the message that was just deleted would undo the
+// rewind the walk exists to serve.
+func TestRepository_GetLastRoomMessage_RemovedPlaceholderNeverPointer(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-removed-ptr"
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	seedLastMsgRow(t, session, roomID, "m-user", base, false, "", "still here")
+	seedLastMsgRow(t, session, roomID, "m-removed", base.Add(time.Minute), false, MessageTypeRemoved, "")
+
+	ptr, got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, ptr)
+	assert.Equal(t, "m-user", ptr.MessageID)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-user", got.MessageID)
 }

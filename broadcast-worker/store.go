@@ -25,11 +25,15 @@ type Store interface {
 	// pointer to a newly created message. preview is the denormalized lastMsg
 	// document (Msg already blanked by the caller for encrypted rooms).
 	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, preview *model.LastMessagePreview) error
-	// RewindRoomLastMessage rewinds the room's last-message pointer after a
-	// delete, but ONLY if the room still points at deletedMsgID (guarded
-	// UpdateOne). survivor == nil clears the fields like a fresh room. A
-	// non-matching pointer is a benign no-op (a concurrent newer message won).
-	RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error
+	// RewindRoomLastMessage rewinds the room's last-message state after a
+	// delete (guarded UpdateOnes; non-matching guards are benign no-ops — a
+	// concurrent newer message won). pointer is the newest surviving message
+	// of ANY type (system notices included) and rewinds lastMsgId/lastMsgAt;
+	// survivor is the newest surviving non-system message and rewinds the
+	// lastMsg preview — they differ when a system notice sits on top.
+	// pointer == nil clears the fields like a fresh room (survivor is nil
+	// then too).
+	RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, pointer *model.LastMessagePointer, survivor *model.LastMessagePreview, updatedAt time.Time) error
 	// SetRoomLastMessageEdited patches lastMsg.msg/lastMsg.encMsg/lastMsg.editedAt
 	// after an edit, but ONLY if the room still points at editedMsgID (guarded
 	// UpdateOne; non-matching pointer is a benign no-op). Exactly one of

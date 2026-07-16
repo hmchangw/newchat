@@ -134,17 +134,17 @@ func (mr *MockStoreMockRecorder) ListSubscriptions(ctx, roomID any) *gomock.Call
 }
 
 // RewindRoomLastMessage mocks base method.
-func (m *MockStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+func (m *MockStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, pointer *model.LastMessagePointer, survivor *model.LastMessagePreview, updatedAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RewindRoomLastMessage", ctx, roomID, deletedMsgID, survivor, updatedAt)
+	ret := m.ctrl.Call(m, "RewindRoomLastMessage", ctx, roomID, deletedMsgID, pointer, survivor, updatedAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // RewindRoomLastMessage indicates an expected call of RewindRoomLastMessage.
-func (mr *MockStoreMockRecorder) RewindRoomLastMessage(ctx, roomID, deletedMsgID, survivor, updatedAt any) *gomock.Call {
+func (mr *MockStoreMockRecorder) RewindRoomLastMessage(ctx, roomID, deletedMsgID, pointer, survivor, updatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RewindRoomLastMessage", reflect.TypeOf((*MockStore)(nil).RewindRoomLastMessage), ctx, roomID, deletedMsgID, survivor, updatedAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RewindRoomLastMessage", reflect.TypeOf((*MockStore)(nil).RewindRoomLastMessage), ctx, roomID, deletedMsgID, pointer, survivor, updatedAt)
 }
 
 // SetRoomLastMessageEdited mocks base method.

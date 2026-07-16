@@ -26,9 +26,12 @@ type MessageReader interface {
 	GetMessagesByIDs(ctx context.Context, messageIDs []string) ([]models.Message, error)
 	GetPinnedMessages(ctx context.Context, roomID string, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetAllPinnedMessages(ctx context.Context, roomID string) ([]models.Message, error)
-	// GetLastRoomMessage returns the room's newest non-deleted, non-system
-	// message within [floor, before), or (nil, nil) when none qualifies.
-	GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error)
+	// GetLastRoomMessage resolves, within [floor, before), the room's newest
+	// surviving pointer row (any type incl. system notices, for
+	// lastMsgId/lastMsgAt) and its newest non-deleted, non-system message
+	// (the preview). Pointer nil ⇒ nothing survives; pointer non-nil with a
+	// nil message ⇒ only system messages survive.
+	GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*pkgmodel.LastMessagePointer, *models.Message, error)
 }
 
 type MessageWriter interface {

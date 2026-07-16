@@ -12,6 +12,7 @@ package main
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
 	gomock "go.uber.org/mock/gomock"
@@ -42,16 +43,17 @@ func (m *MockLastMessageFetcher) EXPECT() *MockLastMessageFetcherMockRecorder {
 }
 
 // FetchLastMessage mocks base method.
-func (m *MockLastMessageFetcher) FetchLastMessage(ctx context.Context, roomID string) (*model.LastMessagePreview, error) {
+func (m *MockLastMessageFetcher) FetchLastMessage(ctx context.Context, roomID string, before time.Time) (*model.LastMessagePreview, *model.LastMessagePointer, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FetchLastMessage", ctx, roomID)
+	ret := m.ctrl.Call(m, "FetchLastMessage", ctx, roomID, before)
 	ret0, _ := ret[0].(*model.LastMessagePreview)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(*model.LastMessagePointer)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // FetchLastMessage indicates an expected call of FetchLastMessage.
-func (mr *MockLastMessageFetcherMockRecorder) FetchLastMessage(ctx, roomID any) *gomock.Call {
+func (mr *MockLastMessageFetcherMockRecorder) FetchLastMessage(ctx, roomID, before any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchLastMessage", reflect.TypeOf((*MockLastMessageFetcher)(nil).FetchLastMessage), ctx, roomID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchLastMessage", reflect.TypeOf((*MockLastMessageFetcher)(nil).FetchLastMessage), ctx, roomID, before)
 }

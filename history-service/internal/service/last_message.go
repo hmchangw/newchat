@@ -35,20 +35,31 @@ func (s *HistoryService) GetLastRoomMessage(c *natsrouter.Context, req pkgmodel.
 		return nil, fmt.Errorf("resolving room times for %s: %w", req.RoomID, err)
 	}
 
+	// The denormalized lastMsgAt can lag while creates sit in the caller's
+	// coalescer buffer, so a caller-supplied Before (the delete-event time)
+	// widens the ceiling to keep buffered-but-unflushed survivors inside the
+	// walk window. max(), not replace: an old Before must never shrink it.
+	if req.Before > 0 {
+		if t := time.UnixMilli(req.Before).UTC(); t.After(lastMsgAt) {
+			lastMsgAt = t
+		}
+	}
+
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
 	// +1ms so the newest row (created_at == lastMsgAt) survives the walker's
 	// strict created_at < before predicate — mirrors LoadHistory's cap.
 	before := ceiling.Add(time.Millisecond)
 
-	msg, err := s.msgReader.GetLastRoomMessage(c, req.RoomID, before, floor)
+	pointer, msg, err := s.msgReader.GetLastRoomMessage(c, req.RoomID, before, floor)
 	if err != nil {
 		return nil, fmt.Errorf("loading last room message: %w", err)
 	}
-	if msg == nil {
-		return &pkgmodel.LastRoomMessageResponse{}, nil
+	resp := &pkgmodel.LastRoomMessageResponse{Pointer: pointer}
+	if msg != nil {
+		decodeMessageAttachments(c, msg)
+		resp.LastMessage = lastMessagePreview(msg)
 	}
-	decodeMessageAttachments(c, msg)
-	return &pkgmodel.LastRoomMessageResponse{LastMessage: lastMessagePreview(msg)}, nil
+	return resp, nil
 }
 
 // lastMessagePreview projects a Cassandra row onto the shared preview shape.

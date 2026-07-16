@@ -1,10 +1,13 @@
 package model_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
 )
@@ -85,4 +88,31 @@ func TestTrimPreview(t *testing.T) {
 			assert.Equal(t, tt.want, model.TrimPreview(tt.in))
 		})
 	}
+}
+
+func TestLastMessagePointerJSON(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	p := model.LastMessagePointer{MessageID: "m-sys", CreatedAt: ts}
+	data, err := json.Marshal(p)
+	require.NoError(t, err)
+	var dst model.LastMessagePointer
+	require.NoError(t, json.Unmarshal(data, &dst))
+	assert.Equal(t, p, dst)
+}
+
+func TestLastRoomMessageResponse_PointerOmittedWhenNil(t *testing.T) {
+	data, err := json.Marshal(model.LastRoomMessageResponse{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "pointer")
+	assert.NotContains(t, string(data), "lastMessage")
+}
+
+func TestLastRoomMessageRequest_BeforeOmittedWhenZero(t *testing.T) {
+	data, err := json.Marshal(model.LastRoomMessageRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "before")
+
+	data, err = json.Marshal(model.LastRoomMessageRequest{RoomID: "r1", Before: 1751364000000})
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"before":1751364000000`)
 }

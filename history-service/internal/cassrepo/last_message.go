@@ -40,17 +40,27 @@ var lastMessageSkipTypes = func() map[string]struct{} {
 }()
 
 // GetLastRoomMessage walks messages_by_room newest→oldest from before down to
-// floor and returns the first row that is neither soft-deleted nor a
-// system-type message, decrypted like every other read. Returns (nil, nil)
-// when no qualifying row exists within the bounds (all deleted/system, empty
-// room, or maxBuckets exhausted). Unlike the paginated readers it does not use
-// fillPage: there is no cursor to hand back, and gocql's iterator already
-// drains a bucket transparently page by page.
-func (r *Repository) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*models.Message, error) {
+// floor and resolves two values in one pass:
+//
+//   - pointer: the first row that is neither soft-deleted nor a
+//     removed-parent placeholder — system notices INCLUDED. This is the value
+//     rooms.{lastMsgId,lastMsgAt} track for room sorting.
+//   - message: the first row that additionally is not a system type — the
+//     preview row, decrypted like every other read.
+//
+// Returns (nil, nil, nil) when nothing qualifies within the bounds (all
+// deleted/removed, empty room, budget or maxBuckets exhausted); a non-nil
+// pointer with a nil message means only system messages survive. A row older
+// than floor terminates the walk — DESC order proves nothing newer remains,
+// so out-of-window history can never leak out. Unlike the paginated readers
+// it does not use fillPage: there is no cursor to hand back, and gocql's
+// iterator already drains a bucket transparently page by page.
+func (r *Repository) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*model.LastMessagePointer, *models.Message, error) {
 	floorBucket := r.bucket.Of(floor)
 	bucket := r.bucket.Of(before)
 
 	remaining := lastMessageScanMaxRows
+	var pointer *model.LastMessagePointer
 	for walked := 0; walked < r.maxBuckets && bucket >= floorBucket && remaining > 0; walked++ {
 		var q *gocql.Query
 		if walked == 0 {
@@ -66,55 +76,77 @@ func (r *Repository) GetLastRoomMessage(ctx context.Context, roomID string, befo
 		}
 
 		iter := q.WithContext(ctx).PageSize(lastMessageScanPageSize).Iter()
-		found, err := r.scanFirstQualifying(ctx, iter, &remaining)
+		ptr, found, stop, err := r.scanBucket(ctx, iter, floor, &remaining, pointer == nil)
 		if err != nil {
-			return nil, fmt.Errorf("get last room message: scan bucket %d: %w", bucket, err)
+			return nil, nil, fmt.Errorf("get last room message: scan bucket %d: %w", bucket, err)
+		}
+		if pointer == nil {
+			pointer = ptr
 		}
 		if found != nil {
-			return found, nil
+			return pointer, found, nil
+		}
+		if stop {
+			break
 		}
 		bucket = r.bucket.Prev(bucket)
 	}
-	return nil, nil
+	return pointer, nil, nil
 }
 
-// scanFirstQualifying drains iter until it hits the first non-deleted,
-// non-system row, decrypts it, and returns it; (nil, nil) when the bucket has
-// no qualifying row. Skipped rows are filtered on the plaintext deleted/type
-// columns, so only the winning row pays a decrypt. Every examined row spends
-// one unit of *remaining; when the budget hits zero the scan stops early —
-// the caller degrades to "no preview".
-func (r *Repository) scanFirstQualifying(ctx context.Context, iter *gocql.Iter, remaining *int) (*models.Message, error) {
-	for *remaining > 0 {
+// scanBucket drains iter resolving the pointer row (first non-deleted,
+// non-removed row of any type — captured only while needPointer) and the
+// preview row (first row additionally not a system type), decrypting only
+// the preview winner. Skipped rows are filtered on the plaintext deleted/type
+// columns. Every examined row spends one unit of *remaining. stop=true ends
+// the whole walk: the budget ran out, or a row older than floor was seen
+// (DESC order — everything after is older still).
+func (r *Repository) scanBucket(ctx context.Context, iter *gocql.Iter, floor time.Time, remaining *int, needPointer bool) (ptr *model.LastMessagePointer, found *models.Message, stop bool, err error) {
+	for {
+		if *remaining <= 0 {
+			if closeErr := iter.Close(); closeErr != nil {
+				return ptr, nil, true, fmt.Errorf("close iterator: %w", closeErr)
+			}
+			return ptr, nil, true, nil
+		}
 		var m models.Message
-		ok, err := structScan(iter, &m)
-		if err != nil {
+		ok, scanErr := structScan(iter, &m)
+		if scanErr != nil {
 			// Preserve any transport error alongside the scan failure.
 			if closeErr := iter.Close(); closeErr != nil {
-				return nil, fmt.Errorf("close after scan failure (%w): %w", err, closeErr)
+				return ptr, nil, false, fmt.Errorf("close after scan failure (%w): %w", scanErr, closeErr)
 			}
-			return nil, err
+			return ptr, nil, false, scanErr
 		}
 		if !ok {
 			break
 		}
 		*remaining--
-		if m.Deleted {
+		if m.CreatedAt.Before(floor) {
+			if closeErr := iter.Close(); closeErr != nil {
+				return ptr, nil, true, fmt.Errorf("close iterator: %w", closeErr)
+			}
+			return ptr, nil, true, nil
+		}
+		if m.Deleted || m.Type == MessageTypeRemoved {
 			continue
+		}
+		if needPointer && ptr == nil {
+			ptr = &model.LastMessagePointer{MessageID: m.MessageID, CreatedAt: m.CreatedAt}
 		}
 		if _, skip := lastMessageSkipTypes[m.Type]; skip {
 			continue
 		}
 		if closeErr := iter.Close(); closeErr != nil {
-			return nil, fmt.Errorf("close iterator: %w", closeErr)
+			return ptr, nil, false, fmt.Errorf("close iterator: %w", closeErr)
 		}
-		if err := r.decryptIfNeeded(ctx, &m); err != nil {
-			return nil, fmt.Errorf("decrypt last-message row: %w", err)
+		if decErr := r.decryptIfNeeded(ctx, &m); decErr != nil {
+			return ptr, nil, false, fmt.Errorf("decrypt last-message row: %w", decErr)
 		}
-		return &m, nil
+		return ptr, &m, false, nil
 	}
-	if err := iter.Close(); err != nil {
-		return nil, fmt.Errorf("close iterator: %w", err)
+	if closeErr := iter.Close(); closeErr != nil {
+		return ptr, nil, false, fmt.Errorf("close iterator: %w", closeErr)
 	}
-	return nil, nil
+	return ptr, nil, false, nil
 }
