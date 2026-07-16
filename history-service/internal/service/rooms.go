@@ -8,16 +8,16 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 const (
-	maxRoomsGetBatch        = 100 // mirrors maxGetByIDsBatchSize
-	maxRoomsGetConcurrency  = 16  // mirrors cassrepo.maxConcurrentIDReads
-	lastMessagePreviewRunes = 256 // room-list snippet cap
-	lastMsgWalkPageSize     = 50  // messages scanned per walk-back page
-	lastMsgWalkMaxPages     = 5   // ponytail: cap the deleted-tail walk; a room with >250 trailing deletes just shows no last message
+	maxRoomsGetBatch       = 100 // mirrors maxGetByIDsBatchSize
+	maxRoomsGetConcurrency = 16  // mirrors cassrepo.maxConcurrentIDReads
+	lastMsgWalkPageSize    = 50  // messages scanned per walk-back page
+	lastMsgWalkMaxPages    = 5   // ponytail: cap the deleted-tail walk; a room with >250 trailing deletes just shows no last message
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -115,16 +115,10 @@ func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now
 	return models.LastMessage{}, false // deleted tail longer than the walk cap
 }
 
-// previewContent trims a message body to a rune-bounded room-list snippet.
+// previewContent trims a message body to the shared rune-bounded room-list
+// snippet cap — the same bound broadcast-worker applies on its write paths.
 func previewContent(msg string) string {
-	if len(msg) <= lastMessagePreviewRunes {
-		return msg // bytes ≤ cap ⇒ runes ≤ cap; no alloc on the common short case
-	}
-	r := []rune(msg)
-	if len(r) <= lastMessagePreviewRunes {
-		return msg
-	}
-	return string(r[:lastMessagePreviewRunes])
+	return pkgmodel.TrimPreview(msg)
 }
 
 // dedupRoomIDs removes duplicate roomIds, preserving first-seen order.

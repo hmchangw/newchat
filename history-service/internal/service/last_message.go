@@ -52,7 +52,9 @@ func (s *HistoryService) GetLastRoomMessage(c *natsrouter.Context, req pkgmodel.
 }
 
 // lastMessagePreview projects a Cassandra row onto the shared preview shape.
-// SenderName cascades EngName → AppName (bots) → Account.
+// SenderName cascades EngName → AppName (bots) → Account. The body is trimmed
+// to the shared snippet cap (previewContent) — full content never rides the
+// RPC into Mongo and every delete event.
 func lastMessagePreview(m *models.Message) *pkgmodel.LastMessagePreview {
 	name := m.Sender.EngName
 	if name == "" {
@@ -66,7 +68,7 @@ func lastMessagePreview(m *models.Message) *pkgmodel.LastMessagePreview {
 		Type:            m.Type,
 		SenderAccount:   m.Sender.Account,
 		SenderName:      name,
-		Msg:             m.Msg,
+		Msg:             previewContent(m.Msg),
 		CreatedAt:       m.CreatedAt,
 		EditedAt:        m.EditedAt,
 		AttachmentCount: len(m.DecodedAttachments),

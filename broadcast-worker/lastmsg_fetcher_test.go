@@ -113,3 +113,23 @@ func TestHistoryLastMessageFetcher_FetchLastMessage(t *testing.T) {
 		assert.Contains(t, err.Error(), "unmarshal last room message")
 	})
 }
+
+// Decode failures must never embed reply fragments in the error: for
+// plaintext rooms the reply body IS message content, and the wrapped error is
+// logged at the jsretry boundary.
+func TestHistoryLastMessageFetcher_MalformedReply_ErrorOmitsPayload(t *testing.T) {
+	nc := startTestNATS(t)
+	siteID := "site-a"
+
+	_, err := nc.Subscribe(context.Background(), subject.MsgRoomLast(siteID), func(_ context.Context, m *nats.Msg) {
+		_ = m.Respond([]byte(`{"lastMessage": {"msg": "SECRET-CONTENT"`)) // truncated JSON carrying content
+	})
+	require.NoError(t, err)
+
+	fetcher := newHistoryLastMessageFetcher(nc, siteID)
+	got, err := fetcher.FetchLastMessage(context.Background(), "r1")
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "unmarshal last room message")
+	assert.NotContains(t, err.Error(), "SECRET-CONTENT", "decode errors must not quote the reply body")
+}

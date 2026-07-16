@@ -5,6 +5,25 @@ import (
 	"time"
 )
 
+// LastMessagePreviewMaxRunes caps a preview body: room-list snippets never
+// need full message content, and untrimmed bodies would otherwise be
+// denormalized into the hot rooms collection and every delete event. Keep in
+// sync with history-service's rooms.get snippet cap.
+const LastMessagePreviewMaxRunes = 256
+
+// TrimPreview bounds a message body to LastMessagePreviewMaxRunes runes,
+// cutting on rune boundaries.
+func TrimPreview(msg string) string {
+	if len(msg) <= LastMessagePreviewMaxRunes {
+		return msg // bytes ≤ cap ⇒ runes ≤ cap; no alloc on the common short case
+	}
+	r := []rune(msg)
+	if len(r) <= LastMessagePreviewMaxRunes {
+		return msg
+	}
+	return string(r[:LastMessagePreviewMaxRunes])
+}
+
 // LastMessagePreview is the denormalized preview of a room's newest
 // non-deleted, non-system message, embedded in room snapshots and delete
 // events so clients can refresh the room-list preview without a history

@@ -186,13 +186,20 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	clientMsg := buildClientMessage(&msg, userByAccount)
-	preview := buildLastMessagePreview(clientMsg)
-	if h.roomEncrypted(meta.Type) {
-		// Encryption failure Naks before any store write or publish —
-		// consistent with encryptRoomEvent on the same path. The key fetch is
-		// LRU-cached, so the second fetch in encryptRoomEvent is cheap.
-		if err := h.encryptPreview(ctx, meta.ID, preview); err != nil {
-			return fmt.Errorf("encrypt last message preview for room %s: %w", meta.ID, err)
+	// System messages (room lifecycle notices) advance lastMsgAt/lastMsgId —
+	// they bump room sorting — but never become the stored preview:
+	// rooms.lastMsg previews the newest NON-system message, matching the
+	// history-service walker and the docs ("system messages never appear").
+	var preview *model.LastMessagePreview
+	if !model.IsSystemMessageType(msg.Type) {
+		preview = buildLastMessagePreview(clientMsg)
+		if h.roomEncrypted(meta.Type) {
+			// Encryption failure Naks before any store write or publish —
+			// consistent with encryptRoomEvent on the same path. The key fetch is
+			// LRU-cached, so the second fetch in encryptRoomEvent is cheap.
+			if err := h.encryptPreview(ctx, meta.ID, preview); err != nil {
+				return fmt.Errorf("encrypt last message preview for room %s: %w", meta.ID, err)
+			}
 		}
 	}
 
@@ -321,23 +328,32 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	// Encrypted rooms: the content ciphertext is computed once and reused for
-	// both the store patch and the published event (same roomcrypto envelope).
+	// The event carries the FULL edited content (clients replace the message
+	// body); the stored preview carries the trimmed snippet. Encrypted rooms
+	// seal each form — when the trim is a no-op (content within the cap, the
+	// common case) the ciphertext is computed once and reused for both.
 	// Encryption failure Naks before the store write or publish.
-	newPreviewMsg := msg.Content
-	var encMsg json.RawMessage
+	newPreviewMsg := model.TrimPreview(msg.Content)
+	var encMsg, encPreviewMsg json.RawMessage
 	if h.roomEncrypted(room.Type) {
 		encMsg, err = h.encryptPreviewContent(ctx, room.ID, msg.Content)
 		if err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
 		}
+		encPreviewMsg = encMsg
+		if newPreviewMsg != msg.Content {
+			encPreviewMsg, err = h.encryptPreviewContent(ctx, room.ID, newPreviewMsg)
+			if err != nil {
+				return fmt.Errorf("encrypt edit preview for room %s: %w", room.ID, err)
+			}
+		}
 		newPreviewMsg = ""
 	}
 
 	// Patch the denormalized rooms.lastMsg preview if the edited message is
-	// still the room's latest (guarded in the store; miss is a no-op). Runs
+	// still the previewed one (guarded in the store; miss is a no-op). Runs
 	// before the publish so a Mongo failure Naks before clients saw the edit.
-	if err := h.store.SetRoomLastMessageEdited(ctx, msg.RoomID, msg.ID, newPreviewMsg, encMsg, *msg.EditedAt); err != nil {
+	if err := h.store.SetRoomLastMessageEdited(ctx, msg.RoomID, msg.ID, newPreviewMsg, encPreviewMsg, *msg.EditedAt); err != nil {
 		return fmt.Errorf("set room last message edited %s: %w", msg.RoomID, err)
 	}
 
@@ -537,21 +553,31 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	// Fetch the surviving preview BEFORE any publish: an error Naks the whole
-	// event (deliberate — every delivered delete event carries the preview).
-	// A nil survivor is the valid "room has no messages left" signal.
-	survivor, err := h.lastMsgFetcher.FetchLastMessage(ctx, msg.RoomID)
-	if err != nil {
-		return fmt.Errorf("fetch last message for room %s: %w", msg.RoomID, err)
-	}
-
-	// Encrypted rooms: transform the survivor in place (EncMsg ciphertext, Msg
-	// blanked) BEFORE any write, so the same preview object feeds both the
-	// Mongo rewind and the published event — one ciphertext, two destinations.
-	// Encryption failure Naks; nothing has been written or published yet.
-	if survivor != nil && h.roomEncrypted(room.Type) {
-		if err := h.encryptPreview(ctx, room.ID, survivor); err != nil {
-			return fmt.Errorf("encrypt last message preview for room %s: %w", room.ID, err)
+	// Resolve the surviving preview BEFORE any publish: an error Naks the
+	// whole event (deliberate — every delivered delete event carries the
+	// preview). A nil survivor is the valid "room has no messages left"
+	// signal. The history RPC is skipped when the stored preview already
+	// identifies the survivor: neither pointer targets the deleted message,
+	// so the preview cannot change and IS the survivor (already trimmed, and
+	// already in wire form — EncMsg — for encrypted rooms). Legacy rooms
+	// (lastMsgId set pre-feature, no lastMsg subdoc) fall back to the fetch.
+	var survivor *model.LastMessagePreview
+	if room.LastMsg != nil && room.LastMsgID != msg.ID && room.LastMsg.MessageID != msg.ID {
+		survivor = room.LastMsg
+	} else {
+		survivor, err = h.lastMsgFetcher.FetchLastMessage(ctx, msg.RoomID)
+		if err != nil {
+			return fmt.Errorf("fetch last message for room %s: %w", msg.RoomID, err)
+		}
+		// Encrypted rooms: transform the fetched survivor in place (EncMsg
+		// ciphertext, Msg blanked) BEFORE any write, so the same preview object
+		// feeds both the Mongo rewind and the published event — one ciphertext,
+		// two destinations. Encryption failure Naks; nothing has been written
+		// or published yet.
+		if survivor != nil && h.roomEncrypted(room.Type) {
+			if err := h.encryptPreview(ctx, room.ID, survivor); err != nil {
+				return fmt.Errorf("encrypt last message preview for room %s: %w", room.ID, err)
+			}
 		}
 	}
 
@@ -1023,14 +1049,15 @@ func previewSenderName(cm *model.ClientMessage) string {
 // buildLastMessagePreview projects a just-created ClientMessage onto the
 // denormalized rooms.lastMsg preview, always in plaintext form — encrypted
 // rooms transform it afterwards via encryptPreview (EncMsg set, Msg blanked)
-// so plaintext content never lands in Mongo.
+// so plaintext content never lands in Mongo. The body is trimmed to the
+// shared snippet cap — previews never carry full message content.
 func buildLastMessagePreview(cm *model.ClientMessage) *model.LastMessagePreview {
 	return &model.LastMessagePreview{
 		MessageID:       cm.ID,
 		Type:            cm.Type,
 		SenderAccount:   cm.UserAccount,
 		SenderName:      previewSenderName(cm),
-		Msg:             cm.Content,
+		Msg:             model.TrimPreview(cm.Content),
 		CreatedAt:       cm.CreatedAt,
 		AttachmentCount: len(cm.Attachments),
 	}

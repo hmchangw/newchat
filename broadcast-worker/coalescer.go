@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -62,6 +63,11 @@ func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStor
 
 // UpdateRoomLastMessage buffers the update. Always returns nil; the buffered
 // write is performed asynchronously by Flush.
+//
+// A nil preview (system message) advances the pointer but must NOT clobber a
+// buffered user preview: the flush then lands the drift state
+// {lastMsgId: system, lastMsg: newest user message}, mirroring what the
+// direct (non-coalesced) writes produce.
 func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool, preview *model.LastMessagePreview) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -69,13 +75,68 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID
 	if at.After(cur.at) {
 		cur.msgID = msgID
 		cur.at = at
-		cur.preview = preview
+		if preview != nil {
+			cur.preview = preview
+		}
 	}
 	if mentionAll && at.After(cur.lastMentionAllAt) {
 		cur.lastMentionAllAt = at
 	}
 	c.pending[roomID] = cur
 	return nil
+}
+
+// RewindRoomLastMessage reconciles the pending buffer with a delete BEFORE
+// delegating the guarded Mongo rewind: the flush write is unguarded, so a
+// buffered create of the deleted message would otherwise resurrect its
+// preview (full content) right after the rewind removed it.
+func (c *coalescingStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+	c.mu.Lock()
+	if cur, ok := c.pending[roomID]; ok {
+		switch {
+		case cur.msgID == deletedMsgID:
+			if survivor != nil {
+				cur.msgID = survivor.MessageID
+				cur.at = survivor.CreatedAt
+				cur.preview = survivor
+				c.pending[roomID] = cur
+			} else {
+				// Room emptied: drop the entry. A pending lastMentionAllAt is
+				// dropped with it — decorative, and the delegate clears the
+				// room's pointer fields anyway.
+				delete(c.pending, roomID)
+			}
+		case cur.preview != nil && cur.preview.MessageID == deletedMsgID:
+			// Drift: a newer (system) message owns the buffered pointer but
+			// the buffered preview still shows the deleted message. Carry the
+			// survivor instead (nil leaves the delegate's preview rewind in
+			// place — the flush then writes no lastMsg field at all).
+			cur.preview = survivor
+			c.pending[roomID] = cur
+		}
+	}
+	c.mu.Unlock()
+	return c.Store.RewindRoomLastMessage(ctx, roomID, deletedMsgID, survivor, updatedAt)
+}
+
+// SetRoomLastMessageEdited patches a buffered preview of the edited message
+// BEFORE delegating the guarded Mongo patch: if the create is still buffered,
+// the Mongo guard misses (benign) and the flush must carry the post-edit body
+// instead of the stale one. The buffered preview is copied, never mutated in
+// place — the original pointer may already have been published.
+func (c *coalescingStore) SetRoomLastMessageEdited(ctx context.Context, roomID, editedMsgID, newMsg string, encMsg json.RawMessage, editedAt time.Time) error {
+	c.mu.Lock()
+	if cur, ok := c.pending[roomID]; ok && cur.preview != nil && cur.preview.MessageID == editedMsgID {
+		patched := *cur.preview
+		patched.Msg = newMsg
+		patched.EncMsg = encMsg
+		at := editedAt
+		patched.EditedAt = &at
+		cur.preview = &patched
+		c.pending[roomID] = cur
+	}
+	c.mu.Unlock()
+	return c.Store.SetRoomLastMessageEdited(ctx, roomID, editedMsgID, newMsg, encMsg, editedAt)
 }
 
 // Flush drains the pending buffer and writes it via the bulk writer. Safe to

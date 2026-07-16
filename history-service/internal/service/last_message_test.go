@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,4 +163,32 @@ func TestHistoryService_GetLastRoomMessage_RoomNotFound(t *testing.T) {
 	assert.Nil(t, resp.LastMessage)
 
 	_ = msgs // absence of expectations asserts the repo is never touched
+}
+
+// Preview bodies are room-list snippets: the service edge must trim to the
+// shared rune cap so full message bodies never ride the RPC into Mongo and
+// every delete event.
+func TestHistoryService_GetLastRoomMessage_TrimsPreviewContent(t *testing.T) {
+	svc, msgs, rooms := newLastMsgService(t)
+
+	lastMsgAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	createdAt := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Millisecond)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(lastMsgAt, createdAt, nil)
+
+	long := strings.Repeat("測", pkgmodel.LastMessagePreviewMaxRunes+44)
+	msgs.EXPECT().
+		GetLastRoomMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
+		Return(&models.Message{
+			MessageID: "m1", RoomID: "r1",
+			Sender:    models.Participant{Account: "alice", EngName: "Alice"},
+			Msg:       long,
+			CreatedAt: lastMsgAt,
+		}, nil)
+
+	resp, err := svc.GetLastRoomMessage(testContext(), pkgmodel.LastRoomMessageRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	require.NotNil(t, resp.LastMessage)
+	got := resp.LastMessage.Msg
+	assert.Equal(t, pkgmodel.LastMessagePreviewMaxRunes, len([]rune(got)), "preview trimmed to the rune cap")
+	assert.Equal(t, strings.Repeat("測", pkgmodel.LastMessagePreviewMaxRunes), got, "trim must cut on rune boundaries")
 }

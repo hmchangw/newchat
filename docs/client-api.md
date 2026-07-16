@@ -852,8 +852,8 @@ the previewed message, not event times.
 | `type` | string | Optional. Message type; omitted for regular messages (system messages never appear as previews). |
 | `senderAccount` | string | The sender's account. |
 | `senderName` | string | Optional. Render-ready sender display name. |
-| `msg` | string | Optional. Plaintext message body; omitted when empty. In encrypted channel rooms it is omitted and `encMsg` carries the content instead. |
-| `encMsg` | [EncryptedMessage](#encryptedmessage) | Optional. Encrypted channel rooms only. Encrypted envelope of the content (same format as `encryptedNewContent` — decrypt with the room key); when present, `msg` is omitted. Both absent for content-less messages (e.g. attachment-only). |
+| `msg` | string | Optional. Plaintext message body, trimmed to 256 runes (a room-list snippet, never the full content); omitted when empty. In encrypted channel rooms it is omitted and `encMsg` carries the content instead. |
+| `encMsg` | [EncryptedMessage](#encryptedmessage) | Optional. Encrypted channel rooms only. Encrypted envelope of the content (same format as `encryptedNewContent` — decrypt with the room key); the sealed plaintext is the same 256-rune snippet as `msg`. When present, `msg` is omitted. Both absent for content-less messages (e.g. attachment-only). |
 | `createdAt` | RFC3339 timestamp | When the previewed message was created. |
 | `editedAt` | RFC3339 timestamp | Optional. Present when the previewed message was edited. |
 | `attachmentCount` | number | Optional. Number of attachments; omitted when 0. |
@@ -5501,7 +5501,7 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
    - **The cipher is identical for both event kinds (same `roomcrypto` AES-256-GCM seal); only the plaintext payload differs**, because each event encrypts exactly what the client needs:
      - **`encryptedMessage`** (new message) decrypts to a UTF-8-encoded JSON `ClientMessage` — a brand-new message the client has never seen, so the whole object (sender, timestamps, thread/quote fields) is sealed.
      - **`encryptedNewContent`** (edit) decrypts to a plain UTF-8 content **string** — the client already has the original message rendered, and an edit only replaces its `content`, so just the new body is sealed (the surrounding message metadata is unchanged and already known).
-     - **`lastMessage.encMsg`** (last-message preview) decrypts to a plain UTF-8 content **string** — same envelope as `encryptedNewContent`; the preview's metadata (sender, timestamps, `attachmentCount`) stays plaintext, only the content is sealed.
+     - **`lastMessage.encMsg`** (last-message preview) decrypts to a plain UTF-8 content **string** trimmed to 256 runes (the room-list snippet, not the full body) — same envelope as `encryptedNewContent`; the preview's metadata (sender, timestamps, `attachmentCount`) stays plaintext, only the content is sealed.
 3. Retain past versions to support history scrolling. The server retains the previous version in its store for at least `ROOM_KEY_GRACE_PERIOD` (default 24h); after that, server-side decryption of old messages may not be possible, but clients holding old keys can still decrypt locally.
 
 #### When clients receive `RoomKeyEvent`s

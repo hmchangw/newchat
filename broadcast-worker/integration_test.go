@@ -761,3 +761,107 @@ func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
+
+// Drift state: a system message owns lastMsgId/lastMsgAt, while lastMsg still
+// previews an older user message. Deleting that user message must replace ONLY
+// the preview — the pointer pair keeps tracking the newest message (including
+// system notices).
+func TestBroadcastWorker_RewindRoomLastMessage_DriftPreviewOnly_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	sysAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	userAt := sysAt.Add(-time.Minute)
+	deletedAt := sysAt.Add(time.Minute)
+	seedDriftRoom := func(t *testing.T, id string) {
+		t.Helper()
+		_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+			"_id": id, "type": model.RoomTypeChannel, "siteId": "site-a",
+			"lastMsgId": "m-sys", "lastMsgAt": sysAt,
+			"lastMsg": model.LastMessagePreview{MessageID: "m-user", SenderAccount: "alice", Msg: "bye", CreatedAt: userAt},
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("survivor replaces the preview, pointer untouched", func(t *testing.T) {
+		seedDriftRoom(t, "r-drift-1")
+		survivorAt := userAt.Add(-time.Hour)
+		survivor := &model.LastMessagePreview{MessageID: "m-prev", SenderAccount: "bob", Msg: "still here", CreatedAt: survivorAt}
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-drift-1", "m-user", survivor, deletedAt))
+
+		var room model.Room
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-drift-1"}).Decode(&room))
+		assert.Equal(t, "m-sys", room.LastMsgID, "lastMsgId keeps tracking the newest (system) message")
+		require.NotNil(t, room.LastMsgAt)
+		assert.WithinDuration(t, sysAt, *room.LastMsgAt, time.Millisecond, "lastMsgAt untouched")
+		require.NotNil(t, room.LastMsg)
+		assert.Equal(t, "m-prev", room.LastMsg.MessageID)
+	})
+
+	t.Run("nil survivor unsets the preview, pointer untouched", func(t *testing.T) {
+		seedDriftRoom(t, "r-drift-2")
+
+		require.NoError(t, store.RewindRoomLastMessage(ctx, "r-drift-2", "m-user", nil, deletedAt))
+
+		var raw bson.M
+		require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-drift-2"}).Decode(&raw))
+		assert.Equal(t, "m-sys", raw["lastMsgId"])
+		_, hasAt := raw["lastMsgAt"]
+		assert.True(t, hasAt, "lastMsgAt untouched")
+		_, hasPreview := raw["lastMsg"]
+		assert.False(t, hasPreview, "lastMsg must be unset")
+	})
+}
+
+// Pre-rollout rooms have lastMsgId but no lastMsg subdoc: the edit patch must
+// no-op instead of fabricating a partial preview missing
+// messageId/senderAccount/createdAt.
+func TestBroadcastWorker_SetRoomLastMessageEdited_LegacyRoomWithoutPreview_NoOp_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	lastAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+		"_id": "r-legacy-1", "type": model.RoomTypeChannel, "siteId": "site-a",
+		"lastMsgId": "m-last", "lastMsgAt": lastAt,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.SetRoomLastMessageEdited(ctx, "r-legacy-1", "m-last", "rewritten", nil, lastAt.Add(time.Minute)))
+
+	var raw bson.M
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-legacy-1"}).Decode(&raw))
+	_, hasPreview := raw["lastMsg"]
+	assert.False(t, hasPreview, "no partial lastMsg may be fabricated on a legacy room")
+}
+
+// Drift state edit: the previewed user message is edited while a newer system
+// message owns lastMsgId — the preview must still be patched.
+func TestBroadcastWorker_SetRoomLastMessageEdited_DriftPreviewPatched_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	sysAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	userAt := sysAt.Add(-time.Minute)
+	editedAt := sysAt.Add(time.Minute)
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+		"_id": "r-drift-ed", "type": model.RoomTypeChannel, "siteId": "site-a",
+		"lastMsgId": "m-sys", "lastMsgAt": sysAt,
+		"lastMsg": model.LastMessagePreview{MessageID: "m-user", SenderAccount: "alice", Msg: "original", CreatedAt: userAt},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.SetRoomLastMessageEdited(ctx, "r-drift-ed", "m-user", "rewritten", nil, editedAt))
+
+	var room model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-drift-ed"}).Decode(&room))
+	assert.Equal(t, "m-sys", room.LastMsgID, "pointer untouched")
+	require.NotNil(t, room.LastMsg)
+	assert.Equal(t, "rewritten", room.LastMsg.Msg)
+	require.NotNil(t, room.LastMsg.EditedAt)
+	assert.WithinDuration(t, editedAt, *room.LastMsg.EditedAt, time.Millisecond)
+}

@@ -237,3 +237,24 @@ func TestRepository_GetLastRoomMessage_EmptyRoomReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
+
+// A deleted tail longer than the total row-scan budget must abort the walk
+// with (nil, nil) — matching the rooms.get ponytail precedent — instead of
+// draining arbitrarily deep partitions on every delete fan-out.
+func TestRepository_GetLastRoomMessage_RowScanCapAbortsDeepTombstoneTail(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	roomID := "r-last-rowcap"
+	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
+	// Survivor buried one row deeper than the budget allows.
+	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "too deep to find")
+	for i := 0; i < lastMessageScanMaxRows+1; i++ {
+		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%04d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
+	}
+
+	got, err := repo.GetLastRoomMessage(ctx, roomID, base.Add(time.Hour), base.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Nil(t, got, "row budget exhausted must degrade to no preview, never keep scanning")
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -792,4 +793,379 @@ func TestBuildLastMessagePreview_CountsAttachments(t *testing.T) {
 	assert.Equal(t, "with files", p.Msg)
 	assert.Empty(t, p.EncMsg, "buildLastMessagePreview always builds the plaintext form")
 	assert.Equal(t, 2, p.AttachmentCount)
+}
+
+// System messages advance lastMsgAt/lastMsgId (room sorting) but must never
+// become the stored rooms.lastMsg preview — the field's contract is "newest
+// non-system message" and the docs promise system messages never appear.
+func TestHandleCreated_SystemMessage_NoPreviewStored(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, nil).Return(nil)
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Type:    model.MessageTypeMembersAdded,
+			Content: "sender added bob", CreatedAt: msgTime,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+	require.Len(t, pub.records, 1, "the system message itself still broadcasts")
+}
+
+// Encrypted channel + system message: no preview means no preview key fetch —
+// exactly one Get for the room-event encryption.
+func TestHandleCreated_SystemMessage_EncryptedChannel_NoPreviewKeyFetch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	key := testRoomKey(t)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
+
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, nil).Return(nil)
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Type:    model.MessageTypeRoomRenamed,
+			Content: "renamed to General", CreatedAt: msgTime,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+}
+
+func TestHandleCreated_PreviewContentTrimmedToRuneCap(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	long := strings.Repeat("測", model.LastMessagePreviewMaxRunes+44)
+
+	var gotPreview *model.LastMessagePreview
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, _ time.Time, _ bool, p *model.LastMessagePreview) error {
+			gotPreview = p
+			return nil
+		})
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", long, msgTime)))
+
+	require.NotNil(t, gotPreview)
+	assert.Equal(t, strings.Repeat("測", model.LastMessagePreviewMaxRunes), gotPreview.Msg,
+		"stored preview is a snippet, not the full body")
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.RoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotNil(t, roomEvt.Message)
+	assert.Equal(t, long, roomEvt.Message.Content, "the room event keeps the FULL content — only the preview is trimmed")
+}
+
+func TestHandleUpdated_LongEdit_PatchTrimmed_EventKeepsFullContent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
+
+	long := strings.Repeat("y", model.LastMessagePreviewMaxRunes+50)
+	edited := time.Date(2026, 7, 1, 12, 5, 0, 0, time.UTC)
+	store.EXPECT().SetRoomLastMessageEdited(gomock.Any(), roomID, "msg-1",
+		strings.Repeat("y", model.LastMessagePreviewMaxRunes), json.RawMessage(nil), edited).Return(nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventUpdated,
+		SiteID:    "site-a",
+		Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content:   long,
+			CreatedAt: edited.Add(-time.Hour),
+			EditedAt:  &edited, UpdatedAt: &edited,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	assert.Equal(t, long, roomEvt.NewContent, "clients replace the message body — never a snippet")
+}
+
+// Long encrypted edit: the event ciphertext seals the FULL content, the store
+// patch seals the trimmed snippet — two distinct envelopes.
+func TestHandleUpdated_EncryptedChannel_LongEdit_DistinctPreviewCiphertext(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	key := testRoomKey(t)
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
+	keyStore.EXPECT().Get(gomock.Any(), roomID).Return(key, nil).Times(2)
+
+	long := strings.Repeat("z", model.LastMessagePreviewMaxRunes+50)
+	edited := time.Date(2026, 7, 1, 12, 5, 0, 0, time.UTC)
+	var storedEnc json.RawMessage
+	store.EXPECT().SetRoomLastMessageEdited(gomock.Any(), roomID, "msg-1", "", gomock.Any(), edited).
+		DoAndReturn(func(_ context.Context, _, _, _ string, encMsg json.RawMessage, _ time.Time) error {
+			storedEnc = encMsg
+			return nil
+		})
+
+	evt := model.MessageEvent{
+		Event:     model.EventUpdated,
+		SiteID:    "site-a",
+		Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content:   long,
+			CreatedAt: edited.Add(-time.Hour),
+			EditedAt:  &edited, UpdatedAt: &edited,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, defaultLastMsgFetcher, true)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.NotEmpty(t, storedEnc)
+	var env roomcrypto.EncryptedMessage
+	require.NoError(t, json.Unmarshal(storedEnc, &env))
+	plaintext, err := decryptForTest(&env, key.KeyPair.PrivateKey)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("z", model.LastMessagePreviewMaxRunes), plaintext,
+		"the stored preview envelope seals the trimmed snippet")
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotEmpty(t, roomEvt.EncryptedNewContent)
+	var evEnv roomcrypto.EncryptedMessage
+	require.NoError(t, json.Unmarshal(roomEvt.EncryptedNewContent, &evEnv))
+	evPlain, err := decryptForTest(&evEnv, key.KeyPair.PrivateKey)
+	require.NoError(t, err)
+	assert.Equal(t, long, evPlain, "the event envelope seals the FULL content")
+}
+
+// The delete-path RPC is skipped when the stored preview already identifies
+// the survivor: neither pointer targets the deleted message, so the preview
+// cannot change and IS the survivor.
+func TestHandleDeleted_StoredPreviewIdentifiesSurvivor_SkipsFetch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	stored := &model.LastMessagePreview{MessageID: "m-last", SenderAccount: "bob", Msg: "current last", CreatedAt: deletedAt.Add(-time.Minute)}
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "m-last", LastMsg: stored}
+	fetcher := &stubLastMsgFetcher{}
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", stored, deletedAt).Return(nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
+
+	assert.Equal(t, 0, fetcher.calls, "a non-latest delete must not pay the history RPC")
+	require.Len(t, pub.records, 1)
+	var roomEvt model.DeleteRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotNil(t, roomEvt.LastMessage)
+	assert.Equal(t, "m-last", roomEvt.LastMessage.MessageID, "the stored preview is the survivor")
+}
+
+// Drift: lastMsgId tracks a newer system message, but the preview still shows
+// the deleted message — the survivor is unknown locally, so the RPC must run.
+func TestHandleDeleted_DriftPreviewIsDeleted_Fetches(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	survivor := survivorPreview(deletedAt.Add(-2 * time.Hour))
+	fetcher := &stubLastMsgFetcher{preview: survivor}
+	room := &model.Room{
+		ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a",
+		LastMsgID: "m-sys",
+		LastMsg:   &model.LastMessagePreview{MessageID: "msg-1", SenderAccount: "alice", Msg: "to be deleted", CreatedAt: deletedAt.Add(-time.Minute)},
+	}
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
+
+	assert.Equal(t, 1, fetcher.calls)
+	require.Len(t, pub.records, 1)
+	var roomEvt model.DeleteRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotNil(t, roomEvt.LastMessage)
+	assert.Equal(t, "m-prev", roomEvt.LastMessage.MessageID)
+}
+
+// Legacy rooms (lastMsgId set pre-feature, no lastMsg subdoc) can't identify
+// the survivor locally — fall back to the RPC.
+func TestHandleDeleted_LegacyRoomNoStoredPreview_Fetches(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	survivor := survivorPreview(deletedAt.Add(-2 * time.Hour))
+	fetcher := &stubLastMsgFetcher{preview: survivor}
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "m-other"}
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
+
+	assert.Equal(t, 1, fetcher.calls, "no stored preview: the survivor must come from history")
+}
+
+// Encrypted room, skipped fetch: the stored preview is already in wire form
+// (EncMsg sealed at create) — served as-is, no key fetch.
+func TestHandleDeleted_EncryptedRoom_StoredPreviewServedAsIs(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	enc := json.RawMessage(`{"v":1,"nonce":"bm9uY2U=","ciphertext":"c2VhbGVk"}`)
+	stored := &model.LastMessagePreview{MessageID: "m-last", SenderAccount: "bob", EncMsg: enc, CreatedAt: deletedAt.Add(-time.Minute)}
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "m-last", LastMsg: stored}
+	fetcher := &stubLastMsgFetcher{}
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", stored, deletedAt).Return(nil)
+	// No keyStore expectations: the stored ciphertext is reused, never re-sealed.
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, true)
+	require.NoError(t, h.HandleMessage(context.Background(), makeDeleteEvent("r1", deletedAt)))
+
+	assert.Equal(t, 0, fetcher.calls)
+	require.Len(t, pub.records, 1)
+	var roomEvt model.DeleteRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotNil(t, roomEvt.LastMessage)
+	assert.Empty(t, roomEvt.LastMessage.Msg)
+	assert.JSONEq(t, string(enc), string(roomEvt.LastMessage.EncMsg))
+}
+
+// Visible thread replies (TShow=true) delete through the room lane: the event
+// must carry the surviving preview AND the thread badge must still update —
+// docs/client-api.md documents both for this lane.
+func TestHandleDeleted_VisibleThreadReply_CarriesPreviewAndBadge(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	deletedAt := time.Date(2026, 7, 1, 12, 10, 0, 0, time.UTC)
+	survivor := survivorPreview(deletedAt.Add(-2 * time.Hour))
+	fetcher := &stubLastMsgFetcher{preview: survivor}
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	newTCount := 3
+	newTlm := deletedAt.Add(-30 * time.Minute)
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().RewindRoomLastMessage(gomock.Any(), "r1", "msg-1", survivor, deletedAt).Return(nil)
+
+	evt := model.MessageEvent{
+		Event:              model.EventDeleted,
+		SiteID:             "site-a",
+		Timestamp:          deletedAt.UnixMilli(),
+		NewTCount:          &newTCount,
+		NewThreadLastMsgAt: &newTlm,
+		Message: model.Message{
+			ID: "msg-1", RoomID: "r1", UserID: "u-alice", UserAccount: "alice",
+			ThreadParentMessageID: "m-parent", TShow: true,
+			CreatedAt: deletedAt.Add(-time.Hour), UpdatedAt: &deletedAt,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, fetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	assert.Equal(t, 1, fetcher.calls, "visible thread-reply deletes ride the room lane incl. the preview fetch")
+	require.Len(t, pub.records, 2, "delete event + thread badge")
+
+	assert.Equal(t, subject.RoomEvent("r1"), pub.records[0].subject)
+	var delEvt model.DeleteRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &delEvt))
+	require.NotNil(t, delEvt.LastMessage, "visible-delete lane carries lastMessage per docs")
+	assert.Equal(t, "m-prev", delEvt.LastMessage.MessageID)
+
+	assert.Equal(t, subject.RoomEvent("r1"), pub.records[1].subject)
+	var badge model.ThreadMetadataUpdatedEvent
+	require.NoError(t, json.Unmarshal(pub.records[1].data, &badge))
+	assert.Equal(t, model.RoomEventThreadMetadataUpdated, badge.Type)
+	assert.Equal(t, model.ThreadActionReplyDeleted, badge.Action)
+	assert.Equal(t, 3, badge.NewTCount)
+	assert.Equal(t, "m-parent", badge.ParentMessageID)
+	require.NotNil(t, badge.NewThreadLastMsgAt)
+	assert.True(t, badge.NewThreadLastMsgAt.Equal(newTlm))
 }

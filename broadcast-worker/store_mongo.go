@@ -132,14 +132,24 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	return nil
 }
 
-// RewindRoomLastMessage rewinds rooms.{lastMsgId,lastMsgAt,lastMsg} after a
-// delete, guarded on the room still pointing at the deleted message so a
-// concurrent newer message is never clobbered (MatchedCount==0 is a benign
-// no-op, not an error).
+// RewindRoomLastMessage rewinds the room's last-message state after a delete,
+// in two guarded phases (MatchedCount==0 on both is a benign no-op — a
+// concurrent newer message won):
+//
+//  1. The deleted message was the room's newest overall (lastMsgId matches):
+//     rewind the full trio {lastMsgId,lastMsgAt,lastMsg}.
+//  2. Drift state — a newer system message owns lastMsgId but lastMsg still
+//     previews the deleted message (system messages advance the pointer
+//     without replacing the preview): replace ONLY lastMsg; the pointer pair
+//     keeps tracking the newest message including system notices.
 //
 // Known benign race: the create-path lastMsg write is coalesced (~250ms
 // flush), so a delete arriving before the create flush of the same message
-// can leave the old pointer in place; the next event on the room self-heals it.
+// can leave the old pointer in place; the coalescer purges its buffered entry
+// (see coalescingStore.RewindRoomLastMessage) and the next event self-heals
+// the pointer. A created-event redelivered AFTER its delete can still
+// re-buffer the dead message — unchanged from the pre-preview behavior of
+// lastMsgId/lastMsgAt.
 func (m *mongoStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, survivor *model.LastMessagePreview, updatedAt time.Time) error {
 	filter := bson.M{"_id": roomID, "lastMsgId": deletedMsgID}
 	var update bson.M
@@ -158,20 +168,43 @@ func (m *mongoStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedM
 			"$unset": bson.M{"lastMsgAt": "", "lastMsg": ""},
 		}
 	}
-	if _, err := m.roomCol.UpdateOne(ctx, filter, update); err != nil {
+	res, err := m.roomCol.UpdateOne(ctx, filter, update)
+	if err != nil {
 		return fmt.Errorf("rewind room last message %s: %w", roomID, err)
+	}
+	if res.MatchedCount > 0 {
+		return nil
+	}
+
+	// Phase 2: preview-only rewind for the drift state.
+	previewFilter := bson.M{"_id": roomID, "lastMsg.messageId": deletedMsgID}
+	var previewUpdate bson.M
+	if survivor != nil {
+		previewUpdate = bson.M{"$set": bson.M{"lastMsg": survivor, "updatedAt": updatedAt}}
+	} else {
+		previewUpdate = bson.M{
+			"$set":   bson.M{"updatedAt": updatedAt},
+			"$unset": bson.M{"lastMsg": ""},
+		}
+	}
+	if _, err := m.roomCol.UpdateOne(ctx, previewFilter, previewUpdate); err != nil {
+		return fmt.Errorf("rewind room last message preview %s: %w", roomID, err)
 	}
 	return nil
 }
 
 // SetRoomLastMessageEdited patches the denormalized lastMsg preview after an
-// edit, guarded on the room still pointing at the edited message
-// (MatchedCount==0 is a benign no-op — the edited message is not the latest).
+// edit, guarded on lastMsg.messageId — the identity of the PREVIEW, not
+// lastMsgId — which covers three cases in one clause: (a) the edited message
+// is no longer previewed (benign no-op), (b) legacy rooms with lastMsgId but
+// no lastMsg subdoc (no partial preview may be fabricated), (c) drift rooms
+// where a newer system message owns lastMsgId but the preview still shows the
+// edited user message (must be patched).
 // encMsg != nil (encrypted room) $sets lastMsg.encMsg with newMsg==""; encMsg
 // == nil (plaintext room / content-less edit) $unsets lastMsg.encMsg so a
 // stale ciphertext never survives a plaintext patch.
 func (m *mongoStore) SetRoomLastMessageEdited(ctx context.Context, roomID, editedMsgID, newMsg string, encMsg json.RawMessage, editedAt time.Time) error {
-	filter := bson.M{"_id": roomID, "lastMsgId": editedMsgID}
+	filter := bson.M{"_id": roomID, "lastMsg.messageId": editedMsgID}
 	set := bson.M{"lastMsg.msg": newMsg, "lastMsg.editedAt": editedAt}
 	update := bson.M{"$set": set}
 	if encMsg != nil {

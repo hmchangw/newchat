@@ -593,6 +593,26 @@ const (
 	MessageTypeTeamsMeetStarted = "teams_meet_started"
 )
 
+// SystemMessageTypes is the canonical set of system-message Type values (room
+// lifecycle notices). Consumers that must exclude system messages — e.g.
+// last-message previews — key off this set so a newly added type cannot
+// silently leak past their filters. Ordinary user messages carry an empty Type.
+var SystemMessageTypes = map[string]struct{}{
+	MessageTypeRoomCreated:      {},
+	MessageTypeMembersAdded:     {},
+	MessageTypeMemberRemoved:    {},
+	MessageTypeMemberLeft:       {},
+	MessageTypeRoomRenamed:      {},
+	MessageTypeRoomRestricted:   {},
+	MessageTypeTeamsMeetStarted: {},
+}
+
+// IsSystemMessageType reports whether typ is a system-message type.
+func IsSystemMessageType(typ string) bool {
+	_, ok := SystemMessageTypes[typ]
+	return ok
+}
+
 const (
 	// AsyncJobStatusOK indicates a successful async job result.
 	AsyncJobStatusOK = "ok"

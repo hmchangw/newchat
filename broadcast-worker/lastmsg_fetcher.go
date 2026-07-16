@@ -56,7 +56,10 @@ func (f *historyLastMessageFetcher) FetchLastMessage(ctx context.Context, roomID
 	}
 	var resp model.LastRoomMessageResponse
 	if err := sonic.Unmarshal(msg.Data, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal last room message for room %s: %w", roomID, err)
+		// Deliberately NOT wrapped: decode errors quote reply fragments, which
+		// for plaintext rooms is message content, and this error is logged at
+		// the jsretry boundary. The byte count is enough to debug a bad reply.
+		return nil, fmt.Errorf("unmarshal last room message for room %s: malformed reply (%d bytes)", roomID, len(msg.Data))
 	}
 	return resp.LastMessage, nil
 }
