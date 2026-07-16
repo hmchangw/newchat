@@ -42,7 +42,7 @@ stages:
           - script: go test ./pkg/... -v -race -coverprofile=coverage-pkg.out
             displayName: 'Test shared packages'
 
-          - script: go test ./$(SERVICE_DIR)/... -v -race -coverprofile=coverage-sync.out
+          - script: go test ./$(SERVICE_DIR)/... -v -race -coverprofile=coverage.out
             displayName: 'Test $(IMAGE_NAME)'
 
           - script: go build -o /dev/null ./$(SERVICE_DIR)/

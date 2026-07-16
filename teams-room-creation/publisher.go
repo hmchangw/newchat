@@ -22,6 +22,13 @@ type publishFunc func(ctx context.Context, subj string, data []byte, dedupID str
 // dedupID is a deterministic Nats-Msg-Id for a batch: identical (site, chat-id
 // set) always yields the same id regardless of chat order, so a re-published
 // un-flipped batch is deduplicated server-side.
+//
+// This is best-effort, not load-bearing: JetStream's server-side dedup on
+// Nats-Msg-Id only suppresses a republish that lands within the stream's
+// Duplicates window (default ~2min) with a byte-identical chat-id set, but
+// this is a CronJob that re-runs minutes-to-hours later. The guarantee
+// against duplicate room creation is the downstream room-worker being
+// idempotent on chat id.
 func dedupID(siteID string, chatIDs []string) string {
 	sorted := append([]string(nil), chatIDs...)
 	sort.Strings(sorted)

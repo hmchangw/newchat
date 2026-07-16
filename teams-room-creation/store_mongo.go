@@ -29,9 +29,12 @@ func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 // ListChatsNeedingRoom returns every teams_chat with needCreateRoom=true,
 // projected to exactly the fields the event needs. Served by the read client.
 func (s *mongoStore) ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsChat, error) {
-	chats, err := s.readChats.FindMany(ctx, bson.M{"needCreateRoom": true}, mongoutil.WithProjection(bson.M{
-		"_id": 1, "name": 1, "members": 1, "createdDateTime": 1, "siteId": 1,
-	}))
+	// Stable _id sort so batch composition is deterministic across runs.
+	chats, err := s.readChats.FindMany(ctx, bson.M{"needCreateRoom": true},
+		mongoutil.WithProjection(bson.M{
+			"_id": 1, "name": 1, "members": 1, "createdDateTime": 1, "siteId": 1,
+		}),
+		mongoutil.WithSort(bson.D{{Key: "_id", Value: 1}}))
 	if err != nil {
 		return nil, fmt.Errorf("list chats needing room: %w", err)
 	}

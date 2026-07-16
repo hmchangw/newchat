@@ -109,6 +109,10 @@ Nats-Msg-Id = teamroom:{siteID}:{sha256-hex of sorted chat IDs in the batch}
 ```
 
 so a re-run that republishes an un-flipped batch is deduplicated server-side.
+This is best-effort across cron runs: if ops want to rely on it, the `ROOMS`
+stream's `Duplicates` window must be ≥ the CronJob interval — otherwise
+duplicate suppression rests on downstream room-worker idempotency (already
+noted out-of-scope in §9).
 
 ## 5. Store
 
