@@ -137,6 +137,12 @@ func RoomCanonical(siteID, operation string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.%s", siteID, operation)
 }
 
+// RoomCanonicalTeamsCreate returns the room-canonical subject for a batch of
+// Teams-derived room-creation events for one site. Lands in ROOMS_{siteID}.
+func RoomCanonicalTeamsCreate(siteID string) string {
+	return fmt.Sprintf("chat.room.canonical.%s.teams.create", siteID)
+}
+
 // RoomCanonicalMemberEvent returns the post-mutation member-event subject (mute-only today).
 func RoomCanonicalMemberEvent(siteID, eventType string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.event.member.%s", siteID, eventType)
