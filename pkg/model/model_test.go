@@ -4484,3 +4484,20 @@ func TestTeamsChatJSON_NeedCreateRoom(t *testing.T) {
 	assert.Contains(t, raw, "needCreateRoom", "BSON doc must have needCreateRoom key")
 	assert.Equal(t, true, raw["needCreateRoom"])
 }
+
+func TestTeamsRoomCreateEventJSON(t *testing.T) {
+	e := model.TeamsRoomCreateEvent{
+		SiteID: "site-a",
+		Chats: []model.TeamsRoomCreateChat{{
+			ID:              "chat-1",
+			Name:            "Project X",
+			CreatedDateTime: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+			Members: []model.TeamsRoomCreateMember{{
+				Account:                     "alice",
+				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			}},
+		}},
+		Timestamp: 1_700_000_000_000,
+	}
+	roundTrip(t, &e, &model.TeamsRoomCreateEvent{})
+}
