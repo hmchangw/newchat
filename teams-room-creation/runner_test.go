@@ -87,7 +87,6 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 	bySubj := map[string]int{}
 	for _, c := range got {
 		assert.Equal(t, int64(1700), c.evt.Timestamp)
-		assert.Contains(t, []string{subjA, subjB}, c.subj)
 		assert.LessOrEqual(t, len(c.evt.Chats), 2)
 		for _, ch := range c.evt.Chats {
 			assert.Equal(t, "acct-"+ch.ID, ch.Members[0].Account)

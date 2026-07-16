@@ -24,11 +24,9 @@ type syncConfig struct {
 	MaxWorkers  int
 	DefaultFrom time.Time
 	Now         func() time.Time
-	// DefaultSiteID is the fallback siteID for a chat whose vote is empty (no
-	// member found in the user cache). Sourced from required,notEmpty config, so
-	// in production it is always set and every built chat gets a non-empty
-	// siteID; the empty-vote skip in syncUser is a defensive guard that only
-	// fires under direct construction with an empty default.
+	// DefaultSiteID is the fallback siteID for a chat whose vote is empty.
+	// Required,notEmpty in production, so syncUser's empty-vote skip is only
+	// reachable via direct construction with an empty default.
 	DefaultSiteID string
 }
 
@@ -198,6 +196,8 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 	now := s.cfg.Now()
 	for _, gc := range graphChats {
 		built := buildChat(gc, cache, now, s.cfg.DefaultSiteID)
+		// Defensive: DefaultSiteID is required,notEmpty in production, so this
+		// only fires if the syncer is built with an empty default (tests).
 		if built.SiteID == "" {
 			slog.Warn("teams chat sync: siteID vote empty, skipping chat", "chatID", gc.ID, "userID", u.ID)
 			continue

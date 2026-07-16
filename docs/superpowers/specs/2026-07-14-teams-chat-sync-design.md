@@ -154,16 +154,19 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    smallest siteID (deterministic across runs). The fetching user is always a
    member and always in the cache, so there is normally ≥ 1 voter. If the vote
    is nonetheless empty (e.g. Graph returns a truncated/empty member list), the
-   chat falls back to the configured `SYNC_DEFAULT_SITE_ID`; when that is unset
-   too, the chat is **skipped with a warning** — never upserted with
-   `siteID: ""` (which `$setOnInsert` would lock in forever) — and the user is
-   marked failed so the watermark holds and the window is retried next run.
+   chat falls back to the **required** `SYNC_DEFAULT_SITE_ID`, so a synced chat
+   is always upserted with a non-empty siteID (never `siteID: ""`, which
+   `$setOnInsert` would lock in forever). A defensive skip-with-warning remains
+   for the now-impossible empty case.
 6. **Upsert** (one `BulkWrite` of upserts per Graph page, keyed on `_id`):
-   - `oneOnOne`: **all** fields under `$setOnInsert` — an existing doc is never
-     modified (oneOnOne chats never change after insert).
+   - `oneOnOne`: **all** fields under `$setOnInsert`, including
+     `needCreateRoom: true` (room-ready on first sight) — an existing doc is
+     never modified (oneOnOne chats never change after insert).
    - group/meeting: `$setOnInsert: {createdDateTime, siteId}`,
-     `$set: {name, chatType, lastUpdatedDateTime, members, needMemberSync: true,
-     updatedAt: now}`.
+     `$set: {name, chatType, lastUpdatedDateTime, needMemberSync: true,
+     needCreateRoom: false, updatedAt: now}`. `members` is **not** written —
+     teams-chat-member-sync owns the group member list and flips
+     `needCreateRoom: true` once it resolves.
    - siteID immutability is thus enforced at the DB layer; the in-memory dedup
      is an optimization, not a correctness mechanism.
 7. **Watermark.** When a user's chats are fully fetched (all pages) and
@@ -188,7 +191,7 @@ required vars.
 | `MONGO_USERNAME` / `MONGO_PASSWORD` | *(empty)* | Optional shared credentials for both clients |
 | `MAX_WORKERS` | `8` | Worker pool size |
 | `SYNC_DEFAULT_FROM` | `2026-04-01T00:00:00Z` | RFC3339 watermark for users with no `from` |
-| `SYNC_DEFAULT_SITE_ID` | *(empty)* | Fallback siteID for chats whose member vote is empty; when unset those chats are skipped with a warning |
+| `SYNC_DEFAULT_SITE_ID` | required | Fallback siteID for chats whose member vote is empty; required,notEmpty so every synced chat gets a non-empty siteID |
 | `GRAPH_CHATS_PAGE_SIZE` | `50` | `$top` page size for Graph list-chats requests (50 = Graph's documented max) |
 | `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |

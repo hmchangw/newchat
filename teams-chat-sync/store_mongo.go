@@ -90,10 +90,8 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 			"needCreateRoom":      true,
 		}})
 	}
-	// Non-oneOnOne chats defer room creation until teams-chat-member-sync has
-	// resolved the full member list: it owns `members` and flips
-	// needCreateRoom=true once done, so this sync never writes members and keeps
-	// needCreateRoom=false.
+	// Non-oneOnOne chats defer room creation to teams-chat-member-sync, which
+	// owns `members` and flips needCreateRoom=true once the member list resolves.
 	return mongoutil.UpsertModel(filter, bson.M{
 		"$setOnInsert": bson.M{
 			"createdDateTime": c.CreatedDateTime,
