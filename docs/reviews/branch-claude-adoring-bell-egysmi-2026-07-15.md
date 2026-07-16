@@ -134,3 +134,31 @@ Findings:
 - **nitpick** — single squashed commit: Red-phase ordering unverifiable from history; test content itself is TDD-shaped (behavior-first, exhaustive error paths).
 
 No shared mutable state, no ordering dependencies, `TestMain`/testutil cleanup conventions intact.
+
+---
+
+# Bug & security
+
+**SAST:** gosec PASS (no medium+ findings). govulncheck and semgrep: **environment-blocked** (proxy 403 fetching vuln DB / semgrep registry) — not code findings; must run in CI.
+
+### Findings
+
+**high — Unguarded coalescer flush resurrects deleted / pre-edit previews.**
+`broadcast-worker/store_mongo.go:108-133` (`BulkUpdateRoomLastMessage`) filters on `_id` only, while the delete rewind (`handler.go:560` → `store_mongo.go:143`) and edit patch (`handler.go:340`) are immediate guarded writes. Failure scenario: create(A) buffers `{A, preview-with-content}` in the coalescer (`coalescer.go:65-79`, 250ms interval, `main.go:45`); delete(A) processes, rewinds to survivor C and publishes the delete; the next flush unconditionally `$set`s `lastMsgId/lastMsg` back to **deleted A** — full content persists in Mongo and in every room-list fetch until the next room event (indefinitely in a quiet room). The window is not just 250ms: the MaxWorkers=100 consumer has no per-room ordering, so a NAK'd created(A) redelivered *after* deleted(A) re-buffers A seconds later. Same shape for edits: create(A)+edit(A) within one flush window → guard misses (Mongo lacks A), flush writes the **pre-edit** body although clients received the edit event. The comment at `store_mongo.go:140-142` documents only the milder "rewind no-ops" variant, not the active overwrite. Fix: have `coalescingStore` override `RewindRoomLastMessage`/`SetRoomLastMessageEdited` to purge/patch `pending[roomID]` under the same mutex.
+
+**medium — Edit patch materializes a malformed `lastMsg` on legacy rooms.**
+`store_mongo.go:173-186` guards only on `lastMsgId`; every pre-deployment room has `lastMsgId` set but no `lastMsg` subdoc. First edit-of-latest after rollout creates `lastMsg = {msg, editedAt}` — no `messageId`, `senderAccount`, zero `createdAt` — a schema-invalid preview clients will render broken. Guard on `"lastMsg.messageId": editedMsgID` (or backfill).
+
+**medium — Plaintext message content newly at rest in Mongo.**
+`handler.go:1027-1037` + `store_mongo.go` writes: for DM/BotDM rooms and channels with encryption disabled (`roomEncrypted`, `handler.go:88-90`), `rooms.lastMsg.msg` stores the body in plaintext. The same content is atrest-encrypted in Cassandra (message-worker wires `pkg/atrest`). This is a new plaintext-content-at-rest surface (Mongo backups/dumps) outside both encryption models — needs explicit sign-off or atrest treatment. Not a logging violation (no new content in logs found).
+
+**medium — Survivor preview bypasses per-member history windows.**
+`history-service/internal/service/last_message.go:17-20` is deliberately ungated, and `handler.go:564-566` fans the survivor's body out room-wide; `rooms.lastMsg` is likewise served to all members. A member whose `historySharedSince` postdates the survivor (the gate `allowedThreadMentions`/`mentionVisible` enforces elsewhere) receives content of a message they cannot fetch via history. Scenario: user joins a no-shared-history channel; newest message is deleted; their client receives the older message's body in `lastMessage`.
+
+**low — Delete fan-out now hard-depends on history-service.**
+`handler.go:543-546` NAKs every main-lane delete on any fetch error (`lastmsg_fetcher.go`, 2s timeout). A history-service outage stalls all delete deliveries to MaxDeliver and re-runs a bucket walk per redelivery. Deliberate per comment, but a new availability coupling worth a conscious ack.
+
+**nitpick — Behavior change on empty-content edits in encrypted rooms:** `handler.go:803-805` now yields neither `newContent` nor `encryptedNewContent` (old `encryptEditedContent` encrypted `""`); confirm client contract.
+
+### Verified non-issues
+`EditedAt`/`UpdatedAt` derefs are guarded (`handler.go:311, 354, 405, 527`). Cassandra queries are fully parameterized; `errcode.Parse` cannot false-positive on `LastRoomMessageResponse`. Redelivery of delete/edit is idempotent (guarded no-ops). Skip-set covers all seven system types + `MessageTypeRemoved`. The thread-lane plaintext gap (channel thread create/edit events publish plaintext under encryption) is **pre-existing and untouched** by this branch.
