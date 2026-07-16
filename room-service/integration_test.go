@@ -2068,8 +2068,8 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 	assert.Nil(t, got)
 
 	// Room "botdm": a human who has read plus a bot that never reads. Bots are
-	// not special-cased — the bot counts as an unread member, so a botDM room
-	// always resolves to nil even though the human is fully caught up.
+	// excluded from the floor, so the room resolves to the human's lastSeenAt
+	// even though the bot has no read position.
 	mustInsertSub(t, db, &model.Subscription{
 		ID: "s8", User: model.SubscriptionUser{ID: "u8", Account: "heidi"},
 		RoomID: "botdm", JoinedAt: earliest, LastSeenAt: &latest,
@@ -2079,6 +2079,56 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 		RoomID: "botdm", JoinedAt: earliest,
 	})
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "botdm")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, latest, *got, time.Second)
+
+	// Room "passive-bot": every human has read, but a bot member has never read.
+	// The bot must not freeze the floor at nil — the floor is the human MIN.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s10", User: model.SubscriptionUser{ID: "u10", Account: "ivan"},
+		RoomID: "passive-bot", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s11", User: model.SubscriptionUser{ID: "u11", Account: "judy"},
+		RoomID: "passive-bot", JoinedAt: earliest, LastSeenAt: &latest,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s12", User: model.SubscriptionUser{ID: "bot2", Account: "helper.bot", IsBot: true},
+		RoomID: "passive-bot", JoinedAt: earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "passive-bot")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// Room "bot-earlier": a bot has read EARLIER than every human. If bots were
+	// counted the floor would be the bot's (earliest) time; excluded, the floor
+	// is the human MIN (mid).
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s13", User: model.SubscriptionUser{ID: "u13", Account: "ken"},
+		RoomID: "bot-earlier", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s14", User: model.SubscriptionUser{ID: "u14", Account: "laura"},
+		RoomID: "bot-earlier", JoinedAt: earliest, LastSeenAt: &latest,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s15", User: model.SubscriptionUser{ID: "bot3", Account: "early.bot", IsBot: true},
+		RoomID: "bot-earlier", JoinedAt: earliest, LastSeenAt: &earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "bot-earlier")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// Room "bot-only": no human members. With bots excluded there are no
+	// countable subs → nil, even though the bot itself has read.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s16", User: model.SubscriptionUser{ID: "bot4", Account: "solo.bot", IsBot: true},
+		RoomID: "bot-only", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "bot-only")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 
@@ -2230,6 +2280,7 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uA", "account": "alice", "chineseName": "愛麗絲", "engName": "Alice"},
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
+		bson.M{"_id": "uD", "account": "dave.bot", "chineseName": "戴夫", "engName": "Dave"},
 	})
 	require.NoError(t, err)
 
@@ -2238,9 +2289,13 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "sA", "roomId": "r1", "u": bson.M{"_id": "uA", "account": "alice"}, "lastSeenAt": msgTime.Add(time.Hour)},
 		bson.M{"_id": "sB", "roomId": "r1", "u": bson.M{"_id": "uB", "account": "bob"}, "lastSeenAt": msgTime.Add(time.Minute)},
 		bson.M{"_id": "sC", "roomId": "r1", "u": bson.M{"_id": "uC", "account": "carol"}, "lastSeenAt": msgTime.Add(-time.Minute)},
+		// A bot that has read well past the message must never appear as a reader.
+		bson.M{"_id": "sD", "roomId": "r1", "u": bson.M{"_id": "uD", "account": "dave.bot", "isBot": true}, "lastSeenAt": msgTime.Add(30 * time.Minute)},
 	})
 	require.NoError(t, err)
 
+	// Only bob qualifies: alice is the sender, carol read before the message, and
+	// dave.bot is a bot (excluded despite having read after the message).
 	rows, err := store.ListReadReceipts(ctx, "r1", msgTime, "alice", 100)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
