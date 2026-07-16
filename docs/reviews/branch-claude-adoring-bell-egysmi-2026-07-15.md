@@ -85,3 +85,32 @@ Clean: `pkg/subject.MsgRoomLast` builder + test; Tier-1 errcode constructors, ra
 
 ## (f) Client-API docs
 Compliant. The RPC is `chat.server.*`, correctly undocumented (precedent: rooms.get; `docs/client-api.md:88` scopes server subjects out). `DeleteRoomEvent.lastMessage` + the `LastMessagePreview` shared-schema table landed in `docs/client-api.md` with plaintext and `encMsg` JSON examples; `events.md` and `request-reply.md` updated in the same PR; `newThreadLastMsgAt`'s reply_deleted population reflected in both `client-api.md:5429` and `events.md:547`. No drift among the three views.
+
+---
+
+# Go expert
+
+**Overall**: high-quality, TDD-shaped work. Tier discipline, nil-safety guards, and doc sync are all correct. Findings below.
+
+**[high] Partial `$set` fabricates a corrupt preview on legacy rooms — `broadcast-worker/store_mongo.go:173-186`**
+`SetRoomLastMessageEdited` filters only on `{_id, lastMsgId: editedMsgID}` with no guard that `lastMsg` exists. Rooms written before this feature (or rooms whose coalesced create-flush hasn't landed) have `lastMsgId` set but no `lastMsg` document. The dotted `$set {"lastMsg.msg", "lastMsg.editedAt"}` then creates a fragment missing `messageId`/`senderAccount`/`createdAt`, which BSON-decodes as a non-nil `*LastMessagePreview` with zero values (`CreatedAt` = 0001-01-01) served to clients in room snapshots. Fix: add `"lastMsg.messageId": editedMsgID` to the filter — guards existence and identity in one clause.
+
+**[medium] Divergent sender-name cascades for the same denormalized field**
+`broadcast-worker/handler.go:1013-1021` (`previewSenderName`: EngName → `UserDisplayName` → `UserAccount`) vs `history-service/internal/service/last_message.go:56-63` (`lastMessagePreview`: EngName → `AppName` → `Account`). The create path and the delete-rewind path write the same `rooms.lastMsg.senderName`, so a bot's preview name flips shape depending on which path wrote last. Align the cascades (or document why they must differ).
+
+**[medium] Delete fan-out now hard-depends on history-service — `broadcast-worker/handler.go:540-546`**
+Every visible delete blocks on a synchronous NATS RPC (Mongo read + Cassandra bucket walk behind it) and Naks on any failure, so a history-service outage halts all delete delivery with unbounded redelivery. This is deliberate and commented, and degrading is not free — the wire contract defines *absent* `lastMessage` as "clear the preview" (docs/client-api.md), so "unknown" is unrepresentable. Flagging the blast radius as a conscious trade-off the team should sign off on; a future `lastMessageUnknown` sentinel would decouple it.
+
+**[low] Documented resurrect race — `broadcast-worker/store_mongo.go:108-133, 140-142`**
+`BulkUpdateRoomLastMessage`'s unguarded `$set` can re-point the room at a just-deleted message when the delete lands before the create's ~250ms coalesced flush. Acknowledged in the comment as self-healing on the next room event; acceptable, but note a room can display a deleted preview indefinitely in an otherwise-quiet room. *(Escalated to high by the bug & security lens — see that chapter for the active-overwrite variants.)*
+
+**[low] Interface placement inconsistency — `broadcast-worker/lastmsg_fetcher.go:21-23`**
+`LastMessageFetcher` is declared beside its implementation, while sibling `ParentFetcher` sits with its consumer in `handler.go:52-57`. Same package, so the consumer-defined rule isn't breached, but move it next to `ParentFetcher` for symmetry.
+
+**[nitpick] Discarded query allocation — `history-service/internal/cassrepo/last_message.go:52-62`**
+The unbounded query is built unconditionally, then overwritten when `walked == 0`. Invert to if/else.
+
+**[nitpick] Decrypt error mislabeled by caller wrap — `history-service/internal/cassrepo/last_message.go:104-106`**
+`scanFirstQualifying` returns the `decryptIfNeeded` error bare; the sole caller (`last_message.go:65-67`) wraps everything as `"scan bucket %d"`, mislabeling a decrypt failure as a scan failure. Wrap locally (`"decrypt last-message row: %w"`). The bare `structScan` return at :90 is fine — the caller's wrap is accurate there.
+
+**Verified clean**: errcode tiering is textbook (`errcode.BadRequest` + raw infra wraps + `errors.Is(mongo.ErrNoDocuments)`, `last_message.go:19-33`; no log-and-return anywhere); nil-deref guards on `EditedAt`/`UpdatedAt` precede every deref (`handler.go:311-313, 527-529`); sonic boundary rules honored — new wire types have no map fields and are pretouch-registered (`pretouch.go:19-20`); `errcode.Parse` in the fetcher follows the existing `parent_fetcher.go:60` precedent; struct tags are camelCase json+bson with correct pointer/`omitempty`/`json.RawMessage` semantics and BSON round-trip tests (`pkg/model/lastmsg.go`); guarded rewind filter is race-sound; the double-`%w` iterator-close wrap (`last_message.go:88`) is correct Go 1.20+ usage; `docs/client-api.md` + both derived views updated per CLAUDE.md.
