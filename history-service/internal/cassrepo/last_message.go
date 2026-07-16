@@ -11,13 +11,6 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// lastMessageScanMaxRows bounds the TOTAL rows examined per walk (across
-// buckets). Product decision: the preview looks back at most 10 rows — if
-// the 10 newest candidate rows are all deleted/system, the room simply shows
-// no preview (the next real message self-heals it). Deliberately tiny: it
-// keeps the per-delete Cassandra cost near-constant, and doubles as the
-// fetch page size so a walk never transfers rows it won't examine.
-const lastMessageScanMaxRows = 10
 
 // lastMessageSkipTypes are the type values that never qualify as a room's
 // last-message preview: the canonical system set (model.SystemMessageTypes)
@@ -55,7 +48,13 @@ func (r *Repository) GetLastRoomMessage(ctx context.Context, roomID string, befo
 	floorBucket := r.bucket.Of(floor)
 	bucket := r.bucket.Of(before)
 
-	remaining := lastMessageScanMaxRows
+	// r.previewLookbackRows (MESSAGE_PREVIEW_LOOKBACK_ROWS, default 10)
+	// bounds the TOTAL rows examined across buckets: all candidates
+	// deleted/system within the budget ⇒ no preview (the next real message
+	// self-heals it). Deliberately tiny — it keeps the per-delete Cassandra
+	// cost near-constant and doubles as the fetch page size below, so a walk
+	// never transfers rows it won't examine.
+	remaining := r.previewLookbackRows
 	var pointer *model.LastMessagePointer
 	for walked := 0; walked < r.maxBuckets && bucket >= floorBucket && remaining > 0; walked++ {
 		var q *gocql.Query

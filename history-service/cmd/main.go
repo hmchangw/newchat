@@ -35,6 +35,7 @@ func checkConfig(cfg *config.Config) {
 	}{
 		{"MESSAGE_BUCKET_HOURS", cfg.MessageBucketHours},
 		{"MESSAGE_READ_MAX_BUCKETS", cfg.MessageReadMaxBuckets},
+		{"MESSAGE_PREVIEW_LOOKBACK_ROWS", cfg.PreviewLookbackRows},
 		{"MESSAGE_HISTORY_FLOOR_DAYS", cfg.MessageHistoryFloorDays},
 		{"LARGE_ROOM_THRESHOLD", cfg.LargeRoomThreshold},
 		{"MAX_PINNED_PER_ROOM", cfg.MaxPinnedPerRoom},
@@ -61,6 +62,7 @@ func main() {
 	slog.Info("message bucket configured",
 		"hours", cfg.MessageBucketHours,
 		"maxBuckets", cfg.MessageReadMaxBuckets,
+		"previewLookbackRows", cfg.PreviewLookbackRows,
 		"historyFloorDays", cfg.MessageHistoryFloorDays,
 		"largeRoomThreshold", cfg.LargeRoomThreshold,
 		"maxPinnedPerRoom", cfg.MaxPinnedPerRoom,
@@ -122,7 +124,7 @@ func main() {
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
+	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cfg.PreviewLookbackRows, cipher)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
 	roomRepo := mongorepo.NewRoomRepo(db)

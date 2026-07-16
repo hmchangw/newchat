@@ -22,9 +22,3 @@ func TestLastMessageSkipTypes_TracksModelSystemSet(t *testing.T) {
 	assert.True(t, ok, "removed-parent placeholder must stay excluded from previews")
 }
 
-// Product decision (PR #73): the preview lookback is exactly 10 rows — if the
-// 10 newest candidate rows are all deleted/system, the room shows no preview
-// rather than scanning deeper. Change deliberately, not incidentally.
-func TestLastMessageScanMaxRows_IsTen(t *testing.T) {
-	assert.Equal(t, 10, lastMessageScanMaxRows)
-}

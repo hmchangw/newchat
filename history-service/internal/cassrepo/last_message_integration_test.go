@@ -19,6 +19,10 @@ import (
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 
+// testPreviewLookback mirrors the MESSAGE_PREVIEW_LOOKBACK_ROWS default; the
+// budget-boundary tests build their repositories with it explicitly.
+const testPreviewLookback = 10
+
 // seedLastMsgRow inserts one messages_by_room row with explicit deleted/type
 // values so tests can build mixed survivor/tombstone/system partitions.
 func seedLastMsgRow(t *testing.T, session *gocql.Session, roomID, messageID string, createdAt time.Time, deleted bool, msgType, msg string) {
@@ -34,7 +38,7 @@ func seedLastMsgRow(t *testing.T, session *gocql.Session, roomID, messageID stri
 
 func TestRepository_GetLastRoomMessage_DeletedLastFallsBackToPriorSurvivor(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-deleted"
@@ -52,7 +56,7 @@ func TestRepository_GetLastRoomMessage_DeletedLastFallsBackToPriorSurvivor(t *te
 func TestRepository_GetLastRoomMessage_EditedLastCarriesCurrentContentAndEditedAt(t *testing.T) {
 	session := setupCassandra(t)
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, nil)
+	repo := NewRepository(session, sizer, 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-edited"
@@ -76,7 +80,7 @@ func TestRepository_GetLastRoomMessage_EditedLastCarriesCurrentContentAndEditedA
 
 func TestRepository_GetLastRoomMessage_AllDeletedReturnsNil(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-all-deleted"
@@ -92,7 +96,7 @@ func TestRepository_GetLastRoomMessage_AllDeletedReturnsNil(t *testing.T) {
 
 func TestRepository_GetLastRoomMessage_SystemMessageNewestIsSkipped(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-system"
@@ -109,7 +113,7 @@ func TestRepository_GetLastRoomMessage_SystemMessageNewestIsSkipped(t *testing.T
 
 func TestRepository_GetLastRoomMessage_OnlySystemAndDeletedReturnsNil(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-sys-deleted"
@@ -126,17 +130,17 @@ func TestRepository_GetLastRoomMessage_OnlySystemAndDeletedReturnsNil(t *testing
 }
 
 // Budget boundary, inclusive side: a survivor sitting right AT the lookback
-// edge (lastMessageScanMaxRows-1 tombstones above it) is still found — the
+// edge (testPreviewLookback-1 tombstones above it) is still found — the
 // budget covers the tombstones plus the survivor row itself.
 func TestRepository_GetLastRoomMessage_SurvivorAtBudgetEdgeFound(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-budget-edge"
 	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
 	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "just in reach")
-	for i := 0; i < lastMessageScanMaxRows-1; i++ {
+	for i := 0; i < testPreviewLookback-1; i++ {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%03d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
 	}
 
@@ -146,18 +150,18 @@ func TestRepository_GetLastRoomMessage_SurvivorAtBudgetEdgeFound(t *testing.T) {
 	assert.Equal(t, "m-survivor", got.MessageID)
 }
 
-// Budget boundary, exclusive side: exactly lastMessageScanMaxRows tombstones
+// Budget boundary, exclusive side: exactly testPreviewLookback tombstones
 // exhaust the lookback before the survivor — empty preview, and that's the
 // deal (the next real message self-heals it).
 func TestRepository_GetLastRoomMessage_TombstonesFillBudgetReturnsNil(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-budget-full"
 	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
 	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "one row too deep")
-	for i := 0; i < lastMessageScanMaxRows; i++ {
+	for i := 0; i < testPreviewLookback; i++ {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%03d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
 	}
 
@@ -171,7 +175,7 @@ func TestRepository_GetLastRoomMessage_TombstonesFillBudgetReturnsNil(t *testing
 // bucket boundaries (including an empty middle bucket) to reach it.
 func TestRepository_GetLastRoomMessage_SurvivorInOlderBucket(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-older-bucket"
@@ -194,7 +198,7 @@ func TestRepository_GetLastRoomMessage_SurvivorInOlderBucket(t *testing.T) {
 func TestRepository_GetLastRoomMessage_ThreadOnlyReplyDoesNotSurface(t *testing.T) {
 	session := setupCassandra(t)
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, nil)
+	repo := NewRepository(session, sizer, 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-thread-only"
@@ -228,7 +232,7 @@ func TestRepository_GetLastRoomMessage_DecryptsEncryptedSurvivor(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	roomID := "r-last-encrypted"
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
@@ -251,7 +255,7 @@ func TestRepository_GetLastRoomMessage_DecryptsEncryptedSurvivor(t *testing.T) {
 
 func TestRepository_GetLastRoomMessage_EmptyRoomReturnsNil(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
@@ -265,14 +269,14 @@ func TestRepository_GetLastRoomMessage_EmptyRoomReturnsNil(t *testing.T) {
 // draining arbitrarily deep partitions on every delete fan-out.
 func TestRepository_GetLastRoomMessage_RowScanCapAbortsDeepTombstoneTail(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-rowcap"
 	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
 	// Survivor buried one row deeper than the budget allows.
 	seedLastMsgRow(t, session, roomID, "m-survivor", base, false, "", "too deep to find")
-	for i := 0; i < lastMessageScanMaxRows+1; i++ {
+	for i := 0; i < testPreviewLookback+1; i++ {
 		seedLastMsgRow(t, session, roomID, fmt.Sprintf("m-del-%04d", i), base.Add(time.Duration(i+1)*time.Second), true, "", "gone")
 	}
 
@@ -286,7 +290,7 @@ func TestRepository_GetLastRoomMessage_RowScanCapAbortsDeepTombstoneTail(t *test
 // "no preview".
 func TestRepository_GetLastRoomMessage_RowBelowFloorNeverLeaks(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-floor-leak"
@@ -305,7 +309,7 @@ func TestRepository_GetLastRoomMessage_RowBelowFloorNeverLeaks(t *testing.T) {
 // included), while the preview skips system types — one walk, two answers.
 func TestRepository_GetLastRoomMessage_PointerIncludesSystemPreviewSkips(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-pointer"
@@ -327,7 +331,7 @@ func TestRepository_GetLastRoomMessage_PointerIncludesSystemPreviewSkips(t *test
 // sorts by the system notice but shows no snippet.
 func TestRepository_GetLastRoomMessage_OnlySystemSurvives_PointerWithoutPreview(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-sys-only"
@@ -347,7 +351,7 @@ func TestRepository_GetLastRoomMessage_OnlySystemSurvives_PointerWithoutPreview(
 // rewind the walk exists to serve.
 func TestRepository_GetLastRoomMessage_RemovedPlaceholderNeverPointer(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "r-last-removed-ptr"
