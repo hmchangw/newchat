@@ -112,6 +112,7 @@ func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.RoomRestricted(h.siteID), h.roomRestricted)
 	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), h.roomsInfoBatch)
 	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), h.threadRoomInfoBatch)
+	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), h.clearAllThreadRead)
 	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), h.ensureRoomKey)
 	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), h.createRoom)
 	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), h.teamsRoomCall)
@@ -1622,6 +1623,84 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	}
 
 	return &model.StatusReply{Status: "accepted"}, nil
+}
+
+// clearAllThreadRead clears every one of the account's thread-unread indicators on
+// this site: thread-subscription read state (lastSeenAt=now, hasMention=false) and
+// room-subscription thread-unread state (threadUnread removed, alert=false). It is
+// the per-site leaf of the user-service clear-all-thread-unread aggregator. Unlike
+// the single-thread path it deliberately skips the thread-room read-floor recompute
+// and thread_message_read fan-out (a bulk dismiss must not advance sender receipts).
+// For a cross-site user each cleared thread rides the existing thread_read event.
+func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThreadReadAllRequest) (*model.RoomThreadReadAllResponse, error) {
+	var ctx context.Context = c
+	account := strings.TrimSpace(req.Account)
+	if account == "" {
+		return nil, errcode.BadRequest("account is required")
+	}
+	c.WithLogValues("account", account)
+
+	now := time.Now().UTC()
+
+	var (
+		cleared                   []model.ThreadSubscription
+		userSiteID                string
+		clearErr, subErr, siteErr error
+	)
+	var g errgroup.Group
+	g.Go(func() error {
+		var err error
+		cleared, err = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
+		clearErr = err
+		return err
+	})
+	g.Go(func() error {
+		err := h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account)
+		subErr = err
+		return err
+	})
+	g.Go(func() error {
+		s, err := h.store.GetUserSiteID(ctx, account)
+		userSiteID, siteErr = s, err
+		return err
+	})
+	_ = g.Wait()
+	switch {
+	case clearErr != nil:
+		return nil, fmt.Errorf("clear thread subscriptions: %w", clearErr)
+	case subErr != nil:
+		return nil, fmt.Errorf("clear subscription thread-unread: %w", subErr)
+	case siteErr != nil:
+		return nil, fmt.Errorf("get user siteId: %w", siteErr)
+	}
+
+	switch {
+	case userSiteID == "":
+		slog.WarnContext(ctx, "user not found locally; skipping cross-site inbox", "account", account)
+	case userSiteID != h.siteID:
+		for i := range cleared {
+			row := &cleared[i]
+			payload := model.ThreadReadEvent{
+				Account:         account,
+				RoomID:          row.RoomID,
+				ThreadRoomID:    row.ThreadRoomID,
+				ParentMessageID: row.ParentMessageID,
+				NewThreadUnread: nil,
+				Alert:           false,
+				LastSeenAt:      now.UnixMilli(),
+				Timestamp:       now.UnixMilli(),
+			}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("marshal thread_read payload: %w", err)
+			}
+			if err := h.federateOne(ctx, row.RoomID, userSiteID, model.InboxThreadRead, data, row.ThreadRoomID+":"+account, now.UnixMilli()); err != nil {
+				return nil, fmt.Errorf("federate thread_read: %w", err)
+			}
+		}
+	}
+
+	return &model.RoomThreadReadAllResponse{ClearedThreads: len(cleared)}, nil
 }
 
 // recomputeThreadFloor fetches the thread room document, applies the

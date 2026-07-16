@@ -4021,6 +4021,89 @@ func TestHandler_MessageThreadRead_UpdateThreadSubscriptionError(t *testing.T) {
 	assert.Equal(t, 0, f.publishCalls)
 }
 
+// --- clear-all-thread-read (bulk) tests ---
+
+func unwrapThreadReadPayload(t *testing.T, outboxData []byte) model.ThreadReadEvent {
+	t.Helper()
+	var fed model.OutboxEvent
+	require.NoError(t, json.Unmarshal(outboxData, &fed))
+	var env model.InboxEvent
+	require.NoError(t, json.Unmarshal(fed.Envelope, &env))
+	require.Equal(t, model.InboxThreadRead, env.Type)
+	var ev model.ThreadReadEvent
+	require.NoError(t, json.Unmarshal(env.Payload, &ev))
+	return ev
+}
+
+func TestHandler_ClearAllThreadRead_LocalUser_NoFederation(t *testing.T) {
+	f := newThreadReadFixture(t) // fixture handler is scoped to site-a
+	rows := []model.ThreadSubscription{
+		{ThreadRoomID: "tr1", RoomID: "r1", ParentMessageID: "p1"},
+		{ThreadRoomID: "tr2", RoomID: "r2", ParentMessageID: "p2"},
+	}
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).Return(rows, nil)
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil) // user home is the handler's own site
+
+	resp, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, resp.ClearedThreads)
+	assert.Equal(t, 0, f.publishCalls) // no cross-site federation for a home-local user
+}
+
+func TestHandler_ClearAllThreadRead_RemoteUser_FederatesPerThread(t *testing.T) {
+	f := newThreadReadFixture(t)
+	rows := []model.ThreadSubscription{
+		{ThreadRoomID: "tr1", RoomID: "r1", ParentMessageID: "p1"},
+		{ThreadRoomID: "tr2", RoomID: "r2", ParentMessageID: "p2"},
+	}
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).Return(rows, nil)
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil) // remote home
+
+	resp, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, resp.ClearedThreads)
+	assert.Equal(t, 2, f.publishCalls) // one thread_read per cleared thread
+
+	ev := unwrapThreadReadPayload(t, f.publishedData) // last published payload
+	assert.Equal(t, "alice", ev.Account)
+	assert.False(t, ev.Alert)
+	assert.Empty(t, ev.NewThreadUnread)
+}
+
+func TestHandler_ClearAllThreadRead_EmptyAccount_BadRequest(t *testing.T) {
+	f := newThreadReadFixture(t)
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{}), model.RoomThreadReadAllRequest{Account: "  "})
+	require.Error(t, err)
+	assert.Equal(t, 0, f.publishCalls)
+}
+
+func TestHandler_ClearAllThreadRead_ClearThreadSubsError(t *testing.T) {
+	f := newThreadReadFixture(t)
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).
+		Return(nil, fmt.Errorf("mongo down"))
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil).AnyTimes()
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
+
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.Error(t, err)
+	assert.Equal(t, 0, f.publishCalls)
+}
+
+func TestHandler_ClearAllThreadRead_FederatePublishError(t *testing.T) {
+	f := newThreadReadFixture(t)
+	f.publishCallErr = fmt.Errorf("nats down")
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).
+		Return([]model.ThreadSubscription{{ThreadRoomID: "tr1", RoomID: "r1", ParentMessageID: "p1"}}, nil)
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil)
+
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.Error(t, err)
+	assert.Equal(t, 1, f.publishCalls)
+}
+
 // --- thread floor recompute tests ---
 
 // baseThreadRoomForFloor returns a minimal ThreadRoom with a non-zero LastMsgAt

@@ -1627,6 +1627,53 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 	return nil
 }
 
+// ClearThreadSubscriptionsForAccount marks every one of account's thread
+// subscriptions as read and returns the affected rows for federation. Projects
+// only the fields the caller federates. No order-safety guard on the source-site
+// write; the $lt guard lives on the inbox-worker side.
+func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) ([]model.ThreadSubscription, error) {
+	filter := bson.M{"userAccount": account}
+	cursor, err := s.threadSubscriptions.Find(ctx, filter, options.Find().SetProjection(bson.M{
+		"threadRoomId":    1,
+		"roomId":          1,
+		"parentMessageId": 1,
+		"_id":             0,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("find thread subscriptions for %q: %w", account, err)
+	}
+	var rows []model.ThreadSubscription
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode thread subscriptions for %q: %w", account, err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if _, err := s.threadSubscriptions.UpdateMany(ctx, filter, bson.M{"$set": bson.M{
+		"lastSeenAt": now,
+		"updatedAt":  now,
+		"hasMention": false,
+	}}); err != nil {
+		return nil, fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
+	}
+	return rows, nil
+}
+
+// ClearSubscriptionThreadUnreadForAccount removes threadUnread and clears alert on
+// every one of account's subscriptions that currently has unread threads
+// (threadUnread.0 exists). Mirrors the single-thread "empty threadUnread → alert
+// cleared" rule; subscriptions with no unread threads are not matched, so a
+// non-thread alert is preserved.
+func (s *MongoStore) ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error {
+	if _, err := s.subscriptions.UpdateMany(ctx,
+		bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}},
+		bson.M{"$set": bson.M{"alert": false}, "$unset": bson.M{"threadUnread": ""}},
+	); err != nil {
+		return fmt.Errorf("clear subscription thread-unread for %q: %w", account, err)
+	}
+	return nil
+}
+
 // UpdateRoomVisibility sets {restricted, externalAccess, updatedAt} on the
 // room. Room-service callers have already validated type=channel before
 // reaching this layer, so no type filter runs here.
