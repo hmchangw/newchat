@@ -76,6 +76,22 @@ func (mr *MockMessageReaderMockRecorder) GetAllPinnedMessages(ctx, roomID any) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllPinnedMessages", reflect.TypeOf((*MockMessageReader)(nil).GetAllPinnedMessages), ctx, roomID)
 }
 
+// GetLastRoomMessage mocks base method.
+func (m *MockMessageReader) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*model.LastMessagePointer, *models.Message, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLastRoomMessage", ctx, roomID, before, floor)
+	ret0, _ := ret[0].(*model.LastMessagePointer)
+	ret1, _ := ret[1].(*models.Message)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetLastRoomMessage indicates an expected call of GetLastRoomMessage.
+func (mr *MockMessageReaderMockRecorder) GetLastRoomMessage(ctx, roomID, before, floor any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLastRoomMessage", reflect.TypeOf((*MockMessageReader)(nil).GetLastRoomMessage), ctx, roomID, before, floor)
+}
+
 // GetMessageByID mocks base method.
 func (m *MockMessageReader) GetMessageByID(ctx context.Context, messageID string) (*models.Message, error) {
 	m.ctrl.T.Helper()
@@ -233,6 +249,20 @@ func (mr *MockMessageWriterMockRecorder) PinMessage(ctx, msg, pinnedAt, pinnedBy
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PinMessage", reflect.TypeOf((*MockMessageWriter)(nil).PinMessage), ctx, msg, pinnedAt, pinnedBy)
 }
 
+// ReconcileDeletedMirrors mocks base method.
+func (m *MockMessageWriter) ReconcileDeletedMirrors(ctx context.Context, msg *models.Message) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReconcileDeletedMirrors", ctx, msg)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ReconcileDeletedMirrors indicates an expected call of ReconcileDeletedMirrors.
+func (mr *MockMessageWriterMockRecorder) ReconcileDeletedMirrors(ctx, msg any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReconcileDeletedMirrors", reflect.TypeOf((*MockMessageWriter)(nil).ReconcileDeletedMirrors), ctx, msg)
+}
+
 // RemoveReaction mocks base method.
 func (m *MockMessageWriter) RemoveReaction(ctx context.Context, msg *models.Message, key models.ReactionKey) error {
 	m.ctrl.T.Helper()
@@ -361,6 +391,22 @@ func (mr *MockMessageRepositoryMockRecorder) GetAllPinnedMessages(ctx, roomID an
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllPinnedMessages", reflect.TypeOf((*MockMessageRepository)(nil).GetAllPinnedMessages), ctx, roomID)
 }
 
+// GetLastRoomMessage mocks base method.
+func (m *MockMessageRepository) GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*model.LastMessagePointer, *models.Message, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLastRoomMessage", ctx, roomID, before, floor)
+	ret0, _ := ret[0].(*model.LastMessagePointer)
+	ret1, _ := ret[1].(*models.Message)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetLastRoomMessage indicates an expected call of GetLastRoomMessage.
+func (mr *MockMessageRepositoryMockRecorder) GetLastRoomMessage(ctx, roomID, before, floor any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLastRoomMessage", reflect.TypeOf((*MockMessageRepository)(nil).GetLastRoomMessage), ctx, roomID, before, floor)
+}
+
 // GetMessageByID mocks base method.
 func (m *MockMessageRepository) GetMessageByID(ctx context.Context, messageID string) (*models.Message, error) {
 	m.ctrl.T.Helper()
@@ -478,6 +524,20 @@ func (m *MockMessageRepository) PinMessage(ctx context.Context, msg *models.Mess
 func (mr *MockMessageRepositoryMockRecorder) PinMessage(ctx, msg, pinnedAt, pinnedBy any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PinMessage", reflect.TypeOf((*MockMessageRepository)(nil).PinMessage), ctx, msg, pinnedAt, pinnedBy)
+}
+
+// ReconcileDeletedMirrors mocks base method.
+func (m *MockMessageRepository) ReconcileDeletedMirrors(ctx context.Context, msg *models.Message) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReconcileDeletedMirrors", ctx, msg)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ReconcileDeletedMirrors indicates an expected call of ReconcileDeletedMirrors.
+func (mr *MockMessageRepositoryMockRecorder) ReconcileDeletedMirrors(ctx, msg any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReconcileDeletedMirrors", reflect.TypeOf((*MockMessageRepository)(nil).ReconcileDeletedMirrors), ctx, msg)
 }
 
 // RemoveReaction mocks base method.

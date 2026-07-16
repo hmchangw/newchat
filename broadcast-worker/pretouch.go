@@ -16,6 +16,8 @@ var pretouchTypes = []reflect.Type{
 	reflect.TypeOf(model.PinStateRoomEvent{}),
 	reflect.TypeOf(model.ReactRoomEvent{}),
 	reflect.TypeOf(model.ThreadMetadataUpdatedEvent{}),
+	reflect.TypeOf(model.LastRoomMessageRequest{}),
+	reflect.TypeOf(model.LastRoomMessageResponse{}),
 }
 
 func pretouchJSON() { jsonwarm.Pretouch(pretouchTypes...) }
