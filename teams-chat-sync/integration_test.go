@@ -96,35 +96,46 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 	assert.Empty(t, got.Members, "group members are owned by member-sync, not this sync")
 }
 
-// TestMongoStore_UpsertChats_GroupReSyncDoesNotResetPipeline is the regression
-// guard for the one-time-onboarding invariant: once member-sync and
-// room-creation have advanced a group chat's pipeline flags, a later chat-sync
-// re-upsert (an active chat's lastUpdatedDateTime keeps moving, so it is
-// re-listed) must refresh only metadata and never push the chat back into the
-// pipeline — otherwise every active group chat would be re-onboarded forever.
-func TestMongoStore_UpsertChats_GroupReSyncDoesNotResetPipeline(t *testing.T) {
+// TestMongoStore_UpsertChats_GroupReSyncRetriggersButNeverClobbers guards the
+// membership-sync invariant on a group re-sync (a chat is re-listed whenever its
+// lastUpdatedDateTime moves): needMemberSync is re-set true to re-trigger member
+// sync, while needCreateRoom is $setOnInsert so a re-sync can never overwrite the
+// true that member-sync sets — which is what would lose a membership-change event.
+func TestMongoStore_UpsertChats_GroupReSyncRetriggersButNeverClobbers(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
 	store := newMongoStore(db, db)
 	ctx := context.Background()
 	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
 
-	// chat-sync discovers the group chat.
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g3", "First", "site-a", now1)}))
-	// member-sync then room-creation advance it to "already created".
-	_, err := store.writeChats.Raw().UpdateByID(ctx, "19:g3",
+	// Case A — re-sync must NOT clobber needCreateRoom that member-sync just set.
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:gA", "First", "site-a", now1)}))
+	// member-sync resolved the roster and advanced it (room not yet created).
+	_, err := store.writeChats.Raw().UpdateByID(ctx, "19:gA",
+		bson.M{"$set": bson.M{"needMemberSync": false, "needCreateRoom": true}})
+	require.NoError(t, err)
+	// chat-sync re-syncs before room-create ran.
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:gA", "Renamed", "site-a", now2)}))
+	gotA, err := store.writeChats.FindByID(ctx, "19:gA")
+	require.NoError(t, err)
+	require.NotNil(t, gotA)
+	assert.Equal(t, "Renamed", gotA.Name, "metadata refreshes on re-sync")
+	assert.True(t, gotA.NeedMemberSync, "re-sync re-triggers member sync")
+	assert.True(t, gotA.NeedCreateRoom, "re-sync must NOT clobber member-sync's needCreateRoom")
+
+	// Case B — after the room was created (needCreateRoom cleared), a re-sync
+	// re-triggers member sync but does not itself re-set needCreateRoom;
+	// member-sync will flip it true again once it re-resolves the roster.
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:gB", "First", "site-a", now1)}))
+	_, err = store.writeChats.Raw().UpdateByID(ctx, "19:gB",
 		bson.M{"$set": bson.M{"needMemberSync": false, "needCreateRoom": false}})
 	require.NoError(t, err)
-
-	// chat-sync re-syncs the same chat after a new message bumped it.
-	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g3", "Renamed", "site-a", now2)}))
-
-	got, err := store.writeChats.FindByID(ctx, "19:g3")
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:gB", "Renamed", "site-a", now2)}))
+	gotB, err := store.writeChats.FindByID(ctx, "19:gB")
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, "Renamed", got.Name, "metadata still refreshes on re-sync")
-	assert.False(t, got.NeedMemberSync, "re-sync must not re-flag member sync")
-	assert.False(t, got.NeedCreateRoom, "re-sync must not re-onboard an already-created room")
+	require.NotNil(t, gotB)
+	assert.True(t, gotB.NeedMemberSync, "re-sync re-triggers member sync")
+	assert.False(t, gotB.NeedCreateRoom, "chat-sync re-sync does not set needCreateRoom; member-sync owns that")
 }
 
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {

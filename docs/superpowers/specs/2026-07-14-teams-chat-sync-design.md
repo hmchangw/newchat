@@ -162,13 +162,17 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    - `oneOnOne`: **all** fields under `$setOnInsert`, including
      `needCreateRoom: true` (room-ready on first sight) — an existing doc is
      never modified (oneOnOne chats never change after insert).
-   - group/meeting: `$setOnInsert: {createdDateTime, siteId, needMemberSync: true,
-     needCreateRoom: false}`, `$set: {name, chatType, lastUpdatedDateTime,
-     updatedAt: now}`. The pipeline flags are **insert-only** so a re-sync of an
-     active chat (whose `lastUpdatedDateTime` keeps moving) refreshes only
-     metadata and never re-onboards it. `members` is **not** written —
-     teams-chat-member-sync owns the group member list and flips
-     `needMemberSync: false` / `needCreateRoom: true` once it resolves.
+   - group/meeting: `$setOnInsert: {createdDateTime, siteId, needCreateRoom: false}`,
+     `$set: {name, chatType, lastUpdatedDateTime, needMemberSync: true, updatedAt: now}`.
+     The two flags sit on opposite sides on purpose: `needMemberSync` is re-set
+     `true` on every re-sync (a chat is re-listed whenever its
+     `lastUpdatedDateTime` moves — any activity, incl. a membership change — so
+     member-sync re-resolves the roster, keeping the room in sync), while
+     `needCreateRoom` is **insert-only** so a re-sync can never clobber the
+     `true` that member-sync sets. `members` is **not** written — member-sync
+     owns the group roster and flips `needMemberSync: false` /
+     `needCreateRoom: true` on each resolve, yielding one create-or-sync event
+     downstream per membership change.
    - siteID immutability is thus enforced at the DB layer; the in-memory dedup
      is an optimization, not a correctness mechanism.
 7. **Watermark.** When a user's chats are fully fetched (all pages) and

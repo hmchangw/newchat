@@ -10,7 +10,11 @@ A run-to-completion job, triggered by a **k8s CronJob**, that turns Teams chats
 flagged for room creation into room-canonical NATS events. It is the consumer
 end of the `needCreateRoom` flag: `teams-chat-sync` sets it `true` for oneOnOne
 chats on insert (complete on first sight), and `teams-chat-member-sync` sets it
-`true` for group chats once their member list is resolved.
+`true` for group chats each time it resolves the roster — on first onboarding
+**and** again whenever a membership change re-triggers member sync. So the
+published event is a **create-or-sync** signal (create the room if absent, else
+reconcile its members), and the downstream room-worker must be idempotent on
+chat id — see §9.
 
 Each run:
 
