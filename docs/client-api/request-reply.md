@@ -1538,7 +1538,8 @@ botDM). Soft-deleted rooms excluded.
 
 #### Request body
 
-`{ "unread": true }` — when `true`, returns active rooms with unread messages.
+`{ "unread": true }` — when `true`, returns active rooms with unread messages or unread
+followed threads (at most +1 per room; muted excluded).
 
 #### Success response
 

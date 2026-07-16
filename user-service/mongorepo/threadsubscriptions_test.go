@@ -51,6 +51,8 @@ func TestThreadSubscriptionRepo_ListByAccount(t *testing.T) {
 		bySite[r.SiteID] = r
 	}
 	assert.Equal(t, "tr1", bySite["site-a"].ThreadRoomID)
+	assert.Equal(t, "r1", bySite["site-a"].RoomID)
+	assert.Equal(t, "r2", bySite["site-b"].RoomID)
 	assert.Equal(t, model.RoomTypeChannel, bySite["site-a"].RoomType)
 	assert.True(t, bySite["site-a"].HasMention)
 	require.NotNil(t, bySite["site-a"].LastSeenAt)
