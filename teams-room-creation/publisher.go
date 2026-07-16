@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -29,8 +30,12 @@ func dedupID(siteID string, chatIDs []string) string {
 }
 
 // newJetStreamPublisher returns a publishFunc that publishes via JetStream and
-// blocks on the PubAck, honoring dedupID as Nats-Msg-Id.
-func newJetStreamPublisher(js jetstream.JetStream) publishFunc {
+// blocks on the PubAck, honoring dedupID as Nats-Msg-Id. js is the o11y-traced
+// JetStream handle from natsutil.Connect(...).JetStream() (see main.go),
+// matching the o11ynats.JetStream parameter used by every other production
+// publisher wrapper in the repo (e.g. user-service/publisher,
+// history-service/internal/publisher) — not the raw nats-io jetstream.JetStream.
+func newJetStreamPublisher(js o11ynats.JetStream) publishFunc {
 	return func(ctx context.Context, subj string, data []byte, dedup string) error {
 		msg := natsutil.NewMsg(ctx, subj, data)
 		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(dedup)); err != nil {
