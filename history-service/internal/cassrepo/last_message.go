@@ -11,7 +11,6 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-
 // lastMessageSkipTypes are the type values that never qualify as a room's
 // last-message preview: the canonical system set (model.SystemMessageTypes)
 // plus the repo-local removed-thread-parent placeholder. Derived, not

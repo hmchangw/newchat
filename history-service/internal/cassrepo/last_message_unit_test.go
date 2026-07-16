@@ -21,4 +21,3 @@ func TestLastMessageSkipTypes_TracksModelSystemSet(t *testing.T) {
 	_, ok := lastMessageSkipTypes[MessageTypeRemoved]
 	assert.True(t, ok, "removed-parent placeholder must stay excluded from previews")
 }
-
