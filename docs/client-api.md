@@ -75,6 +75,8 @@ paths.
 9. [Admin Service](#9-admin-service)
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
+11. [tcard-service](#11-tcard-service)
+    - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/register (admin)](#112-http--post-apiv1cardsregister-admin)
 
 ---
 
@@ -6487,6 +6489,139 @@ This endpoint is intended for **server-to-server use**; bot SDKs do not call it 
 | 400 | `bad_request` | `missing_fields` | `authToken` empty. |
 | 401 | `unauthenticated` | `invalid_token` | Token hash not found. Body carries `{"valid": false, ...}`. |
 | 500 | `internal` | — | Mongo failure. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+---
+
+## 11. tcard-service
+
+Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client publishes new templates (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.
+
+### 11.1 HTTP — GET /api/v1/cards/{path}@{cardVersion}.template.json
+
+**Endpoint:** `GET /api/v1/cards/{path}@{cardVersion}.template.json`
+**Reply:** synchronous HTTP response
+
+Fetches one card template by `path` and `cardVersion`, served from cache with no per-request database read. The filename is a single URL segment: the service strips the `.template.json` suffix, splits the remainder on the **last** `@` into `path` and `cardVersion`, and returns the stored document verbatim minus the Mongo `_id` and the routing `path`.
+
+#### Request
+
+| Field | Source | Type | Required | Notes |
+|---|---|---|---|---|
+| `path` | URL | string | yes | The card path — everything before the last `@`. May contain `@` but never `/`. |
+| `cardVersion` | URL | string | yes | Semantic version `a.b.c` — between the last `@` and the `.template.json` suffix. |
+
+```http
+GET /api/v1/cards/welcome@1.0.0.template.json
+```
+
+#### Success response
+
+`HTTP 200`, `Content-Type: application/json`. The stored card document minus `_id` and `path`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `cardVersion` | string | The document's semantic version. |
+| `cardUsage` | any | Optional usage metadata; absent when the card has none. |
+| `type` | string | `"AdaptiveCard"`. |
+| `schema` | string | `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
+| `version` | string | AdaptiveCard schema version, `"1.5"`. |
+| `body` | array | AdaptiveCard body elements. |
+
+```json
+{
+  "cardVersion": "1.0.0",
+  "cardUsage": "greeting",
+  "type": "AdaptiveCard",
+  "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "version": "1.5",
+  "body": [{ "type": "TextBlock", "text": "Hi" }]
+}
+```
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). HTTP statuses:
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "card template request must include a version: {path}@{cardVersion}.template.json" }` — missing `.template.json` suffix, missing `@` version separator, or empty path/version. |
+| 404 | `not_found` | — | `{ "code": "not_found", "error": "card template not found" }` — no cached card for that `(path, cardVersion)`. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+---
+
+### 11.2 HTTP — POST /api/v1/cards/register (admin)
+
+**Endpoint:** `POST /api/v1/cards/register`
+**Reply:** synchronous HTTP response
+
+**Admin only.** Publishes a new card template: an admin reviews a submitted card and calls this to validate and insert it, after which it is immediately servable via §11.1. Not for end-user browsers. The request body is the full card document.
+
+#### Request
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `path` | string | yes | Card path. Must not contain `/`. |
+| `cardVersion` | string | yes | Semantic version `a.b.c`, no leading zeros. Must be **strictly greater** than the highest existing `cardVersion` for this `path`. |
+| `cardUsage` | any | no | Optional usage metadata. |
+| `type` | string | yes | Must equal `"AdaptiveCard"`. |
+| `schema` | string | yes | Must equal `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
+| `version` | string | yes | Must equal `"1.5"`. |
+| `body` | array | yes | Non-empty AdaptiveCard body array. |
+
+```http
+POST /api/v1/cards/register
+Content-Type: application/json
+```
+
+```json
+{
+  "path": "welcome",
+  "cardVersion": "1.0.0",
+  "cardUsage": "greeting",
+  "type": "AdaptiveCard",
+  "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "version": "1.5",
+  "body": [{ "type": "TextBlock", "text": "Hi" }]
+}
+```
+
+#### Success response
+
+`HTTP 201`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `success` | boolean | Always `true`. |
+
+```json
+{ "success": true }
+```
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). HTTP statuses:
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "body must be a non-empty array" }` — a missing/empty required field, a `path` containing `/`, a non-semver or leading-zero `cardVersion`, a non-array `body`, or a `type`/`schema`/`version` that isn't the pinned value. |
+| 409 | `conflict` | — | `{ "code": "conflict", "error": "cardVersion must be the highest for this path" }` — `cardVersion` isn't strictly higher than the current max, or `(path, cardVersion)` already exists. |
+| 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — Mongo failure. |
 
 #### Triggered events — success path
 
