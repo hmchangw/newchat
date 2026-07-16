@@ -339,6 +339,21 @@ func (m *MockRoomClient) EXPECT() *MockRoomClientMockRecorder {
 	return m.recorder
 }
 
+// ClearAllThreadUnread mocks base method.
+func (m *MockRoomClient) ClearAllThreadUnread(ctx context.Context, siteID, account string) (int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearAllThreadUnread", ctx, siteID, account)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ClearAllThreadUnread indicates an expected call of ClearAllThreadUnread.
+func (mr *MockRoomClientMockRecorder) ClearAllThreadUnread(ctx, siteID, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearAllThreadUnread", reflect.TypeOf((*MockRoomClient)(nil).ClearAllThreadUnread), ctx, siteID, account)
+}
+
 // CreateDMRoom mocks base method.
 func (m *MockRoomClient) CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error) {
 	m.ctrl.T.Helper()

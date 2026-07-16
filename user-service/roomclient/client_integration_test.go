@@ -189,6 +189,64 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 	})
 }
 
+func TestClearAllThreadUnread_Integration(t *testing.T) {
+	t.Run("happy path — returns cleared count", func(t *testing.T) {
+		nc := dial(t)
+		sub, err := nc.Subscribe(context.Background(), subject.RoomThreadReadAll("site-a"), func(_ context.Context, m *nats.Msg) {
+			var req model.RoomThreadReadAllRequest
+			require.NoError(t, json.Unmarshal(m.Data, &req))
+			assert.Equal(t, "alice", req.Account)
+			out, _ := json.Marshal(model.RoomThreadReadAllResponse{ClearedThreads: 4})
+			_ = m.Respond(out)
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+		n, err := New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-a", "alice")
+		require.NoError(t, err)
+		assert.Equal(t, 4, n)
+	})
+
+	t.Run("errcode reply relayed", func(t *testing.T) {
+		nc := dial(t)
+		sub, err := nc.Subscribe(context.Background(), subject.RoomThreadReadAll("site-a"), func(_ context.Context, m *nats.Msg) {
+			data, _ := json.Marshal(errcode.Internal("boom"))
+			_ = m.Respond(data)
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+		_, err = New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-a", "alice")
+		require.Error(t, err)
+		var e *errcode.Error
+		require.True(t, errors.As(err, &e))
+		assert.Equal(t, errcode.CodeInternal, e.Code)
+	})
+
+	t.Run("cross-site siteID routing — uses siteID param not c.siteID", func(t *testing.T) {
+		nc := dial(t)
+		sub, err := nc.Subscribe(context.Background(), subject.RoomThreadReadAll("site-b"), func(_ context.Context, m *nats.Msg) {
+			out, _ := json.Marshal(model.RoomThreadReadAllResponse{ClearedThreads: 2})
+			_ = m.Respond(out)
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+		n, err := New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-b", "alice")
+		require.NoError(t, err)
+		assert.Equal(t, 2, n)
+	})
+
+	t.Run("no responder — returns error wrapping the rpc", func(t *testing.T) {
+		nc := dial(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := New(nc, "site-a").ClearAllThreadUnread(ctx, "site-a", "alice")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "clear-all-thread-unread rpc")
+	})
+}
+
 func TestCreateDMRoom_Integration(t *testing.T) {
 	t.Run("happy path — returns subscription from responder", func(t *testing.T) {
 		nc := dial(t)

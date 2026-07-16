@@ -1332,6 +1332,7 @@ No client-facing events are emitted.
 | `chat.user.{account}.request.user.{siteID}.apps.categories` | [apps.categories](#appscategories) |
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
+| `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
 
 ---
 
@@ -1666,6 +1667,34 @@ Empty object: `{}`.
 "lastMessageAt"?: number, "unavailableSites"?: string[] }` — see
 [../client-api.md §3.4](../client-api.md#get-thread-unread-summary). Per-site RPC
 failures degrade into `unavailableSites` rather than erroring.
+
+#### Errors
+
+`internal` — local thread-subscription read failed.
+
+**Emits:** None.
+
+---
+
+### Clear All Thread Unread
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.thread.read.all`
+
+`{siteID}` is the **caller's own home site**. Clears the unread status of all of the
+user's threads across every site — the "mark all threads read" action. `user-service`
+asks each owning site's `room-service` to clear that user's thread-subscription read
+state and room-subscription thread-unread state.
+
+#### Request body
+
+Empty object: `{}`.
+
+#### Success response
+
+`{ "clearedThreads": number, "unavailableSites"?: string[] }` — see
+[../client-api.md §3.4](../client-api.md#clear-all-thread-unread). A bulk dismiss:
+clears only the requester's own read state; does not advance thread read floors or emit
+`thread_message_read`. Per-site RPC failures degrade into `unavailableSites`.
 
 #### Errors
 
