@@ -162,11 +162,13 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    - `oneOnOne`: **all** fields under `$setOnInsert`, including
      `needCreateRoom: true` (room-ready on first sight) — an existing doc is
      never modified (oneOnOne chats never change after insert).
-   - group/meeting: `$setOnInsert: {createdDateTime, siteId}`,
-     `$set: {name, chatType, lastUpdatedDateTime, needMemberSync: true,
-     needCreateRoom: false, updatedAt: now}`. `members` is **not** written —
+   - group/meeting: `$setOnInsert: {createdDateTime, siteId, needMemberSync: true,
+     needCreateRoom: false}`, `$set: {name, chatType, lastUpdatedDateTime,
+     updatedAt: now}`. The pipeline flags are **insert-only** so a re-sync of an
+     active chat (whose `lastUpdatedDateTime` keeps moving) refreshes only
+     metadata and never re-onboards it. `members` is **not** written —
      teams-chat-member-sync owns the group member list and flips
-     `needCreateRoom: true` once it resolves.
+     `needMemberSync: false` / `needCreateRoom: true` once it resolves.
    - siteID immutability is thus enforced at the DB layer; the in-memory dedup
      is an optimization, not a correctness mechanism.
 7. **Watermark.** When a user's chats are fully fetched (all pages) and

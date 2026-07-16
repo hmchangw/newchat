@@ -90,20 +90,25 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 			"needCreateRoom":      true,
 		}})
 	}
-	// Non-oneOnOne chats defer room creation to teams-chat-member-sync, which
-	// owns `members` and flips needCreateRoom=true once the member list resolves.
+	// Non-oneOnOne chats defer room creation to teams-chat-member-sync. The
+	// pipeline flags are $setOnInsert — set once on discovery, then owned by
+	// member-sync (flips needMemberSync=false, needCreateRoom=true) and
+	// room-creation (clears needCreateRoom). Keeping them out of $set is what
+	// makes onboarding one-time: a re-sync of an active chat (its
+	// lastUpdatedDateTime keeps moving) refreshes only metadata and never
+	// re-enters the pipeline. members is likewise owned by member-sync.
 	return mongoutil.UpsertModel(filter, bson.M{
 		"$setOnInsert": bson.M{
 			"createdDateTime": c.CreatedDateTime,
 			"siteId":          c.SiteID,
+			"needMemberSync":  c.NeedMemberSync,
+			"needCreateRoom":  false,
 		},
 		"$set": bson.M{
 			"name":                c.Name,
 			"chatType":            c.ChatType,
 			"lastUpdatedDateTime": c.LastUpdatedDateTime,
 			"updatedAt":           c.UpdatedAt,
-			"needMemberSync":      c.NeedMemberSync,
-			"needCreateRoom":      false,
 		},
 	})
 }

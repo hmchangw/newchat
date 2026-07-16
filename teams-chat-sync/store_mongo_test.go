@@ -43,17 +43,19 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 	assert.Equal(t, bson.M{
 		"createdDateTime": c.CreatedDateTime,
 		"siteId":          "site-a",
-	}, soi, "siteID and createdDateTime are insert-only")
+		"needMemberSync":  true,
+		"needCreateRoom":  false,
+	}, soi, "siteID, createdDateTime, and the one-time pipeline flags are insert-only")
 
 	set, ok := update["$set"].(bson.M)
 	require.True(t, ok)
 	assert.Equal(t, "Topic", set["name"])
 	assert.Equal(t, "group", set["chatType"])
 	assert.Equal(t, c.LastUpdatedDateTime, set["lastUpdatedDateTime"])
-	assert.Equal(t, true, set["needMemberSync"])
-	assert.Equal(t, false, set["needCreateRoom"], "group chats defer room creation until member-sync flips it")
 	assert.Equal(t, upsertNow, set["updatedAt"], "$set writes the chat's build-time UpdatedAt stamp")
 	assert.NotContains(t, set, "members", "group members are owned by teams-chat-member-sync, not this sync")
+	assert.NotContains(t, set, "needMemberSync", "pipeline flags are set-once; a re-sync must not reset them")
+	assert.NotContains(t, set, "needCreateRoom", "pipeline flags are set-once; a re-sync must not reset them")
 	assert.NotContains(t, set, "siteId", "$set must never touch siteID")
 	assert.NotContains(t, set, "createdDateTime")
 }

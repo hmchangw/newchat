@@ -96,6 +96,37 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 	assert.Empty(t, got.Members, "group members are owned by member-sync, not this sync")
 }
 
+// TestMongoStore_UpsertChats_GroupReSyncDoesNotResetPipeline is the regression
+// guard for the one-time-onboarding invariant: once member-sync and
+// room-creation have advanced a group chat's pipeline flags, a later chat-sync
+// re-upsert (an active chat's lastUpdatedDateTime keeps moving, so it is
+// re-listed) must refresh only metadata and never push the chat back into the
+// pipeline — otherwise every active group chat would be re-onboarded forever.
+func TestMongoStore_UpsertChats_GroupReSyncDoesNotResetPipeline(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsstore")
+	store := newMongoStore(db, db)
+	ctx := context.Background()
+	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+
+	// chat-sync discovers the group chat.
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g3", "First", "site-a", now1)}))
+	// member-sync then room-creation advance it to "already created".
+	_, err := store.writeChats.Raw().UpdateByID(ctx, "19:g3",
+		bson.M{"$set": bson.M{"needMemberSync": false, "needCreateRoom": false}})
+	require.NoError(t, err)
+
+	// chat-sync re-syncs the same chat after a new message bumped it.
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{groupChat("19:g3", "Renamed", "site-a", now2)}))
+
+	got, err := store.writeChats.FindByID(ctx, "19:g3")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "Renamed", got.Name, "metadata still refreshes on re-sync")
+	assert.False(t, got.NeedMemberSync, "re-sync must not re-flag member sync")
+	assert.False(t, got.NeedCreateRoom, "re-sync must not re-onboard an already-created room")
+}
+
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
 	store := newMongoStore(db, db)
