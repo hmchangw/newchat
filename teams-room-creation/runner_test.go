@@ -41,9 +41,13 @@ func recorder(mu *sync.Mutex, out *[]captured, fail map[string]bool) publishFunc
 	}
 }
 
+// chatUpdatedAt is the UpdatedAt stamp on every test chat, threaded into the
+// RoomCreatedRef the runner passes to MarkRoomsCreated (the CAS token).
+var chatUpdatedAt = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
 func chat(id, site string) model.TeamsChat {
 	return model.TeamsChat{
-		ID: id, Name: "n-" + id, SiteID: site,
+		ID: id, Name: "n-" + id, SiteID: site, UpdatedAt: chatUpdatedAt,
 		CreatedDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{{
 			ID: "m-" + id, Account: "acct-" + id,
@@ -64,11 +68,11 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 	var markMu sync.Mutex
 	marked := map[string]bool{}
 	store.EXPECT().MarkRoomsCreated(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, ids []string) error {
+		func(_ context.Context, refs []RoomCreatedRef) error {
 			markMu.Lock()
 			defer markMu.Unlock()
-			for _, id := range ids {
-				marked[id] = true
+			for _, r := range refs {
+				marked[r.ID] = true
 			}
 			return nil
 		}).AnyTimes()
@@ -106,7 +110,7 @@ func TestRunner_FailedBatchNotFlipped(t *testing.T) {
 	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(
 		[]model.TeamsChat{chat("a1", "site-a"), chat("b1", "site-b")}, nil)
 	// Only site-a's chats may be flipped; site-b publish fails.
-	store.EXPECT().MarkRoomsCreated(gomock.Any(), []string{"a1"}).Return(nil)
+	store.EXPECT().MarkRoomsCreated(gomock.Any(), []RoomCreatedRef{{ID: "a1", UpdatedAt: chatUpdatedAt}}).Return(nil)
 
 	var mu sync.Mutex
 	var got []captured
@@ -123,7 +127,7 @@ func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
 	store := NewMockTeamsChatStore(ctrl)
 	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(
 		[]model.TeamsChat{chat("a1", "site-a")}, nil)
-	store.EXPECT().MarkRoomsCreated(gomock.Any(), []string{"a1"}).Return(errors.New("mark boom"))
+	store.EXPECT().MarkRoomsCreated(gomock.Any(), []RoomCreatedRef{{ID: "a1", UpdatedAt: chatUpdatedAt}}).Return(errors.New("mark boom"))
 
 	var mu sync.Mutex
 	var got []captured

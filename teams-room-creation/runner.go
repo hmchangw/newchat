@@ -86,7 +86,7 @@ func (r *runner) publishBatch(ctx context.Context, b batch) {
 			"site_id", b.siteID, "chats", len(ids), "error", err)
 		return
 	}
-	if err := r.store.MarkRoomsCreated(ctx, ids); err != nil {
+	if err := r.store.MarkRoomsCreated(ctx, roomCreatedRefs(b.chats)); err != nil {
 		slog.WarnContext(ctx, "mark rooms created failed; batch republishes next run (dedup absorbs it)",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
 	}
@@ -153,4 +153,15 @@ func chatIDs(chats []model.TeamsChat) []string {
 		ids = append(ids, c.ID)
 	}
 	return ids
+}
+
+// roomCreatedRefs pairs each chat id with the updatedAt it was read at, for the
+// compare-and-set clear in MarkRoomsCreated.
+func roomCreatedRefs(chats []model.TeamsChat) []RoomCreatedRef {
+	refs := make([]RoomCreatedRef, 0, len(chats))
+	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
+	for _, c := range chats {
+		refs = append(refs, RoomCreatedRef{ID: c.ID, UpdatedAt: c.UpdatedAt})
+	}
+	return refs
 }

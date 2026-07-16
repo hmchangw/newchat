@@ -125,16 +125,26 @@ noted out-of-scope in §9).
 
 - **read client** (`mongoutil.ConnectRead`, secondary-preferred):
   `ListChatsNeedingRoom(ctx) ([]model.TeamsChat, error)` — `find {needCreateRoom:true}`
-  with an explicit projection `{_id, name, members, createdDateTime, siteId}`.
+  with an explicit projection `{_id, name, members, createdDateTime, siteId, updatedAt}`
+  (`updatedAt` is the compare-and-set token).
 - **write client** (`mongoutil.Connect`):
-  `MarkRoomsCreated(ctx, ids []string) error` — `updateMany {_id:{$in:ids}} $set {needCreateRoom:false}`.
+  `MarkRoomsCreated(ctx, refs []RoomCreatedRef) error` — bulk **compare-and-set**:
+  for each `{id, updatedAt}` ref, clears `needCreateRoom` only where `updatedAt`
+  still matches. A chat re-flagged by member-sync since it was listed (its
+  `updatedAt` moved) is left set and re-published next run, so a concurrent
+  membership update is never dropped.
 
 Interface (defined in the consumer, `store.go`):
 
 ```go
+type RoomCreatedRef struct {
+    ID        string
+    UpdatedAt time.Time
+}
+
 type TeamsChatStore interface {
     ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsChat, error)
-    MarkRoomsCreated(ctx context.Context, ids []string) error
+    MarkRoomsCreated(ctx context.Context, refs []RoomCreatedRef) error
 }
 ```
 
@@ -167,7 +177,7 @@ run():
       evt = build TeamsRoomCreateEvent(batch, Timestamp=now)   # site is on the subject
       ack, err = publish(subject.RoomCanonicalTeamsCreate(siteId), evt, dedupID)
       if err: log warn, continue                 # chats stay flagged for next run
-      store.MarkRoomsCreated(batch IDs)           # option C: flip only on ack
+      store.MarkRoomsCreated(batch refs)          # option C: CAS-flip only on ack
 ```
 
 - **Partial failure is normal.** A failed batch is logged and skipped; its chats
@@ -188,7 +198,8 @@ run():
   (exact multiple, remainder, batch size 1), publish error → not flipped,
   publish ack → flipped, member field mapping.
 - **Store:** `store_mongo_test.go` integration via `testutil.MongoDB` — list
-  projection correctness and `MarkRoomsCreated` `$in` update.
+  projection correctness, `MarkRoomsCreated` compare-and-set, and a stale-ref
+  no-op (a moved `updatedAt` must not clear the flag).
 - **Integration:** `integration_test.go` with `testutil.MongoDB` + `testutil.NATS`,
   end-to-end: seed flagged chats → run → assert events on the stream and flags
   cleared. `TestMain` drives `testutil.RunTests`.

@@ -30,9 +30,10 @@ func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 // projected to exactly the fields the event needs. Served by the read client.
 func (s *mongoStore) ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsChat, error) {
 	// Stable _id sort so batch composition is deterministic across runs.
+	// updatedAt is carried as the compare-and-set token for MarkRoomsCreated.
 	chats, err := s.readChats.FindMany(ctx, bson.M{"needCreateRoom": true},
 		mongoutil.WithProjection(bson.M{
-			"_id": 1, "name": 1, "members": 1, "createdDateTime": 1, "siteId": 1,
+			"_id": 1, "name": 1, "members": 1, "createdDateTime": 1, "siteId": 1, "updatedAt": 1,
 		}),
 		mongoutil.WithSort(bson.D{{Key: "_id", Value: 1}}))
 	if err != nil {
@@ -43,14 +44,20 @@ func (s *mongoStore) ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsCha
 
 // MarkRoomsCreated clears needCreateRoom for the given ids. Written by the
 // primary client. A nil/empty id slice is a no-op.
-func (s *mongoStore) MarkRoomsCreated(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+func (s *mongoStore) MarkRoomsCreated(ctx context.Context, refs []RoomCreatedRef) error {
+	if len(refs) == 0 {
 		return nil
 	}
-	_, err := s.writeChats.Raw().UpdateMany(ctx,
-		bson.M{"_id": bson.M{"$in": ids}},
-		bson.M{"$set": bson.M{"needCreateRoom": false}})
-	if err != nil {
+	models := make([]mongo.WriteModel, 0, len(refs))
+	for _, r := range refs {
+		// Compare-and-set on updatedAt: only clear the flag if member-sync has
+		// not re-written the chat (and re-flagged needCreateRoom) since we read
+		// it. A stale ref matches nothing, leaving the chat for the next run.
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": r.ID, "updatedAt": r.UpdatedAt}).
+			SetUpdate(bson.M{"$set": bson.M{"needCreateRoom": false}}))
+	}
+	if _, err := s.writeChats.BulkWrite(ctx, models); err != nil {
 		return fmt.Errorf("mark rooms created: %w", err)
 	}
 	return nil

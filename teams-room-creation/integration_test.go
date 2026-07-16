@@ -68,10 +68,11 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 	const siteID = "site-a"
 
 	db := testutil.MongoDB(t, "teamsroom-e2e")
+	ua := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	_, err := db.Collection("teams_chat").InsertMany(ctx, []any{
-		bson.M{"_id": "c1", "name": "A", "siteId": siteID, "needCreateRoom": true,
+		bson.M{"_id": "c1", "name": "A", "siteId": siteID, "needCreateRoom": true, "updatedAt": ua,
 			"members": []bson.M{{"account": "alice"}}},
-		bson.M{"_id": "c2", "name": "B", "siteId": siteID, "needCreateRoom": true, "members": []bson.M{}},
+		bson.M{"_id": "c2", "name": "B", "siteId": siteID, "needCreateRoom": true, "updatedAt": ua, "members": []bson.M{}},
 	})
 	require.NoError(t, err)
 

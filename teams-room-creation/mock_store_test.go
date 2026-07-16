@@ -57,15 +57,15 @@ func (mr *MockTeamsChatStoreMockRecorder) ListChatsNeedingRoom(ctx any) *gomock.
 }
 
 // MarkRoomsCreated mocks base method.
-func (m *MockTeamsChatStore) MarkRoomsCreated(ctx context.Context, ids []string) error {
+func (m *MockTeamsChatStore) MarkRoomsCreated(ctx context.Context, refs []RoomCreatedRef) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "MarkRoomsCreated", ctx, ids)
+	ret := m.ctrl.Call(m, "MarkRoomsCreated", ctx, refs)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // MarkRoomsCreated indicates an expected call of MarkRoomsCreated.
-func (mr *MockTeamsChatStoreMockRecorder) MarkRoomsCreated(ctx, ids any) *gomock.Call {
+func (mr *MockTeamsChatStoreMockRecorder) MarkRoomsCreated(ctx, refs any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkRoomsCreated", reflect.TypeOf((*MockTeamsChatStore)(nil).MarkRoomsCreated), ctx, ids)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkRoomsCreated", reflect.TypeOf((*MockTeamsChatStore)(nil).MarkRoomsCreated), ctx, refs)
 }
