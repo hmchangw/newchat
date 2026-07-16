@@ -4,7 +4,7 @@
 > This doc pins **exactly which source change events the collections migration covers, and which it does not** — the reference for the team building the `oplog-collections-transformer`.
 > Design: `docs/superpowers/specs/2026-06-16-oplog-transformer-collections-design.md`.
 >
-> Scope: the **live CDC tail** of the operational collections (rooms, subscriptions, thread_subscriptions, users). The bulk/initial state sync ≤ checkpoint is a separate owner's job; we tail from the handed-off checkpoint.
+> Scope: the **live CDC tail** of the operational collections (rooms, subscriptions, thread_subscriptions). The bulk/initial state sync ≤ checkpoint is a separate owner's job; we tail from the handed-off checkpoint.
 
 ## CDC payload facts (all collections)
 
@@ -46,11 +46,7 @@ The connector forwards raw change-stream events with **no `updateLookup`** and *
 | 11 | Thread read / mention change | `update` — changed fields only | full current doc | — | ✅ re-read doc → re-upsert |
 | 12 | Thread unfollow | `delete` — `_id` only | nothing — doc gone | destination thread-subs key by `(threadRoomId, userId)`; inbox-worker has no thread-sub removal handler; live stack emits no thread-unfollow federation event | ❌ skip (un-actionable **and** no handler) → stale follow lingers |
 | **Users** |
-| 13 | User create | `insert` — full doc | in payload | `_id`, `username` (mutable), `type`, `customFields.*`, `roles[]`, `federation.origin` | ✅ insert-if-absent by account |
-| 14 | User replace | `replace` — full doc | not needed | whole-doc rewrite | ✅ insert-if-absent (re-classify) |
-| 15 | User **HR-field** change (engName, companyName, dept/sect, roles, …) after first seed | `update` — changed fields only | full current doc | company-wide user sync owns these; insert-if-absent leaves existing untouched | ❌ not propagated (other sync keeps it current) |
-| 15a | User **`statusText`** change | `update` — changed fields only | full current doc | chat-originated (set by the user inside legacy chat), **not** in the HR dataset — no other sync carries it | ✅ fan `user_status_updated` to all sites (global-visibility) |
-| 16 | User deactivate / delete | `update` (`active:false`) or `delete` | `update`: full doc · `delete`: nothing | source sets `active:false` (no row deletion); no destination apply-path wired | ❌ deferred (out of scope) |
+| 13–16 | All `users` change events (create/replace/HR-field/`statusText`/deactivate/delete) | any | n/a — collection not consumed | company-wide user sync owns the destination `users` collection | ❌ **removed from this transformer's scope** — the `users` collection is no longer filtered/consumed; the transformer only *reads* target users for FK resolution (thread-subs, room-members) |
 | **All collections** |
 | 17 | Collection drop / rename | collection-level (`drop`/`rename`/`invalidate`) | n/a | terminates/invalidates the per-collection change stream | ⚠️ out of scope, deferred — connector re-point, not migration logic |
 
@@ -114,7 +110,7 @@ Every apply-handler the inbox-worker exposes is either produced by the migration
 | `thread_subscription_upserted` | ✅ | thread-sub `insert`/`replace`/`update` |
 | `room_renamed` | ✅ | room `name`/`fname` change |
 | `room_restricted` | ✅ | room `restricted`/`externalAccess` change |
-| `user_status_updated` | ✅ | user `statusText` change (chat-owned; fanned to all sites) |
+| `user_status_updated` | ⚠️ not emitted | user migration removed from the collections transformer; no producer in the migration path |
 | `thread_read` | ⚠️ not emitted | redundant — thread-sub `lastSeenAt` rides `thread_subscription_upserted`; `Subscription.ThreadUnread` is message-pipeline-owned |
 
 ## Open confirmations (source engineers)

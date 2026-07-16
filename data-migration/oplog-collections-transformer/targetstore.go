@@ -12,9 +12,8 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// mongoTargetStore is the new-stack per-site Mongo access the transformer needs: user
-// insert-if-absent, thread_room / user FK resolution for thread-sub mapping, and room-member
-// direct writes.
+// mongoTargetStore is the new-stack per-site Mongo access the transformer needs: thread_room /
+// user FK resolution for thread-sub and room-member mapping, and room-member direct writes.
 type mongoTargetStore struct {
 	users       *mongo.Collection // TargetDB.users
 	threadRooms *mongo.Collection // TargetDB.thread_rooms
@@ -31,34 +30,6 @@ func NewMongoTargetStore(db *mongo.Database) *mongoTargetStore {
 		threadRooms: db.Collection("thread_rooms"),
 		roomMembers: db.Collection("room_members"),
 	}
-}
-
-// EnsureIndexes creates the unique index on users.account — the insert-if-absent dedup key.
-// thread_rooms indexes are owned by message-worker and intentionally not touched here.
-func (s *mongoTargetStore) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure users account index: %w", err)
-	}
-	return nil
-}
-
-// UpsertUserIfAbsent inserts u keyed by account only when absent, leaving an existing doc
-// (owned by the company-wide sync) untouched. inserted reports whether a new doc was created.
-//
-//nolint:gocritic // model.User passed by value: one per migrated user record, off the hot path.
-func (s *mongoTargetStore) UpsertUserIfAbsent(ctx context.Context, u model.User) (bool, error) {
-	res, err := s.users.UpdateOne(ctx,
-		bson.M{"account": u.Account},
-		bson.M{"$setOnInsert": u},
-		options.UpdateOne().SetUpsert(true),
-	)
-	if err != nil {
-		return false, fmt.Errorf("upsert user if absent: %w", err)
-	}
-	return res.UpsertedCount > 0, nil
 }
 
 // FindThreadRoom resolves the thread room for parentMessageID, returning room id, thread room id,

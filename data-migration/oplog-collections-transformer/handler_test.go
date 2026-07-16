@@ -38,12 +38,8 @@ func (f *fakeLookup) FindByID(_ context.Context, _ string) ([]byte, error) {
 	return f.doc, f.err
 }
 
-// fakeTarget records UpsertUserIfAbsent calls and answers the FK lookups.
+// fakeTarget records room-member writes and answers the FK lookups.
 type fakeTarget struct {
-	upserted []model.User
-	inserted bool
-	err      error
-
 	roomMemberUpserts []model.RoomMember
 	roomMemberDeletes []string
 	roomMemberErr     error
@@ -55,15 +51,6 @@ type fakeTarget struct {
 	userIDs map[string]string
 	// findUserErr, when set, makes FindUserID return it instead of consulting userIDs.
 	findUserErr error
-}
-
-//nolint:gocritic // signature pinned by the targetStore interface.
-func (f *fakeTarget) UpsertUserIfAbsent(_ context.Context, u model.User) (bool, error) {
-	if f.err != nil {
-		return false, f.err
-	}
-	f.upserted = append(f.upserted, u)
-	return f.inserted, nil
 }
 
 func (f *fakeTarget) FindThreadRoom(_ context.Context, _ string) (string, string, string, bool, error) {
@@ -100,17 +87,14 @@ const (
 	roomsColl     = "rocketchat_rooms"
 	subsColl      = "rocketchat_subscriptions"
 	threadSubColl = "company_thread_subscriptions"
-	usersColl     = "users"
 )
 
 func newTestHandler(pub inboxPublisher, target targetStore, lookup migration.SourceLookup) *handler {
 	return &handler{
 		siteID:          testSiteID,
-		allSiteIDs:      []string{testSiteID, "s2"},
 		roomsColl:       roomsColl,
 		subsColl:        subsColl,
 		threadSubsColl:  threadSubColl,
-		usersColl:       usersColl,
 		roomMembersColl: rmColl,
 		pub:             pub,
 		target:          target,
@@ -118,7 +102,6 @@ func newTestHandler(pub inboxPublisher, target targetStore, lookup migration.Sou
 			roomsColl:     lookup,
 			subsColl:      lookup,
 			threadSubColl: lookup,
-			usersColl:     lookup,
 			rmColl:        lookup,
 			"":            lookup, // bare resolveDoc tests that don't set Collection
 		},
@@ -178,12 +161,11 @@ func TestHandle_Dispatch(t *testing.T) {
 		assert.Len(t, pub.events, 1)
 	})
 
-	t.Run("users collection routes to handleUser", func(t *testing.T) {
-		target := &fakeTarget{inserted: true}
-		h := newTestHandler(&fakePublisher{}, target, &fakeLookup{})
-		err := h.handle(context.Background(), userEv("insert", `{"_id":"u1","username":"alice"}`))
-		require.NoError(t, err)
-		assert.Len(t, target.upserted, 1)
+	t.Run("users collection is no longer routed — skipped", func(t *testing.T) {
+		h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{})
+		err := h.handle(context.Background(), oplogEvent{Op: "insert", Collection: "users",
+			FullDocument: json.RawMessage(`{"_id":"u1","username":"alice"}`)})
+		assert.ErrorIs(t, err, migration.ErrSkipped)
 	})
 }
 
@@ -195,15 +177,6 @@ func TestHandleRoom_PublishError(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, migration.ErrSkipped)
 	assert.NotErrorIs(t, err, migration.ErrPoison, "a transient publish failure must Nak, not poison")
-}
-
-func TestHandleUser_UpsertError(t *testing.T) {
-	target := &fakeTarget{err: errors.New("mongo down")}
-	h := newTestHandler(&fakePublisher{}, target, &fakeLookup{})
-	err := h.handleUser(context.Background(), userEv("insert", `{"_id":"u1","username":"alice"}`))
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, migration.ErrSkipped)
-	assert.NotErrorIs(t, err, migration.ErrPoison, "a transient upsert failure must Nak, not poison")
 }
 
 func TestResolveDoc(t *testing.T) {

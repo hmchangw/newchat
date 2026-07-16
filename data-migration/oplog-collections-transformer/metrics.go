@@ -10,14 +10,13 @@ import (
 )
 
 // metrics holds the transformer's instruments: processed throughput, nak/term/exhausted
-// dispositions, user-seed outcome, and FK resolution misses. Nil-safe (tests run without a meter).
+// dispositions, and FK resolution misses. Nil-safe (tests run without a meter).
 type metrics struct {
 	processed   metric.Int64Counter
 	naks        metric.Int64Counter
 	terms       metric.Int64Counter
 	skipped     metric.Int64Counter
 	exhausted   metric.Int64Counter
-	userSeed    metric.Int64Counter
 	resolveMiss metric.Int64Counter
 	writes      metric.Int64Counter
 }
@@ -49,11 +48,6 @@ func newMetrics() (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exhausted counter: %w", err)
 	}
-	userSeed, err := m.Int64Counter("oplog_collections_transformer_user_seed_total",
-		metric.WithDescription("user insert-if-absent seeds, by outcome (insert/present)"))
-	if err != nil {
-		return nil, fmt.Errorf("user seed counter: %w", err)
-	}
 	resolveMiss, err := m.Int64Counter("oplog_collections_transformer_resolve_miss_total",
 		metric.WithDescription("foreign-key resolution misses (thread-sub user/thread_room, room-member user), by kind"))
 	if err != nil {
@@ -66,7 +60,7 @@ func newMetrics() (*metrics, error) {
 	}
 	return &metrics{
 		processed: processed, naks: naks, terms: terms, skipped: skipped,
-		exhausted: exhausted, userSeed: userSeed, resolveMiss: resolveMiss, writes: writes,
+		exhausted: exhausted, resolveMiss: resolveMiss, writes: writes,
 	}, nil
 }
 
@@ -111,15 +105,6 @@ func (m *metrics) onExhausted(ctx context.Context, op, collection string) {
 		return
 	}
 	m.exhausted.Add(ctx, 1, opCollAttr(op, collection))
-}
-
-// onUserSeed records a user insert-if-absent seed, labelled "insert" (a new doc was created) or
-// "present" (another sync already owns the account, left untouched).
-func (m *metrics) onUserSeed(ctx context.Context, outcome string) {
-	if m == nil {
-		return
-	}
-	m.userSeed.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 
 // onResolveMiss records a foreign-key resolution miss for the thread-sub double dependency

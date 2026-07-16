@@ -38,7 +38,6 @@ func TestParseConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "rocketchat_rooms", cfg.RoomsCollection)
 	assert.Equal(t, "rocketchat_subscriptions", cfg.SubscriptionsCollection)
 	assert.Equal(t, "company_thread_subscriptions", cfg.ThreadSubsCollection)
-	assert.Equal(t, "users", cfg.UsersCollection)
 
 	assert.Equal(t, "primaryPreferred", cfg.SourceReadPreference)
 	assert.Equal(t, "oplog-collections-transformer", cfg.ConsumerDurable)
@@ -77,14 +76,6 @@ func TestParseConfig_EmptyThreadSubsCollectionFails(t *testing.T) {
 	_, err := parseConfig()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "THREAD_SUBS_COLLECTION")
-}
-
-func TestParseConfig_EmptyUsersCollectionFails(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("USERS_COLLECTION", "   ")
-	_, err := parseConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "USERS_COLLECTION")
 }
 
 func TestParseConfig_ClampsDeleteMaxDeliver(t *testing.T) {
@@ -128,13 +119,11 @@ func TestParseConfig_CustomCollectionNames(t *testing.T) {
 	t.Setenv("ROOMS_COLLECTION", "my_rooms")
 	t.Setenv("SUBSCRIPTIONS_COLLECTION", "my_subs")
 	t.Setenv("THREAD_SUBS_COLLECTION", "my_thread_subs")
-	t.Setenv("USERS_COLLECTION", "my_users")
 	cfg, err := parseConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "my_rooms", cfg.RoomsCollection)
 	assert.Equal(t, "my_subs", cfg.SubscriptionsCollection)
 	assert.Equal(t, "my_thread_subs", cfg.ThreadSubsCollection)
-	assert.Equal(t, "my_users", cfg.UsersCollection)
 }
 
 func TestParseConfig_WhitespaceSiteID_Errors(t *testing.T) {

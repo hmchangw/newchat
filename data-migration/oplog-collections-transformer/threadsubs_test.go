@@ -15,7 +15,7 @@ import (
 
 // threadSubTarget is a targetStore fake wired for thread-sub FK resolution tests.
 // It returns configurable results for FindThreadRoom and FindUserID while delegating
-// UpsertUserIfAbsent to the embedded fakeTarget so existing tests are unaffected.
+// the room-member methods to the embedded fakeTarget so existing tests are unaffected.
 type threadSubTarget struct {
 	fakeTarget
 	// FindThreadRoom return values.

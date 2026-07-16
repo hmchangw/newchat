@@ -29,54 +29,10 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 // Target store tests (real Mongo via testutil.MongoDB)
 // --------------------------------------------------------------------------
 
-func TestTargetStore_UpsertUserIfAbsent(t *testing.T) {
-	ctx := context.Background()
-	db := testutil.MongoDB(t, "tgt")
-	s := NewMongoTargetStore(db)
-	require.NoError(t, s.EnsureIndexes(ctx))
-
-	u := model.User{
-		ID:          "userabc123",
-		Account:     "alice",
-		EngName:     "Alice A",
-		ChineseName: "愛麗絲",
-		SiteID:      "site1",
-	}
-
-	// First call — must insert.
-	inserted, err := s.UpsertUserIfAbsent(ctx, u)
-	require.NoError(t, err)
-	assert.True(t, inserted, "first upsert must create the doc")
-
-	// Second call with a different user but same account — must NOT overwrite.
-	u2 := model.User{
-		ID:          "differentid",
-		Account:     "alice", // same account → filter matches existing
-		EngName:     "Someone Else",
-		ChineseName: "別人",
-		SiteID:      "site2",
-	}
-	inserted2, err := s.UpsertUserIfAbsent(ctx, u2)
-	require.NoError(t, err)
-	assert.False(t, inserted2, "second upsert for same account must not insert")
-
-	// Verify the stored doc is unchanged (first one wins).
-	storedID, found, err := s.FindUserID(ctx, "alice")
-	require.NoError(t, err)
-	require.True(t, found)
-	assert.Equal(t, u.ID, storedID, "stored user id must be the first-inserted one")
-
-	// Confirm the full doc still has the original engName.
-	var got model.User
-	require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
-	assert.Equal(t, "Alice A", got.EngName, "$setOnInsert must not overwrite existing fields")
-}
-
 func TestTargetStore_FindUserID(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "tgt")
 	s := NewMongoTargetStore(db)
-	require.NoError(t, s.EnsureIndexes(ctx))
 
 	// Missing → found==false, no error.
 	id, found, err := s.FindUserID(ctx, "nobody")
@@ -84,11 +40,9 @@ func TestTargetStore_FindUserID(t *testing.T) {
 	assert.False(t, found)
 	assert.Empty(t, id)
 
-	// Insert then find.
-	u := model.User{ID: "uid123abc", Account: "bob", SiteID: "site1"}
-	inserted, err := s.UpsertUserIfAbsent(ctx, u)
+	// Seed a user directly (the users collection is owned by the company-wide sync), then find.
+	_, err = db.Collection("users").InsertOne(ctx, bson.M{"_id": "uid123abc", "account": "bob", "siteId": "site1"})
 	require.NoError(t, err)
-	require.True(t, inserted)
 
 	id2, found2, err := s.FindUserID(ctx, "bob")
 	require.NoError(t, err)
@@ -201,75 +155,6 @@ func TestInboxPublisher_RoundTrip(t *testing.T) {
 // End-to-end handler tests (real Mongo source+target + real NATS)
 // --------------------------------------------------------------------------
 
-func TestEndToEnd_UserInsert(t *testing.T) {
-	const site = "site1ue"
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	srcDB := testutil.MongoDB(t, "src")
-	tgtDB := testutil.MongoDB(t, "tgt")
-
-	// Source lookup via the real migration package.
-	srcColl := srcDB.Collection("users")
-	lookup := migration.NewMongoSourceLookup(srcColl)
-
-	// Seed a source users doc.
-	const srcID = "user001"
-	_, err := srcColl.InsertOne(ctx, bson.M{
-		"_id":      srcID,
-		"username": "charlie",
-		"type":     "user",
-		"customFields": bson.M{
-			"engName":     "Charlie C",
-			"companyName": "查理",
-			"deptId":      "dept1",
-			"deptName":    "Engineering",
-		},
-	})
-	require.NoError(t, err)
-
-	// Read back as relaxed extJSON — the shape the connector emits.
-	fullDoc, err := lookup.FindByID(ctx, srcID)
-	require.NoError(t, err)
-	require.NotEmpty(t, fullDoc)
-
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
-	require.NoError(t, err)
-	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := jetstream.New(nc.NatsConn())
-	require.NoError(t, err)
-
-	tgtStore := NewMongoTargetStore(tgtDB)
-	require.NoError(t, tgtStore.EnsureIndexes(ctx))
-
-	h := &handler{
-		siteID:         site,
-		roomsColl:      "rocketchat_rooms",
-		subsColl:       "rocketchat_subscriptions",
-		threadSubsColl: "company_thread_subscriptions",
-		usersColl:      "users",
-		pub:            &jetstreamPublisher{publish: js.PublishMsg},
-		target:         tgtStore,
-		lookups:        map[string]migration.SourceLookup{"users": lookup},
-		now:            func() int64 { return 1700000000000 },
-	}
-
-	require.NoError(t, h.handle(ctx, oplogEvent{
-		Collection:   "users",
-		Op:           "insert",
-		FullDocument: fullDoc,
-	}))
-
-	// Assert the user now exists in the target users collection.
-	var got model.User
-	err = tgtDB.Collection("users").FindOne(ctx, bson.M{"account": "charlie"}).Decode(&got)
-	require.NoError(t, err, "user must be present in target users collection")
-	assert.Equal(t, "charlie", got.Account)
-	assert.Equal(t, "Charlie C", got.EngName)
-	assert.Equal(t, "查理", got.ChineseName)
-	assert.Equal(t, site, got.SiteID)
-}
-
 func TestEndToEnd_RoomInsert_PublishesRoomSync(t *testing.T) {
 	const site = "site1ri"
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -309,14 +194,12 @@ func TestEndToEnd_RoomInsert_PublishesRoomSync(t *testing.T) {
 	require.NoError(t, err)
 
 	tgtStore := NewMongoTargetStore(tgtDB)
-	require.NoError(t, tgtStore.EnsureIndexes(ctx))
 
 	h := &handler{
 		siteID:         site,
 		roomsColl:      "rocketchat_rooms",
 		subsColl:       "rocketchat_subscriptions",
 		threadSubsColl: "company_thread_subscriptions",
-		usersColl:      "users",
 		pub:            &jetstreamPublisher{publish: js.PublishMsg},
 		target:         tgtStore,
 		lookups:        map[string]migration.SourceLookup{"rocketchat_rooms": lookup},
@@ -411,14 +294,12 @@ func TestEndToEnd_ThreadSub_NakThenResolve(t *testing.T) {
 	require.NoError(t, err)
 
 	tgtStore := NewMongoTargetStore(tgtDB)
-	require.NoError(t, tgtStore.EnsureIndexes(ctx))
 
 	h := &handler{
 		siteID:         site,
 		roomsColl:      "rocketchat_rooms",
 		subsColl:       "rocketchat_subscriptions",
 		threadSubsColl: "company_thread_subscriptions",
-		usersColl:      "users",
 		pub:            &jetstreamPublisher{publish: js.PublishMsg},
 		target:         tgtStore,
 		lookups:        map[string]migration.SourceLookup{"company_thread_subscriptions": lookup},
@@ -447,10 +328,8 @@ func TestEndToEnd_ThreadSub_NakThenResolve(t *testing.T) {
 	_, err = tgtDB.Collection("thread_rooms").InsertOne(ctx, tr)
 	require.NoError(t, err)
 
-	u := model.User{ID: "dave_uid", Account: "dave", SiteID: site}
-	inserted, err := tgtStore.UpsertUserIfAbsent(ctx, u)
+	_, err = tgtDB.Collection("users").InsertOne(ctx, bson.M{"_id": "dave_uid", "account": "dave", "siteId": site})
 	require.NoError(t, err)
-	require.True(t, inserted)
 
 	err = h.handle(ctx, oplogEvent{
 		Collection:   "company_thread_subscriptions",

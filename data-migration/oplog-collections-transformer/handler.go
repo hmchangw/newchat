@@ -36,9 +36,6 @@ type inboxPublisher interface {
 
 // targetStore is the new-stack per-site Mongo access the transformer needs.
 type targetStore interface {
-	// UpsertUserIfAbsent inserts the user keyed by account only when absent, leaving an existing
-	// doc (owned by the company-wide sync) untouched. inserted is false when already present.
-	UpsertUserIfAbsent(ctx context.Context, u model.User) (inserted bool, err error)
 	// FindThreadRoom resolves the thread room for a parent message id, returning roomID,
 	// threadRoomID, and the thread room's home siteID (thread-subs inherit the room's site, §6).
 	FindThreadRoom(ctx context.Context, parentMessageID string) (roomID, threadRoomID, siteID string, found bool, err error)
@@ -52,11 +49,9 @@ type targetStore interface {
 
 type handler struct {
 	siteID          string
-	allSiteIDs      []string
 	roomsColl       string
 	subsColl        string
 	threadSubsColl  string
-	usersColl       string
 	roomMembersColl string
 	pub             inboxPublisher
 	target          targetStore
@@ -83,8 +78,6 @@ func (h *handler) handle(ctx context.Context, ev oplogEvent) error {
 	switch ev.Collection {
 	case h.roomsColl:
 		return h.handleRoom(ctx, ev)
-	case h.usersColl:
-		return h.handleUser(ctx, ev)
 	case h.subsColl:
 		return h.handleSubscription(ctx, ev)
 	case h.threadSubsColl:

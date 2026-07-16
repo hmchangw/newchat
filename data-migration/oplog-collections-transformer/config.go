@@ -12,10 +12,6 @@ import (
 type config struct {
 	SiteID string `env:"SITE_ID,required"`
 
-	// AllSiteIDs is every federated site. A user statusText change fans to all of them (incl. ours) —
-	// status is global-visibility and chat-originated (no other sync carries it), unlike HR fields.
-	AllSiteIDs []string `env:"ALL_SITE_IDS" envDefault:"" envSeparator:","`
-
 	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
 
@@ -26,7 +22,7 @@ type config struct {
 	SourcePassword string `env:"SOURCE_MONGO_PASSWORD" envDefault:""`
 	SourceDB       string `env:"SOURCE_DB" envDefault:"rocketchat"`
 
-	// Target new-stack per-site Mongo: users insert-if-absent + thread_room/user FK resolution.
+	// Target new-stack per-site Mongo: thread_room/user FK resolution + room-member writes.
 	TargetMongoURI string `env:"TARGET_MONGO_URI,required"`
 	TargetUsername string `env:"TARGET_MONGO_USERNAME" envDefault:""`
 	TargetPassword string `env:"TARGET_MONGO_PASSWORD" envDefault:""`
@@ -36,7 +32,6 @@ type config struct {
 	RoomsCollection         string `env:"ROOMS_COLLECTION" envDefault:"rocketchat_rooms"`
 	SubscriptionsCollection string `env:"SUBSCRIPTIONS_COLLECTION" envDefault:"rocketchat_subscriptions"`
 	ThreadSubsCollection    string `env:"THREAD_SUBS_COLLECTION" envDefault:"company_thread_subscriptions"`
-	UsersCollection         string `env:"USERS_COLLECTION" envDefault:"users"`
 	RoomMembersCollection   string `env:"ROOM_MEMBERS_COLLECTION" envDefault:"company_room_members"`
 
 	SourceReadPreference string `env:"SOURCE_READ_PREFERENCE" envDefault:"primaryPreferred"`
@@ -70,7 +65,6 @@ func parseConfig() (config, error) {
 	cfg.RoomsCollection = strings.TrimSpace(cfg.RoomsCollection)
 	cfg.SubscriptionsCollection = strings.TrimSpace(cfg.SubscriptionsCollection)
 	cfg.ThreadSubsCollection = strings.TrimSpace(cfg.ThreadSubsCollection)
-	cfg.UsersCollection = strings.TrimSpace(cfg.UsersCollection)
 	cfg.RoomMembersCollection = strings.TrimSpace(cfg.RoomMembersCollection)
 	for name, v := range map[string]string{
 		"SITE_ID":                  cfg.SiteID,
@@ -80,7 +74,6 @@ func parseConfig() (config, error) {
 		"ROOMS_COLLECTION":         cfg.RoomsCollection,
 		"SUBSCRIPTIONS_COLLECTION": cfg.SubscriptionsCollection,
 		"THREAD_SUBS_COLLECTION":   cfg.ThreadSubsCollection,
-		"USERS_COLLECTION":         cfg.UsersCollection,
 		"ROOM_MEMBERS_COLLECTION":  cfg.RoomMembersCollection,
 	} {
 		if v == "" {

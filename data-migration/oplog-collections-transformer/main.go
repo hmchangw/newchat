@@ -41,13 +41,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Surface an empty ALL_SITE_IDS once at startup: user statusText changes won't propagate
-	// (publishUserStatus skips with a per-event metric). Legitimate for a rooms/subs-only partial
-	// deployment; a misconfig otherwise. (Future: promote to a hard-fail once the modes are known.)
-	if !hasDestinationSite(cfg.AllSiteIDs) {
-		slog.Warn("ALL_SITE_IDS is empty — user status fan-out is disabled (intentional only for a partial deployment)")
-	}
-
 	m, err := newMetrics()
 	if err != nil {
 		slog.Error("init metrics failed", "error", err)
@@ -79,11 +72,10 @@ func main() {
 		cfg.RoomsCollection:         migration.NewMongoSourceLookup(sourceDB.Collection(cfg.RoomsCollection, options.Collection().SetReadPreference(rp))),
 		cfg.SubscriptionsCollection: migration.NewMongoSourceLookup(sourceDB.Collection(cfg.SubscriptionsCollection, options.Collection().SetReadPreference(rp))),
 		cfg.ThreadSubsCollection:    migration.NewMongoSourceLookup(sourceDB.Collection(cfg.ThreadSubsCollection, options.Collection().SetReadPreference(rp))),
-		cfg.UsersCollection:         migration.NewMongoSourceLookup(sourceDB.Collection(cfg.UsersCollection, options.Collection().SetReadPreference(rp))),
 		cfg.RoomMembersCollection:   migration.NewMongoSourceLookup(sourceDB.Collection(cfg.RoomMembersCollection, options.Collection().SetReadPreference(rp))),
 	}
 
-	// Target new-stack per-site Mongo: user insert-if-absent + thread_room/user FK resolution.
+	// Target new-stack per-site Mongo: thread_room/user FK resolution + room-member writes.
 	targetClient, err := mongoutil.Connect(ctx, cfg.TargetMongoURI, cfg.TargetUsername, cfg.TargetPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("target mongo connect failed", "error", err)
@@ -91,12 +83,6 @@ func main() {
 		os.Exit(1)
 	}
 	target := NewMongoTargetStore(targetClient.Database(cfg.TargetDB))
-	if err := target.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure target indexes failed", "error", err)
-		mongoutil.Disconnect(ctx, targetClient)
-		mongoutil.Disconnect(ctx, source)
-		os.Exit(1)
-	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
@@ -124,11 +110,9 @@ func main() {
 
 	h := &handler{
 		siteID:          cfg.SiteID,
-		allSiteIDs:      cfg.AllSiteIDs,
 		roomsColl:       cfg.RoomsCollection,
 		subsColl:        cfg.SubscriptionsCollection,
 		threadSubsColl:  cfg.ThreadSubsCollection,
-		usersColl:       cfg.UsersCollection,
 		roomMembersColl: cfg.RoomMembersCollection,
 		pub:             &jetstreamPublisher{publish: js.PublishMsg},
 		target:          target,
@@ -149,7 +133,6 @@ func main() {
 			subject.MigrationOplog(cfg.SiteID, cfg.RoomsCollection, "*"),
 			subject.MigrationOplog(cfg.SiteID, cfg.SubscriptionsCollection, "*"),
 			subject.MigrationOplog(cfg.SiteID, cfg.ThreadSubsCollection, "*"),
-			subject.MigrationOplog(cfg.SiteID, cfg.UsersCollection, "*"),
 			subject.MigrationOplog(cfg.SiteID, cfg.RoomMembersCollection, "*"),
 		},
 	})
@@ -250,16 +233,6 @@ func processOne(ctx context.Context, h *handler, m jetstream.Msg, mtr *metrics, 
 }
 
 func nowMs() int64 { return time.Now().UTC().UnixMilli() }
-
-// hasDestinationSite reports whether sites has at least one non-empty entry (a real fan-out target).
-func hasDestinationSite(sites []string) bool {
-	for _, s := range sites {
-		if s != "" {
-			return true
-		}
-	}
-	return false
-}
 
 // streamWaitTimeout bounds how long startup waits for the connector to bootstrap MIGRATION_OPLOG.
 const streamWaitTimeout = 60 * time.Second
