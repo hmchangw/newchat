@@ -10,13 +10,13 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-func TestOrgTaxonomyJSON_TagsMatchSpotlightOrgIndex(t *testing.T) {
-	tax := model.OrgTaxonomy{
+func TestOrgJSON_TagsMatchSpotlightOrgIndex(t *testing.T) {
+	org := model.Org{
 		SectID: "S", SectTCName: "科", SectName: "Sect", SectDescription: "sd",
 		DeptID: "D", DeptTCName: "處", DeptName: "Dept", DeptDescription: "dd",
 		DivisionID: "V",
 	}
-	data, err := json.Marshal(&tax)
+	data, err := json.Marshal(&org)
 	require.NoError(t, err)
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
@@ -27,42 +27,39 @@ func TestOrgTaxonomyJSON_TagsMatchSpotlightOrgIndex(t *testing.T) {
 	}
 }
 
-func TestOrgTaxonomyJSON_OmitEmpty(t *testing.T) {
-	data, err := json.Marshal(&model.OrgTaxonomy{})
+func TestOrgJSON_OmitEmpty(t *testing.T) {
+	data, err := json.Marshal(&model.Org{})
 	require.NoError(t, err)
 	assert.Equal(t, "{}", string(data), "all org fields omitempty")
 }
 
 func TestEmployeeJSON_OrgFieldsFlat(t *testing.T) {
 	e := model.Employee{
-		OrgTaxonomy: model.OrgTaxonomy{SectID: "S", DeptName: "Dept"},
-		EmployeeID:  "EMP1", Account: "alice", Name: "Alice", SiteID: "site-a", Source: "teams",
+		Org:        model.Org{SectID: "S", DeptName: "Dept"},
+		EmployeeID: "EMP1", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲", SiteID: "site-a", Source: "teams",
 	}
 	data, err := json.Marshal(&e)
 	require.NoError(t, err)
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
-	// org fields must be FLAT (no nested "orgTaxonomy" object)
-	_, nested := raw["OrgTaxonomy"]
-	assert.False(t, nested, "OrgTaxonomy must embed flat, not nest")
+	// org fields must be FLAT (no nested "Org" object)
+	_, nested := raw["Org"]
+	assert.False(t, nested, "Org must embed flat, not nest")
 	assert.Equal(t, "S", raw["sectId"])
 	assert.Equal(t, "EMP1", raw["employeeId"])
+	assert.Equal(t, "Alice", raw["engName"])
+	assert.Equal(t, "愛麗絲", raw["chineseName"])
 	assert.Equal(t, "teams", raw["source"])
 	roundTrip(t, &e, &model.Employee{})
-}
-
-func TestEmployeeChangeConsts(t *testing.T) {
-	assert.Equal(t, model.EmployeeChange("created"), model.EmployeeChangeCreated)
-	assert.Equal(t, model.EmployeeChange("updated"), model.EmployeeChangeUpdated)
 }
 
 func TestEmployeeWithChangeRoundTrip(t *testing.T) {
 	ewc := model.EmployeeWithChange{
 		Employee: model.Employee{
-			OrgTaxonomy: model.OrgTaxonomy{SectID: "S", DeptID: "D"},
-			EmployeeID:  "EMP1", Account: "alice", Source: "teams",
+			Org:        model.Org{SectID: "S", DeptID: "D"},
+			EmployeeID: "EMP1", Account: "alice", Source: "teams",
 		},
-		Change: model.EmployeeChangeCreated,
+		Change: "created",
 	}
 	roundTrip(t, &ewc, &model.EmployeeWithChange{})
 }
@@ -77,18 +74,18 @@ func TestEmployeesUpsertBatch_ConsumerDecodeCompat(t *testing.T) {
 		Timestamp: 1735689600001,
 		Employees: []model.EmployeeWithChange{{
 			Employee: model.Employee{
-				OrgTaxonomy: model.OrgTaxonomy{SectID: "S1", DeptID: "D1", DivisionID: "V1"},
-				EmployeeID:  "EMP1", Account: "alice", Source: "teams",
+				Org:        model.Org{SectID: "S1", DeptID: "D1", DivisionID: "V1"},
+				EmployeeID: "EMP1", Account: "alice", Source: "teams",
 			},
-			Change: model.EmployeeChangeCreated,
+			Change: "created",
 		}},
 	}
 	data, err := json.Marshal(&batch)
 	require.NoError(t, err)
 
 	var consumer struct {
-		Timestamp int64               `json:"timestamp"`
-		Employees []model.OrgTaxonomy `json:"employees"`
+		Timestamp int64       `json:"timestamp"`
+		Employees []model.Org `json:"employees"`
 	}
 	require.NoError(t, json.Unmarshal(data, &consumer))
 	require.Len(t, consumer.Employees, 1)
@@ -101,7 +98,7 @@ func TestEmployeesUpsertBatch_ConsumerDecodeCompat(t *testing.T) {
 func TestUserWithChangeJSON_UserFieldsFlat(t *testing.T) {
 	uwc := model.UserWithChange{
 		User:   model.User{ID: "u1", Account: "alice", SiteID: "site-a", SectID: "S"},
-		Change: model.EmployeeChangeUpdated,
+		Change: "updated",
 	}
 	data, err := json.Marshal(&uwc)
 	require.NoError(t, err)
@@ -116,7 +113,7 @@ func TestUsersUpsertBatchRoundTrip(t *testing.T) {
 	b := model.UsersUpsertBatch{
 		Timestamp: 1735689600001,
 		Users: []model.UserWithChange{{
-			User: model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, Change: model.EmployeeChangeCreated,
+			User: model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, Change: "created",
 		}},
 	}
 	roundTrip(t, &b, &model.UsersUpsertBatch{})

@@ -25,13 +25,15 @@ spotlight-org collection, which decodes each element's flat 9-field org subset).
 
 ## Wire types (`pkg/model`, this phase)
 
-- `OrgTaxonomy` — the 9 org fields, json tags **identical** to search-sync-worker's
+- `Org` — the 9 org fields, json tags **identical** to search-sync-worker's
   org index row so one wire row feeds both the ES index and `hr_employee`. `bson`
   tags added (search-specific struct tags deliberately excluded from `pkg/model`).
-- `Employee` — embeds `OrgTaxonomy` inline (org fields stay flat on the wire) +
-  `employeeId/account/name/siteId/source`. `source` is the coexistence tag.
+- `Employee` — the source of truth a downstream out-of-repo service maps into
+  `model.User`. Embeds `Org` inline (org fields stay flat on the wire) +
+  `employeeId/account/engName/chineseName/siteId/source`. `engName`/`chineseName`
+  mirror `model.User` so the derive is lossless; `source` is the coexistence tag.
 - `EmployeeWithChange` / `UserWithChange` — embed `Employee` / `User` + a `Change`
-  indicator (`created`/`updated`). Flat embedding preserved so the consumer's
+  wire string (`created`/`updated`). Flat embedding preserved so the consumer's
   org-subset decode still works.
 - `EmployeesUpsertBatch` / `UsersUpsertBatch` / `HRSyncEmployeeQuitBatch` — the
   three batch shapes, each carrying `Timestamp`.
@@ -46,6 +48,7 @@ so no false quits.
 
 ## Change semantics — downstream contract (open)
 
-`EmployeeChange`/`UserWithChange.Change` and the quit-batch shape are the downstream
-**persister's** contract, not defined in this repo. Confirm the exact semantics
-before wiring the Phase 3 diff.
+`EmployeeWithChange.Change` / `UserWithChange.Change` (a plain wire string) and the
+quit-batch shape are the downstream **persister's** contract, not defined in this
+repo. The typed change enum + diff logic live in the producer's `transform` layer
+(Phase 3), keeping `pkg/model` a leaf. Confirm the exact semantics before wiring.
