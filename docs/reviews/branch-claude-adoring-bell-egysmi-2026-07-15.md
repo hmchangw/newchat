@@ -56,3 +56,32 @@ Compliant: subject via `pkg/subject.MsgRoomLast` + test; no raw sprintf; no stre
 
 ## (f) Client-API doc rule
 Satisfied. `DeleteRoomEvent`/`Room` (server→client structs) changed and `docs/client-api.md`, `docs/client-api/events.md`, `docs/client-api/request-reply.md` are all updated in-diff (LastMessagePreview schema, `lastMessage` on `message_deleted`, encrypted example). **nitpick**: docs promise "system messages never appear as previews" — currently false for the stored `rooms.lastMsg` (see (a) high).
+
+---
+
+# Service: history-service
+
+## (a) Diff correctness
+- `SoftDeleteMessage`'s 5-tuple widening is mechanically consistent across all error returns (`history-service/internal/cassrepo/write.go:288-368`), the interface (`history-service/internal/service/service.go:45`), `migration.go:89`, and regenerated mocks. The tlm write already existed (`setParentTcountAndTlm`); only the return plumb is new. **low**: on count-set failure (`write.go:366`) the event carries `NewTCount=nil, NewThreadLastMsgAt=nil` with applied=true — follows pre-existing tcount semantics; fine.
+- Repo walk correct: strict `created_at < before` only on the first bucket mirrors `GetMessagesBefore` (`cassrepo/last_message.go:51-56` vs `messages_by_room.go:84-95`); handler's `+1ms` cap (`service/last_message.go:41`) matches LoadHistory. Filtering on plaintext deleted/type columns so only the winner pays decrypt (`last_message.go:89-99`) improves on `scanMessagesUpTo`, which decrypts every row. Builds clean.
+- **medium** — `scanFirstQualifying` has no row-scan cap — gocql transparently drains an entire bucket's deleted tail, while the parallel `rooms.go` walk deliberately caps at 250 rows. Worst case per delete-fanout: unbounded scan of a 72h bucket.
+- **nitpick** — comment "within [floor, before)" (`service.go:29-31`) overstates precision — floor bounds buckets, not rows (same as sibling readers).
+
+## (b) Scope drift
+Tight; every touched file serves the feature, `pkg/model/model_test.go` roundtrips added per the Model Tests rule, no drive-by refactors. **nitpick**: `service/last_message.go:35` double-wraps ("resolving room times for %s" around resolveRoomTimes' own "resolve room times for %s").
+
+## (c) Abstraction — the two walks
+The repo-level walk is justified as a primitive (single decrypt, repo-side filter, no cursor machinery), but two last-message resolvers now diverge:
+- **high** (coherence): `roomLastMessage` (`service/rooms.go:71`) skips only `Deleted`; `GetLastRoomMessage` also skips 8 system types (`cassrepo/last_message.go:24`). Delete the newest user message above a system message and `message_deleted.lastMessage` shows an older user message (or nothing) while a rooms.get refresh shows "alice added bob" — the same room-list preview flip-flops by refresh path. The skip-set (matching the new client docs) is the right semantic; rooms.get should adopt it.
+- **medium**: `rooms.go:119` trims to 256 runes; the preview ships full content — up to 20KB fanned out per member per visible delete. Trim at the service edge.
+- **medium**: three shapes coexist (`model.LastMessage`, `model.LastMessagePreview`, `Room.LastMsgID/At`). Converge: reimplement `roomLastMessage` atop `GetLastRoomMessage` (adding a row-scan cap), make `LastMessagePreview` the target shape, deprecate `model.LastMessage`.
+- **medium** (drift risk): `lastMessageSkipTypes` hand-enumerates constants from `pkg/model/event.go:577-593`; a future system type silently leaks into previews. Export a canonical `model.SystemMessageTypes` set.
+
+## (d) Design coherence
+Good: the RPC returns plaintext; broadcast-worker seals `EncMsg` (`broadcast-worker/handler.go:826`) — encryption stays at the fanout boundary. Missing-room → empty reply (not NotFound) is intentional, commented, tested (`last_message_test.go:151`). **low**: a stale Mongo `lastMsgAt` ceiling can hide a newer survivor in the first bucket — shared, pre-existing trade-off with rooms.go. **nitpick**: preview `Type` can never be non-empty today (skip-set covers all defined types); `last_message.go:47-56` builds the query twice instead of a `firstBucket`-style branch.
+
+## (e) Pattern adherence
+Clean: `pkg/subject.MsgRoomLast` builder + test; Tier-1 errcode constructors, raw `%w` for infra, no log-and-return; bucket math stays inside cassrepo (`r.bucket`) so MESSAGE_BUCKET_HOURS never leaks; `package service_test` matches this package's existing unit-test convention; integration tests use shared testutil containers. **nitpick**: subject namespace `chat.server.request.msg.{siteID}…` vs sibling `chat.server.request.history.{siteID}.rooms.get` (`pkg/subject/subject.go:80`) — two namespaces for one service's internal RPCs.
+
+## (f) Client-API docs
+Compliant. The RPC is `chat.server.*`, correctly undocumented (precedent: rooms.get; `docs/client-api.md:88` scopes server subjects out). `DeleteRoomEvent.lastMessage` + the `LastMessagePreview` shared-schema table landed in `docs/client-api.md` with plaintext and `encMsg` JSON examples; `events.md` and `request-reply.md` updated in the same PR; `newThreadLastMsgAt`'s reply_deleted population reflected in both `client-api.md:5429` and `events.md:547`. No drift among the three views.
