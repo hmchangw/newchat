@@ -98,7 +98,7 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 	data := fetchOne(t, ctx, cons, 3*time.Second)
 	var evt model.TeamsRoomCreateEvent
 	require.NoError(t, json.Unmarshal(data, &evt))
-	assert.Equal(t, siteID, evt.SiteID)
+	// The site is identified by the subject we consumed from, not the payload.
 	require.Len(t, evt.Chats, 2)
 	ids := map[string]bool{}
 	for _, c := range evt.Chats {

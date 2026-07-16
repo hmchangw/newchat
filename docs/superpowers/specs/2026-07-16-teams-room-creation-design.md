@@ -8,8 +8,9 @@
 
 A run-to-completion job, triggered by a **k8s CronJob**, that turns Teams chats
 flagged for room creation into room-canonical NATS events. It is the consumer
-end of the `needCreateRoom` flag that `teams-chat-member-sync` sets on
-`teams_chat` documents.
+end of the `needCreateRoom` flag: `teams-chat-sync` sets it `true` for oneOnOne
+chats on insert (complete on first sight), and `teams-chat-member-sync` sets it
+`true` for group chats once their member list is resolved.
 
 Each run:
 
@@ -53,9 +54,9 @@ New batch envelope, one per (siteId, batch). Added to
 
 ```go
 // TeamsRoomCreateEvent is the batch envelope published to the room-canonical
-// subject: one event carries up to N chats that all share a siteId.
+// subject: one event carries up to N chats that all share a site. The site is
+// carried on the subject, not in the payload.
 type TeamsRoomCreateEvent struct {
-    SiteID    string                `json:"siteId"`
     Chats     []TeamsRoomCreateChat `json:"chats"`
     Timestamp int64                 `json:"timestamp"` // event publish time, UnixMilli UTC
 }
@@ -159,7 +160,7 @@ run():
   groups = group chats by siteId
   for each (siteId, chats) group:                # bounded by MAX_WORKERS
     for each batch of up to N chats:
-      evt = build TeamsRoomCreateEvent(siteId, batch, Timestamp=now)
+      evt = build TeamsRoomCreateEvent(batch, Timestamp=now)   # site is on the subject
       ack, err = publish(subject.RoomCanonicalTeamsCreate(siteId), evt, dedupID)
       if err: log warn, continue                 # chats stay flagged for next run
       store.MarkRoomsCreated(batch IDs)           # option C: flip only on ack

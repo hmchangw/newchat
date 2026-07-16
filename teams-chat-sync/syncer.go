@@ -24,9 +24,11 @@ type syncConfig struct {
 	MaxWorkers  int
 	DefaultFrom time.Time
 	Now         func() time.Time
-	// DefaultSiteID is assigned to a chat whose siteID vote is empty (no member
-	// found in the user cache). When empty, empty-vote chats are skipped with a
-	// warning and the user is failed so the window retries next run.
+	// DefaultSiteID is the fallback siteID for a chat whose vote is empty (no
+	// member found in the user cache). Sourced from required,notEmpty config, so
+	// in production it is always set and every built chat gets a non-empty
+	// siteID; the empty-vote skip in syncUser is a defensive guard that only
+	// fires under direct construction with an empty default.
 	DefaultSiteID string
 }
 

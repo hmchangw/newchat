@@ -34,10 +34,10 @@ type Config struct {
 	// DefaultFrom is the RFC3339 UTC watermark used for users that have never
 	// synced (teams_user docs without a from field).
 	DefaultFrom string `env:"SYNC_DEFAULT_FROM" envDefault:"2026-04-01T00:00:00Z"`
-	// DefaultSiteID is assigned to a chat whose member-majority siteID vote is
-	// empty (no member found in teams_user). When unset, such chats are skipped
-	// with a warning and their user retries next run.
-	DefaultSiteID string `env:"SYNC_DEFAULT_SITE_ID" envDefault:""`
+	// DefaultSiteID is the fallback siteID for a chat whose member-majority vote
+	// is empty (no member found in teams_user). Required and non-empty so every
+	// synced chat is guaranteed a non-empty siteID.
+	DefaultSiteID string `env:"SYNC_DEFAULT_SITE_ID,required,notEmpty"`
 
 	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
 	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`

@@ -92,6 +92,8 @@ func TestMongoStore_UpsertChats_SiteIDImmutable(t *testing.T) {
 	assert.Equal(t, "Renamed", got.Name, "mutable fields must refresh")
 	assert.True(t, got.UpdatedAt.Equal(now2), "updatedAt refreshes to the second write's stamp")
 	assert.True(t, got.NeedMemberSync)
+	assert.False(t, got.NeedCreateRoom, "group defers room creation to member-sync")
+	assert.Empty(t, got.Members, "group members are owned by member-sync, not this sync")
 }
 
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
@@ -125,6 +127,7 @@ func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	assert.True(t, got.LastUpdatedDateTime.Equal(one.LastUpdatedDateTime), "oneOnOne doc must be untouched by re-upsert")
 	assert.True(t, got.UpdatedAt.Equal(now1))
 	assert.False(t, got.NeedMemberSync)
+	assert.True(t, got.NeedCreateRoom, "oneOnOne is ready for room creation on insert")
 }
 
 func TestMongoStore_UpsertChats_MixedBatchAndEmpty(t *testing.T) {

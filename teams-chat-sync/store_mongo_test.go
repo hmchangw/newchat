@@ -50,9 +50,10 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 	assert.Equal(t, "Topic", set["name"])
 	assert.Equal(t, "group", set["chatType"])
 	assert.Equal(t, c.LastUpdatedDateTime, set["lastUpdatedDateTime"])
-	assert.Equal(t, c.Members, set["members"])
 	assert.Equal(t, true, set["needMemberSync"])
+	assert.Equal(t, false, set["needCreateRoom"], "group chats defer room creation until member-sync flips it")
 	assert.Equal(t, upsertNow, set["updatedAt"], "$set writes the chat's build-time UpdatedAt stamp")
+	assert.NotContains(t, set, "members", "group members are owned by teams-chat-member-sync, not this sync")
 	assert.NotContains(t, set, "siteId", "$set must never touch siteID")
 	assert.NotContains(t, set, "createdDateTime")
 }
@@ -82,5 +83,6 @@ func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 		"siteId":              "site-b",
 		"updatedAt":           upsertNow,
 		"needMemberSync":      false,
+		"needCreateRoom":      true,
 	}, soi)
 }

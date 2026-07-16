@@ -4,10 +4,10 @@ import "time"
 
 // TeamsRoomCreateEvent is the batch envelope published by teams-room-creation
 // to the room-canonical subject chat.room.canonical.{siteID}.teams.create.
-// One event carries up to N chats that all share SiteID. Consumed by the room
-// materialization worker (out of scope here).
+// One event carries up to N chats that all share a site — the site is carried
+// on the subject, not in the payload. Consumed by the room materialization
+// worker (out of scope here).
 type TeamsRoomCreateEvent struct {
-	SiteID    string                `json:"siteId" bson:"siteId"`
 	Chats     []TeamsRoomCreateChat `json:"chats" bson:"chats"`
 	Timestamp int64                 `json:"timestamp" bson:"timestamp"` // publish time, UnixMilli UTC
 }

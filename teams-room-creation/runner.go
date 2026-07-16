@@ -73,7 +73,7 @@ func (r *runner) run(ctx context.Context) error {
 // publishBatch marshals and publishes one batch, then clears the flag for its
 // chats iff the publish was acknowledged.
 func (r *runner) publishBatch(ctx context.Context, b batch) {
-	evt := buildEvent(b.siteID, b.chats, r.cfg.Now())
+	evt := buildEvent(b.chats, r.cfg.Now())
 	data, err := json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "marshal room-creation event", "site_id", b.siteID, "error", err)
@@ -119,8 +119,9 @@ func planBatches(chats []model.TeamsChat, size int) []batch {
 }
 
 // buildEvent maps a batch of teams_chat docs into the wire event, dropping each
-// member's Graph id and stamping the publish timestamp.
-func buildEvent(siteID string, chats []model.TeamsChat, now time.Time) model.TeamsRoomCreateEvent {
+// member's Graph id and stamping the publish timestamp. The site is not carried
+// in the payload — it is on the publish subject.
+func buildEvent(chats []model.TeamsChat, now time.Time) model.TeamsRoomCreateEvent {
 	out := make([]model.TeamsRoomCreateChat, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
 	for _, c := range chats {
@@ -139,7 +140,6 @@ func buildEvent(siteID string, chats []model.TeamsChat, now time.Time) model.Tea
 		})
 	}
 	return model.TeamsRoomCreateEvent{
-		SiteID:    siteID,
 		Chats:     out,
 		Timestamp: now.UTC().UnixMilli(),
 	}

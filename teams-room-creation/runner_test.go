@@ -13,6 +13,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // captured records one publish call.
@@ -23,13 +24,14 @@ type captured struct {
 }
 
 // recorder is a thread-safe publishFunc that decodes and stores each batch.
+// fail is keyed by subject: a batch whose subject is present fails to publish.
 func recorder(mu *sync.Mutex, out *[]captured, fail map[string]bool) publishFunc {
 	return func(_ context.Context, subj string, data []byte, dedup string) error {
 		var e model.TeamsRoomCreateEvent
 		if err := json.Unmarshal(data, &e); err != nil {
 			return err
 		}
-		if fail[e.SiteID] {
+		if fail[subj] {
 			return errors.New("boom")
 		}
 		mu.Lock()
@@ -79,16 +81,22 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 	require.NoError(t, r.run(context.Background()))
 
 	// site-a (3 chats, batch 2) -> 2 batches; site-b -> 1 batch. Total 3.
+	subjA := subject.RoomCanonicalTeamsCreate("site-a")
+	subjB := subject.RoomCanonicalTeamsCreate("site-b")
 	assert.Len(t, got, 3)
+	bySubj := map[string]int{}
 	for _, c := range got {
 		assert.Equal(t, int64(1700), c.evt.Timestamp)
-		assert.Equal(t, "chat.room.canonical."+c.evt.SiteID+".teams.create", c.subj)
+		assert.Contains(t, []string{subjA, subjB}, c.subj)
 		assert.LessOrEqual(t, len(c.evt.Chats), 2)
 		for _, ch := range c.evt.Chats {
 			assert.Equal(t, "acct-"+ch.ID, ch.Members[0].Account)
 			assert.Equal(t, "n-"+ch.ID, ch.Name)
 		}
+		bySubj[c.subj]++
 	}
+	assert.Equal(t, 2, bySubj[subjA], "site-a: 3 chats / batch 2 -> 2 batches")
+	assert.Equal(t, 1, bySubj[subjB], "site-b: 1 batch")
 	assert.True(t, marked["a1"] && marked["a2"] && marked["a3"] && marked["b1"])
 	assert.Len(t, marked, 4)
 }
@@ -103,12 +111,12 @@ func TestRunner_FailedBatchNotFlipped(t *testing.T) {
 
 	var mu sync.Mutex
 	var got []captured
-	r := newRunner(store, recorder(&mu, &got, map[string]bool{"site-b": true}), runConfig{
+	r := newRunner(store, recorder(&mu, &got, map[string]bool{subject.RoomCanonicalTeamsCreate("site-b"): true}), runConfig{
 		BatchSize: 10, MaxWorkers: 2, Now: time.Now,
 	})
 	require.NoError(t, r.run(context.Background()))
 	assert.Len(t, got, 1)
-	assert.Equal(t, "site-a", got[0].evt.SiteID)
+	assert.Equal(t, subject.RoomCanonicalTeamsCreate("site-a"), got[0].subj)
 }
 
 func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
@@ -123,7 +131,7 @@ func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
 	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 10, MaxWorkers: 2, Now: time.Now})
 	require.NoError(t, r.run(context.Background())) // mark failure logged, not fatal
 	assert.Len(t, got, 1)                           // publish still happened
-	assert.Equal(t, "site-a", got[0].evt.SiteID)
+	assert.Equal(t, subject.RoomCanonicalTeamsCreate("site-a"), got[0].subj)
 }
 
 func TestRunner_EmptyListNoPublish(t *testing.T) {
@@ -148,7 +156,7 @@ func TestRunner_ListErrorReturned(t *testing.T) {
 }
 
 func TestBuildEvent_MapsMembersDropsID(t *testing.T) {
-	e := buildEvent("site-a", []model.TeamsChat{chat("a1", "site-a")}, time.UnixMilli(42))
+	e := buildEvent([]model.TeamsChat{chat("a1", "site-a")}, time.UnixMilli(42))
 	require.Len(t, e.Chats, 1)
 	require.Len(t, e.Chats[0].Members, 1)
 	assert.Equal(t, "acct-a1", e.Chats[0].Members[0].Account)

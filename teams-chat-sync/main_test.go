@@ -15,6 +15,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("GRAPH_TENANT_ID", "tenant")
 	t.Setenv("GRAPH_CLIENT_ID", "client")
 	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
+	t.Setenv("SYNC_DEFAULT_SITE_ID", "site-default")
 }
 
 func TestConfig_Defaults(t *testing.T) {
@@ -25,7 +26,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 8, cfg.MaxWorkers)
 	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
 	assert.Equal(t, "2026-04-01T00:00:00Z", cfg.DefaultFrom)
-	assert.Equal(t, "", cfg.DefaultSiteID, "no default siteID unless configured")
+	assert.Equal(t, "site-default", cfg.DefaultSiteID, "SYNC_DEFAULT_SITE_ID is required,notEmpty")
 	assert.Equal(t, 50, cfg.GraphChatsPageSize, "default $top is Graph's max for list chats")
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 
@@ -37,6 +38,13 @@ func TestConfig_Defaults(t *testing.T) {
 func TestConfig_MissingRequired(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("MONGO_URI", "") // required,notEmpty — empty must fail
+	_, err := env.ParseAs[Config]()
+	require.Error(t, err)
+}
+
+func TestConfig_MissingDefaultSiteID(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SYNC_DEFAULT_SITE_ID", "") // required,notEmpty — empty must fail
 	_, err := env.ParseAs[Config]()
 	require.Error(t, err)
 }

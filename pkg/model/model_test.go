@@ -4487,7 +4487,6 @@ func TestTeamsChatJSON_NeedCreateRoom(t *testing.T) {
 
 func TestTeamsRoomCreateEventJSON(t *testing.T) {
 	e := model.TeamsRoomCreateEvent{
-		SiteID: "site-a",
 		Chats: []model.TeamsRoomCreateChat{{
 			ID:              "chat-1",
 			Name:            "Project X",
