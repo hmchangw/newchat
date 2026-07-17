@@ -1,0 +1,22 @@
+name: hr-sync-worker
+
+# Long-running consumer persisting the HR feed. BOOTSTRAP_STREAMS=true here
+# only — stream creation is ops-owned in production.
+services:
+  hr-sync-worker:
+    build:
+      context: ../..
+      dockerfile: hr-sync-worker/deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      - SITE_IDS=${SITE_IDS:-site-local}
+      - NATS_URL=nats://nats:4222
+      - MONGO_WRITE_URI=mongodb://mongodb:27017
+      - MONGO_WRITE_DB=chat
+      - BOOTSTRAP_STREAMS=true
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true
