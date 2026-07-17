@@ -28,7 +28,7 @@ func TestRunSync_DiffAndPublish(t *testing.T) {
 	pub := newCapturingPublisher(t, &got)
 
 	stats, err := runSync(context.Background(), graph, transform.DefaultMapper{OrgType: "group"}, store, pub,
-		[]syncGroup{{GroupID: "g1", SiteID: "site-a"}}, 100)
+		[]syncGroup{{GroupID: "g1", SiteID: "site-a"}}, nil, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Created)
 	assert.Zero(t, stats.Updated)
@@ -49,6 +49,6 @@ func TestRunSync_StoreErrorAborts(t *testing.T) {
 
 	_, err := runSync(context.Background(), graph, transform.DefaultMapper{OrgType: "group"}, store,
 		newPublisher(func(context.Context, string, []byte) error { return nil }, "central", transform.DefaultConverter{}),
-		[]syncGroup{{GroupID: "g1", SiteID: "site-a"}}, 100)
+		[]syncGroup{{GroupID: "g1", SiteID: "site-a"}}, nil, 100)
 	require.ErrorIs(t, err, boom)
 }

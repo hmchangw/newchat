@@ -49,6 +49,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse sync groups: %w", err)
 	}
+	siteOverrides, err := parseSiteOverrides(cfg.SiteOverrides)
+	if err != nil {
+		return fmt.Errorf("parse site overrides: %w", err)
+	}
 
 	// SIGTERM/SIGINT (pod deletion, Job activeDeadlineSeconds) cancels the run
 	// so it aborts between operations instead of being killed mid-batch.
@@ -98,13 +102,14 @@ func run() error {
 	logger := slog.With("requestId", idgen.GenerateRequestID())
 	logger.Info("teams hr sync started")
 	start := time.Now()
-	stats, err := runSync(ctx, graph, mapper, store, pub, groups, cfg.GraphPageSize)
+	stats, err := runSync(ctx, graph, mapper, store, pub, groups, siteOverrides, cfg.GraphPageSize)
 	logger.Info("teams hr sync finished",
 		"groups", stats.Groups,
 		"members", stats.Members,
 		"skippedNonUser", stats.SkippedObj,
 		"invalidUpn", stats.InvalidUPN,
 		"dupAccounts", stats.DupAccount,
+		"overridden", stats.Overridden,
 		"created", stats.Created,
 		"updated", stats.Updated,
 		"quits", stats.Quits,
@@ -129,9 +134,9 @@ type runStats struct {
 
 // runSync performs one full sync: walk the configured groups, diff against
 // the persisted teams-sourced rows, publish the delta.
-func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, store Store, pub *publisher, groups []syncGroup, pageSize int) (runStats, error) {
+func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, store Store, pub *publisher, groups []syncGroup, siteOverrides map[string]string, pageSize int) (runStats, error) {
 	var stats runStats
-	current, cs, err := collectEmployees(ctx, graph, mapper, groups, pageSize)
+	current, cs, err := collectEmployees(ctx, graph, mapper, groups, siteOverrides, pageSize)
 	stats.collectStats = cs
 	if err != nil {
 		return stats, fmt.Errorf("collect graph employees: %w", err)

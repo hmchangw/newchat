@@ -29,6 +29,10 @@ type config struct {
 	OrgType string `env:"ORG_TYPE" envDefault:"group"`
 	// CentralSiteID scopes the two upsert subjects (chat.hr.{central}.…).
 	CentralSiteID string `env:"CENTRAL_SITE_ID,required,notEmpty"`
+	// SiteOverrides optionally pins specific accounts to a site regardless of
+	// their group's default: JSON [{"account":"…","siteId":"…"}]. Parsed via
+	// parseSiteOverrides.
+	SiteOverrides string `env:"SITE_OVERRIDES" envDefault:""`
 
 	MongoReadURI      string `env:"MONGO_READ_URI,required,notEmpty"`
 	MongoReadUsername string `env:"MONGO_READ_USERNAME" envDefault:""`
@@ -67,4 +71,34 @@ func parseSyncGroups(raw string) ([]syncGroup, error) {
 		seen[g.GroupID] = struct{}{}
 	}
 	return groups, nil
+}
+
+// siteOverride pins one account to a site, overriding its group default.
+type siteOverride struct {
+	Account string `json:"account"`
+	SiteID  string `json:"siteId"`
+}
+
+// parseSiteOverrides decodes SITE_OVERRIDES into an account→siteId map. Empty
+// or unset yields an empty map; each entry needs both fields; a duplicate
+// account is ambiguous and errors.
+func parseSiteOverrides(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	if raw == "" {
+		return out, nil
+	}
+	var overrides []siteOverride
+	if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+		return nil, fmt.Errorf("decode SITE_OVERRIDES: %w", err)
+	}
+	for i, o := range overrides {
+		if o.Account == "" || o.SiteID == "" {
+			return nil, fmt.Errorf("SITE_OVERRIDES[%d]: account and siteId are both required", i)
+		}
+		if _, dup := out[o.Account]; dup {
+			return nil, fmt.Errorf("SITE_OVERRIDES: duplicate account %q", o.Account)
+		}
+		out[o.Account] = o.SiteID
+	}
+	return out, nil
 }

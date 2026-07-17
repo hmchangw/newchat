@@ -22,6 +22,12 @@ carries the group's `id`/`displayName`/`description` plus a configured `type`
 (`ORG_TYPE`, default `"group"`). `Org` nests under `Employee` as a **single
 node** (json key `org`) — not flattened fields.
 
+Site resolution is two-tier: a member's site defaults to its group's
+`SYNC_GROUPS.siteId`, and an optional `SITE_OVERRIDES` JSON
+(`[{"account":"…","siteId":"…"}]`) pins specific accounts to a site that
+**wins** over the group default (an override for an account in no synced group
+is simply unused).
+
 > Consequence (flagged follow-up): search-sync-worker's spotlight-org consumer
 > decodes each employees.upsert element into a **flat** org-field subset; the
 > nested single-org shape does not feed that decode. Reconciling the consumer is

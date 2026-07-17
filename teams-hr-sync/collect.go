@@ -16,13 +16,14 @@ type collectStats struct {
 	SkippedObj int // non-user member objects (nested groups, devices)
 	InvalidUPN int // members the mapper couldn't derive an account for
 	DupAccount int // accounts already claimed by an earlier group (first wins)
+	Overridden int // accounts whose site came from a SITE_OVERRIDES entry
 }
 
 // collectEmployees walks every configured group and maps its members to
 // Employees via the injected mapper. A member appearing in multiple groups
 // keeps its first mapping (config order wins) so the diff sees one row per
 // account.
-func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, pageSize int) ([]model.Employee, collectStats, error) {
+func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string, pageSize int) ([]model.Employee, collectStats, error) {
 	var stats collectStats
 	var out []model.Employee
 	seen := make(map[string]struct{})
@@ -39,6 +40,12 @@ func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper tra
 				if e.Account == "" {
 					stats.InvalidUPN++
 					continue
+				}
+				// per-account override wins over the group default; applied
+				// post-map on the resolved account so the mapper stays unaware
+				if site := siteOverrides[e.Account]; site != "" {
+					e.SiteID = site
+					stats.Overridden++
 				}
 				if _, dup := seen[e.Account]; dup {
 					stats.DupAccount++

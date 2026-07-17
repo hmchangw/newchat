@@ -107,7 +107,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 		graphUser("u1", "alice@corp.com", "愛麗絲", "EMP1"),
 		graphUser("u2", "bob@corp.com", "鮑伯", "EMP2"),
 	})
-	stats, err := runSync(ctx, graph, transform.DefaultMapper{OrgType: "group"}, store, pub, groups, 100)
+	stats, err := runSync(ctx, graph, transform.DefaultMapper{OrgType: "group"}, store, pub, groups, nil, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 2, stats.Created)
 	assert.Zero(t, stats.Quits)
@@ -140,7 +140,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 		graphUser("u2", "bob@corp.com", "鮑伯二世", "EMP2"),
 		graphUser("u3", "carol@corp.com", "卡蘿", "EMP3"),
 	})
-	stats, err = runSync(ctx, graph, transform.DefaultMapper{OrgType: "group"}, store, pub, groups, 100)
+	stats, err = runSync(ctx, graph, transform.DefaultMapper{OrgType: "group"}, store, pub, groups, nil, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Created)
 	assert.Equal(t, 1, stats.Updated)

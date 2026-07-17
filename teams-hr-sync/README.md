@@ -12,7 +12,8 @@ persists the batches, so a lost publish self-heals on the next run.
 | Env | Required | Default | Notes |
 |---|---|---|---|
 | `TEAMS_TENANT_ID` / `TEAMS_CLIENT_ID` / `TEAMS_CLIENT_SECRET` | ✔ | — | Graph app-only credentials |
-| `SYNC_GROUPS` | ✔ | — | JSON `[{"groupId":"…","siteId":"…"}]`; unique groupIds |
+| `SYNC_GROUPS` | ✔ | — | JSON `[{"groupId":"…","siteId":"…"}]`; unique groupIds. Each group's `siteId` is the DEFAULT site for its members |
+| `SITE_OVERRIDES` | | `[]` | JSON `[{"account":"…","siteId":"…"}]`; per-account site that WINS over the group default (an override for an account in no group is unused) |
 | `CENTRAL_SITE_ID` | ✔ | — | Scopes the two upsert subjects |
 | `MONGO_READ_URI` | ✔ | — | + optional `MONGO_READ_USERNAME/PASSWORD/DB` (db `chat`) |
 | `NATS_URL` | ✔ | — | + optional `NATS_CREDS_FILE` |

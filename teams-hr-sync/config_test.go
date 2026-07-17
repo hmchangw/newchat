@@ -78,3 +78,31 @@ func TestParseSyncGroups(t *testing.T) {
 		})
 	}
 }
+
+func TestParseSiteOverrides(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    map[string]string
+		wantErr string
+	}{
+		{name: "valid", raw: `[{"account":"alice","siteId":"site-x"}]`, want: map[string]string{"alice": "site-x"}},
+		{name: "empty string", raw: "", want: map[string]string{}},
+		{name: "empty list", raw: `[]`, want: map[string]string{}},
+		{name: "missing siteId", raw: `[{"account":"alice"}]`, wantErr: "both required"},
+		{name: "missing account", raw: `[{"siteId":"site-x"}]`, wantErr: "both required"},
+		{name: "duplicate account", raw: `[{"account":"a","siteId":"x"},{"account":"a","siteId":"y"}]`, wantErr: `duplicate account "a"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseSiteOverrides(tt.raw)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
