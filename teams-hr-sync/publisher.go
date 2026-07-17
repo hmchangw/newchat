@@ -44,8 +44,8 @@ func (p *publisher) publishSync(ctx context.Context, d diffResult) (int, error) 
 		published++
 
 		users := make([]model.UserWithChange, 0, len(d.Upserts))
-		for _, e := range d.Upserts {
-			users = append(users, model.UserWithChange{User: p.converter.UserFromEmployee(e.Employee), Change: e.Change})
+		for i := range d.Upserts {
+			users = append(users, model.UserWithChange{User: p.converter.UserFromEmployee(&d.Upserts[i].Employee), Change: d.Upserts[i].Change})
 		}
 		if err := p.publishJSON(ctx, subject.OrgSyncUsersUpsert(p.central),
 			model.UsersUpsertBatch{Timestamp: ts, Users: users}); err != nil {

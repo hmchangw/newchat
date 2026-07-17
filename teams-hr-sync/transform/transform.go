@@ -28,12 +28,12 @@ const SourceTeams = "teams"
 // unmappable (no usable UPN) and must be skipped by the caller.
 type Mapper interface {
 	OrgFromGroup(g msgraph.GroupProfile) model.Org
-	EmployeeFromMember(m msgraph.GraphUser, org model.Org, siteID string) model.Employee
+	EmployeeFromMember(m *msgraph.GraphUser, org model.Org, siteID string) model.Employee
 }
 
 // EmployeeUserConverter maps Employee -> User for the users.upsert feed.
 type EmployeeUserConverter interface {
-	UserFromEmployee(model.Employee) model.User
+	UserFromEmployee(*model.Employee) model.User
 }
 
 // DefaultMapper implements Mapper with the spec'd defaults: Org from the
@@ -47,7 +47,7 @@ func (d DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.Org {
 	return model.Org{ID: g.ID, Name: g.DisplayName, Description: g.Description, Type: d.OrgType}
 }
 
-func (DefaultMapper) EmployeeFromMember(m msgraph.GraphUser, org model.Org, siteID string) model.Employee {
+func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org model.Org, siteID string) model.Employee {
 	account, ok := splitUPN(m.UserPrincipalName)
 	if !ok {
 		return model.Employee{}
@@ -67,7 +67,7 @@ func (DefaultMapper) EmployeeFromMember(m msgraph.GraphUser, org model.Org, site
 // stays zero — the downstream persister owns defaults/merging.
 type DefaultConverter struct{}
 
-func (DefaultConverter) UserFromEmployee(e model.Employee) model.User {
+func (DefaultConverter) UserFromEmployee(e *model.Employee) model.User {
 	return model.User{
 		Account:     e.Account,
 		SiteID:      e.SiteID,

@@ -21,23 +21,24 @@ type diffResult struct {
 // query already filters, but a false quit is destructive downstream).
 // Output is sorted by account for deterministic publishes.
 func diffEmployees(current, stored []model.Employee) diffResult {
-	storedByAccount := make(map[string]model.Employee, len(stored))
-	for _, s := range stored {
-		if s.Source != transform.SourceTeams {
+	storedByAccount := make(map[string]*model.Employee, len(stored))
+	for i := range stored {
+		if stored[i].Source != transform.SourceTeams {
 			continue
 		}
-		storedByAccount[s.Account] = s
+		storedByAccount[stored[i].Account] = &stored[i]
 	}
 
 	res := diffResult{Quits: make(map[string][]string)}
-	for _, c := range current {
+	for i := range current {
+		c := &current[i]
 		prev, exists := storedByAccount[c.Account]
 		delete(storedByAccount, c.Account)
 		switch {
 		case !exists:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: c, Change: transform.ChangeCreated})
-		case prev != c:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: c, Change: transform.ChangeUpdated})
+			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, Change: transform.ChangeCreated})
+		case *prev != *c:
+			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, Change: transform.ChangeUpdated})
 		}
 	}
 	for _, s := range storedByAccount {

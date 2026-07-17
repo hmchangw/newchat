@@ -45,7 +45,7 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, DefaultMapper{OrgType: "group"}.EmployeeFromMember(tt.user, org, "site-a"))
+			assert.Equal(t, tt.want, DefaultMapper{OrgType: "group"}.EmployeeFromMember(&tt.user, org, "site-a"))
 		})
 	}
 }
@@ -56,7 +56,7 @@ func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {
 		SiteID: "site-a", Source: "teams",
 		Org: model.Org{ID: "g1", Name: "Engineering", Type: "group"},
 	}
-	got := DefaultConverter{}.UserFromEmployee(e)
+	got := DefaultConverter{}.UserFromEmployee(&e)
 	assert.Equal(t, model.User{
 		Account:     "alice",
 		SiteID:      "site-a",
@@ -67,5 +67,5 @@ func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {
 }
 
 func TestDefaultConverter_ZeroEmployee(t *testing.T) {
-	assert.Equal(t, model.User{}, DefaultConverter{}.UserFromEmployee(model.Employee{}))
+	assert.Equal(t, model.User{}, DefaultConverter{}.UserFromEmployee(&model.Employee{}))
 }

@@ -141,8 +141,8 @@ func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Ma
 		return stats, fmt.Errorf("list stored employees: %w", err)
 	}
 	diff := diffEmployees(current, stored)
-	for _, u := range diff.Upserts {
-		if u.Change == transform.ChangeCreated {
+	for i := range diff.Upserts {
+		if diff.Upserts[i].Change == transform.ChangeCreated {
 			stats.Created++
 		} else {
 			stats.Updated++
