@@ -69,14 +69,15 @@ func jsPublish(js jetstream.JetStream) PublishFunc {
 // consumed by the outbox-worker durable, HandleEvent forwards each target's
 // pre-marshaled InboxEvent to the destination site's INBOX, and the forwarded
 // bytes must equal the target's Envelope verbatim.
-func TestIntegration_OutboxRoundTrip(t *testing.T) {
+// assertConcurrentLaneForwards drives one relay event of eventType through the
+// OUTBOX per-destination concurrent consumer (config identical to main.go) and
+// asserts it is forwarded to the destination INBOX with the pre-marshaled
+// Envelope bytes intact. Shared by the round-trip tests for each
+// concurrent-partition event type. innerPayload is the pre-marshaled inner event
+// (as a producer would hand to outbox.Publish).
+func assertConcurrentLaneForwards(t *testing.T, siteID, destSiteID, roomID, eventType string, innerPayload []byte, dedupID string) {
+	t.Helper()
 	ctx := context.Background()
-
-	const (
-		siteID     = "site-fed-origin"
-		destSiteID = "site-fed-dest"
-		roomID     = "room-fed-roundtrip"
-	)
 
 	nc := startEmbeddedJetStreamNATS(t)
 	js, err := jetstream.New(nc)
@@ -90,7 +91,7 @@ func TestIntegration_OutboxRoundTrip(t *testing.T) {
 
 	// Observe the forwarded INBOX publish with a core NATS subscription on the
 	// destination subject, set up before publishing the relay event.
-	destSubject := subject.InboxExternal(destSiteID, model.InboxSubscriptionMuteToggled)
+	destSubject := subject.InboxExternal(destSiteID, eventType)
 	type received struct {
 		subject string
 		data    []byte
@@ -108,10 +109,8 @@ func TestIntegration_OutboxRoundTrip(t *testing.T) {
 
 	h := NewHandler(jsPublish(js))
 
-	// Build the pre-marshaled InboxEvent envelope room-service would produce.
-	innerPayload := []byte(`{"account":"alice","roomId":"room-fed-roundtrip"}`)
 	envelope, err := json.Marshal(model.InboxEvent{
-		Type:       model.InboxSubscriptionMuteToggled,
+		Type:       eventType,
 		SiteID:     siteID,
 		DestSiteID: destSiteID,
 		Payload:    innerPayload,
@@ -119,7 +118,6 @@ func TestIntegration_OutboxRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	const dedupID = "0193abcd-0193-7abc-89ab-fed000000001:site-fed-dest"
 	relayEvt, err := json.Marshal(model.OutboxEvent{
 		RoomID:    roomID,
 		Envelope:  envelope,
@@ -128,8 +126,6 @@ func TestIntegration_OutboxRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create the per-destination concurrent consumer (same config as main.go) and
-	// run a consume loop that drives HandleEvent, exactly like production.
 	cons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(stream.ConsumerSettings{
 		AckWait: 30 * time.Second, MaxDeliver: 5, MaxWaiting: 512, MaxAckPending: 1000,
 	}, siteID, destSiteID))
@@ -145,7 +141,7 @@ func TestIntegration_OutboxRoundTrip(t *testing.T) {
 	t.Cleanup(cc.Stop)
 
 	// Publish the relay event onto the OUTBOX stream's destination-scoped subject.
-	_, err = js.Publish(ctx, subject.Outbox(siteID, destSiteID, model.InboxSubscriptionMuteToggled), relayEvt)
+	_, err = js.Publish(ctx, subject.Outbox(siteID, destSiteID, eventType), relayEvt)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -160,6 +156,14 @@ func TestIntegration_OutboxRoundTrip(t *testing.T) {
 	assert.Equal(t, destSubject, forwarded[0].subject)
 	assert.Equal(t, envelope, forwarded[0].data,
 		"forwarded bytes must equal the target's pre-marshaled Envelope verbatim")
+}
+
+func TestIntegration_OutboxRoundTrip(t *testing.T) {
+	// The pre-marshaled InboxEvent payload room-service would produce for a mute toggle.
+	assertConcurrentLaneForwards(t, "site-fed-origin", "site-fed-dest", "room-fed-roundtrip",
+		model.InboxSubscriptionMuteToggled,
+		[]byte(`{"account":"alice","roomId":"room-fed-roundtrip"}`),
+		"0193abcd-0193-7abc-89ab-fed000000001:site-fed-dest")
 }
 
 // TestIntegration_ConcurrentLanePerDestinationIsolation proves finding #1's fix:
@@ -416,4 +420,19 @@ func TestIntegration_OrderedLaneKeepsRenameBehindMemberAdded(t *testing.T) {
 	}
 	assert.Equal(t, []string{model.InboxMemberAdded, model.InboxRoomRenamed}, arrivals,
 		"room_renamed must not overtake the member_added it renames")
+}
+
+// TestIntegration_ThreadSubscriptionUpsertedForwardedViaConcurrentLane proves the
+// message-worker durability fix end-to-end: a thread_subscription_upserted relay
+// event on the OUTBOX is consumed by the per-destination concurrent consumer
+// (whose FilterSubjects derive from outbox.ConcurrentEventTypes) and forwarded to
+// the destination INBOX verbatim.
+func TestIntegration_ThreadSubscriptionUpsertedForwardedViaConcurrentLane(t *testing.T) {
+	// message-worker's fix: thread_subscription_upserted must ride the concurrent
+	// lane (its FilterSubjects derive from outbox.ConcurrentEventTypes) and forward
+	// to the destination INBOX verbatim.
+	assertConcurrentLaneForwards(t, "site-ts-origin", "site-ts-dest", "room-ts-roundtrip",
+		model.InboxThreadSubscriptionUpserted,
+		[]byte(`{"id":"sub-1","threadRoomId":"tr-1","userId":"u-bob","userAccount":"bob","roomId":"room-ts-roundtrip","siteId":"site-ts-origin","hasMention":false}`),
+		"thread-sub-inbox:tr-1:u-bob:msg-1:false:site-ts-dest")
 }
