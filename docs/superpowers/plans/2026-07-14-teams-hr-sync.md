@@ -35,6 +35,15 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
   legacy-source-never-quit) + integration (seeded read + two full one-shot
   runs vs httptest Graph + real Mongo/NATS).
 
+## Phase 4 — dev e2e mock + reference consumer
+
+- `tools/graphmock`: fixture-driven Graph mock (token grant, group profile,
+  `$top`/nextLink-paged members, runtime fixture swap) so the full loop runs
+  without a tenant.
+- `hr-sync-worker`: reference persister for the three subjects (in-repo
+  contract; an external consumer can replace it). Identity-only `users`
+  writes; source-scoped quits; idempotent.
+
 ## Follow-up
 
 - search-sync-worker's spotlight-org consumer decodes a **flat** org subset;

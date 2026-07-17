@@ -56,3 +56,18 @@ stats, err := runSync(ctx, graph, mapper, store, pub, groups, cfg.GraphPageSize)
 ```
 
 The converter is injected the same way via `newPublisher(..., yourConverter)`.
+
+## Dev e2e with graphmock
+
+`tools/graphmock` mocks the whole Graph surface this service touches. Run it
+with `FIXTURES_PATH=tools/graphmock/fixtures.sample.json`, then point the sync
+at it:
+
+```
+GRAPH_BASE_URL=http://localhost:8080/v1.0
+GRAPH_TOKEN_URL=http://localhost:8080/t/oauth2/v2.0/token
+SYNC_GROUPS=[{"groupId":"g-eng","siteId":"site-a"},{"groupId":"g-sales","siteId":"site-b"}]
+```
+
+`PUT /__fixtures` between runs to simulate joins/leaves/renames; pair with
+`hr-sync-worker` consuming the published batches for a full loop.

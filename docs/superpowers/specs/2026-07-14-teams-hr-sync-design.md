@@ -7,7 +7,9 @@
 A standalone producer that walks configured Teams/Graph **groups**, diffs their
 user members against the persisted HR state, and publishes the HR sync feed to
 JetStream on three subjects. It does **not** persist employees/users — a
-downstream microservice consumes the subjects and writes them. It **coexists**
+consumer persists the batches. A **reference consumer ships in-repo**
+(`hr-sync-worker`, see its README): the subject contract is now defined here,
+and an external persister can replace it 1:1. It **coexists**
 with the legacy HR syncer (different systems feeding the same `hr_employee`
 store, distinguished by a `source` field; this producer stamps `source:"teams"`
 and never quits another source's rows).
@@ -84,3 +86,17 @@ prevention): env config via caarlos0/env (fail fast), read-only Mongo client,
 paging), JetStream publish via an injected publish func, run-summary log line
 with counts (groups, members, created, updated, quits, published), non-zero
 exit on failure.
+
+## Reference consumer (`hr-sync-worker`)
+
+One durable sequential consumer per site's `HR_{siteID}` stream. Persists
+employees.upsert → `hr_employee` (replace by `{account, source}`),
+users.upsert → `users` (**identity fields only** — never roles/services/
+password; live auth store), employees.quit → source-scoped `hr_employee`
+delete. Idempotent; malformed = poison-Ack, transient = Nak-backoff.
+
+## Dev e2e (`tools/graphmock`)
+
+Fixture-driven Graph mock (token, group profile, paged members with real
+nextLinks, runtime `PUT /__fixtures` swap) — see `tools/graphmock/README.md`
+and the "Dev e2e with graphmock" section in `teams-hr-sync/README.md`.
