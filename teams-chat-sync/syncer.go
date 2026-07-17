@@ -60,8 +60,9 @@ func startOfDayUTC(t time.Time) time.Time {
 // siteID so the result is deterministic across runs and map iteration orders.
 // Members with an empty siteID (no HR assignment) do not vote, so the empty
 // string never wins. When no member casts a real vote it falls back to
-// defaultSiteID — which may itself be empty when no default is configured; the
-// caller treats "" as unresolvable.
+// defaultSiteID, which is required,notEmpty in production — so the returned
+// siteID is always non-empty (an empty result is only possible under direct
+// construction with an empty default).
 func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defaultSiteID string) string {
 	counts := make(map[string]int)
 	for _, m := range members {
