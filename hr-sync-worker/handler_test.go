@@ -28,7 +28,7 @@ func TestHandleMessage_EmployeesUpsert(t *testing.T) {
 	store, h := newMock(t)
 	store.EXPECT().UpsertEmployees(gomock.Any(), gomock.Len(1)).Return(nil)
 	err := h.HandleMessage(context.Background(), subjEmployees,
-		[]byte(`{"timestamp":1,"employees":[{"account":"alice","source":"teams","change":"created"}]}`))
+		[]byte(`[{"account":"alice","source":"teams","changeType":"new_hire","sectId":"S1"}]`))
 	require.NoError(t, err)
 }
 
@@ -36,7 +36,7 @@ func TestHandleMessage_UsersUpsert(t *testing.T) {
 	store, h := newMock(t)
 	store.EXPECT().UpsertUserIdentities(gomock.Any(), gomock.Len(1)).Return(nil)
 	err := h.HandleMessage(context.Background(), subjUsers,
-		[]byte(`{"timestamp":1,"users":[{"account":"alice","siteId":"site-a","change":"created"}]}`))
+		[]byte(`[{"account":"alice","siteId":"site-a","changeType":"new_hire"}]`))
 	require.NoError(t, err)
 }
 
@@ -68,8 +68,8 @@ func TestHandleMessage_UnknownSubjectIsPermanent(t *testing.T) {
 
 func TestHandleMessage_EmptyBatchesNoStoreCall(t *testing.T) {
 	_, h := newMock(t) // no EXPECT — any store call fails the test
-	assert.NoError(t, h.HandleMessage(context.Background(), subjEmployees, []byte(`{"timestamp":1,"employees":[]}`)))
-	assert.NoError(t, h.HandleMessage(context.Background(), subjUsers, []byte(`{"timestamp":1,"users":[]}`)))
+	assert.NoError(t, h.HandleMessage(context.Background(), subjEmployees, []byte(`[]`)))
+	assert.NoError(t, h.HandleMessage(context.Background(), subjUsers, []byte(`[]`)))
 	assert.NoError(t, h.HandleMessage(context.Background(), subjQuit, []byte(`{"timestamp":1,"siteId":"s","accounts":[]}`)))
 }
 
@@ -78,7 +78,7 @@ func TestHandleMessage_StoreErrorIsTransient(t *testing.T) {
 	boom := errors.New("mongo down")
 	store.EXPECT().UpsertEmployees(gomock.Any(), gomock.Any()).Return(boom)
 	err := h.HandleMessage(context.Background(), subjEmployees,
-		[]byte(`{"timestamp":1,"employees":[{"account":"alice"}]}`))
+		[]byte(`[{"account":"alice"}]`))
 	require.ErrorIs(t, err, boom)
 	var perm *errcode.PermanentError
 	assert.False(t, errors.As(err, &perm), "store failures must Nak-retry, not Ack-drop")

@@ -53,13 +53,12 @@ func TestCollectEmployees_PerGroupSiteAndDedup(t *testing.T) {
 	}
 	groups := []syncGroup{{GroupID: "g1", SiteID: "site-a"}, {GroupID: "g2", SiteID: "site-b"}}
 
-	got, stats, err := collectEmployees(context.Background(), graph, transform.DefaultMapper{OrgType: "group"}, groups, nil, 100)
+	got, stats, err := collectEmployees(context.Background(), graph, transform.DefaultMapper{}, groups, nil, 100)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, "alice", got[0].Account)
 	assert.Equal(t, "site-a", got[0].SiteID, "dup account keeps the first group's site")
-	assert.Equal(t, "g1", got[0].Org.ID)
-	assert.Equal(t, "group", got[0].Org.Type, "mapper stamps its OrgType")
+	assert.Equal(t, "g1", got[0].Org.SectID, "group maps to section")
 	assert.Equal(t, "bob", got[1].Account)
 	assert.Equal(t, "site-b", got[1].SiteID)
 	assert.Equal(t, collectStats{Groups: 2, Members: 4, InvalidUPN: 1, DupAccount: 1}, stats)
@@ -77,7 +76,7 @@ func TestCollectEmployees_SiteOverride(t *testing.T) {
 	// alice overridden; carol's override is for an account not in any group (unused, no error)
 	overrides := map[string]string{"alice": "site-x", "carol": "site-z"}
 
-	got, stats, err := collectEmployees(context.Background(), graph, transform.DefaultMapper{OrgType: "group"}, groups, overrides, 100)
+	got, stats, err := collectEmployees(context.Background(), graph, transform.DefaultMapper{}, groups, overrides, 100)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, "alice", got[0].Account)
@@ -90,6 +89,6 @@ func TestCollectEmployees_SiteOverride(t *testing.T) {
 func TestCollectEmployees_GroupErrorAborts(t *testing.T) {
 	boom := errors.New("graph down")
 	_, _, err := collectEmployees(context.Background(), &fakeGroupReader{err: boom},
-		transform.DefaultMapper{OrgType: "group"}, []syncGroup{{GroupID: "g1", SiteID: "site-a"}}, nil, 100)
+		transform.DefaultMapper{}, []syncGroup{{GroupID: "g1", SiteID: "site-a"}}, nil, 100)
 	require.ErrorIs(t, err, boom)
 }

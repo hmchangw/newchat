@@ -12,12 +12,12 @@ import (
 var testGroup = msgraph.GroupProfile{ID: "g1", DisplayName: "Engineering", Description: "eng dept"}
 
 func TestDefaultMapper_OrgFromGroup(t *testing.T) {
-	got := DefaultMapper{OrgType: "group"}.OrgFromGroup(testGroup)
-	assert.Equal(t, model.Org{ID: "g1", Name: "Engineering", Description: "eng dept", Type: "group"}, got)
+	got := DefaultMapper{}.OrgFromGroup(testGroup)
+	assert.Equal(t, model.Org{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, got, "group maps to section level")
 }
 
 func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
-	org := model.Org{ID: "g1", Name: "Engineering", Description: "eng dept", Type: "group"}
+	org := model.Org{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}
 	tests := []struct {
 		name string
 		user msgraph.GraphUser
@@ -45,7 +45,7 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, DefaultMapper{OrgType: "group"}.EmployeeFromMember(&tt.user, org, "site-a"))
+			assert.Equal(t, tt.want, DefaultMapper{}.EmployeeFromMember(&tt.user, org, "site-a"))
 		})
 	}
 }
@@ -54,7 +54,7 @@ func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {
 	e := model.Employee{
 		EmployeeID: "EMP1", Account: "alice", EngName: "Alice Wu", ChineseName: "愛麗絲",
 		SiteID: "site-a", Source: "teams",
-		Org: model.Org{ID: "g1", Name: "Engineering", Type: "group"},
+		Org: model.Org{SectID: "g1", SectName: "Engineering"},
 	}
 	got := DefaultConverter{}.UserFromEmployee(&e)
 	assert.Equal(t, model.User{

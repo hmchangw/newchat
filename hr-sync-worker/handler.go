@@ -21,25 +21,25 @@ func NewHandler(store Store) *Handler { return &Handler{store: store} }
 func (h *Handler) HandleMessage(ctx context.Context, subj string, data []byte) error {
 	switch {
 	case strings.HasSuffix(subj, ".employees.upsert"):
-		var batch model.EmployeesUpsertBatch
-		if err := json.Unmarshal(data, &batch); err != nil {
+		var employees []model.EmployeeWithChange
+		if err := json.Unmarshal(data, &employees); err != nil {
 			return errcode.Permanent(errcode.BadRequest("malformed employees.upsert payload"))
 		}
-		if len(batch.Employees) == 0 {
+		if len(employees) == 0 {
 			return nil
 		}
-		if err := h.store.UpsertEmployees(ctx, batch.Employees); err != nil {
+		if err := h.store.UpsertEmployees(ctx, employees); err != nil {
 			return fmt.Errorf("upsert employees: %w", err)
 		}
 	case strings.HasSuffix(subj, ".users.upsert"):
-		var batch model.UsersUpsertBatch
-		if err := json.Unmarshal(data, &batch); err != nil {
+		var users []model.UserWithChange
+		if err := json.Unmarshal(data, &users); err != nil {
 			return errcode.Permanent(errcode.BadRequest("malformed users.upsert payload"))
 		}
-		if len(batch.Users) == 0 {
+		if len(users) == 0 {
 			return nil
 		}
-		if err := h.store.UpsertUserIdentities(ctx, batch.Users); err != nil {
+		if err := h.store.UpsertUserIdentities(ctx, users); err != nil {
 			return fmt.Errorf("upsert user identities: %w", err)
 		}
 	case strings.HasSuffix(subj, ".employees.quit"):

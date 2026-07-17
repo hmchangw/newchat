@@ -11,6 +11,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -121,7 +122,13 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), msg.Data()))
+			data, err := decodePayload(msg)
+			if err != nil {
+				// a bad frame won't decode on redelivery → poison
+				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("decode payload")))
+				return
+			}
+			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))
 		})
 	})
 }

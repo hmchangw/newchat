@@ -27,7 +27,7 @@ func TestRunSync_DiffAndPublish(t *testing.T) {
 	var got []captured
 	pub := newCapturingPublisher(t, &got)
 
-	stats, err := runSync(context.Background(), graph, transform.DefaultMapper{OrgType: "group"}, store, pub,
+	stats, err := runSync(context.Background(), graph, transform.DefaultMapper{}, store, pub,
 		[]syncGroup{{GroupID: "g1", SiteID: "site-a"}}, nil, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Created)
@@ -47,8 +47,8 @@ func TestRunSync_StoreErrorAborts(t *testing.T) {
 	store := NewMockStore(ctrl)
 	store.EXPECT().ListTeamsEmployees(gomock.Any()).Return(nil, boom)
 
-	_, err := runSync(context.Background(), graph, transform.DefaultMapper{OrgType: "group"}, store,
-		newPublisher(func(context.Context, string, []byte) error { return nil }, "central", transform.DefaultConverter{}),
+	_, err := runSync(context.Background(), graph, transform.DefaultMapper{}, store,
+		newPublisher(func(context.Context, string, []byte, string) error { return nil }, "central", transform.DefaultConverter{}),
 		[]syncGroup{{GroupID: "g1", SiteID: "site-a"}}, nil, 100)
 	require.ErrorIs(t, err, boom)
 }

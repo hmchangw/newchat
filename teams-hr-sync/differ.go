@@ -7,8 +7,8 @@ import (
 	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
 
-// diffResult is one run's delta: rows to upsert (Change created/updated) and
-// departed accounts grouped by the stored row's siteId.
+// diffResult is one run's delta: rows to upsert (ChangeType new_hire/update)
+// and departed accounts grouped by the stored row's siteId.
 type diffResult struct {
 	Upserts []model.EmployeeWithChange
 	Quits   map[string][]string
@@ -36,9 +36,9 @@ func diffEmployees(current, stored []model.Employee) diffResult {
 		delete(storedByAccount, c.Account)
 		switch {
 		case !exists:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, Change: transform.ChangeCreated})
+			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, ChangeType: model.ChangeTypeNewHire})
 		case *prev != *c:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, Change: transform.ChangeUpdated})
+			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, ChangeType: model.ChangeTypeUpdate})
 		}
 	}
 	for _, s := range storedByAccount {

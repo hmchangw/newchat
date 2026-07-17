@@ -25,8 +25,6 @@ type config struct {
 	// SyncGroups is the JSON list of Graph groups to sync, each mapped to a
 	// site: [{"groupId":"…","siteId":"…"}]. Parsed via parseSyncGroups.
 	SyncGroups string `env:"SYNC_GROUPS,required,notEmpty"`
-	// OrgType is the Employee.Org.Type stamped on every synced row.
-	OrgType string `env:"ORG_TYPE" envDefault:"group"`
 	// CentralSiteID scopes the two upsert subjects (chat.hr.{central}.…).
 	CentralSiteID string `env:"CENTRAL_SITE_ID,required,notEmpty"`
 	// SiteOverrides optionally pins specific accounts to a site regardless of

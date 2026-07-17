@@ -12,20 +12,13 @@ import (
 	"github.com/hmchangw/chat/pkg/msgraph"
 )
 
-// Change labels — the downstream contract's values live here so swapping
-// semantics is a transform-layer change.
-const (
-	ChangeCreated = "created"
-	ChangeUpdated = "updated"
-)
-
 // SourceTeams tags rows this producer owns; other sources' rows are never
 // quit by this sync.
 const SourceTeams = "teams"
 
-// Mapper maps Graph objects into the domain; owns the name-mapping and
-// Org.Type decisions. An EmployeeFromMember result with an empty Account is
-// unmappable (no usable UPN) and must be skipped by the caller.
+// Mapper maps Graph objects into the domain; owns the name-mapping and org
+// placement. An EmployeeFromMember result with an empty Account is unmappable
+// (no usable UPN) and must be skipped by the caller.
 type Mapper interface {
 	OrgFromGroup(g msgraph.GroupProfile) model.Org
 	EmployeeFromMember(m *msgraph.GraphUser, org model.Org, siteID string) model.Employee
@@ -36,15 +29,15 @@ type EmployeeUserConverter interface {
 	UserFromEmployee(*model.Employee) model.User
 }
 
-// DefaultMapper implements Mapper with the spec'd defaults: Org from the
-// group profile + its OrgType; Account = lower(UPN local-part); EngName =
-// givenName+" "+surname trimmed; ChineseName = displayName.
-type DefaultMapper struct {
-	OrgType string
-}
+// DefaultMapper implements Mapper with the spec'd defaults: a group maps to
+// the SECTION level; Account = lower(UPN local-part); EngName =
+// givenName+" "+surname trimmed; ChineseName = displayName. Dept/division and
+// the *TCName fields stay empty — the org-taxonomy source is still an open
+// stub. ponytail: no OrgType — the new Org has no type field.
+type DefaultMapper struct{}
 
-func (d DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.Org {
-	return model.Org{ID: g.ID, Name: g.DisplayName, Description: g.Description, Type: d.OrgType}
+func (DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.Org {
+	return model.Org{SectID: g.ID, SectName: g.DisplayName, SectDescription: g.Description}
 }
 
 func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org model.Org, siteID string) model.Employee {

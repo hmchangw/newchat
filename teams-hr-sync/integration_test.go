@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -91,8 +92,9 @@ func TestRunSync_EndToEnd(t *testing.T) {
 		msgraph.WithBaseURL(baseURL), msgraph.WithTokenURL(tokenURL),
 	)
 	store := newMongoStore(db)
-	pub := newPublisher(func(ctx context.Context, subj string, data []byte) error {
-		_, err := js.Publish(ctx, subj, data)
+	pub := newPublisher(func(ctx context.Context, subj string, data []byte, encoding string) error {
+		msg := &nats.Msg{Subject: subj, Data: data, Header: nats.Header{"Nats-Encoding": []string{encoding}}}
+		_, err := js.PublishMsg(ctx, msg)
 		return err
 	}, "central", transform.DefaultConverter{})
 	groups := []syncGroup{{GroupID: "g1", SiteID: "site-a"}}
@@ -107,7 +109,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 		graphUser("u1", "alice@corp.com", "愛麗絲", "EMP1"),
 		graphUser("u2", "bob@corp.com", "鮑伯", "EMP2"),
 	})
-	stats, err := runSync(ctx, graph, transform.DefaultMapper{OrgType: "group"}, store, pub, groups, nil, 100)
+	stats, err := runSync(ctx, graph, transform.DefaultMapper{}, store, pub, groups, nil, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 2, stats.Created)
 	assert.Zero(t, stats.Quits)
@@ -115,21 +117,21 @@ func TestRunSync_EndToEnd(t *testing.T) {
 
 	msgs := drainStream(t, stream)
 	require.Len(t, msgs, 2)
-	var eb model.EmployeesUpsertBatch
-	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.upsert"], &eb))
-	require.Len(t, eb.Employees, 2)
-	assert.Equal(t, "alice", eb.Employees[0].Account)
-	assert.Equal(t, "created", eb.Employees[0].Change)
-	assert.Equal(t, model.Org{ID: "g1", Name: "Engineering", Description: "eng dept", Type: "group"}, eb.Employees[0].Org)
-	var ub model.UsersUpsertBatch
-	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.users.upsert"], &ub))
-	require.Len(t, ub.Users, 2)
-	assert.Equal(t, "alice", ub.Users[0].Account)
+	var employees []model.EmployeeWithChange
+	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.upsert"], &employees))
+	require.Len(t, employees, 2)
+	assert.Equal(t, "alice", employees[0].Account)
+	assert.Equal(t, model.ChangeTypeNewHire, employees[0].ChangeType)
+	assert.Equal(t, model.Org{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, employees[0].Org)
+	var users []model.UserWithChange
+	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.users.upsert"], &users))
+	require.Len(t, users, 2)
+	assert.Equal(t, "alice", users[0].Account)
 
 	// persist what the downstream consumer would have written, so run 2 diffs
 	// against ground truth
-	docs := make([]any, 0, len(eb.Employees))
-	for _, e := range eb.Employees {
+	docs := make([]any, 0, len(employees))
+	for _, e := range employees {
 		docs = append(docs, e.Employee)
 	}
 	_, err = db.Collection(hrEmployeeCollection).InsertMany(ctx, docs)
@@ -140,7 +142,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 		graphUser("u2", "bob@corp.com", "鮑伯二世", "EMP2"),
 		graphUser("u3", "carol@corp.com", "卡蘿", "EMP3"),
 	})
-	stats, err = runSync(ctx, graph, transform.DefaultMapper{OrgType: "group"}, store, pub, groups, nil, 100)
+	stats, err = runSync(ctx, graph, transform.DefaultMapper{}, store, pub, groups, nil, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Created)
 	assert.Equal(t, 1, stats.Updated)
@@ -149,13 +151,13 @@ func TestRunSync_EndToEnd(t *testing.T) {
 
 	msgs = drainStream(t, stream)
 	require.Len(t, msgs, 3)
-	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.upsert"], &eb))
-	require.Len(t, eb.Employees, 2)
-	assert.Equal(t, "bob", eb.Employees[0].Account)
-	assert.Equal(t, "updated", eb.Employees[0].Change)
-	assert.Equal(t, "鮑伯二世", eb.Employees[0].ChineseName)
-	assert.Equal(t, "carol", eb.Employees[1].Account)
-	assert.Equal(t, "created", eb.Employees[1].Change)
+	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.upsert"], &employees))
+	require.Len(t, employees, 2)
+	assert.Equal(t, "bob", employees[0].Account)
+	assert.Equal(t, model.ChangeTypeUpdate, employees[0].ChangeType)
+	assert.Equal(t, "鮑伯二世", employees[0].ChineseName)
+	assert.Equal(t, "carol", employees[1].Account)
+	assert.Equal(t, model.ChangeTypeNewHire, employees[1].ChangeType)
 	var qb model.HRSyncEmployeeQuitBatch
 	require.NoError(t, json.Unmarshal(msgs["chat.hr.site-a.employees.quit"], &qb))
 	assert.Equal(t, "site-a", qb.SiteID)
@@ -178,7 +180,15 @@ func drainStream(t *testing.T, stream jetstream.Stream) map[string][]byte {
 		require.NoError(t, err)
 		n := 0
 		for m := range batch.Messages() {
-			out[m.Subject()] = m.Data()
+			data := m.Data()
+			if m.Headers().Get("Nats-Encoding") == "zstd" {
+				dec, err := zstd.NewReader(nil)
+				require.NoError(t, err)
+				data, err = dec.DecodeAll(data, nil)
+				require.NoError(t, err)
+				dec.Close()
+			}
+			out[m.Subject()] = data
 			require.NoError(t, m.Ack())
 			n++
 		}

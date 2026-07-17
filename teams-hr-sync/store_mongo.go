@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -14,9 +16,33 @@ import (
 
 const hrEmployeeCollection = "hr_employee"
 
-// mongoStore implements Store over the read client. The projection names
-// exactly the Employee fields so unrelated persister-owned fields never leak
-// into the diff.
+// employeeProjection is derived from model.Employee's bson tags (incl. the
+// inline-embedded Org) so a field rename can't silently drop from the read —
+// the projection tracks the struct.
+var employeeProjection = bsonProjection(reflect.TypeOf(model.Employee{}))
+
+// bsonProjection walks a struct's bson tags (recursing into inline-embedded
+// structs) into a bson.M{tag:1} projection.
+func bsonProjection(t reflect.Type) bson.M {
+	proj := bson.M{}
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if strings.Contains(f.Tag.Get("bson"), "inline") && f.Type.Kind() == reflect.Struct {
+			for k, v := range bsonProjection(f.Type) {
+				proj[k] = v
+			}
+			continue
+		}
+		tag, _, _ := strings.Cut(f.Tag.Get("bson"), ",")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		proj[tag] = 1
+	}
+	return proj
+}
+
+// mongoStore implements Store over the read client.
 type mongoStore struct {
 	employees *mongoutil.Collection[model.Employee]
 }
@@ -30,10 +56,7 @@ func newMongoStore(readDB *mongo.Database) *mongoStore {
 func (s *mongoStore) ListTeamsEmployees(ctx context.Context) ([]model.Employee, error) {
 	rows, err := s.employees.FindMany(ctx,
 		bson.M{"source": transform.SourceTeams},
-		mongoutil.WithProjection(bson.M{
-			"employeeId": 1, "account": 1, "engName": 1, "chineseName": 1,
-			"siteId": 1, "source": 1, "org": 1,
-		}))
+		mongoutil.WithProjection(employeeProjection))
 	if err != nil {
 		return nil, fmt.Errorf("find teams hr employees: %w", err)
 	}

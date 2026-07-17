@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -39,17 +40,25 @@ func startWorker(t *testing.T, js jetstream.JetStream, h *Handler, siteID string
 	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consCfg)
 	require.NoError(t, err)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		jsretry.Settle(context.Background(), msg, jsretry.DefaultBackoff, h.HandleMessage(context.Background(), msg.Subject(), msg.Data()))
+		data, derr := decodePayload(msg)
+		require.NoError(t, derr)
+		jsretry.Settle(context.Background(), msg, jsretry.DefaultBackoff, h.HandleMessage(context.Background(), msg.Subject(), data))
 	})
 	require.NoError(t, err)
 	t.Cleanup(cc.Stop)
 }
 
+// publishJSON publishes payload as a zstd-compressed message with the
+// Nats-Encoding header, matching the producer's wire format.
 func publishJSON(t *testing.T, js jetstream.JetStream, subj string, payload any) {
 	t.Helper()
 	data, err := json.Marshal(payload)
 	require.NoError(t, err)
-	_, err = js.Publish(context.Background(), subj, data)
+	enc, err := zstd.NewWriter(nil)
+	require.NoError(t, err)
+	msg := &nats.Msg{Subject: subj, Data: enc.EncodeAll(data, nil), Header: nats.Header{"Nats-Encoding": []string{"zstd"}}}
+	enc.Close()
+	_, err = js.PublishMsg(context.Background(), msg)
 	require.NoError(t, err)
 }
 
@@ -80,19 +89,16 @@ func TestWorker_EndToEnd(t *testing.T) {
 			Employee: model.Employee{
 				Account: account, SiteID: "site-a", Source: "teams",
 				EngName: "Name " + account,
-				Org:     model.Org{ID: "g1", Name: "Engineering", Type: "group"},
+				Org:     model.Org{SectID: "g1", SectName: "Engineering"},
 			},
-			Change: "created",
+			ChangeType: model.ChangeTypeNewHire,
 		}
 	}
-	batch := model.EmployeesUpsertBatch{Timestamp: 1, Employees: []model.EmployeeWithChange{emp("alice"), emp("bob")}}
+	batch := []model.EmployeeWithChange{emp("alice"), emp("bob")}
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
-	publishJSON(t, js, "chat.hr.site-a.users.upsert", model.UsersUpsertBatch{
-		Timestamp: 1,
-		Users: []model.UserWithChange{
-			{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, Change: "created"},
-			{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿"}, Change: "created"},
-		},
+	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.UserWithChange{
+		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.ChangeTypeNewHire},
+		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿"}, ChangeType: model.ChangeTypeNewHire},
 	})
 
 	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{"source": "teams"}, 2)

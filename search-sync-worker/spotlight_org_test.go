@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
 
@@ -83,17 +84,28 @@ func TestSpotlightOrgTemplateProperties_MatchesStruct(t *testing.T) {
 	assert.Equal(t, 9, esFieldCount, "SpotlightOrgIndex should expose exactly 9 ES-mapped fields")
 }
 
-func hrBatchJSON(t *testing.T, ts int64, employees []SpotlightOrgIndex) []byte {
+// hrBatchJSON builds the employees.upsert bare array wire payload from org
+// rows (each org becomes one Employee element).
+func hrBatchJSON(t *testing.T, orgs []SpotlightOrgIndex) []byte {
 	t.Helper()
-	batch := hrSyncEmployeeBatch{Timestamp: ts, Employees: employees}
-	data, err := json.Marshal(batch)
+	employees := make([]model.EmployeeWithChange, 0, len(orgs))
+	for _, o := range orgs {
+		employees = append(employees, model.EmployeeWithChange{
+			Employee: model.Employee{Org: model.Org{
+				SectID: o.SectID, SectTCName: o.SectTCName, SectName: o.SectName,
+				SectDescription: o.SectDescription, DeptID: o.DeptID, DeptTCName: o.DeptTCName,
+				DeptName: o.DeptName, DeptDescription: o.DeptDescription, DivisionID: o.DivisionID,
+			}},
+		})
+	}
+	data, err := json.Marshal(employees)
 	require.NoError(t, err)
 	return data
 }
 
 func TestSpotlightOrg_BuildAction_HappyPath(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
-	data := hrBatchJSON(t, 1735689600000, []SpotlightOrgIndex{
+	data := hrBatchJSON(t, []SpotlightOrgIndex{
 		{SectID: "S1", SectName: "Eng", DeptID: "D1", DeptName: "Tech"},
 		{SectID: "S2", SectName: "Sales", DeptID: "D2", DeptName: "Biz"},
 	})
@@ -120,7 +132,7 @@ func TestSpotlightOrg_BuildAction_HappyPath(t *testing.T) {
 
 func TestSpotlightOrg_BuildAction_DedupBySectID(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
-	data := hrBatchJSON(t, 1, []SpotlightOrgIndex{
+	data := hrBatchJSON(t, []SpotlightOrgIndex{
 		{SectID: "S1", SectName: "Engineering"},
 		{SectID: "S1", SectName: "Engineering Renamed"},
 		{SectID: "S2", SectName: "Sales"},
@@ -143,7 +155,7 @@ func TestSpotlightOrg_BuildAction_DedupBySectID(t *testing.T) {
 
 func TestSpotlightOrg_BuildAction_EmptySectIDsSkipped(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
-	data := hrBatchJSON(t, 1, []SpotlightOrgIndex{
+	data := hrBatchJSON(t, []SpotlightOrgIndex{
 		{SectID: "", SectName: "no-section"},
 		{SectID: "S1", SectName: "Eng"},
 		{SectID: "", DeptID: "D9"},
@@ -157,7 +169,7 @@ func TestSpotlightOrg_BuildAction_EmptySectIDsSkipped(t *testing.T) {
 
 func TestSpotlightOrg_BuildAction_AllEmptySectIDs(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
-	data := hrBatchJSON(t, 1, []SpotlightOrgIndex{
+	data := hrBatchJSON(t, []SpotlightOrgIndex{
 		{SectName: "no-section-1"},
 		{SectName: "no-section-2"},
 	})
@@ -169,7 +181,7 @@ func TestSpotlightOrg_BuildAction_AllEmptySectIDs(t *testing.T) {
 
 func TestSpotlightOrg_BuildAction_EmptyEmployees(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
-	data := hrBatchJSON(t, 1, []SpotlightOrgIndex{})
+	data := hrBatchJSON(t, []SpotlightOrgIndex{})
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
@@ -178,7 +190,7 @@ func TestSpotlightOrg_BuildAction_EmptyEmployees(t *testing.T) {
 
 func TestSpotlightOrg_BuildAction_PartialFields(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
-	data := hrBatchJSON(t, 1, []SpotlightOrgIndex{
+	data := hrBatchJSON(t, []SpotlightOrgIndex{
 		{SectID: "S1", SectName: "Engineering"},
 	})
 
@@ -204,14 +216,8 @@ func TestSpotlightOrg_BuildAction_PartialFields(t *testing.T) {
 func TestSpotlightOrg_BuildAction_Errors(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
 
-	t.Run("malformed batch json", func(t *testing.T) {
+	t.Run("malformed json", func(t *testing.T) {
 		_, err := coll.BuildAction([]byte("{invalid"))
-		assert.Error(t, err)
-	})
-
-	t.Run("missing timestamp", func(t *testing.T) {
-		data := hrBatchJSON(t, 0, []SpotlightOrgIndex{{SectID: "S1"}})
-		_, err := coll.BuildAction(data)
 		assert.Error(t, err)
 	})
 }

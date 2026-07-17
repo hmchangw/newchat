@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -93,9 +94,13 @@ func run() error {
 	store := newMongoStore(readClient.Database(cfg.MongoReadDB))
 	// Injection point: swap DefaultMapper / DefaultConverter for custom
 	// naming or derivation conventions (see teams-hr-sync/README.md).
-	mapper := transform.DefaultMapper{OrgType: cfg.OrgType}
-	pub := newPublisher(func(ctx context.Context, subj string, data []byte) error {
-		_, err := js.Publish(ctx, subj, data)
+	mapper := transform.DefaultMapper{}
+	pub := newPublisher(func(ctx context.Context, subj string, data []byte, encoding string) error {
+		msg := natsutil.NewMsg(ctx, subj, data)
+		if encoding != "" {
+			msg.Header.Set("Nats-Encoding", encoding)
+		}
+		_, err := js.PublishMsg(ctx, msg)
 		return err
 	}, cfg.CentralSiteID, transform.DefaultConverter{})
 
@@ -147,7 +152,7 @@ func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Ma
 	}
 	diff := diffEmployees(current, stored)
 	for i := range diff.Upserts {
-		if diff.Upserts[i].Change == transform.ChangeCreated {
+		if diff.Upserts[i].ChangeType == model.ChangeTypeNewHire {
 			stats.Created++
 		} else {
 			stats.Updated++
