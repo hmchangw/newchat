@@ -1473,7 +1473,8 @@ fields keep their stored value (or stay absent). At least one field required.
 Any non-empty subset of the seven settings fields (same table as
 [settings.get](#settingsget)). `translateMessageInto` must be a language-tag
 shape — hyphen-separated letter/digit subtags, leading subtag letters-only
-(e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); no value whitelist.
+(e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`) — or `""` to explicitly turn
+translation off; no value whitelist.
 
 `{ "fullWidth": false, "translateMessageInto": "ja" }`
 
