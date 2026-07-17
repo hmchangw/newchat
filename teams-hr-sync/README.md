@@ -17,7 +17,6 @@ persists the batches, so a lost publish self-heals on the next run.
 | `CENTRAL_SITE_ID` | ✔ | — | Scopes the two upsert subjects |
 | `MONGO_READ_URI` | ✔ | — | + optional `MONGO_READ_USERNAME/PASSWORD/DB` (db `chat`) |
 | `NATS_URL` | ✔ | — | + optional `NATS_CREDS_FILE` |
-| `ORG_TYPE` | | `group` | Stamped as `Org.Type` (consumed by DefaultMapper only) |
 | `GRAPH_PAGE_SIZE` | | `500` | Graph `$top`, 1..999 |
 | `GRAPH_BASE_URL` / `GRAPH_TOKEN_URL` | | public Graph | Test/on-prem overrides |
 
@@ -26,16 +25,16 @@ persists the batches, so a lost publish self-heals on the next run.
 All Graph→domain shaping lives behind two interfaces in
 [`transform`](transform/transform.go) — the service only calls the interfaces:
 
-- **`transform.Mapper`** — owns name mapping and `Org.Type` stamping.
-  `OrgFromGroup` shapes the org node from the group profile;
-  `EmployeeFromMember` derives the Employee (account from the UPN, names,
-  site, `Source`). Returning an Employee with an empty `Account` marks the
-  member unmappable — the service skips it.
+- **`transform.Mapper`** — owns name mapping and org placement (a group maps
+  to the section level). `OrgFromGroup` shapes the org node from the group
+  profile; `EmployeeFromMember` derives the Employee (account from the UPN,
+  names, site, `Source`). Returning an Employee with an empty `Account` marks
+  the member unmappable — the service skips it.
 - **`transform.EmployeeUserConverter`** — derives the `users.upsert` row from
   an Employee. `DefaultConverter` copies identity fields only.
 
-Change labels the differ stamps are `transform.ChangeCreated` /
-`transform.ChangeUpdated`; the ownership tag is `transform.SourceTeams`.
+Change labels the differ stamps are `model.ChangeTypeNewHire` /
+`model.ChangeTypeUpdate`; the ownership tag is `transform.SourceTeams`.
 
 Example — different English-name convention:
 
@@ -52,8 +51,8 @@ func (m surnameFirstMapper) EmployeeFromMember(u *msgraph.GraphUser, org model.O
 Wire it at the single injection point in `main.go`:
 
 ```go
-mapper := surnameFirstMapper{transform.DefaultMapper{OrgType: cfg.OrgType}}
-stats, err := runSync(ctx, graph, mapper, store, pub, groups, cfg.GraphPageSize)
+mapper := surnameFirstMapper{transform.DefaultMapper{}}
+stats, err := runSync(ctx, graph, mapper, store, pub, groups, siteOverrides, cfg.GraphPageSize)
 ```
 
 The converter is injected the same way via `newPublisher(..., yourConverter)`.

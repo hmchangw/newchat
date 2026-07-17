@@ -4,13 +4,13 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
 
 ## Phase 1 — `pkg/model` types + `pkg/subject` builders
 
-- `pkg/model/employee.go`: `Org` (`{id, description, name, type}`, the
-  group-shaped org node), `Employee` (source of truth for `User`; nested single
-  `org`; carries `EngName`/`ChineseName` + `Source`), `EmployeeWithChange`,
-  `EmployeesUpsertBatch`, `UserWithChange`, `UsersUpsertBatch`,
-  `HRSyncEmployeeQuitBatch`. `Change` is a plain wire string.
+- `pkg/model/hr.go`: `Org` (nine section/dept/division fields, tag-identical to
+  `SpotlightOrgIndex`, embedded inline in `Employee`), `Employee` (source of
+  truth for `User`; carries `EngName`/`ChineseName` + `Source`), `ChangeType`
+  (`new_hire`/`update`), `EmployeeWithChange`, `UserWithChange`,
+  `HRSyncEmployeeQuitBatch` (the only wrapper).
 - `pkg/subject`: `OrgSyncUsersUpsert(central)`, `EmployeesQuit(siteID)`.
-- `employee_test.go`: nested-org shape + round-trips.
+- `hr_test.go`: flat-org shape + bare-array round-trips.
 
 ## Phase 2 — Graph group surface + service
 
@@ -21,9 +21,10 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
 - `teams-hr-sync/transform`: one-way `EmployeeUserConverter`
   (`DefaultConverter`, identity fields only).
 - `teams-hr-sync/`: one-shot CronJob binary — env config (`SYNC_GROUPS`
-  per-group siteId map, `ORG_TYPE`, `CENTRAL_SITE_ID`, read Mongo, NATS),
-  mapper (Graph member+group → Employee), publisher (3 batches, empty
-  batches skipped, plain JSON), run-summary log line.
+  per-group siteId map + `SITE_OVERRIDES`, `CENTRAL_SITE_ID`, read Mongo, NATS),
+  mapper (Graph member+group → Employee; group → section), publisher (bare
+  zstd arrays for the two upserts + quit wrapper, `Nats-Encoding: zstd`, empty
+  arrays skipped, reflection-derived read projection), run-summary log line.
 
 ## Phase 3 — query-first diff + quit detection
 
@@ -42,10 +43,12 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
   without a tenant.
 - `hr-sync-worker`: reference persister for the three subjects (in-repo
   contract; an external consumer can replace it). Identity-only `users`
-  writes; source-scoped quits; idempotent.
+  writes; source-scoped quits; zstd-aware decode; idempotent.
 
-## Follow-up
+## Phase 5 — unify org shape + search-sync consume
 
-- search-sync-worker's spotlight-org consumer decodes a **flat** org subset;
-  the nested single-org employees.upsert shape doesn't feed it — reconcile the
-  consumer (or its own feed) separately.
+- `model.Org` becomes the nine-field `SpotlightOrgIndex` shape (inline embed),
+  published as bare zstd arrays with `ChangeType`.
+- search-sync-worker decodes the bare `[]EmployeeWithChange` and copies each
+  element's inline org fields into `SpotlightOrgIndex` (1:1) — the earlier
+  flat-vs-nested follow-up is resolved by making the producer shape match.

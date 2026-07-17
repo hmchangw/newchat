@@ -14,13 +14,18 @@ with the legacy HR syncer (different systems feeding the same `hr_employee`
 store, distinguished by a `source` field; this producer stamps `source:"teams"`
 and never quits another source's rows).
 
-## Group = Org
+## Group = Org (section level)
 
-Each configured Graph group maps to one **site** (`SYNC_GROUPS` JSON:
-`[{"groupId":"…","siteId":"…"}]`) and becomes the member's org node: `Org`
-carries the group's `id`/`displayName`/`description` plus a configured `type`
-(`ORG_TYPE`, default `"group"`). `Org` nests under `Employee` as a **single
-node** (json key `org`) — not flattened fields.
+`Org` is the nine-field section/department/division shape — json+bson tags
+**identical** to search-sync-worker's `SpotlightOrgIndex`, embedded **inline**
+in `Employee` so the org fields serialize flat alongside the identity fields.
+One wire row feeds both the ES org index and the `hr_employee` store.
+
+A configured Graph group maps to the **section** level: `Org.SectID` = group
+id, `Org.SectName` = displayName, `Org.SectDescription` = description. The
+dept/division and `*TCName` fields stay empty — the org-taxonomy source is an
+open stub. There is no `Org.Type` / `ORG_TYPE` (the new shape has no type
+field).
 
 Site resolution is two-tier: a member's site defaults to its group's
 `SYNC_GROUPS.siteId`, and an optional `SITE_OVERRIDES` JSON
@@ -28,30 +33,27 @@ Site resolution is two-tier: a member's site defaults to its group's
 **wins** over the group default (an override for an account in no synced group
 is simply unused).
 
-> Consequence (flagged follow-up): search-sync-worker's spotlight-org consumer
-> decodes each employees.upsert element into a **flat** org-field subset; the
-> nested single-org shape does not feed that decode. Reconciling the consumer is
-> tracked separately — not in this service's scope.
-
-## Publishes (plain JSON in v1 — the header contract permits uncompressed)
+## Publishes (bare zstd arrays)
 
 | Method | Subject builder | Payload |
 |---|---|---|
-| employees.upsert | `subject.OrgSyncEmployeesUpsert(central)` | `EmployeesUpsertBatch` |
-| users.upsert | `subject.OrgSyncUsersUpsert(central)` | `UsersUpsertBatch` |
+| employees.upsert | `subject.OrgSyncEmployeesUpsert(central)` | bare `[]EmployeeWithChange` |
+| users.upsert | `subject.OrgSyncUsersUpsert(central)` | bare `[]UserWithChange` |
 | employees.quit | `subject.EmployeesQuit(siteID)` (per-site) | `HRSyncEmployeeQuitBatch` |
 
-Empty batches are skipped. `Timestamp` = publish time (UTC millis).
+All three are zstd-compressed with a `Nats-Encoding: zstd` header (the
+framework decompresses on the consumer side). The two upserts are **bare
+arrays** — no wrapper, no timestamp; quit keeps its wrapper. Empty arrays are
+skipped. search-sync-worker consumes employees.upsert 1:1 (decode the bare
+array → copy each element's inline org fields into `SpotlightOrgIndex`).
 
-## Wire types (`pkg/model`)
+## Wire types (`pkg/model/hr.go`)
 
-- `Org` — `{id, description, name, type}`, the group-shaped org node.
-- `Employee` — the source of truth a downstream service maps into `model.User`:
-  `employeeId/account/engName/chineseName/siteId/source` + nested `org`.
-- `EmployeeWithChange` / `UserWithChange` — embed `Employee` / `User` + a
-  `Change` wire string (`created`/`updated`).
-- `EmployeesUpsertBatch` / `UsersUpsertBatch` / `HRSyncEmployeeQuitBatch` — the
-  three batch shapes, each carrying `Timestamp`.
+- `Org` — the nine flat section/dept/division fields (SpotlightOrgIndex shape).
+- `Employee` — inline `Org` + `employeeId/account/engName/chineseName/siteId/source`.
+- `ChangeType` — `new_hire` / `update`.
+- `EmployeeWithChange` / `UserWithChange` — embed `Employee` / `User` + `ChangeType`.
+- `HRSyncEmployeeQuitBatch` — the only remaining wrapper (quit).
 
 ## Graph mapping (`transform.DefaultMapper`)
 
@@ -60,14 +62,15 @@ displayName,givenName,surname,employeeId`, non-user objects skipped):
 `Account` = lowercased UPN local part (same rule as teams-user-sync),
 `EngName` = `TrimSpace(givenName + " " + surname)`, `ChineseName` =
 `displayName`, `EmployeeID` = `employeeId`, `SiteID` = the group's configured
-site, `Source` = `"teams"`, `Org` = the group profile + `ORG_TYPE`. An account
-appearing in multiple groups keeps its first mapping (config order wins).
+site, `Source` = `"teams"`, `Org` = the group profile at section level
+(`SectID`/`SectName`/`SectDescription`). An account appearing in multiple
+groups keeps its first mapping (config order wins).
 
 ## Injectable seams (`teams-hr-sync/transform`)
 
 Two interfaces, injected in `main.go` (see `teams-hr-sync/README.md` for a
 worked replacement example): `Mapper` (Graph group/member → `Org`/`Employee`;
-owns name mapping + `Org.Type`, `DefaultMapper{OrgType}`) and
+owns name mapping + org placement, `DefaultMapper{}`) and
 `EmployeeUserConverter` (one-way; `DefaultConverter` copies identity fields
 only — `Account/SiteID/EngName/ChineseName/EmployeeID`; every other `User`
 field stays zero, the downstream persister owns defaults/merging). The
