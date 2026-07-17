@@ -1,45 +1,38 @@
 package model
 
-// Org is the shared structured org hierarchy — the same nine fields (and
-// identical json tags) as search-sync-worker's SpotlightOrgIndex, so one wire
-// row feeds both the ES org index and the hr_employee store.
+// Org is the group-shaped org node an Employee belongs to — a Graph group's
+// profile (id, displayName, description) plus a producer-configured type
+// (e.g. "group"). Nested under Employee as a single node.
 type Org struct {
-	SectID          string `json:"sectId,omitempty"          bson:"sectId,omitempty"`
-	SectTCName      string `json:"sectTCName,omitempty"      bson:"sectTCName,omitempty"`
-	SectName        string `json:"sectName,omitempty"        bson:"sectName,omitempty"`
-	SectDescription string `json:"sectDescription,omitempty" bson:"sectDescription,omitempty"`
-	DeptID          string `json:"deptId,omitempty"          bson:"deptId,omitempty"`
-	DeptTCName      string `json:"deptTCName,omitempty"      bson:"deptTCName,omitempty"`
-	DeptName        string `json:"deptName,omitempty"        bson:"deptName,omitempty"`
-	DeptDescription string `json:"deptDescription,omitempty" bson:"deptDescription,omitempty"`
-	DivisionID      string `json:"divisionId,omitempty"      bson:"divisionId,omitempty"`
+	ID          string `json:"id"          bson:"id"`
+	Description string `json:"description" bson:"description"`
+	Name        string `json:"name"        bson:"name"`
+	Type        string `json:"type"        bson:"type"`
 }
 
 // Employee is the shared HR row and the source of truth a downstream service
-// maps into model.User. Org embeds inline so the org fields stay flat on the
-// wire (the search-sync consumer decodes that flat subset). EngName/ChineseName
-// mirror model.User so the derive is lossless. Source tags the origin feed
-// (e.g. "teams") so coexisting producers don't quit each other's rows.
+// maps into model.User. EngName/ChineseName mirror model.User so the derive is
+// lossless. Source tags the origin feed (e.g. "teams") so coexisting producers
+// don't quit each other's rows.
 type Employee struct {
-	Org         `bson:",inline"`
-	EmployeeID  string `json:"employeeId,omitempty"  bson:"employeeId,omitempty"`
-	Account     string `json:"account,omitempty"     bson:"account,omitempty"`
-	EngName     string `json:"engName,omitempty"     bson:"engName,omitempty"`
-	ChineseName string `json:"chineseName,omitempty" bson:"chineseName,omitempty"`
-	SiteID      string `json:"siteId,omitempty"      bson:"siteId,omitempty"`
-	Source      string `json:"source,omitempty"      bson:"source,omitempty"`
+	EmployeeID  string `json:"employeeId"  bson:"employeeId"`
+	Account     string `json:"account"     bson:"account"`
+	EngName     string `json:"engName"     bson:"engName"`
+	ChineseName string `json:"chineseName" bson:"chineseName"`
+	SiteID      string `json:"siteId"      bson:"siteId"`
+	Source      string `json:"source"      bson:"source"`
+	Org         Org    `json:"org"         bson:"org"`
 }
 
-// EmployeeWithChange is one employees.upsert element; Employee embeds anonymously
-// so the org fields stay flat. Change marks how the row moved since the last sync
-// ("created"/"updated") as a plain wire string — the typed enum + diff logic live
-// in the producer's transform layer, not here.
+// EmployeeWithChange is one employees.upsert element. Change marks how the row
+// moved since the last sync ("created"/"updated") as a plain wire string — the
+// diff logic lives in the producer, not here.
 type EmployeeWithChange struct {
 	Employee
 	Change string `json:"change,omitempty"`
 }
 
-// EmployeesUpsertBatch matches the search-sync-worker consumer's wire shape.
+// EmployeesUpsertBatch is the employees.upsert wire shape.
 type EmployeesUpsertBatch struct {
 	Timestamp int64                `json:"timestamp"`
 	Employees []EmployeeWithChange `json:"employees"`
