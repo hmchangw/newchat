@@ -45,7 +45,7 @@ Empty batches are skipped. `Timestamp` = publish time (UTC millis).
 - `EmployeesUpsertBatch` / `UsersUpsertBatch` / `HRSyncEmployeeQuitBatch` — the
   three batch shapes, each carrying `Timestamp`.
 
-## Graph mapping (`teams-hr-sync/mapper.go`)
+## Graph mapping (`transform.DefaultMapper`)
 
 Per member (`GET /groups/{id}/members`, `$select=id,userPrincipalName,
 displayName,givenName,surname,employeeId`, non-user objects skipped):
@@ -55,11 +55,16 @@ displayName,givenName,surname,employeeId`, non-user objects skipped):
 site, `Source` = `"teams"`, `Org` = the group profile + `ORG_TYPE`. An account
 appearing in multiple groups keeps its first mapping (config order wins).
 
-## User derivation (`teams-hr-sync/transform`)
+## Injectable seams (`teams-hr-sync/transform`)
 
-`EmployeeUserConverter` (one-way, `DefaultConverter`) copies identity fields
+Two interfaces, injected in `main.go` (see `teams-hr-sync/README.md` for a
+worked replacement example): `Mapper` (Graph group/member → `Org`/`Employee`;
+owns name mapping + `Org.Type`, `DefaultMapper{OrgType}`) and
+`EmployeeUserConverter` (one-way; `DefaultConverter` copies identity fields
 only — `Account/SiteID/EngName/ChineseName/EmployeeID`; every other `User`
-field stays zero. The downstream persister owns defaults/merging.
+field stays zero, the downstream persister owns defaults/merging). The
+change-label constants (`ChangeCreated`/`ChangeUpdated`) and `SourceTeams`
+live here too.
 
 ## Change detection (query-first)
 
