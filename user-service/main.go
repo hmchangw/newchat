@@ -30,6 +30,7 @@ var (
 	_ service.HistoryClient                = (*historyclient.Client)(nil)
 	_ service.PresenceClient               = (*presenceclient.Client)(nil)
 	_ service.EventPublisher               = (*publisher.Publisher)(nil)
+	_ service.EventPublisher               = (*publisher.CorePublisher)(nil)
 )
 
 func main() {
@@ -87,7 +88,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), &cfg)
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), &cfg)
 
 	router := natsrouter.New(nc, "user-service")
 	router.Use(natsrouter.Recovery())

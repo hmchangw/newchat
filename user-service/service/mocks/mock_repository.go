@@ -201,6 +201,21 @@ func (mr *MockUserRepositoryMockRecorder) GetHRInfoByAccounts(ctx, accounts any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHRInfoByAccounts", reflect.TypeOf((*MockUserRepository)(nil).GetHRInfoByAccounts), ctx, accounts)
 }
 
+// GetUserSettings mocks base method.
+func (m *MockUserRepository) GetUserSettings(ctx context.Context, account string) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserSettings", ctx, account)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserSettings indicates an expected call of GetUserSettings.
+func (mr *MockUserRepositoryMockRecorder) GetUserSettings(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserSettings", reflect.TypeOf((*MockUserRepository)(nil).GetUserSettings), ctx, account)
+}
+
 // GetUserStatus mocks base method.
 func (m *MockUserRepository) GetUserStatus(ctx context.Context, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
@@ -229,6 +244,21 @@ func (m *MockUserRepository) SetUserStatus(ctx context.Context, account, text st
 func (mr *MockUserRepositoryMockRecorder) SetUserStatus(ctx, account, text, isShow any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetUserStatus", reflect.TypeOf((*MockUserRepository)(nil).SetUserStatus), ctx, account, text, isShow)
+}
+
+// UpdateUserSettings mocks base method.
+func (m *MockUserRepository) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, set)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UpdateUserSettings indicates an expected call of UpdateUserSettings.
+func (mr *MockUserRepositoryMockRecorder) UpdateUserSettings(ctx, account, set any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserSettings), ctx, account, set)
 }
 
 // MockAppRepository is a mock of AppRepository interface.
