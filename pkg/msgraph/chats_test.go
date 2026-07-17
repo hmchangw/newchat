@@ -1,9 +1,11 @@
 package msgraph
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -150,6 +152,37 @@ func TestListUserChats_RetriesOn429(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls)
 	require.Len(t, chats, 1)
+}
+
+func TestListUserChats_LogsThrottledResponses(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	tokenSrv := newChatsTokenServer(t)
+	var calls int
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0") // keep the test fast
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	defer graphSrv.Close()
+
+	_, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "graph request throttled", "every throttled response must be logged")
+	assert.Contains(t, out, `"status":429`)
+	assert.Contains(t, out, `"retryAfter":"0"`, "the Retry-After header value must be visible in the log")
+	assert.Contains(t, out, `"attempt":1`)
+	assert.NotContains(t, out, "tok-chats", "the bearer token must never reach the log")
 }
 
 func TestListUserChats_429Exhausted(t *testing.T) {
