@@ -73,11 +73,16 @@ func NewUserListerClient(cfg Config, opts ...Option) (UserLister, error) {
 	return g, nil
 }
 
-// GraphUser is the subset of a Graph user resource we decode when resolving
-// accounts to object IDs.
+// GraphUser is the subset of a Graph user resource we decode. The name fields
+// are populated only by walks whose $select requests them (ListGroupMembers);
+// ResolveAccountIDs/ListUsers select id+userPrincipalName only.
 type GraphUser struct {
 	ID                string `json:"id"`
 	UserPrincipalName string `json:"userPrincipalName"`
+	DisplayName       string `json:"displayName"`
+	GivenName         string `json:"givenName"`
+	Surname           string `json:"surname"`
+	EmployeeID        string `json:"employeeId"`
 }
 
 // CreateOnlineMeetingRequest carries the attributes used to create a meeting.
