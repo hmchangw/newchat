@@ -33,11 +33,12 @@ type syncConfig struct {
 // syncer runs one full teams-chat sync. Each worker persists every chat it
 // lists, including chats shared with other users: a shared chat is upserted
 // once per member rather than claimed by a single worker. Redundant writes are
-// safe because siteId is assigned once via $setOnInsert at the DB layer, so a
-// repeated upsert cannot alter an existing doc. This keeps each user's
-// durability self-contained — a user advances its watermark only after its own
-// chats persist — so one member's failure can never strand a chat that a
-// surviving member would otherwise have written.
+// safe because the immutable fields (siteId, and needCreateRoom via
+// $setOnInsert) are set once at the DB layer and never overwritten — a repeated
+// upsert only refreshes mutable metadata. This keeps each user's durability
+// self-contained — a user advances its watermark only after its own chats
+// persist — so one member's failure can never strand a chat that a surviving
+// member would otherwise have written.
 type syncer struct {
 	users TeamsUserStore
 	chats TeamsChatStore
