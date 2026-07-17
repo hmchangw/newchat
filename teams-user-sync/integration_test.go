@@ -25,9 +25,9 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync_e2e")
 	ctx := context.Background()
 
-	_, err := db.Collection("hr").InsertMany(ctx, []any{
-		bson.M{"accountName": "alice", "siteID": "site-a"},
-		bson.M{"accountName": "old", "siteID": "site-a"},
+	_, err := db.Collection("hr_employee").InsertMany(ctx, []any{
+		bson.M{"account": "alice", "siteId": "site-a"},
+		bson.M{"account": "old", "siteId": "site-a"},
 	})
 	require.NoError(t, err)
 	_, err = db.Collection("teams_user").InsertOne(ctx,

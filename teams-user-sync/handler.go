@@ -28,7 +28,7 @@ type RunStats struct {
 	Seen        int // users returned by Graph
 	Existing    int // already present in teams_user, untouched
 	InvalidUPN  int // UPN without a local part and domain; never syncable
-	HRUnmatched int // no hr.accountName match; retried next run
+	HRUnmatched int // no hr_employee.account match; retried next run
 	Upserted    int // written to teams_user
 }
 

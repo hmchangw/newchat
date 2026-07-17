@@ -23,7 +23,7 @@ func TestRun_OneShotEndToEnd(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync_run")
 	ctx := context.Background()
 
-	_, err := db.Collection("hr").InsertOne(ctx, bson.M{"accountName": "alice", "siteID": "site-a"})
+	_, err := db.Collection("hr_employee").InsertOne(ctx, bson.M{"account": "alice", "siteId": "site-a"})
 	require.NoError(t, err)
 
 	tokenSrv := newFakeTokenServer(t)
