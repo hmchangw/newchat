@@ -61,7 +61,7 @@ func TestPublishSync_AllThreeBatches(t *testing.T) {
 	require.Len(t, employees, 1)
 	assert.Equal(t, "alice", employees[0].Account)
 	assert.Equal(t, model.ChangeTypeNewHire, employees[0].ChangeType)
-	assert.Equal(t, "g1", employees[0].Org.SectID)
+	assert.Equal(t, "g1", employees[0].SectID)
 
 	// users.upsert — bare array
 	assert.Equal(t, "chat.hr.central.users.upsert", got[1].subj)

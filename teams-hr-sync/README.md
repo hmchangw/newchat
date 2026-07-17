@@ -41,7 +41,7 @@ Example — different English-name convention:
 ```go
 type surnameFirstMapper struct{ transform.DefaultMapper }
 
-func (m surnameFirstMapper) EmployeeFromMember(u *msgraph.GraphUser, org model.Org, siteID string) model.Employee {
+func (m surnameFirstMapper) EmployeeFromMember(u *msgraph.GraphUser, org *model.Org, siteID string) model.Employee {
 	e := m.DefaultMapper.EmployeeFromMember(u, org, siteID)
 	e.EngName = strings.TrimSpace(u.Surname + " " + u.GivenName)
 	return e

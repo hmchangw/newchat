@@ -21,7 +21,7 @@ const SourceTeams = "teams"
 // (no usable UPN) and must be skipped by the caller.
 type Mapper interface {
 	OrgFromGroup(g msgraph.GroupProfile) model.Org
-	EmployeeFromMember(m *msgraph.GraphUser, org model.Org, siteID string) model.Employee
+	EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, siteID string) model.Employee
 }
 
 // EmployeeUserConverter maps Employee -> User for the users.upsert feed.
@@ -40,7 +40,7 @@ func (DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.Org {
 	return model.Org{SectID: g.ID, SectName: g.DisplayName, SectDescription: g.Description}
 }
 
-func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org model.Org, siteID string) model.Employee {
+func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, siteID string) model.Employee {
 	account, ok := splitUPN(m.UserPrincipalName)
 	if !ok {
 		return model.Employee{}
@@ -52,7 +52,7 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org model.Org, sit
 		ChineseName: m.DisplayName,
 		SiteID:      siteID,
 		Source:      SourceTeams,
-		Org:         org,
+		Org:         *org,
 	}
 }
 

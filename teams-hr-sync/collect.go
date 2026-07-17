@@ -36,7 +36,7 @@ func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper tra
 		skipped, err := graph.ListGroupMembers(ctx, sg.GroupID, pageSize, func(users []msgraph.GraphUser) error {
 			stats.Members += len(users)
 			for i := range users {
-				e := mapper.EmployeeFromMember(&users[i], org, sg.SiteID)
+				e := mapper.EmployeeFromMember(&users[i], &org, sg.SiteID)
 				if e.Account == "" {
 					stats.InvalidUPN++
 					continue

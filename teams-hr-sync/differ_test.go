@@ -21,7 +21,7 @@ func TestDiffEmployees_Matrix(t *testing.T) {
 	unchanged := teamsEmployee("carol", "site-a")
 	updatedStored := teamsEmployee("dave", "site-a")
 	updatedCurrent := updatedStored
-	updatedCurrent.Org.SectName = "Engineering v2" // org change counts as updated
+	updatedCurrent.SectName = "Engineering v2" // org change counts as updated
 
 	current := []model.Employee{
 		teamsEmployee("alice", "site-a"), // absent in store -> created

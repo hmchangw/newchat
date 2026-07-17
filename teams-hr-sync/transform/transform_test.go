@@ -45,7 +45,7 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, DefaultMapper{}.EmployeeFromMember(&tt.user, org, "site-a"))
+			assert.Equal(t, tt.want, DefaultMapper{}.EmployeeFromMember(&tt.user, &org, "site-a"))
 		})
 	}
 }

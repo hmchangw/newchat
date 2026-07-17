@@ -58,7 +58,7 @@ func TestCollectEmployees_PerGroupSiteAndDedup(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, "alice", got[0].Account)
 	assert.Equal(t, "site-a", got[0].SiteID, "dup account keeps the first group's site")
-	assert.Equal(t, "g1", got[0].Org.SectID, "group maps to section")
+	assert.Equal(t, "g1", got[0].SectID, "group maps to section")
 	assert.Equal(t, "bob", got[1].Account)
 	assert.Equal(t, "site-b", got[1].SiteID)
 	assert.Equal(t, collectStats{Groups: 2, Members: 4, InvalidUPN: 1, DupAccount: 1}, stats)
