@@ -1210,6 +1210,7 @@ func buildAddedMembers(req *model.AddMembersRequest, subs []*model.Subscription,
 				entry.MemberCount = a.MemberCount
 			}
 			entry.OrgName = orgdisplay.Name(agg[orgID], orgID)
+			entry.OrgCode = orgdisplay.Code(agg[orgID])
 			entry.OrgDescription = orgdisplay.Description(agg[orgID])
 			members = append(members, entry)
 		}

@@ -619,6 +619,7 @@ func (s *MongoStore) attachOrgDisplay(ctx context.Context, roomID string, member
 			members[i].Member.MemberCount = a.MemberCount
 		}
 		members[i].Member.OrgName = orgdisplay.Name(agg[id], id)
+		members[i].Member.OrgCode = orgdisplay.Code(agg[id])
 		members[i].Member.OrgDescription = orgdisplay.Description(agg[id])
 	}
 	return nil

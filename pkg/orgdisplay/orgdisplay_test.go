@@ -210,3 +210,36 @@ func TestDescription(t *testing.T) {
 		assert.Empty(t, Description(a))
 	})
 }
+
+// Code returns the raw section/department name (dept-first, matching Name's
+// branch selection) — the plain name, never the combined display string.
+func TestCode(t *testing.T) {
+	t.Run("nil aggregate yields empty", func(t *testing.T) {
+		assert.Empty(t, Code(nil))
+	})
+
+	t.Run("department returns the plain dept name", func(t *testing.T) {
+		a := &Agg{IsDept: true, DeptName: "Engineering", SectName: "ShouldNotShow"}
+		assert.Equal(t, "Engineering", Code(a))
+	})
+
+	t.Run("dept code is the plain name, not the tc-combined display string", func(t *testing.T) {
+		a := &Agg{IsDept: true, DeptName: "Engineering", DeptTCName: "工程"}
+		assert.Equal(t, "Engineering", Code(a), "orgCode carries the code only, unlike Name which combines the TC name")
+	})
+
+	t.Run("dept match without a name falls to the sect name", func(t *testing.T) {
+		a := &Agg{IsDept: true, DeptName: "", SectName: "Engineering"}
+		assert.Equal(t, "Engineering", Code(a))
+	})
+
+	t.Run("section returns the sect name", func(t *testing.T) {
+		a := &Agg{IsDept: false, SectName: "Engineering"}
+		assert.Equal(t, "Engineering", Code(a))
+	})
+
+	t.Run("all names empty yields empty (no orgID fallback)", func(t *testing.T) {
+		a := &Agg{IsDept: true}
+		assert.Empty(t, Code(a))
+	})
+}

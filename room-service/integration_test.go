@@ -678,6 +678,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		m := got[0].Member
 		assert.Equal(t, model.RoomMemberOrg, m.Type)
 		assert.Equal(t, "Engineering", m.OrgName)
+		assert.Equal(t, "Engineering", m.OrgCode)
 		assert.Equal(t, 3, m.MemberCount)
 		assert.Empty(t, m.EngName)
 		assert.False(t, m.IsOwner)
@@ -2697,6 +2698,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_DeptFirst_Integration(t *testing.
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Engineering 工程部", got[0].Member.OrgName, "dept wins on overlap; name+tcName combined")
+	assert.Equal(t, "Engineering", got[0].Member.OrgCode, "orgCode is the plain dept name, no TC combine")
 }
 
 // TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration verifies
@@ -2724,6 +2726,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration(t *te
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Y", got[0].Member.OrgName, "no matching users → falls back to member.id")
+	assert.Empty(t, got[0].Member.OrgCode, "no matching users → orgCode empty, no orgID fallback")
 }
 
 func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {

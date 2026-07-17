@@ -94,6 +94,18 @@ func Name(a *Agg, orgID string) string {
 	return displayfmt.CombineWithFallback(name, tcName, orgID)
 }
 
+// Code returns the org's stable code — the raw section/department name (dept-first,
+// same branch Name selects) rather than the combined display string; "" if none, no orgID fallback.
+func Code(a *Agg) string {
+	if a == nil {
+		return ""
+	}
+	if a.IsDept && a.DeptName != "" {
+		return a.DeptName
+	}
+	return a.SectName
+}
+
 // Description returns the name-supplying branch's description; "" if none, no orgID fallback.
 func Description(a *Agg) string {
 	if a == nil {

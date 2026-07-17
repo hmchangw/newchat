@@ -1229,7 +1229,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
 | `accounts` | string[] | The newly added accounts. |
-| `members` | [RoomMemberEntry](#roommemberentry)[] | The member.list-shaped display entries (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): org entries first (`orgName`, `memberCount`, `orgDescription`), then one individual entry per newly subscribed direct add (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined via org expansion appear in `accounts` only — their org entry represents them, mirroring `member.list`. |
+| `members` | [RoomMemberEntry](#roommemberentry)[] | The member.list-shaped display entries (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): org entries first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per newly subscribed direct add (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined via org expansion appear in `accounts` only — their org entry represents them, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
@@ -1563,7 +1563,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 |---|---|---|---|
 | `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. |
 | `offset` | number | no | If set, must be `>= 0`. For pagination. |
-| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
+| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `orgCode`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
 
 ```json
 { "limit": 50, "enrich": true }
@@ -1597,7 +1597,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 | `employeeId` | string | Optional. The member's employee ID. Populated only when `enrich: true` and entry is an individual. |
 | `name` | string | Optional. Bot/app display name from `apps.name` when the member's account ends with `.bot`. Mutually exclusive with `engName`/`chineseName`. |
 | `isOwner` | boolean | Optional. Populated only when `enrich: true`. |
-| `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback). Populated only when `enrich: true` and entry is an org. |
+| `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback), combined with the TC name when present. Populated only when `enrich: true` and entry is an org. |
+| `orgCode` | string | Optional. Org's plain section/department name (dept-first), without the TC-name combination `orgName` applies and with no orgID fallback. Populated only when `enrich: true` and entry is an org. |
 | `memberCount` | number | Optional. Populated only when `enrich: true` and entry is an org. |
 | `orgDescription` | string | Optional. Org's description, from the same org unit shown in `orgName` (dept-first); omitted when empty. Populated only when `enrich: true` and entry is an org. |
 
@@ -1627,6 +1628,7 @@ When the synchronous reply is an error envelope, the request was rejected before
         "id": "DEPT-100",
         "type": "org",
         "orgName": "Cardiology Department",
+        "orgCode": "Cardiology Department",
         "orgDescription": "Inpatient & outpatient cardiac care",
         "memberCount": 42
       }

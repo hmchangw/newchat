@@ -948,6 +948,7 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	assert.Equal(t, model.RoomMemberOrg, org.Type, "org entries come first, mirroring member.list's sort")
 	assert.Equal(t, "eng", org.ID)
 	assert.Equal(t, "Engineering 工程", org.OrgName)
+	assert.Equal(t, "Engineering", org.OrgCode, "orgCode is the plain sect name, not the tc-combined orgName")
 	assert.Equal(t, "Builds the product", org.OrgDescription)
 	assert.Equal(t, 2, org.MemberCount)
 	assert.Empty(t, org.Account)
@@ -1018,6 +1019,7 @@ func TestHandler_ProcessAddMembers_OrgWithNoUsersFallsBackToOrgID(t *testing.T) 
 	org := evt.Members[0]
 	assert.Equal(t, model.RoomMemberOrg, org.Type)
 	assert.Equal(t, "ghost-org", org.OrgName, "no directory rows → name falls back to the orgID, matching member.list")
+	assert.Empty(t, org.OrgCode, "no directory rows → orgCode empty, no orgID fallback")
 	assert.Empty(t, org.OrgDescription)
 	assert.Zero(t, org.MemberCount)
 }
