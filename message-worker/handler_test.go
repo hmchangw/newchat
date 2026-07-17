@@ -1298,6 +1298,18 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 	}
 }
 
+// unwrapOutbox decodes an OutboxEvent published on the OUTBOX relay and the
+// inner InboxEvent envelope it carries. Thread-subscription federation rides
+// the durable OUTBOX (chat.outbox.…), not a direct INBOX publish.
+func unwrapOutbox(t *testing.T, data []byte) (model.OutboxEvent, model.InboxEvent) {
+	t.Helper()
+	var relay model.OutboxEvent
+	require.NoError(t, json.Unmarshal(data, &relay))
+	var env model.InboxEvent
+	require.NoError(t, json.Unmarshal(relay.Envelope, &env))
+	return relay, env
+}
+
 func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	// Subscription's SiteID is the room's site (here, site-a — the local handler).
@@ -1361,7 +1373,8 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 		err := h.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-b", "msg-1")
 		require.NoError(t, err)
 		require.Equal(t, 1, captured.callCnt)
-		assert.Equal(t, "chat.inbox.site-b.external.thread_subscription_upserted", captured.subj)
+		assert.Equal(t, subject.Outbox("site-a", "site-b", model.InboxThreadSubscriptionUpserted), captured.subj)
+		// = "chat.outbox.site-a.site-b.thread_subscription_upserted"
 		assert.NotEmpty(t, captured.msgID, "dedup ID must be set")
 
 		// Same inputs → same dedup ID (stable across redeliveries).
@@ -1384,10 +1397,12 @@ func TestHandler_PublishThreadSubInboxIfRemote(t *testing.T) {
 		require.NoError(t, h3.publishThreadSubInboxIfRemote(context.Background(), baseSub, "site-b", "msg-2"))
 		assert.NotEqual(t, captured.msgID, third)
 
-		// Payload is an InboxEvent whose inner Payload decodes back to the ThreadSubscription
-		// — and the inner SiteID is unchanged (still the room's site, "site-a").
-		var outer model.InboxEvent
-		require.NoError(t, json.Unmarshal(captured.data, &outer))
+		// The captured data is an OutboxEvent wrapping the InboxEvent envelope,
+		// whose inner Payload decodes back to the ThreadSubscription — and the
+		// inner SiteID is unchanged (still the room's site, "site-a").
+		relay, outer := unwrapOutbox(t, captured.data)
+		assert.Equal(t, "r1", relay.RoomID, "OutboxEvent.RoomID is the channel room ID")
+		assert.Equal(t, captured.msgID, relay.DedupID, "OutboxEvent.DedupID equals the publish Nats-Msg-Id")
 		assert.Equal(t, model.InboxThreadSubscriptionUpserted, outer.Type)
 		assert.Equal(t, "site-a", outer.SiteID)
 		assert.Equal(t, "site-b", outer.DestSiteID)
@@ -1498,8 +1513,7 @@ func TestHandler_FirstReply_InboxPublishes(t *testing.T) {
 
 			gotByDest := map[string]int{}
 			for _, c := range calls {
-				var outer model.InboxEvent
-				require.NoError(t, json.Unmarshal(c.data, &outer))
+				_, outer := unwrapOutbox(t, c.data)
 				assert.Equal(t, model.InboxThreadSubscriptionUpserted, outer.Type)
 				gotByDest[outer.DestSiteID]++
 			}
@@ -1633,8 +1647,12 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 
 			var publishedDests []string
 			h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, data []byte, _ string) error {
+				var relay model.OutboxEvent
+				if err := json.Unmarshal(data, &relay); err != nil {
+					return err
+				}
 				var outer model.InboxEvent
-				if err := json.Unmarshal(data, &outer); err != nil {
+				if err := json.Unmarshal(relay.Envelope, &outer); err != nil {
 					return err
 				}
 				publishedDests = append(publishedDests, outer.DestSiteID)
@@ -1769,8 +1787,12 @@ func TestHandler_MarkThreadMentions_InboxPublishes(t *testing.T) {
 			var publishedDests []string
 			h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), ts, "site-a",
 				func(_ context.Context, _ string, data []byte, _ string) error {
+					var relay model.OutboxEvent
+					if err := json.Unmarshal(data, &relay); err != nil {
+						return err
+					}
 					var outer model.InboxEvent
-					if err := json.Unmarshal(data, &outer); err != nil {
+					if err := json.Unmarshal(relay.Envelope, &outer); err != nil {
 						return err
 					}
 					publishedDests = append(publishedDests, outer.DestSiteID)
@@ -1842,8 +1864,7 @@ func TestHandler_MarkThreadMentions_HasMentionInPayload(t *testing.T) {
 	}
 	require.NoError(t, h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false))
 
-	var outer model.InboxEvent
-	require.NoError(t, json.Unmarshal(captured, &outer))
+	_, outer := unwrapOutbox(t, captured)
 	var sub model.ThreadSubscription
 	require.NoError(t, json.Unmarshal(outer.Payload, &sub))
 	assert.True(t, sub.HasMention, "inbox-emitted ThreadSubscription must carry HasMention=true")

@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -558,23 +559,22 @@ func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, th
 	return nil
 }
 
-// publishThreadSubInboxIfRemote publishes a thread_subscription_upserted
-// inbox event to ownerSiteID when that site differs from the local site.
-// Same-site or empty ownerSiteID is a no-op (empty logs a warning — it
-// indicates a caller bug). ownerSiteID is the subscription owner's home
+// publishThreadSubInboxIfRemote federates a thread_subscription_upserted event
+// to ownerSiteID when that site differs from the local site, via the durable
+// OUTBOX relay (outbox-worker forwards it to the destination INBOX with
+// retry-forever, so a destination outage delays — never drops — the event
+// within retention). Same-site is a no-op; empty ownerSiteID is a no-op that
+// logs a warning (caller bug). ownerSiteID is the subscription owner's home
 // site — NOT sub.SiteID, which is the room's home site.
-//
-// The dedup-ID seed is (threadRoomID, userID, msgID): msg.ID is unique per
-// reply, and (msg.ID, userID) is unique within a reply, so the seed is stable
-// across MESSAGES_CANONICAL redeliveries and JetStream stream-level dedup
-// absorbs duplicates within the dedup window.
 func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.ThreadSubscription, ownerSiteID, msgID string) error {
 	if ownerSiteID == "" {
-		slog.WarnContext(ctx, "owner siteID empty, skipping inbox publish",
+		slog.WarnContext(ctx, "owner siteID empty, skipping outbox publish",
 			"threadRoomID", sub.ThreadRoomID, "user_id", sub.UserID, "msgID", msgID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return nil
 	}
+	// outbox.Publish also no-ops a local destination, but short-circuit here so the
+	// marshal below is skipped on the common same-site path.
 	if ownerSiteID == h.siteID {
 		return nil
 	}
@@ -583,30 +583,17 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 	if err != nil {
 		return fmt.Errorf("marshal thread subscription: %w", err)
 	}
-	externalEvt := model.InboxEvent{
-		Type:       model.InboxThreadSubscriptionUpserted,
-		SiteID:     h.siteID,
-		DestSiteID: ownerSiteID,
-		Payload:    payload,
-		Timestamp:  time.Now().UTC().UnixMilli(),
-	}
-	data, err := sonic.Marshal(externalEvt)
-	if err != nil {
-		return fmt.Errorf("marshal inbox event: %w", err)
-	}
-	// Dedup ID format: {payloadSeed}:{destSiteID}, where payloadSeed encodes
-	// per-publish uniqueness (threadRoomID + userID + msg.ID + hasMention).
-	// msg.ID is stable across MESSAGES_CANONICAL redeliveries → same publish
-	// always produces the same dedup ID. Different users on the same destination
-	// get different dedup IDs because their userIDs differ in the seed.
+	// Dedup-ID seed (threadRoomID + userID + msg.ID + hasMention + destSiteID):
+	// msg.ID is stable across MESSAGES_CANONICAL redeliveries so the same publish
+	// yields the same ID; different users on the same destination differ via userID;
 	// hasMention is in the seed so a HasMention=false upsert and a later
-	// HasMention=true mention update for the same (thread, user, message) get
-	// distinct dedup IDs — otherwise JetStream would drop the mention update and
-	// the flag would never cross sites.
+	// HasMention=true update get distinct dedup IDs (else stream-level dedup would
+	// swallow the mention update). It rides the OUTBOX publish as its Nats-Msg-Id
+	// AND the forward's Nats-Msg-Id at the destination.
 	dedupID := fmt.Sprintf("thread-sub-inbox:%s:%s:%s:%t:%s", sub.ThreadRoomID, sub.UserID, msgID, sub.HasMention, ownerSiteID)
-	subj := subject.InboxExternal(ownerSiteID, model.InboxThreadSubscriptionUpserted)
-	if err := h.publish(ctx, subj, data, dedupID); err != nil {
-		return fmt.Errorf("publish thread subscription inbox to %s: %w", ownerSiteID, err)
+	if err := outbox.Publish(ctx, h.publish, h.siteID, sub.RoomID, ownerSiteID,
+		model.InboxThreadSubscriptionUpserted, payload, dedupID, time.Now().UTC().UnixMilli()); err != nil {
+		return fmt.Errorf("publish thread subscription outbox to %s: %w", ownerSiteID, err)
 	}
 	return nil
 }
