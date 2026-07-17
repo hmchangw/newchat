@@ -2,38 +2,41 @@
 
 See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
 
-## Phase 1 — `pkg/model` types + `pkg/subject` builders (this PR)
+## Phase 1 — `pkg/model` types + `pkg/subject` builders
 
-Additive, no behavior change. Foundation the producer publishes.
-
-- `pkg/model/employee.go`: `Org`, `Employee` (source of truth for `User`;
-  carries `EngName`/`ChineseName` + `Source`), `EmployeeWithChange`,
+- `pkg/model/employee.go`: `Org` (`{id, description, name, type}`, the
+  group-shaped org node), `Employee` (source of truth for `User`; nested single
+  `org`; carries `EngName`/`ChineseName` + `Source`), `EmployeeWithChange`,
   `EmployeesUpsertBatch`, `UserWithChange`, `UsersUpsertBatch`,
-  `HRSyncEmployeeQuitBatch`. `Change` is a plain wire string — the typed enum +
-  diff logic land in the producer's `transform` layer (Phase 3), not `pkg/model`.
+  `HRSyncEmployeeQuitBatch`. `Change` is a plain wire string.
 - `pkg/subject`: `OrgSyncUsersUpsert(central)`, `EmployeesQuit(siteID)`.
-- `employee_test.go` round-trips + a consumer-decode-compat test (marshal
-  `EmployeesUpsertBatch`, decode into the org-only subset, org fields survive).
-- **Deferred:** reusing `Employee` in search-sync-worker (a fit question surfaced
-  separately) — not in this PR. portal-service keeps its own employee type
-  (different purpose), no reuse there.
+- `employee_test.go`: nested-org shape + round-trips.
 
-## Phase 2 — service skeleton + Graph + full-publish
+## Phase 2 — Graph group surface + service
 
-New `teams-hr-sync` service (one-shot CronJob, `signal.NotifyContext`), config,
-a group-members lister added to `pkg/msgraph`, Graph→Employee mapping (Employee is
-the source of truth; a downstream out-of-repo service derives `User` from it) with
-a **stubbed** `resolveOrg` + `source="teams"`. Publish full batches every run (no
-diff yet). Unit + integration.
+- `pkg/msgraph`: `GroupReader` — group profile getter (`GET /groups/{id}`) and
+  group-members lister (`GET /groups/{id}/members`, identity `$select`,
+  nextLink paging pinned to the configured origin, non-user objects
+  skipped + counted).
+- `teams-hr-sync/transform`: one-way `EmployeeUserConverter`
+  (`DefaultConverter`, identity fields only).
+- `teams-hr-sync/`: one-shot CronJob binary — env config (`SYNC_GROUPS`
+  per-group siteId map, `ORG_TYPE`, `CENTRAL_SITE_ID`, read Mongo, NATS),
+  mapper (Graph member+group → Employee), publisher (3 batches, empty
+  batches skipped, plain JSON), run-summary log line.
 
 ## Phase 3 — query-first diff + quit detection
 
-Read `hr_employee` `{source:"teams"}` via the typed Mongo reader, diff → emit only
-changed + quits (siteID from the stored row), empty-store first-run handling. Unit
-(diff matrix incl. `source` scoping) + integration (seed → delta+quit). **Confirm
-the downstream `Change`/quit contract before wiring.**
+- Read-only `hr_employee` reader filtered `{source:"teams"}` with an explicit
+  Employee-field projection.
+- Differ keyed by account: created/updated/omitted; store-present-but-absent →
+  quit grouped per stored row's `siteId`; other-source rows never quit.
+- Unit matrix (created/updated/unchanged/quit/empty-store-first-run/
+  legacy-source-never-quit) + integration (seeded read + two full one-shot
+  runs vs httptest Graph + real Mongo/NATS).
 
 ## Follow-up
 
-Fill `resolveOrg` once the Graph org-taxonomy source is confirmed
-(extensionAttributes vs mapping table vs nested groups).
+- search-sync-worker's spotlight-org consumer decodes a **flat** org subset;
+  the nested single-org employees.upsert shape doesn't feed it — reconcile the
+  consumer (or its own feed) separately.

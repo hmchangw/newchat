@@ -1,54 +1,81 @@
 # teams-hr-sync — design
 
-**Target repo:** `hmchangw/newchat`
-**Precedent:** teams-user-sync (reuse `pkg/msgraph`, the read/write Mongo split, and the K8s-CronJob one-shot model).
+**Precedent:** teams-user-sync (reuse `pkg/msgraph`, the read-side Mongo client, and the K8s-CronJob one-shot model).
 
 ## Overview
 
-A standalone producer that reads the Teams/Graph directory, diffs against the
-current persisted HR state, and publishes the HR sync feed to JetStream on three
-subjects. It does **not** persist employees/users — a downstream microservice
-consumes the subjects and writes them. It **coexists** with the legacy HR syncer
-(different systems feeding the same `hr_employee` store, distinguished by a
-`source` field).
+A standalone producer that walks configured Teams/Graph **groups**, diffs their
+user members against the persisted HR state, and publishes the HR sync feed to
+JetStream on three subjects. It does **not** persist employees/users — a
+downstream microservice consumes the subjects and writes them. It **coexists**
+with the legacy HR syncer (different systems feeding the same `hr_employee`
+store, distinguished by a `source` field; this producer stamps `source:"teams"`
+and never quits another source's rows).
 
-## Publishes (JSON, zstd via `Nats-Encoding: zstd`)
+## Group = Org
+
+Each configured Graph group maps to one **site** (`SYNC_GROUPS` JSON:
+`[{"groupId":"…","siteId":"…"}]`) and becomes the member's org node: `Org`
+carries the group's `id`/`displayName`/`description` plus a configured `type`
+(`ORG_TYPE`, default `"group"`). `Org` nests under `Employee` as a **single
+node** (json key `org`) — not flattened fields.
+
+> Consequence (flagged follow-up): search-sync-worker's spotlight-org consumer
+> decodes each employees.upsert element into a **flat** org-field subset; the
+> nested single-org shape does not feed that decode. Reconciling the consumer is
+> tracked separately — not in this service's scope.
+
+## Publishes (plain JSON in v1 — the header contract permits uncompressed)
 
 | Method | Subject builder | Payload |
 |---|---|---|
-| employees.upsert | `subject.OrgSyncEmployeesUpsert(central)` (exists) | `EmployeesUpsertBatch` |
-| users.upsert | `subject.OrgSyncUsersUpsert(central)` (new) | `UsersUpsertBatch` |
-| employees.quit | `subject.EmployeesQuit(siteID)` (new, per-site) | `HRSyncEmployeeQuitBatch` |
+| employees.upsert | `subject.OrgSyncEmployeesUpsert(central)` | `EmployeesUpsertBatch` |
+| users.upsert | `subject.OrgSyncUsersUpsert(central)` | `UsersUpsertBatch` |
+| employees.quit | `subject.EmployeesQuit(siteID)` (per-site) | `HRSyncEmployeeQuitBatch` |
 
-Only `employees.upsert` exists in-repo today (consumed by search-sync-worker's
-spotlight-org collection, which decodes each element's flat 9-field org subset).
+Empty batches are skipped. `Timestamp` = publish time (UTC millis).
 
-## Wire types (`pkg/model`, this phase)
+## Wire types (`pkg/model`)
 
-- `Org` — the 9 org fields, json tags **identical** to search-sync-worker's
-  org index row so one wire row feeds both the ES index and `hr_employee`. `bson`
-  tags added (search-specific struct tags deliberately excluded from `pkg/model`).
-- `Employee` — the source of truth a downstream out-of-repo service maps into
-  `model.User`. Embeds `Org` inline (org fields stay flat on the wire) +
-  `employeeId/account/engName/chineseName/siteId/source`. `engName`/`chineseName`
-  mirror `model.User` so the derive is lossless; `source` is the coexistence tag.
-- `EmployeeWithChange` / `UserWithChange` — embed `Employee` / `User` + a `Change`
-  wire string (`created`/`updated`). Flat embedding preserved so the consumer's
-  org-subset decode still works.
+- `Org` — `{id, description, name, type}`, the group-shaped org node.
+- `Employee` — the source of truth a downstream service maps into `model.User`:
+  `employeeId/account/engName/chineseName/siteId/source` + nested `org`.
+- `EmployeeWithChange` / `UserWithChange` — embed `Employee` / `User` + a
+  `Change` wire string (`created`/`updated`).
 - `EmployeesUpsertBatch` / `UsersUpsertBatch` / `HRSyncEmployeeQuitBatch` — the
   three batch shapes, each carrying `Timestamp`.
 
-## Change detection (later phase)
+## Graph mapping (`teams-hr-sync/mapper.go`)
 
-Query-first against `hr_employee` scoped to `{source:"teams"}` (not a self-held
-snapshot): diff the Graph walk against ground truth → changed/new → `*WithChange`;
-present-in-store-but-absent → quits (siteID from the stored row). A previously-lost
-publish self-heals on the next run. Legacy-`source` rows are never seen as absent,
-so no false quits.
+Per member (`GET /groups/{id}/members`, `$select=id,userPrincipalName,
+displayName,givenName,surname,employeeId`, non-user objects skipped):
+`Account` = lowercased UPN local part (same rule as teams-user-sync),
+`EngName` = `TrimSpace(givenName + " " + surname)`, `ChineseName` =
+`displayName`, `EmployeeID` = `employeeId`, `SiteID` = the group's configured
+site, `Source` = `"teams"`, `Org` = the group profile + `ORG_TYPE`. An account
+appearing in multiple groups keeps its first mapping (config order wins).
 
-## Change semantics — downstream contract (open)
+## User derivation (`teams-hr-sync/transform`)
 
-`EmployeeWithChange.Change` / `UserWithChange.Change` (a plain wire string) and the
-quit-batch shape are the downstream **persister's** contract, not defined in this
-repo. The typed change enum + diff logic live in the producer's `transform` layer
-(Phase 3), keeping `pkg/model` a leaf. Confirm the exact semantics before wiring.
+`EmployeeUserConverter` (one-way, `DefaultConverter`) copies identity fields
+only — `Account/SiteID/EngName/ChineseName/EmployeeID`; every other `User`
+field stays zero. The downstream persister owns defaults/merging.
+
+## Change detection (query-first)
+
+Diff the Graph walk against `hr_employee` filtered `{source:"teams"}` (ground
+truth, not a self-held snapshot), keyed by account: absent-in-store → `created`;
+any field differs (incl. `Org`) → `updated`; equal → omitted;
+store-present-but-Graph-absent → quit, grouped per the stored row's `siteId`.
+A previously-lost publish self-heals on the next run. Legacy-`source` rows are
+filtered out at the store query (and defensively in the differ), so no false
+quits.
+
+## Service shape
+
+Flat one-shot `teams-hr-sync/` (K8s CronJob owns schedule + overlap
+prevention): env config via caarlos0/env (fail fast), read-only Mongo client,
+`msgraph.GroupReader` (group profile getter + members lister with nextLink
+paging), JetStream publish via an injected publish func, run-summary log line
+with counts (groups, members, created, updated, quits, published), non-zero
+exit on failure.
