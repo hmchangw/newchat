@@ -41,8 +41,7 @@ func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper tra
 					stats.InvalidUPN++
 					continue
 				}
-				// per-account override wins over the group default; applied
-				// post-map on the resolved account so the mapper stays unaware
+				// per-account override wins over the group default
 				if site := siteOverrides[e.Account]; site != "" {
 					e.SiteID = site
 					stats.Overridden++

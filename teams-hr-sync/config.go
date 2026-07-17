@@ -79,9 +79,8 @@ type siteOverride struct {
 	SiteID  string `json:"siteId"`
 }
 
-// parseSiteOverrides decodes SITE_OVERRIDES into an account→siteId map. Empty
-// or unset yields an empty map; each entry needs both fields; a duplicate
-// account is ambiguous and errors.
+// parseSiteOverrides decodes SITE_OVERRIDES into an account→siteId map; a
+// duplicate account errors (ambiguous).
 func parseSiteOverrides(raw string) (map[string]string, error) {
 	out := map[string]string{}
 	if raw == "" {
