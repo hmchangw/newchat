@@ -23,7 +23,7 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
-	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
+	assert.Equal(t, 48*time.Hour, cfg.RunTimeout, "2-day default: a large flagged backlog can run for days")
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 }
 

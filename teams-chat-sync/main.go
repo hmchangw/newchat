@@ -29,8 +29,11 @@ type Config struct {
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
 
-	MaxWorkers int           `env:"MAX_WORKERS" envDefault:"8"`
-	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"30m"`
+	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
+	// RunTimeout is the whole-run deadline. 240h = 10 days: the first sync of a
+	// large tenant walks every user's full chat history under Graph throttling,
+	// so the ceiling is generous — normal incremental runs finish far sooner.
+	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"240h"`
 	// DefaultFrom is the RFC3339 UTC watermark used for users that have never
 	// synced (teams_user docs without a from field).
 	DefaultFrom string `env:"SYNC_DEFAULT_FROM" envDefault:"2026-04-01T00:00:00Z"`
