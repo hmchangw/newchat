@@ -63,11 +63,19 @@ func TestPublish_NoopForEmptyOrLocalDestination(t *testing.T) {
 }
 
 func TestPublish_RejectsEventTypeOutsideThePartition(t *testing.T) {
+	// user_status_updated is in neither ConcurrentEventTypes nor OrderedEventTypes.
 	err := Publish(context.Background(), func(context.Context, string, []byte, string) error { return nil },
-		"site-a", "r1", "site-b", model.InboxThreadSubscriptionUpserted, []byte(`{}`), "d", 1)
+		"site-a", "r1", "site-b", model.InboxUserStatusUpdated, []byte(`{}`), "d", 1)
 	require.Error(t, err,
 		"an event type with no outbox-worker filter would sit in the stream unconsumed — must fail fast at the publish site")
 	assert.Contains(t, err.Error(), "filter set")
+}
+
+func TestThreadSubscriptionUpsertedIsConcurrent(t *testing.T) {
+	assert.Contains(t, ConcurrentEventTypes, model.InboxThreadSubscriptionUpserted,
+		"message-worker federates thread_subscription_upserted; it is order-insensitive at the destination "+
+			"(inbox-worker upsert is $setOnInsert + $max hasMention) so it rides the concurrent lane")
+	assert.NotContains(t, OrderedEventTypes, model.InboxThreadSubscriptionUpserted)
 }
 
 func TestPublish_RejectsEmptyDedupID(t *testing.T) {
