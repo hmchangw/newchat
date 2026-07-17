@@ -3,6 +3,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY pkg/ pkg/
+COPY teams-hr-sync/transform/ teams-hr-sync/transform/
 COPY hr-sync-worker/ hr-sync-worker/
 RUN CGO_ENABLED=0 go build -o /hr-sync-worker ./hr-sync-worker/
 
