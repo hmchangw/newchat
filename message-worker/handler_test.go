@@ -1647,14 +1647,7 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 
 			var publishedDests []string
 			h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, data []byte, _ string) error {
-				var relay model.OutboxEvent
-				if err := json.Unmarshal(data, &relay); err != nil {
-					return err
-				}
-				var outer model.InboxEvent
-				if err := json.Unmarshal(relay.Envelope, &outer); err != nil {
-					return err
-				}
+				_, outer := unwrapOutbox(t, data)
 				publishedDests = append(publishedDests, outer.DestSiteID)
 				return nil
 			})
@@ -1787,14 +1780,7 @@ func TestHandler_MarkThreadMentions_InboxPublishes(t *testing.T) {
 			var publishedDests []string
 			h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), ts, "site-a",
 				func(_ context.Context, _ string, data []byte, _ string) error {
-					var relay model.OutboxEvent
-					if err := json.Unmarshal(data, &relay); err != nil {
-						return err
-					}
-					var outer model.InboxEvent
-					if err := json.Unmarshal(relay.Envelope, &outer); err != nil {
-						return err
-					}
+					_, outer := unwrapOutbox(t, data)
 					publishedDests = append(publishedDests, outer.DestSiteID)
 					return nil
 				})
