@@ -1314,7 +1314,8 @@ Top-level JSON array of `SearchUser` (`account`, `engName`?, `chineseName`?).
 
 All user-service subjects: `chat.user.{account}.request.user.{siteID}.<area>.<action>`,
 except `me` — a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
-No client-facing events are emitted.
+[settings.set](#settingsset) emits [settings.update](events.md#settingsupdate--user-settings-sync);
+no other endpoint emits a client-facing event.
 
 | RPC subject | Method |
 |---|---|
@@ -1322,6 +1323,8 @@ No client-facing events are emitted.
 | `chat.user.{account}.request.user.{siteID}.status.getByName` | [status.getByName](#statusgetbyname) |
 | `chat.user.{account}.request.user.{siteID}.profile.getByName` | [profile.getByName](#profilegetbyname) |
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
+| `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [subscription.list](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [subscription.getChannels](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [subscription.getDM](#subscriptiongetdm) |
@@ -1420,6 +1423,71 @@ Same shape as `status.getByName`.
 
 **Emits:** None client-facing. (A server-side cross-site federation update fires
 internally but is not delivered to clients.)
+
+---
+
+### settings.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
+
+Returns the caller's stored settings **exactly as stored** — `{}` when never set.
+The server never injects defaults; **absent = the client applies its own default**.
+
+#### Request body
+
+None (empty payload).
+
+#### Success response
+
+The stored settings object. All seven fields optional, present only when explicitly set:
+
+| Field | Type |
+|---|---|
+| `fullWidth` | boolean |
+| `translateMessageInto` | string |
+| `showMessagePreviewInSidebarList` | boolean |
+| `muteAllNotifications` | boolean |
+| `showMessagesAndPreviewsInNotifications` | boolean |
+| `showNotificationsDuringCallsAndMeetings` | boolean |
+| `scrollToBottomInChat` | boolean |
+
+`{ "fullWidth": true, "translateMessageInto": "en-US" }`
+
+#### Errors
+
+`"user not found"` (`not_found`).
+
+**Emits:** None.
+
+---
+
+### settings.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.set`
+
+Partial update: **only the fields present in the request are written**; unsent
+fields keep their stored value (or stay absent). At least one field required.
+
+#### Request body
+
+Any non-empty subset of the seven settings fields (same table as
+[settings.get](#settingsget)). `translateMessageInto` must be a language-tag
+shape — hyphen-separated letter/digit subtags, leading subtag letters-only
+(e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); no value whitelist.
+
+`{ "fullWidth": false, "translateMessageInto": "ja" }`
+
+#### Success response
+
+The **full post-update settings** (same shape as [settings.get](#settingsget)).
+
+#### Errors
+
+`"no settings provided"` (`bad_request`), `"invalid translateMessageInto language tag"`
+(`bad_request`), `"user not found"` (`not_found`).
+
+**Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to the
+caller's other devices, carrying the full post-update settings.
 
 ---
 
