@@ -14,6 +14,15 @@ type UserSettings struct {
 	ScrollToBottomInChat                    *bool   `json:"scrollToBottomInChat,omitempty"                    bson:"scrollToBottomInChat,omitempty"`
 }
 
+// IsEmpty reports whether no field is set — the "nothing to write" guard for
+// partial updates.
+func (s *UserSettings) IsEmpty() bool {
+	return s.FullWidth == nil && s.TranslateMessageInto == nil &&
+		s.ShowMessagePreviewInSidebarList == nil && s.MuteAllNotifications == nil &&
+		s.ShowMessagesAndPreviewsInNotifications == nil &&
+		s.ShowNotificationsDuringCallsAndMeetings == nil && s.ScrollToBottomInChat == nil
+}
+
 // SettingsUpdateEvent is the client-facing settings.update fanout payload.
 // It carries the full post-update settings so other devices replace their
 // copy rather than merge deltas. Timestamp is the publish time (ms).

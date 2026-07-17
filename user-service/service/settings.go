@@ -65,10 +65,7 @@ func (s *UserService) SetSettings(c *natsrouter.Context, req models.SettingsSetR
 // validateSettings rejects an empty request (nothing to write) and a
 // malformed translateMessageInto.
 func validateSettings(set *model.UserSettings) error {
-	if set.FullWidth == nil && set.TranslateMessageInto == nil &&
-		set.ShowMessagePreviewInSidebarList == nil && set.MuteAllNotifications == nil &&
-		set.ShowMessagesAndPreviewsInNotifications == nil &&
-		set.ShowNotificationsDuringCallsAndMeetings == nil && set.ScrollToBottomInChat == nil {
+	if set.IsEmpty() {
 		return errcode.BadRequest("no settings provided")
 	}
 	if set.TranslateMessageInto != nil && !translateTagRe.MatchString(*set.TranslateMessageInto) {
