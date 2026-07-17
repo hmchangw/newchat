@@ -4,11 +4,8 @@ import (
 	"sort"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
-
-// sourceTeams tags rows this producer owns; other sources' rows are never
-// quit by this sync.
-const sourceTeams = "teams"
 
 // diffResult is one run's delta: rows to upsert (Change created/updated) and
 // departed accounts grouped by the stored row's siteId.
@@ -26,7 +23,7 @@ type diffResult struct {
 func diffEmployees(current, stored []model.Employee) diffResult {
 	storedByAccount := make(map[string]model.Employee, len(stored))
 	for _, s := range stored {
-		if s.Source != sourceTeams {
+		if s.Source != transform.SourceTeams {
 			continue
 		}
 		storedByAccount[s.Account] = s
@@ -38,9 +35,9 @@ func diffEmployees(current, stored []model.Employee) diffResult {
 		delete(storedByAccount, c.Account)
 		switch {
 		case !exists:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: c, Change: "created"})
+			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: c, Change: transform.ChangeCreated})
 		case prev != c:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: c, Change: "updated"})
+			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: c, Change: transform.ChangeUpdated})
 		}
 	}
 	for _, s := range storedByAccount {

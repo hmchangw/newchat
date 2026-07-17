@@ -87,6 +87,9 @@ func run() error {
 	}, opts...)
 
 	store := newMongoStore(readClient.Database(cfg.MongoReadDB))
+	// Injection point: swap DefaultMapper / DefaultConverter for custom
+	// naming or derivation conventions (see teams-hr-sync/README.md).
+	mapper := transform.DefaultMapper{OrgType: cfg.OrgType}
 	pub := newPublisher(func(ctx context.Context, subj string, data []byte) error {
 		_, err := js.Publish(ctx, subj, data)
 		return err
@@ -95,7 +98,7 @@ func run() error {
 	logger := slog.With("requestId", idgen.GenerateRequestID())
 	logger.Info("teams hr sync started")
 	start := time.Now()
-	stats, err := runSync(ctx, graph, store, pub, groups, cfg.OrgType, cfg.GraphPageSize)
+	stats, err := runSync(ctx, graph, mapper, store, pub, groups, cfg.GraphPageSize)
 	logger.Info("teams hr sync finished",
 		"groups", stats.Groups,
 		"members", stats.Members,
@@ -126,9 +129,9 @@ type runStats struct {
 
 // runSync performs one full sync: walk the configured groups, diff against
 // the persisted teams-sourced rows, publish the delta.
-func runSync(ctx context.Context, graph msgraph.GroupReader, store Store, pub *publisher, groups []syncGroup, orgType string, pageSize int) (runStats, error) {
+func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, store Store, pub *publisher, groups []syncGroup, pageSize int) (runStats, error) {
 	var stats runStats
-	current, cs, err := collectEmployees(ctx, graph, groups, orgType, pageSize)
+	current, cs, err := collectEmployees(ctx, graph, mapper, groups, pageSize)
 	stats.collectStats = cs
 	if err != nil {
 		return stats, fmt.Errorf("collect graph employees: %w", err)
@@ -139,7 +142,7 @@ func runSync(ctx context.Context, graph msgraph.GroupReader, store Store, pub *p
 	}
 	diff := diffEmployees(current, stored)
 	for _, u := range diff.Upserts {
-		if u.Change == "created" {
+		if u.Change == transform.ChangeCreated {
 			stats.Created++
 		} else {
 			stats.Updated++
