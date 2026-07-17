@@ -68,7 +68,9 @@ func validateSettings(set *model.UserSettings) error {
 	if set.IsEmpty() {
 		return errcode.BadRequest("no settings provided")
 	}
-	if set.TranslateMessageInto != nil && !translateTagRe.MatchString(*set.TranslateMessageInto) {
+	// "" is valid: it explicitly stores "translation off" (an unset would fall
+	// back to the client default, erasing the user's choice).
+	if set.TranslateMessageInto != nil && *set.TranslateMessageInto != "" && !translateTagRe.MatchString(*set.TranslateMessageInto) {
 		return errcode.BadRequest("invalid translateMessageInto language tag")
 	}
 	return nil

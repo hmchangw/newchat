@@ -4274,7 +4274,7 @@ The stored settings object. All seven fields are optional and appear only when t
 | Field | Type | Notes |
 |-------|------|-------|
 | `fullWidth` | boolean | Full-width layout. |
-| `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`. |
+| `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `showMessagePreviewInSidebarList` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. |
 | `showMessagesAndPreviewsInNotifications` | boolean | Show message content and previews in notifications. |
@@ -4318,7 +4318,7 @@ Any non-empty subset of the seven settings fields (same types as [`settings.get`
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `fullWidth` | boolean | no | |
-| `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`). No value whitelist. |
+| `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); or `""` to explicitly turn translation off. No value whitelist. |
 | `showMessagePreviewInSidebarList` | boolean | no | |
 | `muteAllNotifications` | boolean | no | |
 | `showMessagesAndPreviewsInNotifications` | boolean | no | |

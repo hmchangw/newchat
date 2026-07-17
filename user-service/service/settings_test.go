@@ -111,7 +111,7 @@ func TestSetSettings_EmptyRequest(t *testing.T) {
 
 func TestSetSettings_InvalidTranslateTag(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
-	for _, tag := range []string{"", "en_US", "-en", "en-", "1en", "en US"} {
+	for _, tag := range []string{"en_US", "-en", "en-", "1en", "en US"} {
 		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{
 			UserSettings: model.UserSettings{TranslateMessageInto: &tag},
 		})
@@ -121,7 +121,7 @@ func TestSetSettings_InvalidTranslateTag(t *testing.T) {
 
 func TestSetSettings_ValidTranslateTags(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
-	for _, tag := range []string{"en", "en-US", "zh-Hant-TW", "ja"} {
+	for _, tag := range []string{"en", "en-US", "zh-Hant-TW", "ja", ""} { // "" = translation off
 		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
 			Return(&model.User{Settings: &model.UserSettings{TranslateMessageInto: &tag}}, nil)
 		pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).Return(nil)
