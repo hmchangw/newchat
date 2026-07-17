@@ -33,9 +33,10 @@ type syncConfig struct {
 // syncer runs one full teams-chat sync. Each worker persists every chat it
 // lists, including chats shared with other users: a shared chat is upserted
 // once per member rather than claimed by a single worker. Redundant writes are
-// safe because the immutable fields (siteId, and needCreateRoom via
-// $setOnInsert) are set once at the DB layer and never overwritten — a repeated
-// upsert only refreshes mutable metadata. This keeps each user's durability
+// safe because the immutable fields (siteId, createdDateTime) are set once at
+// the DB layer via $setOnInsert and never overwritten — a repeated upsert only
+// refreshes mutable metadata (for a complete-roster chat that includes the
+// members and an idempotent needCreateRoom=true). This keeps each user's durability
 // self-contained — a user advances its watermark only after its own chats
 // persist — so one member's failure can never strand a chat that a surviving
 // member would otherwise have written.
@@ -85,10 +86,20 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defau
 	return best
 }
 
+// expandedMembersTrustLimit is the roster-completeness threshold for the
+// $expand=members payload on Graph's list-chats endpoint. Graph truncates the
+// expanded members of a large chat, so an expanded roster of this size or
+// larger may be partial and the chat is routed through teams-chat-member-sync
+// for an authoritative member list. Below the limit (and non-empty) the
+// expanded roster IS the full membership and the member-sync stage is skipped.
+const expandedMembersTrustLimit = 25
+
 // buildChat maps a Graph chat to the teams_chat model, resolving member
 // accounts and the owning site from the user cache. Unknown members are kept
 // with an empty account. UpdatedAt is stamped with now; the store writes it
-// verbatim on every upsert.
+// verbatim on every upsert. NeedMemberSync is set only for non-oneOnOne chats
+// whose expanded roster may be truncated (empty or at/over
+// expandedMembersTrustLimit); a complete roster skips member-sync entirely.
 //
 //nolint:gocritic // hugeParam: gc is consumed once per chat on a batch path; passing by value keeps the mapper pure.
 func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defaultSiteID string) model.TeamsChat {
@@ -100,6 +111,7 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defa
 			VisibleHistoryStartDateTime: m.VisibleHistoryStartDateTime,
 		})
 	}
+	rosterComplete := len(gc.Members) > 0 && len(gc.Members) < expandedMembersTrustLimit
 	return model.TeamsChat{
 		ID:                  gc.ID,
 		Name:                gc.Topic,
@@ -109,7 +121,7 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defa
 		Members:             members,
 		SiteID:              voteSiteID(gc.Members, cache, defaultSiteID),
 		UpdatedAt:           now,
-		NeedMemberSync:      gc.ChatType != model.TeamsChatTypeOneOnOne,
+		NeedMemberSync:      gc.ChatType != model.TeamsChatTypeOneOnOne && !rosterComplete,
 	}
 }
 

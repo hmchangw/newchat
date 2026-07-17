@@ -23,7 +23,10 @@ type TeamsUserStore interface {
 // TeamsChatStore upserts synced chats keyed on _id. oneOnOne chats are
 // insert-only; for other chat types createdDateTime and siteID are
 // $setOnInsert-only while the mutable fields (including each chat's
-// build-time UpdatedAt stamp) are refreshed. Satisfied by *mongoStore.
+// build-time UpdatedAt stamp) are refreshed. A chat with a complete expanded
+// roster (NeedMemberSync=false) also gets its members written and
+// needCreateRoom set true, bypassing the member-sync stage. Satisfied by
+// *mongoStore.
 type TeamsChatStore interface {
 	UpsertChats(ctx context.Context, chats []model.TeamsChat) error
 }

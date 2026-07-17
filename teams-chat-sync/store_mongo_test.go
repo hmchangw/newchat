@@ -59,6 +59,41 @@ func TestChatUpsertModel_Group_SplitsSetAndSetOnInsert(t *testing.T) {
 	assert.NotContains(t, set, "createdDateTime")
 }
 
+func TestChatUpsertModel_Group_CompleteRoster_SkipsMemberSync(t *testing.T) {
+	c := model.TeamsChat{
+		ID: "19:g2", Name: "Small group", ChatType: "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}, {ID: "u2", Account: "bob"}},
+		SiteID:              "site-a",
+		UpdatedAt:           upsertNow,
+		NeedMemberSync:      false, // expanded roster under the trust limit — complete
+	}
+	u := asUpdateOne(t, chatUpsertModel(c))
+	assert.Equal(t, bson.M{"_id": "19:g2"}, u.Filter)
+
+	update, ok := u.Update.(bson.M)
+	require.True(t, ok)
+	soi, ok := update["$setOnInsert"].(bson.M)
+	require.True(t, ok)
+	assert.Equal(t, bson.M{
+		"createdDateTime": c.CreatedDateTime,
+		"siteId":          "site-a",
+	}, soi, "siteID and createdDateTime stay insert-only on the fast path")
+
+	set, ok := update["$set"].(bson.M)
+	require.True(t, ok)
+	assert.Equal(t, "Small group", set["name"])
+	assert.Equal(t, "group", set["chatType"])
+	assert.Equal(t, c.LastUpdatedDateTime, set["lastUpdatedDateTime"])
+	assert.Equal(t, c.Members, set["members"], "a complete expanded roster is written directly")
+	assert.Equal(t, true, set["needCreateRoom"], "complete roster goes straight to room creation")
+	assert.Equal(t, false, set["needMemberSync"], "member-sync stage is skipped")
+	assert.Equal(t, upsertNow, set["updatedAt"])
+	assert.NotContains(t, set, "siteId", "$set must never touch siteID")
+	assert.NotContains(t, set, "createdDateTime")
+}
+
 func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 	c := model.TeamsChat{
 		ID: "19:one1", Name: "", ChatType: model.TeamsChatTypeOneOnOne,

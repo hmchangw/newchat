@@ -138,6 +138,47 @@ func TestMongoStore_UpsertChats_GroupReSyncRetriggersButNeverClobbers(t *testing
 	assert.False(t, gotB.NeedCreateRoom, "chat-sync re-sync does not set needCreateRoom; member-sync owns that")
 }
 
+// TestMongoStore_UpsertChats_GroupCompleteRosterFastPath covers the group
+// fast path (expanded roster complete, NeedMemberSync=false): members are
+// written by this sync and every re-sync re-arms needCreateRoom so a roster
+// change reaches room creation without the member-sync stage.
+func TestMongoStore_UpsertChats_GroupCompleteRosterFastPath(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsstore")
+	store := newMongoStore(db, db)
+	ctx := context.Background()
+	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+
+	chat := groupChat("19:gFast", "Small", "site-a", now1)
+	chat.NeedMemberSync = false
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{chat}))
+
+	got, err := store.writeChats.FindByID(ctx, "19:gFast")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, chat.Members, got.Members, "complete roster written by chat-sync itself")
+	assert.True(t, got.NeedCreateRoom, "fast path is immediately ready for room creation")
+	assert.False(t, got.NeedMemberSync, "member-sync stage skipped")
+
+	// Room created (flag cleared), then the chat is re-listed with a new roster.
+	_, err = store.writeChats.Raw().UpdateByID(ctx, "19:gFast",
+		bson.M{"$set": bson.M{"needCreateRoom": false}})
+	require.NoError(t, err)
+	resync := groupChat("19:gFast", "Renamed", "site-b", now2)
+	resync.NeedMemberSync = false
+	resync.Members = []model.TeamsChatMember{{ID: "u1", Account: "alice"}, {ID: "u3", Account: "carl"}}
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{resync}))
+
+	got, err = store.writeChats.FindByID(ctx, "19:gFast")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "site-a", got.SiteID, "siteID stays immutable on the fast path")
+	assert.Equal(t, "Renamed", got.Name)
+	assert.Equal(t, resync.Members, got.Members, "re-sync refreshes the roster")
+	assert.True(t, got.NeedCreateRoom, "re-sync re-arms room create-or-sync")
+	assert.True(t, got.UpdatedAt.Equal(now2))
+}
+
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
 	store := newMongoStore(db, db)

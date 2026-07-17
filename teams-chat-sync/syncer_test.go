@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -86,11 +87,41 @@ func TestBuildChat(t *testing.T) {
 	assert.Equal(t, "group", c.ChatType)
 	assert.Equal(t, "site-a", c.SiteID)
 	assert.True(t, c.UpdatedAt.Equal(buildNow), "UpdatedAt stamped with now at build time")
-	assert.True(t, c.NeedMemberSync)
+	assert.False(t, c.NeedMemberSync, "an expanded roster under the trust limit is complete — no member sync needed")
 	assert.Equal(t, []model.TeamsChatMember{
 		{ID: "a1", Account: "alice", VisibleHistoryStartDateTime: gc.Members[0].VisibleHistoryStartDateTime},
 		{ID: "ghost", Account: "", VisibleHistoryStartDateTime: gc.Members[1].VisibleHistoryStartDateTime},
 	}, c.Members, "unknown members kept with empty account")
+}
+
+func TestBuildChat_MemberSyncByExpandedRosterSize(t *testing.T) {
+	mkMembers := func(n int) []msgraph.ChatMember {
+		ms := make([]msgraph.ChatMember, 0, n)
+		for i := 0; i < n; i++ {
+			ms = append(ms, member("u"+strconv.Itoa(i)))
+		}
+		return ms
+	}
+	tests := []struct {
+		name     string
+		chatType string
+		members  int
+		want     bool
+	}{
+		{"group under trust limit is complete", "group", expandedMembersTrustLimit - 1, false},
+		{"group at trust limit may be truncated", "group", expandedMembersTrustLimit, true},
+		{"group over trust limit may be truncated", "group", expandedMembersTrustLimit + 5, true},
+		{"group with no expanded members falls back to member sync", "group", 0, true},
+		{"meeting under trust limit is complete", "meeting", 3, false},
+		{"oneOnOne never needs member sync", model.TeamsChatTypeOneOnOne, 2, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gc := msgraph.Chat{ID: "19:x", ChatType: tc.chatType, Members: mkMembers(tc.members)}
+			c := buildChat(gc, nil, time.Now(), "site-default")
+			assert.Equal(t, tc.want, c.NeedMemberSync)
+		})
+	}
 }
 
 func TestBuildChat_OneOnOne(t *testing.T) {
