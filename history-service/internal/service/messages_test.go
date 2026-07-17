@@ -1524,7 +1524,7 @@ func TestHistoryService_DeleteMessage_SoftDeleteFails(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-abc").Return(hydrated, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		Return(time.Time{}, false, (*int)(nil), fmt.Errorf("cassandra timeout"))
+		Return(time.Time{}, false, (*int)(nil), (*time.Time)(nil), fmt.Errorf("cassandra timeout"))
 
 	// No Publish expected when the UPDATE fails.
 
@@ -1552,7 +1552,7 @@ func TestHistoryService_DeleteMessage_ConcurrentDeleteSkipsPublish(t *testing.T)
 	winnerWrote := time.Date(2026, 4, 28, 9, 0, 0, 0, time.UTC)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		Return(winnerWrote, false, (*int)(nil), nil)
+		Return(winnerWrote, false, (*int)(nil), (*time.Time)(nil), nil)
 
 	// Critically, NO Publish call is expected — gomock will fail the test if
 	// the handler tries to publish on the LWT-not-applied path.
@@ -1580,8 +1580,8 @@ func TestHistoryService_DeleteMessage_PublishFails(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-abc").Return(hydrated, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, nil, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
 		})
 
 	pub.EXPECT().
@@ -1610,8 +1610,8 @@ func TestHistoryService_DeleteMessage_PublishesCanonicalDeletedEvent(t *testing.
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, nil, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
 		})
 
 	pub.EXPECT().
@@ -1694,8 +1694,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_CarriesThreadFields(t *testing
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, nil, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
 		})
 
 	pub.EXPECT().
@@ -1731,8 +1731,8 @@ func TestHistoryService_DeleteMessage_PassesDedupMessageID(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, nil, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
 		})
 
 	pub.EXPECT().
@@ -1769,10 +1769,11 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishesThreadMetadataEvent(t
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 
 	newTcount := 4
+	newTlm := time.Date(2026, 5, 14, 12, 30, 0, 0, time.UTC)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, &newTcount, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, &newTcount, &newTlm, nil
 		})
 
 	pub.EXPECT().
@@ -1783,6 +1784,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishesThreadMetadataEvent(t
 			assert.Equal(t, model.EventDeleted, evt.Event)
 			require.NotNil(t, evt.NewTCount)
 			assert.Equal(t, 4, *evt.NewTCount)
+			require.NotNil(t, evt.NewThreadLastMsgAt, "delete event must carry the surviving thread last-message time")
+			assert.True(t, evt.NewThreadLastMsgAt.Equal(newTlm), "NewThreadLastMsgAt must equal the newest surviving reply's createdAt")
 			assert.Equal(t, "reply-1", evt.Message.ID)
 			assert.Equal(t, "r1", evt.Message.RoomID)
 			assert.Equal(t, "parent-1", evt.Message.ThreadParentMessageID)
@@ -1817,8 +1820,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishFailsButDeleteSucceeds(
 	newTcount := 4
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, &newTcount, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, &newTcount, nil, nil
 		})
 
 	pub.EXPECT().
@@ -1848,8 +1851,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_NoMetadataEventWhenTCountNil(t
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
-			return deletedAt, true, nil, nil
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
 		})
 
 	pub.EXPECT().
@@ -2116,7 +2119,7 @@ func TestHistoryService_DeleteMessage_EventDeletedCarriesContent(t *testing.T) {
 	deletedAt := time.Now().UTC()
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
-		Return(deletedAt, true, (*int)(nil), nil)
+		Return(deletedAt, true, (*int)(nil), (*time.Time)(nil), nil)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
