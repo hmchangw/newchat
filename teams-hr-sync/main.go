@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/propagation"
@@ -95,14 +96,7 @@ func run() error {
 	// Injection point: swap DefaultMapper / DefaultConverter for custom
 	// naming or derivation conventions (see teams-hr-sync/README.md).
 	mapper := transform.DefaultMapper{}
-	pub := newPublisher(func(ctx context.Context, subj string, data []byte, encoding string) error {
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if encoding != "" {
-			msg.Header.Set("Nats-Encoding", encoding)
-		}
-		_, err := js.PublishMsg(ctx, msg)
-		return err
-	}, cfg.CentralSiteID, transform.DefaultConverter{})
+	pub := newPublisher(jetStreamPublish(js), cfg.CentralSiteID, transform.DefaultConverter{})
 
 	logger := slog.With("requestId", idgen.GenerateRequestID())
 	logger.Info("teams hr sync started")
@@ -126,6 +120,23 @@ func run() error {
 		return fmt.Errorf("sync: %w", err)
 	}
 	return nil
+}
+
+// jetStreamPublish is the JetStream publishFunc main wires in. natsutil.NewMsg
+// returns a nil Header when ctx carries no request-id (the one-shot-job case),
+// so guard before setting the encoding header.
+func jetStreamPublish(js jetstream.JetStream) publishFunc {
+	return func(ctx context.Context, subj string, data []byte, encoding string) error {
+		msg := natsutil.NewMsg(ctx, subj, data)
+		if encoding != "" {
+			if msg.Header == nil {
+				msg.Header = nats.Header{}
+			}
+			msg.Header.Set("Nats-Encoding", encoding)
+		}
+		_, err := js.PublishMsg(ctx, msg)
+		return err
+	}
 }
 
 // runStats summarizes one sync run for the end-of-run log line.

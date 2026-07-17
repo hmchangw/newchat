@@ -92,11 +92,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 		msgraph.WithBaseURL(baseURL), msgraph.WithTokenURL(tokenURL),
 	)
 	store := newMongoStore(db)
-	pub := newPublisher(func(ctx context.Context, subj string, data []byte, encoding string) error {
-		msg := &nats.Msg{Subject: subj, Data: data, Header: nats.Header{"Nats-Encoding": []string{encoding}}}
-		_, err := js.PublishMsg(ctx, msg)
-		return err
-	}, "central", transform.DefaultConverter{})
+	pub := newPublisher(jetStreamPublish(js), "central", transform.DefaultConverter{})
 	groups := []syncGroup{{GroupID: "g1", SiteID: "site-a"}}
 
 	// legacy-source row: present in the collection but owned by another feed
