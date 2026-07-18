@@ -1074,6 +1074,41 @@ func TestThreadStoreMongo_UpdateThreadRoomLastMessage(t *testing.T) {
 	assert.Contains(t, got.ReplyAccounts, "bob", "replier account should be added to ReplyAccounts")
 }
 
+// TestThreadStoreMongo_UpdateThreadRoomLastMessage_StaleDoesNotRegress verifies
+// the monotonicity guard: an out-of-order (retried or concurrently-processed)
+// reply whose lastMsgAt is older than the stored pointer must NOT regress
+// lastMsgAt/lastMsgId, while its author is still merged into replyAccounts
+// (which is order-independent).
+func TestThreadStoreMongo_UpdateThreadRoomLastMessage_StaleDoesNotRegress(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	room := &model.ThreadRoom{
+		ID:              "tr-stale",
+		ParentMessageID: "msg-parent-stale",
+		RoomID:          "r-1",
+		SiteID:          "site-a",
+		LastMsgAt:       now,
+		LastMsgID:       "msg-newest",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	require.NoError(t, store.CreateThreadRoom(ctx, room))
+
+	older := now.Add(-5 * time.Minute)
+	err := store.UpdateThreadRoomLastMessage(ctx, "tr-stale", "msg-older", []string{"carol"}, older)
+	require.NoError(t, err)
+
+	got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-stale")
+	require.NoError(t, err)
+	assert.Equal(t, "msg-newest", got.LastMsgID, "stale reply must not regress lastMsgId")
+	assert.Equal(t, now, got.LastMsgAt.UTC().Truncate(time.Millisecond), "stale reply must not regress lastMsgAt")
+	assert.Contains(t, got.ReplyAccounts, "carol", "stale reply author must still be merged into ReplyAccounts")
+}
+
 func TestCassandraStore_SaveThreadMessage_IncrementsParentTcount(t *testing.T) {
 	cassSession := setupCassandra(t)
 	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)

@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/errcode/errtest"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -1783,11 +1784,12 @@ func TestHandler_sendReply(t *testing.T) {
 // ---- HandleJetStreamMsg coverage ----
 
 type fakeJSMsg struct {
-	subject string
-	data    []byte
-	headers nats.Header
-	acked   bool
-	naked   bool
+	subject  string
+	data     []byte
+	headers  nats.Header
+	acked    bool
+	naked    bool
+	nakDelay time.Duration
 }
 
 func (m *fakeJSMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
@@ -1798,7 +1800,7 @@ func (m *fakeJSMsg) Reply() string                             { return "" }
 func (m *fakeJSMsg) Ack() error                                { m.acked = true; return nil }
 func (m *fakeJSMsg) DoubleAck(context.Context) error           { m.acked = true; return nil }
 func (m *fakeJSMsg) Nak() error                                { m.naked = true; return nil }
-func (m *fakeJSMsg) NakWithDelay(time.Duration) error          { m.naked = true; return nil }
+func (m *fakeJSMsg) NakWithDelay(d time.Duration) error        { m.naked = true; m.nakDelay = d; return nil }
 func (m *fakeJSMsg) InProgress() error                         { return nil }
 func (m *fakeJSMsg) Term() error                               { return nil }
 func (m *fakeJSMsg) TermWithReason(string) error               { return nil }
@@ -1834,6 +1836,31 @@ func TestHandleJetStreamMsg_InvalidSubject_Acks(t *testing.T) {
 	h.HandleJetStreamMsg(context.Background(), msg)
 	assert.True(t, msg.acked, "invalid subject must Ack — not retryable")
 	assert.False(t, msg.naked)
+}
+
+// A transient infra failure (bare, non-errcode error) must NakWithDelay using
+// the jsretry backoff schedule — not an instant Nak that could burn through
+// MaxDeliver during a brief outage. Metadata() is nil here, so jsretry falls
+// back to the first backoff entry.
+func TestHandleJetStreamMsg_InfraError_NaksWithBackoff(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().
+		GetSubscription(gomock.Any(), "alice", "room-1").
+		Return(nil, fmt.Errorf("connection refused"))
+
+	h := NewHandler(store, nil, makePublishFunc(nil, nil),
+		func(context.Context, *nats.Msg) error { return nil }, "site-a", nil, 500, 1, 8192, "")
+
+	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hello", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f"}
+	data, _ := json.Marshal(req)
+	msg := &fakeJSMsg{subject: "chat.user.alice.room.room-1.site-a.msg.send", data: data}
+
+	h.HandleJetStreamMsg(context.Background(), msg)
+
+	assert.False(t, msg.acked, "infra failure must not Ack")
+	assert.True(t, msg.naked, "infra failure must Nak for redelivery")
+	assert.Equal(t, jsretry.DefaultBackoff[0], msg.nakDelay, "infra Nak must use the jsretry backoff delay, not an instant Nak")
 }
 
 // TestHandler_processMessage_RequestTShowMapsToTShow verifies the
