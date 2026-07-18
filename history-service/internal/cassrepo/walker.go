@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/gocql/gocql"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
@@ -85,98 +86,168 @@ func (r pageResult[T]) toPage() Page[T] {
 // letting callers apply a per-call predicate (e.g. created_at < before) only where needed.
 type bucketQueryFn func(bucket int64, firstBucket bool) *gocql.Query
 
-// fillPage walks buckets in the given direction starting at startBucket,
-// issuing one query per bucket and accumulating rows into out until pageSize
-// is reached or maxBuckets is exhausted. The first bucket may resume from a
-// caller-supplied gocql page state; later buckets always start fresh.
+// walkConfig bounds a bucket walk. concurrency<=1 (or escalateAfter<=0) keeps
+// the walk strictly serial — byte-identical to the original one-bucket-per-RTT
+// behavior. With concurrency>1 the walk escalates to a parallel empty-bucket
+// skip after escalateAfter consecutive empty buckets (see walkBuckets).
+type walkConfig struct {
+	maxBuckets    int // hard cap on buckets traversed before returning a non-terminal cursor
+	concurrency   int // max buckets probed concurrently once escalated; <=1 disables parallelism
+	escalateAfter int // consecutive empty buckets that trigger the parallel skip; <=0 disables
+}
+
+// bucketResult is one bucket's contribution to a page. nextPageState is non-nil
+// iff the bucket was truncated at the requested limit with rows still remaining
+// — the signal that the page filled mid-bucket and must resume here.
+type bucketResult[T any] struct {
+	rows          []T
+	nextPageState []byte
+}
+
+// bucketFetcher reads up to `limit` rows from a single bucket, resuming from
+// pageState (nil = start of bucket). It fully drains the bucket up to `limit`,
+// so a non-nil nextPageState means "limit reached, more rows remain here".
+// firstBucket lets the gocql adapter apply the first-step predicate. A non-nil
+// error aborts the whole walk.
+type bucketFetcher[T any] func(ctx context.Context, bucket int64, firstBucket bool, pageState []byte, limit int) (bucketResult[T], error)
+
+// walkBuckets walks buckets in the given direction from startBucket, calling
+// fetch once per bucket and accumulating rows until pageSize is reached, the
+// floor is crossed, or maxBuckets is exhausted.
 //
-// scan must consume up to `remaining` rows from iter and return them; it is
-// responsible for stopping when full. A non-nil error return aborts the walk
-// immediately — the bucket advance and any further queries are skipped, and
-// the accumulated rows are discarded. This is how scan signals a fatal per-row
-// error (e.g. a decrypt failure) up to the caller.
+// Serial mode reproduces the original one-bucket-at-a-time walk exactly. Once
+// cfg.escalateAfter consecutive empty buckets are seen (and cfg.concurrency>1),
+// it escalates: it probes up to cfg.concurrency buckets CONCURRENTLY to skip
+// runs of empty buckets quickly. Crucially, the parallel path only ever commits
+// to skipping EMPTY buckets — the first bucket that yields rows is handed back
+// to the serial path, so the page contents and resume cursor always come from a
+// single exact-limit read. This keeps parallel output byte-identical to serial
+// (proven by the differential test) while collapsing N sequential RTTs over
+// sparse history into ~N/concurrency rounds.
 //
 // floorBucket bounds the walk: DESC stops when bucket < floorBucket; ASC stops
 // when bucket > floorBucket. To disable floor-based termination, callers pass
 // math.MinInt64 (DESC) or math.MaxInt64 (ASC).
-func fillPage[T any](
+func walkBuckets[T any](
 	ctx context.Context,
 	sizer msgbucket.Sizer,
 	direction walkDirection,
 	startBucket int64,
 	floorBucket int64,
-	maxBuckets int,
+	cfg walkConfig,
 	pageSize int,
 	initialPageState []byte,
-	queryFn bucketQueryFn,
-	scan func(iter *gocql.Iter, remaining int) ([]T, error),
+	fetch bucketFetcher[T],
 ) (pageResult[T], error) {
 	out := make([]T, 0, pageSize)
 	bucket := startBucket
 	pageState := initialPageState
 	walked := 0
+	emptyRun := 0
+	parallel := false
 
-	advance := func() {
+	step := func(b int64) int64 {
 		if direction == walkDesc {
-			bucket = sizer.Prev(bucket)
-		} else {
-			bucket = sizer.Next(bucket)
+			return sizer.Prev(b)
 		}
+		return sizer.Next(b)
 	}
-
 	floorCrossed := func(b int64) bool {
 		if direction == walkDesc {
 			return b < floorBucket
 		}
 		return b > floorBucket
 	}
+	parallelEnabled := cfg.concurrency > 1 && cfg.escalateAfter > 0
 
-	for len(out) < pageSize && walked < maxBuckets {
+	for len(out) < pageSize && walked < cfg.maxBuckets {
 		if floorCrossed(bucket) {
 			return pageResult[T]{Rows: out, NextCursor: "", HasNext: false}, nil
 		}
 
-		q := queryFn(bucket, walked == 0).WithContext(ctx)
-		q = q.PageSize(pageSize - len(out))
-		if pageState != nil {
-			q = q.PageState(pageState)
-		}
+		if parallel {
+			// Build a batch of buckets to probe concurrently, bounded by the
+			// remaining bucket budget and the floor.
+			batch := make([]int64, 0, cfg.concurrency)
+			for b := bucket; len(batch) < cfg.concurrency && walked+len(batch) < cfg.maxBuckets && !floorCrossed(b); b = step(b) {
+				batch = append(batch, b)
+			}
+			if len(batch) == 0 {
+				break // floor or maxBuckets reached at a bucket boundary
+			}
 
-		iter := q.Iter()
-		rows, scanErr := scan(iter, pageSize-len(out))
-		out = append(out, rows...)
-		nextPageState := iter.PageState()
-		if err := iter.Close(); err != nil {
-			return pageResult[T]{}, fmt.Errorf("scan bucket %d: %w", bucket, err)
-		}
-		// A scan error (e.g. a per-row decrypt failure) is fatal: discard the
-		// accumulated rows and abort the walk so a later bucket can't overwrite
-		// the error or serve a partial page.
-		if scanErr != nil {
-			return pageResult[T]{}, fmt.Errorf("scan bucket %d: %w", bucket, scanErr)
-		}
+			results := make([]bucketResult[T], len(batch))
+			g, gctx := errgroup.WithContext(ctx)
+			for i := range batch {
+				g.Go(func() error {
+					// firstBucket is always false here: escalation needs >=1 prior
+					// empty bucket, so walked>0 and this is never the first step.
+					res, err := fetch(gctx, batch[i], false, nil, pageSize)
+					if err != nil {
+						return err
+					}
+					results[i] = res
+					return nil
+				})
+			}
+			if err := g.Wait(); err != nil {
+				return pageResult[T]{}, err
+			}
 
-		if len(nextPageState) > 0 && len(out) < pageSize {
-			// More rows in this bucket but page not yet full — continue draining.
-			pageState = nextPageState
+			firstData := -1
+			for i := range results {
+				if len(results[i].rows) > 0 {
+					firstData = i
+					break
+				}
+			}
+			if firstData < 0 {
+				// Whole batch empty: commit to skipping all of it, stay parallel.
+				for range batch {
+					bucket = step(bucket)
+				}
+				walked += len(batch)
+				continue
+			}
+			// Skip the empties before the data bucket; hand the data bucket back
+			// to the serial path (the speculatively-read rows beyond it are
+			// discarded — they get re-walked exactly once with precise limits).
+			for j := 0; j < firstData; j++ {
+				bucket = step(bucket)
+			}
+			walked += firstData
+			parallel = false
+			emptyRun = 0
+			pageState = nil
 			continue
 		}
-		if len(nextPageState) > 0 && len(out) >= pageSize {
+
+		// Serial step.
+		res, err := fetch(ctx, bucket, walked == 0, pageState, pageSize-len(out))
+		if err != nil {
+			return pageResult[T]{}, err
+		}
+		out = append(out, res.rows...)
+		if res.nextPageState != nil {
 			// Page filled mid-bucket — cursor resumes here on next call.
-			cursor, encErr := encodeBucketCursor(bucket, nextPageState)
+			cursor, encErr := encodeBucketCursor(bucket, res.nextPageState)
 			if encErr != nil {
 				return pageResult[T]{}, fmt.Errorf("encode resume cursor at bucket %d: %w", bucket, encErr)
 			}
-			return pageResult[T]{
-				Rows:       out,
-				NextCursor: cursor,
-				HasNext:    true,
-			}, nil
+			return pageResult[T]{Rows: out, NextCursor: cursor, HasNext: true}, nil
 		}
 
+		if len(res.rows) == 0 {
+			emptyRun++
+		} else {
+			emptyRun = 0
+		}
 		pageState = nil
-		advance()
+		bucket = step(bucket)
 		walked++
+		if parallelEnabled && emptyRun >= cfg.escalateAfter {
+			parallel = true
+		}
 	}
 
 	if floorCrossed(bucket) {
@@ -187,9 +258,58 @@ func fillPage[T any](
 	if encErr != nil {
 		return pageResult[T]{}, fmt.Errorf("encode resume cursor at bucket %d: %w", bucket, encErr)
 	}
-	return pageResult[T]{
-		Rows:       out,
-		NextCursor: cursor,
-		HasNext:    true,
-	}, nil
+	return pageResult[T]{Rows: out, NextCursor: cursor, HasNext: true}, nil
+}
+
+// fillPage adapts a gocql query/scan pair to walkBuckets: it builds a
+// bucketFetcher that drains one bucket up to `limit` rows across gocql pages,
+// then delegates the bucket traversal (serial or escalating-parallel per cfg)
+// to walkBuckets. The fetcher preserves the original semantics — a fatal scan
+// error (e.g. a per-row decrypt failure) aborts the whole walk.
+func fillPage[T any](
+	ctx context.Context,
+	sizer msgbucket.Sizer,
+	direction walkDirection,
+	startBucket int64,
+	floorBucket int64,
+	cfg walkConfig,
+	pageSize int,
+	initialPageState []byte,
+	queryFn bucketQueryFn,
+	scan func(iter *gocql.Iter, remaining int) ([]T, error),
+) (pageResult[T], error) {
+	fetch := func(fctx context.Context, bucket int64, firstBucket bool, pageState []byte, limit int) (bucketResult[T], error) {
+		rows := make([]T, 0, limit)
+		ps := pageState
+		for len(rows) < limit {
+			q := queryFn(bucket, firstBucket).WithContext(fctx).PageSize(limit - len(rows))
+			if ps != nil {
+				q = q.PageState(ps)
+			}
+			iter := q.Iter()
+			got, scanErr := scan(iter, limit-len(rows))
+			rows = append(rows, got...)
+			nextPageState := iter.PageState()
+			if err := iter.Close(); err != nil {
+				return bucketResult[T]{}, fmt.Errorf("scan bucket %d: %w", bucket, err)
+			}
+			if scanErr != nil {
+				return bucketResult[T]{}, fmt.Errorf("scan bucket %d: %w", bucket, scanErr)
+			}
+			if len(nextPageState) > 0 && len(rows) < limit {
+				// More rows in this bucket but limit not yet reached — keep draining.
+				ps = nextPageState
+				continue
+			}
+			if len(nextPageState) > 0 {
+				// Limit reached mid-bucket — signal a resume point.
+				return bucketResult[T]{rows: rows, nextPageState: nextPageState}, nil
+			}
+			// Bucket exhausted.
+			return bucketResult[T]{rows: rows, nextPageState: nil}, nil
+		}
+		return bucketResult[T]{rows: rows, nextPageState: nil}, nil
+	}
+
+	return walkBuckets[T](ctx, sizer, direction, startBucket, floorBucket, cfg, pageSize, initialPageState, fetch)
 }

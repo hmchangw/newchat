@@ -95,7 +95,7 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 	}
 
 	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
+		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.walkCfg,
 		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
 	)
 	if err != nil {
@@ -142,7 +142,7 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 	}
 
 	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
+		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.walkCfg,
 		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
 	)
 	if err != nil {
@@ -172,7 +172,7 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 	}
 
 	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
+		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.walkCfg,
 		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
 	)
 	if err != nil {
@@ -196,7 +196,7 @@ func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor
 	}
 
 	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
+		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.walkCfg,
 		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
 	)
 	if err != nil {

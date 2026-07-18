@@ -13,11 +13,29 @@ import (
 // validate() doesn't touch them.
 func baseValid() Config {
 	return Config{
-		SubCacheSize:  100000,
-		SubCacheTTL:   2 * time.Minute,
-		RoomCacheSize: 50000,
-		RoomCacheTTL:  10 * time.Second,
+		SubCacheSize:                 100000,
+		SubCacheTTL:                  2 * time.Minute,
+		RoomCacheSize:                50000,
+		RoomCacheTTL:                 10 * time.Second,
+		MessageReadBucketConcurrency: 1,
+		MessageReadEscalateAfter:     4,
 	}
+}
+
+func TestValidate_RejectsBucketConcurrencyBelowOne(t *testing.T) {
+	cfg := baseValid()
+	cfg.MessageReadBucketConcurrency = 0
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MESSAGE_READ_BUCKET_CONCURRENCY")
+}
+
+func TestValidate_RejectsEscalateAfterBelowOne(t *testing.T) {
+	cfg := baseValid()
+	cfg.MessageReadEscalateAfter = 0
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MESSAGE_READ_ESCALATE_AFTER")
 }
 
 func TestValidate_AcceptsDefaults(t *testing.T) {

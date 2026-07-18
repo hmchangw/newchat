@@ -61,6 +61,8 @@ func main() {
 	slog.Info("message bucket configured",
 		"hours", cfg.MessageBucketHours,
 		"maxBuckets", cfg.MessageReadMaxBuckets,
+		"readBucketConcurrency", cfg.MessageReadBucketConcurrency,
+		"readEscalateAfter", cfg.MessageReadEscalateAfter,
 		"historyFloorDays", cfg.MessageHistoryFloorDays,
 		"largeRoomThreshold", cfg.LargeRoomThreshold,
 		"maxPinnedPerRoom", cfg.MaxPinnedPerRoom,
@@ -122,7 +124,8 @@ func main() {
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
+	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher,
+		cassrepo.WithReadConcurrency(cfg.MessageReadBucketConcurrency, cfg.MessageReadEscalateAfter))
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
 	roomRepo := mongorepo.NewRoomRepo(db)
