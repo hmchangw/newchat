@@ -1,0 +1,106 @@
+// Command teams-chat-member-sync is a run-to-completion job (k8s CronJob) that
+// resolves the authoritative member list for teams_chat documents flagged
+// needMemberSync=true, then hands them to the room-creation stage by setting
+// needCreateRoom=true.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
+
+	"github.com/caarlos0/env/v11"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/msgraph"
+)
+
+// Config is the job's environment configuration.
+type Config struct {
+	// One replica set serves both lanes: reads go through a secondary-preferred
+	// client (teams_chat scan + teams_user resolution) and writes through a
+	// primary client (teams_chat member updates), so they share one URI, DB and
+	// credential pair — only the read preference differs.
+	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
+	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+
+	MaxWorkers int           `env:"MAX_WORKERS" envDefault:"8"`
+	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"30m"`
+
+	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
+	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`
+	GraphClientSecret string `env:"GRAPH_CLIENT_SECRET,required"`
+	// GraphTLSInsecureSkipVerify disables Graph TLS verification (opt-in,
+	// default false) for dev/on-prem environments behind a TLS-intercepting
+	// proxy. The proxy is taken from HTTPS_PROXY/HTTP_PROXY.
+	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	if err := run(); err != nil {
+		slog.Error("teams-chat-member-sync failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+// validateConfig checks the parsed Config for internal consistency. It isolates
+// run()'s pure logic so it is unit testable without wiring any dependency.
+//
+//nolint:gocritic // hugeParam: cfg is passed by value once at startup; not a hot path
+func validateConfig(cfg Config) error {
+	if cfg.MaxWorkers <= 0 || cfg.RunTimeout <= 0 {
+		return fmt.Errorf("invalid config: MAX_WORKERS and RUN_TIMEOUT must be positive")
+	}
+	return nil
+}
+
+// run wires dependencies and performs one sync. It returns an error rather than
+// calling os.Exit so deferred cleanup always runs.
+func run() error {
+	cfg, err := env.ParseAs[Config]()
+	if err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
+	defer cancel()
+
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	if err != nil {
+		return fmt.Errorf("mongo read connect: %w", err)
+	}
+	defer mongoutil.Disconnect(context.Background(), readClient)
+
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	if err != nil {
+		return fmt.Errorf("mongo write connect: %w", err)
+	}
+	defer mongoutil.Disconnect(context.Background(), writeClient)
+
+	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
+
+	graph := msgraph.NewChatMembersClient(msgraph.Config{
+		TenantID:              cfg.GraphTenantID,
+		ClientID:              cfg.GraphClientID,
+		ClientSecret:          cfg.GraphClientSecret,
+		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
+	})
+
+	s := newSyncer(store, store, graph, syncConfig{
+		MaxWorkers: cfg.MaxWorkers,
+		Now:        time.Now,
+	})
+	if err := s.run(ctx); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+	slog.Info("teams-chat-member-sync done")
+	return nil
+}

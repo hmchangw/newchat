@@ -4332,12 +4332,171 @@ func TestOutboxEvent_RoundTrip(t *testing.T) {
 }
 
 func TestTeamsUserJSON(t *testing.T) {
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	src := model.TeamsUser{
 		ID:      "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
 		UPN:     "Alice@corp.example",
 		Account: "alice",
 		SiteID:  "site-a",
+		From:    &from,
 	}
 	var dst model.TeamsUser
 	roundTrip(t, &src, &dst)
+}
+
+func TestTeamsUserJSON_NoFrom(t *testing.T) {
+	u := model.TeamsUser{ID: "aad-user-2", UPN: "bob@corp.example", SiteID: "site-b", Account: "bob"}
+	data, err := json.Marshal(&u)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, has := raw["from"]
+	assert.False(t, has, "nil From must be omitted from JSON")
+}
+
+func TestTeamsChatJSON(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:meeting_abc@thread.v2",
+		Name:                "Project X",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
+		Members: []model.TeamsChatMember{
+			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		SiteID:         "site-a",
+		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync: true,
+	}
+	roundTrip(t, &c, &model.TeamsChat{})
+}
+
+func TestTeamsUserBSON(t *testing.T) {
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", From: &from}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+
+	// Check raw BSON keys — these are the on-disk contract with teams-user-sync.
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
+	assert.Contains(t, rawDoc, "siteId", "BSON doc must have siteId key")
+	assert.Contains(t, rawDoc, "upn", "BSON doc must have upn key")
+	assert.Contains(t, rawDoc, "account", "BSON doc must have account key")
+	assert.Contains(t, rawDoc, "from", "BSON doc must have from key when From is non-nil")
+	assert.Equal(t, "aad-user-1", rawDoc["_id"])
+	assert.Equal(t, "site-a", rawDoc["siteId"])
+	assert.Equal(t, "alice", rawDoc["account"])
+
+	// Round-trip to struct and verify equality
+	var dst model.TeamsUser
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, u.ID, dst.ID)
+	assert.Equal(t, u.SiteID, dst.SiteID)
+	assert.Equal(t, u.Account, dst.Account)
+	require.NotNil(t, dst.From)
+	assert.True(t, dst.From.UTC().Equal(from.UTC()), "From time must match")
+}
+
+func TestTeamsUserBSON_NoFrom(t *testing.T) {
+	u := model.TeamsUser{ID: "aad-user-2", SiteID: "site-b", Account: "bob"}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+
+	// Check that 'from' key is absent when From is nil
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	_, has := rawDoc["from"]
+	assert.False(t, has, "BSON doc must not have from key when From is nil (omitempty)")
+	assert.Equal(t, "aad-user-2", rawDoc["_id"])
+	assert.Equal(t, "site-b", rawDoc["siteId"])
+	assert.Equal(t, "bob", rawDoc["account"])
+}
+
+func TestTeamsChatBSON(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:meeting_abc@thread.v2",
+		Name:                "Project X",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
+		Members: []model.TeamsChatMember{
+			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		SiteID:         "site-a",
+		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync: true,
+	}
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+
+	// Check raw BSON keys
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
+	assert.Contains(t, rawDoc, "siteId", "BSON doc must have siteID key")
+	assert.Contains(t, rawDoc, "needMemberSync", "BSON doc must have needMemberSync key")
+	assert.Contains(t, rawDoc, "members", "BSON doc must have members key")
+	assert.Equal(t, "19:meeting_abc@thread.v2", rawDoc["_id"])
+	assert.Equal(t, "site-a", rawDoc["siteId"])
+	assert.Equal(t, true, rawDoc["needMemberSync"])
+
+	// Round-trip to struct and verify equality
+	var dst model.TeamsChat
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, c.ID, dst.ID)
+	assert.Equal(t, c.Name, dst.Name)
+	assert.Equal(t, c.ChatType, dst.ChatType)
+	assert.True(t, c.CreatedDateTime.UTC().Equal(dst.CreatedDateTime.UTC()), "CreatedDateTime must match")
+	assert.True(t, c.LastUpdatedDateTime.UTC().Equal(dst.LastUpdatedDateTime.UTC()), "LastUpdatedDateTime must match")
+	assert.Equal(t, c.SiteID, dst.SiteID)
+	assert.True(t, c.UpdatedAt.UTC().Equal(dst.UpdatedAt.UTC()), "UpdatedAt must match")
+	assert.Equal(t, c.NeedMemberSync, dst.NeedMemberSync)
+	require.Equal(t, len(c.Members), len(dst.Members), "Members count must match")
+	for i, member := range c.Members {
+		assert.Equal(t, member.ID, dst.Members[i].ID)
+		assert.Equal(t, member.Account, dst.Members[i].Account)
+		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
+	}
+}
+
+func TestTeamsChatJSON_NeedCreateRoom(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:g1@thread.v2",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}},
+		SiteID:              "site-a",
+		UpdatedAt:           time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync:      false,
+		NeedCreateRoom:      true,
+	}
+	roundTrip(t, &c, &model.TeamsChat{})
+
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+	var raw bson.M
+	require.NoError(t, bson.Unmarshal(data, &raw))
+	assert.Contains(t, raw, "needCreateRoom", "BSON doc must have needCreateRoom key")
+	assert.Equal(t, true, raw["needCreateRoom"])
+}
+
+func TestTeamsRoomCreateEventJSON(t *testing.T) {
+	e := model.TeamsRoomCreateEvent{
+		Chats: []model.TeamsRoomCreateChat{{
+			ID:              "chat-1",
+			Name:            "Project X",
+			CreatedDateTime: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+			Members: []model.TeamsRoomCreateMember{{
+				Account:                     "alice",
+				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			}},
+		}},
+		Timestamp: 1_700_000_000_000,
+	}
+	roundTrip(t, &e, &model.TeamsRoomCreateEvent{})
 }

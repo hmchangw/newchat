@@ -1,0 +1,29 @@
+name: teams-chat-sync
+
+services:
+  teams-chat-sync:
+    build:
+      context: ../..
+      dockerfile: teams-chat-sync/deploy/Dockerfile
+    environment:
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      - MAX_WORKERS=${MAX_WORKERS:-8}
+      - SYNC_DEFAULT_FROM=${SYNC_DEFAULT_FROM:-2026-04-01T00:00:00Z}
+      - SYNC_DEFAULT_SITE_ID=${SYNC_DEFAULT_SITE_ID:-site-local}
+      - RUN_TIMEOUT=${RUN_TIMEOUT:-30m}
+      - GRAPH_TENANT_ID=${GRAPH_TENANT_ID}
+      - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
+      - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}
+      - GRAPH_CHATS_PAGE_SIZE=${GRAPH_CHATS_PAGE_SIZE:-50}
+      - GRAPH_TLS_INSECURE_SKIP_VERIFY=${GRAPH_TLS_INSECURE_SKIP_VERIFY:-false}
+      # Proxy (optional) is taken from the standard env vars via ProxyFromEnvironment.
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

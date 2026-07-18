@@ -1,0 +1,21 @@
+name: teams-room-creation
+
+services:
+  teams-room-creation:
+    build:
+      context: ../..
+      dockerfile: teams-room-creation/deploy/Dockerfile
+    environment:
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-}
+      - ROOM_CREATE_BATCH_SIZE=${ROOM_CREATE_BATCH_SIZE:-100}
+      - MAX_WORKERS=${MAX_WORKERS:-8}
+      - RUN_TIMEOUT=${RUN_TIMEOUT:-30m}
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

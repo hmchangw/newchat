@@ -17,13 +17,12 @@ type config struct {
 	GraphBaseURL  string `env:"GRAPH_BASE_URL" envDefault:""`
 	GraphTokenURL string `env:"GRAPH_TOKEN_URL" envDefault:""`
 
-	MongoReadURI      string `env:"MONGO_READ_URI,required,notEmpty"`
-	MongoReadUsername string `env:"MONGO_READ_USERNAME" envDefault:""`
-	MongoReadPassword string `env:"MONGO_READ_PASSWORD" envDefault:""`
-	MongoReadDB       string `env:"MONGO_READ_DB" envDefault:"chat"`
-
-	MongoWriteURI      string `env:"MONGO_WRITE_URI,required,notEmpty"`
-	MongoWriteUsername string `env:"MONGO_WRITE_USERNAME" envDefault:""`
-	MongoWritePassword string `env:"MONGO_WRITE_PASSWORD" envDefault:""`
-	MongoWriteDB       string `env:"MONGO_WRITE_DB" envDefault:"chat"`
+	// One replica set serves both lanes: the teams_user diff + hr lookup read
+	// through a secondary-preferred client and the teams_user upserts write
+	// through a primary client, so they share one URI, DB and credential pair —
+	// only the read preference differs.
+	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
+	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
 }

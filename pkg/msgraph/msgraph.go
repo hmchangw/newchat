@@ -133,10 +133,20 @@ type graphClient struct {
 	httpClient *http.Client
 	baseURL    string
 	tokenURL   string
+	// chatsPageSize is the $top for ListUserChats first-page requests;
+	// <= 0 means defaultChatsPageSize. Set via WithChatsPageSize.
+	chatsPageSize int
 
 	mu      sync.Mutex
 	token   string
 	tokenAt time.Time // when the cached token expires
+
+	throttleMu sync.Mutex
+	// throttleUntil is the tenant-wide throttle gate: no request is sent
+	// before this instant. Only the chats path (ListUserChats/getThrottled)
+	// arms and consults this gate; meetings/directory/presence calls are not
+	// gated by it.
+	throttleUntil time.Time
 }
 
 // Option customizes the client (used in tests to point at an httptest server).

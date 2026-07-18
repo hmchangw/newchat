@@ -28,10 +28,8 @@ func newFakeTokenServer(t *testing.T) *httptest.Server {
 func setRunEnv(t *testing.T, mongoURI, dbName, graphURL, tokenURL string) {
 	t.Helper()
 	setRequiredEnv(t)
-	t.Setenv("MONGO_READ_URI", mongoURI)
-	t.Setenv("MONGO_WRITE_URI", mongoURI)
-	t.Setenv("MONGO_READ_DB", dbName)
-	t.Setenv("MONGO_WRITE_DB", dbName)
+	t.Setenv("MONGO_URI", mongoURI)
+	t.Setenv("MONGO_DB", dbName)
 	t.Setenv("GRAPH_BASE_URL", graphURL)
 	t.Setenv("GRAPH_TOKEN_URL", tokenURL)
 }

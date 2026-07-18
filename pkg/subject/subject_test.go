@@ -32,6 +32,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.user.alice.request.room.r1.site-a.member.role-update"},
 		{"RoomCanonical", subject.RoomCanonical("site-a", "invited"),
 			"chat.room.canonical.site-a.invited"},
+		{"RoomCanonicalTeamsCreate", subject.RoomCanonicalTeamsCreate("site-a"),
+			"chat.room.canonical.site-a.teams.create"},
 		{"SubscriptionUpdate", subject.SubscriptionUpdate("alice"),
 			"chat.user.alice.event.subscription.update"},
 		{"RoomMetadataChanged", subject.RoomMetadataChanged("alice"),
