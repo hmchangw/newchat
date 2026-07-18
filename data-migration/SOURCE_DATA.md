@@ -311,3 +311,85 @@ in the source collection and can be re-migrated once mapped.
 **new-stack** user `_id` resolved via the transformer's existing `FindUserID(account)` (room-worker's
 dedup queries match `member.id` against new-stack user ids — carrying the legacy user `_id` would break
 them). Unresolvable user at event time ⇒ Nak-retry until the user is seeded (thread-subs precedent).
+
+---
+
+# §8. users / sessions / hr_employee migration — information required (oplog-user-session-transformer)
+
+> Questions from the migration team for the **user/session/hr lanes** (design:
+> `docs/superpowers/specs/2026-07-18-oplog-user-session-transformer-design.md`).
+> Please fill in each **Answer:** below — items marked **[blocking]** gate implementation of that
+> lane; the rest only tighten defaults. Same legend as above (✅ / ❓ / ⛔).
+
+## §8A — Legacy sessions collection
+
+**Q1 — Collection name. [blocking]** What is the exact name of the legacy sessions collection the
+connector must watch (`WATCH_COLLECTIONS` entry / `SESSIONS_COLLECTION` env)?
+
+**Answer:**
+
+
+**Q2 — Doc shape. [blocking]** What does one session doc look like? Specifically: is it **one doc
+per user** carrying a resume-token **list**, or **one doc per session/token**? Please paste a
+sanitized example doc, and name the exact field path of the token list (we currently assume a
+Meteor-style `…resume.loginTokens: [{hashedToken, when}, …]`).
+
+**Answer:**
+
+
+**Q3 — Token encoding + timestamp semantics. [blocking]** Are stored tokens already
+**base64(SHA-256(rawToken))** (the new stack keys `sessions._id` by exactly that), or raw/other?
+And is the per-token timestamp (`when`?) the token's **issue time** (we map it to
+`sessions.issuedAt`, unix ms)?
+
+**Answer:**
+
+
+**Q4 — User reference.** Which field on the session doc identifies the owner, and is it the
+`users.username` (account) or the legacy `users._id`? (We resolve the new-stack
+`userId`/`siteId`/`roles` from the **target** users collection by account.)
+
+**Answer:**
+
+
+**Q5 — Federation marker.** Do session docs carry `federation.origin` (or any foreign-origin
+marker)? This only decides whether the connector-side `$match` can pre-drop foreign sessions —
+the transformer independently skips sessions whose owner's home site is not local.
+
+**Answer:**
+
+
+**Q6 — Mutation pattern.** How does the legacy app maintain this collection — in-place updates to
+the token list, doc replaces, hard deletes on logout/expiry? Any TTL/out-of-band cleanup that
+bypasses the change stream? (Current plan is **upsert-only**: token additions migrate; removals /
+revocations are deliberately ignored during the cutover window.)
+
+**Answer:**
+
+
+## §8B — `users` status fields
+
+**Q7 — Status show-flag field.** The new stack has `statusIsShow` (bool) next to `statusText`.
+Which **source** field on the legacy `users` doc backs it — and if none exists, confirm the
+migration should carry `statusText` only. (This gates both the update-delta trigger and the
+insert-time mapping.)
+
+**Answer:**
+
+
+## §8C — `company_hr_acct_org` → `hr_employee`
+
+**Q8 — Doc shape + field mapping. [blocking]** Please paste a sanitized `company_hr_acct_org`
+example doc and identify the fields that map to the destination `hr_employee` row:
+`account` ← ? · `employeeId` ← ? · `siteId` (home-site assignment) ← ?. Is it one doc per
+account, and is `orgs[]` relevant to the employee row or only to room-member enrichment?
+
+**Answer:**
+
+
+**Q9 — Mutation pattern.** insert/update/replace/delete pattern for `company_hr_acct_org`
+(HR-sync rewrite cadence? hard deletes on leaver?). Until answered, source **deletes are skipped**
+(not mirrored to `hr_employee`).
+
+**Answer:**
+
