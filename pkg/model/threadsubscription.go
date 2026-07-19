@@ -31,6 +31,7 @@ type ThreadSubscription struct {
 // survive the join; RoomType feeds the DM tally.
 type ThreadUnreadRow struct {
 	ThreadRoomID string     `json:"threadRoomId" bson:"threadRoomId"`
+	RoomID       string     `json:"roomId"       bson:"roomId"`
 	SiteID       string     `json:"siteId"       bson:"siteId"`
 	RoomType     RoomType   `json:"roomType"     bson:"roomType"`
 	LastSeenAt   *time.Time `json:"lastSeenAt"   bson:"lastSeenAt"`

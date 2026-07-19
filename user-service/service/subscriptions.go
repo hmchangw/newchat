@@ -552,11 +552,11 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 	return s.countUnread(c, account, total)
 }
 
-// countUnread counts active subs with unread messages. LOCAL subs are counted from the
-// $lookup baseline (room.lastMsgAt) with no RPC; CROSS-SITE subs use per-site GetRoomsInfo
-// RPCs that degrade independently — an unreachable site is skipped (its subs omitted),
-// while local subs and the sites that did respond still count, so a remote hiccup yields a
-// best-effort partial rather than the raw active-sub total.
+// countUnread counts active rooms with unread activity. A room counts once if its
+// messages are unread (LOCAL from the $lookup baseline, CROSS-SITE via per-site
+// GetRoomsInfo) OR it is message-read but has >=1 unread followed thread. Rooms that
+// came out read feed the thread phase (countThreadOnlyUnread); everything degrades
+// best-effort — an unreachable site is skipped rather than nuking the count to total.
 func (s *UserService) countUnread(ctx context.Context, account string, total int) (*models.CountResponse, error) {
 	// Short-circuit zero: min(0, maxSubs)=0 would build a $limit:0 MongoDB rejects.
 	if total == 0 {
@@ -570,13 +570,17 @@ func (s *UserService) countUnread(ctx context.Context, account string, total int
 
 	// LOCAL subs carry room.lastMsgAt on the $lookup baseline — count them with no RPC.
 	// Only CROSS-SITE subs need the per-site GetRoomsInfo RPC (their room docs live remotely).
+	// pendingRooms collects rooms that came out READ (roomID -> siteID) for the thread phase.
 	unreadTotal := 0
+	pendingRooms := map[string]string{}
 	crossBySite := map[string][]model.EnrichedSubscription{}
 	roomIDsBySite := map[string][]string{}
 	for i := range subs {
 		if subs[i].SiteID == s.siteID {
 			if unread(subs[i].LastSeenAt, timeutil.TimeToMillis(subs[i].LastMsgAt)) {
 				unreadTotal++
+			} else {
+				pendingRooms[subs[i].RoomID] = s.siteID
 			}
 			continue
 		}
@@ -584,23 +588,129 @@ func (s *UserService) countUnread(ctx context.Context, account string, total int
 		crossBySite[site] = append(crossBySite[site], subs[i])
 		roomIDsBySite[site] = append(roomIDsBySite[site], subs[i].RoomID)
 	}
-	if len(crossBySite) == 0 {
-		return &models.CountResponse{Count: unreadTotal}, nil
+
+	if len(crossBySite) > 0 {
+		sites := make([]string, 0, len(crossBySite))
+		for site := range crossBySite {
+			sites = append(sites, site)
+		}
+		// Per-site degradation (matches the list path's enrichCrossSite): a failed site is
+		// SKIPPED — its subs drop out of the count and out of pendingRooms — while local subs
+		// and the sites that did respond still contribute. results[i] is written by exactly
+		// one goroutine.
+		type siteCount struct {
+			unread    int
+			readRooms []string
+		}
+		results := make([]siteCount, len(sites))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, maxSiteFanout) // bound concurrent per-site RPCs
+		for i, site := range sites {
+			// Client already gone — stop firing further ~5s RPCs.
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if ctx.Err() != nil {
+					return
+				}
+				infos, err := s.rooms.GetRoomsInfo(ctx, site, roomIDsBySite[site])
+				if err != nil {
+					// Skip this site rather than nuking the whole count to total.
+					slog.WarnContext(ctx, "unread count degraded for site", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+					return
+				}
+				lastMsg := make(map[string]*int64, len(infos))
+				for k := range infos {
+					// Mirror the list path (applyRoomInfo): a not-found or soft-deleted
+					// (^Del-) room must not contribute to the count, even though the RPC
+					// still returns a stale lastMsgAt for a room soft-deleted at its origin.
+					if !infos[k].Found || strings.HasPrefix(infos[k].Name, deletedRoomNamePrefix) {
+						continue
+					}
+					lastMsg[infos[k].RoomID] = infos[k].LastMsgAt
+				}
+				n := 0
+				var read []string
+				siteSubs := crossBySite[site]
+				for j := range siteSubs {
+					rid := siteSubs[j].RoomID
+					// Not-found / soft-deleted rooms are absent from lastMsg — neither
+					// counted nor a thread candidate.
+					if _, ok := lastMsg[rid]; !ok {
+						continue
+					}
+					if unread(siteSubs[j].LastSeenAt, lastMsg[rid]) {
+						n++
+					} else {
+						read = append(read, rid)
+					}
+				}
+				results[i] = siteCount{unread: n, readRooms: read}
+			}()
+		}
+		wg.Wait()
+		for i := range results {
+			unreadTotal += results[i].unread
+			for _, rid := range results[i].readRooms {
+				pendingRooms[rid] = sites[i]
+			}
+		}
 	}
 
-	sites := make([]string, 0, len(crossBySite))
-	for site := range crossBySite {
+	unreadTotal += s.countThreadOnlyUnread(ctx, account, pendingRooms)
+	return &models.CountResponse{Count: unreadTotal}, nil
+}
+
+// countThreadOnlyUnread returns how many pendingRooms (rooms already READ at the message
+// level, roomID -> siteID) have >=1 unread followed thread — at most +1 per room. Thread
+// last-activity is resolved per owning site via GetThreadRoomInfoBatch, degrading like the
+// room pass: a failed site contributes nothing. A ListByAccount failure logs and returns 0
+// so a thread-subsystem hiccup never discards the established room-level count.
+func (s *UserService) countThreadOnlyUnread(ctx context.Context, account string, pendingRooms map[string]string) int {
+	if len(pendingRooms) == 0 {
+		return 0
+	}
+	rows, err := s.threadSubs.ListByAccount(ctx, account)
+	if err != nil {
+		slog.WarnContext(ctx, "unread count: thread subscriptions read failed", "account", account, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+		return 0
+	}
+
+	// Keep only threads whose parent room is a pending (read) candidate; group by owning site.
+	type threadCand struct {
+		roomID     string
+		lastSeenAt *time.Time
+	}
+	idsBySite := map[string][]string{}
+	byThread := make(map[string]threadCand, len(rows))
+	for i := range rows {
+		if _, ok := pendingRooms[rows[i].RoomID]; !ok {
+			continue
+		}
+		idsBySite[rows[i].SiteID] = append(idsBySite[rows[i].SiteID], rows[i].ThreadRoomID)
+		byThread[rows[i].ThreadRoomID] = threadCand{roomID: rows[i].RoomID, lastSeenAt: rows[i].LastSeenAt}
+	}
+	if len(idsBySite) == 0 {
+		return 0
+	}
+
+	sites := make([]string, 0, len(idsBySite))
+	for site := range idsBySite {
 		sites = append(sites, site)
 	}
-	// Per-site degradation (matches the list path's enrichCrossSite): a failed site is
-	// SKIPPED — its subs drop out of the count — while local subs and the sites that did
-	// respond still contribute. WaitGroup (not errgroup.WithContext) so one site's failure
-	// never cancels its siblings; results[i] is written by exactly one goroutine.
-	results := make([]int, len(sites))
+	type siteResult struct {
+		infos  []model.ThreadRoomInfo
+		failed bool
+	}
+	results := make([]siteResult, len(sites))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxSiteFanout) // bound concurrent per-site RPCs
+	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {
-		// Client already gone — stop firing further ~5s RPCs.
 		if ctx.Err() != nil {
 			break
 		}
@@ -609,38 +719,42 @@ func (s *UserService) countUnread(ctx context.Context, account string, total int
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ctx.Err() != nil {
-				return
-			}
-			infos, err := s.rooms.GetRoomsInfo(ctx, site, roomIDsBySite[site])
-			if err != nil {
-				// Skip this site rather than nuking the whole count to total.
-				slog.WarnContext(ctx, "unread count degraded for site", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-				return
-			}
-			lastMsg := make(map[string]*int64, len(infos))
-			for k := range infos {
-				// Mirror the list path (applyRoomInfo): a not-found or soft-deleted
-				// (^Del-) room must not contribute to the count, even though the RPC
-				// still returns a stale lastMsgAt for a room soft-deleted at its origin.
-				if !infos[k].Found || strings.HasPrefix(infos[k].Name, deletedRoomNamePrefix) {
-					continue
+			for _, chunk := range chunkStrings(idsBySite[site], threadInfoBatchChunk) {
+				if ctx.Err() != nil {
+					results[i].failed = true
+					return
 				}
-				lastMsg[infos[k].RoomID] = infos[k].LastMsgAt
-			}
-			n := 0
-			siteSubs := crossBySite[site]
-			for j := range siteSubs {
-				if unread(siteSubs[j].LastSeenAt, lastMsg[siteSubs[j].RoomID]) {
-					n++
+				infos, err := s.rooms.GetThreadRoomInfoBatch(ctx, site, chunk)
+				if err != nil {
+					slog.WarnContext(ctx, "unread count: thread info site degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+					results[i].failed = true
+					return
 				}
+				results[i].infos = append(results[i].infos, infos...)
 			}
-			results[i] = n
 		}()
 	}
 	wg.Wait()
-	for _, n := range results {
-		unreadTotal += n
+
+	// Existence per room: a room bumps at most once; skip a room's remaining threads once bumped.
+	bumped := map[string]bool{}
+	for i := range results {
+		if results[i].failed {
+			continue
+		}
+		for _, info := range results[i].infos {
+			if !info.Found {
+				continue
+			}
+			cand, ok := byThread[info.ThreadRoomID]
+			if !ok || bumped[cand.roomID] {
+				continue
+			}
+			ms := info.LastMsgAt
+			if unread(cand.lastSeenAt, &ms) {
+				bumped[cand.roomID] = true
+			}
+		}
 	}
-	return &models.CountResponse{Count: unreadTotal}, nil
+	return len(bumped)
 }

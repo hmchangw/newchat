@@ -626,6 +626,24 @@ func TestCount_StoreError(t *testing.T) {
 	requireCode(t, err, errcode.CodeInternal)
 }
 
+// newCountSvc builds a service exposing the subscription, room, and thread-sub
+// mocks the thread-aware unread tests drive. maxSubs is large; per-test GetActiveSubscriptions
+// stubs control the fetched page directly.
+func newCountSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockRoomClient, *mocks.MockThreadSubscriptionRepository) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	users := mocks.NewMockUserRepository(ctrl)
+	apps := mocks.NewMockAppRepository(ctrl)
+	rooms := mocks.NewMockRoomClient(ctrl)
+	history := mocks.NewMockHistoryClient(ctrl)
+	presence := mocks.NewMockPresenceClient(ctrl)
+	pub := mocks.NewMockEventPublisher(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100}
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, cfg), subs, rooms, threadSubs
+}
+
 func TestCountUnread_Happy(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
@@ -775,6 +793,173 @@ func TestCountUnread_CrossSiteDeletedRoomNotCounted(t *testing.T) {
 	resp, err := svc.countUnread(context.Background(), "alice", 1)
 	require.NoError(t, err)
 	assert.Equal(t, 0, resp.Count, "a soft-deleted cross-site room must not be counted as unread")
+}
+
+func TestCountUnread_ReadRoomBumpedByUnreadThread(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := time.UnixMilli(50).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	// One LOCAL room, read at the message level (lastMsgAt older than lastSeen).
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	}, nil)
+	// One followed thread in r1, unread (thread lastMsgAt 200 > lastSeen 100).
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-a", []string{"tr1"}).
+		Return([]model.ThreadRoomInfo{{ThreadRoomID: "tr1", Found: true, LastMsgAt: 200}}, nil)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+}
+
+func TestCountUnread_AlreadyUnreadRoomNotDoubleCounted(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	newer := time.UnixMilli(300).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	// r1 is already room-level unread → must not be thread-checked, contributes exactly 1.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer},
+	}, nil)
+	// Every room already unread ⇒ pendingRooms empty ⇒ ListByAccount never called.
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+}
+
+func TestCountUnread_MultipleUnreadThreadsCountOnce(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := time.UnixMilli(50).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	}, nil)
+	// Three unread threads, all in r1 → +1 total.
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
+		{ThreadRoomID: "tr2", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
+		{ThreadRoomID: "tr3", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-a", gomock.InAnyOrder([]string{"tr1", "tr2", "tr3"})).
+		Return([]model.ThreadRoomInfo{
+			{ThreadRoomID: "tr1", Found: true, LastMsgAt: 200},
+			{ThreadRoomID: "tr2", Found: true, LastMsgAt: 200},
+			{ThreadRoomID: "tr3", Found: true, LastMsgAt: 200},
+		}, nil)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+}
+
+func TestCountUnread_ThreadInRoomOutsidePageIgnored(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := time.UnixMilli(50).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	// Fetched page contains only r1 (read).
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	}, nil)
+	// Thread lives in rX, which is NOT in the fetched page → must be filtered out, no batch call.
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "trX", RoomID: "rX", SiteID: "site-a", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count)
+}
+
+func TestCountUnread_CrossSiteThreadResolution(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := int64(50)
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	// r1 lives on site-b, read at the message level.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-b", LastSeenAt: &seen}},
+	}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r1"}).
+		Return([]model.RoomInfo{{RoomID: "r1", Found: true, LastMsgAt: &older}}, nil)
+	// A followed thread in r1 on site-b, unread → resolved via the site-b batch.
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-b", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-b", []string{"tr1"}).
+		Return([]model.ThreadRoomInfo{{ThreadRoomID: "tr1", Found: true, LastMsgAt: 200}}, nil)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+}
+
+func TestCountUnread_ThreadBatchFailureDegrades(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := time.UnixMilli(50).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	}, nil)
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
+	}, nil)
+	// Thread resolution fails → room un-bumped, count degrades to 0, no error.
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-a", []string{"tr1"}).
+		Return(nil, errors.New("down"))
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count)
+}
+
+func TestCountUnread_ThreadListErrorDegrades(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := time.UnixMilli(50).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	}, nil)
+	// Local thread-sub read fails → degrade to the room-level count (0), never error.
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return(nil, errors.New("db down"))
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count)
+}
+
+func TestCountUnread_MutedRoomThreadExcluded(t *testing.T) {
+	svc, subs, rooms, threadSubs := newCountSvc(t)
+	seen := time.UnixMilli(100).UTC()
+	older := time.UnixMilli(50).UTC()
+	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
+	// GetActiveSubscriptions already excludes muted rooms, so a muted room's parent
+	// is never in the fetched page. Only r1 (unmuted, read) is returned.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	}, nil)
+	// A thread in the muted room "rMuted" is returned by ListByAccount but its room is
+	// not in the page → filtered out, no batch, no bump.
+	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "trM", RoomID: "rMuted", SiteID: "site-a", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count)
 }
 
 func TestDistinctListNames(t *testing.T) {

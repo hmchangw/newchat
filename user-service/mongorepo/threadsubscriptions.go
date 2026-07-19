@@ -74,6 +74,7 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 		bson.M{"$project": bson.M{
 			"_id":          0,
 			"threadRoomId": 1,
+			"roomId":       1,
 			"siteId":       1,
 			"lastSeenAt":   1,
 			"hasMention":   1,

@@ -4630,7 +4630,7 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 
 | Field    | Type    | Required | Notes |
 |----------|---------|----------|-------|
-| `unread` | boolean | no       | When `true`, returns the number of active rooms with unread messages. When `false` or absent, returns the total active-subscription count. |
+| `unread` | boolean | no       | When `true`, returns the number of active rooms with unread messages or unread followed threads. When `false` or absent, returns the total active-subscription count. |
 
 ```json
 { "unread": true }
@@ -4647,6 +4647,8 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 ```
 
 **Unread count behavior:** when `unread: true`, the service fetches the active subscriptions and splits them by site. **Local** subscriptions are counted directly from the room baseline carried on the `$lookup` (comparing the room's `lastMsgAt` against the subscription's `lastSeenAt`) — no RPC is made. Only **cross-site** subscriptions trigger a per-site `GetRoomsInfo` RPC, run in **parallel**. The count **degrades per-site** (matching `subscription.list` enrichment): if a cross-site RPC fails, that site's subscriptions are **skipped** — omitted from the count and logged as a warning — while local subscriptions and the sites that did respond still contribute. The result is a best-effort count that may under-report while a remote site is unreachable, rather than the full active-subscription total.
+
+**Threads:** a room also counts as unread if it has at least one unread followed thread, even when its own messages are all read — at most **+1 per room** (existence, not a per-thread count). Muted rooms are excluded (as with room-level unread), and only rooms within the fetched active-subscription page are considered. For message-read rooms, thread last-activity is resolved per owning site and degrades best-effort: if a site's thread lookup fails, its rooms are simply not bumped.
 
 ##### Error response
 

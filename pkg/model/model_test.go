@@ -4300,7 +4300,7 @@ func TestThreadRoomInfoBatchResponseJSON(t *testing.T) {
 func TestThreadUnreadRowJSON(t *testing.T) {
 	seen := time.UnixMilli(1717000000000).UTC()
 	r := model.ThreadUnreadRow{
-		ThreadRoomID: "tr1", SiteID: "site-a", RoomType: model.RoomTypeDM,
+		ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", RoomType: model.RoomTypeDM,
 		LastSeenAt: &seen, HasMention: true,
 	}
 	roundTrip(t, &r, &model.ThreadUnreadRow{})
