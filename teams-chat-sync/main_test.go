@@ -24,7 +24,7 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
-	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
+	assert.Equal(t, 240*time.Hour, cfg.RunTimeout, "default RUN_TIMEOUT is 10 days (240h; Go durations can't express 'd')")
 	assert.Equal(t, "2026-04-01T00:00:00Z", cfg.DefaultFrom)
 	assert.Equal(t, "site-default", cfg.DefaultSiteID, "SYNC_DEFAULT_SITE_ID is required,notEmpty")
 	assert.Equal(t, 50, cfg.GraphChatsPageSize, "default $top is Graph's max for list chats")

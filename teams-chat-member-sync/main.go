@@ -28,8 +28,10 @@ type Config struct {
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
 
-	MaxWorkers int           `env:"MAX_WORKERS" envDefault:"8"`
-	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"30m"`
+	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
+	// RunTimeout is the whole-job context deadline. Default 2 days, expressed as
+	// 48h because Go's time.Duration (and caarlos0/env) can't parse a "d" unit.
+	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"48h"`
 
 	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
 	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`

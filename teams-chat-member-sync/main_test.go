@@ -23,7 +23,7 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
-	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
+	assert.Equal(t, 48*time.Hour, cfg.RunTimeout, "default RUN_TIMEOUT is 2 days (48h; Go durations can't express 'd')")
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 }
 
