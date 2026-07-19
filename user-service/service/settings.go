@@ -58,7 +58,11 @@ func (s *UserService) SetSettings(c *natsrouter.Context, req models.SettingsSetR
 		// Unreachable after a non-empty $set; keep the reply shape total.
 		settings = &model.UserSettings{}
 	}
-	s.publishSettingsUpdate(c, account, settings)
+	// One timestamp for both fanouts so the client event and the cross-site
+	// replica agree on ordering.
+	now := time.Now().UTC().UnixMilli()
+	s.publishSettingsUpdate(c, account, settings, now)
+	s.publishSettingsInbox(c, account, settings, now)
 	return settings, nil
 }
 
@@ -79,12 +83,44 @@ func validateSettings(set *model.UserSettings) error {
 // publishSettingsUpdate fans out the per-user settings.update event over core
 // NATS (ephemeral client delivery, like subscription.update); best-effort —
 // errors are logged, the next set re-broadcasts the full settings.
-func (s *UserService) publishSettingsUpdate(c *natsrouter.Context, account string, settings *model.UserSettings) {
+func (s *UserService) publishSettingsUpdate(c *natsrouter.Context, account string, settings *model.UserSettings, now int64) {
 	data, _ := json.Marshal(model.SettingsUpdateEvent{
-		Timestamp: time.Now().UTC().UnixMilli(),
+		Timestamp: now,
 		Settings:  *settings,
 	}) // UserSettings is all primitives — Marshal cannot fail
 	if err := s.clientPub.Publish(c, subject.SettingsUpdate(account), data); err != nil {
 		slog.WarnContext(c, "publish settings update event", "error", err, "account", account, "request_id", natsutil.RequestIDFromContext(c))
+	}
+}
+
+// publishSettingsInbox replicates the full post-update settings to every other
+// site's external INBOX lane, so each site's notification worker can decide
+// locally whether to push to this user. Mirrors publishStatus; errors logged.
+func (s *UserService) publishSettingsInbox(c *natsrouter.Context, account string, settings *model.UserSettings, now int64) {
+	payload, _ := json.Marshal(model.UserSettingsUpdated{
+		Account:   account,
+		Settings:  *settings,
+		Timestamp: now,
+	}) // UserSettings is all primitives — Marshal cannot fail
+	for _, dest := range s.allSiteIDs {
+		if dest == "" || dest == s.siteID {
+			continue
+		}
+		evt := model.InboxEvent{
+			Type:       model.InboxUserSettingsUpdated,
+			SiteID:     s.siteID,
+			DestSiteID: dest,
+			Payload:    payload,
+			Timestamp:  now,
+		}
+		data, err := json.Marshal(evt)
+		if err != nil {
+			slog.WarnContext(c, "marshal settings inbox event", "error", err, "site", s.siteID, "dest", dest, "account", account, "request_id", natsutil.RequestIDFromContext(c))
+			continue
+		}
+		if err := s.pub.Publish(c, subject.InboxExternal(dest, model.InboxUserSettingsUpdated), data); err != nil {
+			// Non-fatal: settings are last-write-wins, the next set re-broadcasts.
+			slog.WarnContext(c, "publish settings inbox event", "error", err, "site", s.siteID, "dest", dest, "account", account, "request_id", natsutil.RequestIDFromContext(c))
+		}
 	}
 }

@@ -89,6 +89,13 @@ type stubInboxStore struct {
 	applyThreadReadErr error
 	userStatusUpdates  []userStatusUpdate
 	userStatusErr      error
+	settingsUpdates    []userSettingsUpdate
+}
+
+type userSettingsUpdate struct {
+	account   string
+	settings  *model.UserSettings
+	updatedAt time.Time
 }
 
 type userStatusUpdate struct {
@@ -354,6 +361,21 @@ func (s *stubInboxStore) getUserStatusUpdates() []userStatusUpdate {
 	defer s.mu.Unlock()
 	cp := make([]userStatusUpdate, len(s.userStatusUpdates))
 	copy(cp, s.userStatusUpdates)
+	return cp
+}
+
+func (s *stubInboxStore) UpdateUserSettings(_ context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsUpdates = append(s.settingsUpdates, userSettingsUpdate{account: account, settings: settings, updatedAt: updatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getSettingsUpdates() []userSettingsUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]userSettingsUpdate, len(s.settingsUpdates))
+	copy(cp, s.settingsUpdates)
 	return cp
 }
 
@@ -1774,4 +1796,44 @@ func TestHandler_UserStatusUpdated_StoreError(t *testing.T) {
 	err = h.HandleEvent(context.Background(), evt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "update user status")
+}
+
+func TestHandler_UserSettingsUpdated(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	mute := true
+	payload, err := json.Marshal(model.UserSettingsUpdated{
+		Account:   "alice",
+		Settings:  model.UserSettings{MuteAllNotifications: &mute},
+		Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserSettingsUpdated, Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	updates := store.getSettingsUpdates()
+	require.Len(t, updates, 1)
+	assert.Equal(t, "alice", updates[0].account)
+	require.NotNil(t, updates[0].settings.MuteAllNotifications)
+	assert.True(t, *updates[0].settings.MuteAllNotifications)
+	assert.Equal(t, time.UnixMilli(12345).UTC(), updates[0].updatedAt)
+}
+
+func TestHandler_UserSettingsUpdated_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type:    model.InboxUserSettingsUpdated,
+		Payload: []byte("not-json"),
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getSettingsUpdates())
 }

@@ -641,7 +641,7 @@ func newCountSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository,
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100}
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, cfg), subs, rooms, threadSubs
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, cfg), subs, rooms, threadSubs
 }
 
 func TestCountUnread_Happy(t *testing.T) {

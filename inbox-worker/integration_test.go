@@ -1472,3 +1472,59 @@ func TestInboxWorker_UpdateUserStatus_Integration(t *testing.T) {
 		assert.Equal(t, int64(0), count)
 	})
 }
+
+func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	store := &mongoInboxStore{
+		subCol:  db.Collection("subscriptions"),
+		roomCol: db.Collection("rooms"),
+		userCol: db.Collection("users"),
+	}
+
+	_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u1", Account: "alice", SiteID: "site-b"})
+	require.NoError(t, err)
+
+	t1 := time.UnixMilli(1000).UTC()
+	t2 := time.UnixMilli(2000).UTC()
+	yes, no := true, false
+
+	t.Run("writes the full settings sub-document", func(t *testing.T) {
+		require.NoError(t, store.UpdateUserSettings(ctx, "alice", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		require.NotNil(t, got.Settings)
+		require.NotNil(t, got.Settings.MuteAllNotifications)
+		assert.True(t, *got.Settings.MuteAllNotifications)
+	})
+
+	t.Run("replaces wholesale — a field dropped by the user is dropped here", func(t *testing.T) {
+		require.NoError(t, store.UpdateUserSettings(ctx, "alice", &model.UserSettings{FullWidth: &no}, t2))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		require.NotNil(t, got.Settings)
+		assert.Nil(t, got.Settings.MuteAllNotifications, "whole-object replace must not merge the previous value")
+		require.NotNil(t, got.Settings.FullWidth)
+		assert.False(t, *got.Settings.FullWidth)
+	})
+
+	t.Run("stale event is rejected by the settingsUpdatedAt high-water guard", func(t *testing.T) {
+		require.NoError(t, store.UpdateUserSettings(ctx, "alice", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		assert.Nil(t, got.Settings.MuteAllNotifications, "stale settings must not overwrite newer ones")
+		require.NotNil(t, got.Settings.FullWidth)
+	})
+
+	t.Run("unknown account is a no-op", func(t *testing.T) {
+		require.NoError(t, store.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: &yes}, t2))
+
+		count, err := store.userCol.CountDocuments(ctx, bson.M{"account": "ghost"})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+	})
+}

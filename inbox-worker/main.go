@@ -197,6 +197,35 @@ func (s *mongoInboxStore) UpdateUserStatus(ctx context.Context, account, statusT
 	return nil
 }
 
+// UpdateUserSettings replaces the local users doc's settings sub-document with the origin
+// site's full post-update settings — whole-object, so a field the user cleared is cleared
+// here too. A missing user (no doc on this site) is a silent no-op.
+func (s *mongoInboxStore) UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error {
+	// Guard on the settingsUpdatedAt high-water mark so an out-of-order or duplicate event
+	// (settings fan to all sites) can't regress to older settings.
+	filter := bson.M{"account": account, "$or": bson.A{
+		bson.M{"settingsUpdatedAt": bson.M{"$exists": false}},
+		bson.M{"settingsUpdatedAt": bson.M{"$lt": updatedAt}},
+	}}
+	set := bson.M{"settings": settings, "settingsUpdatedAt": updatedAt}
+	res, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set})
+	if err != nil {
+		return fmt.Errorf("update user settings for %q: %w", account, err)
+	}
+	if res.MatchedCount == 0 {
+		// Same reasoning as UpdateUserStatus: the write already committed, so a failed
+		// existence check must not Nak/retry — it only picks the warn message.
+		count, cerr := s.userCol.CountDocuments(ctx, bson.M{"account": account})
+		switch {
+		case cerr != nil:
+			slog.WarnContext(ctx, "user existence check failed, skipping unknown-account log", "account", account, "error", cerr)
+		case count == 0:
+			slog.WarnContext(ctx, "user_settings_updated for unknown account, skipping", "account", account)
+		}
+	}
+	return nil
+}
+
 // BulkCreateSubscriptions inserts the supplied subs idempotently. Each is
 // keyed by (roomId, u.account) and written via $setOnInsert so an existing
 // sub (from a previous delivery, or with read-state already accumulated) is

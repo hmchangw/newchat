@@ -1488,7 +1488,9 @@ The **full post-update settings** (same shape as [settings.get](#settingsget)).
 (`bad_request`), `"user not found"` (`not_found`).
 
 **Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to the
-caller's other devices, carrying the full post-update settings.
+caller's other devices, carrying the full post-update settings. A server-side
+cross-site federation update also fires — every other site receives the full
+settings so its notification worker can apply them — but is not delivered to clients.
 
 ---
 

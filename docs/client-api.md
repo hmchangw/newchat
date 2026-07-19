@@ -4058,7 +4058,7 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 
 `user-service` exposes 16 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
-> **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` triggers a server-side cross-site federation update, which is not delivered to clients.)
+> **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` and `settings.set` also trigger a server-side cross-site federation update, which is not delivered to clients.)
 
 | RPC subject | Method |
 |---|---|
