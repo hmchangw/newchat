@@ -170,7 +170,7 @@ group chats commonly share members, so most fallback lookups hit the cache.
 | `MONGO_URI` | required | Replica set URI; reads use a secondary-preferred client, writes a primary client |
 | `MONGO_DB` | `chat` | Database name |
 | `MAX_WORKERS` | `8` | Worker pool size |
-| `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
+| `RUN_TIMEOUT` | `48h` | Whole-job context deadline (2 days; Go durations can't express `d`) |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |
 | `GRAPH_CLIENT_SECRET` | required | App registration secret |

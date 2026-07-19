@@ -124,7 +124,7 @@ struct lives in `pkg/model/teamsuser.go`:
 | Members | `members` | array | `{id, account, visibleHistoryStartDateTime}` per member |
 | SiteID | `siteId` | string | **`$setOnInsert` only — never changes after insert** |
 | UpdatedAt | `updatedAt` | date | Set to now on every write |
-| NeedMemberSync | `needMemberSync` | bool | `chatType != "oneOnOne"` |
+| NeedMemberSync | `needMemberSync` | bool | `chatType != "oneOnOne"` **and** the inline roster has ≥ `inlineMemberThreshold` (25) members; smaller chats are finalized inline (see Sync flow §6) |
 
 Model structs carry both `json` and `bson` tags (camelCase). Date-times are
 `time.Time` (BSON dates) — they round-trip directly with Graph's ISO-8601.
@@ -158,11 +158,26 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
    is always upserted with a non-empty siteID (never `siteID: ""`, which
    `$setOnInsert` would lock in forever). A defensive skip-with-warning remains
    for the now-impossible empty case.
-6. **Upsert** (one `BulkWrite` of upserts per Graph page, keyed on `_id`):
+6. **Upsert** (one `BulkWrite` of upserts per Graph page, keyed on `_id`) — three
+   branches:
    - `oneOnOne`: **all** fields under `$setOnInsert`, including
      `needCreateRoom: true` (room-ready on first sight) — an existing doc is
      never modified (oneOnOne chats never change after insert).
-   - group/meeting: `$setOnInsert: {createdDateTime, siteId, needCreateRoom: false}`,
+   - **small** group/meeting (inline roster `< inlineMemberThreshold`, 25): the
+     `$expand=members` roster is already complete, so the chat is **finalized
+     inline** — this job writes it itself instead of deferring to member-sync.
+     `$setOnInsert: {createdDateTime, siteId}`,
+     `$set: {name, chatType, lastUpdatedDateTime, updatedAt: now, members,
+     needMemberSync: false, needCreateRoom: true}`. `members` and `needCreateRoom`
+     move into `$set` — exactly what member-sync would write — so every re-sync
+     re-writes the fresh roster and re-flags `needCreateRoom`, yielding one
+     create-or-sync event downstream per chat change (room-creation's
+     compare-and-set on `updatedAt` clears the flag). Keeping the threshold at or
+     below Graph's inline-expansion cap is what makes "fewer than threshold ⇒
+     complete" safe.
+   - **large** group/meeting (inline roster `≥ inlineMemberThreshold`): the inline
+     roster may be truncated, so room creation is **deferred to member-sync**.
+     `$setOnInsert: {createdDateTime, siteId, needCreateRoom: false}`,
      `$set: {name, chatType, lastUpdatedDateTime, needMemberSync: true, updatedAt: now}`.
      The two flags sit on opposite sides on purpose: `needMemberSync` is re-set
      `true` on every re-sync (a chat is re-listed whenever its
@@ -170,9 +185,9 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
      member-sync re-resolves the roster, keeping the room in sync), while
      `needCreateRoom` is **insert-only** so a re-sync can never clobber the
      `true` that member-sync sets. `members` is **not** written — member-sync
-     owns the group roster and flips `needMemberSync: false` /
-     `needCreateRoom: true` on each resolve, yielding one create-or-sync event
-     downstream per membership change.
+     owns the roster and flips `needMemberSync: false` / `needCreateRoom: true`
+     on each resolve, yielding one create-or-sync event downstream per membership
+     change.
    - siteID immutability is thus enforced at the DB layer; the in-memory dedup
      is an optimization, not a correctness mechanism.
 7. **Watermark.** When a user's chats are fully fetched (all pages) and
@@ -199,7 +214,7 @@ required vars.
 | `SYNC_DEFAULT_FROM` | `2026-04-01T00:00:00Z` | RFC3339 watermark for users with no `from` |
 | `SYNC_DEFAULT_SITE_ID` | required | Fallback siteID for chats whose member vote is empty; required,notEmpty so every synced chat gets a non-empty siteID |
 | `GRAPH_CHATS_PAGE_SIZE` | `50` | `$top` page size for Graph list-chats requests (50 = Graph's documented max) |
-| `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
+| `RUN_TIMEOUT` | `240h` | Whole-job context deadline (10 days; Go durations can't express `d`) |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |
 | `GRAPH_CLIENT_SECRET` | required | App registration secret |
@@ -227,6 +242,9 @@ required vars.
   Persistent throttling (retries exhausted) surfaces as a per-user failure:
   the watermark holds and the user is retried next run, while the armed gate
   still slows the remaining workers.
+  Every throttle response (429/503) emits a `WARN` log from `getThrottled`
+  carrying the operation, status, `Retry-After`, and the computed backoff (never
+  the token or endpoint), so rate-limiting is visible in the run logs.
 
 ## Testing (TDD, ≥ 80% coverage)
 
