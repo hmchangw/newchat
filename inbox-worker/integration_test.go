@@ -1483,28 +1483,35 @@ func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
 		userCol: db.Collection("users"),
 	}
 
-	_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u1", Account: "alice", SiteID: "site-b"})
-	require.NoError(t, err)
-
 	t1 := time.UnixMilli(1000).UTC()
 	t2 := time.UnixMilli(2000).UTC()
 	yes, no := true, false
 
+	// Each subtest owns its own account so it passes standalone under -run.
+	seed := func(t *testing.T, account string) {
+		t.Helper()
+		_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u-" + account, Account: account, SiteID: "site-b"})
+		require.NoError(t, err)
+	}
+
 	t.Run("writes the full settings sub-document", func(t *testing.T) {
-		require.NoError(t, store.UpdateUserSettings(ctx, "alice", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+		seed(t, "settings-write")
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-write", &model.UserSettings{MuteAllNotifications: &yes}, t1))
 
 		var got model.User
-		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-write"}).Decode(&got))
 		require.NotNil(t, got.Settings)
 		require.NotNil(t, got.Settings.MuteAllNotifications)
 		assert.True(t, *got.Settings.MuteAllNotifications)
 	})
 
 	t.Run("replaces wholesale — a field dropped by the user is dropped here", func(t *testing.T) {
-		require.NoError(t, store.UpdateUserSettings(ctx, "alice", &model.UserSettings{FullWidth: &no}, t2))
+		seed(t, "settings-replace")
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-replace", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-replace", &model.UserSettings{FullWidth: &no}, t2))
 
 		var got model.User
-		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-replace"}).Decode(&got))
 		require.NotNil(t, got.Settings)
 		assert.Nil(t, got.Settings.MuteAllNotifications, "whole-object replace must not merge the previous value")
 		require.NotNil(t, got.Settings.FullWidth)
@@ -1512,10 +1519,12 @@ func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
 	})
 
 	t.Run("stale event is rejected by the settingsUpdatedAt high-water guard", func(t *testing.T) {
-		require.NoError(t, store.UpdateUserSettings(ctx, "alice", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+		seed(t, "settings-stale")
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-stale", &model.UserSettings{FullWidth: &no}, t2))
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-stale", &model.UserSettings{MuteAllNotifications: &yes}, t1))
 
 		var got model.User
-		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "alice"}).Decode(&got))
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-stale"}).Decode(&got))
 		assert.Nil(t, got.Settings.MuteAllNotifications, "stale settings must not overwrite newer ones")
 		require.NotNil(t, got.Settings.FullWidth)
 	})
