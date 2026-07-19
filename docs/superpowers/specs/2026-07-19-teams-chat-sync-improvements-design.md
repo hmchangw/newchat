@@ -8,7 +8,8 @@ Focused changes to the Teams chat sync pipeline, each independent: (1) finalize
 small chats inline, (2) hand the run deadline to Kubernetes (remove
 `RUN_TIMEOUT`), (3) throttle logging, (4) fetch the least-caught-up users first,
 (5) ensure indexes at startup, (6) drop the OTel SDK from teams-room-creation,
-(7) drop publish-side dedup from teams-room-creation.
+(7) drop publish-side dedup from teams-room-creation, (8) carry the member user
+id in the room-creation event.
 
 ## 1. Finalize small chats inline (skip member-sync)
 
@@ -134,6 +135,17 @@ room creation is the downstream room-worker being idempotent on chat id. So the
 `dedupID` parameter and `PublishMsg` is called with no `WithMsgID`. The
 `dedupID`-only `publisher_test.go` is deleted (the publish path stays covered by
 `runner_test.go` and the integration test).
+
+## 8. Carry the member user id in the room-creation event
+
+`TeamsRoomCreateMember` originally dropped the Graph member id, carrying only
+`account` + `visibleHistoryStartDateTime`. It now also carries the member's user
+id (`id`, the AAD object id / `teams_user` `_id`) so the downstream room-worker
+can correlate members by id, not just account. `buildEvent` maps it through (the
+struct is now field-identical to the stored `TeamsChatMember`, so a direct
+conversion carries all three fields), and the `pkg/model` round-trip test covers
+the new field. This is an internal canonical event (`chat.room.canonical.…`), not
+a client contract, so `docs/client-api.md` is unaffected.
 
 ## Testing
 

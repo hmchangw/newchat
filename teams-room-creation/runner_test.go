@@ -157,10 +157,11 @@ func TestRunner_ListErrorReturned(t *testing.T) {
 	require.Error(t, r.run(context.Background()))
 }
 
-func TestBuildEvent_MapsMembersDropsID(t *testing.T) {
+func TestBuildEvent_MapsMembers(t *testing.T) {
 	e := buildEvent([]model.TeamsChat{chat("a1", "site-a")}, time.UnixMilli(42))
 	require.Len(t, e.Chats, 1)
 	require.Len(t, e.Chats[0].Members, 1)
+	assert.Equal(t, "m-a1", e.Chats[0].Members[0].ID, "the member's user id is carried")
 	assert.Equal(t, "acct-a1", e.Chats[0].Members[0].Account)
 	assert.Equal(t, int64(42), e.Timestamp)
 }

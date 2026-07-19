@@ -73,9 +73,10 @@ type TeamsRoomCreateChat struct {
     CreatedDateTime time.Time               `json:"createdDateTime"`
 }
 
-// TeamsRoomCreateMember is one member reference in a room-creation event.
-// Only account + history-visibility are carried; the Graph member id is dropped.
+// TeamsRoomCreateMember is one member reference in a room-creation event:
+// the member's user id (AAD object id), account, and history-visibility cutoff.
 type TeamsRoomCreateMember struct {
+    ID                          string    `json:"id"`
     Account                     string    `json:"account"`
     VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime"`
 }
@@ -85,8 +86,8 @@ type TeamsRoomCreateMember struct {
 `pkg/model` carries a `Timestamp int64`, stamped at publish time with
 `time.Now().UTC().UnixMilli()`.
 
-The event carries exactly the fields the task specifies per chat:
-`{id, name, members=[{account, visibleHistoryStartDateTime}], createdDateTime}`.
+The event carries these fields per chat:
+`{id, name, members=[{id, account, visibleHistoryStartDateTime}], createdDateTime}`.
 
 ## 4. Subject & stream
 

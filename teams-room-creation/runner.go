@@ -118,19 +118,20 @@ func planBatches(chats []model.TeamsChat, size int) []batch {
 	return out
 }
 
-// buildEvent maps a batch of teams_chat docs into the wire event, dropping each
-// member's Graph id and stamping the publish timestamp. The site is not carried
-// in the payload — it is on the publish subject.
+// buildEvent maps a batch of teams_chat docs into the wire event, carrying each
+// member's user id/account/history-visibility and stamping the publish
+// timestamp. The site is not carried in the payload — it is on the publish
+// subject.
 func buildEvent(chats []model.TeamsChat, now time.Time) model.TeamsRoomCreateEvent {
 	out := make([]model.TeamsRoomCreateChat, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
 	for _, c := range chats {
 		members := make([]model.TeamsRoomCreateMember, 0, len(c.Members))
 		for _, m := range c.Members {
-			members = append(members, model.TeamsRoomCreateMember{
-				Account:                     m.Account,
-				VisibleHistoryStartDateTime: m.VisibleHistoryStartDateTime,
-			})
+			// TeamsRoomCreateMember is field-identical to the stored member; a
+			// direct conversion carries id/account/history-visibility (and turns any
+			// future divergence of the two types into a compile error to resolve).
+			members = append(members, model.TeamsRoomCreateMember(m))
 		}
 		out = append(out, model.TeamsRoomCreateChat{
 			ID:              c.ID,
