@@ -4,7 +4,9 @@
 **Status:** Approved
 **Amends:** `2026-07-14-teams-chat-sync-design.md`, `2026-07-15-teams-chat-member-sync-design.md`
 
-Three focused changes to the Teams chat sync pipeline. Each is independent.
+Focused changes to the Teams chat sync pipeline, each independent: (1) finalize
+small chats inline, (2) longer run timeouts, (3) throttle logging, (4) fetch the
+least-caught-up users first, (5) ensure indexes at startup.
 
 ## 1. Finalize small chats inline (skip member-sync)
 
@@ -78,6 +80,31 @@ endpoint are never logged. Because `getThrottled` is shared, this covers both
 `teams-chat-sync` (`ListUserChats`) and `teams-chat-member-sync`
 (`ListChatMembers`).
 
+## 4. Fetch the least-caught-up users first
+
+`ListUsers` now reads `teams_user` **ordered by `from` ascending**. In Mongo's
+ascending order a missing/null `from` sorts before any date, so users that have
+never synced (no watermark, `from` is `null` on the first run) are returned —
+and dispatched to workers — first, then the rest oldest-watermark to newest.
+The full-collection cache load is unchanged (all users still populate the vote
+map); only the order changes, so the most-behind users get Graph time first.
+
+## 5. Ensure indexes at startup
+
+`mongoStore.EnsureIndexes` (idempotent, write/primary client) is called from
+`run()` right after the store is built. teams-chat-sync owns `teams_chat` and
+the `teams_user.from` watermark, so it owns these indexes:
+
+| Collection | Index | Type | Serves |
+|---|---|---|---|
+| `teams_user` | `{from: 1}` | full | the new watermark-ordered `ListUsers` (non-sparse so null sorts first) |
+| `teams_chat` | `{needMemberSync: 1}` | partial `{needMemberSync: true}` | member-sync's pending scan |
+| `teams_chat` | `{needCreateRoom: 1, _id: 1}` | partial `{needCreateRoom: true}` | room-creation's pending scan + `_id` sort |
+
+Partial-on-`true` keeps the two flag indexes to the small actionable working set
+as `teams_chat` grows. `_id`-keyed writes and `{_id: $in}` reads use the default
+`_id` index.
+
 ## Testing
 
 TDD, per repo convention (≥ 80% coverage):
@@ -91,6 +118,11 @@ TDD, per repo convention (≥ 80% coverage):
 - **Item 3** — a slog-capturing test asserting a `WARN` with the operation,
   status, and `Retry-After` on a throttled chats request and a throttled members
   request, and no throttle log on success.
+- **Item 4** — a MongoDB integration test seeding users with null / old / new
+  watermarks out of order and asserting `ListUsers` returns null-first, then
+  oldest to newest.
+- **Item 5** — a MongoDB integration test asserting `EnsureIndexes` creates the
+  three indexes (names, key specs, partial filters) and is idempotent.
 
 ## Out of scope
 
