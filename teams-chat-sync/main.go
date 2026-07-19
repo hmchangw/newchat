@@ -108,6 +108,9 @@ func run() error {
 	defer mongoutil.Disconnect(context.Background(), writeClient)
 
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
+	if err := store.EnsureIndexes(ctx); err != nil {
+		return fmt.Errorf("ensure indexes: %w", err)
+	}
 
 	graph := msgraph.NewChatsClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,

@@ -4,12 +4,15 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -45,6 +48,89 @@ func TestMongoStore_ListUsers(t *testing.T) {
 	assert.Equal(t, "site-a", byID["u1"].SiteID)
 	assert.Equal(t, "alice", byID["u1"].Account)
 	assert.Nil(t, byID["u2"].From, "user without watermark loads with nil From")
+}
+
+// TestMongoStore_ListUsers_OrdersByWatermarkNullFirst pins the least-first
+// dispatch order: a user that has never synced (no `from`) is returned before
+// any user with a watermark, and the rest come oldest-watermark first.
+func TestMongoStore_ListUsers_OrdersByWatermarkNullFirst(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsstore")
+	store := newMongoStore(db, db)
+	ctx := context.Background()
+
+	old := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	// Inserted deliberately out of watermark order to prove the query sorts.
+	seedUsers(t, store,
+		model.TeamsUser{ID: "u-new", SiteID: "site-a", Account: "newbie", From: &newer},
+		model.TeamsUser{ID: "u-null", SiteID: "site-a", Account: "never"}, // no From (never synced)
+		model.TeamsUser{ID: "u-old", SiteID: "site-a", Account: "oldie", From: &old},
+	)
+
+	users, err := store.ListUsers(ctx)
+	require.NoError(t, err)
+	require.Len(t, users, 3)
+	assert.Equal(t, []string{"u-null", "u-old", "u-new"},
+		[]string{users[0].ID, users[1].ID, users[2].ID},
+		"never-synced (null from) first, then oldest watermark to newest")
+}
+
+// teamsIndex is the subset of an index spec the EnsureIndexes test asserts on.
+type teamsIndex struct {
+	Name    string `bson:"name"`
+	Key     bson.D `bson:"key"`
+	Partial bson.M `bson:"partialFilterExpression"`
+}
+
+// listIndexes returns col's indexes keyed by name.
+func listIndexes(t *testing.T, col *mongo.Collection) map[string]teamsIndex {
+	t.Helper()
+	cur, err := col.Indexes().List(context.Background())
+	require.NoError(t, err)
+	var raw []teamsIndex
+	require.NoError(t, cur.All(context.Background(), &raw))
+	out := make(map[string]teamsIndex, len(raw))
+	for _, ix := range raw {
+		out[ix.Name] = ix
+	}
+	return out
+}
+
+// keySpec renders an index key as "field:dir,..." (order-preserving), so a
+// compound index is asserted exactly and dir type (int32/int) doesn't matter.
+func keySpec(k bson.D) string {
+	parts := make([]string, 0, len(k))
+	for _, e := range k {
+		parts = append(parts, fmt.Sprintf("%s:%v", e.Key, e.Value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func TestMongoStore_EnsureIndexes(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsstore")
+	store := newMongoStore(db, db)
+	ctx := context.Background()
+
+	require.NoError(t, store.EnsureIndexes(ctx))
+	require.NoError(t, store.EnsureIndexes(ctx), "EnsureIndexes must be idempotent")
+
+	userIdx := listIndexes(t, store.writeUsers.Raw())
+	fromIdx, ok := userIdx["from_1"]
+	require.True(t, ok, "teams_user must have the from index")
+	assert.Equal(t, "from:1", keySpec(fromIdx.Key))
+	assert.Nil(t, fromIdx.Partial, "from index is full (non-partial) so null/never-synced users are ordered too")
+
+	chatIdx := listIndexes(t, store.writeChats.Raw())
+	memberSync, ok := chatIdx["needMemberSync_pending"]
+	require.True(t, ok, "teams_chat must have the needMemberSync pending index")
+	assert.Equal(t, "needMemberSync:1", keySpec(memberSync.Key))
+	assert.Equal(t, true, memberSync.Partial["needMemberSync"], "indexes only needMemberSync=true docs")
+
+	createRoom, ok := chatIdx["needCreateRoom_pending"]
+	require.True(t, ok, "teams_chat must have the needCreateRoom pending index")
+	assert.Equal(t, "needCreateRoom:1,_id:1", keySpec(createRoom.Key),
+		"compound with _id serves find(needCreateRoom:true).sort(_id) without an in-memory sort")
+	assert.Equal(t, true, createRoom.Partial["needCreateRoom"], "indexes only needCreateRoom=true docs")
 }
 
 func TestMongoStore_SetFrom(t *testing.T) {
