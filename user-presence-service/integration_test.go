@@ -143,14 +143,14 @@ func TestValkeyStore_PrecedenceLadder(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusOffline, eff, "no connections must beat manual busy")
 
-	// Manual away with an active connection -> away (rung 2).
+	// Manual away with an active connection -> away (rung 3).
 	_, _, err = st.SetActivity(ctx, "grace", "c1", false)
 	require.NoError(t, err)
 	_, eff, err = st.SetManual(ctx, "grace", model.StatusAway)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusAway, eff)
 
-	// Manual online overrides the all-inactive -> away derivation (rung 3 beats 5).
+	// Manual online overrides the all-inactive -> away derivation (rung 5 beats 6).
 	_, _, err = st.SetActivity(ctx, "heidi", "c1", false)
 	require.NoError(t, err)
 	_, eff, err = st.SetManual(ctx, "heidi", model.StatusOnline)
@@ -159,6 +159,39 @@ func TestValkeyStore_PrecedenceLadder(t *testing.T) {
 	_, eff, err = st.SetActivity(ctx, "heidi", "c1", true) // connection goes inactive
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusOnline, eff, "manual online suppresses the away derivation")
+
+	// AC-3.1: manual brb resolves as away and overrides external in-call.
+	_, _, err = st.SetActivity(ctx, "ivan", "c1", false)
+	require.NoError(t, err)
+	_, eff, err = st.SetManual(ctx, "ivan", model.StatusBRB)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusAway, eff, "manual brb resolves to away")
+	_, eff, err = st.SetExternal(ctx, "ivan", model.StatusInCall, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusAway, eff, "manual brb overrides external in-call")
+	_, eff, err = st.SetExternal(ctx, "ivan", model.StatusNone, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusAway, eff, "brb remains when in-call clears")
+
+	// AC-3.2: manual dnd resolves as dnd and is below external in-call but above
+	// connection-derived online/away.
+	_, _, err = st.SetActivity(ctx, "julia", "c1", false)
+	require.NoError(t, err)
+	_, eff, err = st.SetManual(ctx, "julia", model.StatusDND)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusDND, eff, "manual dnd resolves to dnd")
+	_, eff, err = st.SetExternal(ctx, "julia", model.StatusInCall, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusInCall, eff, "external in-call overrides manual dnd")
+	_, eff, err = st.SetExternal(ctx, "julia", model.StatusNone, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusDND, eff, "dnd returns when in-call clears")
+	_, eff, err = st.SetActivity(ctx, "julia", "c1", true) // inactive connection
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusDND, eff, "manual dnd overrides all-inactive away")
+	_, eff, err = st.RemoveConnection(ctx, "julia", "c1")
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusOffline, eff, "no connections beats dnd")
 }
 
 func TestValkeyStore_BatchGet(t *testing.T) {

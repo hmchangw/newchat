@@ -4104,7 +4104,7 @@ None. Any payload is ignored.
 | `statusIsShow` | boolean | Always present. Whether the status is displayed; `false` when never set. |
 | `chineseName`  | string  | Optional — **omitted** when the user record has no Chinese name (never sent as an empty string). |
 | `engName`      | string  | Optional — **omitted** when the user record has no English name (never sent as an empty string). |
-| `presence`     | string  | Effective presence: one of `online`, `away`, `busy`, `offline`, `in-call`. `offline` when unknown or on a degraded presence lookup. |
+| `presence`     | string  | Effective presence: one of `online`, `away`, `busy`, `dnd`, `brb`, `offline`, `in-call`. `offline` when unknown or on a degraded presence lookup. |
 
 ```json
 {
@@ -5526,8 +5526,8 @@ The worker filters recipients per message:
 - In rooms with more than `LARGE_ROOM_THRESHOLD` members (default 500),
   pushes only to mentioned recipients (`@user`, `@all`, `@here`).
 - Bots never receive a mobile push.
-- Presence-busy / in-call recipients are not pushed; everyone else
-  (online, offline, away, missing) receives one.
+- Presence-busy / in-call / `dnd` recipients are not pushed; everyone else
+  (online, offline, away, `brb`, missing) receives one.
 
 ---
 
@@ -5999,10 +5999,12 @@ A newly uploaded emoji is usable immediately — it appears in the next [`emoji.
 ## 8. Presence
 
 Served by **user-presence-service**. Tracks each user's effective presence —
-`online`, `away`, `busy`, `offline`, `in-call` — derived from live connections,
+`online`, `away`, `busy`, `offline`, `in-call`, `dnd`, `brb` — derived from live connections,
 an optional manual override, and an external Teams "in a call" signal
 (`in-call`, set by the presence sync; suppresses notifications, never settable
-as a manual status). Each site owns the presence of its local users; a
+as a manual status). `dnd` and `brb` are manual-only modes: `dnd` suppresses
+push notifications, while `brb` resolves to `away` for display and remains
+push-eligible. Each site owns the presence of its local users; a
 user's home site is the site they connect to. Cross-site is transparent: for
 **live state** (§8.7) a watcher subscribes to the global per-user subject and
 the NATS gateway routes it; for **batch queries** (§8.6) the watcher sends a
@@ -6026,11 +6028,12 @@ top-down; the **first** matching rule wins (so a stale manual override never
 keeps a fully-disconnected user "present"):
 
 1. **No live connections → `offline`** — beats any manual override.
-2. Manual `appear_offline` → `offline`; manual `away` → `away`.
-3. External Teams `in-call` → `in-call`.
-4. Manual `online` → `online`; manual `busy` → `busy`.
-5. All live connections inactive → `away`.
-6. Otherwise → `online`.
+2. Manual `appear_offline` → `offline`.
+3. Manual `away` / `brb` → `away`.
+4. External Teams `in-call` → `in-call`.
+5. Manual `online` / `busy` / `dnd` → that value (`dnd` is returned as `dnd`).
+6. All live connections inactive → `away`.
+7. Otherwise → `online`.
 
 ### 8.1 Hello — initialize a connection (publish, fire-and-forget)
 
@@ -6107,7 +6110,7 @@ does not arrive.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `status` | string | yes | One of `online`, `away`, `busy`, `appear_offline`, or `""` to clear. Any other value → `bad_request`. |
+| `status` | string | yes | One of `online`, `away`, `busy`, `dnd`, `brb`, `appear_offline`, or `""` to clear. `in-call` and any other value → `bad_request`. |
 | `timestamp` | number | no | Millis since Unix epoch (UTC). |
 
 **Success reply:**
@@ -6173,7 +6176,7 @@ in the `siteId` payload field.
 |-------|------|-------|
 | `account` | string | The user. |
 | `siteId` | string | The user's home site. |
-| `status` | string | Effective status: `online` / `away` / `busy` / `offline` / `in-call`. |
+| `status` | string | Effective status: `online` / `away` / `busy` / `dnd` / `brb` / `offline` / `in-call`. |
 | `timestamp` | number | Millis since Unix epoch (UTC) of the change. |
 
 **Subscribe before you snapshot.** To avoid missing a transition between the

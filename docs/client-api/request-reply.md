@@ -1356,8 +1356,7 @@ None. Any payload is ignored.
 `{ "account", "statusText", "statusIsShow", "chineseName"?, "engName"?, "presence" }`
 
 `chineseName`/`engName` are **omitted** when the user record has no value (never
-empty strings). `presence` is one of `online` / `away` / `busy` / `offline` /
-`in-call`; `offline` when unknown or degraded.
+empty strings). `presence` is one of `online` / `away` / `busy` / `dnd` / `brb` / `offline` / `in-call`; `offline` when unknown or degraded.
 
 #### Errors
 
