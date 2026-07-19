@@ -108,7 +108,7 @@ git commit -m "docs(client-api): §3.0 schema repairs — Subscription enrichmen
 
 **Files:** Modify `docs/client-api.md` §3.4 status section (lines ~3011–3132).
 
-- [ ] **Step 2.1 — Add a one-line intro note** to §3.4 (after the "Migration note" block, ~line 3022): `> **Events:** these endpoints emit no client-facing events. (`status.set` triggers a server-side cross-site federation update, which is internal and not delivered to clients.)`
+- [ ] **Step 2.1 — Add a one-line intro note** to §3.4 (after the "Migration note" block, ~line 3022): `> **Events:** these endpoints emit no client-facing events. (`status.set` triggers a server-side cross-site federation update, which is server-side only and never delivered to clients.)`
 
 - [ ] **Step 2.2 — Delete the entire `status.set` "Triggered events — success path" block** (currently lines ~3108–3130, the `UserStatusUpdated` payload table + JSON + the publish-errors sentence).
 

@@ -183,6 +183,13 @@ func SubscriptionUpdate(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.subscription.update", account)
 }
 
+// SettingsUpdate is the client-facing fanout subject published by
+// user-service after a successful settings.set (same delivery pattern as
+// subscription.update — ephemeral, core NATS).
+func SettingsUpdate(account string) string {
+	return fmt.Sprintf("chat.user.%s.event.settings.update", account)
+}
+
 func RoomMetadataChanged(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.room.metadata.update", account)
 }
@@ -1066,6 +1073,28 @@ func UserSubscriptionListPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.list", siteID)
 }
 
+func UserSettingsGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.get", account, siteID)
+}
+
+func UserSettingsGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.get", siteID)
+}
+
+func UserSettingsSet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.set", account, siteID)
+}
+
+func UserSettingsSetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
+}
+
 // UserThreadList is the concrete client-facing subject for the cross-site thread
 // inbox RPC. siteID is the CALLER's own home site — the site that holds the
 // user's federated subscriptions and runs the aggregator. Pair with
@@ -1141,7 +1170,7 @@ func UserSubscriptionGetByRoomIDPattern(siteID string) string {
 //
 //	chat.user.{account}.request.user.{siteID}.{area}.{action}
 //
-// where area is one of "status", "subscription", "profile", "apps".
+// where area is one of "status", "subscription", "profile", "apps", "settings".
 // Does NOT match the room-scoped form — use ParseRoomSubject for those.
 func ParseUserSubject(subj string) (account, siteID, area, action string, ok bool) {
 	parts := strings.Split(subj, ".")
@@ -1155,7 +1184,7 @@ func ParseUserSubject(subj string) (account, siteID, area, action string, ok boo
 		return "", "", "", "", false
 	}
 	switch parts[6] {
-	case "status", "subscription", "profile", "apps":
+	case "status", "subscription", "profile", "apps", "settings":
 	default:
 		return "", "", "", "", false
 	}

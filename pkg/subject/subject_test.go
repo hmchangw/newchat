@@ -36,6 +36,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.room.canonical.site-a.teams.create"},
 		{"SubscriptionUpdate", subject.SubscriptionUpdate("alice"),
 			"chat.user.alice.event.subscription.update"},
+		{"SettingsUpdate", subject.SettingsUpdate("alice"),
+			"chat.user.alice.event.settings.update"},
 		{"RoomMetadataChanged", subject.RoomMetadataChanged("alice"),
 			"chat.user.alice.event.room.metadata.update"},
 		{"Notification", subject.Notification("alice"),
@@ -542,6 +544,8 @@ func TestUserServiceBuilders(t *testing.T) {
 		{"subscription.setAppSubscription", subject.UserSubscriptionSetAppSubscription("alice", "s1"), "chat.user.alice.request.user.s1.subscription.setAppSubscription"},
 		{"subscription.getByRoomID", subject.UserSubscriptionGetByRoomID("alice", "s1"), "chat.user.alice.request.user.s1.subscription.getByRoomID"},
 		{"me", subject.UserMe("alice", "s1"), "chat.user.alice.request.user.s1.me"},
+		{"settings.get", subject.UserSettingsGet("alice", "s1"), "chat.user.alice.request.user.s1.settings.get"},
+		{"settings.set", subject.UserSettingsSet("alice", "s1"), "chat.user.alice.request.user.s1.settings.set"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -710,6 +714,8 @@ func TestUserServiceBuildersRejectWildcardAccounts(t *testing.T) {
 		{"UserSubscriptionSetAppSubscription", func() { subject.UserSubscriptionSetAppSubscription("*", "s1") }},
 		{"UserSubscriptionGetByRoomID", func() { subject.UserSubscriptionGetByRoomID(">", "s1") }},
 		{"UserMe", func() { subject.UserMe("*", "s1") }},
+		{"UserSettingsGet", func() { subject.UserSettingsGet("*", "s1") }},
+		{"UserSettingsSet", func() { subject.UserSettingsSet(">", "s1") }},
 	}
 	for _, b := range builders {
 		t.Run(b.name, func(t *testing.T) {
@@ -829,6 +835,8 @@ func TestUserServicePatternBuilders(t *testing.T) {
 		{"subscription.setAppSubscription", subject.UserSubscriptionSetAppSubscriptionPattern("s1"), "chat.user.{account}.request.user.s1.subscription.setAppSubscription"},
 		{"subscription.getByRoomID", subject.UserSubscriptionGetByRoomIDPattern("s1"), "chat.user.{account}.request.user.s1.subscription.getByRoomID"},
 		{"me", subject.UserMePattern("s1"), "chat.user.{account}.request.user.s1.me"},
+		{"settings.get", subject.UserSettingsGetPattern("s1"), "chat.user.{account}.request.user.s1.settings.get"},
+		{"settings.set", subject.UserSettingsSetPattern("s1"), "chat.user.{account}.request.user.s1.settings.set"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

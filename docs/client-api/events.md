@@ -17,8 +17,9 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 
 1. [AsyncJobResult — async completion](#asyncjobresult--async-completion)
 2. [subscription.update — membership / state changes](#subscriptionupdate--membership--state-changes)
-3. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
-4. [Room events — per-room live events](#room-events--per-room-live-events)
+3. [settings.update — user settings sync](#settingsupdate--user-settings-sync)
+4. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
+5. [Room events — per-room live events](#room-events--per-room-live-events)
    - [new_message (RoomEvent)](#new_message-roomevent)
    - [message_edited (EditRoomEvent)](#message_edited-editroomevent)
    - [message_deleted (DeleteRoomEvent)](#message_deleted-deleteroomevent)
@@ -29,11 +30,11 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
    - [thread_message_read](#thread_message_read)
    - [room_renamed (RoomRenamedRoomEvent)](#room_renamed-roomrenamedroomevent)
    - [room_restricted (RoomRestrictedRoomEvent)](#room_restricted-roomrestrictedroomevent)
-5. [member — room membership events](#member--room-membership-events)
+6. [member — room membership events](#member--room-membership-events)
    - [member_added (MemberAddEvent)](#member_added-memberaddevent)
    - [member_left / member_removed (MemberRemoveEvent)](#member_left--member_removed-memberremoveevent)
-6. [notification — reaction notification](#notification--reaction-notification)
-7. [Presence events](#presence-events)
+7. [notification — reaction notification](#notification--reaction-notification)
+8. [Presence events](#presence-events)
 
 ---
 
@@ -43,6 +44,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 |---|---|
 | `chat.user.{account}.response.{requestID}` | AsyncJobResult (one-shot async job completion) |
 | `chat.user.{account}.event.subscription.update` | SubscriptionUpdateEvent / SubscriptionRemovedEvent |
+| `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
@@ -157,6 +159,47 @@ fields are sent.
 **Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
 Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
+
+---
+
+## settings.update — user settings sync
+
+**Subject:** `chat.user.{account}.event.settings.update`
+
+Published by user-service after every successful [settings.set](request-reply.md#settingsset)
+— ephemeral core-NATS fan-out to the caller's own connected devices, so other
+logged-in clients sync live. Best-effort: a fan-out failure does not fail the set.
+
+The payload carries the **full post-update settings** — receivers replace their
+local copy, they never merge deltas. A field absent from `settings` was never
+set by the user, and **absent means the client applies its own default** (the
+server never injects defaults).
+
+### Schema (SettingsUpdateEvent)
+
+| Field | Type | Notes |
+|---|---|---|
+| `timestamp` | number | Publish time, Unix ms. |
+| `settings` | UserSettings | Full post-update settings; all seven fields optional. |
+
+UserSettings — every field optional, present only when explicitly set:
+
+| Field | Type |
+|---|---|
+| `fullWidth` | boolean |
+| `translateMessageInto` | string |
+| `showMessagePreviewInSidebarList` | boolean |
+| `muteAllNotifications` | boolean |
+| `showMessagesAndPreviewsInNotifications` | boolean |
+| `showNotificationsDuringCallsAndMeetings` | boolean |
+| `scrollToBottomInChat` | boolean |
+
+```json
+{
+  "timestamp": 1737000000000,
+  "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
+}
+```
 
 ---
 

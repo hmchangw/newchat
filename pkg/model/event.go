@@ -164,7 +164,18 @@ const (
 	InboxRoomRenamed                 InboxEventType = "room_renamed"
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
+	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
 )
+
+// UserSettingsUpdated is the cross-site inbox event user-service publishes on
+// settings.set; the remote inbox-worker applies it so the local notification
+// worker can read the user's notification preferences. Settings is the full
+// post-update sub-document — the receiver replaces, never merges.
+type UserSettingsUpdated struct {
+	Account   string       `json:"account"   bson:"account"`
+	Settings  UserSettings `json:"settings"  bson:"settings"`
+	Timestamp int64        `json:"timestamp" bson:"timestamp"`
+}
 
 // SubscriptionReadEvent is the InboxEvent.Payload for type
 // "subscription_read". Sent from a room's home site to the user's home site

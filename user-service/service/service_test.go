@@ -32,7 +32,9 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 	// countUnread's thread phase reads thread-subs; default to none so room-count
 	// tests that don't exercise threads need no per-test stub.
 	threadSubs.EXPECT().ListByAccount(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, cfg), subs, users, apps, rooms, history, pub
+	// The same mock backs both publishers (federation + client fanout) —
+	// expectations are subject-scoped, so tests stay unambiguous.
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, cfg), subs, users, apps, rooms, history, pub
 }
 
 // ctx builds a handler context. siteID is retained for readability but unused

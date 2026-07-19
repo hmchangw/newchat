@@ -4144,6 +4144,40 @@ func TestUserStatusUpdated_RoundTrip(t *testing.T) {
 	roundTrip(t, &src, &dst)
 }
 
+func TestUserSettingsUpdated_RoundTrip(t *testing.T) {
+	mute, width := true, false
+	lang := "ja"
+	src := model.UserSettingsUpdated{
+		Account: "alice",
+		Settings: model.UserSettings{
+			MuteAllNotifications: &mute,
+			FullWidth:            &width,
+			TranslateMessageInto: &lang,
+		},
+		Timestamp: 1735689600000,
+	}
+	dst := model.UserSettingsUpdated{}
+	roundTrip(t, &src, &dst)
+}
+
+func TestUserSettingsUpdated_UnsetSettingsOmittedFromJSON(t *testing.T) {
+	mute := true
+	src := model.UserSettingsUpdated{
+		Account:   "alice",
+		Settings:  model.UserSettings{MuteAllNotifications: &mute},
+		Timestamp: 1735689600000,
+	}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	settings, ok := raw["settings"].(map[string]any)
+	require.True(t, ok)
+	_, present := settings["fullWidth"]
+	assert.False(t, present, "an unset setting must be omitted, so absent keeps meaning client-default")
+}
+
 func TestUserStatusUpdated_StatusIsShowOmittedWhenNil(t *testing.T) {
 	src := model.UserStatusUpdated{
 		Account:    "alice",

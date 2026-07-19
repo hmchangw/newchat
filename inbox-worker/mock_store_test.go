@@ -197,6 +197,20 @@ func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionRoles(ctx, account, room
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRoles", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionRoles), ctx, account, roomID, roles, rolesUpdatedAt)
 }
 
+// UpdateUserSettings mocks base method.
+func (m *MockInboxStore) UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, settings, updatedAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateUserSettings indicates an expected call of UpdateUserSettings.
+func (mr *MockInboxStoreMockRecorder) UpdateUserSettings(ctx, account, settings, updatedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockInboxStore)(nil).UpdateUserSettings), ctx, account, settings, updatedAt)
+}
+
 // UpdateUserStatus mocks base method.
 func (m *MockInboxStore) UpdateUserStatus(ctx context.Context, account, statusText string, statusIsShow *bool, statusUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()

@@ -93,6 +93,59 @@ func (r *UserRepo) GetHRInfoByAccounts(ctx context.Context, accounts []string) (
 	return out, nil
 }
 
+// GetUserSettings returns the user's stored settings sub-document (Settings is
+// nil when never set); (nil, nil) when no active user matched.
+func (r *UserRepo) GetUserSettings(ctx context.Context, account string) (*model.User, error) {
+	return r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "settings": 1}),
+	)
+}
+
+// UpdateUserSettings $sets settings.<field> for each non-nil field in set —
+// unsent fields keep their stored value or stay absent — and returns the
+// updated user (Settings projected) in one round-trip via
+// FindOneAndUpdate(After); returns (nil, nil) when no active user matched.
+// The caller guarantees at least one field is non-nil (an empty $set errors).
+func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+	fields := bson.M{}
+	if set.FullWidth != nil {
+		fields["settings.fullWidth"] = *set.FullWidth
+	}
+	if set.TranslateMessageInto != nil {
+		fields["settings.translateMessageInto"] = *set.TranslateMessageInto
+	}
+	if set.ShowMessagePreviewInSidebarList != nil {
+		fields["settings.showMessagePreviewInSidebarList"] = *set.ShowMessagePreviewInSidebarList
+	}
+	if set.MuteAllNotifications != nil {
+		fields["settings.muteAllNotifications"] = *set.MuteAllNotifications
+	}
+	if set.ShowMessagesAndPreviewsInNotifications != nil {
+		fields["settings.showMessagesAndPreviewsInNotifications"] = *set.ShowMessagesAndPreviewsInNotifications
+	}
+	if set.ShowNotificationsDuringCallsAndMeetings != nil {
+		fields["settings.showNotificationsDuringCallsAndMeetings"] = *set.ShowNotificationsDuringCallsAndMeetings
+	}
+	if set.ScrollToBottomInChat != nil {
+		fields["settings.scrollToBottomInChat"] = *set.ScrollToBottomInChat
+	}
+	opts := options.FindOneAndUpdate().
+		SetReturnDocument(options.After).
+		SetProjection(bson.M{"_id": 0, "settings": 1})
+	res := r.users.Raw().FindOneAndUpdate(ctx, activeUserFilter(account), bson.M{"$set": fields}, opts)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("update user settings: %w", err)
+	}
+	var u model.User
+	if err := res.Decode(&u); err != nil {
+		return nil, fmt.Errorf("decode updated user settings: %w", err)
+	}
+	return &u, nil
+}
+
 // SetUserStatus updates status fields (isShow only written when non-nil) and
 // returns the updated user in one round-trip via FindOneAndUpdate(After),
 // projected to the UserStatusView fields; returns (nil, nil) when no active user matched.

@@ -59,7 +59,7 @@ paths.
      - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users)
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
-     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories)
+     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
 4. [Message Send](#4-message-send)
@@ -166,7 +166,7 @@ Permissions and connection limits come from the auth-service account's scoped si
 
 **Recommended baseline subscriptions on connect:**
 
-- `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, and subscription updates.
+- `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
 - `chat.room.{roomID}.event` for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel.
 
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
@@ -4056,9 +4056,9 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 
 ### 3.4 user-service
 
-`user-service` exposes 14 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
+`user-service` exposes 16 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
-> **Events:** these endpoints emit no client-facing events. (`status.set` triggers a server-side cross-site federation update, which is internal and not delivered to clients.)
+> **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` and `settings.set` also trigger a server-side cross-site federation update, which is not delivered to clients.)
 
 | RPC subject | Method |
 |---|---|
@@ -4066,6 +4066,8 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 | `chat.user.{account}.request.user.{siteID}.status.getByName` | [`status.getByName`](#statusgetbyname) |
 | `chat.user.{account}.request.user.{siteID}.profile.getByName` | [`profile.getByName`](#profilegetbyname) |
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
+| `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [`subscription.list`](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [`subscription.getChannels`](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [`subscription.getDM`](#subscriptiongetdm) |
@@ -4251,6 +4253,121 @@ Same shape as `status.getByName`:
 | `text` > 512 bytes | `bad_request` | — | `{ "code": "bad_request", "error": "status text too long" }` |
 | No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` — nothing is broadcast. |
 | Internal failure | `internal` | — | — |
+
+---
+
+#### settings.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns the calling user's stored settings sub-document — **exactly as stored**. The server never injects defaults: a field the user never set is absent from the reply, and **absent means the client applies its own default** (cross-client default consistency is client-owned by design). A user who never set anything gets `{}`.
+
+##### Request body
+
+None (empty payload).
+
+##### Success response
+
+The stored settings object. All seven fields are optional and appear only when the user has explicitly set them:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `fullWidth` | boolean | Full-width layout. |
+| `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
+| `showMessagePreviewInSidebarList` | boolean | Show message previews in the sidebar list. |
+| `muteAllNotifications` | boolean | Mute all notifications. |
+| `showMessagesAndPreviewsInNotifications` | boolean | Show message content and previews in notifications. |
+| `showNotificationsDuringCallsAndMeetings` | boolean | Show notifications during calls and meetings. |
+| `scrollToBottomInChat` | boolean | Scroll to bottom when entering a chat. |
+
+```json
+{
+  "fullWidth": true,
+  "translateMessageInto": "en-US",
+  "showMessagePreviewInSidebarList": true
+}
+```
+
+Never-set user:
+
+```json
+{}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+---
+
+#### settings.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.set`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Partially updates the calling user's settings: **only the fields present in the request are written**; every unsent field keeps its stored value (or stays absent). At least one field is required. Returns the full post-update settings.
+
+##### Request body
+
+Any non-empty subset of the seven settings fields (same types as [`settings.get`](#settingsget)):
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `fullWidth` | boolean | no | |
+| `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); or `""` to explicitly turn translation off. No value whitelist. |
+| `showMessagePreviewInSidebarList` | boolean | no | |
+| `muteAllNotifications` | boolean | no | |
+| `showMessagesAndPreviewsInNotifications` | boolean | no | |
+| `showNotificationsDuringCallsAndMeetings` | boolean | no | |
+| `scrollToBottomInChat` | boolean | no | |
+
+```json
+{ "fullWidth": false, "translateMessageInto": "ja" }
+```
+
+##### Success response
+
+The **full post-update settings** (same shape as [`settings.get`](#settingsget)) — sent fields updated, previously stored fields retained:
+
+```json
+{
+  "fullWidth": false,
+  "translateMessageInto": "ja",
+  "muteAllNotifications": true
+}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| No fields in the request | `bad_request` | — | `{ "code": "bad_request", "error": "no settings provided" }` |
+| Malformed `translateMessageInto` | `bad_request` | — | `{ "code": "bad_request", "error": "invalid translateMessageInto language tag" }` |
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` — nothing is written or published. |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+<a id="settingsupdate-event"></a>
+##### `settings.update` event
+
+**Emits:** `chat.user.{account}.event.settings.update` after every successful set — ephemeral core-NATS fan-out to the caller's own connected devices (same delivery pattern as `subscription.update`), so other logged-in clients sync live. Best-effort: a fan-out failure does not fail the set.
+
+The payload carries the **full post-update settings** (replace, don't merge):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `timestamp` | number | Publish time, Unix ms. |
+| `settings` | UserSettings | The full post-update settings — same seven optional fields as [`settings.get`](#settingsget). |
+
+```json
+{
+  "timestamp": 1737000000000,
+  "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
+}
+```
 
 ---
 
