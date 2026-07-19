@@ -164,15 +164,17 @@ The run deadline is owned by the Kubernetes CronJob (`activeDeadlineSeconds`),
 not an app-level timeout: `run()` uses a `signal.NotifyContext(SIGINT, SIGTERM)`
 context so the pod's termination signal aborts the run between operations.
 
-`obs.Init` wires o11y once (traces/metrics/logs). No secrets defaulted.
+Plain `log/slog` JSON, like the sibling teams-* jobs — no OTel SDK is wired. NATS
+still needs a tracer/propagator, so `run()` passes no-ops
+(`noop.NewTracerProvider()`, `propagation.TraceContext{}`); `o11y/nats` gates
+header work on `O11Y_ENABLED`, so this stays off the hot path. No secrets defaulted.
 
 ## 7. Flow & error handling
 
 ```
 run():
   parse+validate config
-  obs.Init
-  connect read + write Mongo, NATS (+ JetStream)
+  connect read + write Mongo, NATS (+ JetStream, no-op tracer/propagator)
   chats = store.ListChatsNeedingRoom()
   groups = group chats by siteId
   for each (siteId, chats) group:                # bounded by MAX_WORKERS

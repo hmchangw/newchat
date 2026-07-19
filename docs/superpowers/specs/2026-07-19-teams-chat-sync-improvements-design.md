@@ -7,7 +7,7 @@
 Focused changes to the Teams chat sync pipeline, each independent: (1) finalize
 small chats inline, (2) hand the run deadline to Kubernetes (remove
 `RUN_TIMEOUT`), (3) throttle logging, (4) fetch the least-caught-up users first,
-(5) ensure indexes at startup.
+(5) ensure indexes at startup, (6) drop the OTel SDK from teams-room-creation.
 
 ## 1. Finalize small chats inline (skip member-sync)
 
@@ -110,6 +110,16 @@ the `teams_user.from` watermark, so it owns these indexes:
 Partial-on-`true` keeps the two flag indexes to the small actionable working set
 as `teams_chat` grows. `_id`-keyed writes and `{_id: $in}` reads use the default
 `_id` index.
+
+## 6. Drop the OTel SDK from teams-room-creation
+
+`teams-room-creation` was the only teams-* job wiring `obs.Init` (OpenTelemetry
+traces/metrics); the others use plain `log/slog`. It is removed for consistency:
+`run()` no longer calls `obs.Init`/`obsShutdown`. It still connects to NATS, which
+requires a tracer/propagator, so it passes no-ops (`noop.NewTracerProvider()`,
+`propagation.TraceContext{}`) — the same call this service's integration test and
+`tools/loadgen` already use. `o11y/nats` gates header work on `O11Y_ENABLED`, so
+tracing stays off the hot path. slog is unchanged (set up in `main`, not `obs`).
 
 ## Testing
 
