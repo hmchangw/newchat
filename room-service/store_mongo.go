@@ -1150,16 +1150,17 @@ func (s *MongoStore) GetUserSiteID(ctx context.Context, account string) (string,
 }
 
 // MinSubscriptionLastSeenByRoomID returns the room's strict read floor: the
-// minimum lastSeenAt across ALL of the room's subscriptions, but only when
-// EVERY subscription has a usable lastSeenAt (> zero). If any subscription has
+// minimum lastSeenAt across all of the room's non-bot subscriptions, but only
+// when EVERY such subscription has a usable lastSeenAt (> zero). If any has
 // no usable lastSeenAt — missing, null, or the BSON zero date, i.e. a member
 // who was invited but has never opened the room — it returns nil, meaning "not
 // everyone has read yet". It also returns nil for a room with no subscriptions.
-// Bots are ordinary subscriptions and are counted: a botDM room (the bot never
-// reads) therefore always resolves to nil. The caller $unsets
-// rooms.minUserLastSeenAt on a nil result.
+// Bots (u.isBot) are excluded: a passive bot never freezes the floor, and a
+// botDM resolves to the human's lastSeenAt. A room with only bot subscriptions
+// therefore resolves to nil. The caller $unsets rooms.minUserLastSeenAt on a
+// nil result.
 func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID string) (*time.Time, error) {
-	// The whole result is determined by a single document: the room's
+	// The whole result is determined by a single document: the room's non-bot
 	// subscription with the smallest lastSeenAt. The (roomId, lastSeenAt) index
 	// (non-sparse, so missing fields are indexed as null) returns the room's
 	// subscriptions in ascending lastSeenAt order, and BSON sorts missing/null
@@ -1169,13 +1170,16 @@ func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID
 	//     read → strict floor is nil ("not everyone has read yet");
 	//   - smallest value is a real post-zero date → every member has read and
 	//     that value IS the minimum → the floor.
-	// This replaces the prior full-room $group scan with a single (covered)
-	// index seek, which matters because this runs on the message-read hot path.
+	// The (roomId, lastSeenAt) index still serves the sort; the u.isBot != true
+	// predicate is applied as a residual filter (bots are few per room, and
+	// $ne yields no tight index bound), so this stays a bounded index seek on the
+	// message-read hot path rather than the prior full-room $group scan. $ne:true
+	// (not isBot:false) keeps legacy subs missing the flag counted as humans.
 	var doc struct {
 		LastSeenAt time.Time `bson:"lastSeenAt"`
 	}
 	err := s.subscriptions.FindOne(ctx,
-		bson.M{"roomId": roomID},
+		bson.M{"roomId": roomID, "u.isBot": bson.M{"$ne": true}},
 		options.FindOne().
 			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
 			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),
@@ -1221,6 +1225,9 @@ func (s *MongoStore) ListReadReceipts(
 			"roomId":     roomID,
 			"lastSeenAt": bson.M{"$gte": since},
 			"u.account":  bson.M{"$ne": excludeAccount},
+			// Bots are never surfaced as readers ($ne:true keeps flagless legacy
+			// human subs counted).
+			"u.isBot": bson.M{"$ne": true},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
