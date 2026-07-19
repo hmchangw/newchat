@@ -81,13 +81,13 @@ func (r *runner) publishBatch(ctx context.Context, b batch) {
 	}
 	ids := chatIDs(b.chats)
 	subj := subject.RoomCanonicalTeamsCreate(b.siteID)
-	if err := r.publish(ctx, subj, data, dedupID(b.siteID, ids)); err != nil {
+	if err := r.publish(ctx, subj, data); err != nil {
 		slog.WarnContext(ctx, "publish room-creation batch failed; will retry next run",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
 		return
 	}
 	if err := r.store.MarkRoomsCreated(ctx, roomCreatedRefs(b.chats)); err != nil {
-		slog.WarnContext(ctx, "mark rooms created failed; batch republishes next run (dedup absorbs it)",
+		slog.WarnContext(ctx, "mark rooms created failed; batch republishes next run (room-worker is idempotent on chat id)",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
 	}
 }

@@ -7,7 +7,8 @@
 Focused changes to the Teams chat sync pipeline, each independent: (1) finalize
 small chats inline, (2) hand the run deadline to Kubernetes (remove
 `RUN_TIMEOUT`), (3) throttle logging, (4) fetch the least-caught-up users first,
-(5) ensure indexes at startup, (6) drop the OTel SDK from teams-room-creation.
+(5) ensure indexes at startup, (6) drop the OTel SDK from teams-room-creation,
+(7) drop publish-side dedup from teams-room-creation.
 
 ## 1. Finalize small chats inline (skip member-sync)
 
@@ -120,6 +121,19 @@ requires a tracer/propagator, so it passes no-ops (`noop.NewTracerProvider()`,
 `propagation.TraceContext{}`) — the same call this service's integration test and
 `tools/loadgen` already use. `o11y/nats` gates header work on `O11Y_ENABLED`, so
 tracing stays off the hot path. slog is unchanged (set up in `main`, not `obs`).
+
+## 7. Drop publish-side dedup from teams-room-creation
+
+The batch publisher set a deterministic `Nats-Msg-Id`
+(`teamroom:{siteID}:{sha256 of sorted chat ids}`) for JetStream server-side
+dedup. But this is a CronJob that re-runs minutes-to-hours later — far outside
+any `Duplicates` window — so cross-run dedup never fired, and the design already
+called it "best-effort, not load-bearing". The real guarantee against duplicate
+room creation is the downstream room-worker being idempotent on chat id. So the
+`dedupID` helper and the `Nats-Msg-Id` are removed: `publishFunc` drops its
+`dedupID` parameter and `PublishMsg` is called with no `WithMsgID`. The
+`dedupID`-only `publisher_test.go` is deleted (the publish path stays covered by
+`runner_test.go` and the integration test).
 
 ## Testing
 

@@ -44,7 +44,7 @@ Service directory: `teams-room-creation/`
 | `config.go` | `caarlos0/env` `Config` struct + `validateConfig` |
 | `store.go` | `TeamsChatStore` interface + `//go:generate mockgen` |
 | `store_mongo.go` | Mongo read/write implementation |
-| `publisher.go` | NATS/JetStream connect + batch publish (dedup msgID) |
+| `publisher.go` | NATS/JetStream connect + batch publish |
 | `runner.go` | Orchestration: list → group → batch → publish → flip |
 | `runner_test.go`, `store_mongo_test.go`, `main_test.go` | unit tests |
 | `integration_test.go` | testcontainers (`testutil.MongoDB` + `testutil.NATS`) |
@@ -106,18 +106,11 @@ ownership** — `ROOMS` is owned by ops/IaC. Cross-site delivery is handled by
 the NATS supercluster/gateway routing (an ops concern); the job simply
 publishes to `chat.room.canonical.{chat.siteId}.teams.create` for each group.
 
-Published via JetStream `PublishMsg`, blocking on `PubAck`, with a
-deterministic dedup id:
-
-```
-Nats-Msg-Id = teamroom:{siteID}:{sha256-hex of sorted chat IDs in the batch}
-```
-
-so a re-run that republishes an un-flipped batch is deduplicated server-side.
-This is best-effort across cron runs: if ops want to rely on it, the `ROOMS`
-stream's `Duplicates` window must be ≥ the CronJob interval — otherwise
-duplicate suppression rests on downstream room-worker idempotency (already
-noted out-of-scope in §9).
+Published via JetStream `PublishMsg`, blocking on `PubAck`. **No publish-side
+dedup** (`Nats-Msg-Id`): this is a CronJob that re-runs minutes-to-hours later,
+far outside any `ROOMS` `Duplicates` window, so server-side dedup would never
+fire across runs anyway. Duplicate suppression rests entirely on the downstream
+room-worker being idempotent on chat id (already noted out-of-scope in §9).
 
 ## 5. Store
 
@@ -180,7 +173,7 @@ run():
   for each (siteId, chats) group:                # bounded by MAX_WORKERS
     for each batch of up to N chats:
       evt = build TeamsRoomCreateEvent(batch, Timestamp=now)   # site is on the subject
-      ack, err = publish(subject.RoomCanonicalTeamsCreate(siteId), evt, dedupID)
+      ack, err = publish(subject.RoomCanonicalTeamsCreate(siteId), evt)
       if err: log warn, continue                 # chats stay flagged for next run
       store.MarkRoomsCreated(batch refs)          # option C: CAS-flip only on ack
 ```
@@ -191,9 +184,9 @@ run():
 - **Total failure** (cannot connect to Mongo/NATS, cannot list) returns a
   non-zero exit so the CronJob surfaces it.
 - **At-least-once** semantics: a crash after `PublishMsg` acks but before
-  `MarkRoomsCreated` republishes the batch next run; the deterministic dedup id
-  makes the republish a server-side no-op, and the downstream room-worker must
-  be idempotent on chat id (out of scope for this service).
+  `MarkRoomsCreated` republishes the batch next run; the downstream room-worker
+  must be idempotent on chat id (out of scope for this service), which is what
+  makes the republish safe.
 
 ## 8. Testing (TDD, Red-Green-Refactor)
 
