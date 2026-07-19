@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -29,9 +31,6 @@ type Config struct {
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
 
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
-	// RunTimeout is the whole-job context deadline. Default 2 days, expressed as
-	// 48h because Go's time.Duration (and caarlos0/env) can't parse a "d" unit.
-	RunTimeout time.Duration `env:"RUN_TIMEOUT" envDefault:"48h"`
 
 	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
 	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`
@@ -55,8 +54,8 @@ func main() {
 //
 //nolint:gocritic // hugeParam: cfg is passed by value once at startup; not a hot path
 func validateConfig(cfg Config) error {
-	if cfg.MaxWorkers <= 0 || cfg.RunTimeout <= 0 {
-		return fmt.Errorf("invalid config: MAX_WORKERS and RUN_TIMEOUT must be positive")
+	if cfg.MaxWorkers <= 0 {
+		return fmt.Errorf("invalid config: MAX_WORKERS must be positive")
 	}
 	return nil
 }
@@ -72,8 +71,11 @@ func run() error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
-	defer cancel()
+	// SIGTERM/SIGINT (pod deletion, Job activeDeadlineSeconds) cancels the run so
+	// it aborts between operations instead of being killed mid-batch. The run
+	// deadline is owned by the Kubernetes CronJob, not an app-level timeout.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {

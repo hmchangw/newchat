@@ -24,7 +24,6 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
-	assert.Equal(t, 240*time.Hour, cfg.RunTimeout, "default RUN_TIMEOUT is 10 days (240h; Go durations can't express 'd')")
 	assert.Equal(t, "2026-04-01T00:00:00Z", cfg.DefaultFrom)
 	assert.Equal(t, "site-default", cfg.DefaultSiteID, "SYNC_DEFAULT_SITE_ID is required,notEmpty")
 	assert.Equal(t, 50, cfg.GraphChatsPageSize, "default $top is Graph's max for list chats")
@@ -52,7 +51,7 @@ func TestConfig_MissingDefaultSiteID(t *testing.T) {
 func baseConfig() Config {
 	return Config{
 		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
-		MaxWorkers: 8, RunTimeout: 30 * time.Minute,
+		MaxWorkers:         8,
 		DefaultFrom:        "2026-04-01T00:00:00Z",
 		GraphTenantID:      "tenant",
 		GraphClientID:      "client",
@@ -81,16 +80,6 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name:    "negative max workers",
 			mutate:  func(c *Config) { c.MaxWorkers = -1 },
-			wantErr: true,
-		},
-		{
-			name:    "zero run timeout",
-			mutate:  func(c *Config) { c.RunTimeout = 0 },
-			wantErr: true,
-		},
-		{
-			name:    "negative run timeout",
-			mutate:  func(c *Config) { c.RunTimeout = -time.Second },
 			wantErr: true,
 		},
 		{

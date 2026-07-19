@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -39,8 +41,11 @@ func run() error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
-	defer cancel()
+	// SIGTERM/SIGINT (pod deletion, Job activeDeadlineSeconds) cancels the run so
+	// it aborts between operations instead of being killed mid-batch. The run
+	// deadline is owned by the Kubernetes CronJob, not an app-level timeout.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
