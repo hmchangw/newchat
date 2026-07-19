@@ -3846,3 +3846,87 @@ func TestEnsureIndexes_UsersAccountIndexOptionsConflict_Integration(t *testing.T
 	require.Contains(t, err.Error(), "drop the old non-unique account_1 index",
 		"error must direct operators to drop the conflicting non-unique index")
 }
+
+func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	_, err := db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "tsA1", "threadRoomId": "tr1", "roomId": "r1", "parentMessageId": "p1", "userId": "uA", "userAccount": "alice", "hasMention": true},
+		bson.M{"_id": "tsA2", "threadRoomId": "tr2", "roomId": "r2", "parentMessageId": "p2", "userId": "uA", "userAccount": "alice", "hasMention": false},
+		bson.M{"_id": "tsB1", "threadRoomId": "tr9", "roomId": "r1", "parentMessageId": "p9", "userId": "uB", "userAccount": "bob", "hasMention": true},
+	})
+	require.NoError(t, err)
+
+	rows, err := store.ClearThreadSubscriptionsForAccount(ctx, "alice", now)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	got := map[string]model.ThreadSubscription{}
+	for _, r := range rows {
+		got[r.ThreadRoomID] = r
+	}
+	assert.Equal(t, "r1", got["tr1"].RoomID)
+	assert.Equal(t, "p1", got["tr1"].ParentMessageID)
+	assert.Equal(t, "r2", got["tr2"].RoomID)
+
+	// alice's docs: lastSeenAt set to now, hasMention cleared.
+	for _, id := range []string{"tsA1", "tsA2"} {
+		var raw bson.M
+		require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": id}).Decode(&raw))
+		ls, ok := raw["lastSeenAt"].(bson.DateTime)
+		require.True(t, ok, "lastSeenAt must be set for %s", id)
+		assert.WithinDuration(t, now, ls.Time(), time.Second)
+		assert.Equal(t, false, raw["hasMention"])
+	}
+
+	// bob untouched: no lastSeenAt, hasMention still true.
+	var bobRaw bson.M
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsB1"}).Decode(&bobRaw))
+	_, present := bobRaw["lastSeenAt"]
+	assert.False(t, present, "bob's thread sub must be untouched")
+	assert.Equal(t, true, bobRaw["hasMention"])
+}
+
+func TestMongoStore_ClearThreadSubscriptionsForAccount_Empty_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+
+	rows, err := store.ClearThreadSubscriptionsForAccount(context.Background(), "nobody", time.Now().UTC())
+	require.NoError(t, err)
+	assert.Nil(t, rows)
+}
+
+func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	subs := []model.Subscription{
+		{ID: "sA1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}, Alert: true},
+		{ID: "sA2", RoomID: "r2", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, Alert: false},
+		{ID: "sB1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}, Alert: true},
+	}
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{&subs[0], &subs[1], &subs[2]})
+	require.NoError(t, err)
+
+	require.NoError(t, store.ClearSubscriptionThreadUnreadForAccount(ctx, "alice"))
+
+	// alice r1: threadUnread unset, alert cleared.
+	var r1 bson.M
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA1"}).Decode(&r1))
+	_, present := r1["threadUnread"]
+	assert.False(t, present, "threadUnread must be $unset")
+	assert.Equal(t, false, r1["alert"])
+
+	// bob r1: untouched.
+	var bobRaw model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&bobRaw))
+	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
+	assert.True(t, bobRaw.Alert)
+}

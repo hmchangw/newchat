@@ -4076,6 +4076,7 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 | `chat.user.{account}.request.user.{siteID}.apps.categories` | [`apps.categories`](#appscategories) |
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
+| `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
 
 #### me
 
@@ -4973,6 +4974,52 @@ Empty object.
 ##### Triggered events — success path
 
 `None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### Clear All Thread Unread
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.thread.read.all`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` is the **caller's own home site** — the site that holds the user's federated thread subscriptions and runs the aggregator.
+
+Clears the unread status of **all** of the user's threads across every site the user participates in — the server side of a "mark all threads read" action. `user-service` reads the user's local thread-subscription replicas, determines the distinct owning sites, and asks each site's `room-service` to clear that user's thread-subscription read state (`lastSeenAt` advanced, `hasMention` cleared) and room-subscription thread-unread state (`threadUnread` removed, `alert` cleared). Sites that fail to respond are listed in `unavailableSites` rather than failing the request.
+
+This is a bulk **dismiss**: it clears only the requesting user's own read state. It does **not** advance thread-room read floors or emit `thread_message_read` receipt events, so other participants' read-receipt UI is unaffected.
+
+##### Request body
+
+Empty object.
+
+```json
+{}
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `clearedThreads` | number | Total thread subscriptions cleared across all responding sites. `0` when nothing was unread. |
+| `unavailableSites` | string[] | Optional. Sites whose per-site clear failed; their threads may remain unread. Omitted when all responded. |
+
+```json
+{ "clearedThreads": 7 }
+```
+
+##### Error response
+
+| Condition | `code` | Notes |
+|-----------|--------|-------|
+| Internal failure | `internal` | Local thread-subscription read failed. Per-site RPC failures degrade into `unavailableSites` rather than erroring. |
+
+##### Triggered events — success path
+
+`None — reply only. No thread_message_read receipt events are emitted (bulk dismiss).`
 
 ##### Triggered events — error path
 

@@ -109,6 +109,81 @@ func (s *UserService) GetThreadUnreadSummary(c *natsrouter.Context, _ model.Thre
 	return resp, nil
 }
 
+// ClearAllThreadUnread is the cross-site "mark all threads read" aggregator: it
+// reads the user's home-replica thread-subs, derives the distinct owning sites,
+// and asks each site's room-service to clear all of the account's thread-unread
+// state. Per-site failures degrade into UnavailableSites rather than failing the
+// call, mirroring GetThreadUnreadSummary.
+// NATS: chat.user.{account}.request.user.{siteID}.thread.read.all
+func (s *UserService) ClearAllThreadUnread(c *natsrouter.Context, _ model.ThreadReadAllRequest) (*model.ThreadReadAllResponse, error) {
+	account := c.Param("account")
+	c.WithLogValues("account", account)
+
+	rows, err := s.threadSubs.ListByAccount(c, account)
+	if err != nil {
+		return nil, fmt.Errorf("list thread subscriptions: %w", err)
+	}
+	if len(rows) == 0 {
+		return &model.ThreadReadAllResponse{}, nil
+	}
+
+	// Distinct owning sites, in first-seen order.
+	seen := make(map[string]struct{}, len(rows))
+	sites := make([]string, 0, len(rows))
+	for i := range rows {
+		site := rows[i].SiteID
+		if site == "" {
+			continue
+		}
+		if _, dup := seen[site]; dup {
+			continue
+		}
+		seen[site] = struct{}{}
+		sites = append(sites, site)
+	}
+
+	type siteResult struct {
+		cleared int
+		failed  bool
+	}
+	results := make([]siteResult, len(sites))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxSiteFanout)
+	for i, site := range sites {
+		if c.Err() != nil {
+			results[i].failed = true
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			n, err := s.rooms.ClearAllThreadUnread(c, site, account)
+			if err != nil {
+				slog.WarnContext(c, "thread-read-all site degraded",
+					"account", account, "site", site,
+					"request_id", natsutil.RequestIDFromContext(c), "error", err)
+				results[i].failed = true
+				return
+			}
+			results[i].cleared = n
+		}()
+	}
+	wg.Wait()
+
+	resp := &model.ThreadReadAllResponse{}
+	for i, site := range sites {
+		if results[i].failed {
+			resp.UnavailableSites = append(resp.UnavailableSites, site)
+			continue
+		}
+		resp.ClearedThreads += results[i].cleared
+	}
+	return resp, nil
+}
+
 // chunkStrings splits ids into slices of at most size elements.
 func chunkStrings(ids []string, size int) [][]string {
 	if size <= 0 {
