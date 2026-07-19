@@ -138,6 +138,60 @@ func TestMongoStore_UpsertChats_GroupReSyncRetriggersButNeverClobbers(t *testing
 	assert.False(t, gotB.NeedCreateRoom, "chat-sync re-sync does not set needCreateRoom; member-sync owns that")
 }
 
+// TestMongoStore_UpsertChats_SmallGroupFinalizesInline covers the inline-finalize
+// path: a non-oneOnOne chat with needMemberSync=false (a complete inline roster)
+// is finalized by this sync itself — members are written and needCreateRoom is
+// set true — and a re-sync refreshes the roster and re-flags needCreateRoom
+// (mirroring what member-sync would write for a larger chat), while siteID stays
+// immutable.
+func TestMongoStore_UpsertChats_SmallGroupFinalizesInline(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsstore")
+	store := newMongoStore(db, db)
+	ctx := context.Background()
+	now1 := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	now2 := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+
+	small := func(name, siteID string, members []model.TeamsChatMember, updatedAt time.Time) model.TeamsChat {
+		return model.TeamsChat{
+			ID: "19:small", Name: name, ChatType: "group",
+			CreatedDateTime:     time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			Members:             members,
+			SiteID:              siteID,
+			UpdatedAt:           updatedAt,
+			NeedMemberSync:      false, // inline roster complete -> finalized here
+		}
+	}
+
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{
+		small("First", "site-a", []model.TeamsChatMember{{ID: "u1", Account: "alice"}}, now1),
+	}))
+	got, err := store.writeChats.FindByID(ctx, "19:small")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, got.NeedMemberSync, "small chat skips member sync")
+	assert.True(t, got.NeedCreateRoom, "small chat is finalized room-ready by this sync")
+	require.Len(t, got.Members, 1)
+	assert.Equal(t, "alice", got.Members[0].Account, "the inline roster is written directly")
+
+	// Room-creation clears the flag; then a re-sync with a changed roster must
+	// refresh the members and re-flag needCreateRoom, without changing siteID.
+	_, err = store.writeChats.Raw().UpdateByID(ctx, "19:small", bson.M{"$set": bson.M{"needCreateRoom": false}})
+	require.NoError(t, err)
+	require.NoError(t, store.UpsertChats(ctx, []model.TeamsChat{
+		small("Renamed", "site-b", []model.TeamsChatMember{{ID: "u1", Account: "alice"}, {ID: "u2", Account: "bob"}}, now2),
+	}))
+	got2, err := store.writeChats.FindByID(ctx, "19:small")
+	require.NoError(t, err)
+	require.NotNil(t, got2)
+	assert.Equal(t, "site-a", got2.SiteID, "siteID must never change after insert")
+	assert.Equal(t, "Renamed", got2.Name, "metadata refreshes on re-sync")
+	assert.True(t, got2.UpdatedAt.Equal(now2), "updatedAt refreshes to the second write's stamp")
+	assert.False(t, got2.NeedMemberSync)
+	assert.True(t, got2.NeedCreateRoom, "re-sync re-flags needCreateRoom so room-creation re-syncs the roster")
+	require.Len(t, got2.Members, 2, "the roster refreshes to the new inline member list")
+}
+
 func TestMongoStore_UpsertChats_OneOnOneInsertOnly(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsstore")
 	store := newMongoStore(db, db)

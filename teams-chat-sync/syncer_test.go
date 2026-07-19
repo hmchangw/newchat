@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -86,7 +87,7 @@ func TestBuildChat(t *testing.T) {
 	assert.Equal(t, "group", c.ChatType)
 	assert.Equal(t, "site-a", c.SiteID)
 	assert.True(t, c.UpdatedAt.Equal(buildNow), "UpdatedAt stamped with now at build time")
-	assert.True(t, c.NeedMemberSync)
+	assert.False(t, c.NeedMemberSync, "a small group (< inlineMemberThreshold members) is finalized inline, no member sync")
 	assert.Equal(t, []model.TeamsChatMember{
 		{ID: "a1", Account: "alice", VisibleHistoryStartDateTime: gc.Members[0].VisibleHistoryStartDateTime},
 		{ID: "ghost", Account: "", VisibleHistoryStartDateTime: gc.Members[1].VisibleHistoryStartDateTime},
@@ -103,4 +104,40 @@ func TestBuildChat_UnknownMembersUseDefaultSiteID(t *testing.T) {
 	gc := msgraph.Chat{ID: "19:g9", ChatType: "group", Members: []msgraph.ChatMember{{UserID: "ghost"}}}
 	c := buildChat(gc, nil, time.Now(), "site-default")
 	assert.Equal(t, "site-default", c.SiteID)
+}
+
+// TestBuildChat_InlineThreshold pins the needMemberSync decision to the inline
+// member count: a non-oneOnOne chat whose expanded roster is below
+// inlineMemberThreshold is finalized inline (needMemberSync=false); at or above
+// the threshold it defers to teams-chat-member-sync (needMemberSync=true).
+func TestBuildChat_InlineThreshold(t *testing.T) {
+	mkMembers := func(n int) []msgraph.ChatMember {
+		ms := make([]msgraph.ChatMember, 0, n)
+		for i := 0; i < n; i++ {
+			ms = append(ms, msgraph.ChatMember{UserID: fmt.Sprintf("u%d", i)})
+		}
+		return ms
+	}
+	tests := []struct {
+		name     string
+		chatType string
+		members  int
+		want     bool // NeedMemberSync
+	}{
+		{"oneOnOne never needs member sync", model.TeamsChatTypeOneOnOne, 2, false},
+		{"empty group finalized inline", "group", 0, false},
+		{"small group finalized inline", "group", 24, false},
+		{"group one below threshold finalized inline", "group", inlineMemberThreshold - 1, false},
+		{"group at threshold defers", "group", inlineMemberThreshold, true},
+		{"large group defers", "group", 100, true},
+		{"meeting under threshold finalized inline", "meeting", 10, false},
+		{"meeting at threshold defers", "meeting", inlineMemberThreshold, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gc := msgraph.Chat{ID: "19:x", ChatType: tc.chatType, Members: mkMembers(tc.members)}
+			c := buildChat(gc, map[string]cachedUser{}, time.Now(), "site-default")
+			assert.Equal(t, tc.want, c.NeedMemberSync)
+		})
+	}
 }

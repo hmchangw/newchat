@@ -33,12 +33,12 @@ type syncConfig struct {
 // syncer runs one full teams-chat sync. Each worker persists every chat it
 // lists, including chats shared with other users: a shared chat is upserted
 // once per member rather than claimed by a single worker. Redundant writes are
-// safe because the immutable fields (siteId, and needCreateRoom via
-// $setOnInsert) are set once at the DB layer and never overwritten — a repeated
-// upsert only refreshes mutable metadata. This keeps each user's durability
-// self-contained — a user advances its watermark only after its own chats
-// persist — so one member's failure can never strand a chat that a surviving
-// member would otherwise have written.
+// safe because siteId is immutable ($setOnInsert) and every per-chat upsert is
+// idempotent — a repeated upsert only refreshes mutable metadata (and, for a
+// small chat finalized inline, re-writes the same roster and room-ready flag).
+// This keeps each user's durability self-contained — a user advances its
+// watermark only after its own chats persist — so one member's failure can
+// never strand a chat that a surviving member would otherwise have written.
 type syncer struct {
 	users TeamsUserStore
 	chats TeamsChatStore
@@ -85,10 +85,24 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defau
 	return best
 }
 
+// inlineMemberThreshold is the member-count cutoff for finalizing a
+// non-oneOnOne chat directly from the list-chats $expand=members roster instead
+// of deferring to teams-chat-member-sync. A chat whose inline roster has fewer
+// than this many members is treated as complete — Graph returns the full small
+// roster inline, so this sync writes the members and marks the chat room-ready
+// itself. A chat at or above the threshold may have an inline roster that Graph
+// truncated, so it is deferred to member-sync, which pages
+// GET /chats/{id}/members for the authoritative list. Keeping this at or below
+// Graph's inline-expansion cap is what makes "fewer than threshold ⇒ complete"
+// safe.
+const inlineMemberThreshold = 25
+
 // buildChat maps a Graph chat to the teams_chat model, resolving member
 // accounts and the owning site from the user cache. Unknown members are kept
 // with an empty account. UpdatedAt is stamped with now; the store writes it
-// verbatim on every upsert.
+// verbatim on every upsert. NeedMemberSync is true only for a non-oneOnOne chat
+// whose inline roster reaches inlineMemberThreshold — smaller chats (and every
+// oneOnOne) are finalized inline without a member-sync round trip.
 //
 //nolint:gocritic // hugeParam: gc is consumed once per chat on a batch path; passing by value keeps the mapper pure.
 func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defaultSiteID string) model.TeamsChat {
@@ -109,7 +123,7 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defa
 		Members:             members,
 		SiteID:              voteSiteID(gc.Members, cache, defaultSiteID),
 		UpdatedAt:           now,
-		NeedMemberSync:      gc.ChatType != model.TeamsChatTypeOneOnOne,
+		NeedMemberSync:      gc.ChatType != model.TeamsChatTypeOneOnOne && len(gc.Members) >= inlineMemberThreshold,
 	}
 }
 

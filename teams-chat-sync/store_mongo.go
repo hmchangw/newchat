@@ -52,8 +52,10 @@ func (s *mongoStore) SetFrom(ctx context.Context, userID string, from time.Time)
 }
 
 // UpsertChats bulk-upserts chats keyed on _id. oneOnOne chats are insert-only
-// (all fields $setOnInsert); other chat types keep createdDateTime and siteID
-// $setOnInsert-only while the mutable fields refresh.
+// (all fields $setOnInsert); a small non-oneOnOne chat is finalized inline
+// (members + needCreateRoom refreshed in $set); a large non-oneOnOne chat is
+// deferred to member-sync (members untouched). createdDateTime and siteID are
+// always $setOnInsert-only.
 func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) error {
 	models := make([]mongo.WriteModel, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
@@ -67,10 +69,15 @@ func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) e
 }
 
 // chatUpsertModel builds the upsert for one chat. createdDateTime and siteID
-// are $setOnInsert-only — once a chat has a siteID it never changes. oneOnOne
-// chats put every field under $setOnInsert: they never change after creation,
-// so an existing document is never modified (the "ignore oneOnOne update"
-// rule enforced atomically, without a read).
+// are $setOnInsert-only — once a chat has a siteID it never changes. Three
+// branches, keyed on chatType and needMemberSync:
+//   - oneOnOne: every field under $setOnInsert — they never change after
+//     creation, so an existing document is never modified (the "ignore oneOnOne
+//     update" rule enforced atomically, without a read).
+//   - non-oneOnOne, needMemberSync=false: a small chat with a complete inline
+//     roster — finalize it here ($set members + needCreateRoom=true).
+//   - non-oneOnOne, needMemberSync=true: a large chat — defer members and room
+//     creation to teams-chat-member-sync.
 //
 //nolint:gocritic // hugeParam: c is heavy but unavoidable in this builder pattern
 func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
@@ -90,8 +97,35 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 			"needCreateRoom":      true,
 		}})
 	}
-	// Non-oneOnOne chats defer room creation to teams-chat-member-sync. The two
-	// pipeline flags sit on opposite sides on purpose:
+	if !c.NeedMemberSync {
+		// Small non-oneOnOne chat (fewer than inlineMemberThreshold members): the
+		// list-chats $expand=members roster is already complete, so this sync
+		// finalizes the chat itself instead of deferring to teams-chat-member-sync.
+		// members and needCreateRoom move into $set — exactly what member-sync
+		// would write on a resolve: every re-sync re-writes the fresh roster and
+		// re-flags needCreateRoom, so each chat change yields one create-or-sync
+		// event downstream (room-creation's compare-and-set on updatedAt clears the
+		// flag). needMemberSync is forced false so member-sync skips the chat, and
+		// (unlike the defer path) needCreateRoom must NOT be $setOnInsert here.
+		return mongoutil.UpsertModel(filter, bson.M{
+			"$setOnInsert": bson.M{
+				"createdDateTime": c.CreatedDateTime,
+				"siteId":          c.SiteID,
+			},
+			"$set": bson.M{
+				"name":                c.Name,
+				"chatType":            c.ChatType,
+				"lastUpdatedDateTime": c.LastUpdatedDateTime,
+				"updatedAt":           c.UpdatedAt,
+				"members":             c.Members,
+				"needMemberSync":      false,
+				"needCreateRoom":      true,
+			},
+		})
+	}
+	// Large non-oneOnOne chat (roster at/above inlineMemberThreshold): defer room
+	// creation to teams-chat-member-sync. The two pipeline flags sit on opposite
+	// sides on purpose:
 	//   - needMemberSync in $set: re-set true on every re-sync. A chat is
 	//     re-listed whenever its lastUpdatedDateTime moves (any Teams activity,
 	//     including a membership change), so this re-triggers member-sync to
