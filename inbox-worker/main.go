@@ -178,21 +178,8 @@ func (s *mongoInboxStore) UpdateUserStatus(ctx context.Context, account, statusT
 		bson.M{"statusUpdatedAt": bson.M{"$exists": false}},
 		bson.M{"statusUpdatedAt": bson.M{"$lt": statusUpdatedAt}},
 	}}
-	res, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set})
-	if err != nil {
+	if _, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set}); err != nil {
 		return fmt.Errorf("update user status for %q: %w", account, err)
-	}
-	if res.MatchedCount == 0 {
-		// The UpdateOne above already committed; MatchedCount==0 is a correct no-op (account not on
-		// this site, or a stale event the guard rejected). CountDocuments only picks the warn
-		// message, so a failure here must not Nak/retry an already-applied write — log and move on.
-		count, cerr := s.userCol.CountDocuments(ctx, bson.M{"account": account})
-		switch {
-		case cerr != nil:
-			slog.WarnContext(ctx, "user existence check failed, skipping unknown-account log", "account", account, "error", cerr)
-		case count == 0:
-			slog.WarnContext(ctx, "user_status_updated for unknown account, skipping", "account", account)
-		}
 	}
 	return nil
 }
@@ -208,20 +195,8 @@ func (s *mongoInboxStore) UpdateUserSettings(ctx context.Context, account string
 		bson.M{"settingsUpdatedAt": bson.M{"$lt": updatedAt}},
 	}}
 	set := bson.M{"settings": settings, "settingsUpdatedAt": updatedAt}
-	res, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set})
-	if err != nil {
+	if _, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set}); err != nil {
 		return fmt.Errorf("update user settings for %q: %w", account, err)
-	}
-	if res.MatchedCount == 0 {
-		// Same reasoning as UpdateUserStatus: the write already committed, so a failed
-		// existence check must not Nak/retry — it only picks the warn message.
-		count, cerr := s.userCol.CountDocuments(ctx, bson.M{"account": account})
-		switch {
-		case cerr != nil:
-			slog.WarnContext(ctx, "user existence check failed, skipping unknown-account log", "account", account, "error", cerr)
-		case count == 0:
-			slog.WarnContext(ctx, "user_settings_updated for unknown account, skipping", "account", account)
-		}
 	}
 	return nil
 }
