@@ -110,7 +110,7 @@ func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}, {ID: "u2", Account: "bob"}},
 		SiteID:              "site-b",
 		UpdatedAt:           upsertNow,
-		NeedMemberSync:      false,
+		NeedMemberSync:      true, // forcing input: a oneOnOne must still be written needMemberSync=false
 	}
 	u := asUpdateOne(t, chatUpsertModel(c))
 	update, ok := u.Update.(bson.M)
@@ -126,7 +126,7 @@ func TestChatUpsertModel_OneOnOne_AllSetOnInsert(t *testing.T) {
 		"members":             c.Members,
 		"siteId":              "site-b",
 		"updatedAt":           upsertNow,
-		"needMemberSync":      false,
+		"needMemberSync":      false, // forced false: a oneOnOne never needs member sync
 		"needCreateRoom":      true,
 	}, soi)
 }

@@ -130,8 +130,9 @@ func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) e
 func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 	filter := bson.M{"_id": c.ID}
 	if c.ChatType == model.TeamsChatTypeOneOnOne {
-		// A oneOnOne chat is complete on first sight (exactly two known members,
-		// no separate member sync), so it is immediately ready for room creation.
+		// A oneOnOne chat is complete on first sight (exactly two known members),
+		// so it is immediately ready for room creation and never needs a separate
+		// member sync — needMemberSync is forced false regardless of the input.
 		return mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": bson.M{
 			"name":                c.Name,
 			"chatType":            c.ChatType,
@@ -140,7 +141,7 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 			"members":             c.Members,
 			"siteId":              c.SiteID,
 			"updatedAt":           c.UpdatedAt,
-			"needMemberSync":      c.NeedMemberSync,
+			"needMemberSync":      false,
 			"needCreateRoom":      true,
 		}})
 	}
