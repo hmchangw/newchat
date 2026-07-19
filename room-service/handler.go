@@ -1529,7 +1529,7 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		return nil, errInvalidThreadID
 	}
 
-	// Manual priority after Wait(): errNotRoomMember > errThreadSubNotFound > internal errors.
+	// Manual priority after Wait(): errNotRoomMember > thread-sub-missing no-op > internal errors.
 	// Plain errgroup.Group (not WithContext) so a NotFound from one goroutine does NOT cancel
 	// the siblings — otherwise context.Canceled in subErr/userSiteErr would outrank tsubErr.
 	var (
@@ -1560,7 +1560,10 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	case errors.Is(subErr, model.ErrSubscriptionNotFound):
 		return nil, errNotRoomMember
 	case errors.Is(tsubErr, model.ErrThreadSubscriptionNotFound):
-		return nil, errThreadSubNotFound
+		// The caller is a room member but does not follow this thread, so there is
+		// no thread-read state to advance. Treat the mark-as-read as an idempotent
+		// no-op and return success rather than surfacing an error to the client.
+		return &model.StatusReply{Status: "accepted"}, nil
 	case subErr != nil:
 		return nil, fmt.Errorf("get subscription: %w", subErr)
 	case tsubErr != nil:
