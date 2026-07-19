@@ -1,0 +1,30 @@
+name: tcard-service
+
+services:
+  # Card template docs live in chat.cards; the service caches them in memory
+  # at startup, re-syncs daily at TCARD_CACHE_REFRESH_AT, and on demand via
+  # POST /api/v1/cards/refresh.
+  tcard-service:
+    build:
+      context: ../..
+      dockerfile: tcard-service/deploy/Dockerfile
+    pull_policy: build
+    ports:
+      - "8087:8087"
+    env_file:
+      - path: ../../docker-local/.env
+        required: false
+    environment:
+      - PORT=8087
+      # Daily cache re-sync slot: 08:00 UTC+8 (layout 15:04Z07:00).
+      - TCARD_CACHE_REFRESH_AT=08:00+08:00
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - OTEL_SERVICE_NAME=tcard-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

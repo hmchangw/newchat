@@ -24,6 +24,7 @@ include:
   - ../room-worker/deploy/docker-compose.yml
   - ../search-service/deploy/docker-compose.yml
   - ../search-sync-worker/deploy/docker-compose.yml
+  - ../tcard-service/deploy/docker-compose.yml
   - ../upload-service/deploy/docker-compose.yml
   - ../user-presence-service/deploy/docker-compose.yml
   - ../user-service/deploy/docker-compose.yml
