@@ -5,8 +5,9 @@
 **Amends:** `2026-07-14-teams-chat-sync-design.md`, `2026-07-15-teams-chat-member-sync-design.md`
 
 Focused changes to the Teams chat sync pipeline, each independent: (1) finalize
-small chats inline, (2) longer run timeouts, (3) throttle logging, (4) fetch the
-least-caught-up users first, (5) ensure indexes at startup.
+small chats inline, (2) hand the run deadline to Kubernetes (remove
+`RUN_TIMEOUT`), (3) throttle logging, (4) fetch the least-caught-up users first,
+(5) ensure indexes at startup.
 
 ## 1. Finalize small chats inline (skip member-sync)
 
@@ -49,18 +50,23 @@ mutually exclusive, so the same field is never written on both sides of one
 update, and `errSuperseded` (member-sync's optimistic write) already guards the
 concurrent-write race.
 
-## 2. Longer run timeouts
+## 2. Run deadline owned by Kubernetes (RUN_TIMEOUT removed)
 
-`RUN_TIMEOUT` is the whole-job context deadline for these run-to-completion
-CronJobs. Backfills over the whole federation, paced by Graph throttling, can run
-far longer than the old 30m default.
+Backfills over the whole federation, paced by Graph throttling, can run far
+longer than any sensible app-level default, and the deadline is an operational
+concern better expressed once in the Job spec. So `RUN_TIMEOUT` is **removed**
+from all teams-* jobs (`teams-chat-sync`, `teams-chat-member-sync`,
+`teams-room-creation`); the Kubernetes CronJob owns the deadline via
+`activeDeadlineSeconds`.
 
-- `teams-chat-sync`: **`240h`** (10 days)
-- `teams-chat-member-sync`: **`48h`** (2 days)
-
-Go's `time.Duration` (and `caarlos0/env`) has no `d` unit, so the values are
-expressed in hours. Both stay overridable via the `RUN_TIMEOUT` env var; the
-`deploy/docker-compose.yml` defaults track the code defaults.
+Each `run()` replaces `context.WithTimeout(…, RUN_TIMEOUT)` with
+`signal.NotifyContext(context.Background(), SIGINT, SIGTERM)`, so the SIGTERM
+Kubernetes sends when the deadline is exceeded (or the pod is deleted) cancels
+the run context — the job aborts cleanly between operations (Graph calls,
+throttle waits, and Mongo all honor the context) instead of being SIGKILLed
+mid-batch. This matches the sibling `teams-user-sync`, which already worked this
+way. Config fields, validation, `deploy/docker-compose.yml` entries, and the
+spec config-table rows for `RUN_TIMEOUT` are all dropped.
 
 ## 3. Log Graph throttling / 429 Retry-After
 
@@ -114,7 +120,8 @@ TDD, per repo convention (≥ 80% coverage):
   MongoDB integration test that a small chat is finalized with members +
   `needCreateRoom`, and that a re-sync refreshes the roster and re-flags
   `needCreateRoom` while `siteId` stays immutable.
-- **Item 2** — `TestConfig_Defaults` asserts the new `RUN_TIMEOUT` defaults parse.
+- **Item 2** — config tests drop the `RUN_TIMEOUT` default assertion and the
+  timeout validation cases (the field no longer exists).
 - **Item 3** — a slog-capturing test asserting a `WARN` with the operation,
   status, and `Retry-After` on a throttled chats request and a throttled members
   request, and no throttle log on success.

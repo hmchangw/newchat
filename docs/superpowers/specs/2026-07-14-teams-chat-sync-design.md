@@ -25,9 +25,11 @@ upserts the result into `teams_chat`. Downstream consumers use `teams_chat`
 
 ## Service layout
 
-New top-level flat service `teams-chat-sync/` (repo convention), modeled on the
-`user-presence-service/sync` run-to-completion job (`run() error`, `RUN_TIMEOUT`
-context, deferred cleanup, `os.Exit(1)` on failure):
+New top-level flat service `teams-chat-sync/` (repo convention), a
+run-to-completion job like the sibling `teams-user-sync` (`run() error`, a
+`signal.NotifyContext(SIGINT, SIGTERM)` context so the Kubernetes CronJob owns
+the deadline via `activeDeadlineSeconds`, deferred cleanup, `os.Exit(1)` on
+failure):
 
 ```
 teams-chat-sync/
@@ -237,7 +239,6 @@ required vars.
 | `SYNC_DEFAULT_FROM` | `2026-04-01T00:00:00Z` | RFC3339 watermark for users with no `from` |
 | `SYNC_DEFAULT_SITE_ID` | required | Fallback siteID for chats whose member vote is empty; required,notEmpty so every synced chat gets a non-empty siteID |
 | `GRAPH_CHATS_PAGE_SIZE` | `50` | `$top` page size for Graph list-chats requests (50 = Graph's documented max) |
-| `RUN_TIMEOUT` | `240h` | Whole-job context deadline (10 days; Go durations can't express `d`) |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |
 | `GRAPH_CLIENT_SECRET` | required | App registration secret |

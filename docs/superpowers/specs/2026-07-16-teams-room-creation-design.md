@@ -159,7 +159,10 @@ type TeamsChatStore interface {
 | `NATS_CREDS_FILE` | `""` | |
 | `ROOM_CREATE_BATCH_SIZE` | `100` | chats per event; must be > 0 |
 | `MAX_WORKERS` | `8` | parallel publish across site-group batches |
-| `RUN_TIMEOUT` | `30m` | whole-run deadline |
+
+The run deadline is owned by the Kubernetes CronJob (`activeDeadlineSeconds`),
+not an app-level timeout: `run()` uses a `signal.NotifyContext(SIGINT, SIGTERM)`
+context so the pod's termination signal aborts the run between operations.
 
 `obs.Init` wires o11y once (traces/metrics/logs). No secrets defaulted.
 
