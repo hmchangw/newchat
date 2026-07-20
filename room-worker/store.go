@@ -110,6 +110,8 @@ type SubscriptionStore interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 	// member.list reads room_members whenever it holds any row, so a direct add must write there too once the table is non-empty (not only for orgs).
 	HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error)
+	// ExistingOrgMembers returns which of orgIDs already have an org room_members row in the room, so member_added fires only for genuinely new orgs (a full re-add is a no-op).
+	ExistingOrgMembers(ctx context.Context, roomID string, orgIDs []string) (map[string]struct{}, error)
 	GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error)
 	// FetchOrgDisplayUsers returns the dept/sect display rows feeding the pkg/orgdisplay rollup.
 	FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error)

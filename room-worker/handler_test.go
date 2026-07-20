@@ -794,6 +794,7 @@ func TestHandler_ProcessAddMembers_WithOrgs(t *testing.T) {
 		{ID: "u1", Account: "alice", SiteID: "site-a"},
 	}, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"eng"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	req := model.AddMembersRequest{
 		RoomID:           "r1",
@@ -929,6 +930,7 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 		{SectID: "eng", SectName: "Engineering", SectTCName: "工程", SectDescription: "Builds the product"},
 		{SectID: "eng", SectName: "Engineering", SectTCName: "工程", SectDescription: "Builds the product"},
 	}, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", RequesterAccount: "alice",
@@ -1005,6 +1007,7 @@ func TestHandler_ProcessAddMembers_OrgWithNoUsersFallsBackToOrgID(t *testing.T) 
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 0, 0, gomock.Any()).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"ghost-org"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", RequesterAccount: "alice", Orgs: []string{"ghost-org"},
@@ -1042,6 +1045,7 @@ func TestHandler_ProcessAddMembers_OrgDisplayFetchErrorFailsBeforeWrites(t *test
 		Return([]AddMemberCandidate{{Account: "bob"}}, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"eng"}).Return(nil, fmt.Errorf("mongo timeout"))
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 	// No lookup/write expectations: the failure must precede them all.
 
 	req := model.AddMembersRequest{
@@ -1082,6 +1086,7 @@ func TestHandler_ProcessAddMembers_BackfillUserMissing(t *testing.T) {
 		Return([]AddMemberCandidate{}, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"eng"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
 		ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
@@ -1506,13 +1511,14 @@ func TestHandler_ProcessAddMembers_ExistingOrgsWritesIndividuals(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestHandler_ProcessAddMembers_OrgToIndividualUpgrade verifies the bug fix:
-// when an account already has a subscription (e.g. added earlier via org) but
-// no individual room_members row, an explicit add via req.Users must write the
-// missing individual row WITHOUT creating a duplicate subscription. It also
-// verifies that no MsgCanonicalCreated sys-msg and no MemberEvent are
-// published — the upgrade is a silent backfill, no membership state changed
-// for the room itself.
+// TestHandler_ProcessAddMembers_OrgToIndividualUpgrade verifies the upgrade
+// path: when an account already has a subscription (e.g. added earlier via org)
+// but no individual room_members row, an explicit add via req.Users writes the
+// missing individual row WITHOUT creating a duplicate subscription. Because this
+// changes member.list (alice gains an individual entry), member_added MUST fire
+// carrying alice so a live client learns she is now an individual member. No new
+// subscription is created, so accounts stays empty and no members_added sys-msg
+// is posted (it would render an empty member list).
 func TestHandler_ProcessAddMembers_OrgToIndividualUpgrade(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -1565,16 +1571,62 @@ func TestHandler_ProcessAddMembers_OrgToIndividualUpgrade(t *testing.T) {
 	err := h.processAddMembers(ctx, data)
 	require.NoError(t, err)
 
-	// No membership state changed for the room (only a silent individual-row
-	// backfill); the worker MUST NOT emit a sys-msg or member-add event that
-	// would render a members_added sys-msg with an empty member list.
-	memberEventSubj := subject.RoomMemberEvent(roomID)
+	// member_added fires (member.list changed) carrying only alice, with no new
+	// accounts; the sys-msg is suppressed (no genuinely-new members joined).
+	evt, _ := findMemberAddEvent(t, published, roomID)
+	assert.Empty(t, evt.Accounts, "an upgrade creates no new subscription → no accounts")
+	require.Len(t, evt.Members, 1, "the upgraded individual is announced in members")
+	assert.Equal(t, model.RoomMemberIndividual, evt.Members[0].Type)
+	assert.Equal(t, "alice", evt.Members[0].Account)
+	assert.Equal(t, "u_alice", evt.Members[0].ID)
+
 	sysMsgSubj := subject.MsgCanonicalCreated("site-a")
 	for _, p := range published {
-		assert.NotEqual(t, memberEventSubj, p.subj,
-			"upgrade-only path must NOT publish MemberAddEvent")
 		assert.NotEqual(t, sysMsgSubj, p.subj,
-			"upgrade-only path must NOT publish a members_added sys-msg")
+			"upgrade-only path must NOT publish a members_added sys-msg (empty member list)")
+	}
+}
+
+// TestHandler_ProcessAddMembers_OrgReAddAlreadyPresent_NoEvent verifies comment 2:
+// re-adding an org that is already fully present (all its members subscribed, its
+// org row already written) changes nothing, so neither member_added nor the
+// members_added sys-msg is published.
+func TestHandler_ProcessAddMembers_OrgReAddAlreadyPresent_NoEvent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	var published []publishedMsg
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: append([]byte(nil), data...)})
+		return nil
+	}
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
+	// eng's members are all already subscribed → no new subs, no new individual rows.
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string{"eng"}, nil, "r1").
+		Return([]AddMemberCandidate{{Account: "carol", HasSubscription: true, HasIndividualRoomMember: false}}, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil)
+	// eng already has an org row → newOrgs is empty → nothing changed.
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), "r1", []string{"eng"}).Return(map[string]struct{}{"eng": {}}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 0, 0, gomock.Any()).Return(false, nil)
+	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"eng"}).Return(nil, nil)
+
+	req := model.AddMembersRequest{
+		RoomID: "r1", RequesterAccount: "alice", Orgs: []string{"eng"},
+		History:   model.HistoryConfig{Mode: model.HistoryModeAll},
+		Timestamp: 1735689600000,
+	}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data))
+
+	memberEventSubj := subject.RoomMemberEvent("r1")
+	sysMsgSubj := subject.MsgCanonicalCreated("site-a")
+	for _, p := range published {
+		assert.NotEqual(t, memberEventSubj, p.subj, "re-add of a present org must NOT publish member_added")
+		assert.NotEqual(t, sysMsgSubj, p.subj, "re-add of a present org must NOT publish a members_added sys-msg")
 	}
 }
 
@@ -4206,6 +4258,7 @@ func TestHandler_ProcessAddMembers_BackfillRunsOnFirstOrgTransition(t *testing.T
 
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"o1"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore: testKeyStore, keySender: testKeySender}
 
@@ -4236,6 +4289,7 @@ func TestHandler_ProcessAddMembers_BackfillSubscriptionAccountsErrorFailsHard(t 
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"o1"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, fmt.Errorf("transient mongo error"))
@@ -4268,6 +4322,7 @@ func TestHandler_ProcessAddMembers_BackfillFindUsersErrorFailsHard(t *testing.T)
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"o1"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{"existing_user"}, nil)
@@ -4308,6 +4363,7 @@ func TestHandler_ProcessAddMembers_BackfillSkippedWhenRoomAlreadyHasOrgs(t *test
 
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"o_new"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore: testKeyStore, keySender: testKeySender}
 
@@ -4354,6 +4410,7 @@ func TestHandler_ProcessAddMembers_IndividualFilter_DirectAndOrgOverlap(t *testi
 		})
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"o1"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore: testKeyStore, keySender: testKeySender}
 
@@ -4406,6 +4463,7 @@ func TestHandler_ProcessAddMembers_IndividualFilter_OrgOnly(t *testing.T) {
 		})
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"o1"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore: testKeyStore, keySender: testKeySender}
 
@@ -5167,6 +5225,7 @@ func TestHandler_ProcessAddMembers_Content_OrgAddWithOneMember_UsesMulti(t *test
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().FetchOrgDisplayUsers(gomock.Any(), []string{"eng"}).Return(nil, nil)
+	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 
 	var published []publishedMsg
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {

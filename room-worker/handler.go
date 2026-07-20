@@ -716,6 +716,9 @@ type addMemberInputs struct {
 	// orgDisplayRows feeds the event's org entries; read only when req.Orgs is non-empty and BEFORE any
 	// write, so a transient failure Naks a still-clean delivery (post-write, redelivery would announce nothing).
 	orgDisplayRows []orgdisplay.User
+	// existingOrgIDs is the subset of req.Orgs already present as org rows, read pre-write so member_added
+	// fires only for genuinely new orgs (a full re-add of a present org is a no-op). Empty when req.Orgs is empty.
+	existingOrgIDs map[string]struct{}
 }
 
 // loadAddMemberInputs runs the reads concurrently. Plain errgroup (not WithContext)
@@ -757,6 +760,14 @@ func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembers
 				return fmt.Errorf("fetch org display users: %w", err)
 			}
 			out.orgDisplayRows = rows
+			return nil
+		})
+		g.Go(func() error {
+			existing, err := h.store.ExistingOrgMembers(ctx, req.RoomID, req.Orgs)
+			if err != nil {
+				return fmt.Errorf("check existing org members: %w", err)
+			}
+			out.existingOrgIDs = existing
 			return nil
 		})
 	}
@@ -1065,15 +1076,18 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 	}
 
-	// 8. Publish MemberAddEvent (actualAccounts was built above alongside subs).
-	// Gate on "actual membership change visible to room": new individual subs
-	// (actualAccounts) or new org rows (req.Orgs). The org→individual upgrade
-	// path (only needIRM populated) writes the missing individual room_members
-	// row silently — no membership state changed for the room itself, so
-	// emitting an empty MemberAddEvent and a members_added sys-msg with no
-	// actual members listed would mislead end users.
+	// 8. Publish MemberAddEvent. Fire whenever member.list composition changes:
+	// new subscriptions (actualAccounts), an org→individual upgrade (needIRM writes
+	// a fresh individual row), or a genuinely new org row (newOrgs). A full re-add
+	// of an already-present org touches none of these and stays silent.
+	newOrgs := 0
+	for _, org := range req.Orgs {
+		if _, present := inputs.existingOrgIDs[org]; !present {
+			newOrgs++
+		}
+	}
 	historySharedSince := historySharedSincePtr(req.History, req.Timestamp, req.RoomID)
-	if len(actualAccounts) > 0 || len(req.Orgs) > 0 {
+	if len(actualAccounts) > 0 || len(needIRM) > 0 || newOrgs > 0 {
 		memberAddEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
 			RoomID:             req.RoomID,
@@ -1089,7 +1103,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		// Marshalled BEFORE Members is attached — INBOX payloads must omit it (see model.MemberAddEvent.Members).
 		inboxPayload, _ := json.Marshal(memberAddEvt)
 
-		memberAddEvt.Members = buildAddedMembers(&req, subs, allowedIndividual, inputs.orgDisplayRows, userMap)
+		memberAddEvt.Members = buildAddedMembers(&req, inputs.orgDisplayRows, userMap)
 		memberAddData, _ := json.Marshal(memberAddEvt)
 		if err := h.publish(ctx, subject.RoomMemberEvent(req.RoomID), memberAddData, ""); err != nil {
 			slog.ErrorContext(ctx, "member add event publish failed",
@@ -1118,43 +1132,48 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			}
 		}
 
-		// Individuals = req.Users (direct + channel individuals, merged by
-		// room-service) minus the requester — mirrors create's creator strip.
-		sysIndividuals := withoutAccount(req.Users, req.RequesterAccount)
-		membersAdded := model.MembersAdded{
-			Individuals:     sysIndividuals,
-			Orgs:            nonNil(req.Orgs),
-			Channels:        nonNil(req.Channels),
-			AddedUsersCount: len(subs),
-		}
-		sysMsgData, _ := json.Marshal(membersAdded)
-		seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
-			fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-		content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
-			if u, ok := userMap[a]; ok {
-				return &u
+		// members_added sys-msg: a pure org→individual upgrade adds no new member and
+		// would render an empty member list, so post it only when genuinely new
+		// members joined (actualAccounts) or a new org was added (newOrgs).
+		if len(actualAccounts) > 0 || newOrgs > 0 {
+			// Individuals = req.Users (direct + channel individuals, merged by
+			// room-service) minus the requester — mirrors create's creator strip.
+			sysIndividuals := withoutAccount(req.Users, req.RequesterAccount)
+			membersAdded := model.MembersAdded{
+				Individuals:     sysIndividuals,
+				Orgs:            nonNil(req.Orgs),
+				Channels:        nonNil(req.Channels),
+				AddedUsersCount: len(subs),
 			}
-			return nil
-		})
-		sysMsg := model.Message{
-			ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
-			RoomID:      req.RoomID,
-			UserID:      requester.ID,
-			UserAccount: requester.Account,
-			Type:        model.MessageTypeMembersAdded,
-			Content:     content,
-			SysMsgData:  sysMsgData,
-			CreatedAt:   acceptedAt,
-		}
-		msgEvt := model.MessageEvent{
-			Event:     model.EventCreated,
-			Message:   sysMsg,
-			SiteID:    room.SiteID,
-			Timestamp: now.UnixMilli(),
-		}
-		msgEvtData, _ := json.Marshal(msgEvt)
-		if err := h.publish(ctx, subject.MsgCanonicalCreated(room.SiteID), msgEvtData, natsutil.CanonicalDedupID(&msgEvt)); err != nil {
-			return fmt.Errorf("publish add-members system message: %w", err)
+			sysMsgData, _ := json.Marshal(membersAdded)
+			seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
+				fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
+			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
+				if u, ok := userMap[a]; ok {
+					return &u
+				}
+				return nil
+			})
+			sysMsg := model.Message{
+				ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
+				RoomID:      req.RoomID,
+				UserID:      requester.ID,
+				UserAccount: requester.Account,
+				Type:        model.MessageTypeMembersAdded,
+				Content:     content,
+				SysMsgData:  sysMsgData,
+				CreatedAt:   acceptedAt,
+			}
+			msgEvt := model.MessageEvent{
+				Event:     model.EventCreated,
+				Message:   sysMsg,
+				SiteID:    room.SiteID,
+				Timestamp: now.UnixMilli(),
+			}
+			msgEvtData, _ := json.Marshal(msgEvt)
+			if err := h.publish(ctx, subject.MsgCanonicalCreated(room.SiteID), msgEvtData, natsutil.CanonicalDedupID(&msgEvt)); err != nil {
+				return fmt.Errorf("publish add-members system message: %w", err)
+			}
 		}
 	}
 
@@ -1198,10 +1217,10 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 }
 
 // buildAddedMembers assembles the member.list-shaped display entries (contract: model.MemberAddEvent.Members),
-// org entries first. Entries are the RoomMemberEntry payload only — no membership envelope (id/rid/ts).
-func buildAddedMembers(req *model.AddMembersRequest, subs []*model.Subscription,
-	allowedIndividual map[string]struct{}, orgDisplayRows []orgdisplay.User, userMap map[string]model.User) []model.RoomMemberEntry {
-	members := make([]model.RoomMemberEntry, 0, len(req.Orgs)+len(subs))
+// org entries first, echoing exactly the orgs and users the request named. Entries are the RoomMemberEntry
+// payload only — no membership envelope (id/rid/ts).
+func buildAddedMembers(req *model.AddMembersRequest, orgDisplayRows []orgdisplay.User, userMap map[string]model.User) []model.RoomMemberEntry {
+	members := make([]model.RoomMemberEntry, 0, len(req.Orgs)+len(req.Users))
 	if len(req.Orgs) > 0 {
 		agg := orgdisplay.Build(req.Orgs, orgDisplayRows)
 		for _, orgID := range req.Orgs {
@@ -1215,12 +1234,15 @@ func buildAddedMembers(req *model.AddMembersRequest, subs []*model.Subscription,
 			members = append(members, entry)
 		}
 	}
-	for _, sub := range subs {
-		account := sub.User.Account
-		if _, ok := allowedIndividual[account]; !ok {
-			continue // org-expanded: member.list shows these via the org row only
+	// One individual entry per requested user that was actually added or upgraded
+	// (present in userMap = gained a subscription or an individual row). Org-expanded
+	// accounts (never in req.Users) and already-complete members (absent from userMap)
+	// are excluded — the former ride the org row, the latter need no re-announcement.
+	for _, account := range req.Users {
+		user, ok := userMap[account]
+		if !ok {
+			continue
 		}
-		user := userMap[account]
 		members = append(members, model.RoomMemberEntry{
 			ID:          user.ID,
 			Type:        model.RoomMemberIndividual,

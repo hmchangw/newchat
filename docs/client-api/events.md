@@ -665,18 +665,21 @@ the event on the same room stream they already subscribe to.
 
 ### member_added (MemberAddEvent)
 
-Published once when at least one new account or org is added, or an already-present org is
-re-added (see the no-op note below for what does **not** fire). Triggered by
+Published once whenever the room's member list actually changes: a new account joins, a
+genuinely new org is added, or an existing org member is upgraded to an individual membership
+(see the no-op note below for what does **not** fire). Triggered by
 [Add Members](request-reply.md#add-members) and indirectly by
 [Create Room](request-reply.md#create-room).
 
-A `members_added` system message also flows through the message pipeline as a
-`new_message` room event.
+When new members actually join (or a new org is added), a `members_added` system message also
+flows through the message pipeline as a `new_message` room event; a pure org→individual upgrade
+posts no such message.
 
-> **No-op:** if no org is requested and every requested account is already a member, or the add
-> only upgrades an existing org member to individual membership, no `member_added` event fires.
-> Re-adding an org that is already present is **not** a no-op: `member_added` still fires, carrying
-> the org's entry with `accounts: []`.
+> **No-op:** when the request changes nothing — every requested account already subscribed, no org
+> member upgraded to an individual membership, and every requested org already present — no
+> `member_added` event fires. In particular, re-adding an already-present org is a no-op. An
+> org→individual upgrade is **not** a no-op: `member_added` fires with that individual in `members`
+> and `accounts: []` (no `members_added` system message, since no one newly joined).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -684,8 +687,8 @@ A `members_added` system message also flows through the message pipeline as a
 | `roomId` | string | |
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
-| `accounts` | string[] | The newly added accounts. |
-| `members` | [RoomMemberEntry](../client-api.md#roommemberentry)[] | The member.list-shaped display entries (the [RoomMemberEntry](../client-api.md#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): org entries first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per newly subscribed direct add (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](request-reply.md#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined via org expansion appear in `accounts` only — their org entry represents them, mirroring `member.list`. |
+| `accounts` | string[] | The newly subscribed accounts (org-expanded members included). Empty on an org→individual upgrade, which creates no new subscription. |
+| `members` | [RoomMemberEntry](../client-api.md#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](../client-api.md#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](request-reply.md#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they ride `accounts` and are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |

@@ -462,6 +462,39 @@ func TestMongoStore_DeleteRoomMember_Integration(t *testing.T) {
 	})
 }
 
+func TestMongoStore_ExistingOrgMembers_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("room_members").InsertMany(ctx, []interface{}{
+		model.RoomMember{ID: "rm-eng", RoomID: "r1", Ts: time.Now().UTC(),
+			Member: model.RoomMemberEntry{ID: "eng", Type: model.RoomMemberOrg}},
+		model.RoomMember{ID: "rm-ops", RoomID: "r1", Ts: time.Now().UTC(),
+			Member: model.RoomMemberEntry{ID: "ops", Type: model.RoomMemberOrg}},
+		// An individual row whose member.id collides with a queried value must be ignored (type filter).
+		model.RoomMember{ID: "rm-ind", RoomID: "r1", Ts: time.Now().UTC(),
+			Member: model.RoomMemberEntry{ID: "sales", Type: model.RoomMemberIndividual, Account: "sales"}},
+		// A different room must not leak.
+		model.RoomMember{ID: "rm-other", RoomID: "r2", Ts: time.Now().UTC(),
+			Member: model.RoomMemberEntry{ID: "hr", Type: model.RoomMemberOrg}},
+	})
+	require.NoError(t, err)
+
+	t.Run("returns only present org ids for the room", func(t *testing.T) {
+		got, err := store.ExistingOrgMembers(ctx, "r1", []string{"eng", "ops", "new-org", "sales", "hr"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]struct{}{"eng": {}, "ops": {}}, got,
+			"eng/ops present; new-org absent, sales is individual, hr is in another room")
+	})
+
+	t.Run("empty orgIDs returns empty", func(t *testing.T) {
+		got, err := store.ExistingOrgMembers(ctx, "r1", nil)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+}
+
 func mustInsertSub(t *testing.T, db *mongo.Database, sub *model.Subscription) {
 	t.Helper()
 	_, err := db.Collection("subscriptions").InsertOne(context.Background(), sub)
@@ -1219,7 +1252,8 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	assert.Equal(t, "site-B", relayEnv.DestSiteID)
 	assertLeanMemberAddPayload(t, relayEnv.Payload, "cross-site OUTBOX member_added payload")
 
-	// A re-add is an idempotent upsert: no duplicate org row, and the event still announces the org entry.
+	// Re-adding the already-present org is a no-op: no member_added event fires
+	// (nothing changed), and the idempotent upsert inserts no duplicate org row.
 	cap2 := &publishCapture{}
 	h2 := NewHandler(store, "site-A", cap2.fn(), testKeyStore, testKeySender)
 	body2, err := json.Marshal(model.AddMembersRequest{
@@ -1234,13 +1268,8 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	require.NoError(t, h2.processAddMembers(
 		natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-aaaa00000003"), body2))
 
-	rePubs := cap2.publishesOnPrefix(subject.RoomMemberEvent(roomID))
-	require.Len(t, rePubs, 1)
-	var reEvt model.MemberAddEvent
-	require.NoError(t, json.Unmarshal(rePubs[0].data, &reEvt))
-	require.Len(t, reEvt.Members, 1)
-	assert.Equal(t, "eng", reEvt.Members[0].ID, "re-add still announces the org entry")
-	assert.Equal(t, model.RoomMemberOrg, reEvt.Members[0].Type)
+	assert.Empty(t, cap2.publishesOnPrefix(subject.RoomMemberEvent(roomID)),
+		"re-add of an already-present org fires no member_added event")
 
 	count, err := db.Collection("room_members").CountDocuments(ctx,
 		bson.M{"rid": roomID, "member.type": "org", "member.id": "eng"})

@@ -535,6 +535,33 @@ func (s *MongoStore) HasAnyRoomMembers(ctx context.Context, roomID string) (bool
 	return count > 0, nil
 }
 
+// ExistingOrgMembers returns the subset of orgIDs that already have an org
+// room_members row for roomID. Indexed on (rid, member.type, member.id).
+func (s *MongoStore) ExistingOrgMembers(ctx context.Context, roomID string, orgIDs []string) (map[string]struct{}, error) {
+	if len(orgIDs) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	cursor, err := s.roomMembers.Find(ctx,
+		bson.M{"rid": roomID, "member.type": string(model.RoomMemberOrg), "member.id": bson.M{"$in": orgIDs}},
+		options.Find().SetProjection(bson.M{"member.id": 1, "_id": 0}))
+	if err != nil {
+		return nil, fmt.Errorf("find existing org members for room %q: %w", roomID, err)
+	}
+	var rows []struct {
+		Member struct {
+			ID string `bson:"id"`
+		} `bson:"member"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode existing org members: %w", err)
+	}
+	set := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		set[r.Member.ID] = struct{}{}
+	}
+	return set, nil
+}
+
 func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]AddMemberCandidate, error) {
 	if len(orgIDs) == 0 && len(directAccounts) == 0 {
 		return nil, nil
