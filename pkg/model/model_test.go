@@ -4399,6 +4399,8 @@ func TestTeamsUserJSON_NoFrom(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &raw))
 	_, has := raw["from"]
 	assert.False(t, has, "nil From must be omitted from JSON")
+	assert.Equal(t, "", raw["engName"], "empty EngName must serialize as empty string, not be omitted")
+	assert.Equal(t, "", raw["mail"], "empty Mail must serialize as empty string, not be omitted")
 }
 
 func TestTeamsChatJSON(t *testing.T) {
@@ -4464,6 +4466,8 @@ func TestTeamsUserBSON_NoFrom(t *testing.T) {
 	assert.Equal(t, "aad-user-2", rawDoc["_id"])
 	assert.Equal(t, "site-b", rawDoc["siteId"])
 	assert.Equal(t, "bob", rawDoc["account"])
+	assert.Equal(t, "", rawDoc["engName"], "empty EngName must be present as empty string (no omitempty)")
+	assert.Equal(t, "", rawDoc["mail"], "empty Mail must be present as empty string (no omitempty)")
 }
 
 func TestTeamsChatBSON(t *testing.T) {

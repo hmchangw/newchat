@@ -89,8 +89,14 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	if err != nil {
 		return fmt.Errorf("resolve hr users: %w", err)
 	}
+	matched := 0
+	for _, c := range candidates {
+		if _, ok := hrUsers[c.Account]; ok {
+			matched++
+		}
+	}
 	s.logger.Info("hr site ids lookup result",
-		"requested", len(accounts), "matched", len(hrUsers), "unmatched", len(accounts)-len(hrUsers))
+		"requested", len(accounts), "matched", matched, "unmatched", len(accounts)-matched)
 
 	merged := make([]model.TeamsUser, 0, len(candidates))
 	for _, c := range candidates {
