@@ -49,6 +49,23 @@ RUN set -eux; \
       -o /out/elastic-operator \
       github.com/elastic/cloud-on-k8s/cmd
 
+# Upstream's Dockerfile does `COPY config/eck.yaml /conf/eck.yaml`, but that
+# file is not in the git tree — it's generated at build time by
+# hack/config-extractor/extract.sh from all-in-one.yaml + a Go program.
+# In real deployments (Helm chart, all-in-one manifest) the operator's
+# ConfigMap is mounted as a volume onto /conf/eck.yaml, overriding whatever
+# is baked in. So we ship a minimal stub here — the mount takes over at
+# runtime. This keeps the image usable if someone launches the operator
+# without a ConfigMap (defaults kick in) and matches the file layout the
+# operator's --config=/conf/eck.yaml flag expects.
+RUN mkdir -p /out/conf && \
+    printf '%s\n' \
+      '# Default stub — production deployments override this via ConfigMap' \
+      '# volume mount onto /conf/eck.yaml. See the ECK Helm chart /' \
+      '# all-in-one.yaml for the full set of tunables.' \
+      'log-verbosity: 0' \
+      > /out/conf/eck.yaml
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — minimal runtime with a current base image
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,8 +87,8 @@ RUN microdnf update -y --setopt=tsflags=nodocs \
  && rm -rf /var/cache/yum /var/cache/dnf
 
 WORKDIR /
-COPY --from=builder /out/elastic-operator     ./elastic-operator
-COPY --from=builder /go/src/github.com/elastic/cloud-on-k8s/config/eck.yaml /conf/eck.yaml
+COPY --from=builder /out/elastic-operator                                   ./elastic-operator
+COPY --from=builder /out/conf/eck.yaml                                      /conf/eck.yaml
 COPY --from=builder /go/src/github.com/elastic/cloud-on-k8s/LICENSE.txt     /licenses/LICENSE.txt
 COPY --from=builder /go/src/github.com/elastic/cloud-on-k8s/NOTICE.txt      /licenses/NOTICE.txt
 
