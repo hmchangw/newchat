@@ -34,9 +34,10 @@ func (s *mongoStore) UpsertEmployees(ctx context.Context, employees []model.Empl
 	for i := range employees {
 		rows = append(rows, employees[i].Employee)
 	}
-	// keyed on employeeId — the stable per-employee id also written as _id
-	if _, err := s.employees.BulkUpsert(ctx, rows, func(e model.Employee) any {
-		return bson.M{"employeeId": e.EmployeeID}
+	// _id = employeeId (the stable per-employee id): keys the upsert and gives
+	// the row a string _id from the filter — the wire strips Employee.ID.
+	if _, err := s.employees.BulkUpsertByID(ctx, rows, func(e model.Employee) string {
+		return e.EmployeeID
 	}); err != nil {
 		return fmt.Errorf("bulk upsert hr employees: %w", err)
 	}

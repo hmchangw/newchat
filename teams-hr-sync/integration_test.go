@@ -119,10 +119,13 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	assert.Equal(t, "alice", users[0].Account)
 
 	// persist what the downstream consumer would have written, so run 2 diffs
-	// against ground truth
+	// against ground truth. The consumer keys _id on employeeId (the wire
+	// strips Employee.ID), so stamp it here too.
 	docs := make([]any, 0, len(employees))
 	for _, e := range employees {
-		docs = append(docs, e.Employee)
+		row := e.Employee
+		row.ID = row.EmployeeID
+		docs = append(docs, row)
 	}
 	_, err = db.Collection(hrEmployeeCollection).InsertMany(ctx, docs)
 	require.NoError(t, err)
