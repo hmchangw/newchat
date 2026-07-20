@@ -21,6 +21,9 @@ type config struct {
 	// Microsoft Graph.
 	GraphBaseURL  string `env:"GRAPH_BASE_URL" envDefault:""`
 	GraphTokenURL string `env:"GRAPH_TOKEN_URL" envDefault:""`
+	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Opt-in for
+	// on-prem gateways with self-signed certs; leave false in prod.
+	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
 
 	// SyncGroups is the JSON list of Graph groups to sync, each mapped to a
 	// site: [{"groupId":"…","siteId":"…"}]. Parsed via parseSyncGroups.

@@ -25,6 +25,7 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 500, cfg.GraphPageSize)
 	assert.Equal(t, "", cfg.GraphBaseURL)
+	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 	assert.Equal(t, "chat", cfg.MongoReadDB)
 }
 

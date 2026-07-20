@@ -87,9 +87,10 @@ func run() error {
 		opts = append(opts, msgraph.WithTokenURL(cfg.GraphTokenURL))
 	}
 	graph := msgraph.NewGroupReaderClient(msgraph.Config{
-		TenantID:     cfg.TeamsTenantID,
-		ClientID:     cfg.TeamsClientID,
-		ClientSecret: cfg.TeamsClientSecret,
+		TenantID:              cfg.TeamsTenantID,
+		ClientID:              cfg.TeamsClientID,
+		ClientSecret:          cfg.TeamsClientSecret,
+		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 	}, opts...)
 
 	store := newMongoStore(readClient.Database(cfg.MongoReadDB))

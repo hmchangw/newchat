@@ -19,6 +19,7 @@ persists the batches, so a lost publish self-heals on the next run.
 | `NATS_URL` | ✔ | — | + optional `NATS_CREDS_FILE` |
 | `GRAPH_PAGE_SIZE` | | `500` | Graph `$top`, 1..999 |
 | `GRAPH_BASE_URL` / `GRAPH_TOKEN_URL` | | public Graph | Test/on-prem overrides |
+| `GRAPH_TLS_INSECURE_SKIP_VERIFY` | | `false` | Opt-in; skips Graph TLS verify for on-prem/self-signed |
 
 ## Injecting your own Mapper / Converter
 
