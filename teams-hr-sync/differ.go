@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"sort"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -37,7 +38,7 @@ func diffEmployees(current, stored []model.Employee) diffResult {
 		switch {
 		case !exists:
 			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, ChangeType: model.ChangeTypeNewHire})
-		case *prev != *c:
+		case !reflect.DeepEqual(*prev, *c):
 			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, ChangeType: model.ChangeTypeUpdate})
 		}
 	}

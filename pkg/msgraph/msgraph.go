@@ -83,6 +83,10 @@ type GraphUser struct {
 	GivenName         string `json:"givenName"`
 	Surname           string `json:"surname"`
 	EmployeeID        string `json:"employeeId"`
+	Mail              string `json:"mail"`
+	MailNickname      string `json:"mailNickname"`
+	UserType          string `json:"userType"`
+	AccountEnabled    bool   `json:"accountEnabled"`
 }
 
 // CreateOnlineMeetingRequest carries the attributes used to create a meeting.

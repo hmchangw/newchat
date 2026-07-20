@@ -42,7 +42,7 @@ const graphUserType = "#microsoft.graph.user"
 
 // memberSelect is the $select for the members walk — the identity fields the
 // HR sync maps into an Employee.
-const memberSelect = "id,userPrincipalName,displayName,givenName,surname,employeeId"
+const memberSelect = "id,userPrincipalName,displayName,givenName,surname,employeeId,mail,mailNickname,userType,accountEnabled"
 
 func (g *graphClient) GetGroup(ctx context.Context, groupID string) (*GroupProfile, error) {
 	token, err := g.accessToken(ctx)
