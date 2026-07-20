@@ -161,6 +161,7 @@ const (
 	InboxSubscriptionFavoriteToggled InboxEventType = "subscription_favorite_toggled"
 	InboxThreadSubscriptionUpserted  InboxEventType = "thread_subscription_upserted"
 	InboxThreadRead                  InboxEventType = "thread_read"
+	InboxThreadReadAll               InboxEventType = "thread_read_all"
 	InboxRoomRenamed                 InboxEventType = "room_renamed"
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
@@ -201,6 +202,18 @@ type ThreadReadEvent struct {
 	Alert           bool     `json:"alert"`
 	LastSeenAt      int64    `json:"lastSeenAt"`
 	Timestamp       int64    `json:"timestamp"`
+}
+
+// ThreadReadAllEvent is the InboxEvent.Payload for type "thread_read_all" — the
+// federated "mark all threads read" for a user. One event carries the whole
+// bulk dismiss (no per-thread list): the destination inbox-worker advances every
+// one of the account's thread subscriptions to LastSeenAt under a high-water-mark
+// guard (clearing hasMention) and clears every subscription's threadUnread/alert
+// on the user's home replica.
+type ThreadReadAllEvent struct {
+	Account    string `json:"account"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Timestamp  int64  `json:"timestamp"`
 }
 
 type InboxEvent struct {

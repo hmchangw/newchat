@@ -3916,17 +3916,7 @@ func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	rows, err := store.ClearThreadSubscriptionsForAccount(ctx, "alice", now)
-	require.NoError(t, err)
-	require.Len(t, rows, 2)
-
-	got := map[string]model.ThreadSubscription{}
-	for _, r := range rows {
-		got[r.ThreadRoomID] = r
-	}
-	assert.Equal(t, "r1", got["tr1"].RoomID)
-	assert.Equal(t, "p1", got["tr1"].ParentMessageID)
-	assert.Equal(t, "r2", got["tr2"].RoomID)
+	require.NoError(t, store.ClearThreadSubscriptionsForAccount(ctx, "alice", now))
 
 	// alice's docs: lastSeenAt set to now, hasMention cleared.
 	for _, id := range []string{"tsA1", "tsA2"} {
@@ -3951,9 +3941,8 @@ func TestMongoStore_ClearThreadSubscriptionsForAccount_Empty_Integration(t *test
 	store := NewMongoStore(db)
 	require.NoError(t, store.EnsureIndexes(context.Background()))
 
-	rows, err := store.ClearThreadSubscriptionsForAccount(context.Background(), "nobody", time.Now().UTC())
-	require.NoError(t, err)
-	assert.Nil(t, rows)
+	// No rows for the account is a no-op, not an error.
+	require.NoError(t, store.ClearThreadSubscriptionsForAccount(context.Background(), "nobody", time.Now().UTC()))
 }
 
 func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testing.T) {

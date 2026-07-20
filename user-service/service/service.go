@@ -47,7 +47,7 @@ type RoomClient interface {
 	GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
 	CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error)
 	GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error)
-	ClearAllThreadUnread(ctx context.Context, siteID, account string) (int, error)
+	ClearAllThreadUnread(ctx context.Context, siteID, account string) error
 }
 
 // ThreadSubscriptionRepository reads the local thread_subscriptions replica for

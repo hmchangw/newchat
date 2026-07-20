@@ -71,25 +71,32 @@ type threadRead struct {
 	lastSeenAt      time.Time
 }
 
+type threadReadAll struct {
+	account    string
+	lastSeenAt time.Time
+}
+
 type stubInboxStore struct {
-	mu                 sync.Mutex
-	subscriptions      []model.Subscription
-	bulkSubscriptions  []*model.Subscription
-	bulkCreateErr      error
-	rooms              []model.Room
-	roleUpdates        []roleUpdate
-	muteUpdates        []muteUpdate
-	favoriteUpdates    []favoriteUpdate
-	nameUpdates        []nameUpdate
-	visibilityUpdates  []visibilityUpdate
-	users              []model.User
-	subReads           []subRead
-	threadSubs         []model.ThreadSubscription
-	threadReads        []threadRead
-	applyThreadReadErr error
-	userStatusUpdates  []userStatusUpdate
-	userStatusErr      error
-	settingsUpdates    []userSettingsUpdate
+	mu                    sync.Mutex
+	subscriptions         []model.Subscription
+	bulkSubscriptions     []*model.Subscription
+	bulkCreateErr         error
+	rooms                 []model.Room
+	roleUpdates           []roleUpdate
+	muteUpdates           []muteUpdate
+	favoriteUpdates       []favoriteUpdate
+	nameUpdates           []nameUpdate
+	visibilityUpdates     []visibilityUpdate
+	users                 []model.User
+	subReads              []subRead
+	threadSubs            []model.ThreadSubscription
+	threadReads           []threadRead
+	applyThreadReadErr    error
+	threadReadAlls        []threadReadAll
+	applyThreadReadAllErr error
+	userStatusUpdates     []userStatusUpdate
+	userStatusErr         error
+	settingsUpdates       []userSettingsUpdate
 }
 
 type userSettingsUpdate struct {
@@ -284,6 +291,16 @@ func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID
 		roomID: roomID, threadRoomID: threadRoomID, account: account,
 		newThreadUnread: newThreadUnread, alert: alert, lastSeenAt: lastSeenAt,
 	})
+	return nil
+}
+
+func (s *stubInboxStore) ApplyThreadReadAll(_ context.Context, account string, lastSeenAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applyThreadReadAllErr != nil {
+		return s.applyThreadReadAllErr
+	}
+	s.threadReadAlls = append(s.threadReadAlls, threadReadAll{account: account, lastSeenAt: lastSeenAt})
 	return nil
 }
 
@@ -1526,6 +1543,44 @@ func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	payload := model.ThreadReadEvent{Account: "a", RoomID: "r", ThreadRoomID: "tr", ParentMessageID: "p"}
 	inner, _ := json.Marshal(&payload)
 	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, _ := json.Marshal(&outer)
+	err := h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+}
+
+func TestHandler_HandleEvent_ThreadReadAll_Happy(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	payload := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1735689600000, Timestamp: 1735689600001}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, SiteID: "site-a", DestSiteID: "site-b", Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+	require.Len(t, store.threadReadAlls, 1)
+	assert.Equal(t, "alice", store.threadReadAlls[0].account)
+	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), store.threadReadAlls[0].lastSeenAt)
+}
+
+func TestHandler_HandleEvent_ThreadReadAll_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, Payload: []byte("{")}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+	err = h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+	assert.Len(t, store.threadReadAlls, 0)
+}
+
+func TestHandler_HandleEvent_ThreadReadAll_StoreError(t *testing.T) {
+	store := &stubInboxStore{applyThreadReadAllErr: fmt.Errorf("boom")}
+	h := NewHandler(store)
+	payload := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1}
+	inner, _ := json.Marshal(&payload)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, Payload: inner}
 	data, _ := json.Marshal(&outer)
 	err := h.HandleEvent(context.Background(), data)
 	require.Error(t, err)
