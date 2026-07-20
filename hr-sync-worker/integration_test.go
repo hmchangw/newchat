@@ -72,10 +72,6 @@ func TestWorker_EndToEnd(t *testing.T) {
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 
-	// legacy-source row must survive teams quits
-	_, err = db.Collection(hrEmployeeCollection).InsertOne(ctx,
-		bson.M{"account": "alice", "siteId": "site-a", "source": "legacy-hr"})
-	require.NoError(t, err)
 	// pre-existing user with auth fields the identity upsert must not touch
 	_, err = db.Collection(usersCollection).InsertOne(ctx,
 		bson.M{"_id": "u-alice", "account": "alice", "siteId": "old-site", "roles": []string{"admin"}, "services": bson.M{"password": bson.M{"bcrypt": "hash"}}})
@@ -87,7 +83,8 @@ func TestWorker_EndToEnd(t *testing.T) {
 	emp := func(account string) model.EmployeeWithChange {
 		return model.EmployeeWithChange{
 			Employee: model.Employee{
-				Account: account, SiteID: "site-a", Source: "teams",
+				ID: "E-" + account, EmployeeID: "E-" + account,
+				Account: account, SiteID: "site-a",
 				EngName: "Name " + account,
 				Org:     model.Org{SectID: "g1", SectName: "Engineering"},
 			},
@@ -101,7 +98,7 @@ func TestWorker_EndToEnd(t *testing.T) {
 		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿"}, ChangeType: model.ChangeTypeNewHire},
 	})
 
-	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{"source": "teams"}, 2)
+	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{}, 2)
 	awaitCount(t, ctx, db, usersCollection, bson.M{}, 2) // alice updated in place, carol inserted
 
 	// identity upsert: alice's auth fields intact, identity fields updated
@@ -119,14 +116,13 @@ func TestWorker_EndToEnd(t *testing.T) {
 
 	// re-delivery (same batches again) → no dupes
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
-	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{"source": "teams"}, 2)
+	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{}, 2)
 
-	// quit: teams-sourced bob deleted, legacy alice row survives; users untouched
+	// quit: alice + bob deleted from hr_employee; users untouched
 	publishJSON(t, js, "chat.hr.site-a.employees.quit", model.HRSyncEmployeeQuitBatch{
 		Timestamp: 2, SiteID: "site-a", Accounts: []string{"alice", "bob"},
 	})
-	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{"source": "teams"}, 0)
-	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{"source": "legacy-hr"}, 1)
+	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{}, 0)
 	awaitCount(t, ctx, db, usersCollection, bson.M{}, 2)
 }
 

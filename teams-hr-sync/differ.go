@@ -4,7 +4,6 @@ import (
 	"sort"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
 
 // diffResult is one run's delta: rows to upsert (ChangeType new_hire/update)
@@ -17,15 +16,10 @@ type diffResult struct {
 // diffEmployees diffs the current Graph set against the persisted rows,
 // keyed by account. Absent in store → created; present but any field differs
 // (incl. Org) → updated; equal → omitted. Store-present-but-Graph-absent →
-// quit. Stored rows from another source are ignored defensively (the store
-// query already filters, but a false quit is destructive downstream).
-// Output is sorted by account for deterministic publishes.
+// quit. Output is sorted by account for deterministic publishes.
 func diffEmployees(current, stored []model.Employee) diffResult {
 	storedByAccount := make(map[string]*model.Employee, len(stored))
 	for i := range stored {
-		if stored[i].Source != transform.SourceTeams {
-			continue
-		}
 		storedByAccount[stored[i].Account] = &stored[i]
 	}
 

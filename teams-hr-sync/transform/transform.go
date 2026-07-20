@@ -15,10 +15,6 @@ import (
 	"github.com/hmchangw/chat/pkg/msgraph"
 )
 
-// SourceTeams tags rows this producer owns; other sources' rows are never
-// quit by this sync.
-const SourceTeams = "teams"
-
 // Mapper maps Graph objects into the domain; owns the name-mapping, org
 // placement, and the employeeId derivation. An EmployeeFromMember result with
 // an empty Account is unmappable (no usable UPN or Graph id) and must be
@@ -62,7 +58,6 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, si
 		UserType:       m.UserType,
 		AccountEnabled: m.AccountEnabled,
 		SiteID:         siteID,
-		Source:         SourceTeams,
 		Org:            *org,
 	}
 }

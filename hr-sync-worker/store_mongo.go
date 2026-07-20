@@ -10,7 +10,6 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
 
 const (
@@ -35,10 +34,9 @@ func (s *mongoStore) UpsertEmployees(ctx context.Context, employees []model.Empl
 	for i := range employees {
 		rows = append(rows, employees[i].Employee)
 	}
-	// filter includes source so a same-account row from another feed (legacy
-	// HR) is never clobbered — feeds coexist per-source, like the quit path
+	// keyed on employeeId — the stable per-employee id also written as _id
 	if _, err := s.employees.BulkUpsert(ctx, rows, func(e model.Employee) any {
-		return bson.M{"account": e.Account, "source": e.Source}
+		return bson.M{"employeeId": e.EmployeeID}
 	}); err != nil {
 		return fmt.Errorf("bulk upsert hr employees: %w", err)
 	}
@@ -73,7 +71,6 @@ func (s *mongoStore) UpsertUserIdentities(ctx context.Context, users []model.Use
 func (s *mongoStore) QuitTeamsEmployees(ctx context.Context, accounts []string) error {
 	if _, err := s.employees.Raw().DeleteMany(ctx, bson.M{
 		"account": bson.M{"$in": accounts},
-		"source":  transform.SourceTeams,
 	}); err != nil {
 		return fmt.Errorf("delete quit hr employees: %w", err)
 	}

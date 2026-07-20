@@ -11,7 +11,7 @@ import (
 
 func teamsEmployee(account, siteID string) model.Employee {
 	return model.Employee{
-		Account: account, SiteID: siteID, Source: "teams",
+		Account: account, SiteID: siteID,
 		EngName: "Name " + account,
 		Org:     model.Org{SectID: "g1", SectName: "Engineering"},
 	}
@@ -52,14 +52,6 @@ func TestDiffEmployees_EmptyStoreFirstRun(t *testing.T) {
 		assert.Equal(t, model.ChangeTypeNewHire, u.ChangeType)
 	}
 	assert.Empty(t, got.Quits)
-}
-
-func TestDiffEmployees_LegacySourceNeverQuit(t *testing.T) {
-	legacy := teamsEmployee("legacy-guy", "site-a")
-	legacy.Source = "legacy-hr"
-	got := diffEmployees(nil, []model.Employee{legacy})
-	assert.Empty(t, got.Quits, "rows from another source are never quit")
-	assert.Empty(t, got.Upserts)
 }
 
 func TestDiffEmployees_AllQuitWhenGraphEmpty(t *testing.T) {

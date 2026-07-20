@@ -27,8 +27,7 @@ const (
 // Employee is the shared HR row and the source of truth a downstream service
 // maps into model.User. Org embeds inline so the nine org fields sit flat
 // alongside the identity fields — one row feeds both the ES org index and
-// the hr_employee store. Source tags the origin feed (e.g. "teams") so
-// coexisting producers don't quit each other's rows.
+// the hr_employee store.
 type Employee struct {
 	Org `bson:",inline"`
 	// ID is the hr_employee document _id (a string, per the repo convention).
@@ -43,7 +42,6 @@ type Employee struct {
 	UserType       string `json:"userType"       bson:"userType"`
 	AccountEnabled bool   `json:"accountEnabled" bson:"accountEnabled"`
 	SiteID         string `json:"siteId"         bson:"siteId"`
-	Source         string `json:"source"         bson:"source"`
 }
 
 // EmployeeWithChange is one employees.upsert element (published as a bare

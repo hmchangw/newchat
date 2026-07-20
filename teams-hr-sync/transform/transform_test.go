@@ -38,13 +38,13 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 				Account: "alice.wu", EngName: "Alice Wu",
 				ChineseName: "愛麗絲", Mail: "alice.wu@corp.com", MailNickname: "alice.wu",
 				UserType: "Member", AccountEnabled: true,
-				SiteID: "site-a", Source: "teams", Org: org,
+				SiteID: "site-a", Org: org,
 			},
 		},
 		{
 			name: "surname only trims the joiner space",
 			user: msgraph.GraphUser{ID: "u2", UserPrincipalName: "bob@corp.com", Surname: "Lin"},
-			want: model.Employee{ID: EmployeeIDFromGraphID("u2"), EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", Source: "teams", Org: org},
+			want: model.Employee{ID: EmployeeIDFromGraphID("u2"), EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", Org: org},
 		},
 		// empty Account or missing Graph id signals unmappable — the caller skips
 		{name: "no at sign", user: msgraph.GraphUser{ID: "u3", UserPrincipalName: "not-a-upn"}, want: model.Employee{}},
@@ -71,8 +71,8 @@ func TestEmployeeIDFromGraphID(t *testing.T) {
 func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {
 	e := model.Employee{
 		EmployeeID: "EMP1", Account: "alice", EngName: "Alice Wu", ChineseName: "愛麗絲",
-		SiteID: "site-a", Source: "teams",
-		Org: model.Org{SectID: "g1", SectName: "Engineering"},
+		SiteID: "site-a",
+		Org:    model.Org{SectID: "g1", SectName: "Engineering"},
 	}
 	got := DefaultConverter{}.UserFromEmployee(&e)
 	assert.Equal(t, model.User{

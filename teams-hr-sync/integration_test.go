@@ -95,12 +95,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	pub := newPublisher(jetStreamPublish(js), "central", transform.DefaultConverter{})
 	groups := []syncGroup{{GroupID: "g1", SiteID: "site-a"}}
 
-	// legacy-source row: present in the collection but owned by another feed
-	_, err = db.Collection(hrEmployeeCollection).InsertOne(ctx,
-		bson.M{"account": "legacy-guy", "siteId": "site-a", "source": "legacy-hr"})
-	require.NoError(t, err)
-
-	// --- first run: empty teams-sourced store -> everything created
+	// --- first run: empty store -> everything created
 	fg.setMembers([]map[string]any{
 		graphUser("u1", "alice@corp.com", "愛麗絲", "EMP1"),
 		graphUser("u2", "bob@corp.com", "鮑伯", "EMP2"),

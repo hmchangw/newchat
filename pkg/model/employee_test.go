@@ -17,7 +17,7 @@ func TestEmployeeJSON_OrgFieldsFlat(t *testing.T) {
 			DeptID: "D1", DivisionID: "V1",
 		},
 		EmployeeID: "EMP1", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲",
-		SiteID: "site-a", Source: "teams",
+		SiteID: "site-a",
 	}
 	data, err := json.Marshal(&e)
 	require.NoError(t, err)
@@ -31,13 +31,12 @@ func TestEmployeeJSON_OrgFieldsFlat(t *testing.T) {
 	assert.Equal(t, "V1", raw["divisionId"])
 	assert.Equal(t, "EMP1", raw["employeeId"])
 	assert.Equal(t, "愛麗絲", raw["chineseName"])
-	assert.Equal(t, "teams", raw["source"])
 	roundTrip(t, &e, &model.Employee{})
 }
 
 func TestEmployeeWithChange_BareElement(t *testing.T) {
 	ewc := model.EmployeeWithChange{
-		Employee:   model.Employee{Org: model.Org{SectID: "S1"}, Account: "alice", Source: "teams"},
+		Employee:   model.Employee{Org: model.Org{SectID: "S1"}, Account: "alice"},
 		ChangeType: model.ChangeTypeNewHire,
 	}
 	data, err := json.Marshal(&ewc)

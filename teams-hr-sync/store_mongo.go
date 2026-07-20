@@ -11,7 +11,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
 
 const hrEmployeeCollection = "hr_employee"
@@ -55,7 +54,7 @@ func newMongoStore(readDB *mongo.Database) *mongoStore {
 
 func (s *mongoStore) ListTeamsEmployees(ctx context.Context) ([]model.Employee, error) {
 	rows, err := s.employees.FindMany(ctx,
-		bson.M{"source": transform.SourceTeams},
+		bson.M{},
 		mongoutil.WithProjection(employeeProjection))
 	if err != nil {
 		return nil, fmt.Errorf("find teams hr employees: %w", err)
