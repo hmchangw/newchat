@@ -73,8 +73,10 @@ func TestWorker_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 
 	// pre-existing user with auth fields the identity upsert must not touch
+	// carries employeeId E1 — the identity upsert keys on it, so this row is
+	// the one alice's upsert must update in place (not a fresh insert).
 	_, err = db.Collection(usersCollection).InsertOne(ctx,
-		bson.M{"_id": "u-alice", "account": "alice", "siteId": "old-site", "roles": []string{"admin"}, "services": bson.M{"password": bson.M{"bcrypt": "hash"}}})
+		bson.M{"_id": "u-alice", "account": "alice", "employeeId": "E1", "siteId": "old-site", "roles": []string{"admin"}, "services": bson.M{"password": bson.M{"bcrypt": "hash"}}})
 	require.NoError(t, err)
 
 	h := NewHandler(newMongoStore(db))
@@ -95,7 +97,10 @@ func TestWorker_EndToEnd(t *testing.T) {
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
 	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.UserWithChange{
 		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.ChangeTypeNewHire},
-		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿"}, ChangeType: model.ChangeTypeNewHire},
+		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.ChangeTypeNewHire},
+		// no employeeId → skipped, never written (an empty key would match and
+		// clobber every other keyless row); the count assertion below proves it
+		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.ChangeTypeNewHire},
 	})
 
 	awaitCount(t, ctx, db, hrEmployeeCollection, bson.M{}, 2)

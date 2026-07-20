@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -51,8 +52,14 @@ func (s *mongoStore) UpsertUserIdentities(ctx context.Context, users []model.Use
 	models := make([]mongo.WriteModel, 0, len(users))
 	for i := range users {
 		u := &users[i].User
+		// employeeId is the identity key; an empty one would match every other
+		// keyless row and clobber it, so skip rather than corrupt.
+		if u.EmployeeID == "" {
+			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId", "account", u.Account)
+			continue
+		}
 		models = append(models, mongo.NewUpdateOneModel().
-			SetFilter(bson.M{"account": u.Account}).
+			SetFilter(bson.M{"employeeId": u.EmployeeID}).
 			SetUpdate(bson.M{
 				"$set": bson.M{
 					"account": u.Account, "siteId": u.SiteID,
