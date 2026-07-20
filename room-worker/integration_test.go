@@ -1204,8 +1204,8 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	require.Len(t, roomPubs, 1, "exactly one room-scoped member_added event")
 	var evt model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(roomPubs[0].data, &evt))
-	assert.ElementsMatch(t, []string{"bob", "carol"}, evt.Accounts)
-	require.Len(t, evt.Members, 2, "org entry + direct individual; org-expanded carol rides accounts only")
+	assert.Empty(t, evt.Accounts, "accounts is stripped from the room-scoped (frontend) event; the client renders from members")
+	require.Len(t, evt.Members, 2, "org entry + direct individual; org-expanded carol is not listed individually")
 
 	org := evt.Members[0]
 	assert.Equal(t, model.RoomMemberOrg, org.Type, "org entries come first, mirroring member.list")
@@ -1242,6 +1242,10 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	var internalEnv model.InboxEvent
 	require.NoError(t, json.Unmarshal(internalPubs[0].data, &internalEnv))
 	assertLeanMemberAddPayload(t, internalEnv.Payload, "internal INBOX member_added payload")
+	var internalEvt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(internalEnv.Payload, &internalEvt))
+	assert.ElementsMatch(t, []string{"bob", "carol"}, internalEvt.Accounts,
+		"the INBOX (search) lane keeps every newly-subscribed account")
 
 	outboxPubs := cap.publishesOnPrefix(subject.Outbox("site-A", "site-B", model.InboxMemberAdded))
 	require.Len(t, outboxPubs, 1, "expected one cross-site OUTBOX relay publish")
@@ -1251,6 +1255,9 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	require.NoError(t, json.Unmarshal(outboxEvt.Envelope, &relayEnv))
 	assert.Equal(t, "site-B", relayEnv.DestSiteID)
 	assertLeanMemberAddPayload(t, relayEnv.Payload, "cross-site OUTBOX member_added payload")
+	var relayEvt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(relayEnv.Payload, &relayEvt))
+	assert.ElementsMatch(t, []string{"carol"}, relayEvt.Accounts, "the cross-site lane keeps the destination-site accounts")
 
 	// Re-adding the already-present org is a no-op: no member_added event fires
 	// (nothing changed), and the idempotent upsert inserts no duplicate org row.

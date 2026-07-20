@@ -1103,6 +1103,10 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		// Marshalled BEFORE Members is attached — INBOX payloads must omit it (see model.MemberAddEvent.Members).
 		inboxPayload, _ := json.Marshal(memberAddEvt)
 
+		// Strip Accounts from the room-scoped (frontend) copy only: the client renders
+		// from Members, while the INBOX/search and cross-site copies (already marshalled
+		// or built separately) keep Accounts as their subscribe/index identity list.
+		memberAddEvt.Accounts = nil
 		memberAddEvt.Members = buildAddedMembers(&req, inputs.orgDisplayRows, userMap)
 		memberAddData, _ := json.Marshal(memberAddEvt)
 		if err := h.publish(ctx, subject.RoomMemberEvent(req.RoomID), memberAddData, ""); err != nil {

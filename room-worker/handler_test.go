@@ -522,9 +522,9 @@ func TestHandler_ProcessAddMembers_DirectAdd_ExistingIndividualNotReinserted(t *
 	assert.Equal(t, model.RoomMemberIndividual, createdRoomMembers[0].Member.Type)
 	assert.Equal(t, "newbie", createdRoomMembers[0].Member.Account)
 
-	// The event announces only the newly-subscribed account, as a display entry.
+	// The event announces the newly-subscribed account as a display entry; accounts is stripped from the frontend copy.
 	evt, _ := findMemberAddEvent(t, published, "r1")
-	assert.Equal(t, []string{"newbie"}, evt.Accounts)
+	assert.Empty(t, evt.Accounts, "accounts is stripped from the room-scoped (frontend) event")
 	require.Len(t, evt.Members, 1)
 	assert.Equal(t, "newbie", evt.Members[0].Account)
 	assert.Equal(t, "u_new", evt.Members[0].ID, "entry id is the user id")
@@ -942,9 +942,8 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data))
 
 	evt, _ := findMemberAddEvent(t, published, "r1")
-	assert.ElementsMatch(t, []string{"bob", "carol"}, evt.Accounts,
-		"accounts still carries every newly subscribed account, org-expanded included")
-	require.Len(t, evt.Members, 2, "org entry + direct individual; org-expanded carol rides accounts only")
+	assert.Empty(t, evt.Accounts, "accounts is stripped from the room-scoped (frontend) event; the client renders from members")
+	require.Len(t, evt.Members, 2, "org entry + direct individual; org-expanded carol is not listed individually")
 
 	org := evt.Members[0]
 	assert.Equal(t, model.RoomMemberOrg, org.Type, "org entries come first, mirroring member.list's sort")
@@ -980,10 +979,17 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	var internalEnv model.InboxEvent
 	require.NoError(t, json.Unmarshal(internalData, &internalEnv))
 	requireNoMembersKey(t, internalEnv.Payload, "internal INBOX member_added payload")
+	var internalEvt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(internalEnv.Payload, &internalEvt))
+	assert.ElementsMatch(t, []string{"bob", "carol"}, internalEvt.Accounts,
+		"the INBOX (search) lane keeps every newly-subscribed account")
 
 	_, relayEnv := unwrapOutbox(t, outboxData)
 	assert.Equal(t, "site-b", relayEnv.DestSiteID)
 	requireNoMembersKey(t, relayEnv.Payload, "cross-site OUTBOX member_added payload")
+	var relayEvt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(relayEnv.Payload, &relayEvt))
+	assert.Equal(t, []string{"carol"}, relayEvt.Accounts, "the cross-site lane keeps the destination-site accounts")
 }
 
 func TestHandler_ProcessAddMembers_OrgWithNoUsersFallsBackToOrgID(t *testing.T) {
