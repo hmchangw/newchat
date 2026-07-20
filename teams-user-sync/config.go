@@ -16,6 +16,16 @@ type config struct {
 	// Microsoft Graph.
 	GraphBaseURL  string `env:"GRAPH_BASE_URL" envDefault:""`
 	GraphTokenURL string `env:"GRAPH_TOKEN_URL" envDefault:""`
+	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Defaults to
+	// true because this job runs on-prem behind a TLS-intercepting proxy that
+	// presents its own certificate; set it to false where Graph presents a
+	// verifiable certificate chain.
+	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"true"`
+	// GraphProxyURL, when set, routes the Graph client through this proxy
+	// explicitly (overriding HTTPS_PROXY/HTTP_PROXY). Must include a scheme and
+	// host, e.g. "http://proxy.corp:8080". Empty falls back to the standard proxy
+	// env vars.
+	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
 
 	// One replica set serves both lanes: the teams_user diff + hr lookup read
 	// through a secondary-preferred client and the teams_user upserts write

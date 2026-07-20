@@ -65,8 +65,12 @@ type UserLister interface {
 // client used for meetings; New always returns a *graphClient).
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewUserListerClient(cfg Config, opts ...Option) UserLister {
-	return New(cfg, opts...).(*graphClient)
+func NewUserListerClient(cfg Config, opts ...Option) (UserLister, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // GraphUser is the subset of a Graph user resource we decode when resolving
@@ -107,10 +111,12 @@ type Config struct {
 	// TLSInsecureSkipVerify disables Graph TLS verification. Opt-in, dev/on-prem
 	// only (e.g. a self-signed cert fronting Graph). Never enable in production.
 	TLSInsecureSkipVerify bool
-	// ProxyURL, when non-empty, routes the presence client's HTTP requests
-	// through this proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored only by the
-	// presence client (NewPresenceClient); the app-only and directory clients
-	// ignore it. Must include a scheme and host (e.g. "http://proxy.corp:8080").
+	// ProxyURL, when non-empty, routes the client's HTTP requests through this
+	// proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored by the presence, chats,
+	// chat-members and user-lister clients — each NewXxxClient applies it and
+	// reports an invalid value at construction. The directory and meetings clients
+	// (NewDirectoryClient / New) ignore it and rely on the standard proxy env
+	// vars. Must include a scheme and host (e.g. "http://proxy.corp:8080").
 	ProxyURL string
 	// UserAgent overrides the User-Agent header sent on presence requests. When
 	// empty the presence client falls back to defaultUserAgent. Honored only by
@@ -194,6 +200,34 @@ func New(cfg Config, opts ...Option) Client {
 		opt(g)
 	}
 	return g
+}
+
+// applyProxyURL points hc's transport at rawProxyURL (overriding
+// HTTPS_PROXY/HTTP_PROXY) when it is non-empty. The URL must include a scheme
+// and host; an invalid value is reported so the caller fails fast at
+// construction rather than surfacing an opaque per-request error. A concrete
+// *http.Transport already on hc (e.g. New's TLSInsecureSkipVerify clone) is
+// reused so its settings survive; otherwise the default transport is cloned so
+// proxy and dial defaults are preserved. No-op when rawProxyURL is empty.
+func applyProxyURL(hc *http.Client, rawProxyURL string) error {
+	if rawProxyURL == "" {
+		return nil
+	}
+	proxyURL, err := url.Parse(rawProxyURL)
+	if err != nil {
+		return fmt.Errorf("parse graph proxy url: %w", err)
+	}
+	if proxyURL.Scheme == "" || proxyURL.Host == "" {
+		// Redacted() masks any embedded proxy credentials before it reaches logs.
+		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
+	}
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		tr = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	tr.Proxy = http.ProxyURL(proxyURL)
+	hc.Transport = tr
+	return nil
 }
 
 type tokenResponse struct {

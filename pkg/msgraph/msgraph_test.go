@@ -332,13 +332,14 @@ func TestListUsers_MultiPageFollowsNextLink(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	lister := NewUserListerClient(
+	lister, err := NewUserListerClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
+	require.NoError(t, err)
 
 	var pages [][]GraphUser
-	err := lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
+	err = lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
 		pages = append(pages, users)
 		return nil
 	})
@@ -374,12 +375,13 @@ func TestListUsers_CallbackErrorAbortsWalk(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	lister := NewUserListerClient(
+	lister, err := NewUserListerClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
+	require.NoError(t, err)
 
-	err := lister.ListUsers(context.Background(), 500, func([]GraphUser) error {
+	err = lister.ListUsers(context.Background(), 500, func([]GraphUser) error {
 		return errors.New("boom")
 	})
 	require.ErrorContains(t, err, "boom")
@@ -397,12 +399,13 @@ func TestListUsers_Non200IsError(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	lister := NewUserListerClient(
+	lister, err := NewUserListerClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
+	require.NoError(t, err)
 
-	err := lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
+	err = lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
 	require.ErrorContains(t, err, "status 403")
 }
 
@@ -426,17 +429,35 @@ func TestListUsers_RejectsCrossOriginNextLink(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	lister := NewUserListerClient(
+	lister, err := NewUserListerClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
 	)
+	require.NoError(t, err)
 
 	var pages [][]GraphUser
-	err := lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
+	err = lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
 		pages = append(pages, users)
 		return nil
 	})
 	require.ErrorContains(t, err, "deviates from configured graph origin")
 	assert.False(t, attackerHit, "must not forward the bearer token to a foreign origin")
 	assert.Len(t, pages, 1, "first (valid) page is still delivered before the walk aborts")
+}
+
+// TestGraphClients_InvalidProxyURL asserts every app-only constructor that
+// honors ProxyURL fails fast at construction on a malformed value, rather than
+// silently falling back to direct egress or surfacing an opaque per-request error.
+func TestGraphClients_InvalidProxyURL(t *testing.T) {
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			cfg := Config{TenantID: "t", ProxyURL: proxy}
+			_, err := NewChatsClient(cfg)
+			require.Error(t, err)
+			_, err = NewChatMembersClient(cfg)
+			require.Error(t, err)
+			_, err = NewUserListerClient(cfg)
+			require.Error(t, err)
+		})
+	}
 }

@@ -67,24 +67,8 @@ type presenceClient struct {
 func NewPresenceClient(cfg Config, creds ROPCCredentials, opts ...Option) (PresenceReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	hc := g.httpClient
-	if cfg.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("parse graph proxy url: %w", err)
-		}
-		if proxyURL.Scheme == "" || proxyURL.Host == "" {
-			// Redacted() masks any embedded proxy credentials before it reaches logs.
-			return nil, fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
-		}
-		// Reuse the throwaway client's transport when it is already a concrete
-		// *http.Transport (preserving TLSInsecureSkipVerify settings); otherwise
-		// clone the default transport so proxy/dial defaults survive.
-		tr, ok := hc.Transport.(*http.Transport)
-		if !ok || tr == nil {
-			tr = http.DefaultTransport.(*http.Transport).Clone()
-		}
-		tr.Proxy = http.ProxyURL(proxyURL)
-		hc.Transport = tr
+	if err := applyProxyURL(hc, cfg.ProxyURL); err != nil {
+		return nil, err
 	}
 	ua := cfg.UserAgent
 	if ua == "" {

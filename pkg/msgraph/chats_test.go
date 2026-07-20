@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,12 +24,15 @@ func newChatsTokenServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func newTestChats(tokenURL, baseURL string) ChatsReader {
-	return NewChatsClient(
+func newTestChats(t *testing.T, tokenURL, baseURL string) ChatsReader {
+	t.Helper()
+	c, err := NewChatsClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
+	require.NoError(t, err)
+	return c
 }
 
 var (
@@ -57,7 +62,7 @@ func TestListUserChats_Success_QueryShape(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	chats, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	chats, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 	require.Len(t, chats, 1)
@@ -78,11 +83,12 @@ func TestListUserChats_CustomPageSize(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := NewChatsClient(
+	c, err := NewChatsClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL), WithChatsPageSize(10),
 	)
-	_, err := c.ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
+	require.NoError(t, err)
+	_, err = c.ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 }
 
@@ -96,7 +102,7 @@ func TestListUserChats_NullTopicBecomesEmpty(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	chats, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	chats, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 	require.Len(t, chats, 1)
@@ -121,7 +127,7 @@ func TestListUserChats_FollowsNextLink(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	chats, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	chats, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls)
@@ -145,7 +151,7 @@ func TestListUserChats_RetriesOn429(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	chats, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	chats, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls)
@@ -162,7 +168,7 @@ func TestListUserChats_429Exhausted(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "429")
@@ -177,7 +183,7 @@ func TestListUserChats_GraphError(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 403")
@@ -192,7 +198,7 @@ func TestListUserChats_TokenError(t *testing.T) {
 	}))
 	defer tokenSrv.Close()
 
-	_, err := newTestChats(tokenSrv.URL, "http://unused.invalid").
+	_, err := newTestChats(t, tokenSrv.URL, "http://unused.invalid").
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "acquire graph token")
@@ -200,7 +206,7 @@ func TestListUserChats_TokenError(t *testing.T) {
 
 func TestListUserChats_EmptyUserID(t *testing.T) {
 	tokenSrv := newChatsTokenServer(t)
-	_, err := newTestChats(tokenSrv.URL, "http://unused.invalid").
+	_, err := newTestChats(t, tokenSrv.URL, "http://unused.invalid").
 		ListUserChats(context.Background(), "", chatsFrom, chatsTo)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "userID is required")
@@ -273,13 +279,15 @@ func TestListUserChats_429ArmsGateForNextCall(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	g := NewChatsClient(
+	c, err := NewChatsClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
-	).(*graphClient)
+	)
+	require.NoError(t, err)
+	g := c.(*graphClient)
 
 	start := time.Now()
-	_, err := g.ListUserChats(context.Background(), "u1", chatsFrom, chatsTo)
+	_, err = g.ListUserChats(context.Background(), "u1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
 		"the retry must have waited out the gate armed by the 429")
@@ -291,4 +299,37 @@ func TestListUserChats_429ArmsGateForNextCall(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), 500*time.Millisecond)
 	assert.Equal(t, 3, calls)
+}
+
+// TestListUserChats_ThroughProxy verifies that a configured ProxyURL routes both
+// the token acquisition and the Graph chats request through the proxy. The proxy
+// serves canned responses keyed by request path, so the token and Graph target
+// hosts never need to be reachable — every request is dialed to the proxy.
+func TestListUserChats_ThroughProxy(t *testing.T) {
+	var mu sync.Mutex
+	var proxiedHosts []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxiedHosts = append(proxiedHosts, r.Host)
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "/chats") {
+			_, _ = w.Write([]byte(`{"value":[]}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok-chats", ExpiresIn: 3600}) // #nosec G117 -- test mock encodes a fake OAuth token response; dummy value, not a real secret
+	}))
+	defer proxy.Close()
+
+	c, err := NewChatsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy.URL},
+		WithTokenURL("http://login.example.test/token"), WithBaseURL("http://graph.example.test"),
+	)
+	require.NoError(t, err)
+	_, err = c.ListUserChats(context.Background(), "u1", chatsFrom, chatsTo)
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, proxiedHosts, "login.example.test", "token request should traverse the proxy")
+	assert.Contains(t, proxiedHosts, "graph.example.test", "chats request should traverse the proxy")
 }

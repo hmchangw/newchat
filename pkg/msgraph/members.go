@@ -30,8 +30,12 @@ type ChatMembersReader interface {
 // graph client; New always returns a *graphClient).
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewChatMembersClient(cfg Config, opts ...Option) ChatMembersReader {
-	return New(cfg, opts...).(*graphClient)
+func NewChatMembersClient(cfg Config, opts ...Option) (ChatMembersReader, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 func (g *graphClient) ListChatMembers(ctx context.Context, chatID string) ([]ChatMemberDetail, error) {

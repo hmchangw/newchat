@@ -34,10 +34,16 @@ type Config struct {
 	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
 	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`
 	GraphClientSecret string `env:"GRAPH_CLIENT_SECRET,required"`
-	// GraphTLSInsecureSkipVerify disables Graph TLS verification (opt-in,
-	// default false) for dev/on-prem environments behind a TLS-intercepting
-	// proxy. The proxy is taken from HTTPS_PROXY/HTTP_PROXY.
-	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
+	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Defaults to
+	// true because this job runs on-prem behind a TLS-intercepting proxy that
+	// presents its own certificate; set it to false where Graph presents a
+	// verifiable certificate chain.
+	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"true"`
+	// GraphProxyURL, when set, routes this service's Graph client through this
+	// proxy explicitly (overriding HTTPS_PROXY/HTTP_PROXY). Must include a scheme
+	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
+	// proxy env vars.
+	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
 }
 
 func main() {
@@ -87,12 +93,16 @@ func run() error {
 
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
 
-	graph := msgraph.NewChatMembersClient(msgraph.Config{
+	graph, err := msgraph.NewChatMembersClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,
 		ClientID:              cfg.GraphClientID,
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
+		ProxyURL:              cfg.GraphProxyURL,
 	})
+	if err != nil {
+		return fmt.Errorf("build chat members client: %w", err)
+	}
 
 	s := newSyncer(store, store, graph, syncConfig{
 		MaxWorkers: cfg.MaxWorkers,
