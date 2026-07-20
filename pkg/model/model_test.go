@@ -4383,6 +4383,8 @@ func TestTeamsUserJSON(t *testing.T) {
 		UPN:     "Alice@corp.example",
 		Account: "alice",
 		SiteID:  "site-a",
+		EngName: "Alice Smith",
+		Mail:    "alice@corp.example",
 		From:    &from,
 	}
 	var dst model.TeamsUser
@@ -4419,7 +4421,7 @@ func TestTeamsChatJSON(t *testing.T) {
 
 func TestTeamsUserBSON(t *testing.T) {
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
-	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", From: &from}
+	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", EngName: "Alice Smith", Mail: "alice@corp.example", From: &from}
 	data, err := bson.Marshal(&u)
 	require.NoError(t, err)
 
@@ -4434,6 +4436,8 @@ func TestTeamsUserBSON(t *testing.T) {
 	assert.Equal(t, "aad-user-1", rawDoc["_id"])
 	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, "alice", rawDoc["account"])
+	assert.Equal(t, "Alice Smith", rawDoc["engName"])
+	assert.Equal(t, "alice@corp.example", rawDoc["mail"])
 
 	// Round-trip to struct and verify equality
 	var dst model.TeamsUser
@@ -4441,6 +4445,8 @@ func TestTeamsUserBSON(t *testing.T) {
 	assert.Equal(t, u.ID, dst.ID)
 	assert.Equal(t, u.SiteID, dst.SiteID)
 	assert.Equal(t, u.Account, dst.Account)
+	assert.Equal(t, u.EngName, dst.EngName)
+	assert.Equal(t, u.Mail, dst.Mail)
 	require.NotNil(t, dst.From)
 	assert.True(t, dst.From.UTC().Equal(from.UTC()), "From time must match")
 }
