@@ -240,3 +240,22 @@ failed site is recorded in `unavailableSites` and never cancels its siblings.
   right affected set/count.
 - Run `make generate` (mocks) before tests; `make lint`, `make test`, and
   `make sast` before pushing.
+
+## 11. Post-merge follow-up (PR #77 review)
+
+Review feedback (mliu33) revised the federation and response shape after the
+initial merge:
+
+- **Federation is now one batched event, not per-thread.** §4/§7's per-thread
+  `thread_read` federation is replaced by a single `thread_read_all`
+  (`InboxThreadReadAll`) event per remote peer. `inbox-worker` applies it as a
+  bulk clear on the user's home replica — advancing every one of the account's
+  thread subscriptions under a per-doc `$lt` guard and clearing every
+  subscription's `threadUnread`/`alert` — mirroring the source-site write. This
+  drops the O(threads) event volume to O(remote-sites).
+- **`ClearThreadSubscriptionsForAccount` no longer snapshots rows.** It is a
+  single account-scoped `UpdateMany`, so no Find/Update window can miss a
+  concurrently inserted row (addresses the scope-to-rows-read comment).
+- **`clearedThreads` removed from the response.** The client-facing
+  `ThreadReadAllResponse` and the internal `RoomThreadReadAllResponse` no longer
+  carry a count (not used by the frontend); success is `{ unavailableSites? }`.

@@ -5121,11 +5121,10 @@ Empty object.
 
 | Field | Type | Notes |
 |---|---|---|
-| `clearedThreads` | number | Total thread subscriptions cleared across all responding sites. `0` when nothing was unread. |
 | `unavailableSites` | string[] | Optional. Sites whose per-site clear failed; their threads may remain unread. Omitted when all responded. |
 
 ```json
-{ "clearedThreads": 7 }
+{}
 ```
 
 ##### Error response
