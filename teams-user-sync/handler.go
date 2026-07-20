@@ -116,3 +116,18 @@ func splitUPN(upn string) (account string, ok bool) {
 	}
 	return strings.ToLower(upn[:at]), true
 }
+
+// extractSiteIDFromLocationURL returns the substring after "://" and before
+// ".mysite" (pattern https://{siteID}.mysite.com); "" when either marker is
+// absent.
+func extractSiteIDFromLocationURL(locationURL string) string {
+	_, rest, ok := strings.Cut(locationURL, "://")
+	if !ok {
+		return ""
+	}
+	siteID, _, ok := strings.Cut(rest, ".mysite")
+	if !ok {
+		return ""
+	}
+	return siteID
+}

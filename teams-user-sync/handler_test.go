@@ -241,3 +241,25 @@ func TestSplitUPN(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractSiteIDFromLocationURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"https url", "https://site-a.mysite.com", "site-a"},
+		{"http scheme accepted", "http://site-b.mysite.com", "site-b"},
+		{"trailing path", "https://site-a.mysite.com/floor/3", "site-a"},
+		{"port after domain", "https://site-a.mysite.com:8443", "site-a"},
+		{"no scheme separator", "site-a.mysite.com", ""},
+		{"no mysite marker", "https://site-a.othersite.com", ""},
+		{"empty siteID between markers", "https://.mysite.com", ""},
+		{"empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, extractSiteIDFromLocationURL(tt.url))
+		})
+	}
+}
