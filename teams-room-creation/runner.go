@@ -128,9 +128,8 @@ func buildEvent(chats []model.TeamsChat, now time.Time) model.TeamsRoomCreateEve
 	for _, c := range chats {
 		members := make([]model.TeamsRoomCreateMember, 0, len(c.Members))
 		for _, m := range c.Members {
-			// TeamsRoomCreateMember is field-identical to the stored member; a
-			// direct conversion carries id/account/history-visibility (and turns any
-			// future divergence of the two types into a compile error to resolve).
+			// Field-identical to the stored member; the direct conversion carries
+			// all fields and turns any future divergence into a compile error.
 			members = append(members, model.TeamsRoomCreateMember(m))
 		}
 		out = append(out, model.TeamsRoomCreateChat{

@@ -118,9 +118,9 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 // app+tenant) arms/extends the gate for ALL workers sharing this client and
 // retries up to chatsMaxAttempts. The gate is armed even on the final failed
 // attempt so the rest of the pool still backs off after this user fails. Each
-// throttle response emits a WARN log (label identifies the operation) carrying
+// throttle response emits a WARN log (operation identifies the caller) carrying
 // the status, Retry-After, and computed backoff — never the token or endpoint.
-func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, label string) ([]byte, error) {
+func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operation string) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		if err := g.waitThrottle(ctx); err != nil {
 			return nil, err
@@ -146,10 +146,9 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, label s
 		if throttled {
 			retryAfter := resp.Header.Get("Retry-After")
 			backoff := g.noteThrottle(retryAfter)
-			// Observability for Graph rate-limiting: log the throttle and the
-			// backoff we armed. Never include the token or raw endpoint.
+			// Never log the token or raw endpoint (secret / PII).
 			slog.Warn("msgraph: graph throttled request, backing off",
-				"operation", label,
+				"operation", operation,
 				"status", resp.StatusCode,
 				"retryAfter", retryAfter,
 				"backoff", backoff.String(),

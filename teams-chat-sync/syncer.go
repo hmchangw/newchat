@@ -85,16 +85,11 @@ func voteSiteID(members []msgraph.ChatMember, cache map[string]cachedUser, defau
 	return best
 }
 
-// inlineMemberThreshold is the member-count cutoff for finalizing a
-// non-oneOnOne chat directly from the list-chats $expand=members roster instead
-// of deferring to teams-chat-member-sync. A chat whose inline roster has fewer
-// than this many members is treated as complete — Graph returns the full small
-// roster inline, so this sync writes the members and marks the chat room-ready
-// itself. A chat at or above the threshold may have an inline roster that Graph
-// truncated, so it is deferred to member-sync, which pages
-// GET /chats/{id}/members for the authoritative list. Keeping this at or below
-// Graph's inline-expansion cap is what makes "fewer than threshold ⇒ complete"
-// safe.
+// inlineMemberThreshold is the member-count cutoff below which a non-oneOnOne
+// chat's inline $expand=members roster is trusted as complete and finalized here
+// rather than via teams-chat-member-sync. It MUST stay at or below Graph's
+// inline-expansion cap — above it, a truncated roster would be treated as
+// complete and members would be lost.
 const inlineMemberThreshold = 25
 
 // buildChat maps a Graph chat to the teams_chat model, resolving member

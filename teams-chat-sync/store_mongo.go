@@ -131,56 +131,30 @@ func chatUpsertModel(c model.TeamsChat) mongo.WriteModel {
 			"needCreateRoom":      true,
 		}})
 	}
-	if !c.NeedMemberSync {
-		// Small non-oneOnOne chat (fewer than inlineMemberThreshold members): the
-		// list-chats $expand=members roster is already complete, so this sync
-		// finalizes the chat itself instead of deferring to teams-chat-member-sync.
-		// members and needCreateRoom move into $set — exactly what member-sync
-		// would write on a resolve: every re-sync re-writes the fresh roster and
-		// re-flags needCreateRoom, so each chat change yields one create-or-sync
-		// event downstream (room-creation's compare-and-set on updatedAt clears the
-		// flag). needMemberSync is forced false so member-sync skips the chat, and
-		// (unlike the defer path) needCreateRoom must NOT be $setOnInsert here.
-		return mongoutil.UpsertModel(filter, bson.M{
-			"$setOnInsert": bson.M{
-				"createdDateTime": c.CreatedDateTime,
-				"siteId":          c.SiteID,
-			},
-			"$set": bson.M{
-				"name":                c.Name,
-				"chatType":            c.ChatType,
-				"lastUpdatedDateTime": c.LastUpdatedDateTime,
-				"updatedAt":           c.UpdatedAt,
-				"members":             c.Members,
-				"needMemberSync":      false,
-				"needCreateRoom":      true,
-			},
-		})
+	// Non-oneOnOne chats share this base; createdDateTime and siteId are
+	// insert-only (siteId never changes once set). needMemberSync tracks the
+	// input (false for a small chat — this branch is only reached when it's
+	// false — true for a large one).
+	setOnInsert := bson.M{"createdDateTime": c.CreatedDateTime, "siteId": c.SiteID}
+	set := bson.M{
+		"name":                c.Name,
+		"chatType":            c.ChatType,
+		"lastUpdatedDateTime": c.LastUpdatedDateTime,
+		"updatedAt":           c.UpdatedAt,
+		"needMemberSync":      c.NeedMemberSync,
 	}
-	// Large non-oneOnOne chat (roster at/above inlineMemberThreshold): defer room
-	// creation to teams-chat-member-sync. The two pipeline flags sit on opposite
-	// sides on purpose:
-	//   - needMemberSync in $set: re-set true on every re-sync. A chat is
-	//     re-listed whenever its lastUpdatedDateTime moves (any Teams activity,
-	//     including a membership change), so this re-triggers member-sync to
-	//     re-resolve the roster — keeping the room's members in sync over time.
-	//   - needCreateRoom in $setOnInsert: written only on insert, so a re-sync
-	//     can never clobber the true that member-sync sets. member-sync flips it
-	//     true after each roster resolve and room-creation clears it, so every
-	//     membership change yields exactly one create-or-sync event downstream.
-	// members is likewise owned by member-sync and never written here.
-	return mongoutil.UpsertModel(filter, bson.M{
-		"$setOnInsert": bson.M{
-			"createdDateTime": c.CreatedDateTime,
-			"siteId":          c.SiteID,
-			"needCreateRoom":  false,
-		},
-		"$set": bson.M{
-			"name":                c.Name,
-			"chatType":            c.ChatType,
-			"lastUpdatedDateTime": c.LastUpdatedDateTime,
-			"updatedAt":           c.UpdatedAt,
-			"needMemberSync":      c.NeedMemberSync,
-		},
-	})
+	if c.NeedMemberSync {
+		// Large roster: defer to teams-chat-member-sync, which owns members and
+		// flips needCreateRoom. Keep needCreateRoom insert-only so a re-sync can't
+		// clobber the true member-sync sets.
+		setOnInsert["needCreateRoom"] = false
+	} else {
+		// Small roster: the inline $expand=members list is complete, so finalize
+		// here. members + needCreateRoom go in $set — like member-sync's resolve,
+		// every re-sync re-writes the roster and re-flags needCreateRoom, yielding
+		// one create-or-sync event downstream per chat change.
+		set["members"] = c.Members
+		set["needCreateRoom"] = true
+	}
+	return mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": setOnInsert, "$set": set})
 }
