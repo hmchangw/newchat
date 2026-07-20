@@ -89,6 +89,21 @@ func (mr *MockavatarStoreMockRecorder) EmployeeID(ctx, account any) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EmployeeID", reflect.TypeOf((*MockavatarStore)(nil).EmployeeID), ctx, account)
 }
 
+// RoomMember mocks base method.
+func (m *MockavatarStore) RoomMember(ctx context.Context, roomID, account string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RoomMember", ctx, roomID, account)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RoomMember indicates an expected call of RoomMember.
+func (mr *MockavatarStoreMockRecorder) RoomMember(ctx, roomID, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RoomMember", reflect.TypeOf((*MockavatarStore)(nil).RoomMember), ctx, roomID, account)
+}
+
 // RoomSite mocks base method.
 func (m *MockavatarStore) RoomSite(ctx context.Context, roomID string) (string, model.RoomType, string, bool, error) {
 	m.ctrl.T.Helper()
@@ -119,6 +134,22 @@ func (m *MockavatarStore) SetBotAvatar(ctx context.Context, av *model.Avatar) er
 func (mr *MockavatarStoreMockRecorder) SetBotAvatar(ctx, av any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetBotAvatar", reflect.TypeOf((*MockavatarStore)(nil).SetBotAvatar), ctx, av)
+}
+
+// UserByAccount mocks base method.
+func (m *MockavatarStore) UserByAccount(ctx context.Context, account string) (*model.User, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UserByAccount", ctx, account)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// UserByAccount indicates an expected call of UserByAccount.
+func (mr *MockavatarStoreMockRecorder) UserByAccount(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UserByAccount", reflect.TypeOf((*MockavatarStore)(nil).UserByAccount), ctx, account)
 }
 
 // MockemojiStore is a mock of emojiStore interface.

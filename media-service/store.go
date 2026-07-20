@@ -20,6 +20,12 @@ type avatarStore interface {
 	// RoomSite returns the room's owning site, type, and name from any one of its
 	// local subscriptions. found=false when no local subscription exists.
 	RoomSite(ctx context.Context, roomID string) (siteID string, roomType model.RoomType, name string, found bool, err error)
+	// UserByAccount returns a user's identity fields (id, account, names,
+	// deactivated) for the drive.members probe. found=false when no user record
+	// exists for account.
+	UserByAccount(ctx context.Context, account string) (*model.User, bool, error)
+	// RoomMember reports whether account holds a subscription to roomID.
+	RoomMember(ctx context.Context, roomID, account string) (bool, error)
 	// Avatar looks up a custom-image doc by subject. found=false → serve default.
 	Avatar(ctx context.Context, subjectType model.AvatarSubjectType, subjectID string) (*model.Avatar, bool, error)
 	// SetBotAvatar upserts a bot's avatars doc (by _id).
