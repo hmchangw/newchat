@@ -804,8 +804,8 @@ func TestCountUnread_ReadRoomBumpedByUnreadThread(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 	}, nil)
-	// One followed thread in r1, unread (thread lastMsgAt 200 > lastSeen 100).
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+	// Only the pending (read) room r1 is queried; it has one unread followed thread.
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return([]model.ThreadUnreadRow{
 		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
 	}, nil)
 	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-a", []string{"tr1"}).
@@ -825,8 +825,8 @@ func TestCountUnread_AlreadyUnreadRoomNotDoubleCounted(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer},
 	}, nil)
-	// Every room already unread ⇒ pendingRooms empty ⇒ ListByAccount never called.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), gomock.Any()).Times(0)
+	// Every room already unread ⇒ pendingRooms empty ⇒ no thread-sub read.
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -843,7 +843,7 @@ func TestCountUnread_MultipleUnreadThreadsCountOnce(t *testing.T) {
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 	}, nil)
 	// Three unread threads, all in r1 → +1 total.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return([]model.ThreadUnreadRow{
 		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
 		{ThreadRoomID: "tr2", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
 		{ThreadRoomID: "tr3", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
@@ -869,10 +869,9 @@ func TestCountUnread_ThreadInRoomOutsidePageIgnored(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 	}, nil)
-	// Thread lives in rX, which is NOT in the fetched page → must be filtered out, no batch call.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
-		{ThreadRoomID: "trX", RoomID: "rX", SiteID: "site-a", LastSeenAt: &seen},
-	}, nil)
+	// The thread read is scoped to the pending room list — only r1 is queried, so a
+	// thread in some other room (rX) is never fetched. Repo returns no threads for r1.
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return(nil, nil)
 	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -892,7 +891,7 @@ func TestCountUnread_CrossSiteThreadResolution(t *testing.T) {
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r1"}).
 		Return([]model.RoomInfo{{RoomID: "r1", Found: true, LastMsgAt: &older}}, nil)
 	// A followed thread in r1 on site-b, unread → resolved via the site-b batch.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return([]model.ThreadUnreadRow{
 		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-b", LastSeenAt: &seen},
 	}, nil)
 	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-b", []string{"tr1"}).
@@ -911,7 +910,7 @@ func TestCountUnread_ThreadBatchFailureDegrades(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 	}, nil)
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return([]model.ThreadUnreadRow{
 		{ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen},
 	}, nil)
 	// Thread resolution fails → room un-bumped, count degrades to 0, no error.
@@ -932,7 +931,7 @@ func TestCountUnread_ThreadListErrorDegrades(t *testing.T) {
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 	}, nil)
 	// Local thread-sub read fails → degrade to the room-level count (0), never error.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return(nil, errors.New("db down"))
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return(nil, errors.New("db down"))
 	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -950,11 +949,9 @@ func TestCountUnread_MutedRoomThreadExcluded(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 	}, nil)
-	// A thread in the muted room "rMuted" is returned by ListByAccount but its room is
-	// not in the page → filtered out, no batch, no bump.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
-		{ThreadRoomID: "trM", RoomID: "rMuted", SiteID: "site-a", LastSeenAt: &seen},
-	}, nil)
+	// The muted room is not in the fetched page, so it's not in the pending-room list;
+	// only r1 is queried and it has no threads. The muted room can never bump.
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), "alice", []string{"r1"}).Return(nil, nil)
 	rooms.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
