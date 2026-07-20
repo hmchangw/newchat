@@ -9,9 +9,10 @@ import (
 	"crypto/sha256"
 	"strings"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // SourceTeams tags rows this producer owns; other sources' rows are never
