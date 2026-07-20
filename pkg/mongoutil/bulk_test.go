@@ -66,11 +66,12 @@ func TestBsonSetWithoutID_StripsIDField(t *testing.T) {
 		Age  int    `bson:"age"`
 	}
 
-	m, err := bsonSetWithoutID(doc{ID: "x", Name: "alice", Age: 30})
+	m, id, err := bsonSetWithoutID(doc{ID: "x", Name: "alice", Age: 30})
 	require.NoError(t, err)
 
 	_, hasID := m["_id"]
-	assert.False(t, hasID, "_id must be stripped")
+	assert.False(t, hasID, "_id must be stripped from $set")
+	assert.Equal(t, "x", id, "stripped _id returned for $setOnInsert")
 	assert.Equal(t, "alice", m["name"])
 	assert.EqualValues(t, 30, m["age"])
 }
@@ -81,11 +82,12 @@ func TestBsonSetWithoutID_NoIDField_NoOp(t *testing.T) {
 		Age  int    `bson:"age"`
 	}
 
-	m, err := bsonSetWithoutID(doc{Name: "bob", Age: 25})
+	m, id, err := bsonSetWithoutID(doc{Name: "bob", Age: 25})
 	require.NoError(t, err)
 
 	_, hasID := m["_id"]
 	assert.False(t, hasID, "no _id key should be present")
+	assert.Nil(t, id, "no _id field → nil id → no $setOnInsert")
 	assert.Equal(t, "bob", m["name"])
 	assert.EqualValues(t, 25, m["age"])
 }
@@ -95,7 +97,7 @@ func TestBsonSetWithoutID_MarshalError(t *testing.T) {
 		Ch chan int `bson:"ch"`
 	}
 
-	_, err := bsonSetWithoutID(doc{Ch: make(chan int)})
+	_, _, err := bsonSetWithoutID(doc{Ch: make(chan int)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bson marshal")
 }
