@@ -50,8 +50,10 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, si
 	if !ok || m.ID == "" {
 		return model.Employee{}
 	}
+	empID := EmployeeIDFromGraphID(m.ID)
 	return model.Employee{
-		EmployeeID:     EmployeeIDFromGraphID(m.ID),
+		ID:             empID, // hr_employee _id = the stable derived id
+		EmployeeID:     empID,
 		Account:        account,
 		EngName:        strings.TrimSpace(m.GivenName + " " + m.Surname),
 		ChineseName:    m.DisplayName,

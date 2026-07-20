@@ -30,7 +30,10 @@ const (
 // the hr_employee store. Source tags the origin feed (e.g. "teams") so
 // coexisting producers don't quit each other's rows.
 type Employee struct {
-	Org            `bson:",inline"`
+	Org `bson:",inline"`
+	// ID is the hr_employee document _id (a string, per the repo convention).
+	// Internal storage key only — never published on the employees.upsert wire.
+	ID             string `json:"-"              bson:"_id,omitempty"`
 	EmployeeID     string `json:"employeeId"     bson:"employeeId"`
 	Account        string `json:"account"        bson:"account"`
 	EngName        string `json:"engName"        bson:"engName"`
