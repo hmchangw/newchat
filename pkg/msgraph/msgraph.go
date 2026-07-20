@@ -418,7 +418,8 @@ func (g *graphClient) resolveChunk(ctx context.Context, token string, chunk []st
 	if err := json.Unmarshal(body, &page); err != nil {
 		return fmt.Errorf("decode get-users response: %w", err)
 	}
-	for _, u := range page.Value {
+	for i := range page.Value {
+		u := &page.Value[i]
 		if u.ID == "" {
 			continue
 		}

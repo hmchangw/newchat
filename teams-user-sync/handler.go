@@ -53,8 +53,8 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	}
 
 	ids := make([]string, 0, len(users))
-	for _, u := range users {
-		ids = append(ids, u.ID)
+	for i := range users {
+		ids = append(ids, users[i].ID)
 	}
 	existing, err := s.store.ExistingIDs(ctx, ids)
 	if err != nil {
@@ -63,7 +63,8 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	stats.Existing += len(existing)
 
 	candidates := make([]model.TeamsUser, 0, len(users)-len(existing))
-	for _, u := range users {
+	for i := range users {
+		u := &users[i]
 		if _, ok := existing[u.ID]; ok {
 			continue
 		}

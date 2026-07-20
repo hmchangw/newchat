@@ -123,12 +123,12 @@ func (g *graphClient) ListGroupMembers(ctx context.Context, groupID string, page
 			return skipped, err
 		}
 		users := make([]GraphUser, 0, len(page.Value))
-		for _, m := range page.Value {
-			if m.ODataType != graphUserType {
+		for i := range page.Value {
+			if page.Value[i].ODataType != graphUserType {
 				skipped++
 				continue
 			}
-			users = append(users, m.GraphUser)
+			users = append(users, page.Value[i].GraphUser)
 		}
 		if err := fn(users); err != nil {
 			return skipped, fmt.Errorf("process members page: %w", err)
