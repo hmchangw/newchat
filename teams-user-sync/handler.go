@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -10,16 +11,18 @@ import (
 )
 
 // Syncer runs updateUsers: walk Graph /users page by page, insert the users
-// missing from teams_user that have an HR site assignment.
+// missing from teams_user, joined with their HR data (siteID derived from the
+// HR locationURL) when an hr row exists.
 type Syncer struct {
 	store    Store
 	graph    msgraph.UserLister
 	pageSize int
+	logger   *slog.Logger
 }
 
 // NewSyncer builds a Syncer. pageSize is Graph's $top.
-func NewSyncer(store Store, graph msgraph.UserLister, pageSize int) *Syncer {
-	return &Syncer{store: store, graph: graph, pageSize: pageSize}
+func NewSyncer(store Store, graph msgraph.UserLister, pageSize int, logger *slog.Logger) *Syncer {
+	return &Syncer{store: store, graph: graph, pageSize: pageSize, logger: logger}
 }
 
 // RunStats summarizes one UpdateUsers run for the end-of-run log line.
@@ -28,7 +31,7 @@ type RunStats struct {
 	Seen        int // users returned by Graph
 	Existing    int // already present in teams_user, untouched
 	InvalidUPN  int // UPN without a local part and domain; never syncable
-	HRUnmatched int // no hr.accountName match; retried next run
+	HRUnmatched int // no hr.accountName match; upserted with empty HR fields
 	Upserted    int // written to teams_user
 }
 
@@ -82,23 +85,34 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	for _, c := range candidates {
 		accounts = append(accounts, c.Account)
 	}
-	siteIDs, err := s.store.HRSiteIDs(ctx, accounts)
+	hrUsers, err := s.store.HRUsers(ctx, accounts)
 	if err != nil {
-		return fmt.Errorf("resolve hr site ids: %w", err)
+		return fmt.Errorf("resolve hr users: %w", err)
 	}
+	s.logger.Info("hr site ids lookup result",
+		"requested", len(accounts), "matched", len(hrUsers), "unmatched", len(accounts)-len(hrUsers))
 
 	merged := make([]model.TeamsUser, 0, len(candidates))
 	for _, c := range candidates {
-		siteID, ok := siteIDs[c.Account]
+		hr, ok := hrUsers[c.Account]
 		if !ok {
 			stats.HRUnmatched++
+			s.logger.Info("hr id not found", "account", c.Account, "userId", c.ID)
+			merged = append(merged, c)
 			continue
 		}
-		c.SiteID = siteID
+		c.EngName = hr.EngName
+		c.Mail = hr.Mail
+		if hr.LocationURL == "" {
+			s.logger.Warn("hr locationURL is empty", "account", c.Account)
+		} else {
+			c.SiteID = extractSiteIDFromLocationURL(hr.LocationURL)
+			if c.SiteID == "" {
+				s.logger.Warn("extract siteID from locationURL returned empty",
+					"account", c.Account, "locationURL", hr.LocationURL)
+			}
+		}
 		merged = append(merged, c)
-	}
-	if len(merged) == 0 {
-		return nil
 	}
 	if err := s.store.UpsertTeamsUsers(ctx, merged); err != nil {
 		return fmt.Errorf("upsert teams users: %w", err)

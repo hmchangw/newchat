@@ -70,9 +70,9 @@ func run() error {
 		ClientSecret: cfg.TeamsClientSecret,
 	}, opts...)
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
-	syncer := NewSyncer(store, lister, cfg.GraphPageSize)
-
 	logger := slog.With("requestId", idgen.GenerateRequestID())
+	syncer := NewSyncer(store, lister, cfg.GraphPageSize, logger)
+
 	logger.Info("teams user sync started")
 	start := time.Now()
 	stats, err := syncer.UpdateUsers(ctx)

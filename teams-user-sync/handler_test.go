@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +30,11 @@ func (f *fakeLister) ListUsers(_ context.Context, _ int, fn func([]msgraph.Graph
 	return f.err
 }
 
+// discardLogger keeps Syncer log output out of test noise.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestSyncer_UpdateUsers_HappyPathTwoPages(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -44,21 +51,21 @@ func TestSyncer_UpdateUsers_HappyPathTwoPages(t *testing.T) {
 	// page 1: u1 new, u2 existing
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1", "u2"}).
 		Return(map[string]struct{}{"u2": {}}, nil)
-	store.EXPECT().HRSiteIDs(gomock.Any(), []string{"alice"}).
-		Return(map[string]string{"alice": "site-a"}, nil)
+	store.EXPECT().HRUsers(gomock.Any(), []string{"alice"}).
+		Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil)
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a"},
+		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
 	}).Return(nil)
 	// page 2: u3 new
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u3"}).
 		Return(map[string]struct{}{}, nil)
-	store.EXPECT().HRSiteIDs(gomock.Any(), []string{"carol"}).
-		Return(map[string]string{"carol": "site-b"}, nil)
+	store.EXPECT().HRUsers(gomock.Any(), []string{"carol"}).
+		Return(map[string]hrUser{"carol": {LocationURL: "https://site-b.mysite.com", EngName: "Carol Jones", Mail: "carol@corp.example"}}, nil)
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u3", UPN: "carol@corp.example", Account: "carol", SiteID: "site-b"},
+		{ID: "u3", UPN: "carol@corp.example", Account: "carol", SiteID: "site-b", EngName: "Carol Jones", Mail: "carol@corp.example"},
 	}).Return(nil)
 
-	syncer := NewSyncer(store, lister, 500)
+	syncer := NewSyncer(store, lister, 500, discardLogger())
 	stats, err := syncer.UpdateUsers(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, RunStats{Pages: 2, Seen: 3, Existing: 1, Upserted: 2}, stats)
@@ -73,9 +80,9 @@ func TestSyncer_UpdateUsers_AllExistingSkipsLookupAndWrite(t *testing.T) {
 
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1"}).
 		Return(map[string]struct{}{"u1": {}}, nil)
-	// no HRSiteIDs, no UpsertTeamsUsers
+	// no HRUsers, no UpsertTeamsUsers
 
-	syncer := NewSyncer(store, lister, 500)
+	syncer := NewSyncer(store, lister, 500, discardLogger())
 	stats, err := syncer.UpdateUsers(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, RunStats{Pages: 1, Seen: 1, Existing: 1}, stats)
@@ -92,19 +99,20 @@ func TestSyncer_UpdateUsers_SkipsMalformedUPN(t *testing.T) {
 
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1", "u2", "u3"}).
 		Return(map[string]struct{}{}, nil)
-	store.EXPECT().HRSiteIDs(gomock.Any(), []string{"guest#ext#", "dave"}).
-		Return(map[string]string{"dave": "site-a"}, nil) // guest has no hr row
+	store.EXPECT().HRUsers(gomock.Any(), []string{"guest#ext#", "dave"}).
+		Return(map[string]hrUser{"dave": {LocationURL: "https://site-a.mysite.com", EngName: "Dave Lee", Mail: "dave@corp.example"}}, nil) // guest has no hr row
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u3", UPN: "Dave@CORP.EXAMPLE", Account: "dave", SiteID: "site-a"},
+		{ID: "u1", UPN: "guest#EXT#@other.example", Account: "guest#ext#"},
+		{ID: "u3", UPN: "Dave@CORP.EXAMPLE", Account: "dave", SiteID: "site-a", EngName: "Dave Lee", Mail: "dave@corp.example"},
 	}).Return(nil)
 
-	syncer := NewSyncer(store, lister, 500)
+	syncer := NewSyncer(store, lister, 500, discardLogger())
 	stats, err := syncer.UpdateUsers(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, RunStats{Pages: 1, Seen: 3, InvalidUPN: 1, HRUnmatched: 1, Upserted: 1}, stats)
+	assert.Equal(t, RunStats{Pages: 1, Seen: 3, InvalidUPN: 1, HRUnmatched: 1, Upserted: 2}, stats)
 }
 
-func TestSyncer_UpdateUsers_HRMissSkippedAndCounted(t *testing.T) {
+func TestSyncer_UpdateUsers_HRMissUpsertedAndCounted(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	lister := &fakeLister{pages: [][]msgraph.GraphUser{{
@@ -114,19 +122,64 @@ func TestSyncer_UpdateUsers_HRMissSkippedAndCounted(t *testing.T) {
 
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1", "u2"}).
 		Return(map[string]struct{}{}, nil)
-	store.EXPECT().HRSiteIDs(gomock.Any(), []string{"alice", "eve"}).
-		Return(map[string]string{"alice": "site-a"}, nil) // eve unmatched
+	store.EXPECT().HRUsers(gomock.Any(), []string{"alice", "eve"}).
+		Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil) // eve unmatched
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "site-a"},
+		{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		{ID: "u2", UPN: "eve@corp.example", Account: "eve"},
 	}).Return(nil)
 
-	syncer := NewSyncer(store, lister, 500)
+	syncer := NewSyncer(store, lister, 500, discardLogger())
 	stats, err := syncer.UpdateUsers(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, RunStats{Pages: 1, Seen: 2, HRUnmatched: 1, Upserted: 1}, stats)
+	assert.Equal(t, RunStats{Pages: 1, Seen: 2, HRUnmatched: 1, Upserted: 2}, stats)
 }
 
-func TestSyncer_UpdateUsers_AllHRMissSkipsWrite(t *testing.T) {
+func TestSyncer_UpdateUsers_LocationURLVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		hr   hrUser
+		want model.TeamsUser
+	}{
+		{
+			"valid url derives siteID",
+			hrUser{LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+			model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		},
+		{
+			"empty locationURL keeps empty siteID",
+			hrUser{EngName: "Alice Smith", Mail: "alice@corp.example"},
+			model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		},
+		{
+			"malformed locationURL keeps empty siteID",
+			hrUser{LocationURL: "site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+			model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			lister := &fakeLister{pages: [][]msgraph.GraphUser{{
+				{ID: "u1", UserPrincipalName: "alice@corp.example"},
+			}}}
+
+			store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1"}).
+				Return(map[string]struct{}{}, nil)
+			store.EXPECT().HRUsers(gomock.Any(), []string{"alice"}).
+				Return(map[string]hrUser{"alice": tt.hr}, nil)
+			store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{tt.want}).Return(nil)
+
+			syncer := NewSyncer(store, lister, 500, discardLogger())
+			stats, err := syncer.UpdateUsers(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, RunStats{Pages: 1, Seen: 1, Upserted: 1}, stats)
+		})
+	}
+}
+
+func TestSyncer_UpdateUsers_AllHRMissStillUpserts(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	lister := &fakeLister{pages: [][]msgraph.GraphUser{{
@@ -135,14 +188,16 @@ func TestSyncer_UpdateUsers_AllHRMissSkipsWrite(t *testing.T) {
 
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1"}).
 		Return(map[string]struct{}{}, nil)
-	store.EXPECT().HRSiteIDs(gomock.Any(), []string{"eve"}).
-		Return(map[string]string{}, nil)
-	// no UpsertTeamsUsers
+	store.EXPECT().HRUsers(gomock.Any(), []string{"eve"}).
+		Return(map[string]hrUser{}, nil)
+	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
+		{ID: "u1", UPN: "eve@corp.example", Account: "eve"},
+	}).Return(nil)
 
-	syncer := NewSyncer(store, lister, 500)
+	syncer := NewSyncer(store, lister, 500, discardLogger())
 	stats, err := syncer.UpdateUsers(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, RunStats{Pages: 1, Seen: 1, HRUnmatched: 1}, stats)
+	assert.Equal(t, RunStats{Pages: 1, Seen: 1, HRUnmatched: 1, Upserted: 1}, stats)
 }
 
 func TestSyncer_UpdateUsers_EmptyPageAndEmptyTenant(t *testing.T) {
@@ -151,7 +206,7 @@ func TestSyncer_UpdateUsers_EmptyPageAndEmptyTenant(t *testing.T) {
 		store := NewMockStore(ctrl)
 		lister := &fakeLister{pages: [][]msgraph.GraphUser{{}}}
 
-		syncer := NewSyncer(store, lister, 500)
+		syncer := NewSyncer(store, lister, 500, discardLogger())
 		stats, err := syncer.UpdateUsers(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, RunStats{Pages: 1}, stats)
@@ -161,7 +216,7 @@ func TestSyncer_UpdateUsers_EmptyPageAndEmptyTenant(t *testing.T) {
 		store := NewMockStore(ctrl)
 		lister := &fakeLister{}
 
-		syncer := NewSyncer(store, lister, 500)
+		syncer := NewSyncer(store, lister, 500, discardLogger())
 		stats, err := syncer.UpdateUsers(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, RunStats{}, stats)
@@ -176,7 +231,7 @@ func TestSyncer_UpdateUsers_ErrorPaths(t *testing.T) {
 		store := NewMockStore(ctrl)
 		lister := &fakeLister{err: errors.New("graph down")}
 
-		syncer := NewSyncer(store, lister, 500)
+		syncer := NewSyncer(store, lister, 500, discardLogger())
 		_, err := syncer.UpdateUsers(context.Background())
 		require.ErrorContains(t, err, "graph down")
 	})
@@ -186,19 +241,19 @@ func TestSyncer_UpdateUsers_ErrorPaths(t *testing.T) {
 		store.EXPECT().ExistingIDs(gomock.Any(), gomock.Any()).
 			Return(nil, errors.New("read down"))
 
-		syncer := NewSyncer(store, &fakeLister{pages: page}, 500)
+		syncer := NewSyncer(store, &fakeLister{pages: page}, 500, discardLogger())
 		_, err := syncer.UpdateUsers(context.Background())
 		require.ErrorContains(t, err, "read down")
 	})
-	t.Run("HRSiteIDs error aborts", func(t *testing.T) {
+	t.Run("HRUsers error aborts", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
 		store.EXPECT().ExistingIDs(gomock.Any(), gomock.Any()).
 			Return(map[string]struct{}{}, nil)
-		store.EXPECT().HRSiteIDs(gomock.Any(), gomock.Any()).
+		store.EXPECT().HRUsers(gomock.Any(), gomock.Any()).
 			Return(nil, errors.New("hr down"))
 
-		syncer := NewSyncer(store, &fakeLister{pages: page}, 500)
+		syncer := NewSyncer(store, &fakeLister{pages: page}, 500, discardLogger())
 		_, err := syncer.UpdateUsers(context.Background())
 		require.ErrorContains(t, err, "hr down")
 	})
@@ -207,12 +262,12 @@ func TestSyncer_UpdateUsers_ErrorPaths(t *testing.T) {
 		store := NewMockStore(ctrl)
 		store.EXPECT().ExistingIDs(gomock.Any(), gomock.Any()).
 			Return(map[string]struct{}{}, nil)
-		store.EXPECT().HRSiteIDs(gomock.Any(), gomock.Any()).
-			Return(map[string]string{"alice": "site-a"}, nil)
+		store.EXPECT().HRUsers(gomock.Any(), gomock.Any()).
+			Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com"}}, nil)
 		store.EXPECT().UpsertTeamsUsers(gomock.Any(), gomock.Any()).
 			Return(errors.New("write down"))
 
-		syncer := NewSyncer(store, &fakeLister{pages: page}, 500)
+		syncer := NewSyncer(store, &fakeLister{pages: page}, 500, discardLogger())
 		_, err := syncer.UpdateUsers(context.Background())
 		require.ErrorContains(t, err, "write down")
 	})

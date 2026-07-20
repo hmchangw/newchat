@@ -56,19 +56,19 @@ func (mr *MockStoreMockRecorder) ExistingIDs(ctx, ids any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExistingIDs", reflect.TypeOf((*MockStore)(nil).ExistingIDs), ctx, ids)
 }
 
-// HRSiteIDs mocks base method.
-func (m *MockStore) HRSiteIDs(ctx context.Context, accounts []string) (map[string]string, error) {
+// HRUsers mocks base method.
+func (m *MockStore) HRUsers(ctx context.Context, accounts []string) (map[string]hrUser, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "HRSiteIDs", ctx, accounts)
-	ret0, _ := ret[0].(map[string]string)
+	ret := m.ctrl.Call(m, "HRUsers", ctx, accounts)
+	ret0, _ := ret[0].(map[string]hrUser)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// HRSiteIDs indicates an expected call of HRSiteIDs.
-func (mr *MockStoreMockRecorder) HRSiteIDs(ctx, accounts any) *gomock.Call {
+// HRUsers indicates an expected call of HRUsers.
+func (mr *MockStoreMockRecorder) HRUsers(ctx, accounts any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HRSiteIDs", reflect.TypeOf((*MockStore)(nil).HRSiteIDs), ctx, accounts)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HRUsers", reflect.TypeOf((*MockStore)(nil).HRUsers), ctx, accounts)
 }
 
 // UpsertTeamsUsers mocks base method.

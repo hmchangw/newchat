@@ -41,27 +41,32 @@ func TestMongoStore_ExistingIDs_EmptyInput(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-func TestMongoStore_HRSiteIDs(t *testing.T) {
+func TestMongoStore_HRUsers(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync")
 	ctx := context.Background()
 	store := newMongoStore(db, db)
 
 	_, err := db.Collection("hr").InsertMany(ctx, []any{
-		bson.M{"accountName": "alice", "siteID": "site-a", "unrelated": "x"},
-		bson.M{"accountName": "bob", "siteID": "site-b"},
+		bson.M{"accountName": "alice", "locationURL": "https://site-a.mysite.com", "engName": "Alice Smith", "mail": "alice@corp.example", "unrelated": "x"},
+		bson.M{"accountName": "bob", "locationURL": "https://site-b.mysite.com", "engName": "Bob Wu", "mail": "bob@corp.example"},
+		bson.M{"accountName": "dana"}, // hr row with no HR fields at all
 	})
 	require.NoError(t, err)
 
-	got, err := store.HRSiteIDs(ctx, []string{"alice", "bob", "carol"})
+	got, err := store.HRUsers(ctx, []string{"alice", "bob", "carol", "dana"})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"alice": "site-a", "bob": "site-b"}, got)
+	assert.Equal(t, map[string]hrUser{
+		"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		"bob":   {LocationURL: "https://site-b.mysite.com", EngName: "Bob Wu", Mail: "bob@corp.example"},
+		"dana":  {},
+	}, got)
 }
 
-func TestMongoStore_HRSiteIDs_EmptyInput(t *testing.T) {
+func TestMongoStore_HRUsers_EmptyInput(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync")
 	store := newMongoStore(db, db)
 
-	got, err := store.HRSiteIDs(context.Background(), nil)
+	got, err := store.HRUsers(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -72,7 +77,7 @@ func TestMongoStore_UpsertTeamsUsers_InsertAndIdempotentRerun(t *testing.T) {
 	store := newMongoStore(db, db)
 
 	users := []model.TeamsUser{
-		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a"},
+		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
 		{ID: "u2", UPN: "bob@corp.example", Account: "bob", SiteID: "site-b"},
 	}
 	require.NoError(t, store.UpsertTeamsUsers(ctx, users))
