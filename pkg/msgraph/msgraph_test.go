@@ -440,3 +440,88 @@ func TestListUsers_RejectsCrossOriginNextLink(t *testing.T) {
 	assert.False(t, attackerHit, "must not forward the bearer token to a foreign origin")
 	assert.Len(t, pages, 1, "first (valid) page is still delivered before the walk aborts")
 }
+
+func TestCreateOnlineMeeting_SendsDefaultUserAgent(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "token request must carry User-Agent")
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "meeting request must carry User-Agent")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
+	}))
+	defer graphSrv.Close()
+
+	c := newTestClient(tokenSrv.URL, graphSrv.URL)
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
+		ExternalID:     "room-key-1",
+		Subject:        "Standup",
+		OrganizerEmail: "alice@corp.com",
+	})
+	require.NoError(t, err)
+}
+
+func TestCreateOnlineMeeting_UserAgentOverride(t *testing.T) {
+	const custom = "chat-room-service/9.9"
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, custom, r.Header.Get("User-Agent"))
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
+	}))
+	defer graphSrv.Close()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, custom, r.Header.Get("User-Agent"))
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+
+	c := New(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", UserAgent: custom},
+		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
+	)
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
+		ExternalID: "room-key-1", OrganizerEmail: "alice@corp.com",
+	})
+	require.NoError(t, err)
+}
+
+func TestResolveAccountIDs_SendsUserAgent(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"))
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "directory request must carry User-Agent")
+		_ = json.NewEncoder(w).Encode(map[string]any{"value": []GraphUser{
+			{ID: "ida", UserPrincipalName: "alice@corp.com"},
+		}})
+	}))
+	defer graphSrv.Close()
+
+	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	_, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
+	require.NoError(t, err)
+}
+
+func TestListUsers_SendsUserAgent(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "list-users request must carry User-Agent")
+		_, _ = w.Write([]byte(`{"value":[{"id":"u1","userPrincipalName":"alice@corp.example"}]}`))
+	}))
+	defer graphSrv.Close()
+
+	lister := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+	err := lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
+	require.NoError(t, err)
+}
