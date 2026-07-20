@@ -1,0 +1,80 @@
+# Single-cluster kind test — site1 only, CCS disabled.
+# Used when running `SINGLE_CLUSTER=1 ./charts/elasticsearch/kind/setup.sh`.
+# Deploy directly with:
+#   helm upgrade --install es-chat-site1 ./charts/elasticsearch \
+#     -f charts/elasticsearch/kind/values/site1-single.yaml -n chat
+#
+# Same shape as site1-kind.yaml, minus everything that only makes sense with
+# a peer: ccs.enabled=false, no peers, no registration Job. The chart still
+# renders the ES CR, Istio Gateway/VirtualService/DestinationRule, and Vault
+# secrets — all validated against ECK 1.8.0 + ES 8.19.x.
+properties:
+  site: site1
+  stage: PROD
+  division: site1              # → ES cluster name: es-chat-site1
+  publicDomain: chat.com
+
+# Sidecar exclusions:
+#   9200: Gateway TLS PASSTHROUGH lands directly on ES's own TLS (no double-wrap)
+#   9300: ES transport TLS — bypass sidecar
+cluster:
+  istioConfig:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/excludeInboundPorts: "9200,9300"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "9300"
+
+  # Kind override: collapse to 1 master + 1 data + 1 coord for local footprint.
+  nodeSets:
+    masters:
+    - name: master-a
+      count: 1
+      nodeZone: zone1
+      roles: [master]
+      storageSize: 128Mi
+      storageClassName: standard
+    datas:
+    - name: data-a
+      count: 1
+      nodeZone: zone1
+      roles: [data]
+      storageSize: 512Mi
+      storageClassName: standard
+    coordinators:
+    - name: coords-a
+      count: 1
+      nodeZone: zone1
+      roles: []
+      storageSize: 128Mi
+      storageClassName: standard
+    additionalNodes: []
+
+# Single-cluster: no peers, no registration Job, no shared transport CA needed.
+# nodeRoutable=false because the CCS-only "pin to node-routable=true" scheduler
+# hint would otherwise wedge pods Pending on a plain kind node.
+ccs:
+  enabled: false
+  nodeRoutable: false
+  peers: []
+  registrationJob:
+    enabled: false
+  publicEndpoint:
+    enabled: false
+
+authorizationPolicy:
+  sourceCidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  ports: ["9200", "9300"]
+
+vault:
+  vaultAuthRef: chat-vault-auth
+  vaultConnectionRef: ""
+  mount: secret
+  type: kv-v2
+  refreshAfter: 30s
+  paths:
+    elasticUser: elasticsearch/elastic-user
+    minio: elasticsearch/site1/minio
+    # transportCA path is only consumed when ccs.enabled=true; harmless if unused
+    transportCA: elasticsearch/transport-ca

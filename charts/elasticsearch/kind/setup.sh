@@ -2,7 +2,8 @@
 # One-shot bring-up for a local kind cluster running:
 #   * Istio (default profile, istiod only — no built-in ingressgateway)
 #   * A per-namespace ingressgateway in the `chat` namespace
-#   * ECK operator 2.16 (supports ES up to 8.x)
+#   * ECK operator 1.8.0 (locally rebuilt; see ops/eck-rebuild/) — validated
+#     against ES 8.19.x pods; kept at 1.8.0 so company-wide CRDs don't move
 #   * HashiCorp Vault (dev mode, root token = "root") + Vault Secrets Operator
 #   * Two minimal ECK Elasticsearch clusters (es-chat-site1 / es-chat-site2)
 #     in the same namespace, with Phase 1 same-namespace CCS via the shared
@@ -30,7 +31,7 @@ VCHARTS="${KIND_DIR}/charts"
 ISTIO_BASE="${VCHARTS}/base-1.24.2.tgz"
 ISTIOD="${VCHARTS}/istiod-1.24.2.tgz"
 ISTIO_GATEWAY="${VCHARTS}/gateway-1.24.2.tgz"
-ECK_OPERATOR="${VCHARTS}/eck-operator-2.16.1.tgz"
+ECK_OPERATOR="${VCHARTS}/eck-operator-1.8.0.tgz"
 VAULT="${VCHARTS}/vault-0.32.0.tgz"
 VSO="${VCHARTS}/vault-secrets-operator-0.10.0.tgz"
 
@@ -76,10 +77,22 @@ helm upgrade --install chat-ingressgateway "${ISTIO_GATEWAY}" \
   -f "${MANIFESTS}/istio-gateway-values.yaml"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. ECK operator 2.x from vendored .tgz
+# 4. ECK operator 1.8.0 from vendored .tgz (image = josephsylvan/... rebuild)
 # ─────────────────────────────────────────────────────────────────────────────
-log "Installing ECK operator (chart: ${ECK_OPERATOR##*/})"
-helm upgrade --install eck-operator "${ECK_OPERATOR}" \
+# Load the locally built operator image into kind's containerd so the operator
+# pod can pull it with IfNotPresent — nothing goes to Docker Hub. If the image
+# isn't in the local docker daemon yet, build it via ops/eck-rebuild/build.sh.
+log "Loading operator image into kind cluster '${CLUSTER_NAME}'"
+OPERATOR_IMAGE="josephsylvan/eck-operator:1.8.0-go1.26-cvefix-20260720"
+if ! docker image inspect "${OPERATOR_IMAGE}" >/dev/null 2>&1; then
+  echo "!! Image ${OPERATOR_IMAGE} not found locally."
+  echo "   Build it first:  bash ${ROOT}/ops/eck-rebuild/build.sh"
+  exit 1
+fi
+kind load docker-image "${OPERATOR_IMAGE}" --name "${CLUSTER_NAME}"
+
+log "Installing ECK operator 1.8.0 (chart: ${ECK_OPERATOR##*/})"
+helm upgrade --install elastic-operator "${ECK_OPERATOR}" \
   -n elastic-system --create-namespace --wait \
   -f "${MANIFESTS}/eck-operator-values.yaml"
 
@@ -155,22 +168,37 @@ log "Applying VaultConnection + VaultAuth in '${APP_NS}'"
 kubectl apply -f "${MANIFESTS}/vault-auth.yaml"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Two ES clusters in the chat namespace via the local elasticsearch chart
+# 6. Elasticsearch cluster(s) in the chat namespace via the local chart
+#
+# SINGLE_CLUSTER=1 → install only site1 with CCS disabled (single-cluster
+#                    smoke test — no peer, no shared transport CA needed,
+#                    no register-remotes Job)
+# default          → install site1 + site2 with cert-based CCS between them
 # ─────────────────────────────────────────────────────────────────────────────
-log "Installing es-chat-site1 (chart: ./charts/elasticsearch)"
-helm upgrade --install es-chat-site1 "${ROOT}/charts/elasticsearch" \
-  -n "${APP_NS}" --force-conflicts \
-  -f "${KIND_DIR}/values/site1-kind.yaml"
+if [[ "${SINGLE_CLUSTER:-0}" == "1" ]]; then
+  log "SINGLE_CLUSTER=1 — installing es-chat-site1 only (CCS disabled)"
+  helm upgrade --install es-chat-site1 "${ROOT}/charts/elasticsearch" \
+    -n "${APP_NS}" --force-conflicts \
+    -f "${KIND_DIR}/values/site1-single.yaml"
 
-log "Installing es-chat-site2 (chart: ./charts/elasticsearch)"
-helm upgrade --install es-chat-site2 "${ROOT}/charts/elasticsearch" \
-  -n "${APP_NS}" --force-conflicts \
-  -f "${KIND_DIR}/values/site2-kind.yaml"
+  log "Waiting for Elasticsearch cluster to be green"
+  kubectl -n "${APP_NS}" wait --for=jsonpath='{.status.health}'=green elasticsearch/es-chat-site1 --timeout=600s
+else
+  log "Installing es-chat-site1 (chart: ./charts/elasticsearch)"
+  helm upgrade --install es-chat-site1 "${ROOT}/charts/elasticsearch" \
+    -n "${APP_NS}" --force-conflicts \
+    -f "${KIND_DIR}/values/site1-kind.yaml"
 
-log "Waiting for both Elasticsearch clusters to be green"
-for site in es-chat-site1 es-chat-site2; do
-  kubectl -n "${APP_NS}" wait --for=jsonpath='{.status.health}'=green elasticsearch/${site} --timeout=600s
-done
+  log "Installing es-chat-site2 (chart: ./charts/elasticsearch)"
+  helm upgrade --install es-chat-site2 "${ROOT}/charts/elasticsearch" \
+    -n "${APP_NS}" --force-conflicts \
+    -f "${KIND_DIR}/values/site2-kind.yaml"
+
+  log "Waiting for both Elasticsearch clusters to be green"
+  for site in es-chat-site1 es-chat-site2; do
+    kubectl -n "${APP_NS}" wait --for=jsonpath='{.status.health}'=green elasticsearch/${site} --timeout=600s
+  done
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. CCS is wired automatically by the chart's post-install Job
@@ -181,10 +209,34 @@ done
 #    register-remotes.sh stays available — same logic, callable from a shell.
 # ─────────────────────────────────────────────────────────────────────────────
 
+if [[ "${SINGLE_CLUSTER:-0}" == "1" ]]; then
 cat <<EOF
 
 ─────────────────────────────────────────────────────────────
-✓ kind setup complete
+✓ kind setup complete (single-cluster mode)
+
+Add to /etc/hosts:
+  127.0.0.1  es-site1.chat.com kibana-site1.chat.com
+
+Watch the ES cluster:
+  kubectl -n ${APP_NS} get elasticsearch,kibana,pods -w
+
+Verify:
+  curl -k -u elastic:chat-elastic-pw https://es-site1.chat.com/_cluster/health?pretty
+  # Expect: { "status": "green", ... }
+
+Kibana (browser, accept self-signed cert):
+  https://kibana-site1.chat.com  → login elastic / chat-elastic-pw
+
+To tear everything down:
+  ${KIND_DIR}/teardown.sh
+─────────────────────────────────────────────────────────────
+EOF
+else
+cat <<EOF
+
+─────────────────────────────────────────────────────────────
+✓ kind setup complete (CCS mode)
 
 Add to /etc/hosts (kind exposes the chat-ingressgateway on host 80/443):
   127.0.0.1  es-site1.chat.com kibana-site1.chat.com es-site2.chat.com kibana-site2.chat.com
@@ -216,3 +268,4 @@ To tear everything down:
   ${KIND_DIR}/teardown.sh
 ─────────────────────────────────────────────────────────────
 EOF
+fi

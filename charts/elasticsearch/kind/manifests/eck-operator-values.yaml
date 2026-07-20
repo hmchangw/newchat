@@ -1,8 +1,25 @@
-# Values for the upstream elastic/eck-operator Helm chart (version 2.16.1).
-# 2.x is the line that supports Elasticsearch 8.x and provides the
-# `spec.remoteClusters[].apiKey` field used by the Phase 1 same-namespace CCS.
+# Values for the upstream elastic/eck-operator Helm chart (version 1.8.0).
+#
+# We pin ECK 1.8.0 because production-side CRDs and dependent operators are
+# aligned to 1.8.0 across the company — moving to 2.x would break every
+# other consumer. To close CVEs that upstream never backported to 1.8.0
+# (Go stdlib + old x/crypto / x/net / etc.), the operator image is a locally
+# rebuilt drop-in — same source tag (1.8.0), modern Go toolchain, patched
+# transitive deps, distroless runtime. See ops/eck-rebuild/ for the build.
+#
+# The image runs as UID 1001 (same as upstream ECK 1.8.0), so
+# podSecurityContext.runAsNonRoot=true and the chart's default securityContext
+# work without changes.
 installCRDs: true
 replicaCount: 1
+
+image:
+  repository: josephsylvan/eck-operator
+  tag: 1.8.0-go1.26-cvefix-20260720
+  # IfNotPresent — with `kind load docker-image ...` staging the image into the
+  # cluster's local containerd, no registry pull is needed.
+  pullPolicy: IfNotPresent
+
 resources:
   requests:
     cpu: 50m
@@ -10,5 +27,6 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
 # Watch all namespaces (cluster-scoped). Empty list = all.
 managedNamespaces: []

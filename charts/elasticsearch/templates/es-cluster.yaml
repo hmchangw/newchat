@@ -6,6 +6,17 @@ metadata:
   namespace: {{ .Values.cluster.namespace }}
 spec:
   version: {{ required "An Elasticsearch version is required" .Values.cluster.version }}
+
+  {{- /*
+     PDB pass-through from .Values.cluster.podDisruptionBudget. Default in
+     values.yaml is `{}` (ECK opt-out) — see the comment there for why.
+     Skipped entirely when the value is null.
+  */}}
+  {{- if hasKey .Values.cluster "podDisruptionBudget" }}
+  podDisruptionBudget:
+    {{- toYaml .Values.cluster.podDisruptionBudget | nindent 4 }}
+  {{- end }}
+
   {{- with .Values.auth }}
   auth:
     {{- toYaml . | nindent 4 }}

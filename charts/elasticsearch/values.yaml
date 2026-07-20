@@ -113,7 +113,7 @@ ccs:
     healthTimeoutSeconds: 600
     publicPort: "443"          # override to "30443" for multi-kind harness
 
-  transport:
+  transport: {}
     # Local K8s Secret (kind: tls) holding this cluster's copy of the shared
     # transport CA cert+key. Each cluster always creates its own copy from the
     # shared Vault path (vault.paths.transportCA) — the CONTENT is identical
@@ -153,6 +153,17 @@ cluster:
   # Optional pass-throughs to the Elasticsearch CRD.
   auth: {}
   monitoring: {}
+
+  # PodDisruptionBudget pass-through to the ES CRD's `spec.podDisruptionBudget`.
+  # Default `{}` opts out of ECK's auto-managed PDB entirely — the empty spec
+  # is the ECK contract for "user opt-out" (pkg/apis/common/v1/common.go →
+  # PodDisruptionBudgetTemplate.IsDisabled). We disable because ECK 1.8.0
+  # emits PDBs at `policy/v1beta1`, an API removed in Kubernetes 1.25, so
+  # even the delete-if-exists cleanup path 404s and wedges reconciliation on
+  # any modern control plane. Prod ES clusters here also run with this off
+  # and provision a `policy/v1` PDB out-of-band if HA requires it.
+  # Set to `null` (or override with a full spec) to let ECK manage it.
+  podDisruptionBudget: {}
 
   # Annotations merged into every nodeSet's podTemplate.metadata.annotations.
   istioConfig: {}
