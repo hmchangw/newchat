@@ -20,10 +20,6 @@ import (
 
 // Config is the job's environment configuration.
 type Config struct {
-	// A single primary (master) client serves every collection: the teams_user
-	// scan, its watermark update and the teams_chat upserts all target the
-	// primary, so these freshly populated collections are never read from a
-	// lagging secondary.
 	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
