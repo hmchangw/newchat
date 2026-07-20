@@ -40,6 +40,11 @@ type InboxStore interface {
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead writes ThreadSubscription under a $lt lastSeenAt guard, then the Subscription only if the guard accepted.
 	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error
+	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
+	// user's home replica: it advances every one of account's thread subscriptions
+	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and clears
+	// threadUnread + alert on every subscription that still has unread threads.
+	ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
 	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
@@ -106,6 +111,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleThreadSubscriptionUpserted(ctx, &evt)
 	case "thread_read":
 		return h.handleThreadRead(ctx, &evt)
+	case model.InboxThreadReadAll:
+		return h.handleThreadReadAll(ctx, &evt)
 	case model.InboxRoomRenamed:
 		return h.handleRoomRenamed(ctx, &evt)
 	case model.InboxRoomRestricted:
@@ -313,6 +320,18 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.NewThreadUnread, e.Alert, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read (room %q, thread %q, account %q): %w",
 			e.RoomID, e.ThreadRoomID, e.Account, err)
+	}
+	return nil
+}
+
+func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.ThreadReadAllEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal thread_read_all payload: %w", err)
+	}
+	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
+	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
+		return fmt.Errorf("apply thread read all (account %q): %w", e.Account, err)
 	}
 	return nil
 }

@@ -1635,35 +1635,20 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 }
 
 // ClearThreadSubscriptionsForAccount marks every one of account's thread
-// subscriptions as read and returns the affected rows for federation. Projects
-// only the fields the caller federates. No order-safety guard on the source-site
-// write; the $lt guard lives on the inbox-worker side.
-func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) ([]model.ThreadSubscription, error) {
-	filter := bson.M{"userAccount": account}
-	cursor, err := s.threadSubscriptions.Find(ctx, filter, options.Find().SetProjection(bson.M{
-		"threadRoomId":    1,
-		"roomId":          1,
-		"parentMessageId": 1,
-		"_id":             0,
-	}))
-	if err != nil {
-		return nil, fmt.Errorf("find thread subscriptions for %q: %w", account, err)
-	}
-	var rows []model.ThreadSubscription
-	if err := cursor.All(ctx, &rows); err != nil {
-		return nil, fmt.Errorf("decode thread subscriptions for %q: %w", account, err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	if _, err := s.threadSubscriptions.UpdateMany(ctx, filter, bson.M{"$set": bson.M{
+// subscriptions as read in one account-scoped bulk update. No order-safety guard
+// on the source-site write; the $lt guard lives on the inbox-worker side. A
+// single thread_read_all event carries the cross-site convergence, so no per-row
+// snapshot is returned (and no Find/Update window can miss a concurrently
+// inserted row).
+func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error {
+	if _, err := s.threadSubscriptions.UpdateMany(ctx, bson.M{"userAccount": account}, bson.M{"$set": bson.M{
 		"lastSeenAt": now,
 		"updatedAt":  now,
 		"hasMention": false,
 	}}); err != nil {
-		return nil, fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
+		return fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
 	}
-	return rows, nil
+	return nil
 }
 
 // ClearSubscriptionThreadUnreadForAccount removes threadUnread and clears alert on

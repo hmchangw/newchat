@@ -730,6 +730,62 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 	assert.False(t, gotTS.HasMention)
 }
 
+func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// alice: two thread subs (one older lastSeenAt, one unread/never seen) + one
+	// thread sub already read in the FUTURE (guard must not regress it).
+	_, err := db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "tsA1", "threadRoomId": "tr1", "roomId": "r1", "parentMessageId": "p1", "userAccount": "alice", "siteId": "site-b", "hasMention": true, "lastSeenAt": now.Add(-time.Hour)},
+		bson.M{"_id": "tsA2", "threadRoomId": "tr2", "roomId": "r2", "parentMessageId": "p2", "userAccount": "alice", "siteId": "site-b", "hasMention": false},
+		bson.M{"_id": "tsA3", "threadRoomId": "tr3", "roomId": "r3", "parentMessageId": "p3", "userAccount": "alice", "siteId": "site-b", "hasMention": true, "lastSeenAt": now.Add(time.Hour)},
+		bson.M{"_id": "tsB1", "threadRoomId": "tr9", "roomId": "r1", "parentMessageId": "p9", "userAccount": "bob", "siteId": "site-b", "hasMention": true},
+	})
+	require.NoError(t, err)
+
+	_, err = db.Collection("subscriptions").InsertMany(ctx, []any{
+		&model.Subscription{ID: "sA1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}, Alert: true},
+		&model.Subscription{ID: "sB1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}, Alert: true},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.ApplyThreadReadAll(ctx, "alice", now))
+
+	// tsA1 (older) + tsA2 (never seen) advanced to now, hasMention cleared.
+	for _, id := range []string{"tsA1", "tsA2"} {
+		var ts model.ThreadSubscription
+		require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": id}).Decode(&ts))
+		require.NotNil(t, ts.LastSeenAt, id)
+		assert.Equal(t, now, ts.LastSeenAt.UTC().Truncate(time.Millisecond), id)
+		assert.False(t, ts.HasMention, id)
+	}
+	// tsA3 (future read) must NOT be regressed by the guard.
+	var ts3 model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsA3"}).Decode(&ts3))
+	assert.Equal(t, now.Add(time.Hour), ts3.LastSeenAt.UTC().Truncate(time.Millisecond))
+
+	// alice's subscription: threadUnread unset, alert cleared.
+	var rawA model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA1"}).Decode(&rawA))
+	assert.Empty(t, rawA.ThreadUnread)
+	assert.False(t, rawA.Alert)
+
+	// bob untouched.
+	var tsB model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsB1"}).Decode(&tsB))
+	assert.Nil(t, tsB.LastSeenAt)
+	var subB model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&subB))
+	assert.Equal(t, []string{"p9"}, subB.ThreadUnread)
+	assert.True(t, subB.Alert)
+}
+
 func TestInboxStore_ApplyThreadRead_EmptyArrayUnsetsField(t *testing.T) {
 	db := setupMongo(t)
 	store := &mongoInboxStore{

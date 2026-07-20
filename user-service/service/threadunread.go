@@ -142,17 +142,13 @@ func (s *UserService) ClearAllThreadUnread(c *natsrouter.Context, _ model.Thread
 		sites = append(sites, site)
 	}
 
-	type siteResult struct {
-		cleared int
-		failed  bool
-	}
-	results := make([]siteResult, len(sites))
+	failed := make([]bool, len(sites))
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {
 		if c.Err() != nil {
-			results[i].failed = true
+			failed[i] = true
 			continue
 		}
 		wg.Add(1)
@@ -160,26 +156,21 @@ func (s *UserService) ClearAllThreadUnread(c *natsrouter.Context, _ model.Thread
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			n, err := s.rooms.ClearAllThreadUnread(c, site, account)
-			if err != nil {
+			if err := s.rooms.ClearAllThreadUnread(c, site, account); err != nil {
 				slog.WarnContext(c, "thread-read-all site degraded",
 					"account", account, "site", site,
 					"request_id", natsutil.RequestIDFromContext(c), "error", err)
-				results[i].failed = true
-				return
+				failed[i] = true
 			}
-			results[i].cleared = n
 		}()
 	}
 	wg.Wait()
 
 	resp := &model.ThreadReadAllResponse{}
 	for i, site := range sites {
-		if results[i].failed {
+		if failed[i] {
 			resp.UnavailableSites = append(resp.UnavailableSites, site)
-			continue
 		}
-		resp.ClearedThreads += results[i].cleared
 	}
 	return resp, nil
 }

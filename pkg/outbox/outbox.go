@@ -22,6 +22,7 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	model.InboxRoleUpdated,
 	model.InboxSubscriptionRead,
 	model.InboxThreadRead,
+	model.InboxThreadReadAll,
 	model.InboxSubscriptionMuteToggled,
 	model.InboxSubscriptionFavoriteToggled,
 	model.InboxRoomRestricted,

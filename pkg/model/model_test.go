@@ -2647,14 +2647,16 @@ func TestSubscriptionReadEventJSON(t *testing.T) {
 }
 
 func TestThreadReadAllRoundTrip(t *testing.T) {
-	respFull := model.ThreadReadAllResponse{ClearedThreads: 7, UnavailableSites: []string{"site-b"}}
+	respFull := model.ThreadReadAllResponse{UnavailableSites: []string{"site-b"}}
 	roundTrip(t, &respFull, &model.ThreadReadAllResponse{})
 	respEmpty := model.ThreadReadAllResponse{}
 	roundTrip(t, &respEmpty, &model.ThreadReadAllResponse{})
 	roomReq := model.RoomThreadReadAllRequest{Account: "alice"}
 	roundTrip(t, &roomReq, &model.RoomThreadReadAllRequest{})
-	roomResp := model.RoomThreadReadAllResponse{ClearedThreads: 3}
+	roomResp := model.RoomThreadReadAllResponse{}
 	roundTrip(t, &roomResp, &model.RoomThreadReadAllResponse{})
+	ev := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1717000000000, Timestamp: 1717000000001}
+	roundTrip(t, &ev, &model.ThreadReadAllEvent{})
 }
 
 func TestPresenceStatusValues(t *testing.T) {
