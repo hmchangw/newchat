@@ -6,8 +6,8 @@ set -euo pipefail
 
 REGISTRY="${REGISTRY:-josephsylvan}"
 IMAGE="${IMAGE:-eck-operator}"
-TAG="${TAG:-1.8.0-go1.24}"
-GO_VERSION="${GO_VERSION:-1.24.2}"
+TAG="${TAG:-1.8.0-go1.26}"
+GO_VERSION="${GO_VERSION:-1.26.5}"
 
 FULL_TAG="${REGISTRY}/${IMAGE}:${TAG}"
 DIR="$(cd "$(dirname "$0")" && pwd)"

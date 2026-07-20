@@ -11,11 +11,11 @@
 #
 # Build:
 #   docker build \
-#     -t fleming7612/eck-operator:1.8.0-go1.24 \
+#     -t josephsylvan/eck-operator:1.8.0-go1.26 \
 #     -f ops/eck-rebuild/Dockerfile \
 #     ops/eck-rebuild
 
-ARG GO_VERSION=1.24.2
+ARG GO_VERSION=1.26.5
 ARG ECK_VERSION=1.8.0
 ARG ECK_REF=1.8.0
 
