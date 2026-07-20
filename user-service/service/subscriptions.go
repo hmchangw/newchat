@@ -667,21 +667,26 @@ func (s *UserService) countUnread(ctx context.Context, account string, total int
 }
 
 // countThreadOnlyUnread returns how many pendingRooms (rooms already READ at the message
-// level, roomID -> siteID) have >=1 unread followed thread — at most +1 per room. Thread
-// last-activity is resolved per owning site via GetThreadRoomInfoBatch, degrading like the
-// room pass: a failed site contributes nothing. A ListByAccount failure logs and returns 0
-// so a thread-subsystem hiccup never discards the established room-level count.
+// level, roomID -> siteID) have >=1 unread followed thread — at most +1 per room. Only the
+// pending rooms' thread-subs are read (scoped in the query), then thread last-activity is
+// resolved per owning site via GetThreadRoomInfoBatch, degrading like the room pass: a
+// failed site contributes nothing. A thread-sub read failure logs and returns 0 so a
+// thread-subsystem hiccup never discards the established room-level count.
 func (s *UserService) countThreadOnlyUnread(ctx context.Context, account string, pendingRooms map[string]string) int {
 	if len(pendingRooms) == 0 {
 		return 0
 	}
-	rows, err := s.threadSubs.ListByAccount(ctx, account)
+	roomIDs := make([]string, 0, len(pendingRooms))
+	for roomID := range pendingRooms {
+		roomIDs = append(roomIDs, roomID)
+	}
+	rows, err := s.threadSubs.ListByAccountInRooms(ctx, account, roomIDs)
 	if err != nil {
 		slog.WarnContext(ctx, "unread count: thread subscriptions read failed", "account", account, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 		return 0
 	}
 
-	// Keep only threads whose parent room is a pending (read) candidate; group by owning site.
+	// Rows are already scoped to the pending rooms by the query; group by owning site.
 	type threadCand struct {
 		roomID     string
 		lastSeenAt *time.Time
@@ -689,9 +694,6 @@ func (s *UserService) countThreadOnlyUnread(ctx context.Context, account string,
 	idsBySite := map[string][]string{}
 	byThread := make(map[string]threadCand, len(rows))
 	for i := range rows {
-		if _, ok := pendingRooms[rows[i].RoomID]; !ok {
-			continue
-		}
 		idsBySite[rows[i].SiteID] = append(idsBySite[rows[i].SiteID], rows[i].ThreadRoomID)
 		byThread[rows[i].ThreadRoomID] = threadCand{roomID: rows[i].RoomID, lastSeenAt: rows[i].LastSeenAt}
 	}

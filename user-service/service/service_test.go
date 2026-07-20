@@ -29,9 +29,9 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 	// ListSubscriptions now enriches last-message via history.RoomsGet; default it to a
 	// no-op so list tests that don't exercise last-message need no per-test stub.
 	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	// countUnread's thread phase reads thread-subs; default to none so room-count
-	// tests that don't exercise threads need no per-test stub.
-	threadSubs.EXPECT().ListByAccount(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	// countUnread's thread phase reads pending rooms' thread-subs; default to none so
+	// room-count tests that don't exercise threads need no per-test stub.
+	threadSubs.EXPECT().ListByAccountInRooms(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	// The same mock backs both publishers (federation + client fanout) —
 	// expectations are subject-scoped, so tests stay unambiguous.
 	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, cfg), subs, users, apps, rooms, history, pub

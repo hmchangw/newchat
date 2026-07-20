@@ -140,3 +140,42 @@ func TestThreadSubscriptionRepo_ListByAccount_NewestCappedAndOrdered(t *testing.
 		assert.NotEqual(t, "0000", r.ThreadRoomID)
 	}
 }
+
+// ListByAccountInRooms restricts the read to threads whose parent room is in the given
+// list, applying the same membership/app gate; an empty room list short-circuits to none.
+func TestThreadSubscriptionRepo_ListByAccountInRooms(t *testing.T) {
+	db := testutil.MongoDB(t, "user_service_threadsubs_inrooms")
+	ctx := context.Background()
+	_, err := db.Collection("thread_subscriptions").InsertMany(ctx, []interface{}{
+		model.ThreadSubscription{ID: "1", ThreadRoomID: "tr1", RoomID: "r1", UserAccount: "alice", SiteID: "site-a"},
+		model.ThreadSubscription{ID: "2", ThreadRoomID: "tr2", RoomID: "r2", UserAccount: "alice", SiteID: "site-a"},
+		model.ThreadSubscription{ID: "3", ThreadRoomID: "tr3", RoomID: "r3", UserAccount: "alice", SiteID: "site-a"},
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("subscriptions").InsertMany(ctx, []interface{}{
+		sub("s1", "alice", "r1", model.RoomTypeChannel, false),
+		sub("s2", "alice", "r2", model.RoomTypeChannel, false),
+		sub("s3", "alice", "r3", model.RoomTypeChannel, false),
+	})
+	require.NoError(t, err)
+
+	repo := NewThreadSubscriptionRepo(db)
+
+	// Only threads in the requested rooms come back.
+	rows, err := repo.ListByAccountInRooms(ctx, "alice", []string{"r1", "r3"})
+	require.NoError(t, err)
+	byThread := map[string]model.ThreadUnreadRow{}
+	for _, r := range rows {
+		byThread[r.ThreadRoomID] = r
+	}
+	require.Len(t, rows, 2)
+	assert.Contains(t, byThread, "tr1")
+	assert.Contains(t, byThread, "tr3")
+	assert.Equal(t, "r1", byThread["tr1"].RoomID)
+	assert.NotContains(t, byThread, "tr2") // r2 not requested
+
+	// Empty room list short-circuits without querying.
+	empty, err := repo.ListByAccountInRooms(ctx, "alice", nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}

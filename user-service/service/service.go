@@ -54,6 +54,7 @@ type RoomClient interface {
 // the thread-unread badge.
 type ThreadSubscriptionRepository interface {
 	ListByAccount(ctx context.Context, account string) ([]model.ThreadUnreadRow, error)
+	ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error)
 }
 
 // HistoryClient is the consumer-defined interface for per-site history-service
