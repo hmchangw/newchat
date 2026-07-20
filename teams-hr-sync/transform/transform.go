@@ -59,12 +59,9 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, si
 		MailNickname:   m.MailNickname,
 		UserType:       m.UserType,
 		AccountEnabled: m.AccountEnabled,
-		// Group membership from the walk context (the group being synced); the
-		// collector merges further groups for a member seen in several.
-		Groups: []string{org.SectID},
-		SiteID: siteID,
-		Source: SourceTeams,
-		Org:    *org,
+		SiteID:         siteID,
+		Source:         SourceTeams,
+		Org:            *org,
 	}
 }
 

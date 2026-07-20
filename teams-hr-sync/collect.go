@@ -26,7 +26,7 @@ type collectStats struct {
 func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string, pageSize int) ([]model.Employee, collectStats, error) {
 	var stats collectStats
 	var out []model.Employee
-	seen := make(map[string]int) // account -> index in out
+	seen := make(map[string]struct{})
 	for _, sg := range groups {
 		profile, err := graph.GetGroup(ctx, sg.GroupID)
 		if err != nil {
@@ -46,14 +46,11 @@ func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper tra
 					e.SiteID = site
 					stats.Overridden++
 				}
-				if idx, dup := seen[e.Account]; dup {
+				if _, dup := seen[e.Account]; dup {
 					stats.DupAccount++
-					// First mapping wins for the row; merge the extra group so a
-					// member in several groups keeps every membership.
-					out[idx].Groups = append(out[idx].Groups, e.Groups...)
 					continue
 				}
-				seen[e.Account] = len(out)
+				seen[e.Account] = struct{}{}
 				out = append(out, e)
 			}
 			return nil

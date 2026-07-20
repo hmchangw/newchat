@@ -59,10 +59,8 @@ func TestCollectEmployees_PerGroupSiteAndDedup(t *testing.T) {
 	assert.Equal(t, "alice", got[0].Account)
 	assert.Equal(t, "site-a", got[0].SiteID, "dup account keeps the first group's site")
 	assert.Equal(t, "g1", got[0].SectID, "group maps to section")
-	assert.Equal(t, []string{"g1", "g2"}, got[0].Groups, "member in both groups keeps every membership")
 	assert.Equal(t, "bob", got[1].Account)
 	assert.Equal(t, "site-b", got[1].SiteID)
-	assert.Equal(t, []string{"g2"}, got[1].Groups, "single-group member has one membership")
 	assert.Equal(t, collectStats{Groups: 2, Members: 4, InvalidUPN: 1, DupAccount: 1}, stats)
 }
 

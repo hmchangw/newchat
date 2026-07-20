@@ -31,17 +31,16 @@ const (
 // coexisting producers don't quit each other's rows.
 type Employee struct {
 	Org            `bson:",inline"`
-	EmployeeID     string   `json:"employeeId"     bson:"employeeId"`
-	Account        string   `json:"account"        bson:"account"`
-	EngName        string   `json:"engName"        bson:"engName"`
-	ChineseName    string   `json:"chineseName"    bson:"chineseName"`
-	Mail           string   `json:"mail"           bson:"mail"`
-	MailNickname   string   `json:"mailNickname"   bson:"mailNickname"`
-	UserType       string   `json:"userType"       bson:"userType"`
-	AccountEnabled bool     `json:"accountEnabled" bson:"accountEnabled"`
-	Groups         []string `json:"groups"         bson:"groups"`
-	SiteID         string   `json:"siteId"         bson:"siteId"`
-	Source         string   `json:"source"         bson:"source"`
+	EmployeeID     string `json:"employeeId"     bson:"employeeId"`
+	Account        string `json:"account"        bson:"account"`
+	EngName        string `json:"engName"        bson:"engName"`
+	ChineseName    string `json:"chineseName"    bson:"chineseName"`
+	Mail           string `json:"mail"           bson:"mail"`
+	MailNickname   string `json:"mailNickname"   bson:"mailNickname"`
+	UserType       string `json:"userType"       bson:"userType"`
+	AccountEnabled bool   `json:"accountEnabled" bson:"accountEnabled"`
+	SiteID         string `json:"siteId"         bson:"siteId"`
+	Source         string `json:"source"         bson:"source"`
 }
 
 // EmployeeWithChange is one employees.upsert element (published as a bare

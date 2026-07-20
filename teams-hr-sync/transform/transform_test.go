@@ -32,18 +32,18 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 				Mail: "alice.wu@corp.com", MailNickname: "alice.wu", UserType: "Member", AccountEnabled: true,
 			},
 			// EmployeeID derived from the Graph id (u1), not the AAD EMP1 attribute;
-			// mail/userType/accountEnabled carried through; Groups from the org.
+			// mail/userType/accountEnabled carried through.
 			want: model.Employee{
 				EmployeeID: EmployeeIDFromGraphID("u1"), Account: "alice.wu", EngName: "Alice Wu",
 				ChineseName: "愛麗絲", Mail: "alice.wu@corp.com", MailNickname: "alice.wu",
-				UserType: "Member", AccountEnabled: true, Groups: []string{"g1"},
+				UserType: "Member", AccountEnabled: true,
 				SiteID: "site-a", Source: "teams", Org: org,
 			},
 		},
 		{
 			name: "surname only trims the joiner space",
 			user: msgraph.GraphUser{ID: "u2", UserPrincipalName: "bob@corp.com", Surname: "Lin"},
-			want: model.Employee{EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", Groups: []string{"g1"}, SiteID: "site-a", Source: "teams", Org: org},
+			want: model.Employee{EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", Source: "teams", Org: org},
 		},
 		// empty Account or missing Graph id signals unmappable — the caller skips
 		{name: "no at sign", user: msgraph.GraphUser{ID: "u3", UserPrincipalName: "not-a-upn"}, want: model.Employee{}},
