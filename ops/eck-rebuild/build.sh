@@ -4,7 +4,7 @@
 #   ${REGISTRY}/${IMAGE}:${TAG}
 set -euo pipefail
 
-REGISTRY="${REGISTRY:-fleming7612}"
+REGISTRY="${REGISTRY:-josephsylvan}"
 IMAGE="${IMAGE:-eck-operator}"
 TAG="${TAG:-1.8.0-go1.24}"
 GO_VERSION="${GO_VERSION:-1.24.2}"
