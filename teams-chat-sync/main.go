@@ -20,10 +20,10 @@ import (
 
 // Config is the job's environment configuration.
 type Config struct {
-	// One replica set serves both lanes: the teams_user scan reads through a
-	// secondary-preferred client and the watermark update + teams_chat upserts
-	// write through a primary client, so they share one URI, DB and credential
-	// pair — only the read preference differs.
+	// A single primary (master) client serves every collection: the teams_user
+	// scan, its watermark update and the teams_chat upserts all target the
+	// primary, so these freshly populated collections are never read from a
+	// lagging secondary.
 	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
@@ -93,19 +93,13 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
 	defer cancel()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
-		return fmt.Errorf("mongo read connect: %w", err)
+		return fmt.Errorf("mongo connect: %w", err)
 	}
-	defer mongoutil.Disconnect(context.Background(), readClient)
+	defer mongoutil.Disconnect(context.Background(), mongoClient)
 
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
-	if err != nil {
-		return fmt.Errorf("mongo write connect: %w", err)
-	}
-	defer mongoutil.Disconnect(context.Background(), writeClient)
-
-	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
+	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
 
 	graph := msgraph.NewChatsClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,
