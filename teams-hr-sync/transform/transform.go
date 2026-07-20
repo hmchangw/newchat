@@ -6,19 +6,22 @@
 package transform
 
 import (
+	"crypto/sha256"
 	"strings"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // SourceTeams tags rows this producer owns; other sources' rows are never
 // quit by this sync.
 const SourceTeams = "teams"
 
-// Mapper maps Graph objects into the domain; owns the name-mapping and org
-// placement. An EmployeeFromMember result with an empty Account is unmappable
-// (no usable UPN) and must be skipped by the caller.
+// Mapper maps Graph objects into the domain; owns the name-mapping, org
+// placement, and the employeeId derivation. An EmployeeFromMember result with
+// an empty Account is unmappable (no usable UPN or Graph id) and must be
+// skipped by the caller.
 type Mapper interface {
 	OrgFromGroup(g msgraph.GroupProfile) model.Org
 	EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, siteID string) model.Employee
@@ -42,11 +45,12 @@ func (DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.Org {
 
 func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, siteID string) model.Employee {
 	account, ok := splitUPN(m.UserPrincipalName)
-	if !ok {
+	// No stable Graph id → no deterministic employeeId key → unmappable.
+	if !ok || m.ID == "" {
 		return model.Employee{}
 	}
 	return model.Employee{
-		EmployeeID:  m.EmployeeID,
+		EmployeeID:  EmployeeIDFromGraphID(m.ID),
 		Account:     account,
 		EngName:     strings.TrimSpace(m.GivenName + " " + m.Surname),
 		ChineseName: m.DisplayName,
@@ -54,6 +58,16 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, si
 		Source:      SourceTeams,
 		Org:         *org,
 	}
+}
+
+// EmployeeIDFromGraphID derives a deterministic bson.ObjectID (24-hex) from the
+// immutable Graph object id, so the downstream employeeId-keyed upsert resolves
+// the same user on every sync instead of colliding on a blank AAD attribute.
+func EmployeeIDFromGraphID(graphID string) string {
+	sum := sha256.Sum256([]byte(graphID))
+	var oid bson.ObjectID
+	copy(oid[:], sum[:12])
+	return oid.Hex()
 }
 
 // DefaultConverter copies the identity fields only; every other User field
