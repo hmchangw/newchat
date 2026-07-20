@@ -2,7 +2,6 @@ package main
 
 import (
 	"testing"
-	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +22,6 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
-	assert.Equal(t, 30*time.Minute, cfg.RunTimeout)
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 }
 
@@ -37,7 +35,7 @@ func TestConfig_MissingRequired(t *testing.T) {
 func baseConfig() Config {
 	return Config{
 		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
-		MaxWorkers: 8, RunTimeout: 30 * time.Minute,
+		MaxWorkers:    8,
 		GraphTenantID: "tenant", GraphClientID: "client", GraphClientSecret: "secret",
 	}
 }
@@ -50,7 +48,6 @@ func TestValidateConfig(t *testing.T) {
 	}{
 		{"valid", func(c *Config) {}, false},
 		{"zero max workers", func(c *Config) { c.MaxWorkers = 0 }, true},
-		{"negative run timeout", func(c *Config) { c.RunTimeout = -time.Second }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

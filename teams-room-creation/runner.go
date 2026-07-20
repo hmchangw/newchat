@@ -81,13 +81,13 @@ func (r *runner) publishBatch(ctx context.Context, b batch) {
 	}
 	ids := chatIDs(b.chats)
 	subj := subject.RoomCanonicalTeamsCreate(b.siteID)
-	if err := r.publish(ctx, subj, data, dedupID(b.siteID, ids)); err != nil {
+	if err := r.publish(ctx, subj, data); err != nil {
 		slog.WarnContext(ctx, "publish room-creation batch failed; will retry next run",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
 		return
 	}
 	if err := r.store.MarkRoomsCreated(ctx, roomCreatedRefs(b.chats)); err != nil {
-		slog.WarnContext(ctx, "mark rooms created failed; batch republishes next run (dedup absorbs it)",
+		slog.WarnContext(ctx, "mark rooms created failed; batch republishes next run (room-worker is idempotent on chat id)",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
 	}
 }
@@ -118,19 +118,19 @@ func planBatches(chats []model.TeamsChat, size int) []batch {
 	return out
 }
 
-// buildEvent maps a batch of teams_chat docs into the wire event, dropping each
-// member's Graph id and stamping the publish timestamp. The site is not carried
-// in the payload — it is on the publish subject.
+// buildEvent maps a batch of teams_chat docs into the wire event, carrying each
+// member's user id/account/history-visibility and stamping the publish
+// timestamp. The site is not carried in the payload — it is on the publish
+// subject.
 func buildEvent(chats []model.TeamsChat, now time.Time) model.TeamsRoomCreateEvent {
 	out := make([]model.TeamsRoomCreateChat, 0, len(chats))
 	//nolint:gocritic // rangeValCopy: c is heavy but using index-range would be less idiomatic
 	for _, c := range chats {
 		members := make([]model.TeamsRoomCreateMember, 0, len(c.Members))
 		for _, m := range c.Members {
-			members = append(members, model.TeamsRoomCreateMember{
-				Account:                     m.Account,
-				VisibleHistoryStartDateTime: m.VisibleHistoryStartDateTime,
-			})
+			// Field-identical to the stored member; the direct conversion carries
+			// all fields and turns any future divergence into a compile error.
+			members = append(members, model.TeamsRoomCreateMember(m))
 		}
 		out = append(out, model.TeamsRoomCreateChat{
 			ID:              c.ID,

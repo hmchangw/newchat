@@ -18,15 +18,14 @@ import (
 
 // captured records one publish call.
 type captured struct {
-	subj  string
-	dedup string
-	evt   model.TeamsRoomCreateEvent
+	subj string
+	evt  model.TeamsRoomCreateEvent
 }
 
 // recorder is a thread-safe publishFunc that decodes and stores each batch.
 // fail is keyed by subject: a batch whose subject is present fails to publish.
 func recorder(mu *sync.Mutex, out *[]captured, fail map[string]bool) publishFunc {
-	return func(_ context.Context, subj string, data []byte, dedup string) error {
+	return func(_ context.Context, subj string, data []byte) error {
 		var e model.TeamsRoomCreateEvent
 		if err := json.Unmarshal(data, &e); err != nil {
 			return err
@@ -36,7 +35,7 @@ func recorder(mu *sync.Mutex, out *[]captured, fail map[string]bool) publishFunc
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		*out = append(*out, captured{subj: subj, dedup: dedup, evt: e})
+		*out = append(*out, captured{subj: subj, evt: e})
 		return nil
 	}
 }
@@ -158,10 +157,11 @@ func TestRunner_ListErrorReturned(t *testing.T) {
 	require.Error(t, r.run(context.Background()))
 }
 
-func TestBuildEvent_MapsMembersDropsID(t *testing.T) {
+func TestBuildEvent_MapsMembers(t *testing.T) {
 	e := buildEvent([]model.TeamsChat{chat("a1", "site-a")}, time.UnixMilli(42))
 	require.Len(t, e.Chats, 1)
 	require.Len(t, e.Chats[0].Members, 1)
+	assert.Equal(t, "m-a1", e.Chats[0].Members[0].ID, "the member's user id is carried")
 	assert.Equal(t, "acct-a1", e.Chats[0].Members[0].Account)
 	assert.Equal(t, int64(42), e.Timestamp)
 }

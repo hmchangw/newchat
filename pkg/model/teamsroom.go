@@ -20,10 +20,10 @@ type TeamsRoomCreateChat struct {
 	CreatedDateTime time.Time               `json:"createdDateTime" bson:"createdDateTime"`
 }
 
-// TeamsRoomCreateMember is one member reference in a room-creation event: only
-// the account and history-visibility cutoff are carried (the Graph member id is
-// intentionally dropped).
+// TeamsRoomCreateMember is one member reference in a room-creation event: the
+// member's user id, account, and history-visibility cutoff.
 type TeamsRoomCreateMember struct {
+	ID                          string    `json:"id" bson:"id"` // member's AAD user object id (the teams_user _id)
 	Account                     string    `json:"account" bson:"account"`
 	VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime" bson:"visibleHistoryStartDateTime"`
 }

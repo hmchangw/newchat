@@ -44,7 +44,7 @@ Service directory: `teams-room-creation/`
 | `config.go` | `caarlos0/env` `Config` struct + `validateConfig` |
 | `store.go` | `TeamsChatStore` interface + `//go:generate mockgen` |
 | `store_mongo.go` | Mongo read/write implementation |
-| `publisher.go` | NATS/JetStream connect + batch publish (dedup msgID) |
+| `publisher.go` | NATS/JetStream connect + batch publish |
 | `runner.go` | Orchestration: list → group → batch → publish → flip |
 | `runner_test.go`, `store_mongo_test.go`, `main_test.go` | unit tests |
 | `integration_test.go` | testcontainers (`testutil.MongoDB` + `testutil.NATS`) |
@@ -73,9 +73,10 @@ type TeamsRoomCreateChat struct {
     CreatedDateTime time.Time               `json:"createdDateTime"`
 }
 
-// TeamsRoomCreateMember is one member reference in a room-creation event.
-// Only account + history-visibility are carried; the Graph member id is dropped.
+// TeamsRoomCreateMember is one member reference in a room-creation event:
+// the member's user id (AAD object id), account, and history-visibility cutoff.
 type TeamsRoomCreateMember struct {
+    ID                          string    `json:"id"`
     Account                     string    `json:"account"`
     VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime"`
 }
@@ -85,8 +86,8 @@ type TeamsRoomCreateMember struct {
 `pkg/model` carries a `Timestamp int64`, stamped at publish time with
 `time.Now().UTC().UnixMilli()`.
 
-The event carries exactly the fields the task specifies per chat:
-`{id, name, members=[{account, visibleHistoryStartDateTime}], createdDateTime}`.
+The event carries these fields per chat:
+`{id, name, members=[{id, account, visibleHistoryStartDateTime}], createdDateTime}`.
 
 ## 4. Subject & stream
 
@@ -106,18 +107,11 @@ ownership** — `ROOMS` is owned by ops/IaC. Cross-site delivery is handled by
 the NATS supercluster/gateway routing (an ops concern); the job simply
 publishes to `chat.room.canonical.{chat.siteId}.teams.create` for each group.
 
-Published via JetStream `PublishMsg`, blocking on `PubAck`, with a
-deterministic dedup id:
-
-```
-Nats-Msg-Id = teamroom:{siteID}:{sha256-hex of sorted chat IDs in the batch}
-```
-
-so a re-run that republishes an un-flipped batch is deduplicated server-side.
-This is best-effort across cron runs: if ops want to rely on it, the `ROOMS`
-stream's `Duplicates` window must be ≥ the CronJob interval — otherwise
-duplicate suppression rests on downstream room-worker idempotency (already
-noted out-of-scope in §9).
+Published via JetStream `PublishMsg`, blocking on `PubAck`. **No publish-side
+dedup** (`Nats-Msg-Id`): this is a CronJob that re-runs minutes-to-hours later,
+far outside any `ROOMS` `Duplicates` window, so server-side dedup would never
+fire across runs anyway. Duplicate suppression rests entirely on the downstream
+room-worker being idempotent on chat id (already noted out-of-scope in §9).
 
 ## 5. Store
 
@@ -159,23 +153,28 @@ type TeamsChatStore interface {
 | `NATS_CREDS_FILE` | `""` | |
 | `ROOM_CREATE_BATCH_SIZE` | `100` | chats per event; must be > 0 |
 | `MAX_WORKERS` | `8` | parallel publish across site-group batches |
-| `RUN_TIMEOUT` | `30m` | whole-run deadline |
 
-`obs.Init` wires o11y once (traces/metrics/logs). No secrets defaulted.
+The run deadline is owned by the Kubernetes CronJob (`activeDeadlineSeconds`),
+not an app-level timeout: `run()` uses a `signal.NotifyContext(SIGINT, SIGTERM)`
+context so the pod's termination signal aborts the run between operations.
+
+Plain `log/slog` JSON, like the sibling teams-* jobs — no OTel SDK is wired. NATS
+still needs a tracer/propagator, so `run()` passes no-ops
+(`noop.NewTracerProvider()`, `propagation.TraceContext{}`); `o11y/nats` gates
+header work on `O11Y_ENABLED`, so this stays off the hot path. No secrets defaulted.
 
 ## 7. Flow & error handling
 
 ```
 run():
   parse+validate config
-  obs.Init
-  connect read + write Mongo, NATS (+ JetStream)
+  connect read + write Mongo, NATS (+ JetStream, no-op tracer/propagator)
   chats = store.ListChatsNeedingRoom()
   groups = group chats by siteId
   for each (siteId, chats) group:                # bounded by MAX_WORKERS
     for each batch of up to N chats:
       evt = build TeamsRoomCreateEvent(batch, Timestamp=now)   # site is on the subject
-      ack, err = publish(subject.RoomCanonicalTeamsCreate(siteId), evt, dedupID)
+      ack, err = publish(subject.RoomCanonicalTeamsCreate(siteId), evt)
       if err: log warn, continue                 # chats stay flagged for next run
       store.MarkRoomsCreated(batch refs)          # option C: CAS-flip only on ack
 ```
@@ -186,9 +185,9 @@ run():
 - **Total failure** (cannot connect to Mongo/NATS, cannot list) returns a
   non-zero exit so the CronJob surfaces it.
 - **At-least-once** semantics: a crash after `PublishMsg` acks but before
-  `MarkRoomsCreated` republishes the batch next run; the deterministic dedup id
-  makes the republish a server-side no-op, and the downstream room-worker must
-  be idempotent on chat id (out of scope for this service).
+  `MarkRoomsCreated` republishes the batch next run; the downstream room-worker
+  must be idempotent on chat id (out of scope for this service), which is what
+  makes the republish safe.
 
 ## 8. Testing (TDD, Red-Green-Refactor)
 

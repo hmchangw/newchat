@@ -4537,6 +4537,7 @@ func TestTeamsRoomCreateEventJSON(t *testing.T) {
 			Name:            "Project X",
 			CreatedDateTime: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
 			Members: []model.TeamsRoomCreateMember{{
+				ID:                          "aad-user-1",
 				Account:                     "alice",
 				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 			}},
