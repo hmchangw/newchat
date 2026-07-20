@@ -32,21 +32,12 @@ func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 	}
 }
 
-// EnsureIndexes creates the indexes the chat-sync pipeline queries on, via the
-// write (primary) client. Idempotent — re-creating an existing index is a no-op,
-// so it is safe to run on every startup. teams-chat-sync owns teams_chat (and
-// the teams_user `from` watermark it writes), so it owns these indexes; the
-// downstream member-sync/room-creation jobs rely on the teams_chat ones.
+// EnsureIndexes creates the teams_chat indexes the chat-sync pipeline queries
+// on, via the write (primary) client. Idempotent — re-creating an existing
+// index is a no-op, so it is safe to run on every startup. teams-chat-sync owns
+// teams_chat, so it owns these indexes; the downstream member-sync/room-creation
+// jobs rely on them.
 func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
-	// teams_user.from: ListUsers scans every user ordered by watermark ascending
-	// (never-synced/null first). A plain, non-sparse index indexes a missing
-	// `from` as null so those users are still ordered (and sort first).
-	if _, err := s.writeUsers.Raw().Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "from", Value: 1}},
-		Options: options.Index().SetName("from_1"),
-	}); err != nil {
-		return fmt.Errorf("ensure teams_user from index: %w", err)
-	}
 	// teams_chat pending-work flags: each downstream job scans for its flag ==
 	// true. Partial indexes on the true value index only the small actionable
 	// working set, so they stay lean even as teams_chat grows (a chat drops out
@@ -74,16 +65,11 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 }
 
 // ListUsers returns every teams_user projected to the sync fields
-// (_id, siteId, account, from), ordered by watermark ascending. Served by the
-// read client. In Mongo's ascending order a missing/null `from` sorts before
-// any date, so users that have never synced (no watermark) are returned — and
-// therefore dispatched to workers — first, then the rest from oldest watermark
-// to newest. Backed by the teams_user `from` index (see EnsureIndexes) so the
-// full-collection scan is index-ordered, not an in-memory sort.
+// (_id, siteId, account, from). Served by the read client.
 func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
-	users, err := s.readUsers.FindMany(ctx, bson.M{},
-		mongoutil.WithProjection(bson.M{"_id": 1, "siteId": 1, "account": 1, "from": 1}),
-		mongoutil.WithSort(bson.D{{Key: "from", Value: 1}}))
+	users, err := s.readUsers.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
+		"_id": 1, "siteId": 1, "account": 1, "from": 1,
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("list teams users: %w", err)
 	}

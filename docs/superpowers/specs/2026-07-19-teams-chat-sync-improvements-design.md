@@ -6,10 +6,9 @@
 
 Focused changes to the Teams chat sync pipeline, each independent: (1) finalize
 small chats inline, (2) hand the run deadline to Kubernetes (remove
-`RUN_TIMEOUT`), (3) throttle logging, (4) fetch the least-caught-up users first,
-(5) ensure indexes at startup, (6) drop the OTel SDK from teams-room-creation,
-(7) drop publish-side dedup from teams-room-creation, (8) carry the member user
-id in the room-creation event.
+`RUN_TIMEOUT`), (3) throttle logging, (4) ensure teams_chat indexes at startup,
+(5) drop the OTel SDK from teams-room-creation, (6) drop publish-side dedup from
+teams-room-creation, (7) carry the member user id in the room-creation event.
 
 ## 1. Finalize small chats inline (skip member-sync)
 
@@ -88,24 +87,14 @@ endpoint are never logged. Because `getThrottled` is shared, this covers both
 `teams-chat-sync` (`ListUserChats`) and `teams-chat-member-sync`
 (`ListChatMembers`).
 
-## 4. Fetch the least-caught-up users first
-
-`ListUsers` now reads `teams_user` **ordered by `from` ascending**. In Mongo's
-ascending order a missing/null `from` sorts before any date, so users that have
-never synced (no watermark, `from` is `null` on the first run) are returned —
-and dispatched to workers — first, then the rest oldest-watermark to newest.
-The full-collection cache load is unchanged (all users still populate the vote
-map); only the order changes, so the most-behind users get Graph time first.
-
-## 5. Ensure indexes at startup
+## 4. Ensure teams_chat indexes at startup
 
 `mongoStore.EnsureIndexes` (idempotent, write/primary client) is called from
-`run()` right after the store is built. teams-chat-sync owns `teams_chat` and
-the `teams_user.from` watermark, so it owns these indexes:
+`run()` right after the store is built. teams-chat-sync owns `teams_chat`, so it
+owns these indexes:
 
 | Collection | Index | Type | Serves |
 |---|---|---|---|
-| `teams_user` | `{from: 1}` | full | the new watermark-ordered `ListUsers` (non-sparse so null sorts first) |
 | `teams_chat` | `{needMemberSync: 1}` | partial `{needMemberSync: true}` | member-sync's pending scan |
 | `teams_chat` | `{needCreateRoom: 1, _id: 1}` | partial `{needCreateRoom: true}` | room-creation's pending scan + `_id` sort |
 
@@ -113,7 +102,7 @@ Partial-on-`true` keeps the two flag indexes to the small actionable working set
 as `teams_chat` grows. `_id`-keyed writes and `{_id: $in}` reads use the default
 `_id` index.
 
-## 6. Drop the OTel SDK from teams-room-creation
+## 5. Drop the OTel SDK from teams-room-creation
 
 `teams-room-creation` was the only teams-* job wiring `obs.Init` (OpenTelemetry
 traces/metrics); the others use plain `log/slog`. It is removed for consistency:
@@ -123,7 +112,7 @@ requires a tracer/propagator, so it passes no-ops (`noop.NewTracerProvider()`,
 `tools/loadgen` already use. `o11y/nats` gates header work on `O11Y_ENABLED`, so
 tracing stays off the hot path. slog is unchanged (set up in `main`, not `obs`).
 
-## 7. Drop publish-side dedup from teams-room-creation
+## 6. Drop publish-side dedup from teams-room-creation
 
 The batch publisher set a deterministic `Nats-Msg-Id`
 (`teamroom:{siteID}:{sha256 of sorted chat ids}`) for JetStream server-side
@@ -136,7 +125,7 @@ room creation is the downstream room-worker being idempotent on chat id. So the
 `dedupID`-only `publisher_test.go` is deleted (the publish path stays covered by
 `runner_test.go` and the integration test).
 
-## 8. Carry the member user id in the room-creation event
+## 7. Carry the member user id in the room-creation event
 
 `TeamsRoomCreateMember` originally dropped the Graph member id, carrying only
 `account` + `visibleHistoryStartDateTime`. It now also carries the member's user
@@ -161,11 +150,8 @@ TDD, per repo convention (≥ 80% coverage):
 - **Item 3** — a slog-capturing test asserting a `WARN` with the operation,
   status, and `Retry-After` on a throttled chats request and a throttled members
   request, and no throttle log on success.
-- **Item 4** — a MongoDB integration test seeding users with null / old / new
-  watermarks out of order and asserting `ListUsers` returns null-first, then
-  oldest to newest.
-- **Item 5** — a MongoDB integration test asserting `EnsureIndexes` creates the
-  three indexes (names, key specs, partial filters) and is idempotent.
+- **Item 4** — a MongoDB integration test asserting `EnsureIndexes` creates the
+  two `teams_chat` indexes (names, key specs, partial filters) and is idempotent.
 
 ## Out of scope
 

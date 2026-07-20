@@ -136,13 +136,11 @@ Members not found in `teams_user` (guests, outsiders) are **kept** with
 ## Indexes
 
 Created idempotently at startup by `mongoStore.EnsureIndexes` (write/primary
-client) — this job owns `teams_chat` and the `teams_user.from` watermark it
-writes, so it owns these indexes; the downstream member-sync / room-creation
-jobs rely on the `teams_chat` ones.
+client) — this job owns `teams_chat`, so it owns these indexes; the downstream
+member-sync / room-creation jobs rely on them.
 
 | Collection | Index | Type | Serves |
 |---|---|---|---|
-| `teams_user` | `{from: 1}` | full (non-sparse) | This job's watermark-ordered `ListUsers` scan; non-sparse so null/never-synced `from` is indexed and sorts first |
 | `teams_chat` | `{needMemberSync: 1}` | partial `{needMemberSync: true}` | `teams-chat-member-sync` `find({needMemberSync: true})` |
 | `teams_chat` | `{needCreateRoom: 1, _id: 1}` | partial `{needCreateRoom: true}` | `teams-room-creation` `find({needCreateRoom: true}).sort({_id: 1})` (trailing `_id` avoids an in-memory sort) |
 
@@ -154,13 +152,8 @@ set) even as `teams_chat` grows. Writes/upserts keyed on `_id` and the
 ## Sync flow
 
 1. **Load cache.** Read all `teams_user` docs (projection: `_id, siteId,
-   account, from`) **ordered by `from` ascending** into an in-memory
-   `map[userID]cachedUser` plus an ordered work list. In Mongo's ascending
-   order a missing/null `from` sorts before any date, so users that have never
-   synced come first, then oldest watermark to newest — the work list is
-   dispatched in that order, so the least-caught-up users are fetched first.
-   Backed by the `teams_user.from` index (see Indexes). The map still serves as
-   the member→siteID/account lookup for the vote.
+   account, from`) into an in-memory `map[userID]cachedUser`. This map serves
+   both as the work list and as the member→siteID/account lookup.
 2. **Window.** `to = startOfDay(now, UTC)`. Per user, `from` = their watermark
    or `SYNC_DEFAULT_FROM`. The Graph filter is half-open `[from, to)`: a chat
    updated exactly at a boundary lands in exactly one run. Users with
