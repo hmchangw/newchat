@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/historyclient"
@@ -31,6 +32,9 @@ var (
 	_ service.PresenceClient               = (*presenceclient.Client)(nil)
 	_ service.EventPublisher               = (*publisher.Publisher)(nil)
 	_ service.EventPublisher               = (*publisher.CorePublisher)(nil)
+	_ service.SSOTokenRepository           = (*mongorepo.SSOTokenRepo)(nil)
+	_ service.TokenValidator               = (*pkgoidc.Validator)(nil)
+	_ service.TokenRefresher               = (*pkgoidc.Validator)(nil)
 )
 
 func main() {
@@ -71,6 +75,7 @@ func main() {
 	userRepo := mongorepo.NewUserRepo(db)
 	appRepo := mongorepo.NewAppRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
+	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
 	if err := subRepo.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
@@ -87,8 +92,18 @@ func main() {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}
+	if err := ssoTokenRepo.EnsureIndexes(ctx); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), &cfg)
+	tokenValidator, tokenRefresher, err := oidcValidator(ctx, &cfg)
+	if err != nil {
+		slog.Error("oidc validator init failed", "error", err)
+		os.Exit(1)
+	}
+
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
 	router := natsrouter.New(nc, "user-service")
 	router.Use(natsrouter.Recovery())

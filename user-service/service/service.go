@@ -2,16 +2,18 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository,SSOTokenRepository,TokenValidator,TokenRefresher
 
 // SubscriptionRepository is the consumer-defined interface for subscription persistence (botDM app-subscription rows included).
 type SubscriptionRepository interface {
@@ -32,6 +34,7 @@ type UserRepository interface {
 	GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error)
 	GetUserSettings(ctx context.Context, account string) (*model.User, error)
 	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
+	GetUserRoles(ctx context.Context, account string) (*model.User, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.
@@ -77,6 +80,22 @@ type EventPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
+// SSOTokenRepository is the consumer-defined interface for the SSO token vault (sso_tokens collection; legacy field names kept).
+type SSOTokenRepository interface {
+	GetByUsername(ctx context.Context, username string) (*model.SSOToken, error)
+	Upsert(ctx context.Context, username, ssoToken string, ssoTokenExpMs int64, refreshToken string) error
+}
+
+// TokenValidator verifies an SSO token against the configured OIDC issuer; nil when the SSO feature is not configured (endpoints reply unavailable).
+type TokenValidator interface {
+	Validate(ctx context.Context, raw string) (oidc.Claims, error)
+}
+
+// TokenRefresher exchanges a refresh token at the issuer's token endpoint; nil when the SSO feature is not configured.
+type TokenRefresher interface {
+	Refresh(ctx context.Context, refreshToken string) (oidc.TokenSet, error)
+}
+
 // UserService handles all user-related NATS request/reply endpoints.
 type UserService struct {
 	subs       SubscriptionRepository
@@ -89,35 +108,43 @@ type UserService struct {
 	pub        EventPublisher
 	// clientPub fans out ephemeral client-facing events (settings.update) over
 	// core NATS — same delivery pattern as room-worker's subscription.update.
-	clientPub       EventPublisher
-	siteID          string
-	allSiteIDs      []string
-	maxSubs         int
-	defaultLimit    int
-	maxApps         int
-	defaultApps     int
-	maxAccountNames int
+	clientPub        EventPublisher
+	ssoTokens        SSOTokenRepository
+	tokenValidator   TokenValidator
+	tokenRefresher   TokenRefresher
+	ssoRefreshWindow time.Duration
+	siteID           string
+	allSiteIDs       []string
+	maxSubs          int
+	defaultLimit     int
+	maxApps          int
+	defaultApps      int
+	maxAccountNames  int
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
 	return &UserService{
-		subs:            subs,
-		users:           users,
-		apps:            apps,
-		threadSubs:      threadSubs,
-		rooms:           rooms,
-		history:         history,
-		presence:        presence,
-		pub:             pub,
-		clientPub:       clientPub,
-		siteID:          cfg.SiteID,
-		allSiteIDs:      cfg.AllSiteIDs,
-		maxSubs:         cfg.MaxSubscriptionLimit,
-		defaultLimit:    cfg.DefaultSubscriptionLimit,
-		maxApps:         cfg.MaxAppsLimit,
-		defaultApps:     cfg.DefaultAppsLimit,
-		maxAccountNames: cfg.MaxAccountNames,
+		subs:             subs,
+		users:            users,
+		apps:             apps,
+		threadSubs:       threadSubs,
+		rooms:            rooms,
+		history:          history,
+		presence:         presence,
+		pub:              pub,
+		clientPub:        clientPub,
+		ssoTokens:        ssoTokens,
+		tokenValidator:   tokenValidator,
+		tokenRefresher:   tokenRefresher,
+		ssoRefreshWindow: cfg.SSORefreshWindow,
+		siteID:           cfg.SiteID,
+		allSiteIDs:       cfg.AllSiteIDs,
+		maxSubs:          cfg.MaxSubscriptionLimit,
+		defaultLimit:     cfg.DefaultSubscriptionLimit,
+		maxApps:          cfg.MaxAppsLimit,
+		defaultApps:      cfg.DefaultAppsLimit,
+		maxAccountNames:  cfg.MaxAccountNames,
 	}
 }
 
@@ -141,4 +168,6 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.UserSubscriptionSetAppSubscriptionPattern(s.siteID), s.SetAppSubscription)
 	natsrouter.Register(r, subject.UserAppsListPattern(s.siteID), s.ListApps)
 	natsrouter.RegisterNoBody(r, subject.UserAppsCategoriesPattern(s.siteID), s.ListAppCategories)
+	natsrouter.Register(r, subject.UserSSOSetPattern(s.siteID), s.SSOSet)
+	natsrouter.RegisterOptionalBody(r, subject.UserSSORefreshPattern(s.siteID), s.SSORefresh)
 }

@@ -30,6 +30,7 @@ func newMeSvc(t *testing.T) (*UserService, *mocks.MockUserRepository, *mocks.Moc
 		presence,
 		mocks.NewMockEventPublisher(ctrl),
 		mocks.NewMockEventPublisher(ctrl),
+		nil, nil, nil,
 		cfg,
 	)
 	return svc, users, presence

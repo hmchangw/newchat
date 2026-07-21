@@ -16,6 +16,9 @@ services:
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - MAX_SUBSCRIPTION_LIMIT=1000
+      - OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
+      - OIDC_AUDIENCES=nats-chat
+      - OIDC_CLIENT_ID=nats-chat
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:
