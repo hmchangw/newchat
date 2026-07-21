@@ -23,7 +23,10 @@ func TestRun_OneShotEndToEnd(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync_run")
 	ctx := context.Background()
 
-	_, err := db.Collection("hr").InsertOne(ctx, bson.M{"accountName": "alice", "siteID": "site-a"})
+	_, err := db.Collection("hr").InsertOne(ctx, bson.M{
+		"accountName": "alice", "locationURL": "https://site-a.mysite.com",
+		"engName": "Alice Smith", "mail": "alice@corp.example",
+	})
 	require.NoError(t, err)
 
 	tokenSrv := newFakeTokenServer(t)
@@ -39,7 +42,8 @@ func TestRun_OneShotEndToEnd(t *testing.T) {
 	var doc model.TeamsUser
 	require.NoError(t, db.Collection("teams_user").FindOne(ctx, bson.M{"_id": "id-alice"}).Decode(&doc))
 	assert.Equal(t, model.TeamsUser{
-		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", SiteID: "site-a",
+		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice",
+		SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example",
 	}, doc)
 }
 
