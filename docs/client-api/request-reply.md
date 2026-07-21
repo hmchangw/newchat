@@ -536,7 +536,9 @@ Synchronous RPC. Advances the caller's `lastSeenAt`, recomputes the per-subscrip
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read`
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Synchronous RPC. Clears one thread's unread state for the caller.
+Synchronous RPC. Clears one thread's unread state for the caller. A caller who does
+not follow the thread (no `ThreadSubscription`) gets an idempotent no-op that still
+returns `accepted`.
 
 #### Request body
 
@@ -550,8 +552,7 @@ Synchronous RPC. Clears one thread's unread state for the caller.
 
 #### Errors
 
-`"only room members can perform this action"`, `"thread subscription not found"`,
-`"threadId is required"`.
+`"only room members can perform this action"`, `"threadId is required"`.
 
 **Emits:** [`thread_message_read`](events.md#thread_message_read) (only when the thread's
 read floor `minUserLastSeenAt` changes; routed by the **parent** room's type) →

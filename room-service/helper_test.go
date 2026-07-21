@@ -78,7 +78,6 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 		{"target not member", errTargetNotMember, errcode.CodeBadRequest, errcode.RoomTargetNotMember},
 		{"not room member", errNotRoomMember, errcode.CodeForbidden, errcode.RoomNotMember},
 		{"invalid thread id", errInvalidThreadID, errcode.CodeBadRequest, ""},
-		{"thread sub not found", errThreadSubNotFound, errcode.CodeNotFound, ""},
 		{"promote requires individual", errPromoteRequiresIndividual, errcode.CodeBadRequest, errcode.RoomPromoteRequiresIndividual},
 		{"empty create request", errEmptyCreateRequest, errcode.CodeBadRequest, ""},
 		{"bot in channel", errBotInChannel, errcode.CodeBadRequest, errcode.RoomBotInChannel},
