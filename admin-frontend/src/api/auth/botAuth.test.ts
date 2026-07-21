@@ -11,7 +11,6 @@ function mockResponse(status: number, body: unknown): Response {
 }
 
 const BUNDLE = {
-  userId: 'u-1',
   authToken: 'tok-abc',
   account: 'acct-1',
   siteId: 'site-1',
@@ -23,7 +22,7 @@ describe('botLogin', () => {
     vi.unstubAllGlobals()
   })
 
-  it('POSTs to PORTAL_URL/api/v1/login with the username/password body and returns the bundle', async () => {
+  it('POSTs to ADMIN_SERVICE_URL/v1/login with the username/password body and returns the bundle', async () => {
     const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, BUNDLE))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -31,7 +30,7 @@ describe('botLogin', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toMatch(/\/api\/v1\/login$/)
+    expect(url).toBe('http://localhost:8082/v1/login')
     expect(init.method).toBe('POST')
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(JSON.parse(init.body)).toEqual({ username: 'alice', password: 'hunter2' })

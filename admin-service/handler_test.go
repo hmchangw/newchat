@@ -20,6 +20,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/session"
 )
 
 func init() {
@@ -34,12 +35,19 @@ func testCfg() Config {
 	}
 }
 
+// emptySessionStore returns a fakeSessionStore with every method left unset —
+// safe to pass into newHandler for tests whose code path never calls
+// h.sessions (calling an unset Fn panics loudly if that assumption breaks).
+func emptySessionStore() *fakeSessionStore {
+	return &fakeSessionStore{}
+}
+
 // setupRouter wires h into a Gin engine with a fake requireAdmin middleware that
 // injects a fixed principal, bypassing real session lookup.
 func setupRouter(h *Handler) *gin.Engine {
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
-		c.Set(ctxPrincipal, Session{
+		c.Set(ctxPrincipal, session.Session{
 			ID:      "sess-1",
 			UserID:  "admin-user-id",
 			Account: "p_admin",
@@ -51,8 +59,8 @@ func setupRouter(h *Handler) *gin.Engine {
 	r.GET("/users", h.listUsers)
 	r.POST("/users", h.createUser)
 	r.GET("/users/:account", h.getUser)
-	r.PUT("/users/:account", h.updateUser)
-	r.PUT("/users/:account/password", h.setPassword)
+	r.PATCH("/users/:account", h.updateUser)
+	r.POST("/users/:account/password", h.setPassword)
 	return r
 }
 
@@ -334,7 +342,7 @@ func TestHandler_createUser(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg())
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -426,7 +434,7 @@ func TestHandler_listUsers(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg())
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -498,7 +506,7 @@ func TestHandler_getUser(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg())
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -524,14 +532,16 @@ func TestHandler_getUser(t *testing.T) {
 
 func TestHandler_updateUser(t *testing.T) {
 	trueVal := true
+	falseVal := false
 
 	tests := []struct {
-		name       string
-		userID     string
-		body       any
-		setupMock  func(m *MockAdminStore)
-		wantStatus int
-		wantReason string
+		name          string
+		userID        string
+		body          any
+		setupMock     func(m *MockAdminStore)
+		setupSessions func(s *fakeSessionStore)
+		wantStatus    int
+		wantReason    string
 	}{
 		{
 			name:   "update roles – no session revocation",
@@ -546,20 +556,13 @@ func TestHandler_updateUser(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:   "deactivating user – UpdateUser applies the flag (store revokes atomically)",
+			name:   "deactivating user – atomic DeactivateAndRevoke",
 			userID: "u2",
 			body: map[string]any{
 				"deactivated": true,
 			},
 			setupMock: func(m *MockAdminStore) {
-				// UpdateUser revokes sessions atomically with the update, so the
-				// handler makes no separate DeleteSessionsByAccount call.
-				m.EXPECT().UpdateUser(gomock.Any(), "site-A", "u2", gomock.Any()).
-					DoAndReturn(func(_ context.Context, siteID, id string, u UserUpdate) error {
-						require.NotNil(t, u.Deactivated)
-						assert.True(t, *u.Deactivated)
-						return nil
-					})
+				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2").Return(nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, e *AuditEntry) error {
 						assert.Equal(t, "user.update", e.Action)
@@ -630,7 +633,49 @@ func TestHandler_updateUser(t *testing.T) {
 				return m
 			}(),
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().UpdateUser(gomock.Any(), "site-A", "u6", gomock.Any()).Return(nil)
+				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u6").Return(nil)
+				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:   "deactivated=true + engName rejected as mixed patch",
+			userID: "u7",
+			body: map[string]any{
+				"deactivated": true,
+				"engName":     "Would Be Dropped",
+			},
+			// no DeactivateAndRevoke / UpdateUser / AppendAudit — must reject before any write
+			setupMock:  func(m *MockAdminStore) {},
+			wantStatus: http.StatusBadRequest,
+			wantReason: string(errcode.AdminMixedDeactivatePatch),
+		},
+		{
+			name:   "deactivated=true + roles rejected as mixed patch",
+			userID: "u8",
+			body: map[string]any{
+				"deactivated": true,
+				"roles":       []string{"admin"},
+			},
+			setupMock:  func(m *MockAdminStore) {},
+			wantStatus: http.StatusBadRequest,
+			wantReason: string(errcode.AdminMixedDeactivatePatch),
+		},
+		{
+			name:   "deactivated=false + engName still goes through UpdateUser (reactivate + edit is fine)",
+			userID: "u9",
+			body: func() map[string]any {
+				type body struct {
+					Deactivated *bool  `json:"deactivated"`
+					EngName     string `json:"engName"`
+				}
+				b, _ := json.Marshal(body{Deactivated: &falseVal, EngName: "Reactivated Rita"})
+				var m map[string]any
+				_ = json.Unmarshal(b, &m)
+				return m
+			}(),
+			setupMock: func(m *MockAdminStore) {
+				m.EXPECT().UpdateUser(gomock.Any(), "site-A", "u9", gomock.Any()).Return(nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusOK,
@@ -643,11 +688,16 @@ func TestHandler_updateUser(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			sess := emptySessionStore()
+			if tc.setupSessions != nil {
+				tc.setupSessions(sess)
+			}
+
+			h := newHandler(m, sess, testCfg())
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPut, "/users/"+tc.userID, bodyBytes(t, tc.body))
+			req := httptest.NewRequest(http.MethodPatch, "/users/"+tc.userID, bodyBytes(t, tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			r.ServeHTTP(w, req)
 
@@ -660,11 +710,33 @@ func TestHandler_updateUser(t *testing.T) {
 	}
 }
 
+// TestHandler_updateUser_DeactivateAndRevoke_TxError_Returns500 covers the
+// atomic transaction's failure path: the user flag and the session revoke
+// are now one Mongo transaction (DeactivateAndRevoke), so a failure there
+// means nothing was applied — the handler surfaces it as a 500, and
+// AppendAudit must not fire.
+func TestHandler_updateUser_DeactivateAndRevoke_TxError_Returns500(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	m := NewMockAdminStore(ctrl)
+	m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2b").Return(fmt.Errorf("mongo dead"))
+	// no AppendAudit expectation — must not fire
+
+	h := newHandler(m, emptySessionStore(), testCfg())
+	r := setupRouter(h)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/users/u2b", bodyBytes(t, map[string]any{"deactivated": true}))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
 // setupSessionRouter wires the session + audit handlers into a Gin engine.
 func setupSessionRouter(h *Handler) *gin.Engine {
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
-		c.Set(ctxPrincipal, Session{
+		c.Set(ctxPrincipal, session.Session{
 			ID:      "sess-1",
 			UserID:  "admin-user-id",
 			Account: "p_admin",
@@ -688,26 +760,30 @@ func setupSessionRouter(h *Handler) *gin.Engine {
 
 func TestHandler_listSessions(t *testing.T) {
 	tests := []struct {
-		name       string
-		account    string
-		setupMock  func(m *MockAdminStore)
-		wantStatus int
-		checkBody  func(t *testing.T, body map[string]any, raw []byte)
+		name          string
+		account       string
+		setupSessions func(s *fakeSessionStore)
+		wantStatus    int
+		checkBody     func(t *testing.T, body map[string]any, raw []byte)
 	}{
 		{
 			name:    "returns projected session fields only",
 			account: "alice",
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListSessionsByAccount(gomock.Any(), "site-A", "alice").Return([]Session{
-					{
-						ID:       "sess-abc",
-						UserID:   "u1",
-						Account:  "alice",
-						SiteID:   "site-A",
-						Roles:    []string{"admin"},
-						IssuedAt: 1700000000000,
-					},
-				}, nil)
+			setupSessions: func(s *fakeSessionStore) {
+				s.ListForAccountFn = func(_ context.Context, siteID, account string) ([]session.Session, error) {
+					assert.Equal(t, "site-A", siteID)
+					assert.Equal(t, "alice", account)
+					return []session.Session{
+						{
+							ID:       "sess-abc",
+							UserID:   "u1",
+							Account:  "alice",
+							SiteID:   "site-A",
+							Roles:    []string{"admin"},
+							IssuedAt: 1700000000000,
+						},
+					}, nil
+				}
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
@@ -731,8 +807,10 @@ func TestHandler_listSessions(t *testing.T) {
 		{
 			name:    "empty sessions list returns empty array",
 			account: "bob",
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListSessionsByAccount(gomock.Any(), "site-A", "bob").Return([]Session{}, nil)
+			setupSessions: func(s *fakeSessionStore) {
+				s.ListForAccountFn = func(_ context.Context, siteID, account string) ([]session.Session, error) {
+					return []session.Session{}, nil
+				}
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
@@ -744,15 +822,16 @@ func TestHandler_listSessions(t *testing.T) {
 		{
 			name:    "store error returns 500",
 			account: "carol",
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().ListSessionsByAccount(gomock.Any(), "site-A", "carol").Return(nil, fmt.Errorf("db offline"))
+			setupSessions: func(s *fakeSessionStore) {
+				s.ListForAccountFn = func(_ context.Context, siteID, account string) ([]session.Session, error) {
+					return nil, fmt.Errorf("db offline")
+				}
 			},
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "missing account query returns 400",
 			account:    "",
-			setupMock:  func(m *MockAdminStore) {},
 			wantStatus: http.StatusBadRequest,
 		},
 	}
@@ -761,9 +840,13 @@ func TestHandler_listSessions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			m := NewMockAdminStore(ctrl)
-			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			sess := emptySessionStore()
+			if tc.setupSessions != nil {
+				tc.setupSessions(sess)
+			}
+
+			h := newHandler(m, sess, testCfg())
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -785,16 +868,16 @@ func TestHandler_listSessions(t *testing.T) {
 
 func TestHandler_revokeAllSessions(t *testing.T) {
 	tests := []struct {
-		name       string
-		account    string
-		setupMock  func(m *MockAdminStore)
-		wantStatus int
+		name          string
+		account       string
+		setupMock     func(m *MockAdminStore)
+		setupSessions func(s *fakeSessionStore)
+		wantStatus    int
 	}{
 		{
-			name:    "calls DeleteSessionsByAccount and audits session.revoke_all",
+			name:    "calls DeleteForAccount and audits session.revoke_all",
 			account: "alice",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().DeleteSessionsByAccount(gomock.Any(), "site-A", "alice").Return(int64(3), nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, e *AuditEntry) error {
 						assert.Equal(t, "session.revoke_all", e.Action)
@@ -804,20 +887,28 @@ func TestHandler_revokeAllSessions(t *testing.T) {
 						return nil
 					})
 			},
+			setupSessions: func(s *fakeSessionStore) {
+				s.DeleteForAccountFn = func(_ context.Context, siteID, account string) (int64, error) {
+					assert.Equal(t, "site-A", siteID)
+					assert.Equal(t, "alice", account)
+					return 3, nil
+				}
+			},
 			wantStatus: http.StatusOK,
 		},
 		{
 			name:    "store error returns 500",
 			account: "bob",
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().DeleteSessionsByAccount(gomock.Any(), "site-A", "bob").Return(int64(0), fmt.Errorf("db offline"))
+			setupSessions: func(s *fakeSessionStore) {
+				s.DeleteForAccountFn = func(_ context.Context, siteID, account string) (int64, error) {
+					return 0, fmt.Errorf("db offline")
+				}
 			},
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "missing account query returns 400",
 			account:    "",
-			setupMock:  func(m *MockAdminStore) {},
 			wantStatus: http.StatusBadRequest,
 		},
 	}
@@ -826,9 +917,16 @@ func TestHandler_revokeAllSessions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			m := NewMockAdminStore(ctrl)
-			tc.setupMock(m)
+			if tc.setupMock != nil {
+				tc.setupMock(m)
+			}
 
-			h := newHandler(m, testCfg())
+			sess := emptySessionStore()
+			if tc.setupSessions != nil {
+				tc.setupSessions(sess)
+			}
+
+			h := newHandler(m, sess, testCfg())
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -846,18 +944,18 @@ func TestHandler_revokeAllSessions(t *testing.T) {
 
 func TestHandler_revokeSession(t *testing.T) {
 	tests := []struct {
-		name      string
-		account   string
-		sessionID string
-		setupMock func(m *MockAdminStore)
-		wantCode  int
+		name          string
+		account       string
+		sessionID     string
+		setupMock     func(m *MockAdminStore)
+		setupSessions func(s *fakeSessionStore)
+		wantCode      int
 	}{
 		{
-			name:      "calls DeleteSession and audits session.revoke with sessionId detail",
+			name:      "calls DeleteByID and audits session.revoke with sessionId detail",
 			account:   "alice",
 			sessionID: "sess-xyz",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().DeleteSession(gomock.Any(), "site-A", "alice", "sess-xyz").Return(int64(1), nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, e *AuditEntry) error {
 						assert.Equal(t, "session.revoke", e.Action)
@@ -868,14 +966,24 @@ func TestHandler_revokeSession(t *testing.T) {
 						return nil
 					})
 			},
+			setupSessions: func(s *fakeSessionStore) {
+				s.DeleteByIDFn = func(_ context.Context, siteID, account, id string) (int64, error) {
+					assert.Equal(t, "site-A", siteID)
+					assert.Equal(t, "alice", account)
+					assert.Equal(t, "sess-xyz", id)
+					return 1, nil
+				}
+			},
 			wantCode: http.StatusOK,
 		},
 		{
 			name:      "store error returns 500",
 			account:   "bob",
 			sessionID: "sess-abc",
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().DeleteSession(gomock.Any(), "site-A", "bob", "sess-abc").Return(int64(0), fmt.Errorf("db offline"))
+			setupSessions: func(s *fakeSessionStore) {
+				s.DeleteByIDFn = func(_ context.Context, siteID, account, id string) (int64, error) {
+					return 0, fmt.Errorf("db offline")
+				}
 			},
 			wantCode: http.StatusInternalServerError,
 		},
@@ -883,7 +991,6 @@ func TestHandler_revokeSession(t *testing.T) {
 			name:      "missing account query returns 400",
 			account:   "",
 			sessionID: "sess-abc",
-			setupMock: func(m *MockAdminStore) {},
 			wantCode:  http.StatusBadRequest,
 		},
 	}
@@ -892,9 +999,16 @@ func TestHandler_revokeSession(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			m := NewMockAdminStore(ctrl)
-			tc.setupMock(m)
+			if tc.setupMock != nil {
+				tc.setupMock(m)
+			}
 
-			h := newHandler(m, testCfg())
+			sess := emptySessionStore()
+			if tc.setupSessions != nil {
+				tc.setupSessions(sess)
+			}
+
+			h := newHandler(m, sess, testCfg())
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -971,7 +1085,7 @@ func TestHandler_listAudit(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg())
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -995,7 +1109,7 @@ func TestHandler_healthz(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
 
-	h := newHandler(m, testCfg())
+	h := newHandler(m, emptySessionStore(), testCfg())
 	r := setupSessionRouter(h)
 
 	w := httptest.NewRecorder()
@@ -1013,7 +1127,7 @@ func TestHandler_readyz(t *testing.T) {
 		m := NewMockAdminStore(ctrl)
 		m.EXPECT().Ping(gomock.Any()).Return(nil)
 
-		h := newHandler(m, testCfg())
+		h := newHandler(m, emptySessionStore(), testCfg())
 		r := setupSessionRouter(h)
 
 		w := httptest.NewRecorder()
@@ -1030,7 +1144,7 @@ func TestHandler_readyz(t *testing.T) {
 		m := NewMockAdminStore(ctrl)
 		m.EXPECT().Ping(gomock.Any()).Return(fmt.Errorf("mongo unreachable"))
 
-		h := newHandler(m, testCfg())
+		h := newHandler(m, emptySessionStore(), testCfg())
 		r := setupSessionRouter(h)
 
 		w := httptest.NewRecorder()
@@ -1047,25 +1161,25 @@ func TestHandler_readyz(t *testing.T) {
 
 func TestHandler_setPassword(t *testing.T) {
 	tests := []struct {
-		name       string
-		userID     string
-		body       any
-		setupMock  func(m *MockAdminStore)
-		wantStatus int
-		wantReason string
+		name          string
+		userID        string
+		body          any
+		setupMock     func(m *MockAdminStore)
+		setupSessions func(s *fakeSessionStore)
+		wantStatus    int
+		wantReason    string
 	}{
 		{
-			name:   "happy path – hashes, sets requireChange (store revokes atomically)",
+			name:   "happy path – hashes, sets requireChange, atomically revokes all sessions",
 			userID: "u1",
 			body:   map[string]any{"password": "newSecret123", "requirePasswordChange": true},
 			setupMock: func(m *MockAdminStore) {
-				// UpdateUserPassword revokes the account's sessions atomically
-				// with the hash change, so the handler makes no separate call.
-				m.EXPECT().UpdateUserPassword(gomock.Any(), "site-A", "u1", gomock.Any(), true).
-					DoAndReturn(func(_ context.Context, siteID, id, hash string, requireChange bool) error {
+				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u1", gomock.Any(), true, "").
+					DoAndReturn(func(_ context.Context, siteID, id, hash string, requireChange bool, exceptSessionID string) error {
 						expected := sha256HexOf("newSecret123")
 						err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(expected))
 						assert.NoError(t, err, "stored hash must verify against bcrypt(sha256_hex(plaintext))")
+						assert.Empty(t, exceptSessionID, "admin-forced reset must revoke every session, no exception")
 						return nil
 					})
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
@@ -1102,11 +1216,11 @@ func TestHandler_setPassword(t *testing.T) {
 			wantReason: string(errcode.AuthMissingFields),
 		},
 		{
-			name:   "store UpdateUserPassword error → 500",
+			name:   "store UpdateUserPasswordAndRevoke error → 500",
 			userID: "u2",
 			body:   map[string]any{"password": "apassword"},
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().UpdateUserPassword(gomock.Any(), "site-A", "u2", gomock.Any(), gomock.Any()).
+				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u2", gomock.Any(), gomock.Any(), "").
 					Return(fmt.Errorf("db offline"))
 			},
 			wantStatus: http.StatusInternalServerError,
@@ -1116,7 +1230,7 @@ func TestHandler_setPassword(t *testing.T) {
 			userID: "no-such",
 			body:   map[string]any{"password": "somepass"},
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().UpdateUserPassword(gomock.Any(), "site-A", "no-such", gomock.Any(), gomock.Any()).
+				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "no-such", gomock.Any(), gomock.Any(), "").
 					Return(ErrUserNotFound)
 			},
 			wantStatus: http.StatusNotFound,
@@ -1127,7 +1241,7 @@ func TestHandler_setPassword(t *testing.T) {
 			userID: "u3",
 			body:   map[string]any{"password": "somepass"},
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().UpdateUserPassword(gomock.Any(), "site-A", "u3", gomock.Any(), true).Return(nil)
+				m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u3", gomock.Any(), true, "").Return(nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusOK,
@@ -1140,11 +1254,16 @@ func TestHandler_setPassword(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, testCfg())
+			sess := emptySessionStore()
+			if tc.setupSessions != nil {
+				tc.setupSessions(sess)
+			}
+
+			h := newHandler(m, sess, testCfg())
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPut, "/users/"+tc.userID+"/password", bodyBytes(t, tc.body))
+			req := httptest.NewRequest(http.MethodPost, "/users/"+tc.userID+"/password", bodyBytes(t, tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			r.ServeHTTP(w, req)
 
@@ -1155,4 +1274,27 @@ func TestHandler_setPassword(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandler_setPassword_TxError_Returns500 covers the atomic transaction's
+// failure path: the password write and the all-sessions revoke are now one
+// Mongo transaction (UpdateUserPasswordAndRevoke), so a failure there means
+// nothing was applied — the handler surfaces it as a 500, and AppendAudit
+// must not fire.
+func TestHandler_setPassword_TxError_Returns500(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	m := NewMockAdminStore(ctrl)
+	m.EXPECT().UpdateUserPasswordAndRevoke(gomock.Any(), "site-A", "u9", gomock.Any(), true, "").
+		Return(fmt.Errorf("mongo dead"))
+	// no AppendAudit expectation — must not fire
+
+	h := newHandler(m, emptySessionStore(), testCfg())
+	r := setupRouter(h)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/users/u9/password", bodyBytes(t, map[string]any{"password": "newSecret123"}))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }

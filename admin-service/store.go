@@ -12,16 +12,6 @@ var (
 	ErrAccountExists = errors.New("account exists")
 )
 
-// Session mirrors the botplatform-issued session row (read/write here).
-type Session struct {
-	ID       string   `bson:"_id"`
-	UserID   string   `bson:"userId"`
-	Account  string   `bson:"account"`
-	SiteID   string   `bson:"siteId"`
-	Roles    []string `bson:"roles"`
-	IssuedAt int64    `bson:"issuedAt"`
-}
-
 // UserUpdate carries optional account-management edits (nil = leave unchanged).
 type UserUpdate struct {
 	EngName     *string
@@ -56,14 +46,28 @@ type AuditFilter struct {
 type AdminStore interface {
 	SearchUsers(ctx context.Context, siteID, q string, page, limit int) ([]model.User, int64, error)
 	GetUserByAccount(ctx context.Context, siteID, account string) (*model.User, error)
+	// GetUserForAuth loads a user for password-verification paths (login and
+	// self-service change-password). Returns credential fields (services.password.bcrypt,
+	// roles, deactivated, requirePasswordChange, id, siteId, account) — the ONLY
+	// reads of the bcrypt hash in this service. Never call from admin management
+	// endpoints; those must use GetUserByAccount which scrubs the hash.
+	GetUserForAuth(ctx context.Context, siteID, account string) (*model.User, error)
 	CreateUser(ctx context.Context, u *model.User) error
 	UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) error
-	UpdateUserPassword(ctx context.Context, siteID, account, bcryptHash string, requireChange bool) error
 
-	FindSessionByHash(ctx context.Context, hash string) (*Session, error)
-	ListSessionsByAccount(ctx context.Context, siteID, account string) ([]Session, error)
-	DeleteSessionsByAccount(ctx context.Context, siteID, account string) (int64, error)
-	DeleteSession(ctx context.Context, siteID, account, sessionID string) (int64, error)
+	// UpdateUserPasswordAndRevoke atomically updates the user's bcrypt hash +
+	// requirePasswordChange flag AND deletes matching sessions for that account.
+	// If exceptSessionID is non-empty, sessions with that _id survive (used by
+	// self-service change-password to keep the caller logged in). If empty, ALL
+	// sessions for the account are deleted (used by admin setPassword). Both
+	// writes run in a single Mongo transaction — requires a replica set.
+	UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error
+
+	// DeactivateAndRevoke atomically sets deactivated=true on the user AND
+	// deletes every session for the account. Runs in one Mongo transaction.
+	// Called only for the deactivate branch of updateUser; other UpdateUser
+	// patches (name/roles) stay non-transactional.
+	DeactivateAndRevoke(ctx context.Context, siteID, account string) error
 
 	AppendAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error)

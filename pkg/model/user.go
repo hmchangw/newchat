@@ -108,6 +108,17 @@ func HasLoginRole(roles []UserRole) bool {
 	return false
 }
 
+// ContainsBotRole reports whether the role slice contains the bot role.
+// Used by portal-service's bot-login feature-flag gate.
+func ContainsBotRole(roles []UserRole) bool {
+	for _, r := range roles {
+		if r == UserRoleBot {
+			return true
+		}
+	}
+	return false
+}
+
 // IsBot reports whether account is a bot account (a ".bot" suffix).
 func IsBot(account string) bool {
 	return strings.HasSuffix(account, ".bot")

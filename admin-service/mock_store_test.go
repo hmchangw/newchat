@@ -69,34 +69,18 @@ func (mr *MockAdminStoreMockRecorder) CreateUser(ctx, u any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateUser", reflect.TypeOf((*MockAdminStore)(nil).CreateUser), ctx, u)
 }
 
-// DeleteSession mocks base method.
-func (m *MockAdminStore) DeleteSession(ctx context.Context, siteID, account, sessionID string) (int64, error) {
+// DeactivateAndRevoke mocks base method.
+func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteSession", ctx, siteID, account, sessionID)
-	ret0, _ := ret[0].(int64)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret := m.ctrl.Call(m, "DeactivateAndRevoke", ctx, siteID, account)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
-// DeleteSession indicates an expected call of DeleteSession.
-func (mr *MockAdminStoreMockRecorder) DeleteSession(ctx, siteID, account, sessionID any) *gomock.Call {
+// DeactivateAndRevoke indicates an expected call of DeactivateAndRevoke.
+func (mr *MockAdminStoreMockRecorder) DeactivateAndRevoke(ctx, siteID, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSession", reflect.TypeOf((*MockAdminStore)(nil).DeleteSession), ctx, siteID, account, sessionID)
-}
-
-// DeleteSessionsByAccount mocks base method.
-func (m *MockAdminStore) DeleteSessionsByAccount(ctx context.Context, siteID, account string) (int64, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteSessionsByAccount", ctx, siteID, account)
-	ret0, _ := ret[0].(int64)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// DeleteSessionsByAccount indicates an expected call of DeleteSessionsByAccount.
-func (mr *MockAdminStoreMockRecorder) DeleteSessionsByAccount(ctx, siteID, account any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSessionsByAccount", reflect.TypeOf((*MockAdminStore)(nil).DeleteSessionsByAccount), ctx, siteID, account)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeactivateAndRevoke", reflect.TypeOf((*MockAdminStore)(nil).DeactivateAndRevoke), ctx, siteID, account)
 }
 
 // EnsureIndexes mocks base method.
@@ -111,21 +95,6 @@ func (m *MockAdminStore) EnsureIndexes(ctx context.Context) error {
 func (mr *MockAdminStoreMockRecorder) EnsureIndexes(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureIndexes", reflect.TypeOf((*MockAdminStore)(nil).EnsureIndexes), ctx)
-}
-
-// FindSessionByHash mocks base method.
-func (m *MockAdminStore) FindSessionByHash(ctx context.Context, hash string) (*Session, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FindSessionByHash", ctx, hash)
-	ret0, _ := ret[0].(*Session)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// FindSessionByHash indicates an expected call of FindSessionByHash.
-func (mr *MockAdminStoreMockRecorder) FindSessionByHash(ctx, hash any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindSessionByHash", reflect.TypeOf((*MockAdminStore)(nil).FindSessionByHash), ctx, hash)
 }
 
 // GetUserByAccount mocks base method.
@@ -143,6 +112,21 @@ func (mr *MockAdminStoreMockRecorder) GetUserByAccount(ctx, siteID, account any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserByAccount", reflect.TypeOf((*MockAdminStore)(nil).GetUserByAccount), ctx, siteID, account)
 }
 
+// GetUserForAuth mocks base method.
+func (m *MockAdminStore) GetUserForAuth(ctx context.Context, siteID, account string) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserForAuth", ctx, siteID, account)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserForAuth indicates an expected call of GetUserForAuth.
+func (mr *MockAdminStoreMockRecorder) GetUserForAuth(ctx, siteID, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserForAuth", reflect.TypeOf((*MockAdminStore)(nil).GetUserForAuth), ctx, siteID, account)
+}
+
 // ListAudit mocks base method.
 func (m *MockAdminStore) ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error) {
 	m.ctrl.T.Helper()
@@ -157,21 +141,6 @@ func (m *MockAdminStore) ListAudit(ctx context.Context, siteID string, f AuditFi
 func (mr *MockAdminStoreMockRecorder) ListAudit(ctx, siteID, f, page, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListAudit", reflect.TypeOf((*MockAdminStore)(nil).ListAudit), ctx, siteID, f, page, limit)
-}
-
-// ListSessionsByAccount mocks base method.
-func (m *MockAdminStore) ListSessionsByAccount(ctx context.Context, siteID, account string) ([]Session, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListSessionsByAccount", ctx, siteID, account)
-	ret0, _ := ret[0].([]Session)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ListSessionsByAccount indicates an expected call of ListSessionsByAccount.
-func (mr *MockAdminStoreMockRecorder) ListSessionsByAccount(ctx, siteID, account any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSessionsByAccount", reflect.TypeOf((*MockAdminStore)(nil).ListSessionsByAccount), ctx, siteID, account)
 }
 
 // Ping mocks base method.
@@ -218,16 +187,16 @@ func (mr *MockAdminStoreMockRecorder) UpdateUser(ctx, siteID, account, fields an
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUser", reflect.TypeOf((*MockAdminStore)(nil).UpdateUser), ctx, siteID, account, fields)
 }
 
-// UpdateUserPassword mocks base method.
-func (m *MockAdminStore) UpdateUserPassword(ctx context.Context, siteID, account, bcryptHash string, requireChange bool) error {
+// UpdateUserPasswordAndRevoke mocks base method.
+func (m *MockAdminStore) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateUserPassword", ctx, siteID, account, bcryptHash, requireChange)
+	ret := m.ctrl.Call(m, "UpdateUserPasswordAndRevoke", ctx, siteID, account, bcryptHash, requireChange, exceptSessionID)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// UpdateUserPassword indicates an expected call of UpdateUserPassword.
-func (mr *MockAdminStoreMockRecorder) UpdateUserPassword(ctx, siteID, account, bcryptHash, requireChange any) *gomock.Call {
+// UpdateUserPasswordAndRevoke indicates an expected call of UpdateUserPasswordAndRevoke.
+func (mr *MockAdminStoreMockRecorder) UpdateUserPasswordAndRevoke(ctx, siteID, account, bcryptHash, requireChange, exceptSessionID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserPassword", reflect.TypeOf((*MockAdminStore)(nil).UpdateUserPassword), ctx, siteID, account, bcryptHash, requireChange)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserPasswordAndRevoke", reflect.TypeOf((*MockAdminStore)(nil).UpdateUserPasswordAndRevoke), ctx, siteID, account, bcryptHash, requireChange, exceptSessionID)
 }

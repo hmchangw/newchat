@@ -9,34 +9,22 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/session"
 )
 
-type mongoStore struct {
+type storeMongo struct {
 	users    *mongo.Collection
-	sessions *mongo.Collection
+	sessions session.Store
 }
 
-func newMongoStore(ctx context.Context, db *mongo.Database) (*mongoStore, error) {
-	s := &mongoStore{
+func newStoreMongo(db *mongo.Database) *storeMongo {
+	return &storeMongo{
 		users:    db.Collection("users"),
-		sessions: db.Collection("sessions"),
+		sessions: session.NewMongoStore(db),
 	}
-	if err := s.ensureIndexes(ctx); err != nil {
-		return nil, fmt.Errorf("ensure indexes: %w", err)
-	}
-	return s, nil
 }
 
-// ensureIndexes creates the compound index used by FIFO eviction and the
-// future list-sessions / revoke-all paths. The {_id: 1} primary is automatic.
-func (s *mongoStore) ensureIndexes(ctx context.Context) error {
-	_, err := s.sessions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "userId", Value: 1}, {Key: "issuedAt", Value: 1}},
-	})
-	return err
-}
-
-func (s *mongoStore) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
+func (s *storeMongo) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
 	var u model.User
 	err := s.users.FindOne(ctx, bson.M{"account": account},
 		options.FindOne().SetProjection(bson.M{
@@ -56,63 +44,22 @@ func (s *mongoStore) FindUserByAccount(ctx context.Context, account string) (*mo
 	return &u, nil
 }
 
-func (s *mongoStore) InsertSession(ctx context.Context, sess *session) error {
-	if _, err := s.sessions.InsertOne(ctx, sess); err != nil {
-		return fmt.Errorf("insert session: %w", err)
-	}
-	return nil
+func (s *storeMongo) InsertSession(ctx context.Context, sess *session.Session) error {
+	return s.sessions.Insert(ctx, sess)
 }
 
-func (s *mongoStore) FindSessionByHash(ctx context.Context, hash string) (*session, error) {
-	var sess session
-	err := s.sessions.FindOne(ctx, bson.M{"_id": hash}).Decode(&sess)
-	if err != nil {
-		return nil, fmt.Errorf("find session by hash: %w", err)
-	}
-	return &sess, nil
+func (s *storeMongo) FindSessionByHash(ctx context.Context, hash string) (*session.Session, error) {
+	return s.sessions.FindByHash(ctx, hash)
 }
 
-func (s *mongoStore) DeleteSessionsBeyondCap(ctx context.Context, userID string, cap int) (int64, error) {
-	if cap < 0 {
+func (s *storeMongo) DeleteSessionsBeyondCap(ctx context.Context, account string, max int) (int64, error) {
+	if max < 0 {
 		return 0, nil
 	}
-	// Skip the newest `cap` rows (sorted DESC by issuedAt); anything
-	// returned is over-cap. Uses the {userId:1, issuedAt:1} compound
-	// index. Under-cap users: one RTT with zero docs returned, no
-	// DeleteMany call. Over-cap users (typically over by 1): one RTT to
-	// fetch the victim IDs + one RTT for DeleteMany.
-	// Sort DESC by issuedAt with _id as a tie-breaker so two logins landing
-	// in the same millisecond evict deterministically (Mongo's within-key
-	// order is otherwise implementation-defined).
-	cur, err := s.sessions.Find(ctx, bson.M{"userId": userID},
-		options.Find().
-			SetProjection(bson.M{"_id": 1}).
-			SetSort(bson.D{{Key: "issuedAt", Value: -1}, {Key: "_id", Value: -1}}).
-			SetSkip(int64(cap)))
-	if err != nil {
-		return 0, fmt.Errorf("find over-cap: %w", err)
-	}
-	var rows []struct {
-		ID string `bson:"_id"`
-	}
-	if err := cur.All(ctx, &rows); err != nil {
-		return 0, fmt.Errorf("decode over-cap: %w", err)
-	}
-	if len(rows) == 0 {
-		return 0, nil
-	}
-	ids := make([]string, len(rows))
-	for i, r := range rows {
-		ids[i] = r.ID
-	}
-	res, err := s.sessions.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
-	if err != nil {
-		return 0, fmt.Errorf("delete over-cap: %w", err)
-	}
-	return res.DeletedCount, nil
+	return s.sessions.DeleteBeyondCap(ctx, account, max)
 }
 
-func (s *mongoStore) Ping(ctx context.Context) error {
+func (s *storeMongo) Ping(ctx context.Context) error {
 	if err := s.users.Database().Client().Ping(ctx, nil); err != nil {
 		return fmt.Errorf("ping mongo: %w", err)
 	}

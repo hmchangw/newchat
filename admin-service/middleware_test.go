@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
+
+	"github.com/hmchangw/chat/pkg/session"
 )
 
 func init() {
@@ -34,21 +36,21 @@ func TestRequireAdmin(t *testing.T) {
 		rawToken       = "valid-raw-token-abc123"
 		configuredSite = "site-local"
 	)
-	adminSession := &Session{
+	adminSession := &session.Session{
 		ID:      "hash-of-token",
 		UserID:  "user-1",
 		Account: "admin@example.com",
 		SiteID:  configuredSite,
 		Roles:   []string{"admin"},
 	}
-	nonAdminSession := &Session{
+	nonAdminSession := &session.Session{
 		ID:      "hash-of-token",
 		UserID:  "user-2",
 		Account: "user@example.com",
 		SiteID:  configuredSite,
 		Roles:   []string{"user"},
 	}
-	adminOtherSiteSession := &Session{
+	adminOtherSiteSession := &session.Session{
 		ID:      "hash-of-token",
 		UserID:  "user-3",
 		Account: "admin2@example.com",
@@ -59,7 +61,7 @@ func TestRequireAdmin(t *testing.T) {
 	tests := []struct {
 		name           string
 		authHeader     string
-		setupMock      func(m *MockAdminStore)
+		setupSessions  func(s *fakeSessionStore)
 		wantStatus     int
 		wantReason     string
 		wantNextCalled bool
@@ -67,24 +69,22 @@ func TestRequireAdmin(t *testing.T) {
 		{
 			name:       "no Authorization header → 401 invalid_token, no store call",
 			authHeader: "",
-			setupMock:  func(m *MockAdminStore) { /* no calls expected */ },
 			wantStatus: http.StatusUnauthorized,
 			wantReason: "invalid_token",
 		},
 		{
 			name:       "Authorization without Bearer prefix → 401 invalid_token, no store call",
 			authHeader: "Basic sometoken",
-			setupMock:  func(m *MockAdminStore) { /* no calls expected */ },
 			wantStatus: http.StatusUnauthorized,
 			wantReason: "invalid_token",
 		},
 		{
-			name:       "Bearer present but FindSessionByHash errors → 401 invalid_token",
+			name:       "Bearer present but FindByHash errors → 401 invalid_token",
 			authHeader: "Bearer " + rawToken,
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().
-					FindSessionByHash(gomock.Any(), gomock.Any()).
-					Return(nil, errUserNotFoundSentinel)
+			setupSessions: func(s *fakeSessionStore) {
+				s.FindByHashFn = func(_ context.Context, hash string) (*session.Session, error) {
+					return nil, errNotFoundSentinel
+				}
 			},
 			wantStatus: http.StatusUnauthorized,
 			wantReason: "invalid_token",
@@ -92,10 +92,10 @@ func TestRequireAdmin(t *testing.T) {
 		{
 			name:       "session found but lacks admin role → 403 not_admin",
 			authHeader: "Bearer " + rawToken,
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().
-					FindSessionByHash(gomock.Any(), gomock.Any()).
-					Return(nonAdminSession, nil)
+			setupSessions: func(s *fakeSessionStore) {
+				s.FindByHashFn = func(_ context.Context, hash string) (*session.Session, error) {
+					return nonAdminSession, nil
+				}
 			},
 			wantStatus: http.StatusForbidden,
 			wantReason: "not_admin",
@@ -103,10 +103,10 @@ func TestRequireAdmin(t *testing.T) {
 		{
 			name:       "admin session from different site → 403 not_admin, next NOT called",
 			authHeader: "Bearer " + rawToken,
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().
-					FindSessionByHash(gomock.Any(), gomock.Any()).
-					Return(adminOtherSiteSession, nil)
+			setupSessions: func(s *fakeSessionStore) {
+				s.FindByHashFn = func(_ context.Context, hash string) (*session.Session, error) {
+					return adminOtherSiteSession, nil
+				}
 			},
 			wantStatus:     http.StatusForbidden,
 			wantReason:     "not_admin",
@@ -115,10 +115,10 @@ func TestRequireAdmin(t *testing.T) {
 		{
 			name:       "admin session matching configured site → next handler runs, principal in context",
 			authHeader: "Bearer " + rawToken,
-			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().
-					FindSessionByHash(gomock.Any(), gomock.Any()).
-					Return(adminSession, nil)
+			setupSessions: func(s *fakeSessionStore) {
+				s.FindByHashFn = func(_ context.Context, hash string) (*session.Session, error) {
+					return adminSession, nil
+				}
 			},
 			wantStatus:     http.StatusOK,
 			wantNextCalled: true,
@@ -127,14 +127,15 @@ func TestRequireAdmin(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			mockStore := NewMockAdminStore(ctrl)
-			tc.setupMock(mockStore)
+			sess := emptySessionStore()
+			if tc.setupSessions != nil {
+				tc.setupSessions(sess)
+			}
 
 			c, w := newTestContext(http.MethodGet, "/admin/test", tc.authHeader)
 
 			nextCalled := false
-			mw := requireAdmin(mockStore, configuredSite)
+			mw := requireAdmin(sess, configuredSite)
 
 			// Simulate gin chain: run middleware, then check if next would run.
 			// We replicate gin's chain logic manually: if the middleware calls
@@ -164,5 +165,5 @@ func TestRequireAdmin(t *testing.T) {
 	}
 }
 
-// errUserNotFoundSentinel stands in for any store error (e.g. mongo.ErrNoDocuments).
-var errUserNotFoundSentinel = ErrUserNotFound
+// errNotFoundSentinel stands in for any session store miss (session.ErrNotFound).
+var errNotFoundSentinel = session.ErrNotFound

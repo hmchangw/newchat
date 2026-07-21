@@ -11,18 +11,17 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/session"
 )
 
 type storeMongo struct {
 	users      *mongo.Collection
-	sessions   *mongo.Collection
 	adminAudit *mongo.Collection
 }
 
 func newStoreMongo(db *mongo.Database) *storeMongo {
 	return &storeMongo{
 		users:      db.Collection("users"),
-		sessions:   db.Collection("sessions"),
 		adminAudit: db.Collection("admin_audit"),
 	}
 }
@@ -36,14 +35,6 @@ func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create users account index: %w", err)
-	}
-
-	// Matches botplatform's existing "userId_1_issuedAt_1" index.
-	_, err = s.sessions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "userId", Value: 1}, {Key: "issuedAt", Value: 1}},
-	})
-	if err != nil {
-		return fmt.Errorf("create sessions userId_issuedAt index: %w", err)
 	}
 
 	_, err = s.adminAudit.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -143,6 +134,34 @@ func (s *storeMongo) GetUserByAccount(ctx context.Context, siteID, account strin
 	return &u, nil
 }
 
+// userAuthProjection contains fields returned for the login/change-password
+// paths, including the bcrypt hash needed for pwhash.Verify. Never used by
+// admin management endpoints — those use userProjection, which excludes it.
+var userAuthProjection = bson.M{
+	"_id":                   1,
+	"account":               1,
+	"siteId":                1,
+	"roles":                 1,
+	"requirePasswordChange": 1,
+	"deactivated":           1,
+	"services":              1,
+}
+
+// GetUserForAuth loads a user with credential material for the login/change-password paths. Not exposed to admin management endpoints.
+func (s *storeMongo) GetUserForAuth(ctx context.Context, siteID, account string) (*model.User, error) {
+	var u model.User
+	err := s.users.FindOne(ctx, bson.M{"siteId": siteID, "account": account},
+		options.FindOne().SetProjection(userAuthProjection),
+	).Decode(&u)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("get user for auth: %w", err)
+	}
+	return &u, nil
+}
+
 func (s *storeMongo) CreateUser(ctx context.Context, u *model.User) error {
 	_, err := s.users.InsertOne(ctx, u)
 	if err != nil {
@@ -152,21 +171,6 @@ func (s *storeMongo) CreateUser(ctx context.Context, u *model.User) error {
 		return fmt.Errorf("insert user: %w", err)
 	}
 	return nil
-}
-
-// withTransaction runs fn inside a Mongo multi-document transaction. Requires a
-// replica-set deployment (production, and the RS container in integration tests).
-// The driver retries fn on transient transaction errors.
-func (s *storeMongo) withTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	sess, err := s.users.Database().Client().StartSession()
-	if err != nil {
-		return fmt.Errorf("start session: %w", err)
-	}
-	defer sess.EndSession(ctx)
-	_, err = sess.WithTransaction(ctx, func(ctx context.Context) (any, error) {
-		return nil, fn(ctx)
-	})
-	return err
 }
 
 func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) error {
@@ -189,24 +193,10 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 
 	filter := bson.M{"account": account, "siteId": siteID}
 
-	// Deactivation must atomically revoke the account's sessions — a failed
-	// revoke after the deactivate would leave live tokens for a disabled user.
-	if fields.Deactivated != nil && *fields.Deactivated {
-		return s.withTransaction(ctx, func(ctx context.Context) error {
-			result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": set})
-			if err != nil {
-				return fmt.Errorf("update user: %w", err)
-			}
-			if result.MatchedCount == 0 {
-				return ErrUserNotFound
-			}
-			if _, err := s.sessions.DeleteMany(ctx, filter); err != nil {
-				return fmt.Errorf("revoke sessions: %w", err)
-			}
-			return nil
-		})
-	}
-
+	// Deactivation no longer flows through UpdateUser — the handler routes
+	// Deactivated=true to DeactivateAndRevoke instead so the user-flag flip
+	// and session-purge run in one Mongo transaction. UpdateUser stays
+	// non-transactional for the remaining patch fields (roles, names).
 	result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": set})
 	if err != nil {
 		return fmt.Errorf("update user: %w", err)
@@ -217,13 +207,36 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 	return nil
 }
 
-// UpdateUserPassword replaces the bcrypt hash and atomically revokes every
-// session for the account, so a leaked old credential cannot keep a session
-// alive after the reset. Requires a replica set (see withTransaction).
-func (s *storeMongo) UpdateUserPassword(ctx context.Context, siteID, account, bcryptHash string, requireChange bool) error {
-	filter := bson.M{"account": account, "siteId": siteID}
+// withTransaction runs fn inside a Mongo multi-document transaction. Requires a
+// replica-set deployment (production, and the RS container in integration tests).
+// The driver retries fn on transient transaction errors.
+func (s *storeMongo) withTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	sess, err := s.users.Database().Client().StartSession()
+	if err != nil {
+		return fmt.Errorf("start session: %w", err)
+	}
+	defer sess.EndSession(ctx)
+	_, err = sess.WithTransaction(ctx, func(ctx context.Context) (any, error) {
+		return nil, fn(ctx)
+	})
+	return err
+}
+
+// UpdateUserPasswordAndRevoke atomically replaces the bcrypt hash +
+// requirePasswordChange flag and deletes matching sessions for the account, so
+// a leaked old credential cannot keep a session alive after the reset.
+// exceptSessionID, when non-empty, is excluded from the revoke (self-service
+// change-password keeps the caller logged in); empty revokes every session
+// for the account (admin-forced password set). Requires a replica set.
+func (s *storeMongo) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error {
+	userFilter := bson.M{"account": account, "siteId": siteID}
+	sessionFilter := bson.M{"siteId": siteID, "account": account}
+	if exceptSessionID != "" {
+		sessionFilter["_id"] = bson.M{"$ne": exceptSessionID}
+	}
+
 	return s.withTransaction(ctx, func(ctx context.Context) error {
-		result, err := s.users.UpdateOne(ctx, filter,
+		result, err := s.users.UpdateOne(ctx, userFilter,
 			bson.M{"$set": bson.M{
 				"services.password.bcrypt": bcryptHash,
 				"requirePasswordChange":    requireChange,
@@ -235,75 +248,34 @@ func (s *storeMongo) UpdateUserPassword(ctx context.Context, siteID, account, bc
 		if result.MatchedCount == 0 {
 			return ErrUserNotFound
 		}
-		if _, err := s.sessions.DeleteMany(ctx, filter); err != nil {
+		sessions := s.users.Database().Collection(session.Collection)
+		if _, err := sessions.DeleteMany(ctx, sessionFilter); err != nil {
 			return fmt.Errorf("revoke sessions: %w", err)
 		}
 		return nil
 	})
 }
 
-// sessionProjection returns all session fields.
-var sessionProjection = bson.M{
-	"_id":      1,
-	"userId":   1,
-	"account":  1,
-	"siteId":   1,
-	"roles":    1,
-	"issuedAt": 1,
-}
+// DeactivateAndRevoke atomically sets deactivated=true on the user and
+// deletes every session for the account, so a disabled account can't keep a
+// live token. Requires a replica set.
+func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account string) error {
+	filter := bson.M{"account": account, "siteId": siteID}
 
-func (s *storeMongo) FindSessionByHash(ctx context.Context, hash string) (*Session, error) {
-	var sess Session
-	err := s.sessions.FindOne(ctx, bson.M{"_id": hash},
-		options.FindOne().SetProjection(sessionProjection),
-	).Decode(&sess)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, ErrUserNotFound
+	return s.withTransaction(ctx, func(ctx context.Context) error {
+		result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"deactivated": true}})
+		if err != nil {
+			return fmt.Errorf("deactivate user: %w", err)
 		}
-		return nil, fmt.Errorf("find session by hash: %w", err)
-	}
-	return &sess, nil
-}
-
-func (s *storeMongo) ListSessionsByAccount(ctx context.Context, siteID, account string) ([]Session, error) {
-	cur, err := s.sessions.Find(ctx, bson.M{"siteId": siteID, "account": account},
-		options.Find().
-			SetProjection(sessionProjection).
-			SetSort(bson.D{{Key: "issuedAt", Value: -1}}),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
-	}
-	var sessions []Session
-	if err := cur.All(ctx, &sessions); err != nil {
-		return nil, fmt.Errorf("decode sessions: %w", err)
-	}
-	if sessions == nil {
-		sessions = []Session{}
-	}
-	return sessions, nil
-}
-
-// DeleteSessionsByAccount revokes every session for the given account — the
-// account-keyed variant used by the admin session-management endpoints.
-func (s *storeMongo) DeleteSessionsByAccount(ctx context.Context, siteID, account string) (int64, error) {
-	res, err := s.sessions.DeleteMany(ctx, bson.M{"siteId": siteID, "account": account})
-	if err != nil {
-		return 0, fmt.Errorf("delete sessions by account: %w", err)
-	}
-	return res.DeletedCount, nil
-}
-
-// DeleteSession revokes a single session scoped to the given site + account so
-// an admin cannot revoke a session outside their site or belonging to a
-// different account than the one queried.
-func (s *storeMongo) DeleteSession(ctx context.Context, siteID, account, sessionID string) (int64, error) {
-	res, err := s.sessions.DeleteOne(ctx, bson.M{"_id": sessionID, "siteId": siteID, "account": account})
-	if err != nil {
-		return 0, fmt.Errorf("delete session: %w", err)
-	}
-	return res.DeletedCount, nil
+		if result.MatchedCount == 0 {
+			return ErrUserNotFound
+		}
+		sessions := s.users.Database().Collection(session.Collection)
+		if _, err := sessions.DeleteMany(ctx, filter); err != nil {
+			return fmt.Errorf("revoke sessions: %w", err)
+		}
+		return nil
+	})
 }
 
 // auditProjection returns all audit entry fields.

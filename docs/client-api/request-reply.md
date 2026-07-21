@@ -209,13 +209,15 @@ login is [../client-api.md §2.5](../client-api.md#25-http--post-apiv1login-port
 
 ## HTTP — Admin Service
 
-Account-management REST endpoints served by `admin-service`. All `/v1/admin/…`
-routes require an admin session token (`Authorization: Bearer <authToken>`,
-`admin` role + matching `siteId`). Full schemas, examples, and error tables are in
+Account-management REST endpoints served by `admin-service`. `POST /v1/login` is
+unauthenticated; `POST /v1/password/change` and all `/v1/admin/…` routes require
+an admin session token (`Authorization: Bearer <authToken>`, `admin` role +
+matching `siteId`). Full schemas, examples, and error tables are in
 [../client-api.md §9](../client-api.md#9-admin-service).
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
+| `POST /v1/login` | synchronous HTTP | Admin console password login; issues an `authToken` (§9.10). |
 | `GET /v1/admin/users` | synchronous HTTP | List/search users (§9.1). |
 | `POST /v1/admin/users` | synchronous HTTP | Create a user (§9.2). |
 | `GET /v1/admin/users/:account` | synchronous HTTP | Get a user by account (§9.3). |
@@ -225,6 +227,7 @@ routes require an admin session token (`Authorization: Bearer <authToken>`,
 | `DELETE /v1/admin/sessions?account=<account>` | synchronous HTTP | Revoke all of an account's sessions (§9.7). |
 | `DELETE /v1/admin/sessions/:sessionId?account=<account>` | synchronous HTTP | Revoke a single session (§9.8). |
 | `GET /v1/admin/audit` | synchronous HTTP | List the audit log (§9.9). |
+| `POST /v1/password/change` | synchronous HTTP | Logged-in admin's self-service password change (§9.11). |
 
 **Emits:** `None — HTTP-only.`
 

@@ -74,10 +74,13 @@ var testSites = map[string]siteURL{
 	"site-local": {BaseURL: "http://localhost:3000", NATSURL: "ws://localhost:9222"},
 }
 
-// testSettings is the settings payload used by the handler tests.
+// testSettings is the settings payload used by the handler tests. BotLoginEnabled
+// defaults true to match production's envDefault, so most tests exercise the
+// unblocked path; bot-login-gate tests override it explicitly.
 var testSettings = settingsResponse{
-	APIVersion:  "v2",
-	OTELBaseURL: "https://otel.example.com/v1",
+	APIVersion:      "v2",
+	OTELBaseURL:     "https://otel.example.com/v1",
+	BotLoginEnabled: true,
 }
 
 // newTestHandler builds a PortalHandler with the test site registry and the
@@ -487,7 +490,7 @@ func TestHandleSettings(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, w.Code)
 		assert.JSONEq(t,
-			`{"apiVersion":"v2","otelBaseUrl":"https://otel.example.com/v1"}`,
+			`{"apiVersion":"v2","otelBaseUrl":"https://otel.example.com/v1","botLoginEnabled":true}`,
 			w.Body.String())
 		// Deployment config must not be cached by intermediaries.
 		assert.Equal(t, "no-cache", w.Header().Get("Cache-Control"))
@@ -500,7 +503,7 @@ func TestHandleSettings(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, w.Code)
 		assert.JSONEq(t,
-			`{"apiVersion":"v2","otelBaseUrl":"https://otel.example.com/v1"}`,
+			`{"apiVersion":"v2","otelBaseUrl":"https://otel.example.com/v1","botLoginEnabled":true}`,
 			w.Body.String())
 	})
 }
@@ -598,6 +601,52 @@ func TestHandleLogin_503_UpstreamUnreachable(t *testing.T) {
 	w := postLogin(t, setupRouter(t, h), loginRequest{Username: bot.Account, Password: "p"})
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Contains(t, w.Body.String(), "upstream_unavailable")
+}
+
+func TestHandleLogin_BotLoginDisabled_RejectsBot(t *testing.T) {
+	// Flag off + bot account -> 403 before the upstream hop.
+	var captured upstreamCapture
+	srv := upstreamMock(t, http.StatusOK, "should not be called", &captured)
+	defer srv.Close()
+
+	rc := resty.New().SetTimeout(2 * time.Second).SetBaseURL(srv.URL)
+	settings := testSettings
+	settings.BotLoginEnabled = false
+	h := NewPortalHandler(cacheWith(bot), false, "site-local", "ws://localhost:9222",
+		testSites, settings, WithRestyClient(rc))
+
+	w := postLogin(t, setupRouter(t, h), loginRequest{Username: bot.Account, Password: "p"})
+	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
+	errtest.AssertReason(t, w.Body.Bytes(), errcode.PortalBotLoginDisabled)
+	assert.Equal(t, 0, captured.calls, "portal must NOT call upstream when bot login is disabled")
+}
+
+func TestHandleLogin_BotLoginDisabled_AllowsAdmin(t *testing.T) {
+	// Flag off must not block admin accounts -- only bot-role accounts are gated.
+	const upstreamBody = `{"status":"success","data":{"userId":"u1","authToken":"bp-tok","me":{"requirePasswordChange":false}}}`
+	var captured upstreamCapture
+	srv := upstreamMock(t, http.StatusOK, upstreamBody, &captured)
+	defer srv.Close()
+
+	rc := resty.New().SetTimeout(2 * time.Second).SetBaseURL(srv.URL)
+	settings := testSettings
+	settings.BotLoginEnabled = false
+	h := NewPortalHandler(cacheWith(admin), false, "site-local", "ws://localhost:9222",
+		testSites, settings, WithRestyClient(rc))
+
+	w := postLogin(t, setupRouter(t, h), loginRequest{Username: admin.Account, Password: "p"})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, captured.calls, "admin login must still reach upstream when only bot login is disabled")
+}
+
+func TestHandleSettings_ExposesBotLoginFlag(t *testing.T) {
+	settings := testSettings
+	settings.BotLoginEnabled = false
+	h := NewPortalHandler(cacheWith(alice), false, "site-local", "ws://localhost:9222", testSites, settings)
+
+	w := getPath(t, setupRouter(t, h), "/api/settings")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"botLoginEnabled":false`)
 }
 
 func TestHandleLogin_500_SiteUnknown(t *testing.T) {

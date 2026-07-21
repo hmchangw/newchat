@@ -8,6 +8,7 @@ import MainApp from '@/components/MainApp/MainApp'
 import OidcCallback from '@/pages/OidcCallback'
 import BotLoginPage from '@/pages/BotLoginPage'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
+import { BOT_LOGIN_ENABLED } from '@/lib/runtimeConfig'
 
 function AppContent() {
   const { connected } = useNats()
@@ -28,6 +29,18 @@ function AppContent() {
     setPathname(window.location.pathname)
   }, [])
 
+  // Backend enforces the flag regardless — this effect is UI-only so the app
+  // doesn't advertise a disabled surface. Clearing the URL (rather than doing
+  // it inline during render) keeps render side-effect-free so React
+  // StrictMode's double-render doesn't double-fire history mutations; a
+  // refresh won't keep re-landing here once the URL is cleared.
+  useEffect(() => {
+    if (!connected && pathname === '/dev-login' && !BOT_LOGIN_ENABLED) {
+      window.history.replaceState({}, '', '/')
+      setPathname('/')
+    }
+  }, [connected, pathname])
+
   if (pathname === '/oidc-callback') {
     return <OidcCallback onDone={handleOidcDone} />
   }
@@ -35,7 +48,7 @@ function AppContent() {
   // Bot/admin password login — independent of DEV_MODE (bots never SSO).
   // Gated on !connected so that once login succeeds (connected flips true)
   // the user falls through to MainApp even while the URL is still /dev-login.
-  if (!connected && pathname === '/dev-login') {
+  if (!connected && pathname === '/dev-login' && BOT_LOGIN_ENABLED) {
     return <BotLoginPage />
   }
 

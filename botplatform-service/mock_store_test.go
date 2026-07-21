@@ -14,6 +14,7 @@ import (
 	reflect "reflect"
 
 	model "github.com/hmchangw/chat/pkg/model"
+	session "github.com/hmchangw/chat/pkg/session"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -42,25 +43,25 @@ func (m *MockBotplatformStore) EXPECT() *MockBotplatformStoreMockRecorder {
 }
 
 // DeleteSessionsBeyondCap mocks base method.
-func (m *MockBotplatformStore) DeleteSessionsBeyondCap(ctx context.Context, userID string, cap int) (int64, error) {
+func (m *MockBotplatformStore) DeleteSessionsBeyondCap(ctx context.Context, account string, max int) (int64, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteSessionsBeyondCap", ctx, userID, cap)
+	ret := m.ctrl.Call(m, "DeleteSessionsBeyondCap", ctx, account, max)
 	ret0, _ := ret[0].(int64)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // DeleteSessionsBeyondCap indicates an expected call of DeleteSessionsBeyondCap.
-func (mr *MockBotplatformStoreMockRecorder) DeleteSessionsBeyondCap(ctx, userID, cap any) *gomock.Call {
+func (mr *MockBotplatformStoreMockRecorder) DeleteSessionsBeyondCap(ctx, account, max any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSessionsBeyondCap", reflect.TypeOf((*MockBotplatformStore)(nil).DeleteSessionsBeyondCap), ctx, userID, cap)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSessionsBeyondCap", reflect.TypeOf((*MockBotplatformStore)(nil).DeleteSessionsBeyondCap), ctx, account, max)
 }
 
 // FindSessionByHash mocks base method.
-func (m *MockBotplatformStore) FindSessionByHash(ctx context.Context, hash string) (*session, error) {
+func (m *MockBotplatformStore) FindSessionByHash(ctx context.Context, hash string) (*session.Session, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FindSessionByHash", ctx, hash)
-	ret0, _ := ret[0].(*session)
+	ret0, _ := ret[0].(*session.Session)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -87,7 +88,7 @@ func (mr *MockBotplatformStoreMockRecorder) FindUserByAccount(ctx, account any) 
 }
 
 // InsertSession mocks base method.
-func (m *MockBotplatformStore) InsertSession(ctx context.Context, s *session) error {
+func (m *MockBotplatformStore) InsertSession(ctx context.Context, s *session.Session) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "InsertSession", ctx, s)
 	ret0, _ := ret[0].(error)

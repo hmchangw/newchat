@@ -72,6 +72,17 @@ describe('runtimeConfig', () => {
     expect(mod.OTEL_DEPLOYMENT_ENVIRONMENT).toBe('local')
   })
 
+  it('BOT_LOGIN_ENABLED defaults to true when not overridden', async () => {
+    const { BOT_LOGIN_ENABLED } = await import('./runtimeConfig.js')
+    expect(BOT_LOGIN_ENABLED).toBe(true)
+  })
+
+  it('BOT_LOGIN_ENABLED is false when window.__APP_CONFIG__.BOT_LOGIN_ENABLED = "false"', async () => {
+    window.__APP_CONFIG__ = { BOT_LOGIN_ENABLED: 'false' }
+    const { BOT_LOGIN_ENABLED } = await import('./runtimeConfig.js')
+    expect(BOT_LOGIN_ENABLED).toBe(false)
+  })
+
   it('telemetry settings read from window.__APP_CONFIG__', async () => {
     window.__APP_CONFIG__ = {
       OTEL_ENABLED: 'false',

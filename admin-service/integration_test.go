@@ -3,10 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -15,6 +20,9 @@ import (
 
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/pwhash"
+	"github.com/hmchangw/chat/pkg/session"
+	"github.com/hmchangw/chat/pkg/sessiontoken"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -22,10 +30,11 @@ func TestMain(m *testing.M) {
 	testutil.RunTestsWithPrewarm(m, testutil.EnsureMongoReplicaSet)
 }
 
-// seedSession inserts a session row directly into the sessions collection.
-func seedSession(t *testing.T, db *mongo.Database, sess Session) {
+// seedSession inserts a session row directly into the shared sessions
+// collection (owned by pkg/session, not this service's store).
+func seedSession(t *testing.T, db *mongo.Database, sess session.Session) {
 	t.Helper()
-	_, err := db.Collection("sessions").InsertOne(context.Background(), sess)
+	_, err := db.Collection(session.Collection).InsertOne(context.Background(), sess)
 	require.NoError(t, err)
 }
 
@@ -189,8 +198,9 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		assert.Equal(t, []model.UserRole{model.UserRoleAdmin}, got.Roles)
 	})
 
-	t.Run("update deactivated revokes sessions atomically", func(t *testing.T) {
-		seedSession(t, db, Session{ID: "eve-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
+	t.Run("update deactivated on this path does not touch sessions (handler routes Deactivated=true to DeactivateAndRevoke instead)", func(t *testing.T) {
+		sessStore := session.NewMongoStore(db)
+		seedSession(t, db, session.Session{ID: "eve-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 
 		deact := true
 		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Deactivated: &deact})
@@ -200,9 +210,9 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, got.Deactivated)
 
-		sessions, err := st.ListSessionsByAccount(ctx, "site-a", u.Account)
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
-		assert.Empty(t, sessions, "deactivation must revoke the account's sessions in the same transaction")
+		assert.Len(t, sessions, 1, "store.UpdateUser must leave sessions alone — revocation is the handler's job now")
 	})
 
 	t.Run("update names", func(t *testing.T) {
@@ -230,10 +240,10 @@ func TestIntegration_UpdateUser(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
-// UpdateUserPassword
+// UpdateUserPasswordAndRevoke
 // -------------------------------------------------------------------------
 
-func TestIntegration_UpdateUserPassword(t *testing.T) {
+func TestIntegration_UpdateUserPasswordAndRevoke(t *testing.T) {
 	db := testutil.MongoDBReplicaSet(t, "adminsvc")
 	st := newStoreMongo(db)
 	require.NoError(t, st.EnsureIndexes(context.Background()))
@@ -248,7 +258,7 @@ func TestIntegration_UpdateUserPassword(t *testing.T) {
 	require.NoError(t, st.CreateUser(ctx, u))
 
 	t.Run("sets hash and requirePasswordChange=false", func(t *testing.T) {
-		err := st.UpdateUserPassword(ctx, "site-a", u.Account, "$2a$04$fakehash", false)
+		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$fakehash", false, "")
 		require.NoError(t, err)
 
 		// Read back via raw projection to check services.password.bcrypt.
@@ -269,7 +279,7 @@ func TestIntegration_UpdateUserPassword(t *testing.T) {
 	})
 
 	t.Run("sets requirePasswordChange=true", func(t *testing.T) {
-		err := st.UpdateUserPassword(ctx, "site-a", u.Account, "$2a$04$anotherhash", true)
+		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$anotherhash", true, "")
 		require.NoError(t, err)
 
 		var raw struct {
@@ -282,20 +292,81 @@ func TestIntegration_UpdateUserPassword(t *testing.T) {
 		assert.True(t, raw.RequirePasswordChange)
 	})
 
-	t.Run("revokes the account's sessions atomically", func(t *testing.T) {
-		seedSession(t, db, Session{ID: "frank-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
-		seedSession(t, db, Session{ID: "frank-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
+	t.Run("exceptSessionID=\"\" revokes every session for the account", func(t *testing.T) {
+		sessStore := session.NewMongoStore(db)
+		seedSession(t, db, session.Session{ID: "frank-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
+		seedSession(t, db, session.Session{ID: "frank-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
 
-		err := st.UpdateUserPassword(ctx, "site-a", u.Account, "$2a$04$rotatedhash", false)
+		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$rotatedhash", false, "")
 		require.NoError(t, err)
 
-		sessions, err := st.ListSessionsByAccount(ctx, "site-a", u.Account)
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
-		assert.Empty(t, sessions, "password reset must revoke all of the account's sessions in the same transaction")
+		assert.Empty(t, sessions, "exceptSessionID=\"\" (admin setPassword) must kill every session for the account")
+	})
+
+	t.Run("exceptSessionID=<id> preserves caller session, revokes siblings", func(t *testing.T) {
+		sessStore := session.NewMongoStore(db)
+		seedSession(t, db, session.Session{ID: "frank-caller", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 10})
+		seedSession(t, db, session.Session{ID: "frank-sibling-a", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 11})
+		seedSession(t, db, session.Session{ID: "frank-sibling-b", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 12})
+
+		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", u.Account, "$2a$04$callerkeeps", false, "frank-caller")
+		require.NoError(t, err)
+
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
+		require.NoError(t, err)
+		require.Len(t, sessions, 1, "only the caller's session should survive")
+		assert.Equal(t, "frank-caller", sessions[0].ID)
 	})
 
 	t.Run("nonexistent id returns ErrUserNotFound", func(t *testing.T) {
-		err := st.UpdateUserPassword(ctx, "site-a", "nonexistent-account", "$2a$04$fakehash", false)
+		err := st.UpdateUserPasswordAndRevoke(ctx, "site-a", "nonexistent-account", "$2a$04$fakehash", false, "")
+		assert.ErrorIs(t, err, ErrUserNotFound)
+	})
+}
+
+// -------------------------------------------------------------------------
+// DeactivateAndRevoke
+// -------------------------------------------------------------------------
+
+func TestIntegration_DeactivateAndRevoke(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+
+	ctx := context.Background()
+	u := &model.User{
+		ID:      idgen.GenerateUUIDv7(),
+		Account: "gwen",
+		SiteID:  "site-a",
+	}
+	require.NoError(t, st.CreateUser(ctx, u))
+
+	t.Run("sets deactivated=true and kills every session for the account atomically", func(t *testing.T) {
+		sessStore := session.NewMongoStore(db)
+		seedSession(t, db, session.Session{ID: "gwen-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
+		seedSession(t, db, session.Session{ID: "gwen-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
+
+		err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
+		require.NoError(t, err)
+
+		var raw struct {
+			Deactivated bool `bson:"deactivated"`
+		}
+		err = db.Collection("users").FindOne(ctx, bson.M{"_id": u.ID},
+			options.FindOne().SetProjection(bson.M{"deactivated": 1}),
+		).Decode(&raw)
+		require.NoError(t, err)
+		assert.True(t, raw.Deactivated)
+
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
+		require.NoError(t, err)
+		assert.Empty(t, sessions, "deactivate must kill every session for the account")
+	})
+
+	t.Run("nonexistent account returns ErrUserNotFound", func(t *testing.T) {
+		err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
@@ -304,36 +375,43 @@ func TestIntegration_UpdateUserPassword(t *testing.T) {
 // Sessions
 // -------------------------------------------------------------------------
 
+// TestIntegration_Sessions exercises the session.Store surface the way
+// admin-service's handlers use it (listSessions/revokeSession/revokeAllSessions
+// and the middleware's FindByHash). Insert/FindByHash/DeleteBeyondCap/
+// DeleteForAccountExcept already have their own coverage in
+// pkg/session/session_integration_test.go; this focuses on the
+// site+account-scoped surface (ListForAccount/DeleteByID/DeleteForAccount)
+// that only admin-service calls.
 func TestIntegration_Sessions(t *testing.T) {
 	db := testutil.MongoDBReplicaSet(t, "adminsvc")
-	st := newStoreMongo(db)
-	require.NoError(t, st.EnsureIndexes(context.Background()))
+	sessStore := session.NewMongoStore(db)
+	require.NoError(t, sessStore.EnsureIndexes(context.Background()))
 
 	ctx := context.Background()
 	userID := idgen.GenerateUUIDv7()
 	otherUserID := idgen.GenerateUUIDv7()
 
 	// Seed sessions directly.
-	sessA := Session{ID: "hash-a", UserID: userID, Account: "grace", SiteID: "site-a", Roles: []string{"admin"}, IssuedAt: 1000}
-	sessB := Session{ID: "hash-b", UserID: userID, Account: "grace", SiteID: "site-a", Roles: []string{"admin"}, IssuedAt: 2000}
-	sessC := Session{ID: "hash-c", UserID: otherUserID, Account: "other", SiteID: "site-a", Roles: []string{"user"}, IssuedAt: 3000}
+	sessA := session.Session{ID: "hash-a", UserID: userID, Account: "grace", SiteID: "site-a", Roles: []string{"admin"}, IssuedAt: 1000}
+	sessB := session.Session{ID: "hash-b", UserID: userID, Account: "grace", SiteID: "site-a", Roles: []string{"admin"}, IssuedAt: 2000}
+	sessC := session.Session{ID: "hash-c", UserID: otherUserID, Account: "other", SiteID: "site-a", Roles: []string{"user"}, IssuedAt: 3000}
 	seedSession(t, db, sessA)
 	seedSession(t, db, sessB)
 	seedSession(t, db, sessC)
 
-	t.Run("FindSessionByHash hit", func(t *testing.T) {
-		got, err := st.FindSessionByHash(ctx, "hash-a")
+	t.Run("FindByHash hit", func(t *testing.T) {
+		got, err := sessStore.FindByHash(ctx, "hash-a")
 		require.NoError(t, err)
 		assert.Equal(t, userID, got.UserID)
 	})
 
-	t.Run("FindSessionByHash miss returns ErrUserNotFound", func(t *testing.T) {
-		_, err := st.FindSessionByHash(ctx, "no-such-hash")
-		assert.ErrorIs(t, err, ErrUserNotFound)
+	t.Run("FindByHash miss returns session.ErrNotFound", func(t *testing.T) {
+		_, err := sessStore.FindByHash(ctx, "no-such-hash")
+		assert.ErrorIs(t, err, session.ErrNotFound)
 	})
 
-	t.Run("ListSessionsByAccount returns only that account's sessions", func(t *testing.T) {
-		sessions, err := st.ListSessionsByAccount(ctx, "site-a", "grace")
+	t.Run("ListForAccount returns only that account's sessions", func(t *testing.T) {
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", "grace")
 		require.NoError(t, err)
 		assert.Len(t, sessions, 2)
 		for _, s := range sessions {
@@ -341,8 +419,8 @@ func TestIntegration_Sessions(t *testing.T) {
 		}
 	})
 
-	t.Run("ListSessionsByAccount returns empty for unknown account", func(t *testing.T) {
-		sessions, err := st.ListSessionsByAccount(ctx, "site-a", "no-such-account")
+	t.Run("ListForAccount returns empty for unknown account", func(t *testing.T) {
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", "no-such-account")
 		require.NoError(t, err)
 		assert.Empty(t, sessions)
 	})
@@ -350,63 +428,63 @@ func TestIntegration_Sessions(t *testing.T) {
 	t.Run("cross-site: wrong site cannot list or revoke another site's sessions", func(t *testing.T) {
 		// grace's sessions live on site-a; a site-b admin must see nothing and
 		// revoke nothing.
-		sessions, err := st.ListSessionsByAccount(ctx, "site-b", "grace")
+		sessions, err := sessStore.ListForAccount(ctx, "site-b", "grace")
 		require.NoError(t, err)
 		assert.Empty(t, sessions, "site-b admin must not see site-a sessions")
 
-		n, err := st.DeleteSession(ctx, "site-b", "grace", "hash-a")
+		n, err := sessStore.DeleteByID(ctx, "site-b", "grace", "hash-a")
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), n, "site-b admin must not revoke a site-a session")
 
-		n, err = st.DeleteSessionsByAccount(ctx, "site-b", "grace")
+		n, err = sessStore.DeleteForAccount(ctx, "site-b", "grace")
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), n, "site-b admin must not revoke site-a sessions in bulk")
 
 		// hash-a survives the cross-site attempts.
-		got, err := st.FindSessionByHash(ctx, "hash-a")
+		got, err := sessStore.FindByHash(ctx, "hash-a")
 		require.NoError(t, err)
 		assert.Equal(t, "grace", got.Account)
 	})
 
-	t.Run("DeleteSession account-scoped: wrong account does NOT delete", func(t *testing.T) {
+	t.Run("DeleteByID account-scoped: wrong account does NOT delete", func(t *testing.T) {
 		// Try to delete sessA using the wrong account.
-		n, err := st.DeleteSession(ctx, "site-a", "other", "hash-a")
+		n, err := sessStore.DeleteByID(ctx, "site-a", "other", "hash-a")
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), n, "session belonging to a different account must not be deleted")
 
 		// Verify sessA still exists.
-		got, err := st.FindSessionByHash(ctx, "hash-a")
+		got, err := sessStore.FindByHash(ctx, "hash-a")
 		require.NoError(t, err)
 		assert.Equal(t, userID, got.UserID)
 	})
 
-	t.Run("DeleteSession account-scoped: correct account deletes", func(t *testing.T) {
-		n, err := st.DeleteSession(ctx, "site-a", "grace", "hash-a")
+	t.Run("DeleteByID account-scoped: correct account deletes", func(t *testing.T) {
+		n, err := sessStore.DeleteByID(ctx, "site-a", "grace", "hash-a")
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), n)
 
-		_, err = st.FindSessionByHash(ctx, "hash-a")
-		assert.ErrorIs(t, err, ErrUserNotFound)
+		_, err = sessStore.FindByHash(ctx, "hash-a")
+		assert.ErrorIs(t, err, session.ErrNotFound)
 	})
 
-	t.Run("DeleteSessionsByAccount removes all of the account's sessions", func(t *testing.T) {
-		n, err := st.DeleteSessionsByAccount(ctx, "site-a", "grace")
+	t.Run("DeleteForAccount removes all of the account's sessions", func(t *testing.T) {
+		n, err := sessStore.DeleteForAccount(ctx, "site-a", "grace")
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, n, int64(1)) // hash-b remains at this point
 
-		sessions, err := st.ListSessionsByAccount(ctx, "site-a", "grace")
+		sessions, err := sessStore.ListForAccount(ctx, "site-a", "grace")
 		require.NoError(t, err)
 		assert.Empty(t, sessions)
 	})
 
-	t.Run("DeleteSessionsByAccount removes the other account's sessions only", func(t *testing.T) {
+	t.Run("DeleteForAccount removes the other account's sessions only", func(t *testing.T) {
 		// hash-c belongs to the "other" account and is still present.
-		n, err := st.DeleteSessionsByAccount(ctx, "site-a", "other")
+		n, err := sessStore.DeleteForAccount(ctx, "site-a", "other")
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), n)
 
-		_, err = st.FindSessionByHash(ctx, "hash-c")
-		assert.ErrorIs(t, err, ErrUserNotFound)
+		_, err = sessStore.FindByHash(ctx, "hash-c")
+		assert.ErrorIs(t, err, session.ErrNotFound)
 	})
 }
 
@@ -509,4 +587,75 @@ func TestIntegration_EnsureIndexes_Idempotent(t *testing.T) {
 	require.NoError(t, st.EnsureIndexes(context.Background()), "first EnsureIndexes must succeed")
 	// Second call must also succeed (idempotent).
 	require.NoError(t, st.EnsureIndexes(context.Background()), "second EnsureIndexes must be idempotent")
+}
+
+// -------------------------------------------------------------------------
+// TestLoginAndChangePasswordEndToEnd
+// -------------------------------------------------------------------------
+
+func TestLoginAndChangePasswordEndToEnd(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminlogin")
+	sessions := session.NewMongoStore(db)
+	require.NoError(t, sessions.EnsureIndexes(context.Background()))
+	store := newStoreMongo(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+
+	cfg := Config{SiteID: "site-a", BcryptCost: 4, SessionsMaxPerAccount: 100}
+	h := newHandler(store, sessions, cfg)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	registerRoutes(r, h, sessions, cfg.SiteID)
+
+	// Seed one admin
+	hash, err := pwhash.Hash("s3cret", cfg.BcryptCost)
+	require.NoError(t, err)
+	require.NoError(t, store.CreateUser(context.Background(), &model.User{
+		ID: "u-alice", Account: "p_alice", SiteID: "site-a",
+		Roles:    []model.UserRole{model.UserRoleAdmin},
+		Services: model.Services{Password: model.PasswordCredentials{Bcrypt: hash}},
+	}))
+
+	// 1. Login
+	w := postJSON(t, r, "/v1/login", map[string]string{"username": "p_alice", "password": "s3cret"})
+	require.Equal(t, http.StatusOK, w.Code)
+	var login loginResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &login))
+	require.NotEmpty(t, login.AuthToken)
+
+	// Sanity: session row exists
+	_, err = sessions.FindByHash(context.Background(), sessiontoken.Hash(login.AuthToken))
+	require.NoError(t, err)
+
+	// 2. Seed a second session for the same account (represents a chat-frontend session)
+	other := &session.Session{
+		ID: "other-session-hash", UserID: "u-alice", Account: "p_alice", SiteID: "site-a",
+		Roles: []string{string(model.UserRoleAdmin)}, IssuedAt: 1,
+	}
+	require.NoError(t, sessions.Insert(context.Background(), other))
+
+	// 3. Change password using the login session
+	body := map[string]string{"oldPassword": "s3cret", "newPassword": "newp@ss"}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/password/change", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+login.AuthToken)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	// Caller session still valid
+	_, err = sessions.FindByHash(context.Background(), sessiontoken.Hash(login.AuthToken))
+	require.NoError(t, err)
+	// Sibling session gone
+	_, err = sessions.FindByHash(context.Background(), "other-session-hash")
+	require.Error(t, err)
+
+	// Old password no longer works
+	w = postJSON(t, r, "/v1/login", map[string]string{"username": "p_alice", "password": "s3cret"})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// New password does
+	w = postJSON(t, r, "/v1/login", map[string]string{"username": "p_alice", "password": "newp@ss"})
+	require.Equal(t, http.StatusOK, w.Code)
 }

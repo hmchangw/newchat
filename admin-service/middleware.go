@@ -9,6 +9,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
 )
 
@@ -26,7 +27,7 @@ func bearer(c *gin.Context) string {
 
 // authenticate validates the bearer session token and its siteID, writing the
 // error envelope and aborting on failure — shared by requireAuth/requireAdmin.
-func authenticate(c *gin.Context, store AdminStore, siteID string) (sess *Session, ok bool) {
+func authenticate(c *gin.Context, sessions session.Store, siteID string) (sess *session.Session, ok bool) {
 	ctx := c.Request.Context()
 
 	tok := bearer(c)
@@ -37,7 +38,7 @@ func authenticate(c *gin.Context, store AdminStore, siteID string) (sess *Sessio
 		return nil, false
 	}
 
-	sess, err := store.FindSessionByHash(ctx, sessiontoken.Hash(tok))
+	sess, err := sessions.FindByHash(ctx, sessiontoken.Hash(tok))
 	if err != nil {
 		errhttp.Write(ctx, c, errcode.Unauthenticated("invalid session token",
 			errcode.WithReason(errcode.AdminInvalidToken)))
@@ -57,9 +58,9 @@ func authenticate(c *gin.Context, store AdminStore, siteID string) (sess *Sessio
 
 // requireAdmin is Gin middleware requiring a valid session for this site that
 // also holds the admin role.
-func requireAdmin(store AdminStore, siteID string) gin.HandlerFunc {
+func requireAdmin(sessions session.Store, siteID string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sess, ok := authenticate(c, store, siteID)
+		sess, ok := authenticate(c, sessions, siteID)
 		if !ok {
 			return
 		}
@@ -78,8 +79,8 @@ func requireAdmin(store AdminStore, siteID string) gin.HandlerFunc {
 
 // principalFrom retrieves the Session stored by requireAuth/requireAdmin, or
 // zero-value if none.
-func principalFrom(c *gin.Context) Session {
+func principalFrom(c *gin.Context) session.Session {
 	v, _ := c.Get(ctxPrincipal)
-	s, _ := v.(Session)
+	s, _ := v.(session.Session)
 	return s
 }

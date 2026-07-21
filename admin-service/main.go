@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -44,12 +45,17 @@ func run() error {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 
-	st := newStoreMongo(mongoClient.Database(cfg.MongoDB))
+	db := mongoClient.Database(cfg.MongoDB)
+	st := newStoreMongo(db)
 	if err := st.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
 	}
+	sessStore := session.NewMongoStore(db)
+	if err := sessStore.EnsureIndexes(ctx); err != nil {
+		return fmt.Errorf("ensure session indexes: %w", err)
+	}
 
-	h := newHandler(st, cfg)
+	h := newHandler(st, sessStore, cfg)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -58,7 +64,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
-	registerRoutes(r, h, st, cfg.SiteID)
+	registerRoutes(r, h, sessStore, cfg.SiteID)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

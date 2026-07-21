@@ -1,13 +1,20 @@
 package main
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/gin-gonic/gin"
+
+	"github.com/hmchangw/chat/pkg/session"
+)
 
 // registerRoutes wires all HTTP routes onto r.
-func registerRoutes(r *gin.Engine, h *Handler, store AdminStore, siteID string) {
+func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID string) {
 	r.GET("/healthz", h.healthz)
 	r.GET("/readyz", h.readyz)
 
-	admin := r.Group("/v1/admin", requireAdmin(store, siteID))
+	r.POST("/v1/login", h.handleLogin)
+	r.POST("/v1/password/change", requireAdmin(sessions, siteID), h.handleChangePassword)
+
+	admin := r.Group("/v1/admin", requireAdmin(sessions, siteID))
 	admin.GET("/users", h.listUsers)
 	admin.POST("/users", h.createUser)
 	admin.GET("/users/:account", h.getUser)
