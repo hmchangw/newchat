@@ -116,7 +116,10 @@ func run() error {
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
-	}, msgraph.WithChatsPageSize(cfg.GraphChatsPageSize))
+	}, msgraph.WithChatsPageSize(cfg.GraphChatsPageSize),
+		// Each worker issues one sequential Graph request at a time, so keep one
+		// warm idle connection per worker.
+		msgraph.WithMaxIdleConns(cfg.MaxWorkers))
 	if err != nil {
 		return fmt.Errorf("build chats client: %w", err)
 	}

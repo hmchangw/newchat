@@ -547,3 +547,55 @@ func TestListUsers_SendsUserAgent(t *testing.T) {
 	err = lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
 	require.NoError(t, err)
 }
+
+func TestWithMaxIdleConns_SetsIdlePool(t *testing.T) {
+	// Only the idle keep-alive pool is tuned: MaxIdleConnsPerHost (the stdlib
+	// default is 2, which forces a fresh TLS handshake for every worker beyond the
+	// second) plus the global MaxIdleConns that bounds it. The hard
+	// MaxConnsPerHost cap is deliberately left unset — worker concurrency already
+	// bounds in-flight requests, so a cap would only risk blocking a worker.
+	g := New(Config{TenantID: "t"}, WithMaxIdleConns(10)).(*graphClient)
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok, "WithMaxIdleConns must install a concrete *http.Transport")
+	assert.Equal(t, 10, tr.MaxIdleConnsPerHost, "idle keep-alives retained for reuse")
+	assert.GreaterOrEqual(t, tr.MaxIdleConns, 10, "global idle budget must cover the per-host budget")
+	assert.Zero(t, tr.MaxConnsPerHost, "no hard connection cap — concurrency is bounded by the worker count")
+}
+
+func TestWithMaxIdleConns_PreservesTLSSkip(t *testing.T) {
+	// Idle-pool tuning must mutate the existing TLS-skip transport in place, not
+	// clone a fresh one — otherwise InsecureSkipVerify (the on-prem default) is
+	// dropped.
+	g := New(Config{TenantID: "t", TLSInsecureSkipVerify: true}, WithMaxIdleConns(5)).(*graphClient)
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.TLSClientConfig, "TLS-skip config must survive idle-pool tuning")
+	assert.True(t, tr.TLSClientConfig.InsecureSkipVerify, "idle-pool tuning must not drop the TLS-skip config")
+	assert.Equal(t, 5, tr.MaxIdleConnsPerHost)
+	assert.Zero(t, tr.MaxConnsPerHost, "no hard connection cap")
+}
+
+func TestWithMaxIdleConns_NonPositiveNoop(t *testing.T) {
+	// n<=0 leaves the pool at Go's defaults (no concrete transport installed).
+	g := New(Config{TenantID: "t"}, WithMaxIdleConns(0)).(*graphClient)
+	assert.Nil(t, g.httpClient.Transport, "n<=0 must leave the default transport untouched")
+	gneg := New(Config{TenantID: "t"}, WithMaxIdleConns(-1)).(*graphClient)
+	assert.Nil(t, gneg.httpClient.Transport, "negative n must leave the default transport untouched")
+}
+
+func TestNewChatsClient_MaxIdleConnsSurvivesProxy(t *testing.T) {
+	// NewChatsClient applies the options (WithMaxIdleConns) inside New, then wires
+	// the proxy afterwards. applyProxyURL must reuse that transport so the idle
+	// pool size is not lost when a proxy is configured.
+	c, err := NewChatsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"},
+		WithMaxIdleConns(7),
+	)
+	require.NoError(t, err)
+	g := c.(*graphClient)
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Equal(t, 7, tr.MaxIdleConnsPerHost, "idle pool must survive proxy application")
+	assert.Zero(t, tr.MaxConnsPerHost, "no hard connection cap")
+	require.NotNil(t, tr.Proxy, "proxy must still be configured alongside the idle pool")
+}

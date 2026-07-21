@@ -195,6 +195,28 @@ func WithTokenURL(u string) Option {
 	return func(g *graphClient) { g.tokenURL = u }
 }
 
+// WithMaxIdleConns tunes the client's idle connection pool for the Graph host:
+// it sets MaxIdleConnsPerHost (the idle keep-alives retained for reuse) to n and
+// raises the global MaxIdleConns to at least n. Callers issue one sequential
+// Graph request per worker, so sizing n to the worker count keeps one warm,
+// reused connection per worker; the stdlib default retains only 2 idle
+// connections per host, so every worker beyond the second would pay a fresh TLS
+// handshake per request — costly through a TLS-intercepting proxy. The hard
+// MaxConnsPerHost cap is deliberately left unset: worker concurrency already
+// bounds the number of in-flight requests, so a cap equal to it would add no
+// limiting and only risk briefly blocking a worker while a connection is
+// recycled. Values <= 0 leave the pool at Go's defaults.
+func WithMaxIdleConns(n int) Option {
+	return func(g *graphClient) {
+		if n <= 0 {
+			return
+		}
+		tr := mutableTransport(g.httpClient)
+		tr.MaxIdleConnsPerHost = n
+		tr.MaxIdleConns = max(tr.MaxIdleConns, n)
+	}
+}
+
 // New constructs a live Graph client for the given config.
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
@@ -229,13 +251,25 @@ func New(cfg Config, opts ...Option) Client {
 	return g
 }
 
+// mutableTransport returns hc's *http.Transport for in-place tuning, installing
+// a clone of http.DefaultTransport when hc has no transport (or a
+// non-*http.Transport) so ProxyFromEnvironment and dial defaults are preserved.
+// An already-configured *http.Transport (e.g. New's TLSInsecureSkipVerify clone)
+// is reused so its settings survive rather than being cloned over.
+func mutableTransport(hc *http.Client) *http.Transport {
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		tr = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	hc.Transport = tr
+	return tr
+}
+
 // applyProxyURL points hc's transport at rawProxyURL (overriding
 // HTTPS_PROXY/HTTP_PROXY) when it is non-empty. The URL must include a scheme
 // and host; an invalid value is reported so the caller fails fast at
-// construction rather than surfacing an opaque per-request error. A concrete
-// *http.Transport already on hc (e.g. New's TLSInsecureSkipVerify clone) is
-// reused so its settings survive; otherwise the default transport is cloned so
-// proxy and dial defaults are preserved. No-op when rawProxyURL is empty.
+// construction rather than surfacing an opaque per-request error. No-op when
+// rawProxyURL is empty.
 func applyProxyURL(hc *http.Client, rawProxyURL string) error {
 	if rawProxyURL == "" {
 		return nil
@@ -248,12 +282,7 @@ func applyProxyURL(hc *http.Client, rawProxyURL string) error {
 		// Redacted() masks any embedded proxy credentials before it reaches logs.
 		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
 	}
-	tr, ok := hc.Transport.(*http.Transport)
-	if !ok || tr == nil {
-		tr = http.DefaultTransport.(*http.Transport).Clone()
-	}
-	tr.Proxy = http.ProxyURL(proxyURL)
-	hc.Transport = tr
+	mutableTransport(hc).Proxy = http.ProxyURL(proxyURL)
 	return nil
 }
 
