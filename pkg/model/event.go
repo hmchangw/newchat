@@ -242,16 +242,21 @@ type OutboxEvent struct {
 }
 
 type MemberAddEvent struct {
-	Type               string   `json:"type"               bson:"type"`
-	RoomID             string   `json:"roomId"             bson:"roomId"`
-	RoomName           string   `json:"roomName"           bson:"roomName"`
-	RoomType           RoomType `json:"roomType,omitempty" bson:"roomType,omitempty"`
-	Accounts           []string `json:"accounts"           bson:"accounts"`
+	Type     string   `json:"type"               bson:"type"`
+	RoomID   string   `json:"roomId"             bson:"roomId"`
+	RoomName string   `json:"roomName"           bson:"roomName"`
+	RoomType RoomType `json:"roomType,omitempty" bson:"roomType,omitempty"`
+	// Accounts is stripped from the room-scoped (frontend) copy — the client renders from Members —
+	// but kept on the INBOX/search and cross-site copies, which carry no Members and subscribe/index by account.
+	Accounts           []string `json:"accounts,omitempty" bson:"accounts,omitempty"`
 	SiteID             string   `json:"siteId"             bson:"siteId"`
 	RequesterAccount   string   `json:"requesterAccount,omitempty" bson:"requesterAccount,omitempty"`
 	JoinedAt           int64    `json:"joinedAt"           bson:"joinedAt"`
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
-	Timestamp          int64    `json:"timestamp"          bson:"timestamp"`
+	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
+	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
+	Members   []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
+	Timestamp int64             `json:"timestamp"         bson:"timestamp"`
 }
 
 // Participant represents a user with display name info for client rendering.

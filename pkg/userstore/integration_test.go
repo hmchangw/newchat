@@ -129,8 +129,8 @@ func TestMongoStore_FindUsersByAccounts(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := col.InsertMany(ctx, []any{
-		bson.M{"_id": "u-1", "account": "alice", "siteId": "site-a", "engName": "Alice Wang", "chineseName": "愛麗絲", "employeeId": "EMP001"},
-		bson.M{"_id": "u-2", "account": "bob", "siteId": "site-a", "engName": "Bob Chen", "chineseName": "鮑勃", "employeeId": "EMP002"},
+		bson.M{"_id": "u-1", "account": "alice", "siteId": "site-a", "engName": "Alice Wang", "chineseName": "愛麗絲", "employeeId": "EMP001", "sectName": "Cardiology"},
+		bson.M{"_id": "u-2", "account": "bob", "siteId": "site-a", "engName": "Bob Chen", "chineseName": "鮑勃", "employeeId": "EMP002", "sectName": "Radiology"},
 	})
 	require.NoError(t, err)
 
@@ -151,4 +151,15 @@ func TestMongoStore_FindUsersByAccounts(t *testing.T) {
 			assert.Len(t, got, tt.wantCount)
 		})
 	}
+
+	t.Run("projection carries display fields incl. sectName and employeeId", func(t *testing.T) {
+		// A projection regression would silently blank room-worker's member_added enrichment.
+		got, err := store.FindUsersByAccounts(ctx, []string{"alice"})
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Alice Wang", got[0].EngName)
+		assert.Equal(t, "愛麗絲", got[0].ChineseName)
+		assert.Equal(t, "EMP001", got[0].EmployeeID)
+		assert.Equal(t, "Cardiology", got[0].SectName)
+	})
 }
