@@ -78,7 +78,7 @@ bot-msg-handler                                             (n pods, queue-group
   │  └─ reply with full canonical Message
   ▼
 BOT_MESSAGES_CANONICAL_{siteID}
-  subject: chat.bot.msg.canonical.{siteID}.created
+  subject: chat.bot.canonical.{siteID}.created
   │
   ├───────────────┬──────────────────────┬─────────────────────┐
   ▼               ▼                      ▼                     ▼
@@ -87,7 +87,7 @@ bot-msg-worker  search-sync-worker    bot-broadcast-worker  bot-notification-wor
                new consumer)                                    │
                                                                 ▼
                                                     BOT_PUSH_NOTIF_{siteID}
-                                                    subject: chat.bot.notif.push.{siteID}.>
+                                                    subject: chat.bot.notification.push.{siteID}.>
                                                                 │
                                                                 ▼
                                                         bot-push-service (thin wrapper, APNs/FCM)
@@ -165,7 +165,7 @@ NATS **request/reply** service. Modeled after `room-service` — the real sync r
 | Subjects consumed | `chat.server.bot.request.room.*.*.msg.send`, `chat.server.bot.request.dm.*.*.msg.send` |
 | Dependencies | NATS + JetStream, MongoDB (subscriptions), Valkey (subscription cache) |
 | Max NATS payload | Read `nc.MaxPayload()` at connect; enforce per-reply, matches `room-service` pattern |
-| Publish target | JS publish to `chat.bot.msg.canonical.{siteID}.created` with `MsgID = messageID` for JS-layer dedup |
+| Publish target | JS publish to `chat.bot.canonical.{siteID}.created` with `MsgID = messageID` for JS-layer dedup |
 | Reply | Full canonical `Message` envelope on success, typed `*errcode.Error` via `errnats.Reply` on failure |
 
 **Per-request work:**
@@ -173,7 +173,7 @@ NATS **request/reply** service. Modeled after `room-service` — the real sync r
 1. Extract caller `Participant` from NATS message header `X-Bot-Identity` (BP forwards it; see §7). BP also generates `messageID = idgen.GenerateMessageID()` and `createdAt = time.Now().UTC()` and forwards them in NATS headers `X-Bot-Message-ID` and `X-Bot-Created-At` — bot-msg-handler uses those verbatim and does NOT regenerate. If BP retries, a fresh (messageID, createdAt) pair is fine: Cassandra's compound PK dedups exact duplicates and any genuine retry-after-in-flight is already blocked by BP's Valkey sentinel (§9.1) so bot-msg-handler never runs concurrently for the same opID.
 2. **Subscription-first lookup** — the room document lives at exactly one origin site, but the caller's subscription (which carries the room's origin `siteID`) lives at the caller's local site:
    - Read `subscriptions` by `(roomID, botID)` from local Mongo (for send-to-room). Cache in a local LRU with 60s TTL (§5.2.1). Missing → `errcode.Forbidden(reason: "not_a_room_member")`.
-   - For DM: derive `roomID = idgen.BuildDMRoomID(botID, targetUserID)` and look up the subscription. If missing → the DM has never been created from this side; call bot-room-service local RPC `chat.bot.room.dm.ensure` to create the local DM room + subscription and fan out a `member_added` to the target user's site (see §17).
+   - For DM: derive `roomID = idgen.BuildDMRoomID(botID, targetUserID)` and look up the subscription. If missing → the DM has never been created from this side; call bot-room-service local RPC `chat.server.bot.request.room.{siteID}.dm.ensure` to create the local DM room + subscription and fan out a `member_added` to the target user's site (see §17).
 3. **Room-info fetch (cross-site request)** — the room doc lives only at its origin site (`subscription.SiteID`). bot-msg-handler issues a NATS req/reply to that origin site's bot-room-service on `chat.server.bot.request.room.{originSiteID}.get` with `{roomID}` and receives back the authoritative room record (name, type, ownerID, restricted flag). If `originSiteID == localSiteID`, the request routes locally by NATS; otherwise the supercluster routes to the origin site. Result cached in the same LRU with 60s TTL. Missing → `errcode.NotFound(reason: "room_not_found")`.
 4. Content validation and mention canonicalization:
    - `len(content) > 0 && len(content) <= 20*1024`.
@@ -181,7 +181,7 @@ NATS **request/reply** service. Modeled after `room-service` — the real sync r
    - Card payload structure valid (schema check on `Card`).
    - **No attachments allowed** — bots send text and cards only. Enforced by `DisallowUnknownFields` at decode time (§14.1).
 5. Enrich the canonical envelope: `ID = messageID`, `CreatedAt = createdAt` (both from the NATS headers set in step 1), `Sender` populated from `X-Bot-Identity`. Thread-reply fields (`ThreadParentMessageID`, `ThreadParentMessageCreatedAt`, `TShow`) copied through from the request body if present.
-6. JS publish: `js.Publish(subject.BotMsgCanonicalCreated(siteID), data, jetstream.WithMsgID(messageID))` — messageID doubles as MsgID for JS dedup within the 5-min window. Await ack with 2s timeout. Failure → return `errcode.Internal` (BP surfaces 5xx; bot safe-retries).
+6. JS publish: `js.Publish(subject.BotCanonicalCreated(siteID), data, jetstream.WithMsgID(messageID))` — messageID doubles as MsgID for JS dedup within the 5-min window. Await ack with 2s timeout. Failure → return `errcode.Internal` (BP surfaces 5xx; bot safe-retries).
 7. Reply with full canonical `Message`.
 
 **Failure modes:** see §10 (Error mapping).
@@ -203,7 +203,7 @@ Consumes canonical stream, writes to Cassandra at the **origin site only**. Writ
 | Deployment | **2 pods** (single durable consumer, deploys for HA not throughput) |
 | Consumer | Durable pull, `MaxWorkers=100`, semaphore + `PullMaxMessages=200` |
 | Consumer name | `bot-msg-worker` |
-| Filter subject | `chat.bot.msg.canonical.{siteID}.created` |
+| Filter subject | `chat.bot.canonical.{siteID}.created` |
 | AckWait | 30s |
 | MaxDeliver | 5 (matches worker convention; after 5 deliveries the message is Ack-dropped as poison) |
 | BackOff | Exponential [1s, 2s, 5s, 10s, 30s] |
@@ -238,7 +238,7 @@ Instead: bot-broadcast-worker copies the JetStream consumer skeleton from the us
 | Deployment | **2-3 pods** (sized for expected fanout ~4.6 MB/s per pod at 230 peak msg/s × 20-member rooms; scale up if load-testing exposes the 20 KiB worst-case) |
 | Consumer | Durable pull, `MaxWorkers=100`, semaphore + `PullMaxMessages=200` |
 | Consumer name | `bot-broadcast-worker` |
-| Filter subject | `chat.bot.msg.canonical.{siteID}.created` |
+| Filter subject | `chat.bot.canonical.{siteID}.created` |
 | AckWait | 30s |
 | MaxDeliver | 5 (matches worker convention) |
 | BackOff | Exponential [1s, 2s, 5s, 10s, 30s] |
@@ -268,10 +268,10 @@ Publishes push events **directly** to `BOT_PUSH_NOTIF_{siteID}` — no intermedi
 | Deployment | **1 pod** — matches existing user `notification-worker` deployment convention |
 | Consumer | Durable pull, `MaxWorkers=100` |
 | Consumer name | `bot-notification-worker` |
-| Filter subject | `chat.bot.msg.canonical.{siteID}.created` |
+| Filter subject | `chat.bot.canonical.{siteID}.created` |
 | AckWait | 30s |
 | MaxDeliver | 5 (matches worker convention) |
-| Publishes to | `chat.bot.notif.push.{siteID}.{kind}` on `BOT_PUSH_NOTIF_{siteID}` |
+| Publishes to | `chat.bot.notification.push.{siteID}.{kind}` on `BOT_PUSH_NOTIF_{siteID}` |
 | Batch max_payload | `NATS_MAX_PAYLOAD_BYTES=262144` config, enforced by emitter (matches user `notification-worker`) |
 
 **Trade-off**: single-pod deployment means no HA — a pod crash pauses notification emission until the pod is rescheduled. Downstream persistence and broadcast continue (their workers have their own pods). Accepted trade-off inherited from user notification-worker convention.
@@ -286,7 +286,7 @@ Consumes `BOT_PUSH_NOTIF_{siteID}`, dispatches to APNs/FCM. Thin wrapper mirrori
 | Consumer | Parallel pull, `MaxWorkers=100`, semaphore + `PullMaxMessages=200` (high-throughput pattern) |
 | Ordering | **Best-effort per-device**. See ordering note below. |
 | Consumer name | `bot-push-service` |
-| Filter subject | `chat.bot.notif.push.{siteID}.>` |
+| Filter subject | `chat.bot.notification.push.{siteID}.>` |
 
 **Ordering — honest statement**: JetStream distributes messages randomly across the 2 pods via the queue group, so per-user in-process sharding within a pod cannot guarantee global per-recipient FIFO — the same recipient's pushes can land on different pods. This is an inherent property of the deployment shape.
 
@@ -295,7 +295,7 @@ We accept this because APNs and FCM already don't guarantee inter-device orderin
 - **Best-effort per-device**: near-instantaneous same-pod dispatch means most pushes for the same device arrive in order in practice.
 - **No strict cross-pod per-user FIFO**: not claimed.
 
-If strict per-user FIFO is later required (rare — chat doesn't typically need it), options are: (a) partition subjects by userID hash (`chat.bot.notif.push.{siteID}.user.{userIDShard}.>`) with per-shard durable consumers pinned to specific pods, (b) single-pod deployment (loses HA). Neither is required for v1.
+If strict per-user FIFO is later required (rare — chat doesn't typically need it), options are: (a) partition subjects by userID hash (`chat.bot.notification.push.{siteID}.user.{userIDShard}.>`) with per-shard durable consumers pinned to specific pods, (b) single-pod deployment (loses HA). Neither is required for v1.
 
 ### 5.7 search-sync-worker (existing service, extended)
 
@@ -315,10 +315,10 @@ Sync NATS req/reply service for bot room management ops. Modeled after `room-ser
 |---|---|
 | Deployment | 2-3 pods (low volume; sized for HA not throughput) |
 | Transport | NATS req/reply, queue-group `bot-room-service` |
-| Subjects consumed | `chat.server.bot.request.room.*.create`, `chat.server.bot.request.room.*.*.member.add`, `chat.server.bot.request.room.*.*.member.remove`, `chat.server.bot.request.room.*.get` (cross-site room-info fetch called by bot-msg-handler; site-scoped), `chat.bot.room.dm.ensure` (internal, called by bot-msg-handler) |
+| Subjects consumed | `chat.server.bot.request.room.*.create`, `chat.server.bot.request.room.*.*.member.add`, `chat.server.bot.request.room.*.*.member.remove`, `chat.server.bot.request.room.*.get` (cross-site room-info fetch called by bot-msg-handler; site-scoped), `chat.server.bot.request.room.{siteID}.dm.ensure` (internal, called by bot-msg-handler) |
 | Dependencies | NATS + JetStream, MongoDB (rooms, subscriptions), Valkey (identity cache, room membership cache) |
 | Publish target (federation membership) | `pkg/outbox.Publish(...)` → existing `OUTBOX_{siteID}` with `member_added`/`member_removed` event types (existing `OrderedEventTypes` lane) |
-| Publish target (sysmsg — local only) | `chat.bot.msg.canonical.{siteID}.created` with `Type=sysmsg` — delivered to LOCAL room members by bot workers. Sysmsgs are NOT federated cross-site via OUTBOX — matches user `room-worker` behavior (`room-worker/handler.go:489` publishes the sysmsg only to the local canonical stream). |
+| Publish target (sysmsg — local only) | `chat.bot.canonical.{siteID}.created` with `Type=sysmsg` — delivered to LOCAL room members by bot workers. Sysmsgs are NOT federated cross-site via OUTBOX — matches user `room-worker` behavior (`room-worker/handler.go:489` publishes the sysmsg only to the local canonical stream). |
 | Reply | Structured envelope for each op (e.g. `{roomID, createdAt}` for create, `{added: [userIDs]}` for add); typed `*errcode.Error` on failure |
 | Max NATS payload | `nc.MaxPayload()` at connect, enforce per-reply |
 
@@ -327,7 +327,7 @@ Sync NATS req/reply service for bot room management ops. Modeled after `room-ser
 | Op | NATS subject | Behavior |
 |---|---|---|
 | Create channel room | `chat.server.bot.request.room.{siteID}.create` | See §5.8.1. Body: `{name, topic, members:[userID], orgs:[orgID]}`. |
-| Ensure DM room | `chat.bot.room.dm.ensure` | Compute `roomID = idgen.BuildDMRoomID(bot, targetUser)`. Insert local `rooms` doc (this site is the DM's origin — see §17). Insert bot's local subscription. If targetUser on remote site: `outbox.Publish(member_added)` for the target carrying both participant accounts in payload — target's site upserts a subscription only, NOT a room doc (see §6.1). |
+| Ensure DM room | `chat.server.bot.request.room.{siteID}.dm.ensure` | Compute `roomID = idgen.BuildDMRoomID(bot, targetUser)`. Insert local `rooms` doc (this site is the DM's origin — see §17). Insert bot's local subscription. If targetUser on remote site: `outbox.Publish(member_added)` for the target carrying both participant accounts in payload — target's site upserts a subscription only, NOT a room doc (see §6.1). |
 | Add members / orgs (batch) | `chat.server.bot.request.room.{siteID}.{roomID}.member.add` | Body: `{userIds:[...], orgIds:[...]}` — matches HTTP `POST /api/v1/rooms/{roomID}/members/add`. Verify bot is room owner. Expand orgs → users. **Diff against current subscriptions**: `newlyAdded = requested \ existing`. If `newlyAdded` is empty → return success with empty diff, no side effects. Otherwise: upsert local subscriptions for `newlyAdded`; per remote destination `outbox.Publish(member_added)` carrying accounts; emit ONE local sysmsg listing `newlyAdded`. |
 | Remove members / orgs (batch) | `chat.server.bot.request.room.{siteID}.{roomID}.member.remove` | Body: `{userIds:[...], orgIds:[...]}` — matches HTTP `POST /api/v1/rooms/{roomID}/members/remove`. Verify bot is room owner. Diff similarly: `actuallyRemoved = requested ∩ existing`. If empty → return success with empty diff. Otherwise: delete local subscriptions; per remote destination `outbox.Publish(member_removed)`; emit ONE local sysmsg. Bot cannot remove itself via this op. |
 | Get room | `chat.server.bot.request.room.{siteID}.get` | Body: `{roomID}`. Reads local `rooms` by `_id`, replies with the room record. Cross-site fetch: bot-msg-handler at other sites requests this against the room's origin site (routed by NATS supercluster). |
@@ -451,13 +451,23 @@ BP auth middleware:
 
 **Deprecation note (informational)**: bot NATS JWTs (issued via callout for chat-frontend login "as" a bot account) are being feature-flagged off in favor of a separate bot-dev frontend. This spec's auth model doesn't depend on that feature-flag state — BP's `x-auth-token` bearer flow is the sole auth for the pipeline.
 
-**Trust model — NATS account permissions** (deployment-side, not an in-code check): the internal-cluster NATS account topology restricts publish permission on `chat.server.bot.request.>` to the `bot-platform-service` account only. bot-msg-handler and bot-room-service consume from those subjects but no other account may publish. This means `X-Bot-Identity` cannot be forged by an internal-cluster client that isn't BP. bot-msg-handler / bot-room-service verify:
+**Trust model — NATS account permissions** (deployment-side, not an in-code check): the internal-cluster NATS account topology restricts publish permission on `chat.server.bot.request.>` on a per-subject basis so that `X-Bot-Identity` (and any other request header) cannot be forged by an internal-cluster client that shouldn't be issuing that call:
+
+| Subject | Publish permission granted to |
+|---|---|
+| `chat.server.bot.request.room.{siteID}.{roomID}.msg.send` | `bot-platform-service` only |
+| `chat.server.bot.request.dm.{siteID}.{userID}.msg.send` | `bot-platform-service` only |
+| `chat.server.bot.request.room.{siteID}.create` | `bot-platform-service` only |
+| `chat.server.bot.request.room.{siteID}.{roomID}.member.add` | `bot-platform-service` only |
+| `chat.server.bot.request.room.{siteID}.{roomID}.member.remove` | `bot-platform-service` only |
+| `chat.server.bot.request.room.{siteID}.get` | `bot-msg-handler` only |
+| `chat.server.bot.request.room.{siteID}.dm.ensure` | `bot-msg-handler` only |
+
+bot-msg-handler and bot-room-service consume from these subjects but only the listed accounts may publish. bot-msg-handler / bot-room-service verify at the code layer:
 
 - Request arrived on a `chat.server.bot.request.>` subject (subject-based trust boundary)
 - `X-Bot-Identity` header present (missing → reject)
 - Body's Sender field is IGNORED — always overwritten from the header
-
-The internal-only RPC `chat.bot.room.dm.ensure` is similarly restricted: publish permission granted only to the `bot-msg-handler` account.
 
 **Invariant**: `caller.IsBot == true` for every request into BP. A session whose `users` record shows `IsBot == false` gets `errcode.Forbidden(reason: "not_a_bot")` at the auth middleware.
 
@@ -653,7 +663,7 @@ Standard consumer config env vars per existing worker services: `NATS_URL`, `MAX
 | Field | Value |
 |---|---|
 | Name | `BOT_MESSAGES_CANONICAL_{siteID}` |
-| Subjects | `["chat.bot.msg.canonical.{siteID}.>"]` (`>` allows `.edited`, `.deleted` in future) |
+| Subjects | `["chat.bot.canonical.{siteID}.>"]` (`>` allows `.edited`, `.deleted` in future) |
 | Retention | Limits-based, MaxAge = 7d (matches user `MESSAGES_CANONICAL`) |
 | Duplicate window | 5m (uses `MsgID = messageID`, BP-generated per §9.0) |
 | Storage | File-backed |
@@ -665,7 +675,7 @@ Standard consumer config env vars per existing worker services: `NATS_URL`, `MAX
 | Field | Value |
 |---|---|
 | Name | `BOT_PUSH_NOTIF_{siteID}` |
-| Subjects | `["chat.bot.notif.push.{siteID}.>"]` |
+| Subjects | `["chat.bot.notification.push.{siteID}.>"]` |
 | Retention | Limits-based, MaxAge = 1d |
 | Storage | File-backed |
 | Owning service (bootstrap) | `bot-notification-worker` |
@@ -683,34 +693,29 @@ Standard consumer config env vars per existing worker services: `NATS_URL`, `MAX
 
 ### 13.1 New subject builders (`pkg/subject`)
 
-**Convention**: `chat.server.bot.request.>` matches the existing `chat.server.request.>` convention — ingress (from bot servers via BP) and cross-site inter-service req/reply. Streams and internal RPCs use `chat.bot.>`.
+**Convention**: **all bot req/reply — external ingress and internal service-to-service — lives under `chat.server.bot.request.>`**. Matches the existing `chat.server.request.>` prefix. Streams live under `chat.bot.>`, mirroring the user pipeline's `chat.room.canonical.*` / `chat.server.notification.push.*` split (streams don't use the `chat.server.request.*` prefix).
 
-**Ingress + cross-site req/reply (subjects consumed by BP-fronted services):**
+**Req/reply subjects (all bot RPCs; ingress + internal):**
 
-| Function | Output |
-|---|---|
-| `ServerBotMsgRoomSend(siteID, roomID)` | `chat.server.bot.request.room.{siteID}.{roomID}.msg.send` |
-| `ServerBotDMSend(siteID, userID)` | `chat.server.bot.request.dm.{siteID}.{userID}.msg.send` |
-| `ServerBotRoomCreate(siteID)` | `chat.server.bot.request.room.{siteID}.create` |
-| `ServerBotRoomMemberAdd(siteID, roomID)` | `chat.server.bot.request.room.{siteID}.{roomID}.member.add` |
-| `ServerBotRoomMemberRemove(siteID, roomID)` | `chat.server.bot.request.room.{siteID}.{roomID}.member.remove` |
-| `ServerBotRoomGet(siteID)` | `chat.server.bot.request.room.{siteID}.get` (bot-msg-handler → bot-room-service at room's origin site for room-info fetch) |
-| `ServerBotWildcard()` | `chat.server.bot.request.>` |
-
-**Internal RPCs (between bot services, never invoked by bot servers):**
-
-| Function | Output |
-|---|---|
-| `BotRoomDMEnsure()` | `chat.bot.room.dm.ensure` |
+| Function | Output | Caller |
+|---|---|---|
+| `ServerBotMsgRoomSend(siteID, roomID)` | `chat.server.bot.request.room.{siteID}.{roomID}.msg.send` | BP (from bot server) |
+| `ServerBotDMSend(siteID, userID)` | `chat.server.bot.request.dm.{siteID}.{userID}.msg.send` | BP (from bot server) |
+| `ServerBotRoomCreate(siteID)` | `chat.server.bot.request.room.{siteID}.create` | BP (from bot server) |
+| `ServerBotRoomMemberAdd(siteID, roomID)` | `chat.server.bot.request.room.{siteID}.{roomID}.member.add` | BP (from bot server) |
+| `ServerBotRoomMemberRemove(siteID, roomID)` | `chat.server.bot.request.room.{siteID}.{roomID}.member.remove` | BP (from bot server) |
+| `ServerBotRoomGet(siteID)` | `chat.server.bot.request.room.{siteID}.get` | bot-msg-handler → bot-room-service at room's origin site (cross-site room-info fetch) |
+| `ServerBotRoomDMEnsure(siteID)` | `chat.server.bot.request.room.{siteID}.dm.ensure` | bot-msg-handler → bot-room-service (local; DM origin is always bot's site) |
+| `ServerBotWildcard()` | `chat.server.bot.request.>` | Wildcard for consumer registration |
 
 **Streams / event subjects:**
 
 | Function | Output |
 |---|---|
-| `BotMsgCanonicalCreated(siteID)` | `chat.bot.msg.canonical.{siteID}.created` |
-| `BotMsgCanonicalWildcard(siteID)` | `chat.bot.msg.canonical.{siteID}.>` |
-| `BotPushNotification(siteID, kind)` | `chat.bot.notif.push.{siteID}.{kind}` |
-| `BotPushNotificationWildcard(siteID)` | `chat.bot.notif.push.{siteID}.>` |
+| `BotCanonicalCreated(siteID)` | `chat.bot.canonical.{siteID}.created` |
+| `BotCanonicalWildcard(siteID)` | `chat.bot.canonical.{siteID}.>` |
+| `BotPushNotification(siteID, kind)` | `chat.bot.notification.push.{siteID}.{kind}` |
+| `BotPushNotificationWildcard(siteID)` | `chat.bot.notification.push.{siteID}.>` |
 
 **Federation**: room management flow reuses existing `chat.outbox.{origin}.{dest}.{eventType}` subjects from `pkg/subject.Outbox(...)` and existing `member_added` / `member_removed` event types. **No new OUTBOX event type is introduced.**
 
@@ -896,7 +901,7 @@ site A (bot's site — becomes DM origin)         site B (target user's site)
    subscriptions.FindOne({roomID=BuildDMRoomID(bot, user), userID=botID})
    - Hit → subscription.SiteID tells us the DM origin site; proceed to send.
    - Miss → this bot has never DMed this user from here.
-             Call bot-room-service local chat.bot.room.dm.ensure.
+             Call bot-room-service local chat.server.bot.request.room.{siteID}.dm.ensure.
 
 2. bot-room-service (at site A) — first-DM path:
    a. Insert local rooms doc { _id: BuildDMRoomID(bot,user), type: "dm",
@@ -1081,7 +1086,8 @@ Per CLAUDE.md §5:
 - **Bot suspension propagation** — session deletion in Mongo is immediate; next request's `sessions.FindOne` misses → 401. No revocation broadcast needed (§7)
 - **messageID + createdAt generation** — BP generates both and forwards to bot-msg-handler via NATS headers `X-Bot-Message-ID` and `X-Bot-Created-At`. bot-msg-handler uses them verbatim. Cassandra PK dedups exact duplicates; BP's sentinel blocks concurrent retries. No Valkey envelope-mapping mechanism (§5.2)
 - **Idempotency — sentinel only, no response cache** — `SET NX idem:{opID} "processing" EX 30`. In-flight retries get 409. Post-completion the sentinel is deleted (200 / 4xx) or expires (5xx). No cached response envelope — retries after the sentinel expires re-execute and downstream dedup (Cassandra PK, `member_added` upsert diff, outbox `dedupID`) keeps the outcome consistent (§9.1)
-- **X-Bot-Identity trust** — NATS account permissions restrict `chat.server.bot.request.>` publish to BP account only; `chat.bot.room.dm.ensure` restricted to bot-msg-handler account only (§7)
+- **X-Bot-Identity trust** — NATS account permissions restrict `chat.server.bot.request.>` publish per-subject: BP owns publish for the client-facing ingress subjects; bot-msg-handler owns publish for the internal `.get` and `.dm.ensure` subjects (§7)
+- **NATS subject convention** — ALL bot req/reply (external ingress + internal service-to-service, all sync) lives under `chat.server.bot.request.>`, matching existing `chat.server.request.>`. Streams live under `chat.bot.>` (`chat.bot.canonical.*`, `chat.bot.notification.push.*`), mirroring the user pipeline's `chat.room.canonical.*` / `chat.server.notification.push.*` split. No `chat.bot.room.*` internal subjects (§13)
 - **create-room idempotency** — relies on BP's Valkey sentinel; no `createOpID` field on `rooms`, no Mongo unique index. Retries beyond the sentinel window create a fresh room (matches Rocket.Chat behavior at this volume) (§5.8.1)
 - **Add / remove member idempotency** — no `bot_room_mgmt_ops` collection. Handler diffs requested against existing (`newlyAdded = requested \ existing`); duplicate adds are no-ops, sysmsg only emitted when `len(newlyAdded) > 0`. Same for remove. Retry-safe without a durable-op collection (§5.8.2)
 - **Bot room management sysmsg — LOCAL ONLY** — origin site publishes sysmsg to local `BOT_MESSAGES_CANONICAL`. NOT federated cross-site via OUTBOX; matches `room-worker/handler.go:489` which publishes only to local canonical stream. Remote members learn membership from the `member_added` event. No new OUTBOX event type (§16.1, §5.8)
