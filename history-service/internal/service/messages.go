@@ -480,7 +480,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	}
 
 	deletedAt := time.Now().UTC()
-	actualDeletedAt, applied, newTcount, err := s.msgWriter.SoftDeleteMessage(c, msg, deletedAt)
+	actualDeletedAt, applied, newTcount, newThreadLastMsgAt, err := s.msgWriter.SoftDeleteMessage(c, msg, deletedAt)
 	if err != nil {
 		return nil, fmt.Errorf("deleting message %s: %w", req.MessageID, err)
 	}
@@ -508,9 +508,10 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 			ThreadParentMessageCreatedAt: msg.ThreadParentCreatedAt,
 			TShow:                        msg.TShow,
 		},
-		SiteID:    siteID,
-		Timestamp: deletedAtMs,
-		NewTCount: newTcount,
+		SiteID:             siteID,
+		Timestamp:          deletedAtMs,
+		NewTCount:          newTcount,
+		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
