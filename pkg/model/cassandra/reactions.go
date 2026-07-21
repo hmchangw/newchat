@@ -2,6 +2,7 @@ package cassandra
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
@@ -24,6 +25,11 @@ type ReactorInfo struct {
 	ChnName   string    `json:"chnName"   cql:"chn_name"`
 	Account   string    `json:"account"   cql:"account"`
 	ReactedAt time.Time `json:"reactedAt" cql:"reacted_at"`
+	// DisplayName is a transient carrier populated only when a Reactions value was
+	// decoded from the client wire form (see UnmarshalJSON). MarshalJSON prefers it
+	// over composing from EngName/ChnName. json:"-" keeps it off the wire directly;
+	// cql:"-" keeps gocql from binding/scanning it into the Cassandra UDT.
+	DisplayName string `json:"-" cql:"-"`
 }
 
 // Reactions is the in-row reaction map. Stored as map[(emoji,userAccount)]reactor;
@@ -53,10 +59,14 @@ func (r Reactions) MarshalJSON() ([]byte, error) {
 	}
 	staged := make(map[string][]reactorWithTime, len(r))
 	for k, v := range r {
+		dn := v.DisplayName
+		if dn == "" {
+			dn = displayfmt.CombineWithFallback(v.EngName, v.ChnName, k.UserAccount)
+		}
 		staged[k.Emoji] = append(staged[k.Emoji], reactorWithTime{
 			user: reactionUser{
 				Account:     k.UserAccount,
-				DisplayName: displayfmt.CombineWithFallback(v.EngName, v.ChnName, k.UserAccount),
+				DisplayName: dn,
 			},
 			reactedAt: v.ReactedAt,
 		})
@@ -76,4 +86,40 @@ func (r Reactions) MarshalJSON() ([]byte, error) {
 		grouped[emoji] = users
 	}
 	return json.Marshal(grouped)
+}
+
+// UnmarshalJSON is the inverse of MarshalJSON: it reads the wire shape
+// map<emoji, [{account, displayName}]> back into the struct-keyed map. Without it
+// the default decoder rejects the JSON object because the map key is a struct
+// (ReactionKey), not a string/int/TextUnmarshaler — which is what broke decoding
+// any cassandra.Message that carries reactions.
+//
+// The wire form is lossy — userId, chnName and reactedAt are not transmitted — so
+// a decoded ReactorInfo carries only Account plus the already-composed display
+// name (in the transient DisplayName field, which MarshalJSON re-emits verbatim).
+// A synthetic per-emoji ReactedAt preserves each emoji's on-wire FIFO reactor order
+// across marshal→unmarshal→marshal. "null" → nil map; "{}" → non-nil empty map.
+func (r *Reactions) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*r = nil
+		return nil
+	}
+	var grouped map[string][]reactionUser
+	if err := json.Unmarshal(data, &grouped); err != nil {
+		return fmt.Errorf("decode reactions: %w", err)
+	}
+	out := make(Reactions, len(grouped))
+	for emoji, users := range grouped {
+		for i, u := range users {
+			out[ReactionKey{Emoji: emoji, UserAccount: u.Account}] = ReactorInfo{
+				Account:     u.Account,
+				DisplayName: u.DisplayName,
+				// Index-based so MarshalJSON's (reactedAt, account) sort replays the
+				// original array order; distinct per position within each emoji bucket.
+				ReactedAt: time.UnixMilli(int64(i)),
+			}
+		}
+	}
+	*r = out
+	return nil
 }

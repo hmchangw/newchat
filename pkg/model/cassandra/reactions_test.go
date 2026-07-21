@@ -178,3 +178,89 @@ func TestReactions_MarshalJSON(t *testing.T) {
 		}
 	})
 }
+
+func TestReactions_UnmarshalJSON(t *testing.T) {
+	t.Run("null_yields_nil_map", func(t *testing.T) {
+		var r Reactions
+		require.NoError(t, json.Unmarshal([]byte("null"), &r))
+		assert.Nil(t, r)
+	})
+
+	t.Run("empty_object_yields_non_nil_empty_map", func(t *testing.T) {
+		// Non-nil so it re-marshals back to "{}" rather than "null".
+		var r Reactions
+		require.NoError(t, json.Unmarshal([]byte("{}"), &r))
+		require.NotNil(t, r)
+		assert.Len(t, r, 0)
+	})
+
+	t.Run("single_reactor_round_trips_to_client_shape", func(t *testing.T) {
+		const wire = `{"👍":[{"account":"alice","displayName":"Alice 爱丽丝"}]}`
+		var r Reactions
+		require.NoError(t, json.Unmarshal([]byte(wire), &r))
+		got, ok := r[ReactionKey{Emoji: "👍", UserAccount: "alice"}]
+		require.True(t, ok, "expected (👍, alice) key")
+		assert.Equal(t, "alice", got.Account)
+		// Behaviour asserted via the wire, not the internal carrier field.
+		out, err := json.Marshal(r)
+		require.NoError(t, err)
+		assert.JSONEq(t, wire, string(out))
+	})
+
+	t.Run("multiple_emoji_multiple_reactors", func(t *testing.T) {
+		wire := `{"👍":[{"account":"alice","displayName":"Alice"},{"account":"bob","displayName":"Bob"}],"❤️":[{"account":"carol","displayName":"Carol"}]}`
+		var r Reactions
+		require.NoError(t, json.Unmarshal([]byte(wire), &r))
+		assert.Len(t, r, 3)
+		assert.Contains(t, r, ReactionKey{Emoji: "👍", UserAccount: "alice"})
+		assert.Contains(t, r, ReactionKey{Emoji: "👍", UserAccount: "bob"})
+		assert.Contains(t, r, ReactionKey{Emoji: "❤️", UserAccount: "carol"})
+	})
+
+	t.Run("wire_stable_across_marshal_unmarshal_marshal", func(t *testing.T) {
+		// A Cassandra-read value (EngName/ChnName + real ReactedAt) re-serializes
+		// byte-for-byte after a decode, preserving per-emoji FIFO reactor order.
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		src := Reactions{
+			ReactionKey{Emoji: "👍", UserAccount: "carol"}: ReactorInfo{EngName: "Carol", Account: "carol", ReactedAt: now.Add(2 * time.Minute)},
+			ReactionKey{Emoji: "👍", UserAccount: "alice"}: ReactorInfo{EngName: "Alice", Account: "alice", ReactedAt: now},
+			ReactionKey{Emoji: "👍", UserAccount: "dave"}:  ReactorInfo{EngName: "Dave", Account: "dave", ReactedAt: now.Add(1 * time.Minute)},
+			ReactionKey{Emoji: "❤️", UserAccount: "bob"}:  ReactorInfo{EngName: "Bob", ChnName: "鲍勃", Account: "bob", ReactedAt: now},
+		}
+		first, err := json.Marshal(src)
+		require.NoError(t, err)
+		var decoded Reactions
+		require.NoError(t, json.Unmarshal(first, &decoded))
+		second, err := json.Marshal(decoded)
+		require.NoError(t, err)
+		assert.Equal(t, string(first), string(second))
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		var r Reactions
+		assert.Error(t, json.Unmarshal([]byte(`{"👍":"not-an-array"}`), &r))
+	})
+}
+
+// TestMessage_DecodeWithReactions reproduces the reported thread-list decode
+// failure: a cassandra.Message carrying reactions must round-trip through JSON.
+func TestMessage_DecodeWithReactions(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	src := Message{
+		RoomID:    "r1",
+		CreatedAt: now,
+		MessageID: "m1",
+		Sender:    Participant{ID: "u1", Account: "alice"},
+		Msg:       "hi",
+		Reactions: Reactions{
+			ReactionKey{Emoji: "👍", UserAccount: "alice"}: ReactorInfo{EngName: "Alice", Account: "alice", ReactedAt: now},
+		},
+	}
+	data, err := json.Marshal(src)
+	require.NoError(t, err)
+
+	var dst Message
+	require.NoError(t, json.Unmarshal(data, &dst), "Message with reactions must decode")
+	require.NotNil(t, dst.Reactions)
+	assert.Contains(t, dst.Reactions, ReactionKey{Emoji: "👍", UserAccount: "alice"})
+}

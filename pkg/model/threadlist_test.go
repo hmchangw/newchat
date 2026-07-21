@@ -63,9 +63,15 @@ func TestThreadListItemJSON_OmitsNilLastSeenAt(t *testing.T) {
 	assert.False(t, hasParent, "nil parentMessage must be omitted")
 }
 
-// The hydrated parent/last message bodies survive a JSON round trip.
+// The hydrated parent/last message bodies survive a JSON round trip — including
+// reactions, whose struct-keyed map once failed to decode (see cassandra.Reactions).
 func TestThreadListItemJSON_WithMessages(t *testing.T) {
-	parent := &cassandra.Message{MessageID: "msg-parent", RoomID: "room-1", Msg: "anyone?"}
+	parent := &cassandra.Message{
+		MessageID: "msg-parent", RoomID: "room-1", Msg: "anyone?",
+		Reactions: cassandra.Reactions{
+			cassandra.ReactionKey{Emoji: "👍", UserAccount: "alice"}: cassandra.ReactorInfo{EngName: "Alice", Account: "alice"},
+		},
+	}
 	last := &cassandra.Message{MessageID: "msg-last", RoomID: "room-1", Msg: "on it"}
 	src := model.ThreadListItem{
 		SiteID: "site-a", RoomID: "room-1", ThreadRoomID: "thr-1",
@@ -80,6 +86,7 @@ func TestThreadListItemJSON_WithMessages(t *testing.T) {
 	require.NotNil(t, dst.LastMessage)
 	assert.Equal(t, "msg-parent", dst.ParentMessage.MessageID)
 	assert.Equal(t, "on it", dst.LastMessage.Msg)
+	assert.Contains(t, dst.ParentMessage.Reactions, cassandra.ReactionKey{Emoji: "👍", UserAccount: "alice"})
 }
 
 func TestThreadSubscriptionListRequestJSON(t *testing.T) {
