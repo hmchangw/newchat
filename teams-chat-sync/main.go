@@ -22,10 +22,6 @@ import (
 
 // Config is the job's environment configuration.
 type Config struct {
-	// One replica set serves both lanes: the teams_user scan reads through a
-	// secondary-preferred client and the watermark update + teams_chat upserts
-	// write through a primary client, so they share one URI, DB and credential
-	// pair — only the read preference differs.
 	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
@@ -46,10 +42,16 @@ type Config struct {
 	// GraphChatsPageSize is the $top page size for Graph list-chats requests.
 	// 50 is Graph's documented maximum for that endpoint.
 	GraphChatsPageSize int `env:"GRAPH_CHATS_PAGE_SIZE" envDefault:"50"`
-	// GraphTLSInsecureSkipVerify disables Graph TLS verification (opt-in,
-	// default false) for dev/on-prem environments behind a TLS-intercepting
-	// proxy. The proxy itself is taken from HTTPS_PROXY/HTTP_PROXY.
-	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
+	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Defaults to
+	// true because this job runs on-prem behind a TLS-intercepting proxy that
+	// presents its own certificate; set it to false where Graph presents a
+	// verifiable certificate chain.
+	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"true"`
+	// GraphProxyURL, when set, routes this service's Graph client through this
+	// proxy explicitly (overriding HTTPS_PROXY/HTTP_PROXY). Must include a scheme
+	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
+	// proxy env vars.
+	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
 }
 
 func main() {
@@ -97,29 +99,27 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
-		return fmt.Errorf("mongo read connect: %w", err)
+		return fmt.Errorf("mongo connect: %w", err)
 	}
-	defer mongoutil.Disconnect(context.Background(), readClient)
+	defer mongoutil.Disconnect(context.Background(), mongoClient)
 
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
-	if err != nil {
-		return fmt.Errorf("mongo write connect: %w", err)
-	}
-	defer mongoutil.Disconnect(context.Background(), writeClient)
-
-	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
+	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
 	if err := store.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
 	}
 
-	graph := msgraph.NewChatsClient(msgraph.Config{
+	graph, err := msgraph.NewChatsClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,
 		ClientID:              cfg.GraphClientID,
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
+		ProxyURL:              cfg.GraphProxyURL,
 	}, msgraph.WithChatsPageSize(cfg.GraphChatsPageSize))
+	if err != nil {
+		return fmt.Errorf("build chats client: %w", err)
+	}
 
 	s := newSyncer(store, store, graph, syncConfig{
 		MaxWorkers:    cfg.MaxWorkers,

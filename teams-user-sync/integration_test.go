@@ -55,10 +55,11 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 	}))
 	t.Cleanup(graphSrv.Close)
 
-	lister := msgraph.NewUserListerClient(
+	lister, err := msgraph.NewUserListerClient(
 		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		msgraph.WithBaseURL(graphSrv.URL), msgraph.WithTokenURL(tokenSrv.URL),
 	)
+	require.NoError(t, err)
 	syncer := NewSyncer(newMongoStore(db, db), lister, 500, discardLogger())
 
 	stats, err := syncer.UpdateUsers(ctx)

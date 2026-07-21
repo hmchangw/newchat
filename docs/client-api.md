@@ -1222,7 +1222,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 
 **3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed account (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once when at least one new account or org was added. Delivered to clients subscribed to `chat.room.>` for the room.
+**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1230,17 +1230,17 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 | `roomId` | string | |
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
-| `accounts` | string[] | The newly added accounts. |
+| `members` | [RoomMemberEntry](#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
 | `historySharedSince` | number | Optional. Epoch ms (UTC); present when prior history is shared with the new members. |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
-A `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event.
+The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
 > [!NOTE]
-> **No-op:** if every requested account is already a member (and no new orgs), or the add only upgrades an existing org member to an individual membership, the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow.
+> **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
 
 ##### Triggered events — error path
 
@@ -1564,7 +1564,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 |---|---|---|---|
 | `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. |
 | `offset` | number | no | If set, must be `>= 0`. For pagination. |
-| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
+| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `orgCode`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
 
 ```json
 { "limit": 50, "enrich": true }
@@ -1598,7 +1598,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 | `employeeId` | string | Optional. The member's employee ID. Populated only when `enrich: true` and entry is an individual. |
 | `name` | string | Optional. Bot/app display name from `apps.name` when the member's account ends with `.bot`. Mutually exclusive with `engName`/`chineseName`. |
 | `isOwner` | boolean | Optional. Populated only when `enrich: true`. |
-| `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback). Populated only when `enrich: true` and entry is an org. |
+| `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback), combined with the TC name when present. Populated only when `enrich: true` and entry is an org. |
+| `orgCode` | string | Optional. Org's plain section/department name (dept-first), without the TC-name combination `orgName` applies and with no orgID fallback. Populated only when `enrich: true` and entry is an org. |
 | `memberCount` | number | Optional. Populated only when `enrich: true` and entry is an org. |
 | `orgDescription` | string | Optional. Org's description, from the same org unit shown in `orgName` (dept-first); omitted when empty. Populated only when `enrich: true` and entry is an org. |
 
@@ -1628,6 +1629,7 @@ When the synchronous reply is an error envelope, the request was rejected before
         "id": "DEPT-100",
         "type": "org",
         "orgName": "Cardiology Department",
+        "orgCode": "Cardiology Department",
         "orgDescription": "Inpatient & outpatient cardiac care",
         "memberCount": 42
       }
@@ -5121,11 +5123,10 @@ Empty object.
 
 | Field | Type | Notes |
 |---|---|---|
-| `clearedThreads` | number | Total thread subscriptions cleared across all responding sites. `0` when nothing was unread. |
 | `unavailableSites` | string[] | Optional. Sites whose per-site clear failed; their threads may remain unread. Omitted when all responded. |
 
 ```json
-{ "clearedThreads": 7 }
+{}
 ```
 
 ##### Error response

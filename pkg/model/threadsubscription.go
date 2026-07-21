@@ -58,11 +58,10 @@ type ThreadUnreadSummaryResponse struct {
 type ThreadReadAllRequest struct{}
 
 // ThreadReadAllResponse is the cross-site clear-all-thread-unread result.
-// ClearedThreads sums the thread subscriptions cleared on each responding site.
 // UnavailableSites lists sites whose bulk-clear RPC failed (their threads may
-// remain unread); the overall call still succeeds.
+// remain unread); the overall call still succeeds. Success is otherwise an empty
+// object — the clear is fire-and-forget from the client's view.
 type ThreadReadAllResponse struct {
-	ClearedThreads   int      `json:"clearedThreads"`
 	UnavailableSites []string `json:"unavailableSites,omitempty"`
 }
 
@@ -72,10 +71,9 @@ type RoomThreadReadAllRequest struct {
 	Account string `json:"account"`
 }
 
-// RoomThreadReadAllResponse reports how many thread subscriptions the site cleared.
-type RoomThreadReadAllResponse struct {
-	ClearedThreads int `json:"clearedThreads"`
-}
+// RoomThreadReadAllResponse is the per-site ack. The clear either succeeds or
+// returns an error envelope; there are no payload fields.
+type RoomThreadReadAllResponse struct{}
 
 // ThreadRoomInfoBatchRequest asks room-service for a batch of thread rooms' info.
 type ThreadRoomInfoBatchRequest struct {

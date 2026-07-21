@@ -71,7 +71,7 @@ func TestListUserChats_LogsThrottle(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 
@@ -99,11 +99,12 @@ func TestListChatMembers_LogsThrottle(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := NewChatMembersClient(
+	c, err := NewChatMembersClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
-	_, err := c.ListChatMembers(context.Background(), "19:chat1")
+	require.NoError(t, err)
+	_, err = c.ListChatMembers(context.Background(), "19:chat1")
 	require.NoError(t, err)
 
 	_, attrs, ok := rec.find(slog.LevelWarn, "throttled")
@@ -120,7 +121,7 @@ func TestGetThrottled_NoLogOnSuccess(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestChats(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
 		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
 	require.NoError(t, err)
 

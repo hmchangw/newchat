@@ -27,11 +27,22 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "2026-04-01T00:00:00Z", cfg.DefaultFrom)
 	assert.Equal(t, "site-default", cfg.DefaultSiteID, "SYNC_DEFAULT_SITE_ID is required,notEmpty")
 	assert.Equal(t, 50, cfg.GraphChatsPageSize, "default $top is Graph's max for list chats")
-	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
+	assert.True(t, cfg.GraphTLSInsecureSkipVerify, "TLS verification is skipped by default (on-prem behind a TLS-intercepting proxy)")
+	assert.Empty(t, cfg.GraphProxyURL, "GRAPH_PROXY_URL defaults to empty (fall back to HTTPS_PROXY/HTTP_PROXY)")
 
 	from, err := time.Parse(time.RFC3339, cfg.DefaultFrom)
 	require.NoError(t, err, "the default watermark must be valid RFC3339")
 	assert.True(t, from.Equal(time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)))
+}
+
+func TestConfig_GraphProxyAndTLSOverrides(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("GRAPH_PROXY_URL", "http://proxy.corp:8080")
+	t.Setenv("GRAPH_TLS_INSECURE_SKIP_VERIFY", "false")
+	cfg, err := env.ParseAs[Config]()
+	require.NoError(t, err)
+	assert.Equal(t, "http://proxy.corp:8080", cfg.GraphProxyURL)
+	assert.False(t, cfg.GraphTLSInsecureSkipVerify, "GRAPH_TLS_INSECURE_SKIP_VERIFY=false overrides the true default")
 }
 
 func TestConfig_MissingRequired(t *testing.T) {

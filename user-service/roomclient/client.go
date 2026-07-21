@@ -69,25 +69,21 @@ func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, thre
 }
 
 // ClearAllThreadUnread issues the bulk clear-all-thread-unread RPC to room-service
-// on the given site; non-OK reply envelopes are relayed via errcode.Parse. Returns
-// the number of thread subscriptions cleared on that site.
-func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account string) (int, error) {
+// on the given site; non-OK reply envelopes are relayed via errcode.Parse. The
+// reply carries no payload — success is a nil error.
+func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
 	req, err := json.Marshal(model.RoomThreadReadAllRequest{Account: account})
 	if err != nil {
-		return 0, fmt.Errorf("marshal clear-all-thread-unread request: %w", err)
+		return fmt.Errorf("marshal clear-all-thread-unread request: %w", err)
 	}
 	msg, err := c.nc.Request(ctx, subject.RoomThreadReadAll(siteID), req, roomRPCTimeout)
 	if err != nil {
-		return 0, fmt.Errorf("clear-all-thread-unread rpc: %w", err)
+		return fmt.Errorf("clear-all-thread-unread rpc: %w", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
-		return 0, e
+		return e
 	}
-	var out model.RoomThreadReadAllResponse
-	if err := json.Unmarshal(msg.Data, &out); err != nil {
-		return 0, fmt.Errorf("decode clear-all-thread-unread response: %w", err)
-	}
-	return out.ClearedThreads, nil
+	return nil
 }
 
 // CreateDMRoom issues a DM-room creation RPC to room-worker; non-OK reply envelopes are relayed via errcode.Parse.

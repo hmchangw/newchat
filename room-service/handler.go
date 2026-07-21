@@ -1631,7 +1631,8 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 // the per-site leaf of the user-service clear-all-thread-unread aggregator. Unlike
 // the single-thread path it deliberately skips the thread-room read-floor recompute
 // and thread_message_read fan-out (a bulk dismiss must not advance sender receipts).
-// For a cross-site user each cleared thread rides the existing thread_read event.
+// For a cross-site user the whole dismiss rides one thread_read_all event, which
+// inbox-worker applies as the same bulk clear on the user's home replica.
 func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThreadReadAllRequest) (*model.RoomThreadReadAllResponse, error) {
 	var ctx context.Context = c
 	account := strings.TrimSpace(req.Account)
@@ -1643,26 +1644,21 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	now := time.Now().UTC()
 
 	var (
-		cleared                   []model.ThreadSubscription
-		userSiteID                string
+		homeSite                  string
 		clearErr, subErr, siteErr error
 	)
 	var g errgroup.Group
 	g.Go(func() error {
-		var err error
-		cleared, err = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
-		clearErr = err
-		return err
+		clearErr = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
+		return clearErr
 	})
 	g.Go(func() error {
-		err := h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account)
-		subErr = err
-		return err
+		subErr = h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account)
+		return subErr
 	})
 	g.Go(func() error {
-		s, err := h.store.GetUserSiteID(ctx, account)
-		userSiteID, siteErr = s, err
-		return err
+		homeSite, siteErr = h.store.GetUserSiteID(ctx, account)
+		return siteErr
 	})
 	_ = g.Wait()
 	switch {
@@ -1675,32 +1671,25 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	}
 
 	switch {
-	case userSiteID == "":
+	case homeSite == "":
 		slog.WarnContext(ctx, "user not found locally; skipping cross-site inbox", "account", account)
-	case userSiteID != h.siteID:
-		for i := range cleared {
-			row := &cleared[i]
-			payload := model.ThreadReadEvent{
-				Account:         account,
-				RoomID:          row.RoomID,
-				ThreadRoomID:    row.ThreadRoomID,
-				ParentMessageID: row.ParentMessageID,
-				NewThreadUnread: nil,
-				Alert:           false,
-				LastSeenAt:      now.UnixMilli(),
-				Timestamp:       now.UnixMilli(),
-			}
-			data, err := json.Marshal(payload)
-			if err != nil {
-				return nil, fmt.Errorf("marshal thread_read payload: %w", err)
-			}
-			if err := h.federateOne(ctx, row.RoomID, userSiteID, model.InboxThreadRead, data, row.ThreadRoomID+":"+account, now.UnixMilli()); err != nil {
-				return nil, fmt.Errorf("federate thread_read: %w", err)
-			}
+	case homeSite != h.siteID:
+		payload := model.ThreadReadAllEvent{
+			Account:    account,
+			LastSeenAt: now.UnixMilli(),
+			Timestamp:  now.UnixMilli(),
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal thread_read_all payload: %w", err)
+		}
+		// Not room-scoped: one bulk-dismiss event per remote peer, deduped by request ID.
+		if err := h.federateOne(ctx, "", homeSite, model.InboxThreadReadAll, data, account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate thread_read_all: %w", err)
 		}
 	}
 
-	return &model.RoomThreadReadAllResponse{ClearedThreads: len(cleared)}, nil
+	return &model.RoomThreadReadAllResponse{}, nil
 }
 
 // recomputeThreadFloor fetches the thread room document, applies the

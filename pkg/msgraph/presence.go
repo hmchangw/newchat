@@ -35,14 +35,6 @@ type PresenceReader interface {
 // maxPresenceIDs is Graph's documented per-request cap for getPresencesByUserId.
 const maxPresenceIDs = 650
 
-// defaultUserAgent is sent on presence requests when Config.UserAgent is empty.
-// Microsoft Graph rejects requests without a User-Agent header, and a fronting
-// corporate proxy/WAF commonly rejects non-browser agents; a desktop-browser
-// string is the value most likely to pass both. Override per-environment via
-// Config.UserAgent (GRAPH_USER_AGENT) since a pinned browser version ages.
-const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-
 type presenceClient struct {
 	cfg       Config
 	creds     ROPCCredentials
@@ -67,24 +59,8 @@ type presenceClient struct {
 func NewPresenceClient(cfg Config, creds ROPCCredentials, opts ...Option) (PresenceReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	hc := g.httpClient
-	if cfg.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("parse graph proxy url: %w", err)
-		}
-		if proxyURL.Scheme == "" || proxyURL.Host == "" {
-			// Redacted() masks any embedded proxy credentials before it reaches logs.
-			return nil, fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
-		}
-		// Reuse the throwaway client's transport when it is already a concrete
-		// *http.Transport (preserving TLSInsecureSkipVerify settings); otherwise
-		// clone the default transport so proxy/dial defaults survive.
-		tr, ok := hc.Transport.(*http.Transport)
-		if !ok || tr == nil {
-			tr = http.DefaultTransport.(*http.Transport).Clone()
-		}
-		tr.Proxy = http.ProxyURL(proxyURL)
-		hc.Transport = tr
+	if err := applyProxyURL(hc, cfg.ProxyURL); err != nil {
+		return nil, err
 	}
 	ua := cfg.UserAgent
 	if ua == "" {

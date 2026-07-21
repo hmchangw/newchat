@@ -86,12 +86,11 @@ func (mr *MockRoomStoreMockRecorder) ClearSubscriptionThreadUnreadForAccount(ctx
 }
 
 // ClearThreadSubscriptionsForAccount mocks base method.
-func (m *MockRoomStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) ([]model.ThreadSubscription, error) {
+func (m *MockRoomStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ClearThreadSubscriptionsForAccount", ctx, account, now)
-	ret0, _ := ret[0].([]model.ThreadSubscription)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // ClearThreadSubscriptionsForAccount indicates an expected call of ClearThreadSubscriptionsForAccount.

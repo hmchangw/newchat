@@ -370,12 +370,11 @@ func (m *MockRoomClient) EXPECT() *MockRoomClientMockRecorder {
 }
 
 // ClearAllThreadUnread mocks base method.
-func (m *MockRoomClient) ClearAllThreadUnread(ctx context.Context, siteID, account string) (int, error) {
+func (m *MockRoomClient) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ClearAllThreadUnread", ctx, siteID, account)
-	ret0, _ := ret[0].(int)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // ClearAllThreadUnread indicates an expected call of ClearAllThreadUnread.

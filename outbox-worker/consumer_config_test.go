@@ -28,6 +28,7 @@ func TestBuildConcurrentConsumerConfig(t *testing.T) {
 		"chat.outbox.site-a.site-b.role_updated",
 		"chat.outbox.site-a.site-b.subscription_read",
 		"chat.outbox.site-a.site-b.thread_read",
+		"chat.outbox.site-a.site-b.thread_read_all",
 		"chat.outbox.site-a.site-b.subscription_mute_toggled",
 		"chat.outbox.site-a.site-b.subscription_favorite_toggled",
 		"chat.outbox.site-a.site-b.room_restricted",

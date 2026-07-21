@@ -453,6 +453,36 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoo
 	return nil
 }
 
+// ApplyThreadReadAll is the home-replica bulk clear for the federated
+// thread_read_all event. It advances every one of account's thread subscriptions
+// to lastSeenAt under a per-doc $lt guard (so a genuinely newer read is never
+// regressed) and clears threadUnread + alert on every subscription that still has
+// unread threads. Missing docs are a no-op (the mark-all dismiss is best-effort).
+func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error {
+	tsFilter := bson.M{
+		"userAccount": account,
+		"$or": bson.A{
+			bson.M{"lastSeenAt": nil},
+			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
+		},
+	}
+	tsUpdate := bson.M{"$set": bson.M{
+		"lastSeenAt": lastSeenAt,
+		"updatedAt":  lastSeenAt,
+		"hasMention": false,
+	}}
+	if _, err := s.threadSubCol.UpdateMany(ctx, tsFilter, tsUpdate); err != nil {
+		return fmt.Errorf("apply thread read all on thread subscriptions for %q: %w", account, err)
+	}
+
+	subFilter := bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}}
+	subUpdate := bson.M{"$set": bson.M{"alert": false}, "$unset": bson.M{"threadUnread": ""}}
+	if _, err := s.subCol.UpdateMany(ctx, subFilter, subUpdate); err != nil {
+		return fmt.Errorf("apply thread read all on subscriptions for %q: %w", account, err)
+	}
+	return nil
+}
+
 // laneMsg pairs a consumed JetStream message with the per-message context
 // carrying its consumer span. The o11y/nats facade delivers (ctx, jetstream.Msg)
 // separately rather than an o11y-owned message type, so the two-lane dispatch

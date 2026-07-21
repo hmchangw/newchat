@@ -678,6 +678,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		m := got[0].Member
 		assert.Equal(t, model.RoomMemberOrg, m.Type)
 		assert.Equal(t, "Engineering", m.OrgName)
+		assert.Equal(t, "Engineering", m.OrgCode)
 		assert.Equal(t, 3, m.MemberCount)
 		assert.Empty(t, m.EngName)
 		assert.False(t, m.IsOwner)
@@ -2752,6 +2753,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_DeptFirst_Integration(t *testing.
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Engineering 工程部", got[0].Member.OrgName, "dept wins on overlap; name+tcName combined")
+	assert.Equal(t, "Engineering", got[0].Member.OrgCode, "orgCode is the plain dept name, no TC combine")
 }
 
 // TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration verifies
@@ -2779,6 +2781,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration(t *te
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Y", got[0].Member.OrgName, "no matching users → falls back to member.id")
+	assert.Empty(t, got[0].Member.OrgCode, "no matching users → orgCode empty, no orgID fallback")
 }
 
 func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
@@ -3916,17 +3919,7 @@ func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	rows, err := store.ClearThreadSubscriptionsForAccount(ctx, "alice", now)
-	require.NoError(t, err)
-	require.Len(t, rows, 2)
-
-	got := map[string]model.ThreadSubscription{}
-	for _, r := range rows {
-		got[r.ThreadRoomID] = r
-	}
-	assert.Equal(t, "r1", got["tr1"].RoomID)
-	assert.Equal(t, "p1", got["tr1"].ParentMessageID)
-	assert.Equal(t, "r2", got["tr2"].RoomID)
+	require.NoError(t, store.ClearThreadSubscriptionsForAccount(ctx, "alice", now))
 
 	// alice's docs: lastSeenAt set to now, hasMention cleared.
 	for _, id := range []string{"tsA1", "tsA2"} {
@@ -3951,9 +3944,8 @@ func TestMongoStore_ClearThreadSubscriptionsForAccount_Empty_Integration(t *test
 	store := NewMongoStore(db)
 	require.NoError(t, store.EnsureIndexes(context.Background()))
 
-	rows, err := store.ClearThreadSubscriptionsForAccount(context.Background(), "nobody", time.Now().UTC())
-	require.NoError(t, err)
-	assert.Nil(t, rows)
+	// No rows for the account is a no-op, not an error.
+	require.NoError(t, store.ClearThreadSubscriptionsForAccount(context.Background(), "nobody", time.Now().UTC()))
 }
 
 func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testing.T) {

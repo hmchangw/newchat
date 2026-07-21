@@ -1465,6 +1465,73 @@ func TestMemberAddEventJSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal(data, &dst))
 		assert.Nil(t, dst.HistorySharedSince)
 	})
+
+	t.Run("members round-trips enriched member.list-shaped entries", func(t *testing.T) {
+		src := model.MemberAddEvent{
+			Type:     "member_added",
+			RoomID:   "r1",
+			Accounts: []string{"bob", "carol"},
+			SiteID:   "site-a",
+			JoinedAt: 1735689600000,
+			Members: []model.RoomMemberEntry{
+				{
+					ID:             "DEPT-100",
+					Type:           model.RoomMemberOrg,
+					OrgName:        "Cardiology Department",
+					OrgDescription: "Inpatient cardiac care",
+					MemberCount:    42,
+				},
+				{
+					ID:          "u-bob",
+					Type:        model.RoomMemberIndividual,
+					Account:     "bob",
+					EngName:     "Bob",
+					ChineseName: "鮑",
+					SectName:    "Cardiology",
+					EmployeeID:  "E10293",
+				},
+			},
+			Timestamp: 1735689600000,
+		}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+
+		// Wire key "members" carries the RoomMemberEntry display fields directly (no id/rid/ts envelope).
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		entries, ok := raw["members"].([]any)
+		require.True(t, ok, "members must marshal as an array")
+		require.Len(t, entries, 2)
+		orgEntry, ok := entries[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "org", orgEntry["type"])
+		assert.Equal(t, "Cardiology Department", orgEntry["orgName"])
+		assert.Equal(t, "Inpatient cardiac care", orgEntry["orgDescription"])
+		assert.EqualValues(t, 42, orgEntry["memberCount"])
+		_, hasEnvelope := orgEntry["rid"]
+		assert.False(t, hasEnvelope, "entries carry no membership envelope (rid/ts)")
+
+		var dst model.MemberAddEvent
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, src.Members, dst.Members)
+	})
+
+	t.Run("nil members is omitted on the wire", func(t *testing.T) {
+		src := model.MemberAddEvent{
+			Type:      "member_added",
+			RoomID:    "r1",
+			Accounts:  []string{"alice"},
+			SiteID:    "site-a",
+			Timestamp: 1735689600000,
+		}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, hasMembers := raw["members"]
+		assert.False(t, hasMembers, "members must be omitted when nil so INBOX copies stay lean")
+	})
 }
 
 func TestMemberAddEventCarriesRoomName(t *testing.T) {
@@ -1590,7 +1657,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q should be omitted when zero", k)
 	}
@@ -1599,7 +1666,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	entry := model.RoomMemberEntry{
 		ID: "org-1", Type: model.RoomMemberOrg,
-		OrgName: "Engineering", MemberCount: 42, OrgDescription: "Eng dept",
+		OrgName: "Engineering", OrgCode: "Engineering", MemberCount: 42, OrgDescription: "Eng dept",
 		SectName: "Cardiology", EmployeeID: "E10293",
 	}
 	data, err := bson.Marshal(&entry)
@@ -1609,7 +1676,7 @@ func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &got))
 	assert.Equal(t, "org-1", got["id"])
 	assert.Equal(t, "org", got["type"])
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q must not be persisted to BSON", k)
 	}
@@ -1659,6 +1726,7 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 			ID:             "sect-eng",
 			Type:           model.RoomMemberOrg,
 			OrgName:        "Engineering",
+			OrgCode:        "Engineering",
 			OrgDescription: "Eng dept",
 		}
 		data, err := json.Marshal(&entry)
@@ -1666,6 +1734,7 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
 		assert.Equal(t, "Engineering", raw["orgName"])
+		assert.Equal(t, "Engineering", raw["orgCode"])
 		assert.Equal(t, "Eng dept", raw["orgDescription"])
 		_, hasSectName := raw["sectName"]
 		assert.False(t, hasSectName, "sectName absent on an org entry")
@@ -2647,14 +2716,16 @@ func TestSubscriptionReadEventJSON(t *testing.T) {
 }
 
 func TestThreadReadAllRoundTrip(t *testing.T) {
-	respFull := model.ThreadReadAllResponse{ClearedThreads: 7, UnavailableSites: []string{"site-b"}}
+	respFull := model.ThreadReadAllResponse{UnavailableSites: []string{"site-b"}}
 	roundTrip(t, &respFull, &model.ThreadReadAllResponse{})
 	respEmpty := model.ThreadReadAllResponse{}
 	roundTrip(t, &respEmpty, &model.ThreadReadAllResponse{})
 	roomReq := model.RoomThreadReadAllRequest{Account: "alice"}
 	roundTrip(t, &roomReq, &model.RoomThreadReadAllRequest{})
-	roomResp := model.RoomThreadReadAllResponse{ClearedThreads: 3}
+	roomResp := model.RoomThreadReadAllResponse{}
 	roundTrip(t, &roomResp, &model.RoomThreadReadAllResponse{})
+	ev := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1717000000000, Timestamp: 1717000000001}
+	roundTrip(t, &ev, &model.ThreadReadAllEvent{})
 }
 
 func TestPresenceStatusValues(t *testing.T) {

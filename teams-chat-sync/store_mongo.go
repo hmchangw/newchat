@@ -13,28 +13,27 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-// mongoStore implements TeamsUserStore and TeamsChatStore over two databases:
-// readDB (the teams_user scan, typically a secondary-preferred read client)
-// and writeDB (the teams_user watermark update and teams_chat upserts). Every
+// mongoStore implements TeamsUserStore and TeamsChatStore over a single
+// primary (master) database: the teams_user scan, the teams_user watermark
+// update and the teams_chat upserts all target the primary, so these freshly
+// populated collections are never read from a lagging secondary. Every
 // collection goes through mongoutil.Collection so projection and cursor
 // handling stay in the shared helper.
 type mongoStore struct {
-	readUsers  *mongoutil.Collection[model.TeamsUser]
-	writeUsers *mongoutil.Collection[model.TeamsUser]
-	writeChats *mongoutil.Collection[model.TeamsChat]
+	users *mongoutil.Collection[model.TeamsUser]
+	chats *mongoutil.Collection[model.TeamsChat]
 }
 
-func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
+func newMongoStore(db *mongo.Database) *mongoStore {
 	return &mongoStore{
-		readUsers:  mongoutil.NewCollection[model.TeamsUser](readDB.Collection("teams_user")),
-		writeUsers: mongoutil.NewCollection[model.TeamsUser](writeDB.Collection("teams_user")),
-		writeChats: mongoutil.NewCollection[model.TeamsChat](writeDB.Collection("teams_chat")),
+		users: mongoutil.NewCollection[model.TeamsUser](db.Collection("teams_user")),
+		chats: mongoutil.NewCollection[model.TeamsChat](db.Collection("teams_chat")),
 	}
 }
 
 // EnsureIndexes creates the teams_chat indexes the chat-sync pipeline queries
-// on, via the write (primary) client. Idempotent — re-creating an existing
-// index is a no-op, so it is safe to run on every startup. teams-chat-sync owns
+// on, via the primary client. Idempotent — re-creating an existing index is a
+// no-op, so it is safe to run on every startup. teams-chat-sync owns
 // teams_chat, so it owns these indexes; the downstream member-sync/room-creation
 // jobs rely on them.
 func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
@@ -42,7 +41,7 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 	// true. Partial indexes on the true value index only the small actionable
 	// working set, so they stay lean even as teams_chat grows (a chat drops out
 	// of the index the moment its flag is cleared).
-	if _, err := s.writeChats.Raw().Indexes().CreateMany(ctx, []mongo.IndexModel{
+	if _, err := s.chats.Raw().Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{
 			// teams-chat-member-sync: ListChatsToSync — find({needMemberSync: true}).
 			Keys: bson.D{{Key: "needMemberSync", Value: 1}},
@@ -65,9 +64,9 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 }
 
 // ListUsers returns every teams_user projected to the sync fields
-// (_id, siteId, account, from). Served by the read client.
+// (_id, siteId, account, from). Served by the primary.
 func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
-	users, err := s.readUsers.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
+	users, err := s.users.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
 		"_id": 1, "siteId": 1, "account": 1, "from": 1,
 	}))
 	if err != nil {
@@ -76,9 +75,9 @@ func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 	return users, nil
 }
 
-// SetFrom advances one user's sync watermark. Written by the write client.
+// SetFrom advances one user's sync watermark.
 func (s *mongoStore) SetFrom(ctx context.Context, userID string, from time.Time) error {
-	if _, err := s.writeUsers.Raw().UpdateByID(ctx, userID, bson.M{"$set": bson.M{"from": from}}); err != nil {
+	if _, err := s.users.Raw().UpdateByID(ctx, userID, bson.M{"$set": bson.M{"from": from}}); err != nil {
 		return fmt.Errorf("set teams user watermark: %w", err)
 	}
 	return nil
@@ -95,7 +94,7 @@ func (s *mongoStore) UpsertChats(ctx context.Context, chats []model.TeamsChat) e
 	for _, c := range chats {
 		models = append(models, chatUpsertModel(c))
 	}
-	if _, err := s.writeChats.BulkWrite(ctx, models); err != nil {
+	if _, err := s.chats.BulkWrite(ctx, models); err != nil {
 		return fmt.Errorf("upsert teams chats: %w", err)
 	}
 	return nil
