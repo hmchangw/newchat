@@ -142,3 +142,44 @@ func TestLoad_AppsDefaultExceedsAppsMax(t *testing.T) {
 	_, err := Load()
 	require.Error(t, err)
 }
+
+func TestLoad_SSODisabledByDefault(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.OIDCIssuerURL)
+	require.Equal(t, time.Hour, cfg.SSORefreshWindow)
+}
+
+func TestLoad_SSOEnabledRequiresAudiencesAndClientID(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("OIDC_ISSUER_URL", "http://keycloak:8080/realms/chatapp")
+	_, err := Load()
+	require.ErrorContains(t, err, "OIDC_AUDIENCES")
+
+	t.Setenv("OIDC_AUDIENCES", "nats-chat")
+	_, err = Load()
+	require.ErrorContains(t, err, "OIDC_CLIENT_ID")
+
+	t.Setenv("OIDC_CLIENT_ID", "nats-chat")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.NotEmpty(t, cfg.OIDCIssuerURL)
+	require.Equal(t, []string{"nats-chat"}, cfg.OIDCAudiences)
+}
+
+func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("OIDC_ISSUER_URL", "http://keycloak:8080/realms/chatapp")
+	t.Setenv("OIDC_AUDIENCES", "nats-chat")
+	t.Setenv("OIDC_CLIENT_ID", "nats-chat")
+	t.Setenv("SSO_REFRESH_WINDOW", "0s")
+	_, err := Load()
+	require.ErrorContains(t, err, "SSO_REFRESH_WINDOW")
+}

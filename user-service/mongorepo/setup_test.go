@@ -18,6 +18,7 @@ var (
 	_ service.SubscriptionRepository = (*SubscriptionRepo)(nil)
 	_ service.UserRepository         = (*UserRepo)(nil)
 	_ service.AppRepository          = (*AppRepo)(nil)
+	_ service.SSOTokenRepository     = (*SSOTokenRepo)(nil)
 )
 
 // newTestSubscriptionRepo builds a SubscriptionRepo with siteID "site-a"; seed cross-site rows with a different siteId to exercise the deleted-filter.
@@ -43,6 +44,15 @@ func newTestAppRepo(t *testing.T) (*AppRepo, *mongo.Database) {
 	t.Helper()
 	db := testutil.MongoDB(t, "user-service")
 	return NewAppRepo(db), db
+}
+
+// newTestSSOTokenRepo builds an SSOTokenRepo over an isolated test database.
+func newTestSSOTokenRepo(t *testing.T) (*SSOTokenRepo, *mongo.Database) {
+	t.Helper()
+	db := testutil.MongoDB(t, "user-service")
+	r := NewSSOTokenRepo(db)
+	require.NoError(t, r.EnsureIndexes(context.Background()))
+	return r, db
 }
 
 // seed inserts raw docs into a collection on db.
