@@ -91,3 +91,48 @@ func TestOrgDisplayUsers(t *testing.T) {
 		assert.Empty(t, got)
 	})
 }
+
+func TestMatchCandidatesFilterWithDirectBots_Mongo(t *testing.T) {
+	users := testutil.MongoDB(t, "pipelines_botfilter").Collection("users")
+	ctx := context.Background()
+
+	// org1 contains a human and a bot; weather.bot and p_hook exist outside orgs.
+	_, err := users.InsertMany(ctx, []any{
+		bson.M{"_id": "u1", "account": "alice", "sectId": "org1"},
+		bson.M{"_id": "u2", "account": "orgbound.bot", "sectId": "org1"},
+		bson.M{"_id": "u3", "account": "weather.bot"},
+		bson.M{"_id": "u4", "account": "p_hook"},
+		bson.M{"_id": "u5", "account": "bob"},
+	})
+	require.NoError(t, err)
+
+	fetch := func(t *testing.T, filter bson.M) []string {
+		t.Helper()
+		cursor, err := users.Find(ctx, filter)
+		require.NoError(t, err)
+		var rows []struct {
+			Account string `bson:"account"`
+		}
+		require.NoError(t, cursor.All(ctx, &rows))
+		got := make([]string, len(rows))
+		for i, r := range rows {
+			got[i] = r.Account
+		}
+		return got
+	}
+
+	t.Run("direct bots match, org-covered bots stay excluded", func(t *testing.T) {
+		got := fetch(t, MatchCandidatesFilterWithDirectBots([]string{"org1"}, []string{"weather.bot", "p_hook", "bob"}, ""))
+		assert.ElementsMatch(t, []string{"alice", "weather.bot", "p_hook", "bob"}, got)
+	})
+
+	t.Run("excludeAccount still applies on top", func(t *testing.T) {
+		got := fetch(t, MatchCandidatesFilterWithDirectBots([]string{"org1"}, []string{"weather.bot"}, "alice"))
+		assert.ElementsMatch(t, []string{"weather.bot"}, got)
+	})
+
+	t.Run("legacy filter keeps excluding direct bots", func(t *testing.T) {
+		got := fetch(t, MatchCandidatesFilter([]string{"org1"}, []string{"weather.bot", "bob"}, ""))
+		assert.ElementsMatch(t, []string{"alice", "bob"}, got)
+	})
+}

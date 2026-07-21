@@ -207,7 +207,8 @@ UserSettings — every field optional, present only when explicitly set:
 
 **Subject:** `chat.user.{account}.event.room.key`
 
-Delivers the AES-256-GCM room key to channel members. Fired at create, add, and remove.
+Delivers the AES-256-GCM room key to **human** channel members — bot members never
+receive a key. Fired at create, add, and remove.
 DM/botDM rooms are never encrypted and emit no key event.
 
 | Field | Type | Notes |
@@ -229,7 +230,7 @@ DM/botDM rooms are never encrypted and emit no key event.
 **When fired:**
 
 - **Create Room (channel):** one event per initial enrolled member.
-- **Add Members (channel):** one event per newly-subscribed account; existing members receive no duplicate.
+- **Add Members (channel):** one event per newly-subscribed **human** account; existing members receive no duplicate; bot members receive none.
 - **Remove Member (channel):** the key is rotated; every surviving member receives a new event with `version` incremented. The removed account stops receiving events.
 
 **Initial key bootstrap on (re)connect:** live events fire only when keys change.

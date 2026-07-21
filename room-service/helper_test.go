@@ -82,6 +82,8 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 		{"empty create request", errEmptyCreateRequest, errcode.CodeBadRequest, ""},
 		{"bot in channel", errBotInChannel, errcode.CodeBadRequest, errcode.RoomBotInChannel},
 		{"bot not available", errBotNotAvailable, errcode.CodeNotFound, errcode.RoomBotNotAvailable},
+		{"bot cross-site", errBotCrossSite, errcode.CodeBadRequest, errcode.RoomBotCrossSite},
+		{"bot cannot be owner", errBotCannotBeOwner, errcode.CodeBadRequest, errcode.RoomBotCannotBeOwner},
 		{"invalid user data", errInvalidUserData, errcode.CodeBadRequest, ""},
 		{"channel name required", errChannelNameRequired, errcode.CodeBadRequest, ""},
 		{"channel name too long", errChannelNameTooLong, errcode.CodeBadRequest, ""},

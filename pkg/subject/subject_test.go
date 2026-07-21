@@ -50,6 +50,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.inbox.site-b.external.member_removed"},
 		{"InboxInternalMemberRemoved", subject.InboxInternal("site-a", "member_removed"),
 			"chat.inbox.site-a.internal.member_removed"},
+		{"BotDelivery", subject.BotDelivery("site-a"),
+			"chat.server.bot.delivery.site-a"},
 		{"MsgCanonicalCreated", subject.MsgCanonicalCreated("site-a"),
 			"chat.msg.canonical.site-a.created"},
 		{"MsgCanonicalUpdated", subject.MsgCanonicalUpdated("site-a"),

@@ -58,10 +58,10 @@ func TestBootstrapStreams(t *testing.T) {
 			wantErrSub: "verify ROOMS stream",
 		},
 		{
-			name:        "enabled - creates ROOMS",
+			name:        "enabled - creates ROOMS + BOT_DELIVERY",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"ROOMS_test"},
+			wantCreated: []string{"ROOMS_test", "BOT_DELIVERY_test"},
 		},
 		{
 			name:       "enabled - wraps ROOMS creator error",
@@ -70,6 +70,14 @@ func TestBootstrapStreams(t *testing.T) {
 			failOn:     "ROOMS_test",
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create ROOMS stream",
+		},
+		{
+			name:       "enabled - wraps BOT_DELIVERY creator error",
+			enabled:    true,
+			existing:   map[string]bool{},
+			failOn:     "BOT_DELIVERY_test",
+			failErr:    errors.New("nats down"),
+			wantErrSub: "create BOT_DELIVERY stream",
 		},
 	}
 	for _, tc := range tests {

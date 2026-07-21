@@ -49,11 +49,20 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 		}); err != nil {
 			return fmt.Errorf("create ROOMS stream: %w", err)
 		}
+		// BOT_DELIVERY carries the bot-platform feed. Dev-only bootstrap; in prod
+		// it is ops-owned and publish is best-effort, so it is NOT verified below.
+		botCfg := stream.BotDelivery(siteID)
+		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+			Name:     botCfg.Name,
+			Subjects: botCfg.Subjects,
+		}); err != nil {
+			return fmt.Errorf("create BOT_DELIVERY stream: %w", err)
+		}
 		return nil
 	}
-	// Production path: verify the stream exists. Fail fast if it doesn't —
-	// ops/IaC owns provisioning, and a missing stream means the deploy is
-	// broken before the first publish or consume.
+	// Verify the ROOMS stream this service CONSUMES — fail fast if ops didn't
+	// provision it. BOT_DELIVERY is only published to (best-effort), so it is
+	// intentionally not verified.
 	if _, err := js.Stream(ctx, roomsCfg.Name); err != nil {
 		return fmt.Errorf("verify ROOMS stream: %w", err)
 	}

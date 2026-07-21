@@ -27,6 +27,7 @@ func TestStreamConfigs(t *testing.T) {
 		{"Outbox", stream.Outbox(siteID), "OUTBOX_site-a", "chat.outbox.site-a.>"},
 		{"PushNotification", stream.PushNotification(siteID), "PUSH_NOTIFICATION_site-a", "chat.server.notification.push.site-a.>"},
 		{"OrgSyncStream", stream.OrgSyncStream(siteID), "HR_site-a", "chat.hr.site-a.>"},
+		{"BotDelivery", stream.BotDelivery(siteID), "BOT_DELIVERY_site-a", "chat.server.bot.delivery.site-a"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

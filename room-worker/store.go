@@ -115,6 +115,9 @@ type SubscriptionStore interface {
 	GetSubscriptionAccounts(ctx context.Context, roomID string) ([]string, error)
 	// FetchOrgDisplayUsers returns the dept/sect display rows feeding the pkg/orgdisplay rollup.
 	FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error)
+	// ListBotAccountsInRoom: index-backed {roomId, u.isBot} read of just the
+	// room's bot members — the room_join/room_leave fan-out recipient set.
+	ListBotAccountsInRoom(ctx context.Context, roomID string) ([]string, error)
 
 	// ListAddMemberCandidates: per-user {hasSub, hasIndividualRow} flags so the worker splits into needSub vs needIRM (org→individual upgrade).
 	ListAddMemberCandidates(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]AddMemberCandidate, error)
@@ -128,9 +131,9 @@ type SubscriptionStore interface {
 	// modified, so the handler reconciles against the existing doc and reuses it.
 	CreateRoom(ctx context.Context, room *model.Room, key *roomkeystore.RoomKeyPair) (inserted bool, err error)
 
-	// ListNewMembersForNewRoom is the empty-roomID variant of the
-	// ListAddMemberCandidates candidate resolution — same dedup + bot filter,
-	// no "already-subscribed" pruning since the room doesn't exist yet.
+	// ListNewMembersForNewRoom is the create-time candidate resolution — keeps
+	// the full bot exclusion (create-channel rejects bots) and skips the
+	// already-subscribed pruning since the room doesn't exist yet.
 	// excludeAccount drops one account from the candidate set; create-channel
 	// passes the requester's account so they aren't materialized as a regular
 	// member in addition to being added separately as the owner.

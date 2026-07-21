@@ -42,6 +42,16 @@ func PushNotification(siteID string) Config {
 	}
 }
 
+// BotDelivery returns the BOT_DELIVERY_{siteID} stream config (the bot platform's
+// durable-pull feed). Ops-owned in prod, dev-bootstrapped by room-worker; the
+// backend publishes to the subject, never the name, so a prod name can differ.
+func BotDelivery(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("BOT_DELIVERY_%s", siteID),
+		Subjects: []string{subject.BotDelivery(siteID)},
+	}
+}
+
 // Inbox returns the canonical config for the `INBOX_{siteID}` stream that
 // carries federation events for a site.
 //

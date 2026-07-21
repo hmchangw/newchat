@@ -380,33 +380,38 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Rotate after delete + reconcile; GetSubscriptionAccounts returns the
-	// post-deletion survivor accounts (projected — fan-out only needs accounts,
-	// not full subscription docs).
-	survivorAccounts, listErr := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
-	if listErr != nil {
-		return fmt.Errorf("list survivors for key fan-out (room %s): %w", req.RoomID, listErr)
-	}
-	if err := h.rotateAndFanOut(ctx, req.RoomID, currentPair, survivorAccounts); err != nil {
-		return fmt.Errorf("rotate and fan-out room key after remove-individual: %w", err)
+	// Rotate after delete + reconcile; survivors are the post-deletion accounts.
+	// Bot key delivery is out of scope for this PR, so bots aren't in the key
+	// fan-out and bot removal skips rotation (a temporary exclusion, not a rule).
+	targetIsBot := model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)
+	if !targetIsBot {
+		survivorAccounts, listErr := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
+		if listErr != nil {
+			return fmt.Errorf("list survivors for key fan-out (room %s): %w", req.RoomID, listErr)
+		}
+		if err := h.rotateAndFanOut(ctx, req.RoomID, currentPair, survivorAccounts); err != nil {
+			return fmt.Errorf("rotate and fan-out room key after remove-individual: %w", err)
+		}
 	}
 
 	now := time.Now().UTC()
 
-	// Subscription update event. RoomType is fixed to channel: room-service
-	// rejects member.remove for any other room kind.
-	subEvt := model.SubscriptionRemovedEvent{
-		UserID: user.ID,
-		Subscription: model.RemovedSubscriptionRef{
-			RoomID:   req.RoomID,
-			RoomType: model.RoomTypeChannel,
-			U:        model.SubscriptionUser{ID: user.ID, Account: req.Account},
-		},
-		Action:    "removed",
-		Timestamp: now.UnixMilli(),
+	// Subscription update event (channel-only handler). Skipped for bots — no
+	// websocket client, dotted-subject collision class (see the add path).
+	if !targetIsBot {
+		subEvt := model.SubscriptionRemovedEvent{
+			UserID: user.ID,
+			Subscription: model.RemovedSubscriptionRef{
+				RoomID:   req.RoomID,
+				RoomType: model.RoomTypeChannel,
+				U:        model.SubscriptionUser{ID: user.ID, Account: req.Account},
+			},
+			Action:    "removed",
+			Timestamp: now.UnixMilli(),
+		}
+		subEvtData, _ := json.Marshal(subEvt)
+		h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
 	}
-	subEvtData, _ := json.Marshal(subEvt)
-	h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
 
 	// Member change event
 	evtType := model.MessageTypeMemberLeft
@@ -439,6 +444,25 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
 		slog.ErrorContext(ctx, "local inbox member_removed publish failed", "error", err, "room_id", req.RoomID)
 	}
+
+	// room_leave fans out to the room's remaining bots, plus the leaver itself if
+	// it's a bot (1.0 parity): a departing bot hears its own removal. room.name
+	// stays empty (cosmetic; the bot keys on room._id). Best-effort roster read.
+	leaveRecipients, listErr := h.store.ListBotAccountsInRoom(ctx, req.RoomID)
+	if listErr != nil {
+		slog.ErrorContext(ctx, "list room bots for leave feed failed",
+			"error", listErr, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(ctx))
+		leaveRecipients = nil
+	}
+	if targetIsBot {
+		leaveRecipients = append(leaveRecipients, req.Account)
+	}
+	h.publishBotRoomDelivery(ctx, &model.BotRoomEventParams{
+		EventType:     model.BotEventRoomLeave,
+		Room:          model.BotRoomRef{ID: req.RoomID, Type: model.RoomTypeChannel},
+		User:          model.BotRoomUser{ID: user.ID, Username: user.Account, Name: user.ChineseName, EngName: user.EngName},
+		Subscriptions: leaveRecipients,
+	}, now)
 
 	// Sys-msg sender: leaving user for self-leave, requester for forced removal.
 	requester := &user.User
@@ -598,9 +622,41 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	}
 
 	now := time.Now().UTC()
+	// room_leave fan-out roster (best-effort): the room's remaining bots. Skip the
+	// read entirely when nothing was removed (every candidate kept another
+	// membership tie), since the fan-out loop below is then a no-op.
+	var botsInRoom []string
+	if len(toRemove) > 0 {
+		var listErr error
+		botsInRoom, listErr = h.store.ListBotAccountsInRoom(ctx, req.RoomID)
+		if listErr != nil {
+			slog.ErrorContext(ctx, "list room bots for org leave feed failed",
+				"error", listErr, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(ctx))
+			botsInRoom = nil
+		}
+	}
 
-	// Publish per-account subscription update and collect cross-site accounts
+	// Every removed member fans out a room_leave to the room's remaining bots
+	// (1.0 parity), plus the leaver itself if it's a bot. Non-bot members also
+	// get a per-account subscription.update; bots do not (no websocket client).
 	for _, m := range toRemove {
+		isBot := model.IsBot(m.Account) || model.IsPlatformAdminAccount(m.Account)
+		recipients := botsInRoom
+		if isBot {
+			recipients = append(append([]string{}, botsInRoom...), m.Account)
+		}
+		// OrgMemberStatus.Name/TCName are the ORG unit's names, not the user's, so
+		// only the account is safe here; user _id/name/engName are unavailable on
+		// the sweep path (and the platform never reads data.user).
+		h.publishBotRoomDelivery(ctx, &model.BotRoomEventParams{
+			EventType:     model.BotEventRoomLeave,
+			Room:          model.BotRoomRef{ID: req.RoomID, Type: model.RoomTypeChannel},
+			User:          model.BotRoomUser{Username: m.Account},
+			Subscriptions: recipients,
+		}, now)
+		if isBot {
+			continue
+		}
 		subEvt := model.SubscriptionRemovedEvent{
 			Subscription: model.RemovedSubscriptionRef{
 				RoomID:   req.RoomID,
@@ -923,6 +979,30 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 	}
 
+	// room_join must fire IMMEDIATELY after the sub commit: a later failure Naks,
+	// and the redelivery recomputes needSub empty — a deferred join would be lost.
+	// Fans out to every bot in the room (1.0 parity): each newly-joined member,
+	// human or bot, notifies the room's bot roster minus the joiner itself, so a
+	// lone bot joining a bot-empty room notifies nobody. Best-effort: a failed
+	// roster read skips the feed rather than failing the add. Skip the roster read
+	// entirely when nothing was newly subscribed (idempotent re-adds, redeliveries).
+	if len(subs) > 0 {
+		if botsInRoom, listErr := h.store.ListBotAccountsInRoom(ctx, req.RoomID); listErr != nil {
+			slog.ErrorContext(ctx, "bot join fan-out: list room bots failed",
+				"error", listErr, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(ctx))
+		} else if len(botsInRoom) > 0 {
+			for _, sub := range subs {
+				u := userMap[sub.User.Account]
+				h.publishBotRoomDelivery(ctx, &model.BotRoomEventParams{
+					EventType:     model.BotEventRoomJoin,
+					Room:          model.BotRoomRef{ID: room.ID, Name: room.Name, Type: room.Type},
+					User:          model.BotRoomUser{ID: u.ID, Username: u.Account, Name: u.ChineseName, EngName: u.EngName},
+					Subscriptions: withoutAccount(botsInRoom, sub.User.Account),
+				}, now)
+			}
+		}
+	}
+
 	// Collect all room_member docs to write in a single bulk insert:
 	// new individuals (from needSub ∩ req.Users) + individual upgrades
 	// (needIRM = req.Users with existing sub but no IRM row) + new orgs +
@@ -1043,8 +1123,12 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	h.bustRoomMeta(ctx, req.RoomID)
 
 	// Publish subscription.update BEFORE room.key so clients have a sub entry to store the key under.
-	// Channel-only handler: roomName is the already-fetched channel name.
+	// Bots are skipped: no websocket client, and a dotted account makes
+	// chat.user.weather.bot.> readable by a human account "weather".
 	for _, sub := range subs {
+		if sub.User.IsBot {
+			continue
+		}
 		subEvt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: *sub,
@@ -2263,6 +2347,42 @@ func (h *Handler) buildAndFanOutRoomKey(ctx context.Context, roomID string, pair
 	return nil
 }
 
+// publishBotRoomDelivery emits p as a room_join/room_leave NatsEvent, stamping
+// EventID/Timestamp/SiteID. No-op when there are no bots to notify. Best-effort
+// (membership already committed; a Nak could not re-emit), so failures are
+// logged, never returned. The Nats-Msg-Id is request-scoped and keyed on the
+// subject member (User.Username), excluding the publish-time ts — a ts would
+// change per redelivery and defeat JetStream publish dedup.
+func (h *Handler) publishBotRoomDelivery(ctx context.Context, p *model.BotRoomEventParams, now time.Time) {
+	if len(p.Subscriptions) == 0 {
+		return
+	}
+	requestID := natsutil.RequestIDFromContext(ctx)
+	p.EventID = idgen.GenerateUUIDv7()
+	p.Timestamp = now.UTC().Format(time.RFC3339)
+	p.SiteID = h.siteID
+	evt, err := model.NewBotRoomNatsEvent(p)
+	if err != nil {
+		slog.ErrorContext(ctx, "build bot delivery event failed",
+			"error", err, "type", p.EventType, "member", p.User.Username, "room_id", p.Room.ID, "request_id", requestID)
+		return
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal bot delivery event failed",
+			"error", err, "type", p.EventType, "member", p.User.Username, "room_id", p.Room.ID, "request_id", requestID)
+		return
+	}
+	msgID := fmt.Sprintf("botdelivery:%s:%s:%s:%s", p.EventType, p.Room.ID, p.User.Username, requestID)
+	if err := h.publish(ctx, subject.BotDelivery(h.siteID), data, msgID); err != nil {
+		slog.ErrorContext(ctx, "bot delivery publish failed",
+			"error", err, "type", p.EventType, "member", p.User.Username, "room_id", p.Room.ID, "request_id", requestID)
+		return
+	}
+	slog.Log(ctx, logctx.LevelFlow, "room-worker bot delivery", "phase", "publish",
+		"request_id", requestID, "type", p.EventType, "member", p.User.Username, "bots", len(p.Subscriptions), "room_id", p.Room.ID)
+}
+
 // fanOutKey distributes evt to every account using up to h.keyFanoutWorkers
 // concurrent goroutines. The event is marshaled exactly once and the resulting
 // bytes are published to each account — on a giant room this avoids one
@@ -2273,6 +2393,16 @@ func (h *Handler) buildAndFanOutRoomKey(ctx context.Context, roomID string, pair
 // evt is taken by pointer so the 80-byte struct isn't copied per fan-out call;
 // callers must not mutate it after passing it in.
 func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []string, evt *model.RoomKeyEvent) {
+	// Bot key delivery is out of scope for this PR, so bots are filtered out of
+	// the key fan-out here (a temporary exclusion, not a design rule). This is
+	// the single choke point — add fan-out and rotation both funnel here.
+	humans := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		if !model.IsBot(a) && !model.IsPlatformAdminAccount(a) {
+			humans = append(humans, a)
+		}
+	}
+	accounts = humans
 	if len(accounts) == 0 {
 		return
 	}

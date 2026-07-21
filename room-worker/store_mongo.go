@@ -570,22 +570,19 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 	type candidate struct{ ID, Account string }
 	var candidates []candidate
 	if len(orgIDs) == 0 {
-		// Direct accounts only: resolve via the user reader (cache-friendly) and
-		// filter bots in Go — avoids the users query and the $not regex entirely.
+		// Direct accounts only, cache-friendly. Bots are NOT filtered here —
+		// room-service already validated the explicitly-listed ones.
 		users, err := s.userReader.FindUsersByAccounts(ctx, directAccounts)
 		if err != nil {
 			return nil, fmt.Errorf("find add-member candidate users: %w", err)
 		}
 		for i := range users {
-			if model.IsBot(users[i].Account) || model.IsPlatformAdminAccount(users[i].Account) {
-				continue
-			}
 			candidates = append(candidates, candidate{ID: users[i].ID, Account: users[i].Account})
 		}
 	} else {
-		// Org expansion needs the sectId/deptId query on the users collection,
-		// which the by-account reader cannot serve.
-		filter := pipelines.MatchCandidatesFilter(orgIDs, directAccounts, "")
+		// Org expansion needs the sectId/deptId query. WithDirectBots admits
+		// listed bots while keeping the org arms bot-free.
+		filter := pipelines.MatchCandidatesFilterWithDirectBots(orgIDs, directAccounts, "")
 		cursor, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 1}))
 		if err != nil {
 			return nil, fmt.Errorf("find add-member candidates: %w", err)
@@ -668,6 +665,31 @@ func (s *MongoStore) GetSubscriptionAccounts(ctx context.Context, roomID string)
 	}
 	if err := cursor.All(ctx, &subs); err != nil {
 		return nil, fmt.Errorf("decode subscription accounts: %w", err)
+	}
+	accounts := make([]string, len(subs))
+	for i, s := range subs {
+		accounts[i] = s.User.Account
+	}
+	return accounts, nil
+}
+
+// ListBotAccountsInRoom returns the accounts of the bot members currently
+// subscribed to roomID. Index-backed on {roomId, u.isBot} (the same flag the
+// appCount query uses), so it returns only the handful of bots — never the full
+// roster — for the room_join/room_leave fan-out.
+func (s *MongoStore) ListBotAccountsInRoom(ctx context.Context, roomID string) ([]string, error) {
+	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID, "u.isBot": true},
+		options.Find().SetProjection(bson.M{"u.account": 1, "_id": 0}))
+	if err != nil {
+		return nil, fmt.Errorf("list bot accounts for room %q: %w", roomID, err)
+	}
+	var subs []struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
+	}
+	if err := cursor.All(ctx, &subs); err != nil {
+		return nil, fmt.Errorf("decode bot accounts: %w", err)
 	}
 	accounts := make([]string, len(subs))
 	for i, s := range subs {

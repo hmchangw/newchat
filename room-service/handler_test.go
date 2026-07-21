@@ -594,7 +594,7 @@ func TestHandler_RemoveMember_SelfLeave_Success(t *testing.T) {
 	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
 		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
-		Return(&RoomCounts{MemberCount: 3, OwnerCount: 2}, nil)
+		Return(&RoomCounts{MemberCount: 3, HumanCount: 3, OwnerCount: 2}, nil)
 
 	var publishedSubj string
 	var publishedData []byte
@@ -658,7 +658,7 @@ func TestHandler_RemoveMember_SelfLeave_NoOrgs_Allowed(t *testing.T) {
 	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
 		Return(&SubscriptionWithMembership{Subscription: sub}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
-		Return(&RoomCounts{MemberCount: 2, OwnerCount: 1}, nil)
+		Return(&RoomCounts{MemberCount: 2, HumanCount: 2, OwnerCount: 1}, nil)
 
 	var publishedData []byte
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(ctx context.Context, _ string, data []byte, _ string) error {
@@ -697,7 +697,7 @@ func TestHandler_RemoveMember_LastOwner_Rejected(t *testing.T) {
 				store.EXPECT().GetSubscription(gomock.Any(), tc.requester, "r1").Return(ownerSub, nil)
 			}
 			store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
-				Return(&RoomCounts{MemberCount: 3, OwnerCount: 1}, nil)
+				Return(&RoomCounts{MemberCount: 3, HumanCount: 3, OwnerCount: 1}, nil)
 			handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
 			_, err := handler.removeMember(ctxParams(map[string]string{"account": tc.requester, "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 			require.Error(t, err)
@@ -717,7 +717,7 @@ func TestHandler_RemoveMember_LastMember_Rejected(t *testing.T) {
 	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
 		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
-		Return(&RoomCounts{MemberCount: 1, OwnerCount: 0}, nil)
+		Return(&RoomCounts{MemberCount: 1, HumanCount: 1, OwnerCount: 0}, nil)
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.Error(t, err)
@@ -740,7 +740,7 @@ func TestHandler_RemoveMember_OwnerRemovesOther_Success(t *testing.T) {
 		Return(&SubscriptionWithMembership{Subscription: targetSub, HasIndividualMembership: true}, nil)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(ownerSub, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
-		Return(&RoomCounts{MemberCount: 3, OwnerCount: 1}, nil)
+		Return(&RoomCounts{MemberCount: 3, HumanCount: 3, OwnerCount: 1}, nil)
 	var publishedData []byte
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(ctx context.Context, subj string, data []byte, _ string) error {
 		publishedData = data
@@ -892,7 +892,7 @@ func TestHandler_RemoveMember_PublishError(t *testing.T) {
 	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
 		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
-		Return(&RoomCounts{MemberCount: 3, OwnerCount: 2}, nil)
+		Return(&RoomCounts{MemberCount: 3, HumanCount: 3, OwnerCount: 2}, nil)
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(_ context.Context, _ string, _ []byte, _ string) error {
 		return fmt.Errorf("nats down")
 	}, nil, nil, 0)
@@ -1076,10 +1076,127 @@ func TestHandler_AddMembers_EmptyAfterResolve(t *testing.T) {
 	assert.Equal(t, "accepted", resp.Status)
 }
 
-func TestHandler_AddMembers_RejectsDirectBot(t *testing.T) {
+func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
+	enabledApp := &model.App{ID: "app1", Name: "Weather", Assistant: &model.AppAssistant{Enabled: true, Name: "weather.bot"}}
+
+	tests := []struct {
+		name            string
+		botAccount      string
+		setupMocks      func(store *MockRoomStore)
+		wantErr         error
+		wantErrContains string
+		wantPublish     bool
+	}{
+		{
+			name:       "enabled local bot is accepted",
+			botAccount: "weather.bot",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(enabledApp, nil)
+				store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("site-a", nil)
+				expectAllAccountsExist(store)
+			},
+			wantPublish: true,
+		},
+		{
+			name:       "platform-admin pseudo account accepted like a bot",
+			botAccount: "p_hook",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "p_hook").Return(
+					&model.App{ID: "app2", Assistant: &model.AppAssistant{Enabled: true, Name: "p_hook"}}, nil)
+				store.EXPECT().GetUserSiteID(gomock.Any(), "p_hook").Return("", nil)
+				expectAllAccountsExist(store)
+			},
+			wantPublish: true,
+		},
+		{
+			name:       "unknown app rejected",
+			botAccount: "weather.bot",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(nil, ErrAppNotFound)
+			},
+			wantErr: errBotNotAvailable,
+		},
+		{
+			name:       "disabled assistant rejected",
+			botAccount: "weather.bot",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(
+					&model.App{ID: "app1", Assistant: &model.AppAssistant{Enabled: false, Name: "weather.bot"}}, nil)
+			},
+			wantErr: errBotNotAvailable,
+		},
+		{
+			name:       "cross-site bot rejected",
+			botAccount: "weather.bot",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(enabledApp, nil)
+				store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("site-b", nil)
+			},
+			wantErr: errBotCrossSite,
+		},
+		{
+			name:       "GetApp infra error collapses to internal",
+			botAccount: "weather.bot",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(nil, errors.New("mongo timeout"))
+			},
+			wantErrContains: "get app for bot",
+		},
+		{
+			name:       "GetUserSiteID infra error collapses to internal",
+			botAccount: "weather.bot",
+			setupMocks: func(store *MockRoomStore) {
+				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(enabledApp, nil)
+				store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("", errors.New("mongo timeout"))
+			},
+			wantErrContains: "get bot siteId",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+			store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+				User:  model.SubscriptionUser{ID: "u1", Account: "alice"},
+				Roles: []model.Role{model.RoleOwner},
+			}, nil)
+			store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+				ID: "r1", Type: model.RoomTypeChannel, UserCount: 1,
+			}, nil)
+			tc.setupMocks(store)
+
+			var publishedPayload []byte
+			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
+				publishToStream: func(_ context.Context, _ string, data []byte, _ string) error {
+					publishedPayload = data
+					return nil
+				},
+			}
+			_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.AddMembersRequest{Users: []string{tc.botAccount}})
+			if tc.wantErr != nil || tc.wantErrContains != "" {
+				require.Error(t, err)
+				if tc.wantErr != nil {
+					assert.True(t, errors.Is(err, tc.wantErr), "want %v, got %v", tc.wantErr, err)
+				}
+				if tc.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tc.wantErrContains)
+				}
+				assert.Nil(t, publishedPayload)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, tc.wantPublish)
+			var published model.AddMembersRequest
+			require.NoError(t, json.Unmarshal(publishedPayload, &published))
+			assert.Contains(t, published.Users, tc.botAccount)
+		})
+	}
+}
+
+// A bot listed twice costs one GetApp + one GetUserSiteID (dedup before validate).
+func TestHandler_AddMembers_DuplicateBot_ValidatedOnce(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
-
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		User:  model.SubscriptionUser{ID: "u1", Account: "alice"},
 		Roles: []model.Role{model.RoleOwner},
@@ -1087,16 +1204,117 @@ func TestHandler_AddMembers_RejectsDirectBot(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Type: model.RoomTypeChannel, UserCount: 1,
 	}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "weather.bot").Times(1).Return(
+		&model.App{ID: "app1", Assistant: &model.AppAssistant{Enabled: true, Name: "weather.bot"}}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Times(1).Return("site-a", nil)
+	expectAllAccountsExist(store)
 
 	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
 		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
 	}
-	req := model.AddMembersRequest{
-		Users: []string{"weather.bot"},
+	_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+		model.AddMembersRequest{Users: []string{"weather.bot", "weather.bot"}})
+	require.NoError(t, err)
+}
+
+// For a bot-owner target the last-member guard is skipped but the last-owner
+// guard still fires — a sole bot-owner cannot be stranded.
+func TestHandler_RemoveMember_BotOwnerTarget_LastOwnerGuardApplies(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	botOwnerSub := &model.Subscription{
+		ID: "s9", User: model.SubscriptionUser{ID: "u9", Account: "weather.bot", IsBot: true},
+		RoomID: "r1", Roles: []model.Role{model.RoleOwner},
 	}
-	_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+	requesterSub := &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", Roles: []model.Role{model.RoleOwner},
+	}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "weather.bot").
+		Return(&SubscriptionWithMembership{Subscription: botOwnerSub, HasIndividualMembership: true}, nil)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(requesterSub, nil)
+	// Owner target → counts fetched; last-owner guard fires on OwnerCount<=1.
+	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
+		Return(&RoomCounts{MemberCount: 2, HumanCount: 1, OwnerCount: 1}, nil)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
+	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+		model.RemoveMemberRequest{RoomID: "r1", Account: "weather.bot"})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errBotInChannel))
+	assert.True(t, errors.Is(err, errLastOwnerCannotLeave))
+}
+
+// A bot/pseudo principal must never fetch room-key material (pull-side guard).
+func TestHandler_GetRoomKey_BotRequester_Forbidden(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	// Guard fires before any store read.
+	keyStore := NewMockRoomKeyStore(ctrl)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
+	_, err := handler.getRoomKey(ctxParams(map[string]string{"account": "p_hook", "roomID": "r1"}))
+	require.Error(t, err)
+	var ec *errcode.Error
+	require.True(t, errors.As(err, &ec))
+	assert.Equal(t, errcode.CodeForbidden, ec.Code)
+}
+
+func TestHandler_RemoveMember_BotTarget_SkipsMemberGuards(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	botSub := &model.Subscription{
+		ID: "s9", User: model.SubscriptionUser{ID: "u9", Account: "weather.bot", IsBot: true},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember},
+	}
+	ownerSub := &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", Roles: []model.Role{model.RoleOwner},
+	}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "weather.bot").
+		Return(&SubscriptionWithMembership{Subscription: botSub, HasIndividualMembership: true}, nil)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(ownerSub, nil)
+	// No CountMembersAndOwners expectation: a non-owner bot target skips the guard.
+	var publishedData []byte
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(_ context.Context, _ string, data []byte, _ string) error {
+		publishedData = data
+		return nil
+	}, nil, nil, 0)
+	resp, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "weather.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", resp.Status)
+	var published model.RemoveMemberRequest
+	require.NoError(t, json.Unmarshal(publishedData, &published))
+	assert.Equal(t, "weather.bot", published.Account)
+}
+
+func TestHandler_RemoveMember_LastHumanWithBotsPresent_Rejected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	sub := &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember},
+	}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
+		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
+	// Two subs (alice + a bot) but one human: removing the last human is blocked.
+	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
+		Return(&RoomCounts{MemberCount: 2, HumanCount: 1, OwnerCount: 1}, nil)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
+	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errCannotRemoveLastMember))
+}
+
+func TestHandler_UpdateRole_BotPromotion_Rejected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	// The bot check fires before any store read, so no store expectations.
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
+	_, err := handler.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+		model.UpdateRoleRequest{RoomID: "r1", Account: "weather.bot", NewRole: model.RoleOwner})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errBotCannotBeOwner))
 }
 
 func TestHandler_AddMembers_SilentlyFiltersBotsFromChannelRefs(t *testing.T) {

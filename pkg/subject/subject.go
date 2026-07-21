@@ -238,6 +238,14 @@ func InboxMemberEventSubjects(siteID string) []string {
 	}
 }
 
+// BotDelivery is the subject the backend publishes bot-platform delivery events
+// to: `chat.server.bot.delivery.{siteID}`. Under chat.server.* (like the push lane)
+// so client JWTs cannot subscribe. Membership and (later) message events share it,
+// distinguished by BotEvent.Type — the platform dispatches on that, not the subject.
+func BotDelivery(siteID string) string {
+	return fmt.Sprintf("chat.server.bot.delivery.%s", siteID)
+}
+
 func MsgCanonicalCreated(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.created", siteID)
 }

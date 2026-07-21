@@ -45,6 +45,7 @@ func TestHandler_ProcessRemoveMember_FallsBackToNowOnInvalidTimestamp(t *testing
 	// rejection.
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().GetUserWithMembership(gomock.Any(), "r1", "alice").Return(nil, fmt.Errorf("db error"))
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
@@ -65,6 +66,7 @@ func TestHandler_ProcessRemoveMember_FallsBackToNowOnInvalidTimestamp(t *testing
 func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID  = "room-1"
@@ -148,6 +150,7 @@ func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID  = "room-1"
@@ -205,6 +208,7 @@ func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			store := NewMockSubscriptionStore(ctrl)
+			store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 			const (
 				roomID  = "room-1"
@@ -249,6 +253,7 @@ func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted(t *testing.T) {
 func TestHandler_ProcessRemoveMember_OwnerRemovesIndividual(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID    = "room-1"
@@ -322,6 +327,7 @@ func TestHandler_ProcessAddMembers_FallsBackToNowOnInvalidTimestamp(t *testing.T
 	// rejection.
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(nil, fmt.Errorf("db error"))
 	// The three up-front reads now run concurrently, so candidates/has-orgs are
 	// issued alongside GetRoom; their results are discarded once GetRoom errors.
@@ -346,6 +352,7 @@ func TestHandler_ProcessAddMembers_FallsBackToNowOnInvalidTimestamp(t *testing.T
 func TestHandler_ProcessAddMembers(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -423,6 +430,7 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 func TestHandler_ProcessAddMembers_WritesIndividualWhenTableNonEmpty(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
@@ -455,6 +463,7 @@ func TestHandler_ProcessAddMembers_WritesIndividualWhenTableNonEmpty(t *testing.
 func TestHandler_ProcessAddMembers_SubscriptionOnlyWhenTableEmpty(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
@@ -481,6 +490,7 @@ func TestHandler_ProcessAddMembers_SubscriptionOnlyWhenTableEmpty(t *testing.T) 
 func TestHandler_ProcessAddMembers_DirectAdd_ExistingIndividualNotReinserted(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -537,6 +547,7 @@ func TestHandler_ProcessAddMembers_DirectAdd_ExistingIndividualNotReinserted(t *
 func TestHandler_ProcessAddMembers_PublishesSubscriptionUpdateBeforeRoomKey(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	// Wire both the regular publish callback and the keySender to a single
 	// mockPublisher so we get one chronological timeline across both event kinds.
@@ -596,6 +607,7 @@ func TestHandler_ProcessAddMembers_PublishesSubscriptionUpdateBeforeRoomKey(t *t
 func TestHandler_ProcessAddMembers_HistoryAll(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
@@ -656,6 +668,7 @@ func findMemberAddEvent(t *testing.T, published []publishedMsg, roomID string) (
 func TestHandler_ProcessAddMembers_RestrictedPropagatesPointer(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -721,6 +734,7 @@ func TestHandler_ProcessAddMembers_RestrictedPropagatesPointer(t *testing.T) {
 func TestHandler_ProcessAddMembers_UnrestrictedOmitsFieldFromWire(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -764,6 +778,7 @@ func TestHandler_ProcessAddMembers_UnrestrictedOmitsFieldFromWire(t *testing.T) 
 func TestHandler_ProcessAddMembers_WithOrgs(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
@@ -825,6 +840,7 @@ func requireNoMembersKey(t *testing.T, payload []byte, context string) {
 func TestHandler_ProcessAddMembers_RoomEventCarriesEnrichedMembers(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -894,6 +910,7 @@ func TestHandler_ProcessAddMembers_RoomEventCarriesEnrichedMembers(t *testing.T)
 func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -1082,6 +1099,7 @@ func TestHandler_ProcessAddMembers_OrgDisplayFetchErrorFailsBeforeWrites(t *test
 func TestHandler_ProcessAddMembers_BackfillUserMissing(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
@@ -1127,6 +1145,7 @@ func TestHandler_ProcessAddMembers_BackfillUserMissing(t *testing.T) {
 func TestHandler_ProcessAddMembers_UserNotFound(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
@@ -1161,6 +1180,7 @@ func TestHandler_ProcessAddMembers_UserNotFound(t *testing.T) {
 func TestHandler_ProcessAddMembers_MultipleSiteInbox(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
@@ -1223,6 +1243,7 @@ func TestHandler_ProcessAddMembers_MultipleSiteInbox(t *testing.T) {
 func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID    = "room-1"
@@ -1293,6 +1314,7 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 func TestHandler_ProcessRemoveMember_CrossSiteInbox(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID    = "room-1"
@@ -1352,6 +1374,7 @@ func TestHandler_ProcessRemoveMember_CrossSiteInbox(t *testing.T) {
 func TestHandler_ProcessRemoveMember_UnmarshalError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
 
 	err := h.processRemoveMember(context.Background(), []byte("{not json"))
@@ -1362,6 +1385,7 @@ func TestHandler_ProcessRemoveMember_UnmarshalError(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_GetUserError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(nil, fmt.Errorf("db down"))
@@ -1378,6 +1402,7 @@ func TestHandler_ProcessRemoveIndividual_GetUserError(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_DeleteRoomMemberError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
@@ -1400,6 +1425,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteRoomMemberError(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_DualDemoteError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
@@ -1426,6 +1452,7 @@ func TestHandler_ProcessRemoveIndividual_DualDemoteError(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
@@ -1451,6 +1478,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
@@ -1479,6 +1507,7 @@ func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T
 func TestHandler_ProcessAddMembers_ExistingOrgsWritesIndividuals(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
@@ -1528,6 +1557,7 @@ func TestHandler_ProcessAddMembers_ExistingOrgsWritesIndividuals(t *testing.T) {
 func TestHandler_ProcessAddMembers_OrgToIndividualUpgrade(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "room-1"
 	requestID := idgen.GenerateRequestID()
@@ -1640,6 +1670,7 @@ func TestHandler_ProcessAddMembers_OrgReAddAlreadyPresent_NoEvent(t *testing.T) 
 func TestHandler_ProcessRemoveIndividual_InboxFailurePropagates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID    = "room-1"
@@ -1685,6 +1716,7 @@ func TestHandler_ProcessRemoveIndividual_InboxFailurePropagates(t *testing.T) {
 func TestHandler_ProcessRemoveOrg_InboxFailurePropagates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const (
 		roomID     = "room-1"
@@ -1726,6 +1758,7 @@ func TestHandler_ProcessRemoveOrg_InboxFailurePropagates(t *testing.T) {
 func TestHandler_processAddMembers_PublishesSuccessEventToRequesterSubject(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var capturedSubject string
 	var capturedData []byte
@@ -1775,6 +1808,7 @@ func TestHandler_processAddMembers_PublishesSuccessEventToRequesterSubject(t *te
 func TestHandler_processAddMembers_PublishesFailureEventOnError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var capturedSubject string
 	var capturedData []byte
@@ -1882,6 +1916,7 @@ func newAddMembersTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, f
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
 		published = append(published, publishedMsg{subj: subj, data: data})
@@ -1921,6 +1956,442 @@ func setupAddMembersHappyPath(t *testing.T, mockStore *MockSubscriptionStore, ac
 	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+}
+
+func TestHandler_ProcessAddMembers_BotJoin(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	// After the add commits, the room's only bot is weather.bot.
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return([]string{"weather.bot"}, nil).AnyTimes()
+	setupAddMembersHappyPath(t, store, []string{"bob", "weather.bot"})
+
+	var published []publishedMsg
+	botMsgIDs := map[string]string{} // account -> Nats-Msg-Id
+	keyPub := &mockPublisher{}
+	h := NewHandler(store, "site-A", func(_ context.Context, subj string, data []byte, msgID string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		if subj == subject.BotDelivery("site-A") {
+			var e model.NatsEvent
+			require.NoError(t, json.Unmarshal(data, &e))
+			botMsgIDs[e.Subscriptions[0]] = msgID
+		}
+		return nil
+	}, testKeyStore, roomkeysender.NewSender(keyPub))
+
+	req := model.AddMembersRequest{
+		RoomID: "r1", Users: []string{"bob", "weather.bot"},
+		RequesterAccount: "alice", RequesterID: "u_alice", Timestamp: 1747000000000,
+	}
+	data, _ := json.Marshal(req)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+	require.NoError(t, h.processAddMembers(ctx, data))
+
+	// (b) 1.0 parity: bob (human) joining notifies the room's bot; weather.bot
+	// joining notifies nobody (it's the only bot, dropped from its own recipients).
+	// So exactly one room_join — subject bob, recipient weather.bot. The
+	// Nats-Msg-Id is request-scoped and keyed on the joiner, not the recipient.
+	assert.Equal(t, "botdelivery:room_join:r1:bob:"+testRequestID, botMsgIDs["weather.bot"])
+
+	var joins []model.NatsEvent
+	for _, p := range published {
+		if p.subj != subject.BotDelivery("site-A") {
+			continue
+		}
+		var evt model.NatsEvent
+		require.NoError(t, json.Unmarshal(p.data, &evt))
+		joins = append(joins, evt)
+	}
+	require.Len(t, joins, 1, "one room_join: bob joining, fanned out to the room's bot")
+	evt := joins[0]
+	assert.Equal(t, model.BotEventRoomJoin, evt.Type)
+	assert.Equal(t, []string{"weather.bot"}, evt.Subscriptions, "the room's bot is the recipient")
+	assert.Equal(t, "site-A", evt.Origin)
+	assert.NotEmpty(t, evt.Timestamp)
+	var d model.BotRoomData
+	require.NoError(t, json.Unmarshal(evt.Data, &d))
+	assert.Equal(t, "r1", d.Room.ID)
+	assert.Equal(t, "deal team", d.Room.Name)
+	assert.Equal(t, model.RoomTypeChannel, d.Room.Type)
+	assert.Equal(t, "u_bob", d.User.ID)
+	assert.Equal(t, "bob", d.User.Username, "data.user is the joiner")
+	assert.Equal(t, "X", d.User.Name)
+	assert.Equal(t, "X", d.User.EngName)
+
+	// Bots get no per-user subscription.update.
+	subjSet := map[string]bool{}
+	for _, p := range published {
+		subjSet[p.subj] = true
+	}
+	assert.True(t, subjSet[subject.SubscriptionUpdate("bob")], "human still gets subscription.update")
+	assert.False(t, subjSet[subject.SubscriptionUpdate("weather.bot")], "bot must not get subscription.update")
+
+	// Key fan-out reaches the human only.
+	keyPub.mu.Lock()
+	defer keyPub.mu.Unlock()
+	require.Len(t, keyPub.subjects, 1, "exactly one key delivery (the human)")
+	assert.Equal(t, subject.RoomKeyUpdate("bob"), keyPub.subjects[0])
+}
+
+// room_join publishes right after the sub commit, so a later handler failure
+// (whose redelivery recomputes needSub empty) must NOT lose it.
+func TestHandler_ProcessAddMembers_BotJoin_SurvivesLaterFailure(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	// A pre-existing bot (helper.bot) is in the room, so weather.bot joining has a
+	// recipient and the room_join actually fires before the later failure point.
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return([]string{"helper.bot", "weather.bot"}, nil).AnyTimes()
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-A",
+	}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").
+		Return([]AddMemberCandidate{{Account: "weather.bot"}}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"weather.bot"}).
+		Return([]model.User{{ID: "u_wb", Account: "weather.bot", SiteID: "site-A"}}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u_alice", Account: "alice", SiteID: "site-A"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(false, errors.New("mongo down"))
+
+	var joinPublished bool
+	h := NewHandler(store, "site-A", func(_ context.Context, subj string, _ []byte, _ string) error {
+		if subj == subject.BotDelivery("site-A") {
+			joinPublished = true
+		}
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"weather.bot"}, RequesterAccount: "alice", Timestamp: 1}
+	data, _ := json.Marshal(req)
+	err := h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data)
+	require.Error(t, err, "count-delta failure still errors the delivery")
+	assert.True(t, joinPublished, "room_join must already be out before the failure point")
+}
+
+// An already-subscribed bot (needSub empty) must not re-emit room_join.
+func TestHandler_ProcessAddMembers_BotAlreadySubscribed_NoJoin(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-A",
+	}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").
+		Return([]AddMemberCandidate{{Account: "weather.bot", HasSubscription: true}}, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+
+	var published []publishedMsg
+	h := NewHandler(store, "site-A", func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"weather.bot"}, RequesterAccount: "alice", Timestamp: 1}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data))
+	for _, p := range published {
+		assert.NotEqual(t, subject.BotDelivery("site-A"), p.subj, "no room_join for an already-subscribed bot")
+	}
+}
+
+// A failed bot-delivery publish is best-effort and must not fail the handler.
+func TestHandler_ProcessAddMembers_BotDeliveryPublishFailure_LogsAndContinues(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	// A pre-existing bot makes weather.bot's join actually publish (to helper.bot),
+	// so the injected publish failure is exercised.
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return([]string{"helper.bot", "weather.bot"}, nil).AnyTimes()
+	setupAddMembersHappyPath(t, store, []string{"weather.bot"})
+
+	h := NewHandler(store, "site-A", func(_ context.Context, subj string, _ []byte, _ string) error {
+		if subj == subject.BotDelivery("site-A") {
+			return errors.New("nats down")
+		}
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"weather.bot"}, RequesterAccount: "alice", Timestamp: 1}
+	data, _ := json.Marshal(req)
+	assert.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data),
+		"bot-delivery publish failure is best-effort and must not fail the add")
+}
+
+func TestHandler_ProcessRemoveIndividual_BotLeave(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	const (
+		roomID  = "room-1"
+		account = "weather.bot"
+		siteID  = "site-a"
+	)
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).
+		Return(&UserWithMembership{User: model.User{ID: "u9", Account: account, SiteID: siteID}}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u9").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
+		ID: "u1", Account: "alice", SiteID: siteID, EngName: "Alice", ChineseName: "A",
+	}, nil)
+	// No GetSubscriptionAccounts: bot removal skips the key rotation.
+
+	var published []publishedMsg
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	var leaves []model.NatsEvent
+	for _, p := range published {
+		if p.subj != subject.BotDelivery(siteID) {
+			continue
+		}
+		var evt model.NatsEvent
+		require.NoError(t, json.Unmarshal(p.data, &evt))
+		leaves = append(leaves, evt)
+	}
+	require.Len(t, leaves, 1, "one room_leave for the removed bot")
+	assert.Equal(t, model.BotEventRoomLeave, leaves[0].Type)
+	assert.Equal(t, []string{account}, leaves[0].Subscriptions)
+	var d model.BotRoomData
+	require.NoError(t, json.Unmarshal(leaves[0].Data, &d))
+	assert.Equal(t, roomID, d.Room.ID)
+	assert.Empty(t, d.Room.Name, "leave omits room.name")
+	assert.Equal(t, "u9", d.User.ID)
+	assert.Equal(t, account, d.User.Username, "data.user is the removed bot")
+
+	// Member-removed room events still fire; the bot gets no subscription.update.
+	subjSet := map[string]bool{}
+	for _, p := range published {
+		subjSet[p.subj] = true
+	}
+	assert.True(t, subjSet[subject.MemberEvent(roomID)])
+	assert.True(t, subjSet[subject.InboxInternal(siteID, model.InboxMemberRemoved)])
+	assert.False(t, subjSet[subject.SubscriptionUpdate(account)], "bot must not get subscription.update")
+}
+
+// A human joining a room that already has a bot must notify the bot (1.0
+// parity): data.user is the joining human, recipient is the room's bot.
+func TestHandler_ProcessAddMembers_HumanJoin_NotifiesRoomBots(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	// weather.bot is already in the room; only bob is newly added.
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return([]string{"weather.bot"}, nil).AnyTimes()
+	setupAddMembersHappyPath(t, store, []string{"bob"})
+
+	var published []publishedMsg
+	h := NewHandler(store, "site-A", func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.AddMembersRequest{
+		RoomID: "r1", Users: []string{"bob"},
+		RequesterAccount: "alice", RequesterID: "u_alice", Timestamp: 1747000000000,
+	}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data))
+
+	var joins []model.NatsEvent
+	for _, p := range published {
+		if p.subj == subject.BotDelivery("site-A") {
+			var evt model.NatsEvent
+			require.NoError(t, json.Unmarshal(p.data, &evt))
+			joins = append(joins, evt)
+		}
+	}
+	require.Len(t, joins, 1, "the room's bot is told a human joined")
+	assert.Equal(t, model.BotEventRoomJoin, joins[0].Type)
+	assert.Equal(t, []string{"weather.bot"}, joins[0].Subscriptions, "recipient is the room's bot")
+	var d model.BotRoomData
+	require.NoError(t, json.Unmarshal(joins[0].Data, &d))
+	assert.Equal(t, "bob", d.User.Username, "data.user is the joining human")
+	assert.Equal(t, "u_bob", d.User.ID)
+}
+
+// A human removed from a room with a bot must notify the bot (1.0 parity):
+// data.user is the removed human, recipient is the surviving bot.
+func TestHandler_ProcessRemoveIndividual_HumanLeave_NotifiesRoomBots(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const (
+		roomID    = "room-1"
+		account   = "bob"
+		requester = "alice"
+		siteID    = "site-a"
+	)
+	// weather.bot survives in the room after bob is removed.
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), roomID).Return([]string{"weather.bot"}, nil).AnyTimes()
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).
+		Return(&UserWithMembership{User: model.User{ID: "u2", Account: account, SiteID: siteID, EngName: "Bob", ChineseName: "鮑伯"}}, nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u2").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// Human removal rotates the key; no human survivors here so the fan-out no-ops.
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).
+		Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID, EngName: "Alice", ChineseName: "愛"}, nil)
+
+	var published []publishedMsg
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: requester, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	var leaves []model.NatsEvent
+	for _, p := range published {
+		if p.subj == subject.BotDelivery(siteID) {
+			var evt model.NatsEvent
+			require.NoError(t, json.Unmarshal(p.data, &evt))
+			leaves = append(leaves, evt)
+		}
+	}
+	require.Len(t, leaves, 1, "the surviving bot is told a human was removed")
+	assert.Equal(t, model.BotEventRoomLeave, leaves[0].Type)
+	assert.Equal(t, []string{"weather.bot"}, leaves[0].Subscriptions, "recipient is the surviving bot, not the human")
+	var d model.BotRoomData
+	require.NoError(t, json.Unmarshal(leaves[0].Data, &d))
+	assert.Equal(t, "bob", d.User.Username, "data.user is the removed human")
+	assert.Equal(t, "u2", d.User.ID)
+}
+
+// A failed bot-roster read is best-effort: the remove still succeeds, and a
+// departing bot still hears its own room_leave (recipients fall back to itself).
+func TestHandler_ProcessRemoveIndividual_BotLeave_RosterReadFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const (
+		roomID  = "room-1"
+		account = "weather.bot"
+		siteID  = "site-a"
+	)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), roomID).Return(nil, errors.New("mongo down")).AnyTimes()
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).
+		Return(&UserWithMembership{User: model.User{ID: "u9", Account: account, SiteID: siteID}}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u9").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: siteID}, nil)
+
+	var leaves []model.NatsEvent
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		if subj == subject.BotDelivery(siteID) {
+			var e model.NatsEvent
+			require.NoError(t, json.Unmarshal(data, &e))
+			leaves = append(leaves, e)
+		}
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data), "roster-read failure must not fail the remove")
+	require.Len(t, leaves, 1, "the departing bot still hears its own leave even when the roster read failed")
+	assert.Equal(t, []string{account}, leaves[0].Subscriptions)
+}
+
+// A human removed via org expansion, with a surviving bot in the room, must
+// notify that bot (1.0 parity on the org-remove loop, distinct code from the
+// individual path).
+func TestHandler_ProcessRemoveOrg_HumanLeave_NotifiesSurvivingBot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	const (
+		roomID = "room-1"
+		siteID = "site-a"
+		orgID  = "org-x"
+	)
+	// helper.bot stays in the room after bob's org membership is removed.
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), roomID).Return([]string{"helper.bot"}, nil).AnyTimes()
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).
+		Return([]OrgMemberStatus{{Account: "bob", SiteID: siteID}}, nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.Any()).Return(int64(1), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{"helper.bot"}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: siteID}, nil)
+
+	var leaves []model.NatsEvent
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		if subj == subject.BotDelivery(siteID) {
+			var e model.NatsEvent
+			require.NoError(t, json.Unmarshal(data, &e))
+			leaves = append(leaves, e)
+		}
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", OrgID: orgID, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	require.Len(t, leaves, 1, "the surviving bot is told the human left via org removal")
+	assert.Equal(t, model.BotEventRoomLeave, leaves[0].Type)
+	assert.Equal(t, []string{"helper.bot"}, leaves[0].Subscriptions, "recipient is the surviving bot")
+	var d model.BotRoomData
+	require.NoError(t, json.Unmarshal(leaves[0].Data, &d))
+	assert.Equal(t, "bob", d.User.Username, "data.user is the removed human")
+}
+
+// A bot filed under the removed org (individual row already gone) is swept and
+// must emit room_leave, not a subscription.update.
+func TestHandler_ProcessRemoveOrg_SweptBot_EmitsLeave(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	const (
+		roomID = "room-1"
+		siteID = "site-a"
+		orgID  = "org-x"
+	)
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).
+		Return([]OrgMemberStatus{
+			{Account: "bob", SiteID: siteID},
+			{Account: "helper.bot", SiteID: siteID},
+		}, nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.Any()).Return(int64(2), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{"alice"}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
+		ID: "u1", Account: "alice", SiteID: siteID, EngName: "Alice", ChineseName: "A",
+	}, nil)
+
+	var published []publishedMsg
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", OrgID: orgID, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	subjSet := map[string]bool{}
+	var leaves []model.NatsEvent
+	for _, p := range published {
+		subjSet[p.subj] = true
+		if p.subj == subject.BotDelivery(siteID) {
+			var evt model.NatsEvent
+			require.NoError(t, json.Unmarshal(p.data, &evt))
+			leaves = append(leaves, evt)
+		}
+	}
+	require.Len(t, leaves, 1, "swept bot emits exactly one room_leave")
+	assert.Equal(t, model.BotEventRoomLeave, leaves[0].Type)
+	assert.Equal(t, []string{"helper.bot"}, leaves[0].Subscriptions)
+	assert.True(t, subjSet[subject.SubscriptionUpdate("bob")], "human still gets subscription.update")
+	assert.False(t, subjSet[subject.SubscriptionUpdate("helper.bot")], "swept bot must not get subscription.update")
 }
 
 // The legacy TestProcessAddMembers_RequiresRequestID test pinned the old
@@ -2194,6 +2665,7 @@ func newCreateRoomTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, f
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	var published []publishedMsg
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
 		published = append(published, publishedMsg{subj: subj, data: data})
@@ -2287,6 +2759,7 @@ func channelKeyTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, *Moc
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	mockKeys := NewMockRoomKeyStore(ctrl)
 	pub := &mockPublisher{}
 	h := &Handler{
@@ -3099,6 +3572,7 @@ func newSyncDMTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, *dmPu
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	capture := &dmPublishCapture{}
 	h := &Handler{siteID: "site-a", store: store, publish: capture.fn}
 	return h, store, capture
@@ -3275,6 +3749,7 @@ func TestHandleSyncCreateDM_SelfDM_StoreErrors(t *testing.T) {
 func TestHandleSyncCreateDM_SelfDM_ProvisionsDEK(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
 		{ID: "u_alice", Account: "alice", SiteID: "site-a"},
 	}, nil)
@@ -3690,6 +4165,7 @@ func TestHandleSyncCreateDM_SameSite_NoInbox(t *testing.T) {
 func TestHandleSyncCreateDM_InboxPublishFails_FailsRequest(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	failingPublish := func(_ context.Context, subj string, _ []byte, _ string) error {
 		if strings.HasPrefix(subj, "chat.outbox.") {
 			return errors.New("jetstream pubAck failed")
@@ -3851,6 +4327,7 @@ func findInboxMemberAdded(t *testing.T, captured []inboxCapturedPublish, siteID 
 func TestProcessCreateRoom_DM_PublishesLocalInbox(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	publish, getCaptured := captureInboxPublishes()
 	h := &Handler{store: mockStore, publish: publish, siteID: "site-A", keyStore: testKeyStore, keySender: testKeySender}
 	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
@@ -3904,6 +4381,7 @@ func TestProcessCreateRoom_DM_PublishesLocalInbox(t *testing.T) {
 func TestProcessCreateRoom_Channel_PublishesLocalInbox(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	publish, getCaptured := captureInboxPublishes()
 	h := &Handler{store: mockStore, publish: publish, siteID: "site-A", keyStore: testKeyStore, keySender: testKeySender}
 	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
@@ -4037,6 +4515,7 @@ func TestBuildAndFanOutRoomKey_SendsToAllMembersIncludingRemoteSite(t *testing.T
 func TestProcessCreateRoom_KeyStoreGetError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	keyStore := NewMockRoomKeyStore(ctrl)
 
 	requester := &model.User{ID: "u_alice", Account: "alice", SiteID: "site-a"}
@@ -4067,6 +4546,7 @@ func TestProcessCreateRoom_KeyStoreGetError(t *testing.T) {
 func TestProcessAddMembers_FansOutKeyToNewAccountsOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	keyStore := NewMockRoomKeyStore(ctrl)
 	pub := &mockPublisher{}
 	keySender := roomkeysender.NewSender(pub)
@@ -4111,6 +4591,7 @@ func TestProcessAddMembers_FansOutKeyToNewAccountsOnly(t *testing.T) {
 func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	keyStore := NewMockRoomKeyStore(ctrl)
 
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
@@ -4147,6 +4628,7 @@ func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
 func TestProcessAddMembers_TransientErrorWhenValkeyFails(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	keyStore := NewMockRoomKeyStore(ctrl)
 
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
@@ -4181,6 +4663,7 @@ func TestProcessAddMembers_TransientErrorWhenValkeyFails(t *testing.T) {
 func TestProcessAddMembers_RejectsNonChannel(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Type: model.RoomTypeDM, SiteID: "site-a",
 	}, nil)
@@ -4202,6 +4685,7 @@ func TestProcessAddMembers_RejectsNonChannel(t *testing.T) {
 func TestProcessRemoveMember_RejectsNonChannel(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender)
 	req := model.RemoveMemberRequest{RoomID: "r1", Requester: "alice", Account: "bob", RoomType: model.RoomTypeDM}
@@ -4217,6 +4701,7 @@ func TestProcessRemoveMember_RejectsNonChannel(t *testing.T) {
 func TestFanOutRoomKeyToSurvivors_SendsToAllSurvivorsIncludingRemoteSite(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	pub := &mockPublisher{}
 	keySender := roomkeysender.NewSender(pub)
 
@@ -4242,6 +4727,7 @@ func TestFanOutRoomKeyToSurvivors_SendsToAllSurvivorsIncludingRemoteSite(t *test
 func TestHandler_ProcessAddMembers_BackfillRunsOnFirstOrgTransition(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4283,6 +4769,7 @@ func TestHandler_ProcessAddMembers_BackfillRunsOnFirstOrgTransition(t *testing.T
 func TestHandler_ProcessAddMembers_BackfillSubscriptionAccountsErrorFailsHard(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4316,6 +4803,7 @@ func TestHandler_ProcessAddMembers_BackfillSubscriptionAccountsErrorFailsHard(t 
 func TestHandler_ProcessAddMembers_BackfillFindUsersErrorFailsHard(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4350,6 +4838,7 @@ func TestHandler_ProcessAddMembers_BackfillFindUsersErrorFailsHard(t *testing.T)
 func TestHandler_ProcessAddMembers_BackfillSkippedWhenRoomAlreadyHasOrgs(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4390,6 +4879,7 @@ func TestHandler_ProcessAddMembers_BackfillSkippedWhenRoomAlreadyHasOrgs(t *test
 func TestHandler_ProcessAddMembers_IndividualFilter_DirectAndOrgOverlap(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4446,6 +4936,7 @@ func TestHandler_ProcessAddMembers_IndividualFilter_DirectAndOrgOverlap(t *testi
 func TestHandler_ProcessAddMembers_IndividualFilter_OrgOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4491,6 +4982,7 @@ func TestHandler_ProcessAddMembers_IndividualFilter_OrgOnly(t *testing.T) {
 func TestHandler_ProcessCreateRoom_Channel_IndividualFilter(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	requester := &model.User{ID: "r_id", Account: "r", SiteID: "site-a", EngName: "Req", ChineseName: "請"}
@@ -4544,6 +5036,7 @@ func TestHandler_ProcessCreateRoom_Channel_IndividualFilter(t *testing.T) {
 func TestHandler_ProcessAddMembers_RequesterNotFound(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4604,6 +5097,7 @@ func findSysMsg(t *testing.T, published []publishedMsg, siteID, msgType string) 
 func TestHandler_ProcessAddMembers_Content_Single(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4641,6 +5135,7 @@ func TestHandler_ProcessAddMembers_Content_Single(t *testing.T) {
 func TestHandler_ProcessAddMembers_Content_Multi(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4681,6 +5176,7 @@ func TestHandler_ProcessAddMembers_Content_Multi(t *testing.T) {
 func TestHandler_ProcessAddMembers_RequesterExcludedFromSysMsg(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4733,6 +5229,7 @@ func TestHandler_ProcessAddMembers_RequesterExcludedFromSysMsg(t *testing.T) {
 func TestHandler_ProcessAddMembers_RequesterExcluded_SingleNamed(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -4772,6 +5269,7 @@ func TestHandler_ProcessAddMembers_RequesterExcluded_SingleNamed(t *testing.T) {
 func TestHandler_PublishChannelSysMessages_MembersAddedContent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	var published []publishedMsg
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
@@ -4805,6 +5303,7 @@ func TestHandler_PublishChannelSysMessages_MembersAddedContent(t *testing.T) {
 func TestHandler_PublishChannelSysMessages_SingleNamed(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	var published []publishedMsg
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
 		published = append(published, publishedMsg{subj: subj, data: data})
@@ -4826,6 +5325,7 @@ func TestHandler_PublishChannelSysMessages_SingleNamed(t *testing.T) {
 func TestHandler_PublishChannelSysMessages_OrgsOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	var published []publishedMsg
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
 		published = append(published, publishedMsg{subj: subj, data: data})
@@ -4853,6 +5353,7 @@ func TestHandler_PublishChannelSysMessages_OrgsOnly(t *testing.T) {
 func TestHandler_PublishChannelSysMessages_EmptySkipsMembersAdded(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	var published []publishedMsg
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
 		published = append(published, publishedMsg{subj: subj, data: data})
@@ -4884,6 +5385,7 @@ func TestHandler_PublishChannelSysMessages_EmptySkipsMembersAdded(t *testing.T) 
 func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "bob").
@@ -4916,6 +5418,7 @@ func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "bob").
@@ -4949,6 +5452,7 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 func TestHandler_ProcessRemoveOrg_AllOverlap_SectNameFromUnfiltered(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, "o1").
@@ -4984,6 +5488,7 @@ func TestHandler_ProcessRemoveOrg_AllOverlap_SectNameFromUnfiltered(t *testing.T
 func TestHandler_ProcessRemoveOrg_AllSectNamesEmpty(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, "o1").
@@ -5021,6 +5526,7 @@ func TestHandler_ProcessRemoveOrg_AllSectNamesEmpty(t *testing.T) {
 func TestHandler_ProcessRemoveOrg_OtherOrgCovers_PreservesSub(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	// alice has no individual row, but is still covered by another org row.
@@ -5142,6 +5648,7 @@ func TestProcessCreateRoom_BotDM_SetsParticipantFields(t *testing.T) {
 func TestHandleSyncCreateDM_SetsParticipantFieldsOnInitialCreate(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	h := &Handler{store: mockStore, siteID: "site-A", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }}
 
 	requester := model.User{ID: "u_zzz", Account: "alice", EngName: "Alice", ChineseName: "愛", SiteID: "site-A"}
@@ -5214,6 +5721,7 @@ func TestProcessCreateRoom_Channel_DoesNotSetParticipantFields(t *testing.T) {
 func TestHandler_ProcessAddMembers_Content_OrgAddWithOneMember_UsesMulti(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -5256,6 +5764,7 @@ func TestHandler_ProcessAddMembers_Content_OrgAddWithOneMember_UsesMulti(t *test
 func TestHandler_ProcessAddMembers_HasAnyRoomMembersError_FailsClosed(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	roomID := "r1"
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
@@ -5380,6 +5889,7 @@ func TestHandler_ProcessRemoveOrg_DeptFirstTiebreak(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			store := NewMockSubscriptionStore(ctrl)
+			store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 			roomID := "r1"
 			store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, "o1").Return(tc.members, nil)
@@ -5425,6 +5935,7 @@ func (f *fakeDEKProvisioner) EnsureDEK(_ context.Context, roomID string) error {
 func TestHandleSyncCreateDM_DEKFailure_AbortsBeforeCreate(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
+	mockStore.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
 		{ID: "u_alice", Account: "alice", SiteID: "site-a"},
 		{ID: "u_bob", Account: "bob", SiteID: "site-a"},
@@ -5495,6 +6006,7 @@ func TestFindRemoteSitesForAccounts(t *testing.T) {
 	t.Run("dedupes remote, drops local, preserves siteIDs", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockSubscriptionStore(ctrl)
+		store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 		store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice", "bob", "carol", "dave"}).Return([]model.User{
 			{Account: "alice", SiteID: "site-a"}, // local
 			{Account: "bob", SiteID: "site-b"},   // remote
@@ -5510,6 +6022,7 @@ func TestFindRemoteSitesForAccounts(t *testing.T) {
 	t.Run("empty input returns empty slice", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockSubscriptionStore(ctrl)
+		store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 		h := &Handler{store: store, siteID: "site-a"}
 		got, err := h.findRemoteSitesForAccounts(context.Background(), nil)
 		require.NoError(t, err)
@@ -5520,6 +6033,7 @@ func TestFindRemoteSitesForAccounts(t *testing.T) {
 func TestFindRemoteSitesForAccounts_StoreError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, errors.New("mongo timeout"))
 
 	h := &Handler{store: store, siteID: "site-a"}
@@ -5536,6 +6050,7 @@ func TestProcessRoomRename_MissingRequestID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	// No EXPECT calls — store must not be called.
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error {
@@ -5552,6 +6067,7 @@ func TestProcessRoomRename_InvalidUUID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
@@ -5568,6 +6084,7 @@ func TestProcessRoomRename_UnmarshalFailure(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	requestID := testRequestID
 	var publishedSubjects []string
@@ -5592,6 +6109,7 @@ func TestProcessRoomRename_RoomNotFound(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	requestID := testRequestID
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "renamed").Return(ErrRoomNotFound)
@@ -5621,6 +6139,7 @@ func TestProcessRoomRename_NotChannelRoom(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	requestID := testRequestID
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "renamed").Return(ErrNotChannelRoom)
@@ -5650,6 +6169,7 @@ func TestProcessRoomRename_TransientSubscriptionUpdateError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	requestID := testRequestID
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "renamed").Return(nil)
@@ -5669,6 +6189,7 @@ func TestProcessRoomRename_PublishesRoomRenamedEvent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const roomID, newName = "r1", "renamed"
 	requestID := testRequestID
@@ -5712,6 +6233,7 @@ func TestProcessRoomRename_HappyPathNoRemoteSites(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const roomID, newName = "r1", "renamed"
 	requestID := testRequestID
@@ -5756,6 +6278,7 @@ func TestProcessRoomRename_HappyPathWithRemoteSite(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	const roomID, newName = "r1", "renamed"
 	requestID := testRequestID
@@ -5828,6 +6351,7 @@ func TestProcessRoomRename_ErrorThenOkRetrySequence(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	store := NewMockSubscriptionStore(ctrl)
+	store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	requestID := testRequestID
 
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "x").Return(errors.New("mongo timeout"))
@@ -5983,6 +6507,7 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			store := NewMockSubscriptionStore(ctrl)
+			store.EXPECT().ListBotAccountsInRoom(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 			if tt.setupMock != nil {
 				tt.setupMock(store)
 			}

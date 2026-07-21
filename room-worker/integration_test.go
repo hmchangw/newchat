@@ -395,6 +395,39 @@ func TestMongoStore_DeleteSubscriptionsByAccounts_Integration(t *testing.T) {
 	assert.Equal(t, "carol", subs[0].User.Account)
 }
 
+func TestMongoStore_ListBotAccountsInRoom_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	// r1: one human + two bots; r2 has a bot that must NOT leak into r1's result.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice", IsBot: false},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "weather.bot", IsBot: true},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s3", User: model.SubscriptionUser{ID: "u3", Account: "helper.bot", IsBot: true},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s4", User: model.SubscriptionUser{ID: "u4", Account: "other.bot", IsBot: true},
+		RoomID: "r2", Roles: []model.Role{model.RoleMember}, JoinedAt: time.Now().UTC(),
+	})
+
+	got, err := store.ListBotAccountsInRoom(ctx, "r1")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"weather.bot", "helper.bot"}, got,
+		"only r1's bots — human excluded (u.isBot filter), no cross-room leak, u.account decoded")
+
+	empty, err := store.ListBotAccountsInRoom(ctx, "no-such-room")
+	require.NoError(t, err)
+	assert.Empty(t, empty, "a bot-free room returns no recipients")
+}
+
 func TestMongoStore_ReconcileMemberCounts_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -681,17 +714,36 @@ func TestMongoStore_ListAddMemberCandidates_Integration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := store.ListAddMemberCandidates(ctx, []string{"org-eng"}, nil, roomID)
-	require.NoError(t, err)
-
-	byAccount := map[string]AddMemberCandidate{}
-	for _, c := range got {
-		byAccount[c.Account] = c
+	collect := func(t *testing.T, orgIDs, direct []string) map[string]AddMemberCandidate {
+		t.Helper()
+		got, err := store.ListAddMemberCandidates(ctx, orgIDs, direct, roomID)
+		require.NoError(t, err)
+		byAccount := map[string]AddMemberCandidate{}
+		for _, c := range got {
+			byAccount[c.Account] = c
+		}
+		return byAccount
 	}
-	require.Len(t, byAccount, 3, "bot dave.bot must be excluded")
-	assert.Equal(t, AddMemberCandidate{Account: "alice", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["alice"])
-	assert.Equal(t, AddMemberCandidate{Account: "bob", HasSubscription: true, HasIndividualRoomMember: false}, byAccount["bob"], "bug scenario: sub exists, IRM does not")
-	assert.Equal(t, AddMemberCandidate{Account: "carol", HasSubscription: true, HasIndividualRoomMember: true}, byAccount["carol"])
+
+	t.Run("org expansion excludes bots", func(t *testing.T) {
+		byAccount := collect(t, []string{"org-eng"}, nil)
+		require.Len(t, byAccount, 3, "org-covered bot dave.bot must be excluded")
+		assert.Equal(t, AddMemberCandidate{Account: "alice", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["alice"])
+		assert.Equal(t, AddMemberCandidate{Account: "bob", HasSubscription: true, HasIndividualRoomMember: false}, byAccount["bob"], "bug scenario: sub exists, IRM does not")
+		assert.Equal(t, AddMemberCandidate{Account: "carol", HasSubscription: true, HasIndividualRoomMember: true}, byAccount["carol"])
+	})
+
+	t.Run("explicitly listed bot resolves via the direct-only path", func(t *testing.T) {
+		byAccount := collect(t, nil, []string{"dave.bot"})
+		require.Len(t, byAccount, 1)
+		assert.Equal(t, AddMemberCandidate{Account: "dave.bot", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["dave.bot"])
+	})
+
+	t.Run("explicitly listed bot resolves alongside org expansion", func(t *testing.T) {
+		byAccount := collect(t, []string{"org-eng"}, []string{"dave.bot"})
+		require.Len(t, byAccount, 4, "direct bot admitted, org arms still bot-free")
+		assert.Contains(t, byAccount, "dave.bot")
+	})
 }
 
 // newIntegrationHandler creates a Handler wired to the given store and siteID with a no-op publish function.

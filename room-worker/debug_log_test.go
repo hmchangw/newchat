@@ -134,6 +134,7 @@ func TestProcessRemoveMember_DebugEdge(t *testing.T) {
 		store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil).AnyTimes()
 		store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil).AnyTimes()
 		store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil).AnyTimes()
+		store.EXPECT().ListBotAccountsInRoom(gomock.Any(), roomID).Return(nil, nil).AnyTimes()
 		h := NewHandler(store, siteID, func(context.Context, string, []byte, string) error { return nil }, testKeyStore, testKeySender)
 		req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
 		data, _ := json.Marshal(req)

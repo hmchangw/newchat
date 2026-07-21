@@ -215,6 +215,16 @@ func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs [
 	if withLastMsg {
 		s.enrichLastMessage(c, subs, idxBySite, roomIDsBySite)
 	}
+	// Bot key delivery is out of scope for this PR: strip key material from the
+	// bot's subscription-list bootstrap. Every list/get entry point funnels here.
+	if model.IsBot(c.Param("account")) || model.IsPlatformAdminAccount(c.Param("account")) {
+		for i := range subs {
+			if subs[i].Room != nil {
+				subs[i].Room.PrivateKey = nil
+				subs[i].Room.KeyVersion = nil
+			}
+		}
+	}
 	// Single-item lookups (dropDeleted=false) keep a cross-site Del- sub room-less;
 	// only the list/count paths remove it.
 	if !dropDeleted || len(dropped) == 0 {

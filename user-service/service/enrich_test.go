@@ -453,3 +453,47 @@ func TestApplyRoomInfo_ComputesHasGroupMention_CrossSite(t *testing.T) {
 		})
 	}
 }
+
+// A bot/pseudo principal listing its own subscriptions gets no room-key
+// material; a human requester keeps it.
+func TestEnrichWithRoomInfo_BotRequester_StripsKeyMaterial(t *testing.T) {
+	secret := make([]byte, roomKeySecretLen)
+	for i := range secret {
+		secret[i] = 0x42
+	}
+	mkSubs := func() []model.EnrichedSubscription {
+		return []model.EnrichedSubscription{{
+			Subscription: model.Subscription{
+				ID: "s1", RoomID: "r1", SiteID: "site-a",
+				RoomType: model.RoomTypeChannel,
+			},
+			RoomName:    "general",
+			RoomKeyPriv: append([]byte(nil), secret...),
+			RoomKeyVer:  3,
+		}}
+	}
+	svc := &UserService{siteID: "site-a"}
+
+	t.Run("p_ pseudo requester gets no key", func(t *testing.T) {
+		got := svc.enrichWithRoomInfoAndLastMsg(ctx("p_hook", "site-a"), mkSubs(), false, false)
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].Room)
+		assert.Nil(t, got[0].Room.PrivateKey, "bot principal must not receive the room key")
+		assert.Nil(t, got[0].Room.KeyVersion)
+	})
+
+	t.Run("dotted bot requester gets no key", func(t *testing.T) {
+		got := svc.enrichWithRoomInfoAndLastMsg(ctx("weather.bot", "site-a"), mkSubs(), false, false)
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].Room)
+		assert.Nil(t, got[0].Room.PrivateKey)
+	})
+
+	t.Run("human requester keeps the key", func(t *testing.T) {
+		got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), mkSubs(), false, false)
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].Room)
+		require.NotNil(t, got[0].Room.PrivateKey)
+		assert.NotEmpty(t, *got[0].Room.PrivateKey)
+	})
+}
