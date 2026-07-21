@@ -1323,3 +1323,14 @@ func MigrationOplogWildcard(siteID string) string {
 func OrgSyncEmployeesUpsert(centralSiteID string) string {
 	return fmt.Sprintf("chat.hr.%s.employees.upsert", centralSiteID)
 }
+
+// OrgSyncUsersUpsert is the subject the HR-feed producer publishes users.upsert
+// on, at the central site.
+func OrgSyncUsersUpsert(centralSiteID string) string {
+	return fmt.Sprintf("chat.hr.%s.users.upsert", centralSiteID)
+}
+
+// EmployeesQuit is the per-site subject for departed-employee batches.
+func EmployeesQuit(siteID string) string {
+	return fmt.Sprintf("chat.hr.%s.employees.quit", siteID)
+}

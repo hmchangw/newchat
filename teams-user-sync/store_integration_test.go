@@ -46,9 +46,9 @@ func TestMongoStore_HRSiteIDs(t *testing.T) {
 	ctx := context.Background()
 	store := newMongoStore(db, db)
 
-	_, err := db.Collection("hr").InsertMany(ctx, []any{
-		bson.M{"accountName": "alice", "siteID": "site-a", "unrelated": "x"},
-		bson.M{"accountName": "bob", "siteID": "site-b"},
+	_, err := db.Collection("hr_employee").InsertMany(ctx, []any{
+		bson.M{"account": "alice", "siteId": "site-a", "unrelated": "x"},
+		bson.M{"account": "bob", "siteId": "site-b"},
 	})
 	require.NoError(t, err)
 

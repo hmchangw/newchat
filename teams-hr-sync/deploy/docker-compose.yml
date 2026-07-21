@@ -1,0 +1,29 @@
+name: teams-hr-sync
+
+# One invocation = one sync run. In production this image is triggered by a
+# Kubernetes CronJob (schedule + concurrencyPolicy: Forbid are owned by
+# ops/IaC); this compose file runs a single ad-hoc sync against local deps.
+# No stream bootstrap here — the HR stream is owned by its consumer side.
+services:
+  teams-hr-sync:
+    build:
+      context: ../..
+      dockerfile: teams-hr-sync/deploy/Dockerfile
+    restart: "no"
+    environment:
+      - TEAMS_TENANT_ID=${TEAMS_TENANT_ID}
+      - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
+      - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
+      - GRAPH_PAGE_SIZE=500
+      - SYNC_GROUPS=${SYNC_GROUPS}
+      - ORG_TYPE=group
+      - CENTRAL_SITE_ID=${CENTRAL_SITE_ID}
+      - MONGO_READ_URI=mongodb://mongodb:27017
+      - MONGO_READ_DB=chat
+      - NATS_URL=nats://nats:4222
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

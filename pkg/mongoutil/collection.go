@@ -167,11 +167,18 @@ func (c *Collection[T]) BulkUpsert(ctx context.Context, items []T, filter func(T
 	}
 	models := make([]mongo.WriteModel, 0, len(items))
 	for _, it := range items {
-		setDoc, err := bsonSetWithoutID(it)
+		setDoc, id, err := bsonSetWithoutID(it)
 		if err != nil {
 			return nil, fmt.Errorf("bulk upsert %s marshal item: %w", c.name, err)
 		}
-		models = append(models, UpsertModel(filter(it), bson.M{"$set": setDoc}))
+		update := bson.M{"$set": setDoc}
+		if id != nil {
+			// Seed the domain _id on insert so a non-_id filter doesn't fall
+			// back to a Mongo-generated ObjectID (BulkUpsertByID's filter _id
+			// matches this, so no _id conflict there).
+			update["$setOnInsert"] = bson.M{"_id": id}
+		}
+		models = append(models, UpsertModel(filter(it), update))
 	}
 	return c.BulkWrite(ctx, models)
 }

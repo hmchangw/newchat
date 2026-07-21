@@ -594,9 +594,9 @@ func TestSearchSyncSpotlightOrg_Integration(t *testing.T) {
 	require.NoError(t, err, "create HR stream")
 
 	subj := subject.OrgSyncEmployeesUpsert(centralSiteID)
-	publish := func(employees []SpotlightOrgIndex, ts int64) {
+	publish := func(employees []SpotlightOrgIndex) {
 		t.Helper()
-		raw := hrBatchJSON(t, ts, employees)
+		raw := hrBatchJSON(t, employees)
 		enc, encErr := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
 		require.NoError(t, encErr)
 		compressed := enc.EncodeAll(raw, nil)
@@ -620,7 +620,7 @@ func TestSearchSyncSpotlightOrg_Integration(t *testing.T) {
 	publish([]SpotlightOrgIndex{
 		{SectID: "S1", SectName: "Engineering", DeptID: "D1", DeptName: "Tech"},
 		{SectID: "S2", SectName: "Sales", DeptID: "D2", DeptName: "Biz"},
-	}, time.Now().UnixMilli())
+	})
 
 	batch, err := cons.Fetch(1, jetstream.FetchMaxWait(10*time.Second))
 	require.NoError(t, err)
@@ -643,7 +643,7 @@ func TestSearchSyncSpotlightOrg_Integration(t *testing.T) {
 
 	publish([]SpotlightOrgIndex{
 		{SectID: "S1", SectName: "Engineering Renamed"},
-	}, time.Now().UnixMilli()+1)
+	})
 
 	batch, err = cons.Fetch(1, jetstream.FetchMaxWait(10*time.Second))
 	require.NoError(t, err)

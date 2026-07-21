@@ -1,0 +1,25 @@
+{
+  "groups": [
+    {
+      "id": "g-eng",
+      "displayName": "Engineering",
+      "description": "Engineering department",
+      "members": [
+        {"@odata.type": "#microsoft.graph.user", "id": "u1", "userPrincipalName": "alice.wu@corp.example", "displayName": "愛麗絲", "givenName": "Alice", "surname": "Wu", "employeeId": "EMP001"},
+        {"@odata.type": "#microsoft.graph.user", "id": "u2", "userPrincipalName": "bob.lin@corp.example", "displayName": "鮑伯", "givenName": "Bob", "surname": "Lin", "employeeId": "EMP002"},
+        {"@odata.type": "#microsoft.graph.user", "id": "u3", "userPrincipalName": "carol.chen@corp.example", "displayName": "卡蘿", "givenName": "Carol", "surname": "Chen", "employeeId": "EMP003"},
+        {"@odata.type": "#microsoft.graph.group", "id": "g-nested", "displayName": "Nested Team"}
+      ]
+    },
+    {
+      "id": "g-sales",
+      "displayName": "Sales",
+      "description": "Sales department",
+      "members": [
+        {"@odata.type": "#microsoft.graph.user", "id": "u4", "userPrincipalName": "dave.huang@corp.example", "displayName": "戴夫", "givenName": "Dave", "surname": "Huang", "employeeId": "EMP004"},
+        {"@odata.type": "#microsoft.graph.user", "id": "u5", "userPrincipalName": "eve.tsai@corp.example", "displayName": "伊芙", "givenName": "Eve", "surname": "Tsai", "employeeId": "EMP005"},
+        {"@odata.type": "#microsoft.graph.user", "id": "u6", "userPrincipalName": "frank.kao@corp.example", "displayName": "法蘭克", "givenName": "Frank", "surname": "Kao", "employeeId": "EMP006"}
+      ]
+    }
+  ]
+}
