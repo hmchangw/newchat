@@ -183,5 +183,6 @@ func (s *syncer) syncChat(ctx context.Context, chat ChatToSync, sum *summary) er
 		return fmt.Errorf("set members synced: %w", err)
 	}
 	sum.MembersWritten.Add(int64(len(members)))
+	slog.Info("teams chat member sync: members set", "chatID", chat.ID, "members", len(members))
 	return nil
 }

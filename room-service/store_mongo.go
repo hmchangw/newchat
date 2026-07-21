@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
@@ -59,11 +60,10 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure room_members (rid) index: %w", err)
 	}
-	// Unique logical key — retries from room-worker generate fresh _id values
-	// (see processAddMembers), so without this constraint a redelivered
-	// member.add would silently insert duplicate room_members. The bulk-insert
-	// path in room-worker already ignores mongo.IsDuplicateKeyError, so this
-	// makes redelivery idempotent.
+	// Unique logical key — room-worker upserts room_members on this key
+	// ($setOnInsert keyed on (rid, member.type, member.id), see BulkCreateRoomMembers),
+	// so a redelivered or re-requested member.add matches the existing row and no-ops.
+	// Without this constraint a fresh _id per retry would silently insert duplicates.
 	if _, err := s.roomMembers.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "rid", Value: 1}, {Key: "member.type", Value: 1}, {Key: "member.id", Value: 1}},
 		Options: options.Index().SetUnique(true),
@@ -605,58 +605,24 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 // single index-backed batch query feeds a Go-side rollup, replacing the prior
 // per-row correlated $lookup whose $expr $or could not use an index.
 func (s *MongoStore) attachOrgDisplay(ctx context.Context, roomID string, members []model.RoomMember, orgIDs []string) error {
-	users, err := s.fetchOrgDisplayUsers(ctx, orgIDs)
+	users, err := pipelines.OrgDisplayUsers(ctx, s.users, orgIDs)
 	if err != nil {
 		return fmt.Errorf("attach org display for %q: %w", roomID, err)
 	}
-	agg := buildOrgDisplay(orgIDs, users)
+	agg := orgdisplay.Build(orgIDs, users)
 	for i := range members {
 		if members[i].Member.Type != model.RoomMemberOrg {
 			continue
 		}
 		id := members[i].Member.ID
 		if a := agg[id]; a != nil {
-			members[i].Member.MemberCount = a.memberCount
+			members[i].Member.MemberCount = a.MemberCount
 		}
-		members[i].Member.OrgName = orgDisplaySectName(agg[id], id)
-		members[i].Member.OrgDescription = orgDisplayDescription(agg[id])
+		members[i].Member.OrgName = orgdisplay.Name(agg[id], id)
+		members[i].Member.OrgCode = orgdisplay.Code(agg[id])
+		members[i].Member.OrgDescription = orgdisplay.Description(agg[id])
 	}
 	return nil
-}
-
-// fetchOrgDisplayUsers returns the dept/sect identity and name fields for every
-// user whose deptId or sectId is one of orgIDs. The top-level $or with $in is
-// index-backed by the (deptId, account) and (sectId, account) indexes — unlike
-// the prior $expr-based correlated $lookup, which forced a users collection
-// scan for each org row.
-func (s *MongoStore) fetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgDisplayUser, error) {
-	cursor, err := s.users.Find(ctx,
-		bson.M{"$or": []bson.M{
-			{"deptId": bson.M{"$in": orgIDs}},
-			{"sectId": bson.M{"$in": orgIDs}},
-		}},
-		options.Find().SetProjection(bson.M{
-			"_id":             0,
-			"deptId":          1,
-			"sectId":          1,
-			"deptName":        1,
-			"deptTCName":      1,
-			"sectName":        1,
-			"sectTCName":      1,
-			"deptDescription": 1,
-			"sectDescription": 1,
-		}),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("find org display users: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var users []orgDisplayUser
-	if err := cursor.All(ctx, &users); err != nil {
-		return nil, fmt.Errorf("decode org display users: %w", err)
-	}
-	return users, nil
 }
 
 // roomMemberEnrichedRow is the decode target for the enriched aggregation
@@ -1635,35 +1601,20 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 }
 
 // ClearThreadSubscriptionsForAccount marks every one of account's thread
-// subscriptions as read and returns the affected rows for federation. Projects
-// only the fields the caller federates. No order-safety guard on the source-site
-// write; the $lt guard lives on the inbox-worker side.
-func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) ([]model.ThreadSubscription, error) {
-	filter := bson.M{"userAccount": account}
-	cursor, err := s.threadSubscriptions.Find(ctx, filter, options.Find().SetProjection(bson.M{
-		"threadRoomId":    1,
-		"roomId":          1,
-		"parentMessageId": 1,
-		"_id":             0,
-	}))
-	if err != nil {
-		return nil, fmt.Errorf("find thread subscriptions for %q: %w", account, err)
-	}
-	var rows []model.ThreadSubscription
-	if err := cursor.All(ctx, &rows); err != nil {
-		return nil, fmt.Errorf("decode thread subscriptions for %q: %w", account, err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	if _, err := s.threadSubscriptions.UpdateMany(ctx, filter, bson.M{"$set": bson.M{
+// subscriptions as read in one account-scoped bulk update. No order-safety guard
+// on the source-site write; the $lt guard lives on the inbox-worker side. A
+// single thread_read_all event carries the cross-site convergence, so no per-row
+// snapshot is returned (and no Find/Update window can miss a concurrently
+// inserted row).
+func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error {
+	if _, err := s.threadSubscriptions.UpdateMany(ctx, bson.M{"userAccount": account}, bson.M{"$set": bson.M{
 		"lastSeenAt": now,
 		"updatedAt":  now,
 		"hasMention": false,
 	}}); err != nil {
-		return nil, fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
+		return fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
 	}
-	return rows, nil
+	return nil
 }
 
 // ClearSubscriptionThreadUnreadForAccount removes threadUnread and clears alert on

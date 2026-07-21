@@ -160,7 +160,8 @@ group chats commonly share members, so most fallback lookups hit the cache.
 - Graph 429/503: per-request Retry-After retries (bounded) plus the shared
   tenant-wide throttle gate already in `pkg/msgraph`. Exhausted throttle
   surfaces as a per-chat failure.
-- `log/slog` JSON. Per-chat failures logged at error level with chat id; never
+- `log/slog` JSON. Each synced chat logs an info line with its chat id and the
+  member count written; per-chat failures log at error level with chat id. Never
   log tokens or the client secret.
 
 ## Configuration
@@ -170,7 +171,6 @@ group chats commonly share members, so most fallback lookups hit the cache.
 | `MONGO_URI` | required | Replica set URI; reads use a secondary-preferred client, writes a primary client |
 | `MONGO_DB` | `chat` | Database name |
 | `MAX_WORKERS` | `8` | Worker pool size |
-| `RUN_TIMEOUT` | `30m` | Whole-job context deadline |
 | `GRAPH_TENANT_ID` | required | Azure AD tenant |
 | `GRAPH_CLIENT_ID` | required | App registration id |
 | `GRAPH_CLIENT_SECRET` | required | App registration secret |

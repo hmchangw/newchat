@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -45,6 +46,47 @@ func TestSubscribedAccounts(t *testing.T) {
 
 	t.Run("empty when the candidate set is empty", func(t *testing.T) {
 		got, err := SubscribedAccounts(ctx, subs, "r1", []string{})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+}
+
+func TestOrgDisplayUsers(t *testing.T) {
+	users := testutil.MongoDB(t, "pipelines_orgdisplay_test").Collection("users")
+	ctx := context.Background()
+
+	_, err := users.InsertMany(ctx, []any{
+		bson.M{"_id": "u1", "account": "carol", "sectId": "eng", "sectName": "Engineering",
+			"sectTCName": "工程", "sectDescription": "Builds the product"},
+		bson.M{"_id": "u2", "account": "dave", "deptId": "eng", "deptName": "Engineering Dept",
+			"deptTCName": "工程部", "deptDescription": "The whole department"},
+		bson.M{"_id": "u3", "account": "erin", "sectId": "ops", "sectName": "Operations"},
+	})
+	require.NoError(t, err)
+
+	t.Run("returns dept and sect matches with the full display projection", func(t *testing.T) {
+		got, err := OrgDisplayUsers(ctx, users, []string{"eng"})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []orgdisplay.User{
+			{SectID: "eng", SectName: "Engineering", SectTCName: "工程", SectDescription: "Builds the product"},
+			{DeptID: "eng", DeptName: "Engineering Dept", DeptTCName: "工程部", DeptDescription: "The whole department"},
+		}, got)
+	})
+
+	t.Run("empty for an org no user belongs to", func(t *testing.T) {
+		got, err := OrgDisplayUsers(ctx, users, []string{"ghost"})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+
+	t.Run("multiple orgs resolve in one batch", func(t *testing.T) {
+		got, err := OrgDisplayUsers(ctx, users, []string{"eng", "ops"})
+		require.NoError(t, err)
+		assert.Len(t, got, 3)
+	})
+
+	t.Run("empty orgIDs short-circuits with no rows", func(t *testing.T) {
+		got, err := OrgDisplayUsers(ctx, users, nil)
 		require.NoError(t, err)
 		assert.Empty(t, got)
 	})

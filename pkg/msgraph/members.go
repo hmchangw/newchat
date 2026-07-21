@@ -53,7 +53,7 @@ func (g *graphClient) ListChatMembers(ctx context.Context, chatID string) ([]Cha
 
 	var members []ChatMemberDetail
 	for next != "" {
-		body, err := g.getThrottled(ctx, token, next)
+		body, err := g.getThrottled(ctx, token, next, "list chat members")
 		if err != nil {
 			return nil, fmt.Errorf("list chat members: %w", err)
 		}

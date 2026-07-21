@@ -370,12 +370,11 @@ func (m *MockRoomClient) EXPECT() *MockRoomClientMockRecorder {
 }
 
 // ClearAllThreadUnread mocks base method.
-func (m *MockRoomClient) ClearAllThreadUnread(ctx context.Context, siteID, account string) (int, error) {
+func (m *MockRoomClient) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ClearAllThreadUnread", ctx, siteID, account)
-	ret0, _ := ret[0].(int)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // ClearAllThreadUnread indicates an expected call of ClearAllThreadUnread.
@@ -597,4 +596,19 @@ func (m *MockThreadSubscriptionRepository) ListByAccount(ctx context.Context, ac
 func (mr *MockThreadSubscriptionRepositoryMockRecorder) ListByAccount(ctx, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByAccount", reflect.TypeOf((*MockThreadSubscriptionRepository)(nil).ListByAccount), ctx, account)
+}
+
+// ListByAccountInRooms mocks base method.
+func (m *MockThreadSubscriptionRepository) ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListByAccountInRooms", ctx, account, roomIDs)
+	ret0, _ := ret[0].([]model.ThreadUnreadRow)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListByAccountInRooms indicates an expected call of ListByAccountInRooms.
+func (mr *MockThreadSubscriptionRepositoryMockRecorder) ListByAccountInRooms(ctx, account, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByAccountInRooms", reflect.TypeOf((*MockThreadSubscriptionRepository)(nil).ListByAccountInRooms), ctx, account, roomIDs)
 }

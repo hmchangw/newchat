@@ -11,13 +11,16 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/obs"
 )
 
 func main() {
@@ -39,18 +42,11 @@ func run() error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
-	defer cancel()
-
-	sdk, obsShutdown, err := obs.Init(ctx)
-	if err != nil {
-		return fmt.Errorf("init observability: %w", err)
-	}
-	defer func() {
-		if err := obsShutdown(context.Background()); err != nil {
-			slog.Error("observability shutdown", "error", err)
-		}
-	}()
+	// SIGTERM/SIGINT (pod deletion, Job activeDeadlineSeconds) cancels the run so
+	// it aborts between operations instead of being killed mid-batch. The run
+	// deadline is owned by the Kubernetes CronJob, not an app-level timeout.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
@@ -64,7 +60,10 @@ func run() error {
 	}
 	defer mongoutil.Disconnect(context.Background(), writeClient)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	// No OTel SDK wired for this job (plain slog, like the sibling teams-* jobs);
+	// NATS still needs a tracer/propagator, so pass no-ops. o11y/nats also gates
+	// header work on O11Y_ENABLED, so this stays off the hot path.
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{})
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}

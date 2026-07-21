@@ -23,7 +23,8 @@ type UserStore interface {
 }
 
 // userProjection is the field set shared by the two account-keyed reads.
-var userProjection = bson.M{"_id": 1, "account": 1, "siteId": 1, "engName": 1, "chineseName": 1, "employeeId": 1}
+// sectName rides along for room-worker's member_added enrichment.
+var userProjection = bson.M{"_id": 1, "account": 1, "siteId": 1, "engName": 1, "chineseName": 1, "employeeId": 1, "sectName": 1}
 
 type mongoStore struct {
 	col *mongo.Collection

@@ -238,13 +238,12 @@ func TestClearAllThreadUnread_MultiSite(t *testing.T) {
 		{ThreadRoomID: "tr2", SiteID: "site-b"},
 		{ThreadRoomID: "tr3", SiteID: "site-b"},
 	}, nil)
-	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-a", "alice").Return(1, nil)
-	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-b", "alice").Return(2, nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-a", "alice").Return(nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-b", "alice").Return(nil)
 
 	svc := newThreadUnreadService(t, ts, rc)
 	resp, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, 3, resp.ClearedThreads)
 	assert.Empty(t, resp.UnavailableSites)
 }
 
@@ -259,7 +258,6 @@ func TestClearAllThreadUnread_NoThreads(t *testing.T) {
 	svc := newThreadUnreadService(t, ts, rc)
 	resp, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, 0, resp.ClearedThreads)
 	assert.Empty(t, resp.UnavailableSites)
 }
 
@@ -272,13 +270,12 @@ func TestClearAllThreadUnread_SiteDegrades(t *testing.T) {
 		{ThreadRoomID: "tr1", SiteID: "site-a"},
 		{ThreadRoomID: "tr2", SiteID: "site-b"},
 	}, nil)
-	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-a", "alice").Return(1, nil)
-	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-b", "alice").Return(0, fmt.Errorf("site down"))
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-a", "alice").Return(nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-b", "alice").Return(fmt.Errorf("site down"))
 
 	svc := newThreadUnreadService(t, ts, rc)
 	resp, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, 1, resp.ClearedThreads)
 	assert.Equal(t, []string{"site-b"}, resp.UnavailableSites)
 }
 

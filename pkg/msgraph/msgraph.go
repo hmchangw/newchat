@@ -118,10 +118,11 @@ type Config struct {
 	// (NewDirectoryClient / New) ignore it and rely on the standard proxy env
 	// vars. Must include a scheme and host (e.g. "http://proxy.corp:8080").
 	ProxyURL string
-	// UserAgent overrides the User-Agent header sent on presence requests. When
-	// empty the presence client falls back to defaultUserAgent. Honored only by
-	// the presence client (NewPresenceClient). Set this to whatever a fronting
-	// proxy/WAF expects (e.g. a browser string) when the default is rejected.
+	// UserAgent overrides the User-Agent header sent on every Graph request. When
+	// empty the client falls back to defaultUserAgent (a browser string). Honored
+	// by both the app-only client (New) and the presence client
+	// (NewPresenceClient). Set this to whatever a fronting proxy/WAF expects when
+	// the default is rejected.
 	UserAgent string
 }
 
@@ -131,6 +132,14 @@ const (
 	// tokenExpirySkew is subtracted from the token's reported lifetime so the
 	// cached token is refreshed before the server-side expiry.
 	tokenExpirySkew = 60 * time.Second
+	// defaultUserAgent is sent on every app-only and presence Graph request when
+	// Config.UserAgent is empty. Microsoft Graph rejects requests without a
+	// User-Agent header, and a fronting corporate proxy/WAF commonly rejects
+	// non-browser agents; a desktop-browser string is the value most likely to
+	// pass both. Override per-environment via Config.UserAgent (GRAPH_USER_AGENT)
+	// since a pinned browser version ages.
+	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 )
 
 // graphClient is the live (*Client) implementation.
@@ -142,6 +151,9 @@ type graphClient struct {
 	// chatsPageSize is the $top for ListUserChats first-page requests;
 	// <= 0 means defaultChatsPageSize. Set via WithChatsPageSize.
 	chatsPageSize int
+	// userAgent is the resolved User-Agent header sent on every request
+	// (Config.UserAgent, or defaultUserAgent when empty).
+	userAgent string
 
 	mu      sync.Mutex
 	token   string
@@ -196,6 +208,11 @@ func New(cfg Config, opts ...Option) Client {
 			url.PathEscape(cfg.TenantID),
 		),
 	}
+	ua := cfg.UserAgent
+	if ua == "" {
+		ua = defaultUserAgent
+	}
+	g.userAgent = ua
 	for _, opt := range opts {
 		opt(g)
 	}
@@ -258,6 +275,7 @@ func (g *graphClient) accessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("build token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", g.userAgent)
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
@@ -372,6 +390,7 @@ func (g *graphClient) resolveChunk(ctx context.Context, token string, chunk []st
 	// startsWith on userPrincipalName is served as an advanced query — request
 	// eventual consistency so Graph accepts it regardless of tenant defaults.
 	req.Header.Set("ConsistencyLevel", "eventual")
+	req.Header.Set("User-Agent", g.userAgent)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("get users: %w", err)
@@ -467,6 +486,7 @@ func (g *graphClient) CreateOnlineMeeting(ctx context.Context, req CreateOnlineM
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", g.userAgent)
 
 	resp, err := g.httpClient.Do(httpReq)
 	if err != nil {
@@ -556,6 +576,7 @@ func (g *graphClient) fetchUsersPage(ctx context.Context, token, endpoint string
 		return nil, fmt.Errorf("build list-users request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", g.userAgent)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)

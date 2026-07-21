@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -99,7 +100,7 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 
 	var chats []Chat
 	for next != "" {
-		body, err := g.getThrottled(ctx, token, next)
+		body, err := g.getThrottled(ctx, token, next, "list user chats")
 		if err != nil {
 			return nil, err
 		}
@@ -120,8 +121,10 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 // tenant-wide throttle gate; a 429/503 response (Graph throttles per
 // app+tenant) arms/extends the gate for ALL workers sharing this client and
 // retries up to chatsMaxAttempts. The gate is armed even on the final failed
-// attempt so the rest of the pool still backs off after this user fails.
-func (g *graphClient) getThrottled(ctx context.Context, token, endpoint string) ([]byte, error) {
+// attempt so the rest of the pool still backs off after this user fails. Each
+// throttle response emits a WARN log (operation identifies the caller) carrying
+// the status, Retry-After, and computed backoff — never the token or endpoint.
+func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operation string) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		if err := g.waitThrottle(ctx); err != nil {
 			return nil, err
@@ -145,7 +148,18 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint string) 
 		throttled := resp.StatusCode == http.StatusTooManyRequests ||
 			resp.StatusCode == http.StatusServiceUnavailable
 		if throttled {
-			g.noteThrottle(resp.Header.Get("Retry-After"))
+			retryAfter := resp.Header.Get("Retry-After")
+			backoff := g.noteThrottle(retryAfter)
+			// Never log the token or raw endpoint (secret / PII).
+			slog.Warn("msgraph: graph throttled request, backing off",
+				"operation", operation,
+				"status", resp.StatusCode,
+				"retryAfter", retryAfter,
+				"backoff", backoff.String(),
+				"attempt", attempt,
+				"maxAttempts", chatsMaxAttempts,
+				"willRetry", attempt < chatsMaxAttempts,
+			)
 		}
 		switch {
 		case resp.StatusCode == http.StatusOK:
@@ -171,9 +185,10 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint string) 
 }
 
 // noteThrottle arms/extends the tenant-wide throttle gate from a Retry-After
-// header (default when absent/invalid, capped against hostile values). The
-// gate only ever extends — a later, shorter Retry-After never shrinks it.
-func (g *graphClient) noteThrottle(retryAfter string) {
+// header (default when absent/invalid, capped against hostile values) and
+// returns the capped wait it derived (for logging). The gate only ever
+// extends — a later, shorter Retry-After never shrinks it.
+func (g *graphClient) noteThrottle(retryAfter string) time.Duration {
 	wait := chatsDefaultRetryWait
 	if secs, err := strconv.Atoi(retryAfter); err == nil && secs >= 0 {
 		wait = time.Duration(secs) * time.Second
@@ -187,6 +202,7 @@ func (g *graphClient) noteThrottle(retryAfter string) {
 	if until.After(g.throttleUntil) {
 		g.throttleUntil = until
 	}
+	return wait
 }
 
 // throttleDeadline returns the current gate deadline (zero when unarmed).

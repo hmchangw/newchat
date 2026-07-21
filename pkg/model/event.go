@@ -161,6 +161,7 @@ const (
 	InboxSubscriptionFavoriteToggled InboxEventType = "subscription_favorite_toggled"
 	InboxThreadSubscriptionUpserted  InboxEventType = "thread_subscription_upserted"
 	InboxThreadRead                  InboxEventType = "thread_read"
+	InboxThreadReadAll               InboxEventType = "thread_read_all"
 	InboxRoomRenamed                 InboxEventType = "room_renamed"
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
@@ -203,6 +204,18 @@ type ThreadReadEvent struct {
 	Timestamp       int64    `json:"timestamp"`
 }
 
+// ThreadReadAllEvent is the InboxEvent.Payload for type "thread_read_all" — the
+// federated "mark all threads read" for a user. One event carries the whole
+// bulk dismiss (no per-thread list): the destination inbox-worker advances every
+// one of the account's thread subscriptions to LastSeenAt under a high-water-mark
+// guard (clearing hasMention) and clears every subscription's threadUnread/alert
+// on the user's home replica.
+type ThreadReadAllEvent struct {
+	Account    string `json:"account"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Timestamp  int64  `json:"timestamp"`
+}
+
 type InboxEvent struct {
 	Type       InboxEventType `json:"type"`
 	SiteID     string         `json:"siteId"`
@@ -229,16 +242,21 @@ type OutboxEvent struct {
 }
 
 type MemberAddEvent struct {
-	Type               string   `json:"type"               bson:"type"`
-	RoomID             string   `json:"roomId"             bson:"roomId"`
-	RoomName           string   `json:"roomName"           bson:"roomName"`
-	RoomType           RoomType `json:"roomType,omitempty" bson:"roomType,omitempty"`
-	Accounts           []string `json:"accounts"           bson:"accounts"`
+	Type     string   `json:"type"               bson:"type"`
+	RoomID   string   `json:"roomId"             bson:"roomId"`
+	RoomName string   `json:"roomName"           bson:"roomName"`
+	RoomType RoomType `json:"roomType,omitempty" bson:"roomType,omitempty"`
+	// Accounts is stripped from the room-scoped (frontend) copy — the client renders from Members —
+	// but kept on the INBOX/search and cross-site copies, which carry no Members and subscribe/index by account.
+	Accounts           []string `json:"accounts,omitempty" bson:"accounts,omitempty"`
 	SiteID             string   `json:"siteId"             bson:"siteId"`
 	RequesterAccount   string   `json:"requesterAccount,omitempty" bson:"requesterAccount,omitempty"`
 	JoinedAt           int64    `json:"joinedAt"           bson:"joinedAt"`
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
-	Timestamp          int64    `json:"timestamp"          bson:"timestamp"`
+	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
+	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
+	Members   []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
+	Timestamp int64             `json:"timestamp"         bson:"timestamp"`
 }
 
 // Participant represents a user with display name info for client rendering.

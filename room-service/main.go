@@ -51,9 +51,13 @@ type config struct {
 	TeamsEmailDomain  string `env:"TEAMS_EMAIL_DOMAIN"       envDefault:"dev.local"`
 	// TeamsTLSInsecure disables Graph TLS verification (dev/on-prem self-signed
 	// certs only). Never enable in production.
-	TeamsTLSInsecure     bool `env:"TEAMS_TLS_INSECURE" envDefault:"false"`
-	RoomMembersLimit     int  `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
-	RoomMembersCallLimit int  `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
+	TeamsTLSInsecure bool `env:"TEAMS_TLS_INSECURE" envDefault:"false"`
+	// GraphUserAgent overrides the User-Agent header on Graph requests (meetings
+	// path). Empty falls back to the msgraph browser default. Named GRAPH_USER_AGENT
+	// for consistency with user-presence-service.
+	GraphUserAgent       string `env:"GRAPH_USER_AGENT" envDefault:""`
+	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
+	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest   atrest.Config      // env vars already prefixed ATREST_*
@@ -154,6 +158,7 @@ func main() {
 			ClientID:              cfg.TeamsClientID,
 			ClientSecret:          cfg.TeamsClientSecret,
 			TLSInsecureSkipVerify: cfg.TeamsTLSInsecure,
+			UserAgent:             cfg.GraphUserAgent,
 		})
 	}
 

@@ -1755,7 +1755,8 @@ failures degrade into `unavailableSites` rather than erroring.
 `{siteID}` is the **caller's own home site**. Clears the unread status of all of the
 user's threads across every site — the "mark all threads read" action. `user-service`
 asks each owning site's `room-service` to clear that user's thread-subscription read
-state and room-subscription thread-unread state.
+state and room-subscription thread-unread state; each remote site converges the user's
+home replica via one `thread_read_all` inbox event.
 
 #### Request body
 
@@ -1763,7 +1764,7 @@ Empty object: `{}`.
 
 #### Success response
 
-`{ "clearedThreads": number, "unavailableSites"?: string[] }` — see
+`{ "unavailableSites"?: string[] }` — see
 [../client-api.md §3.4](../client-api.md#clear-all-thread-unread). A bulk dismiss:
 clears only the requester's own read state; does not advance thread read floors or emit
 `thread_message_read`. Per-site RPC failures degrade into `unavailableSites`.

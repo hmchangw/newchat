@@ -47,13 +47,14 @@ type RoomClient interface {
 	GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
 	CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error)
 	GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error)
-	ClearAllThreadUnread(ctx context.Context, siteID, account string) (int, error)
+	ClearAllThreadUnread(ctx context.Context, siteID, account string) error
 }
 
 // ThreadSubscriptionRepository reads the local thread_subscriptions replica for
 // the thread-unread badge.
 type ThreadSubscriptionRepository interface {
 	ListByAccount(ctx context.Context, account string) ([]model.ThreadUnreadRow, error)
+	ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error)
 }
 
 // HistoryClient is the consumer-defined interface for per-site history-service
