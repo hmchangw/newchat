@@ -28,8 +28,12 @@ type ChatsReader interface {
 // used for meetings; New always returns a *graphClient).
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewChatsClient(cfg Config, opts ...Option) ChatsReader {
-	return New(cfg, opts...).(*graphClient)
+func NewChatsClient(cfg Config, opts ...Option) (ChatsReader, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // Chat is the subset of a Graph chat resource the sync consumes.

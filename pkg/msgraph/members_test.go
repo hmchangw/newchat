@@ -21,9 +21,12 @@ func newMembersTokenServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func newTestMembers(tokenURL, baseURL string, opts ...Option) ChatMembersReader {
+func newTestMembers(t *testing.T, tokenURL, baseURL string, opts ...Option) ChatMembersReader {
+	t.Helper()
 	all := append([]Option{WithTokenURL(tokenURL), WithBaseURL(baseURL)}, opts...)
-	return NewChatMembersClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"}, all...)
+	c, err := NewChatMembersClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"}, all...)
+	require.NoError(t, err)
+	return c
 }
 
 func TestListChatMembers_Success_QueryShape(t *testing.T) {
@@ -39,7 +42,7 @@ func TestListChatMembers_Success_QueryShape(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	members, err := newTestMembers(tokenSrv.URL, graphSrv.URL).
+	members, err := newTestMembers(t, tokenSrv.URL, graphSrv.URL).
 		ListChatMembers(context.Background(), "19:abc@thread.v2")
 	require.NoError(t, err)
 	require.Len(t, members, 2)
@@ -63,7 +66,7 @@ func TestListChatMembers_FollowsNextLink(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	members, err := newTestMembers(tokenSrv.URL, graphSrv.URL).
+	members, err := newTestMembers(t, tokenSrv.URL, graphSrv.URL).
 		ListChatMembers(context.Background(), "19:abc@thread.v2")
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls)
@@ -86,7 +89,7 @@ func TestListChatMembers_RetriesOn429(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestMembers(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestMembers(t, tokenSrv.URL, graphSrv.URL).
 		ListChatMembers(context.Background(), "19:abc@thread.v2")
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls)
@@ -100,7 +103,7 @@ func TestListChatMembers_GraphError(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestMembers(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestMembers(t, tokenSrv.URL, graphSrv.URL).
 		ListChatMembers(context.Background(), "19:abc@thread.v2")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 403")
@@ -110,7 +113,7 @@ func TestListChatMembers_GraphError(t *testing.T) {
 
 func TestListChatMembers_EmptyChatID(t *testing.T) {
 	tokenSrv := newMembersTokenServer(t)
-	_, err := newTestMembers(tokenSrv.URL, "http://unused.invalid").
+	_, err := newTestMembers(t, tokenSrv.URL, "http://unused.invalid").
 		ListChatMembers(context.Background(), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "chatID is required")

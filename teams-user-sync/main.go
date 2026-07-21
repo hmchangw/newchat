@@ -64,11 +64,16 @@ func run() error {
 	if cfg.GraphTokenURL != "" {
 		opts = append(opts, msgraph.WithTokenURL(cfg.GraphTokenURL))
 	}
-	lister := msgraph.NewUserListerClient(msgraph.Config{
-		TenantID:     cfg.TeamsTenantID,
-		ClientID:     cfg.TeamsClientID,
-		ClientSecret: cfg.TeamsClientSecret,
+	lister, err := msgraph.NewUserListerClient(msgraph.Config{
+		TenantID:              cfg.TeamsTenantID,
+		ClientID:              cfg.TeamsClientID,
+		ClientSecret:          cfg.TeamsClientSecret,
+		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
+		ProxyURL:              cfg.GraphProxyURL,
 	}, opts...)
+	if err != nil {
+		return fmt.Errorf("build user lister client: %w", err)
+	}
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
 	syncer := NewSyncer(store, lister, cfg.GraphPageSize)
 
