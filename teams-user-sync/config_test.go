@@ -29,14 +29,8 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Empty(t, cfg.GraphProxyURL, "GRAPH_PROXY_URL defaults to empty (fall back to HTTPS_PROXY/HTTP_PROXY)")
 	assert.Equal(t, "tenant", cfg.GraphTenantID)
 
-	assert.Equal(t, "mongodb://read:27017", cfg.MongoReadURI)
-	assert.Equal(t, "chat", cfg.MongoReadDB)
-	assert.Empty(t, cfg.MongoReadUsername)
-	assert.Empty(t, cfg.MongoReadPassword)
-	assert.Equal(t, "mongodb://write:27017", cfg.MongoWriteURI)
-	assert.Equal(t, "chat", cfg.MongoWriteDB)
-	assert.Empty(t, cfg.MongoWriteUsername)
-	assert.Empty(t, cfg.MongoWritePassword)
+	assert.Equal(t, mongoConfig{URI: "mongodb://read:27017", DB: "chat"}, cfg.MongoRead)
+	assert.Equal(t, mongoConfig{URI: "mongodb://write:27017", DB: "chat"}, cfg.MongoWrite)
 }
 
 func TestConfig_Overrides(t *testing.T) {
@@ -58,12 +52,8 @@ func TestConfig_Overrides(t *testing.T) {
 	assert.Equal(t, "http://proxy.corp:8080", cfg.GraphProxyURL)
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify, "GRAPH_TLS_INSECURE_SKIP_VERIFY=false overrides the true default")
 
-	assert.Equal(t, "readdb", cfg.MongoReadDB)
-	assert.Equal(t, "reader", cfg.MongoReadUsername)
-	assert.Equal(t, "readpw", cfg.MongoReadPassword)
-	assert.Equal(t, "writedb", cfg.MongoWriteDB)
-	assert.Equal(t, "writer", cfg.MongoWriteUsername)
-	assert.Equal(t, "writepw", cfg.MongoWritePassword)
+	assert.Equal(t, mongoConfig{URI: "mongodb://read:27017", DB: "readdb", Username: "reader", Password: "readpw"}, cfg.MongoRead)
+	assert.Equal(t, mongoConfig{URI: "mongodb://write:27017", DB: "writedb", Username: "writer", Password: "writepw"}, cfg.MongoWrite)
 }
 
 func TestConfig_MissingRequiredFails(t *testing.T) {

@@ -26,14 +26,16 @@ type config struct {
 	// through a secondary-preferred read client, the teams_user upserts write
 	// through a primary write client. Each lane has its own URI, DB and
 	// credential pair so read and write can point at different clusters (they
-	// may be identical in dev). Connection strings are required with no
-	// default; credentials default to empty.
-	MongoReadURI       string `env:"MONGO_READ_URI,required,notEmpty"`
-	MongoReadDB        string `env:"MONGO_READ_DB" envDefault:"chat"`
-	MongoReadUsername  string `env:"MONGO_READ_USERNAME" envDefault:""`
-	MongoReadPassword  string `env:"MONGO_READ_PASSWORD" envDefault:""`
-	MongoWriteURI      string `env:"MONGO_WRITE_URI,required,notEmpty"`
-	MongoWriteDB       string `env:"MONGO_WRITE_DB" envDefault:"chat"`
-	MongoWriteUsername string `env:"MONGO_WRITE_USERNAME" envDefault:""`
-	MongoWritePassword string `env:"MONGO_WRITE_PASSWORD" envDefault:""`
+	// may be identical in dev).
+	MongoRead  mongoConfig `envPrefix:"MONGO_READ_"`
+	MongoWrite mongoConfig `envPrefix:"MONGO_WRITE_"`
+}
+
+// mongoConfig is one Mongo lane's connection settings. The connection string
+// is required with no default; credentials default to empty.
+type mongoConfig struct {
+	URI      string `env:"URI,required,notEmpty"`
+	DB       string `env:"DB" envDefault:"chat"`
+	Username string `env:"USERNAME" envDefault:""`
+	Password string `env:"PASSWORD" envDefault:""`
 }

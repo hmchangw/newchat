@@ -46,12 +46,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoRead.URI, cfg.MongoRead.Username, cfg.MongoRead.Password)
 	if err != nil {
 		return fmt.Errorf("connect mongo read client: %w", err)
 	}
 	defer disconnect(readClient)
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWriteURI, cfg.MongoWriteUsername, cfg.MongoWritePassword)
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWrite.URI, cfg.MongoWrite.Username, cfg.MongoWrite.Password)
 	if err != nil {
 		return fmt.Errorf("connect mongo write client: %w", err)
 	}
@@ -67,7 +67,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build user lister client: %w", err)
 	}
-	store := newMongoStore(readClient.Database(cfg.MongoReadDB), writeClient.Database(cfg.MongoWriteDB))
+	store := newMongoStore(readClient.Database(cfg.MongoRead.DB), writeClient.Database(cfg.MongoWrite.DB))
 	logger := slog.With("requestId", idgen.GenerateRequestID())
 	syncer := NewSyncer(store, lister, cfg.GraphPageSize, logger)
 
