@@ -294,8 +294,8 @@ func TestSplitUPN(t *testing.T) {
 }
 
 func TestExtractSiteIDFromLocationURL(t *testing.T) {
-	// TODO: tighten these expectations once the real https://{siteID}.mysite.com
-	// parsing lands; for now the locationURL is returned unchanged.
+	// TODO: tighten these expectations once real locationURL parsing lands;
+	// for now the locationURL is returned unchanged.
 	tests := []struct {
 		name string
 		url  string

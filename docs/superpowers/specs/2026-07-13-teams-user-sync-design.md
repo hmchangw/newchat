@@ -1,6 +1,6 @@
 # teams-user-sync — Design
 
-**Date:** 2026-07-13
+**Date:** 2026-07-13 (revised 2026-07-20)
 **Status:** Approved
 
 ## 1. Purpose
@@ -9,22 +9,33 @@ A run-once batch job, triggered by a Kubernetes CronJob (revised 2026-07-14
 from the original long-running in-process cron design), that keeps the
 MongoDB `teams_user`
 collection populated with every Teams (Azure AD) user in the tenant, joined
-with the HR system's site assignment. On each scheduled run it walks the
+with the HR system's site assignment, English name, and mail. On each
+scheduled run it walks the
 Microsoft Graph `/users` directory page by page, finds users not yet in
-`teams_user`, resolves their `siteID` from the `hr` collection, and
+`teams_user`, resolves their HR data from the `hr` collection, and
 batch-writes the merged records.
 
 The resulting `teams_user` document is:
 
 ```json
-{ "_id": "<teams user object id>", "upn": "<userPrincipalName>", "account": "<upn local part>", "siteId": "<hr siteID>" }
+{ "_id": "<teams user object id>", "upn": "<userPrincipalName>", "account": "<upn local part>", "siteId": "<derived from hr locationURL>", "engName": "<hr engName>", "mail": "<hr mail>" }
 ```
 
 - `_id` — Teams (Azure AD) user object id, from Graph.
 - `upn` — the user's `userPrincipalName`, from Graph.
 - `account` — the lowercased UPN local part (text before `@`); the same value
   used for the `hr.accountName` lookup.
-- `siteId` — the HR system's site id, from the `hr` collection.
+- `siteId` — derived from the HR row's `locationURL` (see §3.3 step 4); empty
+  when the account has no HR row.
+- `engName` — the HR system's English name; empty when the account has no HR row.
+- `mail` — the HR system's mail address; empty when the account has no HR row.
+
+**2026-07-20 revision:** the HR join changed. `siteId` is now *derived from
+the HR row's `locationURL`* instead of read from a stored `hr.siteID` column,
+and `teams_user` additionally carries `engName` and `mail`. A Teams user with
+no HR row is now **written with those three fields empty** (previously
+skipped). Sections below reflect the current design; the revision is called
+out inline where it changed a prior decision.
 
 ## 2. Decisions (settled during brainstorming)
 
@@ -32,8 +43,8 @@ The resulting `teams_user` document is:
 |---|---|
 | Scheduling | **Kubernetes CronJob** triggers the binary; one invocation = one sync run (revised from in-process robfig/cron). Skip-if-running comes from the CronJob's `concurrencyPolicy: Forbid` — the schedule and that policy are owned by ops/IaC, like stream topology. |
 | Sync strategy | **Page-streaming** (Approach A): process each Graph page immediately — memory bounded at one page, partial progress survives a mid-run failure. |
-| HR miss | A Teams user with no matching `hr.accountName` is **skipped** (no write) and counted; the per-run summary logs the total. Retried naturally next run. |
-| Write scope | **Insert missing only** — users already present in `teams_user` (by `_id`) are left untouched; no UPN-change refresh in v1. The write itself is an idempotent upsert (mechanism, not scope — see §3.3 step 4). |
+| HR miss | *(revised 2026-07-20)* A Teams user with no matching `hr.accountName` is **written with `siteId`/`engName`/`mail` empty** (previously skipped) and counted; the per-run summary logs the total. |
+| Write scope | **Insert missing only** — users already present in `teams_user` (by `_id`) are left untouched; no UPN-change refresh, and existing docs are **not** backfilled with the new fields (see §7). The write itself is an idempotent upsert (mechanism, not scope — see §3.3 step 4). |
 | Mongo separation | **Two URIs, two clients** (`MONGO_READ_URI` / `MONGO_WRITE_URI`, each with its own credentials and db name). Reads (`teams_user` diff, `hr` lookup) use the read client; the batch write uses the write client. URIs may be identical in dev. The write client is the existing `mongoutil.Connect`; the read client is a new reusable `mongoutil.ConnectRead` helper other services can adopt. |
 
 ## 3. Architecture
@@ -111,12 +122,20 @@ For each Graph page (≤ `GRAPH_PAGE_SIZE` users):
    and domain) is skipped and counted; any other UPN proceeds to the HR
    lookup, where guests/service accounts naturally fall out as unmatched.
 3. **HR lookup:** query `hr` via the **read** client:
-   `find({accountName: {$in: accounts}}, {projection: {accountName: 1, siteID: 1}})`
-   → `account → siteID` map. Accounts with no match are skipped and counted.
-4. **Merge + write:** for each user with an HR match, build
-   `TeamsUser{ID, UPN, Account, SiteID}` and bulk-**upsert** via the **write** client
-   (`mongoutil.UpsertModel` batch keyed on `_id`). Upsert (not insert) keeps
-   reruns and read-replica lag harmless — no duplicate-key failures.
+   `find({accountName: {$in: accounts}}, {projection: {accountName: 1, locationURL: 1, engName: 1, mail: 1}})`
+   → `account → {locationURL, engName, mail}` map. Accounts with no match are
+   counted (and logged) but no longer skipped — see step 4.
+4. **Merge + write:** for **every** candidate user, build
+   `TeamsUser{ID, UPN, Account, SiteID, EngName, Mail}` and bulk-**upsert**
+   via the **write** client (`mongoutil.UpsertModel` batch keyed on `_id`).
+   For an account with an HR row, `EngName`/`Mail` come straight from the row
+   and `SiteID` is derived from the row's `locationURL` via
+   `extractSiteIDFromLocationURL` (currently a passthrough returning the
+   `locationURL` unchanged — real parsing is a TODO); an empty or
+   unparseable `locationURL` yields an empty `SiteID` and is warn-logged. For
+   an account with no HR row, all three HR fields are left empty. Upsert (not
+   insert) keeps reruns and read-replica lag harmless — no duplicate-key
+   failures.
 
 Any Graph or Mongo error aborts the run with a wrapped error logged once at
 the run level. The next CronJob fire retries from scratch; idempotent upserts
@@ -129,16 +148,21 @@ Shared — `pkg/model/teamsuser.go`, so other services can consume the
 
 ```go
 // TeamsUser is the persisted teams_user collection document: a Teams (Azure
-// AD) user joined with the HR system's site assignment by teams-user-sync.
+// AD) user joined with the HR system's site assignment (derived from the HR
+// locationURL), English name, and mail by teams-user-sync.
 type TeamsUser struct {
     ID      string `json:"id" bson:"_id"`
     UPN     string `json:"upn" bson:"upn"`
     Account string `json:"account" bson:"account"`
     SiteID  string `json:"siteId" bson:"siteId"`
+    EngName string `json:"engName" bson:"engName"`
+    Mail    string `json:"mail" bson:"mail"`
 }
 ```
 
-`siteId` follows the repo's camelCase bson/json tag convention (matching
+`teams-chat-sync` additionally writes a `From *time.Time` watermark field
+(omitempty) on this same document; it is defined alongside these fields in
+`pkg/model/teamsuser.go`. `siteId` follows the repo's camelCase bson/json tag convention (matching
 `pkg/model/teams.go`), even though the HR source field is `siteID`. TeamsUser
 is a persistence model, not a client-facing request/reply or event struct, so
 no `docs/client-api.md` update is required. It gets a `roundTrip` case in
@@ -152,12 +176,16 @@ Consumer-defined interface in `store.go`:
 type Store interface {
     // ExistingIDs returns which of ids already exist in teams_user (read client).
     ExistingIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
-    // HRSiteIDs resolves accounts to siteIDs from the hr collection (read client).
-    HRSiteIDs(ctx context.Context, accounts []string) (map[string]string, error)
+    // HRUsers resolves accounts to their HR data from the hr collection (read client).
+    HRUsers(ctx context.Context, accounts []string) (map[string]hrUser, error)
     // UpsertTeamsUsers bulk-upserts merged records into teams_user (write client).
     UpsertTeamsUsers(ctx context.Context, users []model.TeamsUser) error
 }
 ```
+
+`hrUser` is the raw HR data resolved for an account
+(`{LocationURL, EngName, Mail string}`, defined in `store.go`); `siteId`
+derivation from `LocationURL` happens in the handler, not the store.
 
 `store_mongo.go` holds two `*mongo.Database` handles: the **write** handle
 from the existing `mongoutil.Connect`, the **read** handle from a new
@@ -174,10 +202,10 @@ Both queries project precisely (per CLAUDE.md). Collection names are
 constants: `teams_user`, `hr`.
 
 The `hr` document shape this service depends on (read-only, owned by the
-external HR pipeline): `{ accountName: string, siteID: string }`. Matching is
-by the lowercased UPN local part; `hr.accountName` is assumed to be stored
-lowercase (the same convention `pkg/msgraph.ResolveAccountIDs` already relies
-on).
+external HR pipeline): `{ accountName: string, locationURL: string, engName: string, mail: string }`.
+Matching is by the lowercased UPN local part; `hr.accountName` is assumed to
+be stored lowercase (the same convention `pkg/msgraph.ResolveAccountIDs`
+already relies on).
 
 Index: `teams_user` needs no secondary indexes in v1 (`_id` covers the diff
 query and the upsert). No index is created on `hr` — this service does not
@@ -209,7 +237,11 @@ required vars. Secrets are `required` with no defaults.
 - slog JSON. Each run generates a request id via `idgen.GenerateRequestID()`,
   carried in `context.Context` and attached to every log line of the run.
 - End-of-run summary log: pages walked, users seen, already present,
-  invalid-UPN-skipped, HR-unmatched, upserted, duration.
+  invalid-UPN-skipped, HR-unmatched (now upserted-without-HR-data, not
+  skipped), upserted, duration.
+- Per-page: an info line with the HR lookup result (requested / matched /
+  unmatched); per unmatched account an info "hr id not found"; a warn when a
+  matched account's `locationURL` is empty or yields an empty `siteId`.
 - No HTTP listener: Kubernetes Jobs are not probed and take no traffic; the
   Job's exit code and the run-summary log line are the observability surface.
 - No Prometheus endpoint in v1.
@@ -225,8 +257,10 @@ once at the run boundary. Never log tokens or Graph response bodies.
 - **`handler_test.go`** — table-driven unit tests of the per-page flow with a
   mocked `Store` (mockgen) and a fake `UserLister` (function-backed): happy
   path (multi-page), all-users-existing (no HR call, no write), HR miss
-  skipped + counted, malformed UPN (no `@`)
-  skipped, store error aborts run, Graph error aborts run, empty tenant.
+  upserted-with-empty-fields + counted, malformed UPN (no `@`)
+  skipped, `locationURL` variants (present passes through, empty keeps empty
+  `siteId`), store error aborts run, Graph error aborts run, empty tenant.
+  Plus a table test for `extractSiteIDFromLocationURL` (passthrough + empty).
 - **`config_test.go`** — required-var failure, defaults.
 - **`pkg/mongoutil` integration test** — `ConnectRead` connects, pings, and
   carries the secondaryPreferred read preference.
@@ -254,7 +288,10 @@ once at the run boundary. Never log tokens or Graph response bodies.
 ## 7. Out of scope (v1)
 
 - Deleting/disabling `teams_user` docs for users removed from the tenant.
-- Refreshing existing docs on UPN or siteID change.
+- Refreshing existing docs on UPN or siteID change, and backfilling `siteId`/
+  `engName`/`mail` onto docs written before the 2026-07-20 revision or onto
+  HR-unmatched docs whose HR row later appears (the diff only inserts users
+  missing from `teams_user`).
 - Graph delta queries (`/users/delta`) for incremental sync.
 - Prometheus metrics.
 - Multi-tenant support.

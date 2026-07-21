@@ -133,8 +133,8 @@ func splitUPN(upn string) (account string, ok bool) {
 }
 
 // extractSiteIDFromLocationURL derives the siteID from an HR locationURL.
-// TODO: parse the siteID out of the pattern https://{siteID}.mysite.com;
-// for now the raw locationURL is returned unchanged.
+// TODO: parse the siteID out of the locationURL; for now the raw locationURL
+// is returned unchanged.
 func extractSiteIDFromLocationURL(locationURL string) string {
 	return locationURL
 }
