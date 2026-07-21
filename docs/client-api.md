@@ -454,8 +454,10 @@ Cross-origin callers must send the request with credentials (e.g. `fetch(..., { 
 Response header:
 
 ```
-Set-Cookie: ssoToken=<token>; Path=/; HttpOnly; Secure; SameSite=None; Partitioned
+Set-Cookie: ssoToken=<token>; Path=/; HttpOnly; Secure; SameSite=None
 ```
+
+`Partitioned` is env-controlled server-side (`SETCOOKIE_PARTITIONED`, default `false` — omitted) and is added only when enabled.
 
 ```json
 { "success": true }
