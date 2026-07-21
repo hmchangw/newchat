@@ -27,12 +27,18 @@ type config struct {
 	// env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
 
-	// One replica set serves both lanes: the teams_user diff + hr lookup read
-	// through a secondary-preferred client and the teams_user upserts write
-	// through a primary client, so they share one URI, DB and credential pair —
-	// only the read preference differs.
-	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
-	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// Two Mongo clients, one per lane: the teams_user diff + hr lookup read
+	// through a secondary-preferred read client, the teams_user upserts write
+	// through a primary write client. Each lane has its own URI, DB and
+	// credential pair so read and write can point at different clusters (they
+	// may be identical in dev). Connection strings are required with no
+	// default; credentials default to empty.
+	MongoReadURI       string `env:"MONGO_READ_URI,required,notEmpty"`
+	MongoReadDB        string `env:"MONGO_READ_DB" envDefault:"chat"`
+	MongoReadUsername  string `env:"MONGO_READ_USERNAME" envDefault:""`
+	MongoReadPassword  string `env:"MONGO_READ_PASSWORD" envDefault:""`
+	MongoWriteURI      string `env:"MONGO_WRITE_URI,required,notEmpty"`
+	MongoWriteDB       string `env:"MONGO_WRITE_DB" envDefault:"chat"`
+	MongoWriteUsername string `env:"MONGO_WRITE_USERNAME" envDefault:""`
+	MongoWritePassword string `env:"MONGO_WRITE_PASSWORD" envDefault:""`
 }

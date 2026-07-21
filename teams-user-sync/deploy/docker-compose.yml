@@ -14,8 +14,12 @@ services:
       - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
       - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
       - GRAPH_PAGE_SIZE=500
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      # Local dev points both lanes at the same MongoDB; production may split
+      # them across a read replica and a primary.
+      - MONGO_READ_URI=mongodb://mongodb:27017
+      - MONGO_READ_DB=chat
+      - MONGO_WRITE_URI=mongodb://mongodb:27017
+      - MONGO_WRITE_DB=chat
     networks:
       - chat-local
 
