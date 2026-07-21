@@ -138,7 +138,9 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operati
 		if err != nil {
 			return nil, fmt.Errorf("get chats: %w", err)
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
+		// Bound the read so a runaway or hostile response can't exhaust memory;
+		// real list-chats pages ($top=50, members expanded) are far smaller.
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<26)) // 64 MiB
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			return nil, fmt.Errorf("close chats response: %w", closeErr)
 		}
