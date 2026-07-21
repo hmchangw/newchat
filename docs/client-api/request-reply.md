@@ -1340,6 +1340,8 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
 | `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
+| `chat.user.{account}.request.user.{siteID}.sso.set` | [sso.set](#ssoset) |
+| `chat.user.{account}.request.user.{siteID}.sso.refresh` | [sso.refresh](#ssorefresh) |
 
 ---
 
@@ -1776,6 +1778,66 @@ clears only the requester's own read state; does not advance thread read floors 
 #### Errors
 
 `internal` — local thread-subscription read failed.
+
+**Emits:** None.
+
+---
+
+### sso.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.sso.set`
+
+Store (upsert) a user's SSO token pair in the site-local vault. **Platform-admin
+only.** The submitted `ssoToken` is verified against the site's OIDC issuer; its
+`preferred_username` must equal the target account. Expiry is derived server-side
+from the token's `exp` claim.
+
+#### Request body
+
+`{ "ssoToken": string, "refreshToken": string, "account"?: string }` — `account`
+defaults to the caller (admin on-behalf-of).
+
+#### Success response
+
+`{ "success": true }`
+
+#### Errors
+
+`missing_fields` (`bad_request`, `ssoToken`/`refreshToken` missing), invalid
+`account` or `preferred_username` mismatch (`bad_request`), non-admin caller
+(`forbidden`), target account not found/deactivated (`not_found`),
+`sso_token_expired` (`unauthenticated`), `invalid_sso_token` (`unauthenticated`),
+`upstream_unavailable` (`unavailable`, SSO not configured on this site),
+`internal` (local store failure).
+
+**Emits:** None.
+
+---
+
+### sso.refresh
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.sso.refresh`
+
+Returns the caller's stored `ssoToken`, transparently refreshing it against the
+OIDC issuer when within the refresh window (default 1h) of expiry or already
+expired. Self-service; platform admins may target another account. The request
+body is optional — an empty payload means self.
+
+#### Request body
+
+`{ "account"?: string }` — optional, empty payload means self.
+
+#### Success response
+
+`{ "ssoToken": string }`
+
+#### Errors
+
+Invalid `account` (`bad_request`), non-admin caller targeting another account
+(`forbidden`), caller/target not found/deactivated (`not_found`),
+`sso_token_not_found` (`not_found`, no token pair stored), `sso_token_expired`
+(`unauthenticated`, refresh failed or refreshed token not owned by the account — re-login),
+`upstream_unavailable` (`unavailable`, SSO not configured on this site), `internal` (local store failure).
 
 **Emits:** None.
 
