@@ -66,17 +66,20 @@ type Handler struct {
 	preview        previewFunc
 	nowMilli       func() int64
 	cacheMaxAge    int
+
+	setCookiePartitioned bool
 }
 
 // NewHandler wires the handler dependencies. maxImages/maxImageSize gate the image
 // endpoint; maxAttachments/maxFileSize/mimeFilter/preview gate the file endpoint; s3
-// backs the MinIO/S3 download endpoint; cacheMaxAge is its Cache-Control max-age in seconds.
+// backs the MinIO/S3 download endpoint; cacheMaxAge is its Cache-Control max-age in
+// seconds; setCookiePartitioned gates the Partitioned attribute on HandleSetCookie.
 func NewHandler(store Store, dc driveClient, s3 objectStore, maxImages, maxAttachments int, maxImageSize, maxFileSize int64,
-	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int) *Handler {
+	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int, setCookiePartitioned bool) *Handler {
 	return &Handler{
 		store: store, drive: dc, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
 		maxImageSize: maxImageSize, maxFileSize: maxFileSize, mimeFilter: mimeFilter,
-		preview: preview, cacheMaxAge: cacheMaxAge,
+		preview: preview, cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
 		nowMilli: func() int64 { return time.Now().UTC().UnixMilli() },
 	}
 }
@@ -105,7 +108,7 @@ func (h *Handler) HandleHealth(c *gin.Context) {
 // SameSite=None + Partitioned require the hand-built http.Cookie; c.SetCookie cannot set them.
 func (h *Handler) HandleSetCookie(c *gin.Context) {
 	token := tokenFromRequest(c)
-	// #nosec G124 -- SameSite=None is required for the cross-site <img> download flow; it is mitigated by Secure + HttpOnly + Partitioned.
+	// #nosec G124 -- SameSite=None is required for the cross-site <img> download flow; mitigated by Secure + HttpOnly (and Partitioned when SETCOOKIE_PARTITIONED is enabled).
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:        ssoTokenName,
 		Value:       token,
@@ -113,7 +116,7 @@ func (h *Handler) HandleSetCookie(c *gin.Context) {
 		HttpOnly:    true,
 		Secure:      true,
 		SameSite:    http.SameSiteNoneMode,
-		Partitioned: true,
+		Partitioned: h.setCookiePartitioned,
 	})
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
