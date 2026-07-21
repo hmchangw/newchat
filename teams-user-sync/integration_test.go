@@ -5,8 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -61,7 +59,7 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		msgraph.WithBaseURL(graphSrv.URL), msgraph.WithTokenURL(tokenSrv.URL),
 	)
-	syncer := NewSyncer(newMongoStore(db, db), lister, 500, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := NewSyncer(newMongoStore(db, db), lister, 500, discardLogger())
 
 	stats, err := syncer.UpdateUsers(ctx)
 	require.NoError(t, err)

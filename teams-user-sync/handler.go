@@ -90,13 +90,12 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 		return fmt.Errorf("resolve hr users: %w", err)
 	}
 	matched := 0
-	merged := make([]model.TeamsUser, 0, len(candidates))
-	for _, c := range candidates {
+	for i := range candidates {
+		c := &candidates[i]
 		hr, ok := hrUsers[c.Account]
 		if !ok {
 			stats.HRUnmatched++
 			s.logger.Info("hr id not found", "account", c.Account, "userId", c.ID)
-			merged = append(merged, c)
 			continue
 		}
 		matched++
@@ -111,14 +110,13 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 					"account", c.Account, "locationURL", hr.LocationURL)
 			}
 		}
-		merged = append(merged, c)
 	}
 	s.logger.Info("hr site ids lookup result",
 		"requested", len(accounts), "matched", matched, "unmatched", len(accounts)-matched)
-	if err := s.store.UpsertTeamsUsers(ctx, merged); err != nil {
+	if err := s.store.UpsertTeamsUsers(ctx, candidates); err != nil {
 		return fmt.Errorf("upsert teams users: %w", err)
 	}
-	stats.Upserted += len(merged)
+	stats.Upserted += len(candidates)
 	return nil
 }
 

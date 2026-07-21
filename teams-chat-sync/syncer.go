@@ -155,7 +155,7 @@ func (s *syncer) run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for u := range jobs {
-				if err := s.syncUser(ctx, &u, to, cache, &sum); err != nil {
+				if err := s.syncUser(ctx, u, to, cache, &sum); err != nil {
 					sum.Failed.Add(1)
 					slog.Error("teams chat sync: user failed", "userID", u.ID, "error", err)
 					continue
@@ -165,7 +165,7 @@ func (s *syncer) run(ctx context.Context) error {
 		}()
 	}
 	for _, u := range users {
-		if !s.effectiveFrom(&u).Before(to) {
+		if !s.effectiveFrom(u).Before(to) {
 			sum.Skipped++
 			continue
 		}
@@ -187,7 +187,9 @@ func (s *syncer) run(ctx context.Context) error {
 
 // effectiveFrom is the user's watermark, falling back to the configured
 // default for users that have never synced.
-func (s *syncer) effectiveFrom(u *model.TeamsUser) time.Time {
+//
+//nolint:gocritic // hugeParam: u is read once per user on a batch path; passing by value keeps the accessor pure.
+func (s *syncer) effectiveFrom(u model.TeamsUser) time.Time {
 	if u.From != nil {
 		return *u.From
 	}
@@ -197,7 +199,9 @@ func (s *syncer) effectiveFrom(u *model.TeamsUser) time.Time {
 // syncUser fetches one user's chat window, upserts every chat it lists, and
 // advances the user's watermark only after everything succeeded — a failed user
 // keeps its old watermark and is retried next run.
-func (s *syncer) syncUser(ctx context.Context, u *model.TeamsUser, to time.Time, cache map[string]cachedUser, sum *summary) error {
+//
+//nolint:gocritic // hugeParam: u is consumed once per user on a batch path; passing by value keeps the worker pure.
+func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, cache map[string]cachedUser, sum *summary) error {
 	graphChats, err := s.graph.ListUserChats(ctx, u.ID, s.effectiveFrom(u), to)
 	if err != nil {
 		return fmt.Errorf("list user chats: %w", err)
