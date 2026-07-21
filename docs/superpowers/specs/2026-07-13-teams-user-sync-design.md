@@ -216,18 +216,18 @@ indexing.
 
 | Env var | Required | Default | Purpose |
 |---|---|---|---|
-| `TEAMS_TENANT_ID` | yes | — | Azure AD tenant |
-| `TEAMS_CLIENT_ID` | yes | — | App registration client id |
-| `TEAMS_CLIENT_SECRET` | yes | — | App registration secret |
+| `GRAPH_TENANT_ID` | yes | — | Azure AD tenant |
+| `GRAPH_CLIENT_ID` | yes | — | App registration client id |
+| `GRAPH_CLIENT_SECRET` | yes | — | App registration secret |
 | `GRAPH_PAGE_SIZE` | no | `500` | Graph `$top` per page |
+| `GRAPH_TLS_INSECURE_SKIP_VERIFY` | no | `true` | Skip Graph TLS verification (on-prem TLS-intercepting proxy) |
+| `GRAPH_PROXY_URL` | no | empty | Explicit Graph proxy (overrides `HTTPS_PROXY`/`HTTP_PROXY`) |
 | `MONGO_READ_URI` | yes | — | Read cluster URI (`teams_user` diff, `hr` lookup) |
 | `MONGO_READ_USERNAME` / `MONGO_READ_PASSWORD` | no | empty | Read credentials |
 | `MONGO_READ_DB` | no | `chat` | Read database name |
 | `MONGO_WRITE_URI` | yes | — | Write cluster URI (`teams_user` upserts) |
 | `MONGO_WRITE_USERNAME` / `MONGO_WRITE_PASSWORD` | no | empty | Write credentials |
 | `MONGO_WRITE_DB` | no | `chat` | Write database name |
-| `GRAPH_BASE_URL` | no | empty (public Graph) | Graph API endpoint override (tests, on-prem gateways) |
-| `GRAPH_TOKEN_URL` | no | empty (public login) | OAuth2 token endpoint override |
 
 Parsed with `caarlos0/env` into a typed `Config`; fail fast on missing
 required vars. Secrets are `required` with no defaults.

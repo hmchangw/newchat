@@ -57,20 +57,13 @@ func run() error {
 	}
 	defer disconnect(writeClient)
 
-	var opts []msgraph.Option
-	if cfg.GraphBaseURL != "" {
-		opts = append(opts, msgraph.WithBaseURL(cfg.GraphBaseURL))
-	}
-	if cfg.GraphTokenURL != "" {
-		opts = append(opts, msgraph.WithTokenURL(cfg.GraphTokenURL))
-	}
 	lister, err := msgraph.NewUserListerClient(msgraph.Config{
-		TenantID:              cfg.TeamsTenantID,
-		ClientID:              cfg.TeamsClientID,
-		ClientSecret:          cfg.TeamsClientSecret,
+		TenantID:              cfg.GraphTenantID,
+		ClientID:              cfg.GraphClientID,
+		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
-	}, opts...)
+	})
 	if err != nil {
 		return fmt.Errorf("build user lister client: %w", err)
 	}

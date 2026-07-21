@@ -10,9 +10,9 @@ services:
       dockerfile: teams-user-sync/deploy/Dockerfile
     restart: "no"
     environment:
-      - TEAMS_TENANT_ID=${TEAMS_TENANT_ID}
-      - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
-      - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
+      - GRAPH_TENANT_ID=${GRAPH_TENANT_ID}
+      - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
+      - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}
       - GRAPH_PAGE_SIZE=500
       # Local dev points both lanes at the same MongoDB; production may split
       # them across a read replica and a primary.

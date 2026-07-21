@@ -6,16 +6,11 @@ package main
 // Forbid). Credentials and connection strings are required with no default
 // (fail fast); operational knobs default to sane dev values.
 type config struct {
-	TeamsTenantID     string `env:"TEAMS_TENANT_ID,required,notEmpty"`
-	TeamsClientID     string `env:"TEAMS_CLIENT_ID,required,notEmpty"`
-	TeamsClientSecret string `env:"TEAMS_CLIENT_SECRET,required,notEmpty"`
+	GraphTenantID     string `env:"GRAPH_TENANT_ID,required,notEmpty"`
+	GraphClientID     string `env:"GRAPH_CLIENT_ID,required,notEmpty"`
+	GraphClientSecret string `env:"GRAPH_CLIENT_SECRET,required,notEmpty"`
 	// GraphPageSize is Graph's $top per page (max 999).
 	GraphPageSize int `env:"GRAPH_PAGE_SIZE" envDefault:"500"`
-	// GraphBaseURL / GraphTokenURL override the Graph API and OAuth2 token
-	// endpoints (integration tests, on-prem gateways); empty means the public
-	// Microsoft Graph.
-	GraphBaseURL  string `env:"GRAPH_BASE_URL" envDefault:""`
-	GraphTokenURL string `env:"GRAPH_TOKEN_URL" envDefault:""`
 	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Defaults to
 	// true because this job runs on-prem behind a TLS-intercepting proxy that
 	// presents its own certificate; set it to false where Graph presents a

@@ -9,7 +9,7 @@ import (
 func TestRun_FailsFastOnBadConfig(t *testing.T) {
 	t.Run("missing required env", func(t *testing.T) {
 		setRequiredEnv(t)
-		t.Setenv("TEAMS_TENANT_ID", "")
+		t.Setenv("GRAPH_TENANT_ID", "")
 
 		err := run()
 		require.Error(t, err)
