@@ -1,0 +1,47 @@
+# OpenTelemetry Collector — local dev.
+# Receives OTLP traces and logs from every chat service (default
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318). Traces are forwarded
+# to Tempo; logs are forwarded to Loki via Loki's OTLP ingest path. Metrics are
+# pulled by Prometheus directly off each service's :2112.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://localhost:3000
+            - http://127.0.0.1:3000
+          allowed_headers:
+            - Content-Type
+          max_age: 7200
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 2s
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      address: 0.0.0.0:8888

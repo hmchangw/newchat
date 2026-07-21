@@ -7,6 +7,8 @@ import (
 	"io"
 
 	"github.com/minio/minio-go/v7"
+
+	"github.com/hmchangw/chat/pkg/minioutil"
 )
 
 // errBlobNotFound is returned by blobStore.Get when the object does not exist.
@@ -25,11 +27,11 @@ type blobStore interface {
 }
 
 type minioBlobStore struct {
-	client *minio.Client
+	client minioutil.ObjectStore
 	bucket string
 }
 
-func newMinioBlobStore(client *minio.Client, bucket string) *minioBlobStore {
+func newMinioBlobStore(client minioutil.ObjectStore, bucket string) *minioBlobStore {
 	return &minioBlobStore{client: client, bucket: bucket}
 }
 

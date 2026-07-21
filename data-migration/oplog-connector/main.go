@@ -2,28 +2,25 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
+	"go.opentelemetry.io/otel/propagation"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -34,18 +31,12 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)})))
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "oplog-connector")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
-		os.Exit(1)
-	}
-	meterShutdown, err := otelutil.InitMeter("oplog-connector")
-	if err != nil {
-		slog.Error("init meter failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 	// role distinguishes the two split deployments in logs and metrics (PR #482 review).
@@ -59,22 +50,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind synchronously so a port conflict fails startup loudly rather than
-	// running blind — observability is the stall signal for this single-replica pump.
-	metricsServer := newMetricsServer()
-	ln, err := net.Listen("tcp", cfg.MetricsAddr)
+	// Bind synchronously so a port conflict fails startup loudly. Metrics are
+	// owned by the o11y SDK's Prometheus endpoint; this is health-only.
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("health server failed to start", "addr", cfg.HealthAddr, "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("metrics+health server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
-	conn, err := start(ctx, &cfg, m)
+	conn, err := start(ctx, &cfg, m, sdk, sdk.Propagator)
 	if err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
@@ -96,8 +80,7 @@ func main() {
 		case err := <-conn.Fatal():
 			if err != nil {
 				slog.Error("fatal watcher error — exiting", "error", err)
-				_ = tracerShutdown(context.Background())
-				_ = meterShutdown(context.Background())
+				_ = obsShutdown(context.Background())
 				conn.Close()
 				os.Exit(1)
 			}
@@ -105,40 +88,22 @@ func main() {
 		}
 	}()
 
-	// Ordered, timeout-bounded cleanup:
-	// stop readers → drain watchers → metrics/health → observability → NATS → Mongo.
+	// Ordered, timeout-bounded cleanup: stop readers → drain watchers → health →
+	// NATS → Mongo → flush observability LAST so all teardown telemetry exports.
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { conn.beginShutdown(); return nil },
 		func(ctx context.Context) error { return conn.awaitWatchers(ctx) },
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
-		func(ctx context.Context) error { return meterShutdown(ctx) },
+		func(ctx context.Context) error { return healthStop(ctx) },
 		func(context.Context) error { return conn.nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, conn.client); return nil },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
-}
-
-// newMetricsServer builds the /metrics + /healthz HTTP server with timeouts that guard against hung scrapers tying up goroutines.
-func newMetricsServer() *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	return &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
 }
 
 // connector owns the running watchers and the connections they share. Close stops watchers (flushing final checkpoints), then drains NATS, then Mongo.
 type connector struct {
 	client *mongo.Client
-	nc     *otelnats.Conn
+	nc     *o11ynats.Conn
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	fatal  chan error
@@ -147,7 +112,7 @@ type connector struct {
 }
 
 // start connects Mongo + NATS, bootstraps the stream, and launches one watcher per collection. Returns a running connector driven via Fatal()/Close().
-func start(ctx context.Context, cfg *config, m *metrics) (*connector, error) {
+func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Observability, prop propagation.TextMapPropagator) (*connector, error) {
 	if cfg.StartResumeToken != "" || cfg.StartAtTime != "" {
 		// One-off seed overrides: left set, they force a reseed (ignoring the checkpoint)
 		// on every restart — so warn loudly. Prefer a seed checkpoint doc.
@@ -155,17 +120,17 @@ func start(ctx context.Context, cfg *config, m *metrics) (*connector, error) {
 			"startResumeTokenSet", cfg.StartResumeToken != "", "startAtTime", cfg.StartAtTime)
 	}
 
-	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword)
+	client, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword, mongoutil.WithObservability(obsProv))
 	if err != nil {
 		return nil, fmt.Errorf("source mongo connect: %w", err)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, obsProv.TracerProvider(), prop)
 	if err != nil {
 		mongoutil.Disconnect(ctx, client)
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		_ = nc.Drain()
 		mongoutil.Disconnect(ctx, client)
@@ -284,18 +249,5 @@ func readPreference(s string) (*readpref.ReadPref, error) {
 		return readpref.Nearest(), nil
 	default:
 		return nil, fmt.Errorf("invalid READ_PREFERENCE: %s", s)
-	}
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
 	}
 }

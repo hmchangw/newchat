@@ -12,8 +12,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -29,7 +31,7 @@ type testResp struct {
 	Greeting string `json:"greeting"`
 }
 
-func startTestNATS(t *testing.T) *otelnats.Conn {
+func startTestNATS(t *testing.T) *o11ynats.Conn {
 	t.Helper()
 	opts := &natsserver.Options{Port: -1}
 	ns, err := natsserver.NewServer(opts)
@@ -38,7 +40,7 @@ func startTestNATS(t *testing.T) *otelnats.Conn {
 	require.True(t, ns.ReadyForConnections(5*time.Second), "nats server did not become ready")
 	t.Cleanup(ns.Shutdown)
 
-	nc, err := otelnats.Connect(ns.ClientURL())
+	nc, err := o11ynats.Connect(context.Background(), ns.ClientURL(), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
 	return nc
@@ -631,7 +633,7 @@ func TestRouter_WithMaxConcurrency_IgnoresNonPositive(t *testing.T) {
 func TestRouter_replyBusy_NoReplySubject(t *testing.T) {
 	r := New(nil, "test")
 	msg := &nats.Msg{Subject: "void.subject", Reply: ""}
-	r.replyBusy(msg)
+	r.replyBusy(context.Background(), msg)
 }
 
 func TestDefault_PreInstallsMiddleware(t *testing.T) {

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -12,7 +11,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 )
 
 func TestReadPreference(t *testing.T) {
@@ -46,27 +45,6 @@ func TestReadPreference(t *testing.T) {
 	}
 }
 
-func TestParseLevel(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want slog.Level
-	}{
-		{name: "debug", in: "debug", want: slog.LevelDebug},
-		{name: "info", in: "info", want: slog.LevelInfo},
-		{name: "warn", in: "warn", want: slog.LevelWarn},
-		{name: "error", in: "error", want: slog.LevelError},
-		{name: "uppercase trimmed", in: "  ERROR  ", want: slog.LevelError},
-		{name: "unknown defaults to info", in: "trace", want: slog.LevelInfo},
-		{name: "empty defaults to info", in: "", want: slog.LevelInfo},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, parseLevel(tc.in))
-		})
-	}
-}
-
 func TestNowMs(t *testing.T) {
 	a := nowMs()
 	b := nowMs()
@@ -74,16 +52,16 @@ func TestNowMs(t *testing.T) {
 	assert.Positive(t, a)
 }
 
-// fakeJetStream embeds the oteljetstream.JetStream interface (unimplemented methods panic if
+// fakeJetStream embeds the o11ynats.JetStream interface (unimplemented methods panic if
 // called, which these tests never do) and overrides only CreateOrUpdateConsumer.
 type fakeJetStream struct {
-	oteljetstream.JetStream
+	o11ynats.JetStream
 	calls int
 	err   error
 }
 
-//nolint:gocritic // cfg by value matches the oteljetstream.JetStream interface signature.
-func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ jetstream.ConsumerConfig) (oteljetstream.Consumer, error) {
+//nolint:gocritic // cfg by value matches the o11ynats.JetStream interface signature.
+func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
 	f.calls++
 	return nil, f.err
 }
@@ -110,11 +88,4 @@ func TestCreateConsumerWithRetry_ContextCancelledDuringWait(t *testing.T) {
 	_, err := createConsumerWithRetry(ctx, js, "MIGRATION_OPLOG_site1", jetstream.ConsumerConfig{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
-}
-
-func TestNewMetricsServer(t *testing.T) {
-	srv := newMetricsServer()
-	require.NotNil(t, srv)
-	assert.NotNil(t, srv.Handler)
-	assert.Positive(t, srv.ReadHeaderTimeout)
 }

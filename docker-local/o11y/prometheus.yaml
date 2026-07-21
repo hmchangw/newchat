@@ -1,0 +1,43 @@
+# Prometheus — scrapes the SDK metrics endpoint (:2112) off every service
+# container in the chat-local-services compose project via Docker service
+# discovery, so the service list is picked up automatically without scraping
+# third-party deps that don't expose SDK metrics.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: chat-services
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        port: 2112
+    relabel_configs:
+      # Only containers attached to the chat-local network.
+      - source_labels: [__meta_docker_network_name]
+        regex: chat-local
+        action: keep
+      # Only the microservice aggregate stack; deps/o11y containers either do
+      # not expose :2112 or have their own explicit scrape jobs.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        regex: chat-local-services
+        action: keep
+      # Ignore stale/orphan one-off containers if they are still present from an
+      # older local stack.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: traefik|vault|portal-seed
+        action: drop
+      # docker_sd emits each container's exposed app port when one is present;
+      # force every service target to the SDK Prometheus endpoint instead.
+      - source_labels: [__meta_docker_network_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: ${1}:2112
+      # Use the container name as the Prometheus `instance`.
+      - source_labels: [__meta_docker_container_name]
+        regex: /?(.*)
+        target_label: instance
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

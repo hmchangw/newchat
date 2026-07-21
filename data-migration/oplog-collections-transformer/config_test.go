@@ -45,8 +45,7 @@ func TestParseConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 1000, cfg.MaxDeliver)
 	assert.Equal(t, 60, cfg.DeleteMaxDeliver)
 	assert.Equal(t, false, cfg.Bootstrap.Enabled)
-	assert.Equal(t, ":9090", cfg.MetricsAddr)
-	assert.Equal(t, "info", cfg.LogLevel)
+	assert.Equal(t, ":9090", cfg.HealthAddr)
 }
 
 func TestParseConfig_MissingRequired(t *testing.T) {

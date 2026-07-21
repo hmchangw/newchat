@@ -8,10 +8,13 @@ name: chat-local-services
 # Stop:   make down
 
 include:
+  - ../admin-service/deploy/docker-compose.yml
   - ../auth-service/deploy/docker-compose.yml
+  - ../botplatform-service/deploy/docker-compose.yml
   - ../broadcast-worker/deploy/docker-compose.yml
   - ../history-service/deploy/docker-compose.yml
   - ../inbox-worker/deploy/docker-compose.yml
+  - ../media-service/deploy/docker-compose.yml
   - ../message-gatekeeper/deploy/docker-compose.yml
   - ../message-worker/deploy/docker-compose.yml
   - ../notification-worker/deploy/docker-compose.yml
@@ -21,11 +24,39 @@ include:
   - ../room-worker/deploy/docker-compose.yml
   - ../search-service/deploy/docker-compose.yml
   - ../search-sync-worker/deploy/docker-compose.yml
+  - ../tcard-service/deploy/docker-compose.yml
   - ../upload-service/deploy/docker-compose.yml
   - ../user-presence-service/deploy/docker-compose.yml
   - ../user-service/deploy/docker-compose.yml
 
+x-local-o11y: &local-o11y
+  environment:
+    # The aggregate stack is an explicit local observability environment.
+    # Individual service deployment Compose files intentionally omit this so
+    # production stays zero-impact unless its deployment sets the master switch.
+    O11Y_ENABLED: ${O11Y_ENABLED:-true}
+
 services:
+  admin-service: *local-o11y
+  auth-service: *local-o11y
+  botplatform-service: *local-o11y
+  broadcast-worker: *local-o11y
+  history-service: *local-o11y
+  inbox-worker: *local-o11y
+  media-service: *local-o11y
+  message-gatekeeper: *local-o11y
+  message-worker: *local-o11y
+  notification-worker: *local-o11y
+  outbox-worker: *local-o11y
+  portal-service: *local-o11y
+  room-service: *local-o11y
+  room-worker: *local-o11y
+  search-service: *local-o11y
+  search-sync-worker: *local-o11y
+  upload-service: *local-o11y
+  user-presence-service: *local-o11y
+  user-service: *local-o11y
+
   # Unified `/api/v1` gateway (docker-local Task 5 of the unified-gateway
   # migration). Fronts auth/upload/media/botplatform on the single baseUrl
   # port :7777; routing is a static file (./traefik/dynamic.yml) rather than

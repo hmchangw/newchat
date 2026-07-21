@@ -205,7 +205,7 @@ describe('useJwtRefresh', () => {
       result.current.setCredentials({ jwt: makeJwt(100), seed: new Uint8Array([9]), natsPublicKey: 'UPUB', refreshable: true })
     })
     await vi.advanceTimersByTimeAsync(95 * 1000)
-    expect(global.fetch).toHaveBeenCalledWith('http://auth.site-a/auth', expect.anything())
+    expect(global.fetch).toHaveBeenCalledWith('http://auth.site-a/api/v1/auth', expect.anything())
   })
 
   it('session mode re-mints with {authToken} (no SSO renew) and reconnects', async () => {
@@ -225,7 +225,7 @@ describe('useJwtRefresh', () => {
 
     expect(renewSsoToken).not.toHaveBeenCalled()
     const [url, opts] = global.fetch.mock.calls.at(-1)
-    expect(url).toBe('http://auth.site-a/auth')
+    expect(url).toBe('http://auth.site-a/api/v1/auth')
     expect(JSON.parse(opts.body)).toEqual({ authToken: 'tok43', natsPublicKey: 'UPUB' })
     expect(reconnect).toHaveBeenCalledTimes(1)
   })

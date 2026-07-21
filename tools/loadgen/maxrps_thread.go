@@ -13,7 +13,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -42,7 +41,7 @@ func (w *threadWorkload) Label() string { return "thread" }
 // and drains NATS. fixtures must already be seeded (rooms/subs/keys in Mongo,
 // parents in Cassandra).
 func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixtures *ThreadFixtures, seed int64) (*threadWorkload, func(), error) {
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
 	}

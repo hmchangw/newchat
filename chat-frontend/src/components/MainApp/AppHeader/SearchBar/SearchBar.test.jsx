@@ -21,7 +21,7 @@ describe('SearchBar', () => {
   it('does not search when query < 2 chars', async () => {
     const request = vi.fn()
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -40,7 +40,7 @@ describe('SearchBar', () => {
       total: 1,
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -52,7 +52,7 @@ describe('SearchBar', () => {
     vi.advanceTimersByTime(250)
     await waitFor(() => {
       expect(request).toHaveBeenCalledWith(
-        'chat.user.alice.request.search.rooms',
+        'chat.user.alice.request.search.site-A.rooms',
         { query: 'fro', roomType: 'all', size: 8 }
       )
     })
@@ -67,7 +67,7 @@ describe('SearchBar', () => {
       total: 2,
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -90,7 +90,7 @@ describe('SearchBar', () => {
       total: 1,
     })
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request,
     })
 
@@ -114,7 +114,7 @@ describe('SearchBar', () => {
   it('Enter key calls onEnterSearch', async () => {
     const onEnterSearch = vi.fn()
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request: vi.fn().mockResolvedValue({ rooms: [], total: 0 }),
     })
 
@@ -129,7 +129,7 @@ describe('SearchBar', () => {
 
   it('Escape key closes dropdown and clears input', async () => {
     useNats.mockReturnValue({
-      user: { account: 'alice' },
+      user: { account: 'alice', siteId: 'site-A' },
       request: vi.fn().mockResolvedValue({
         rooms: [{ roomId: 'r1', name: 'general', roomType: 'c', siteId: 'site-A' }],
         total: 1,

@@ -30,7 +30,7 @@ export async function searchRooms(
   { user, request }: Nats,
   { searchText, roomType, size }: SearchRoomsArgs,
 ): Promise<SearchRoomsResponse> {
-  return request<SearchRoomsResponse>(searchRoomsSubject(user.account), {
+  return request<SearchRoomsResponse>(searchRoomsSubject(user.account, user.siteId), {
     query: searchText,
     roomType,
     size,

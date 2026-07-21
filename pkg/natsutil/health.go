@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/health"
@@ -21,7 +21,7 @@ type connStatus interface {
 // flapping on every reconnect. A sustained DISCONNECTED/CLOSED state reports
 // not-ready. This is a per-pod signal (this pod's own connection), which is what
 // readiness should reflect — unlike a shared datastore.
-func HealthCheck(nc *otelnats.Conn) health.Check {
+func HealthCheck(nc *o11ynats.Conn) health.Check {
 	return healthCheckFor(nc.NatsConn())
 }
 

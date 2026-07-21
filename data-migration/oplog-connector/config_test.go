@@ -29,7 +29,7 @@ func TestParseConfig_DefaultsAndSlices(t *testing.T) {
 	assert.Equal(t, "secondary", cfg.ReadPreference)
 	assert.Equal(t, 100, cfg.CheckpointEvery)
 	assert.Equal(t, 30, cfg.CheckpointMaxAgeSeconds)
-	assert.Equal(t, ":9090", cfg.MetricsAddr)
+	assert.Equal(t, ":9090", cfg.HealthAddr)
 	assert.Equal(t, "now", cfg.StartMode)
 	assert.False(t, cfg.Bootstrap.Enabled)
 }

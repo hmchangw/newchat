@@ -232,7 +232,7 @@ func runHistorySustained(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1

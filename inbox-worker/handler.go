@@ -44,6 +44,11 @@ type InboxStore interface {
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead writes ThreadSubscription under a $lt lastSeenAt guard, then the Subscription only if the guard accepted.
 	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error
+	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
+	// user's home replica: it advances every one of account's thread subscriptions
+	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and clears
+	// threadUnread + alert on every subscription that still has unread threads.
+	ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
 	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
@@ -68,6 +73,10 @@ type InboxStore interface {
 	// mark is a no-op so out-of-order multi-site delivery can't regress the status. statusIsShow
 	// is written only when non-nil. A missing user (no doc on this site) is a logged no-op.
 	UpdateUserStatus(ctx context.Context, account, statusText string, statusIsShow *bool, statusUpdatedAt time.Time) error
+	// UpdateUserSettings replaces the local users doc's settings sub-document with the
+	// full post-update settings from the origin site, guarded by settingsUpdatedAt so an
+	// out-of-order or duplicate delivery can't regress. A missing user is a logged no-op.
+	UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error
 }
 
 // Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
@@ -106,12 +115,16 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleThreadSubscriptionUpserted(ctx, &evt)
 	case "thread_read":
 		return h.handleThreadRead(ctx, &evt)
+	case model.InboxThreadReadAll:
+		return h.handleThreadReadAll(ctx, &evt)
 	case model.InboxRoomRenamed:
 		return h.handleRoomRenamed(ctx, &evt)
 	case model.InboxRoomRestricted:
 		return h.handleRoomVisibilityChanged(ctx, &evt)
 	case model.InboxUserStatusUpdated:
 		return h.handleUserStatusUpdated(ctx, &evt)
+	case model.InboxUserSettingsUpdated:
+		return h.handleUserSettingsUpdated(ctx, &evt)
 	default:
 		slog.Warn("unknown event type, skipping", "type", evt.Type)
 		return nil
@@ -319,6 +332,18 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 	return nil
 }
 
+func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.ThreadReadAllEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal thread_read_all payload: %w", err)
+	}
+	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
+	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
+		return fmt.Errorf("apply thread read all (account %q): %w", e.Account, err)
+	}
+	return nil
+}
+
 func (h *Handler) handleRoomRenamed(ctx context.Context, evt *model.InboxEvent) error {
 	var p model.RoomRenamedInboxPayload
 	if err := json.Unmarshal(evt.Payload, &p); err != nil {
@@ -350,6 +375,19 @@ func (h *Handler) handleUserStatusUpdated(ctx context.Context, evt *model.InboxE
 	}
 	if err := h.store.UpdateUserStatus(ctx, e.Account, e.StatusText, e.StatusIsShow, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update user status for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
+// handleUserSettingsUpdated mirrors a cross-site settings change onto the local users doc,
+// guarded by the event Timestamp so an out-of-order or duplicate delivery can't regress.
+func (h *Handler) handleUserSettingsUpdated(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.UserSettingsUpdated
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal user_settings_updated payload: %w", err)
+	}
+	if err := h.store.UpdateUserSettings(ctx, e.Account, &e.Settings, time.UnixMilli(e.Timestamp).UTC()); err != nil {
+		return fmt.Errorf("update user settings for %q: %w", e.Account, err)
 	}
 	return nil
 }

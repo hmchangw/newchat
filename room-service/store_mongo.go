@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
@@ -59,11 +60,10 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure room_members (rid) index: %w", err)
 	}
-	// Unique logical key — retries from room-worker generate fresh _id values
-	// (see processAddMembers), so without this constraint a redelivered
-	// member.add would silently insert duplicate room_members. The bulk-insert
-	// path in room-worker already ignores mongo.IsDuplicateKeyError, so this
-	// makes redelivery idempotent.
+	// Unique logical key — room-worker upserts room_members on this key
+	// ($setOnInsert keyed on (rid, member.type, member.id), see BulkCreateRoomMembers),
+	// so a redelivered or re-requested member.add matches the existing row and no-ops.
+	// Without this constraint a fresh _id per retry would silently insert duplicates.
 	if _, err := s.roomMembers.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "rid", Value: 1}, {Key: "member.type", Value: 1}, {Key: "member.id", Value: 1}},
 		Options: options.Index().SetUnique(true),
@@ -605,58 +605,24 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 // single index-backed batch query feeds a Go-side rollup, replacing the prior
 // per-row correlated $lookup whose $expr $or could not use an index.
 func (s *MongoStore) attachOrgDisplay(ctx context.Context, roomID string, members []model.RoomMember, orgIDs []string) error {
-	users, err := s.fetchOrgDisplayUsers(ctx, orgIDs)
+	users, err := pipelines.OrgDisplayUsers(ctx, s.users, orgIDs)
 	if err != nil {
 		return fmt.Errorf("attach org display for %q: %w", roomID, err)
 	}
-	agg := buildOrgDisplay(orgIDs, users)
+	agg := orgdisplay.Build(orgIDs, users)
 	for i := range members {
 		if members[i].Member.Type != model.RoomMemberOrg {
 			continue
 		}
 		id := members[i].Member.ID
 		if a := agg[id]; a != nil {
-			members[i].Member.MemberCount = a.memberCount
+			members[i].Member.MemberCount = a.MemberCount
 		}
-		members[i].Member.OrgName = orgDisplaySectName(agg[id], id)
-		members[i].Member.OrgDescription = orgDisplayDescription(agg[id])
+		members[i].Member.OrgName = orgdisplay.Name(agg[id], id)
+		members[i].Member.OrgCode = orgdisplay.Code(agg[id])
+		members[i].Member.OrgDescription = orgdisplay.Description(agg[id])
 	}
 	return nil
-}
-
-// fetchOrgDisplayUsers returns the dept/sect identity and name fields for every
-// user whose deptId or sectId is one of orgIDs. The top-level $or with $in is
-// index-backed by the (deptId, account) and (sectId, account) indexes — unlike
-// the prior $expr-based correlated $lookup, which forced a users collection
-// scan for each org row.
-func (s *MongoStore) fetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgDisplayUser, error) {
-	cursor, err := s.users.Find(ctx,
-		bson.M{"$or": []bson.M{
-			{"deptId": bson.M{"$in": orgIDs}},
-			{"sectId": bson.M{"$in": orgIDs}},
-		}},
-		options.Find().SetProjection(bson.M{
-			"_id":             0,
-			"deptId":          1,
-			"sectId":          1,
-			"deptName":        1,
-			"deptTCName":      1,
-			"sectName":        1,
-			"sectTCName":      1,
-			"deptDescription": 1,
-			"sectDescription": 1,
-		}),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("find org display users: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var users []orgDisplayUser
-	if err := cursor.All(ctx, &users); err != nil {
-		return nil, fmt.Errorf("decode org display users: %w", err)
-	}
-	return users, nil
 }
 
 // roomMemberEnrichedRow is the decode target for the enriched aggregation
@@ -1150,16 +1116,17 @@ func (s *MongoStore) GetUserSiteID(ctx context.Context, account string) (string,
 }
 
 // MinSubscriptionLastSeenByRoomID returns the room's strict read floor: the
-// minimum lastSeenAt across ALL of the room's subscriptions, but only when
-// EVERY subscription has a usable lastSeenAt (> zero). If any subscription has
+// minimum lastSeenAt across all of the room's non-bot subscriptions, but only
+// when EVERY such subscription has a usable lastSeenAt (> zero). If any has
 // no usable lastSeenAt — missing, null, or the BSON zero date, i.e. a member
 // who was invited but has never opened the room — it returns nil, meaning "not
 // everyone has read yet". It also returns nil for a room with no subscriptions.
-// Bots are ordinary subscriptions and are counted: a botDM room (the bot never
-// reads) therefore always resolves to nil. The caller $unsets
-// rooms.minUserLastSeenAt on a nil result.
+// Bots (u.isBot) are excluded: a passive bot never freezes the floor, and a
+// botDM resolves to the human's lastSeenAt. A room with only bot subscriptions
+// therefore resolves to nil. The caller $unsets rooms.minUserLastSeenAt on a
+// nil result.
 func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID string) (*time.Time, error) {
-	// The whole result is determined by a single document: the room's
+	// The whole result is determined by a single document: the room's non-bot
 	// subscription with the smallest lastSeenAt. The (roomId, lastSeenAt) index
 	// (non-sparse, so missing fields are indexed as null) returns the room's
 	// subscriptions in ascending lastSeenAt order, and BSON sorts missing/null
@@ -1169,13 +1136,16 @@ func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID
 	//     read → strict floor is nil ("not everyone has read yet");
 	//   - smallest value is a real post-zero date → every member has read and
 	//     that value IS the minimum → the floor.
-	// This replaces the prior full-room $group scan with a single (covered)
-	// index seek, which matters because this runs on the message-read hot path.
+	// The (roomId, lastSeenAt) index still serves the sort; the u.isBot != true
+	// predicate is applied as a residual filter (bots are few per room, and
+	// $ne yields no tight index bound), so this stays a bounded index seek on the
+	// message-read hot path rather than the prior full-room $group scan. $ne:true
+	// (not isBot:false) keeps legacy subs missing the flag counted as humans.
 	var doc struct {
 		LastSeenAt time.Time `bson:"lastSeenAt"`
 	}
 	err := s.subscriptions.FindOne(ctx,
-		bson.M{"roomId": roomID},
+		bson.M{"roomId": roomID, "u.isBot": bson.M{"$ne": true}},
 		options.FindOne().
 			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
 			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),
@@ -1221,6 +1191,9 @@ func (s *MongoStore) ListReadReceipts(
 			"roomId":     roomID,
 			"lastSeenAt": bson.M{"$gte": since},
 			"u.account":  bson.M{"$ne": excludeAccount},
+			// Bots are never surfaced as readers ($ne:true keeps flagless legacy
+			// human subs counted).
+			"u.isBot": bson.M{"$ne": true},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
@@ -1623,6 +1596,38 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 	if res.MatchedCount == 0 {
 		return fmt.Errorf("update thread subscription read for %q in thread room %q: %w",
 			account, threadRoomID, model.ErrThreadSubscriptionNotFound)
+	}
+	return nil
+}
+
+// ClearThreadSubscriptionsForAccount marks every one of account's thread
+// subscriptions as read in one account-scoped bulk update. No order-safety guard
+// on the source-site write; the $lt guard lives on the inbox-worker side. A
+// single thread_read_all event carries the cross-site convergence, so no per-row
+// snapshot is returned (and no Find/Update window can miss a concurrently
+// inserted row).
+func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error {
+	if _, err := s.threadSubscriptions.UpdateMany(ctx, bson.M{"userAccount": account}, bson.M{"$set": bson.M{
+		"lastSeenAt": now,
+		"updatedAt":  now,
+		"hasMention": false,
+	}}); err != nil {
+		return fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
+	}
+	return nil
+}
+
+// ClearSubscriptionThreadUnreadForAccount removes threadUnread and clears alert on
+// every one of account's subscriptions that currently has unread threads
+// (threadUnread.0 exists). Mirrors the single-thread "empty threadUnread → alert
+// cleared" rule; subscriptions with no unread threads are not matched, so a
+// non-thread alert is preserved.
+func (s *MongoStore) ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error {
+	if _, err := s.subscriptions.UpdateMany(ctx,
+		bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}},
+		bson.M{"$set": bson.M{"alert": false}, "$unset": bson.M{"threadUnread": ""}},
+	); err != nil {
+		return fmt.Errorf("clear subscription thread-unread for %q: %w", account, err)
 	}
 	return nil
 }

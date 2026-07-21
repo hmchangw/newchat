@@ -10,6 +10,7 @@
 import { StringCodec, headers as natsHeaders } from 'nats.ws'
 import type { NatsConnection, Subscription as NatsSubscription } from 'nats.ws'
 import { v7 as uuidv7 } from 'uuid'
+import { injectTraceHeaders, natsSpanName, withLinkedSpan, withSpan } from '@/lib/telemetry'
 import { userResponse } from './subjects'
 import type { AsyncJobOptions, AsyncJobResult } from '../types'
 
@@ -208,10 +209,20 @@ export async function requestSync<T = unknown>(
     debugPayload = false,
   }: { requestId?: string; timeout?: number; debugLevel?: string; debugPayload?: boolean } = {},
 ): Promise<T> {
+  return withSpan(
+    natsSpanName('request', subject),
+    {
+      'messaging.system': 'nats',
+      'messaging.operation.name': 'request',
+      'messaging.destination.name': subject,
+      'chat.request_id': requestId,
+    },
+    async () => {
   const h = natsHeaders()
   h.set('X-Request-ID', requestId)
   if (debugLevel && debugLevel !== 'off') h.set('X-Debug', debugLevel)
   if (debugPayload) h.set('X-Debug-Payload', '1')
+  injectTraceHeaders(h)
   const resp = await nc.request(subject, sc.encode(JSON.stringify(data)), { timeout, headers: h })
   const parsed = JSON.parse(sc.decode(resp.data))
   if (parsed.error) {
@@ -225,6 +236,8 @@ export async function requestSync<T = unknown>(
     })
   }
   return parsed as T
+    },
+  )
 }
 
 /**
@@ -257,7 +270,17 @@ export async function requestWithAsyncResult<S = unknown, A = unknown>(
     debugPayload = false,
   } = opts
 
-  const sub: NatsSubscription = nc.subscribe(userResponse(account, requestId), { max: 1 })
+  return withSpan(
+    natsSpanName('request_async_result', subject),
+    {
+      'messaging.system': 'nats',
+      'messaging.operation.name': 'request',
+      'messaging.destination.name': subject,
+      'chat.request_id': requestId,
+    },
+    async () => {
+  const responseSubject = userResponse(account, requestId)
+  const sub: NatsSubscription = nc.subscribe(responseSubject, { max: 1 })
 
   // Register before request resolves so a result that arrives during the
   // sync window is buffered, not dropped. Tagged-envelope resolves never
@@ -267,7 +290,21 @@ export async function requestWithAsyncResult<S = unknown, A = unknown>(
   ;(async () => {
     try {
       for await (const msg of sub) {
-        resolveAsync({ kind: 'data', data: JSON.parse(sc.decode(msg.data)) })
+        const msgSubject = msg.subject || responseSubject
+        withLinkedSpan(
+          natsSpanName('receive', msgSubject),
+          {
+            'messaging.system': 'nats',
+            'messaging.operation.name': 'receive',
+            'messaging.destination.name': msgSubject,
+            'messaging.subscription.name': responseSubject,
+            'chat.request_id': requestId,
+          },
+          msg.headers,
+          () => {
+            resolveAsync({ kind: 'data', data: JSON.parse(sc.decode(msg.data)) })
+          },
+        )
         return
       }
       resolveAsync({ kind: 'closed' })
@@ -286,6 +323,7 @@ export async function requestWithAsyncResult<S = unknown, A = unknown>(
     h.set('X-Request-ID', requestId)
     if (debugLevel && debugLevel !== 'off') h.set('X-Debug', debugLevel)
     if (debugPayload) h.set('X-Debug-Payload', '1')
+    injectTraceHeaders(h)
     const resp = await nc.request(subject, sc.encode(JSON.stringify(payload)), {
       timeout: syncTimeout,
       headers: h,
@@ -356,4 +394,6 @@ export async function requestWithAsyncResult<S = unknown, A = unknown>(
     cleanupSub()
     throw err
   }
+    },
+  )
 }

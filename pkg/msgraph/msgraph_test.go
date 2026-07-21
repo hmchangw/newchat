@@ -3,9 +3,11 @@ package msgraph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -304,4 +306,244 @@ func TestLocalPart(t *testing.T) {
 			assert.Equal(t, tc.ok, ok)
 		})
 	}
+}
+func TestListUsers_MultiPageFollowsNextLink(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	var requests []string
+	var graphSrv *httptest.Server
+	graphSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.String())
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`{"value":[{"id":"u3","userPrincipalName":"carol@corp.example"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[` +
+			`{"id":"u1","userPrincipalName":"alice@corp.example"},` +
+			`{"id":"u2","userPrincipalName":"bob@corp.example"}],` +
+			`"@odata.nextLink":"` + graphSrv.URL + `/users?page=2"}`))
+	}))
+	defer graphSrv.Close()
+
+	lister, err := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+	require.NoError(t, err)
+
+	var pages [][]GraphUser
+	err = lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
+		pages = append(pages, users)
+		return nil
+	})
+	require.NoError(t, err)
+
+	require.Len(t, pages, 2)
+	assert.Equal(t, []GraphUser{
+		{ID: "u1", UserPrincipalName: "alice@corp.example"},
+		{ID: "u2", UserPrincipalName: "bob@corp.example"},
+	}, pages[0])
+	assert.Equal(t, []GraphUser{{ID: "u3", UserPrincipalName: "carol@corp.example"}}, pages[1])
+
+	// first request carries $top and $select
+	require.NotEmpty(t, requests)
+	first, err := url.Parse(requests[0])
+	require.NoError(t, err)
+	assert.Equal(t, "500", first.Query().Get("$top"))
+	assert.Equal(t, "id,userPrincipalName", first.Query().Get("$select"))
+}
+
+func TestListUsers_CallbackErrorAbortsWalk(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	var calls int
+	var graphSrv *httptest.Server
+	graphSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"value":[{"id":"u1","userPrincipalName":"a@x"}],` +
+			`"@odata.nextLink":"` + graphSrv.URL + `/users?page=2"}`))
+	}))
+	defer graphSrv.Close()
+
+	lister, err := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+	require.NoError(t, err)
+
+	err = lister.ListUsers(context.Background(), 500, func([]GraphUser) error {
+		return errors.New("boom")
+	})
+	require.ErrorContains(t, err, "boom")
+	assert.Equal(t, 1, calls, "must not fetch further pages after fn error")
+}
+
+func TestListUsers_Non200IsError(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer graphSrv.Close()
+
+	lister, err := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+	require.NoError(t, err)
+
+	err = lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
+	require.ErrorContains(t, err, "status 403")
+}
+
+func TestListUsers_RejectsCrossOriginNextLink(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	var attackerHit bool
+	attackerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attackerHit = true
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	defer attackerSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Point the next page at a foreign origin — a tampered/intercepted nextLink.
+		_, _ = w.Write([]byte(`{"value":[{"id":"u1","userPrincipalName":"a@x"}],` +
+			`"@odata.nextLink":"` + attackerSrv.URL + `/users?page=2"}`))
+	}))
+	defer graphSrv.Close()
+
+	lister, err := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+	require.NoError(t, err)
+
+	var pages [][]GraphUser
+	err = lister.ListUsers(context.Background(), 500, func(users []GraphUser) error {
+		pages = append(pages, users)
+		return nil
+	})
+	require.ErrorContains(t, err, "deviates from configured graph origin")
+	assert.False(t, attackerHit, "must not forward the bearer token to a foreign origin")
+	assert.Len(t, pages, 1, "first (valid) page is still delivered before the walk aborts")
+}
+
+// TestGraphClients_InvalidProxyURL asserts every app-only constructor that
+// honors ProxyURL fails fast at construction on a malformed value, rather than
+// silently falling back to direct egress or surfacing an opaque per-request error.
+func TestGraphClients_InvalidProxyURL(t *testing.T) {
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			cfg := Config{TenantID: "t", ProxyURL: proxy}
+			_, err := NewChatsClient(cfg)
+			require.Error(t, err)
+			_, err = NewChatMembersClient(cfg)
+			require.Error(t, err)
+			_, err = NewUserListerClient(cfg)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestCreateOnlineMeeting_SendsDefaultUserAgent(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "token request must carry User-Agent")
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "meeting request must carry User-Agent")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
+	}))
+	defer graphSrv.Close()
+
+	c := newTestClient(tokenSrv.URL, graphSrv.URL)
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
+		ExternalID:     "room-key-1",
+		Subject:        "Standup",
+		OrganizerEmail: "alice@corp.com",
+	})
+	require.NoError(t, err)
+}
+
+func TestCreateOnlineMeeting_UserAgentOverride(t *testing.T) {
+	const custom = "chat-room-service/9.9"
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, custom, r.Header.Get("User-Agent"))
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
+	}))
+	defer graphSrv.Close()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, custom, r.Header.Get("User-Agent"))
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+
+	c := New(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", UserAgent: custom},
+		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
+	)
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
+		ExternalID: "room-key-1", OrganizerEmail: "alice@corp.com",
+	})
+	require.NoError(t, err)
+}
+
+func TestResolveAccountIDs_SendsUserAgent(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"))
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "directory request must carry User-Agent")
+		_ = json.NewEncoder(w).Encode(map[string]any{"value": []GraphUser{
+			{ID: "ida", UserPrincipalName: "alice@corp.com"},
+		}})
+	}))
+	defer graphSrv.Close()
+
+	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	_, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
+	require.NoError(t, err)
+}
+
+func TestListUsers_SendsUserAgent(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, defaultUserAgent, r.Header.Get("User-Agent"), "list-users request must carry User-Agent")
+		_, _ = w.Write([]byte(`{"value":[{"id":"u1","userPrincipalName":"alice@corp.example"}]}`))
+	}))
+	defer graphSrv.Close()
+
+	lister, err := NewUserListerClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithBaseURL(graphSrv.URL), WithTokenURL(tokenSrv.URL),
+	)
+	require.NoError(t, err)
+	err = lister.ListUsers(context.Background(), 500, func([]GraphUser) error { return nil })
+	require.NoError(t, err)
 }

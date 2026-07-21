@@ -2,20 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
@@ -23,7 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -79,18 +76,13 @@ func main() {
 
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "broadcast-worker")
+	sdk, obsShutdown, err := obs.InitWithLoggerHandler(ctx, logctx.LevelTrace, logctx.NewHandler)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
-		os.Exit(1)
-	}
-	meterShutdown, err := otelutil.InitMeter("broadcast-worker")
-	if err != nil {
-		slog.Error("init meter failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -98,7 +90,10 @@ func main() {
 	db := mongoClient.Database(cfg.MongoDB)
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword)
+		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
 		if err != nil {
 			slog.Error("valkey connect (room-meta L2) failed", "error", err)
 			os.Exit(1)
@@ -134,13 +129,13 @@ func main() {
 		keyStore = roomkeystore.NewMongoStore(db.Collection("rooms"), cfg.RoomKeyGracePeriod)
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
@@ -191,19 +186,19 @@ func main() {
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
-	broadcastSub, err := nc.QueueSubscribe(subject.ServerBroadcastWildcard(cfg.SiteID), "broadcast-worker",
-		func(msg otelnats.Msg) {
-			broadcastCtx, _ := natsutil.StampRequestID(context.Background(), msg.Msg.Header, msg.Msg.Subject)
-			broadcastCtx = logctx.Admit(broadcastCtx, msg.Msg.Header)
-			logctx.CapturePayload(broadcastCtx, "consumed", msg.Msg.Subject, msg.Msg.Data)
-			handler.HandleServerBroadcast(broadcastCtx, msg.Msg.Data)
+	broadcastSub, err := nc.QueueSubscribe(ctx, subject.ServerBroadcastWildcard(cfg.SiteID), "broadcast-worker",
+		func(msgCtx context.Context, msg *nats.Msg) {
+			broadcastCtx, _ := natsutil.StampRequestID(msgCtx, msg.Header, msg.Subject)
+			broadcastCtx = logctx.Admit(broadcastCtx, msg.Header)
+			logctx.CapturePayload(broadcastCtx, "consumed", msg.Subject, msg.Data)
+			handler.HandleServerBroadcast(broadcastCtx, msg.Data)
 		})
 	if err != nil {
 		slog.Error("subscribe server-broadcast failed", "error", err)
 		os.Exit(1)
 	}
 
-	iter, err := cons.Messages(jetstream.PullMaxMessages(2 * cfg.MaxWorkers))
+	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -219,21 +214,6 @@ func main() {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
 	}
-
-	// Bind synchronously so a port conflict fails startup loudly rather than
-	// running blind — /metrics exposes the cache hit-rate counters Prometheus scrapes.
-	metricsServer := otelutil.MetricsServer()
-	metricsLn, err := net.Listen("tcp", cfg.MetricsAddr)
-	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
-		os.Exit(1)
-	}
-	go func() {
-		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
 	slog.Info("broadcast-worker started", "site", cfg.SiteID, "encryption", cfg.Encryption.Enabled)
 
@@ -261,11 +241,6 @@ func main() {
 			flushCancel()
 			return nil
 		},
-		// Stop /metrics late so Prometheus can scrape the final drain-window counts,
-		// then flush the meter provider before NATS/Mongo close.
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
-		func(ctx context.Context) error { return meterShutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 	}
 	if keyStore != nil {
@@ -275,14 +250,16 @@ func main() {
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
+		// Flush observability LAST so all prior teardown telemetry is exported.
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 
 	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
-// natsPublisher adapts *otelnats.Conn to the Publisher interface.
+// natsPublisher adapts *o11ynats.Conn to the Publisher interface.
 type natsPublisher struct {
-	nc *otelnats.Conn
+	nc *o11ynats.Conn
 }
 
 func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
@@ -295,7 +272,7 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 // messageProcessor handles one consumed message, performing its own Ack/Nak.
 type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
 
-// messageIterator is the slice of oteljetstream.MessagesContext that
+// messageIterator is the slice of o11y/nats MessagesContext that
 // consumeLoop drives — an interface so the loop is testable against a real
 // embedded JetStream consumer.
 type messageIterator interface {

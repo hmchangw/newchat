@@ -22,7 +22,7 @@ import (
 )
 
 // Message is the minimal JetStream message surface Run needs to drop a poison
-// message. Both jetstream.Msg and oteljetstream.Msg satisfy it.
+// message. Both jetstream.Msg and the o11y/nats facade's message satisfy it.
 type Message interface {
 	Subject() string
 	Ack() error

@@ -1465,6 +1465,73 @@ func TestMemberAddEventJSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal(data, &dst))
 		assert.Nil(t, dst.HistorySharedSince)
 	})
+
+	t.Run("members round-trips enriched member.list-shaped entries", func(t *testing.T) {
+		src := model.MemberAddEvent{
+			Type:     "member_added",
+			RoomID:   "r1",
+			Accounts: []string{"bob", "carol"},
+			SiteID:   "site-a",
+			JoinedAt: 1735689600000,
+			Members: []model.RoomMemberEntry{
+				{
+					ID:             "DEPT-100",
+					Type:           model.RoomMemberOrg,
+					OrgName:        "Cardiology Department",
+					OrgDescription: "Inpatient cardiac care",
+					MemberCount:    42,
+				},
+				{
+					ID:          "u-bob",
+					Type:        model.RoomMemberIndividual,
+					Account:     "bob",
+					EngName:     "Bob",
+					ChineseName: "鮑",
+					SectName:    "Cardiology",
+					EmployeeID:  "E10293",
+				},
+			},
+			Timestamp: 1735689600000,
+		}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+
+		// Wire key "members" carries the RoomMemberEntry display fields directly (no id/rid/ts envelope).
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		entries, ok := raw["members"].([]any)
+		require.True(t, ok, "members must marshal as an array")
+		require.Len(t, entries, 2)
+		orgEntry, ok := entries[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "org", orgEntry["type"])
+		assert.Equal(t, "Cardiology Department", orgEntry["orgName"])
+		assert.Equal(t, "Inpatient cardiac care", orgEntry["orgDescription"])
+		assert.EqualValues(t, 42, orgEntry["memberCount"])
+		_, hasEnvelope := orgEntry["rid"]
+		assert.False(t, hasEnvelope, "entries carry no membership envelope (rid/ts)")
+
+		var dst model.MemberAddEvent
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, src.Members, dst.Members)
+	})
+
+	t.Run("nil members is omitted on the wire", func(t *testing.T) {
+		src := model.MemberAddEvent{
+			Type:      "member_added",
+			RoomID:    "r1",
+			Accounts:  []string{"alice"},
+			SiteID:    "site-a",
+			Timestamp: 1735689600000,
+		}
+		data, err := json.Marshal(src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, hasMembers := raw["members"]
+		assert.False(t, hasMembers, "members must be omitted when nil so INBOX copies stay lean")
+	})
 }
 
 func TestMemberAddEventCarriesRoomName(t *testing.T) {
@@ -1590,7 +1657,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q should be omitted when zero", k)
 	}
@@ -1599,7 +1666,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	entry := model.RoomMemberEntry{
 		ID: "org-1", Type: model.RoomMemberOrg,
-		OrgName: "Engineering", MemberCount: 42, OrgDescription: "Eng dept",
+		OrgName: "Engineering", OrgCode: "Engineering", MemberCount: 42, OrgDescription: "Eng dept",
 		SectName: "Cardiology", EmployeeID: "E10293",
 	}
 	data, err := bson.Marshal(&entry)
@@ -1609,7 +1676,7 @@ func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &got))
 	assert.Equal(t, "org-1", got["id"])
 	assert.Equal(t, "org", got["type"])
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q must not be persisted to BSON", k)
 	}
@@ -1659,6 +1726,7 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 			ID:             "sect-eng",
 			Type:           model.RoomMemberOrg,
 			OrgName:        "Engineering",
+			OrgCode:        "Engineering",
 			OrgDescription: "Eng dept",
 		}
 		data, err := json.Marshal(&entry)
@@ -1666,6 +1734,7 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
 		assert.Equal(t, "Engineering", raw["orgName"])
+		assert.Equal(t, "Engineering", raw["orgCode"])
 		assert.Equal(t, "Eng dept", raw["orgDescription"])
 		_, hasSectName := raw["sectName"]
 		assert.False(t, hasSectName, "sectName absent on an org entry")
@@ -2644,6 +2713,19 @@ func TestSubscriptionReadEventJSON(t *testing.T) {
 	if !reflect.DeepEqual(src, dst) {
 		t.Errorf("round-trip mismatch:\n  got  %+v\n  want %+v", dst, src)
 	}
+}
+
+func TestThreadReadAllRoundTrip(t *testing.T) {
+	respFull := model.ThreadReadAllResponse{UnavailableSites: []string{"site-b"}}
+	roundTrip(t, &respFull, &model.ThreadReadAllResponse{})
+	respEmpty := model.ThreadReadAllResponse{}
+	roundTrip(t, &respEmpty, &model.ThreadReadAllResponse{})
+	roomReq := model.RoomThreadReadAllRequest{Account: "alice"}
+	roundTrip(t, &roomReq, &model.RoomThreadReadAllRequest{})
+	roomResp := model.RoomThreadReadAllResponse{}
+	roundTrip(t, &roomResp, &model.RoomThreadReadAllResponse{})
+	ev := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1717000000000, Timestamp: 1717000000001}
+	roundTrip(t, &ev, &model.ThreadReadAllEvent{})
 }
 
 func TestPresenceStatusValues(t *testing.T) {
@@ -4133,6 +4215,40 @@ func TestUserStatusUpdated_RoundTrip(t *testing.T) {
 	roundTrip(t, &src, &dst)
 }
 
+func TestUserSettingsUpdated_RoundTrip(t *testing.T) {
+	mute, width := true, false
+	lang := "ja"
+	src := model.UserSettingsUpdated{
+		Account: "alice",
+		Settings: model.UserSettings{
+			MuteAllNotifications: &mute,
+			FullWidth:            &width,
+			TranslateMessageInto: &lang,
+		},
+		Timestamp: 1735689600000,
+	}
+	dst := model.UserSettingsUpdated{}
+	roundTrip(t, &src, &dst)
+}
+
+func TestUserSettingsUpdated_UnsetSettingsOmittedFromJSON(t *testing.T) {
+	mute := true
+	src := model.UserSettingsUpdated{
+		Account:   "alice",
+		Settings:  model.UserSettings{MuteAllNotifications: &mute},
+		Timestamp: 1735689600000,
+	}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	settings, ok := raw["settings"].(map[string]any)
+	require.True(t, ok)
+	_, present := settings["fullWidth"]
+	assert.False(t, present, "an unset setting must be omitted, so absent keeps meaning client-default")
+}
+
 func TestUserStatusUpdated_StatusIsShowOmittedWhenNil(t *testing.T) {
 	src := model.UserStatusUpdated{
 		Account:    "alice",
@@ -4300,7 +4416,7 @@ func TestThreadRoomInfoBatchResponseJSON(t *testing.T) {
 func TestThreadUnreadRowJSON(t *testing.T) {
 	seen := time.UnixMilli(1717000000000).UTC()
 	r := model.ThreadUnreadRow{
-		ThreadRoomID: "tr1", SiteID: "site-a", RoomType: model.RoomTypeDM,
+		ThreadRoomID: "tr1", RoomID: "r1", SiteID: "site-a", RoomType: model.RoomTypeDM,
 		LastSeenAt: &seen, HasMention: true,
 	}
 	roundTrip(t, &r, &model.ThreadUnreadRow{})
@@ -4329,4 +4445,175 @@ func TestOutboxEvent_RoundTrip(t *testing.T) {
 	var got model.OutboxEvent
 	require.NoError(t, json.Unmarshal(data, &got))
 	require.Equal(t, evt, got)
+}
+
+func TestTeamsUserJSON(t *testing.T) {
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	src := model.TeamsUser{
+		ID:      "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
+		UPN:     "Alice@corp.example",
+		Account: "alice",
+		SiteID:  "site-a",
+		From:    &from,
+	}
+	var dst model.TeamsUser
+	roundTrip(t, &src, &dst)
+}
+
+func TestTeamsUserJSON_NoFrom(t *testing.T) {
+	u := model.TeamsUser{ID: "aad-user-2", UPN: "bob@corp.example", SiteID: "site-b", Account: "bob"}
+	data, err := json.Marshal(&u)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, has := raw["from"]
+	assert.False(t, has, "nil From must be omitted from JSON")
+}
+
+func TestTeamsChatJSON(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:meeting_abc@thread.v2",
+		Name:                "Project X",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
+		Members: []model.TeamsChatMember{
+			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		SiteID:         "site-a",
+		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync: true,
+	}
+	roundTrip(t, &c, &model.TeamsChat{})
+}
+
+func TestTeamsUserBSON(t *testing.T) {
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", From: &from}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+
+	// Check raw BSON keys — these are the on-disk contract with teams-user-sync.
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
+	assert.Contains(t, rawDoc, "siteId", "BSON doc must have siteId key")
+	assert.Contains(t, rawDoc, "upn", "BSON doc must have upn key")
+	assert.Contains(t, rawDoc, "account", "BSON doc must have account key")
+	assert.Contains(t, rawDoc, "from", "BSON doc must have from key when From is non-nil")
+	assert.Equal(t, "aad-user-1", rawDoc["_id"])
+	assert.Equal(t, "site-a", rawDoc["siteId"])
+	assert.Equal(t, "alice", rawDoc["account"])
+
+	// Round-trip to struct and verify equality
+	var dst model.TeamsUser
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, u.ID, dst.ID)
+	assert.Equal(t, u.SiteID, dst.SiteID)
+	assert.Equal(t, u.Account, dst.Account)
+	require.NotNil(t, dst.From)
+	assert.True(t, dst.From.UTC().Equal(from.UTC()), "From time must match")
+}
+
+func TestTeamsUserBSON_NoFrom(t *testing.T) {
+	u := model.TeamsUser{ID: "aad-user-2", SiteID: "site-b", Account: "bob"}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+
+	// Check that 'from' key is absent when From is nil
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	_, has := rawDoc["from"]
+	assert.False(t, has, "BSON doc must not have from key when From is nil (omitempty)")
+	assert.Equal(t, "aad-user-2", rawDoc["_id"])
+	assert.Equal(t, "site-b", rawDoc["siteId"])
+	assert.Equal(t, "bob", rawDoc["account"])
+}
+
+func TestTeamsChatBSON(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:meeting_abc@thread.v2",
+		Name:                "Project X",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
+		Members: []model.TeamsChatMember{
+			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		SiteID:         "site-a",
+		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync: true,
+	}
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+
+	// Check raw BSON keys
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "_id", "BSON doc must have _id key")
+	assert.Contains(t, rawDoc, "siteId", "BSON doc must have siteID key")
+	assert.Contains(t, rawDoc, "needMemberSync", "BSON doc must have needMemberSync key")
+	assert.Contains(t, rawDoc, "members", "BSON doc must have members key")
+	assert.Equal(t, "19:meeting_abc@thread.v2", rawDoc["_id"])
+	assert.Equal(t, "site-a", rawDoc["siteId"])
+	assert.Equal(t, true, rawDoc["needMemberSync"])
+
+	// Round-trip to struct and verify equality
+	var dst model.TeamsChat
+	require.NoError(t, bson.Unmarshal(data, &dst))
+	assert.Equal(t, c.ID, dst.ID)
+	assert.Equal(t, c.Name, dst.Name)
+	assert.Equal(t, c.ChatType, dst.ChatType)
+	assert.True(t, c.CreatedDateTime.UTC().Equal(dst.CreatedDateTime.UTC()), "CreatedDateTime must match")
+	assert.True(t, c.LastUpdatedDateTime.UTC().Equal(dst.LastUpdatedDateTime.UTC()), "LastUpdatedDateTime must match")
+	assert.Equal(t, c.SiteID, dst.SiteID)
+	assert.True(t, c.UpdatedAt.UTC().Equal(dst.UpdatedAt.UTC()), "UpdatedAt must match")
+	assert.Equal(t, c.NeedMemberSync, dst.NeedMemberSync)
+	require.Equal(t, len(c.Members), len(dst.Members), "Members count must match")
+	for i, member := range c.Members {
+		assert.Equal(t, member.ID, dst.Members[i].ID)
+		assert.Equal(t, member.Account, dst.Members[i].Account)
+		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
+	}
+}
+
+func TestTeamsChatJSON_NeedCreateRoom(t *testing.T) {
+	c := model.TeamsChat{
+		ID:                  "19:g1@thread.v2",
+		ChatType:            "group",
+		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+		Members:             []model.TeamsChatMember{{ID: "u1", Account: "alice"}},
+		SiteID:              "site-a",
+		UpdatedAt:           time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC),
+		NeedMemberSync:      false,
+		NeedCreateRoom:      true,
+	}
+	roundTrip(t, &c, &model.TeamsChat{})
+
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+	var raw bson.M
+	require.NoError(t, bson.Unmarshal(data, &raw))
+	assert.Contains(t, raw, "needCreateRoom", "BSON doc must have needCreateRoom key")
+	assert.Equal(t, true, raw["needCreateRoom"])
+}
+
+func TestTeamsRoomCreateEventJSON(t *testing.T) {
+	e := model.TeamsRoomCreateEvent{
+		Chats: []model.TeamsRoomCreateChat{{
+			ID:              "chat-1",
+			Name:            "Project X",
+			CreatedDateTime: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+			Members: []model.TeamsRoomCreateMember{{
+				ID:                          "aad-user-1",
+				Account:                     "alice",
+				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			}},
+		}},
+		Timestamp: 1_700_000_000_000,
+	}
+	roundTrip(t, &e, &model.TeamsRoomCreateEvent{})
 }

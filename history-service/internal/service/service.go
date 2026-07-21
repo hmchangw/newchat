@@ -34,9 +34,11 @@ type MessageWriter interface {
 	// runs the mirror-table and parent-tcount work when the LWT applies.
 	// Returns the updated_at value now persisted (the deletedAt argument when
 	// applied; the existing value when a concurrent delete won the race).
-	// newTcount is non-nil when the parent's tcount was decremented via CAS;
+	// newTcount is non-nil when the parent's tcount was recomputed via CAS;
 	// nil means the CAS was skipped (e.g. parent row not found, or msg is not a thread reply).
-	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, newTcount *int, err error)
+	// newThreadLastMsgAt is the newest surviving reply's createdAt (nil when none survive or the
+	// CAS was skipped), letting the caller carry it on the canonical event without a second read.
+	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, newTcount *int, newThreadLastMsgAt *time.Time, err error)
 	PinMessage(ctx context.Context, msg *models.Message, pinnedAt time.Time, pinnedBy models.Participant) error
 	UnpinMessage(ctx context.Context, msg *models.Message) error
 	// AddReaction writes one (emoji, user_account) map-cell to every mirror; idempotent.
@@ -151,6 +153,7 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), s.LoadSurroundingMessages)
 	natsrouter.Register(r, subject.MsgGetPattern(siteID), s.GetMessageByID)
 	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), s.GetMessagesByIDs)
+	natsrouter.Register(r, subject.RoomsGet(siteID), s.RoomsGet)
 	natsrouter.Register(r, subject.MsgEditPattern(siteID), func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
 		return s.EditMessage(c, siteID, req)
 	})

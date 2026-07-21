@@ -10,6 +10,8 @@ services:
     # and in-network callers reach it as botplatform-service:8080. Publishing host
     # 8080 collided with auth-service and media-service, which also default to 8080.
     environment:
+      - OTEL_SERVICE_NAME=botplatform-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - PORT=8080
       - SITE_ID=site-local
       - MONGO_URI=mongodb://mongodb:27017

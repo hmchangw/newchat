@@ -24,6 +24,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
@@ -729,23 +730,21 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	return nil
 }
 
-// addMemberInputs bundles the three independent up-front reads processAddMembers
-// needs. None depends on another, so loadAddMemberInputs fetches them
-// concurrently to collapse three serial Mongo round trips into one.
+// addMemberInputs bundles processAddMembers' independent up-front reads (fetched concurrently).
 type addMemberInputs struct {
-	room          *model.Room
-	candidates    []AddMemberCandidate
-	hadOrgsBefore bool
+	room              *model.Room
+	candidates        []AddMemberCandidate
+	hasAnyRoomMembers bool
+	// orgDisplayRows feeds the event's org entries; read only when req.Orgs is non-empty and BEFORE any
+	// write, so a transient failure Naks a still-clean delivery (post-write, redelivery would announce nothing).
+	orgDisplayRows []orgdisplay.User
+	// existingOrgIDs is the subset of req.Orgs already present as org rows, read pre-write so member_added
+	// fires only for genuinely new orgs (a full re-add of a present org is a no-op). Empty when req.Orgs is empty.
+	existingOrgIDs map[string]struct{}
 }
 
-// loadAddMemberInputs runs GetRoomMeta, ListAddMemberCandidates, and
-// HasOrgRoomMembers concurrently, collapsing three serial Mongo round trips into
-// one. A plain errgroup.Group (not WithContext) is used deliberately: these are
-// independent reads, so a failure in one need not cancel the others — matching
-// the prior serial code, which returned the first error without cancellation.
-// g.Wait returns the first error; each is wrapped exactly as the serial code
-// did. Each goroutine writes a distinct field of out (no race) and g.Wait
-// establishes the happens-before for the reads of out below.
+// loadAddMemberInputs runs the reads concurrently. Plain errgroup (not WithContext)
+// deliberately: independent reads, first error wins, no cancellation — like the prior serial code.
 func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembersRequest) (addMemberInputs, error) {
 	var (
 		out addMemberInputs
@@ -768,14 +767,32 @@ func (h *Handler) loadAddMemberInputs(ctx context.Context, req *model.AddMembers
 		return nil
 	})
 	g.Go(func() error {
-		// Fail closed: defaulting hadOrgsBefore=false on error would trigger spurious first-org backfill.
-		hadOrgsBefore, err := h.store.HasOrgRoomMembers(ctx, req.RoomID)
+		// Fail closed: gates writeIndividuals, so a false default would drop the individual room_members row member.list needs.
+		hasAny, err := h.store.HasAnyRoomMembers(ctx, req.RoomID)
 		if err != nil {
-			return fmt.Errorf("check existing org room members: %w", err)
+			return fmt.Errorf("check existing room members: %w", err)
 		}
-		out.hadOrgsBefore = hadOrgsBefore
+		out.hasAnyRoomMembers = hasAny
 		return nil
 	})
+	if len(req.Orgs) > 0 {
+		g.Go(func() error {
+			rows, err := h.store.FetchOrgDisplayUsers(ctx, req.Orgs)
+			if err != nil {
+				return fmt.Errorf("fetch org display users: %w", err)
+			}
+			out.orgDisplayRows = rows
+			return nil
+		})
+		g.Go(func() error {
+			existing, err := h.store.ExistingOrgMembers(ctx, req.RoomID, req.Orgs)
+			if err != nil {
+				return fmt.Errorf("check existing org members: %w", err)
+			}
+			out.existingOrgIDs = existing
+			return nil
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return addMemberInputs{}, err
 	}
@@ -817,8 +834,8 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		return permanent(errcode.BadRequest(fmt.Sprintf("add-member only valid on channel rooms, got %s", room.Type)))
 	}
 	candidates := inputs.candidates
-	hadOrgsBefore := inputs.hadOrgsBefore
-	writeIndividuals := len(req.Orgs) > 0 || hadOrgsBefore
+	// Align the write-gate to member.list's read-source: write individual rows whenever room_members already holds any row, not only when orgs are present.
+	writeIndividuals := len(req.Orgs) > 0 || inputs.hasAnyRoomMembers
 
 	allowedIndividual := make(map[string]struct{}, len(req.Users))
 	for _, acc := range req.Users {
@@ -953,6 +970,8 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			},
 		})
 	}
+	// Org rows are upserted on the (rid, member.type, member.id) unique key, so a re-add/redelivery
+	// is an idempotent no-op — no pre-read of existing rows needed.
 	for _, org := range req.Orgs {
 		roomMembers = append(roomMembers, &model.RoomMember{
 			ID:     idgen.GenerateUUIDv7(),
@@ -962,13 +981,13 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		})
 	}
 
-	// Backfill existing subscribers into room_members only when orgs are
-	// joining for the first time and we're starting to track individuals.
-	// Backfill errors propagate: log-and-continue would silently corrupt
-	// room_members (existing subs would never get IRM rows). Retry is safe —
-	// subs are already written so needSub is empty, hadOrgsBefore stays false
-	// until BulkCreateRoomMembers commits, and the backfill re-runs cleanly.
-	if len(req.Orgs) > 0 && !hadOrgsBefore {
+	// Backfill existing subscribers into room_members on the first org add,
+	// i.e. while the table is still empty — that's when individual tracking begins.
+	// Errors propagate: log-and-continue would silently corrupt room_members
+	// (existing subs would never get IRM rows). Retry is safe — subs are already
+	// written so needSub is empty, the table stays empty until BulkCreateRoomMembers
+	// commits, and the backfill re-runs cleanly.
+	if len(req.Orgs) > 0 && !inputs.hasAnyRoomMembers {
 		existingAccounts, err := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 		if err != nil {
 			return fmt.Errorf("get subscription accounts for backfill: %w", err)
@@ -985,10 +1004,9 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 				return fmt.Errorf("find users for backfill: %w", err)
 			}
 			// Fail-hard if any requested account is missing. A partial result
-			// would commit some IRM rows + flip hadOrgsBefore=true (once
-			// BulkCreateRoomMembers writes the org row), after which no future
-			// redelivery can repair the missing rows — backfill only fires on
-			// the first-org transition. Better to halt and surface the stale
+			// would commit some IRM rows (making the table non-empty), after which
+			// no future redelivery can repair the missing rows — backfill only fires
+			// while room_members is still empty. Better to halt and surface the stale
 			// sub via the async-job error than to bake permanent divergence
 			// between subscriptions and room_members.
 			found := make(map[string]struct{}, len(backfillUsers))
@@ -1080,15 +1098,18 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 	}
 
-	// 8. Publish MemberAddEvent (actualAccounts was built above alongside subs).
-	// Gate on "actual membership change visible to room": new individual subs
-	// (actualAccounts) or new org rows (req.Orgs). The org→individual upgrade
-	// path (only needIRM populated) writes the missing individual room_members
-	// row silently — no membership state changed for the room itself, so
-	// emitting an empty MemberAddEvent and a members_added sys-msg with no
-	// actual members listed would mislead end users.
+	// 8. Publish MemberAddEvent. Fire whenever member.list composition changes:
+	// new subscriptions (actualAccounts), an org→individual upgrade (needIRM writes
+	// a fresh individual row), or a genuinely new org row (newOrgs). A full re-add
+	// of an already-present org touches none of these and stays silent.
+	newOrgs := 0
+	for _, org := range req.Orgs {
+		if _, present := inputs.existingOrgIDs[org]; !present {
+			newOrgs++
+		}
+	}
 	historySharedSince := historySharedSincePtr(req.History, req.Timestamp, req.RoomID)
-	if len(actualAccounts) > 0 || len(req.Orgs) > 0 {
+	if len(actualAccounts) > 0 || len(needIRM) > 0 || newOrgs > 0 {
 		memberAddEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
 			RoomID:             req.RoomID,
@@ -1101,6 +1122,14 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			HistorySharedSince: historySharedSince,
 			Timestamp:          now.UnixMilli(),
 		}
+		// Marshalled BEFORE Members is attached — INBOX payloads must omit it (see model.MemberAddEvent.Members).
+		inboxPayload, _ := json.Marshal(memberAddEvt)
+
+		// Strip Accounts from the room-scoped (frontend) copy only: the client renders
+		// from Members, while the INBOX/search and cross-site copies (already marshalled
+		// or built separately) keep Accounts as their subscribe/index identity list.
+		memberAddEvt.Accounts = nil
+		memberAddEvt.Members = buildAddedMembers(&req, inputs.orgDisplayRows, userMap)
 		memberAddData, _ := json.Marshal(memberAddEvt)
 		if err := h.publish(ctx, subject.RoomMemberEvent(req.RoomID), memberAddData, ""); err != nil {
 			slog.ErrorContext(ctx, "member add event publish failed",
@@ -1115,7 +1144,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 				Type:       model.InboxMemberAdded,
 				SiteID:     room.SiteID,
 				DestSiteID: room.SiteID,
-				Payload:    memberAddData,
+				Payload:    inboxPayload,
 				Timestamp:  now.UnixMilli(),
 			}
 			internalData, _ := json.Marshal(internalEvt)
@@ -1129,43 +1158,48 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			}
 		}
 
-		// Individuals = req.Users (direct + channel individuals, merged by
-		// room-service) minus the requester — mirrors create's creator strip.
-		sysIndividuals := withoutAccount(req.Users, req.RequesterAccount)
-		membersAdded := model.MembersAdded{
-			Individuals:     sysIndividuals,
-			Orgs:            nonNil(req.Orgs),
-			Channels:        nonNil(req.Channels),
-			AddedUsersCount: len(subs),
-		}
-		sysMsgData, _ := json.Marshal(membersAdded)
-		seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
-			fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-		content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
-			if u, ok := userMap[a]; ok {
-				return &u
+		// members_added sys-msg: a pure org→individual upgrade adds no new member and
+		// would render an empty member list, so post it only when genuinely new
+		// members joined (actualAccounts) or a new org was added (newOrgs).
+		if len(actualAccounts) > 0 || newOrgs > 0 {
+			// Individuals = req.Users (direct + channel individuals, merged by
+			// room-service) minus the requester — mirrors create's creator strip.
+			sysIndividuals := withoutAccount(req.Users, req.RequesterAccount)
+			membersAdded := model.MembersAdded{
+				Individuals:     sysIndividuals,
+				Orgs:            nonNil(req.Orgs),
+				Channels:        nonNil(req.Channels),
+				AddedUsersCount: len(subs),
 			}
-			return nil
-		})
-		sysMsg := model.Message{
-			ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
-			RoomID:      req.RoomID,
-			UserID:      requester.ID,
-			UserAccount: requester.Account,
-			Type:        model.MessageTypeMembersAdded,
-			Content:     content,
-			SysMsgData:  sysMsgData,
-			CreatedAt:   acceptedAt,
-		}
-		msgEvt := model.MessageEvent{
-			Event:     model.EventCreated,
-			Message:   sysMsg,
-			SiteID:    room.SiteID,
-			Timestamp: now.UnixMilli(),
-		}
-		msgEvtData, _ := json.Marshal(msgEvt)
-		if err := h.publish(ctx, subject.MsgCanonicalCreated(room.SiteID), msgEvtData, natsutil.CanonicalDedupID(&msgEvt)); err != nil {
-			return fmt.Errorf("publish add-members system message: %w", err)
+			sysMsgData, _ := json.Marshal(membersAdded)
+			seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
+				fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
+			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
+				if u, ok := userMap[a]; ok {
+					return &u
+				}
+				return nil
+			})
+			sysMsg := model.Message{
+				ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
+				RoomID:      req.RoomID,
+				UserID:      requester.ID,
+				UserAccount: requester.Account,
+				Type:        model.MessageTypeMembersAdded,
+				Content:     content,
+				SysMsgData:  sysMsgData,
+				CreatedAt:   acceptedAt,
+			}
+			msgEvt := model.MessageEvent{
+				Event:     model.EventCreated,
+				Message:   sysMsg,
+				SiteID:    room.SiteID,
+				Timestamp: now.UnixMilli(),
+			}
+			msgEvtData, _ := json.Marshal(msgEvt)
+			if err := h.publish(ctx, subject.MsgCanonicalCreated(room.SiteID), msgEvtData, natsutil.CanonicalDedupID(&msgEvt)); err != nil {
+				return fmt.Errorf("publish add-members system message: %w", err)
+			}
 		}
 	}
 
@@ -1206,6 +1240,46 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 
 	return nil
+}
+
+// buildAddedMembers assembles the member.list-shaped display entries (contract: model.MemberAddEvent.Members),
+// org entries first, echoing exactly the orgs and users the request named. Entries are the RoomMemberEntry
+// payload only — no membership envelope (id/rid/ts).
+func buildAddedMembers(req *model.AddMembersRequest, orgDisplayRows []orgdisplay.User, userMap map[string]model.User) []model.RoomMemberEntry {
+	members := make([]model.RoomMemberEntry, 0, len(req.Orgs)+len(req.Users))
+	if len(req.Orgs) > 0 {
+		agg := orgdisplay.Build(req.Orgs, orgDisplayRows)
+		for _, orgID := range req.Orgs {
+			entry := model.RoomMemberEntry{ID: orgID, Type: model.RoomMemberOrg}
+			if a := agg[orgID]; a != nil {
+				entry.MemberCount = a.MemberCount
+			}
+			entry.OrgName = orgdisplay.Name(agg[orgID], orgID)
+			entry.OrgCode = orgdisplay.Code(agg[orgID])
+			entry.OrgDescription = orgdisplay.Description(agg[orgID])
+			members = append(members, entry)
+		}
+	}
+	// One individual entry per requested user that was actually added or upgraded
+	// (present in userMap = gained a subscription or an individual row). Org-expanded
+	// accounts (never in req.Users) and already-complete members (absent from userMap)
+	// are excluded — the former ride the org row, the latter need no re-announcement.
+	for _, account := range req.Users {
+		user, ok := userMap[account]
+		if !ok {
+			continue
+		}
+		members = append(members, model.RoomMemberEntry{
+			ID:          user.ID,
+			Type:        model.RoomMemberIndividual,
+			Account:     account,
+			EngName:     user.EngName,
+			ChineseName: user.ChineseName,
+			SectName:    user.SectName,
+			EmployeeID:  user.EmployeeID,
+		})
+	}
+	return members
 }
 
 func mustMarshal(v any) []byte {

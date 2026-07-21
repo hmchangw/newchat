@@ -135,3 +135,25 @@ func TestCORS_PreflightOptions_Returns204WithoutHandler(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
 }
+
+func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CORS())
+	r.GET("/api/userInfo", func(c *gin.Context) {
+		t.Fatal("downstream handler must NOT run on preflight")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/api/userInfo", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "traceparent,tracestate,baggage")
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	allowed := w.Header().Get("Access-Control-Allow-Headers")
+	assert.Contains(t, allowed, "traceparent")
+	assert.Contains(t, allowed, "tracestate")
+	assert.Contains(t, allowed, "baggage")
+}

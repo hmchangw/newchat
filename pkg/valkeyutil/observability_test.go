@@ -1,0 +1,48 @@
+package valkeyutil
+
+import (
+	"testing"
+
+	"github.com/flywindy/o11y"
+	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+)
+
+// *o11y.SDK must satisfy the minimal Observability interface so services pass
+// the SDK directly without valkeyutil importing the concrete type.
+var _ Observability = (*o11y.SDK)(nil)
+
+type fakeObs struct{}
+
+func (fakeObs) TracerProvider() trace.TracerProvider { return tracenoop.NewTracerProvider() }
+func (fakeObs) MeterProvider() metric.MeterProvider  { return metricnoop.NewMeterProvider() }
+
+func TestNewConnectConfig_NoOptions(t *testing.T) {
+	cfg := newConnectConfig()
+	assert.Nil(t, cfg.obs, "without options, no instrumentation should be configured")
+}
+
+func TestNewConnectConfig_WithObservability(t *testing.T) {
+	obs := fakeObs{}
+	cfg := newConnectConfig(WithObservability(obs))
+	assert.Equal(t, obs, cfg.obs)
+}
+
+func TestNewConnectConfig_WithRedisOptions(t *testing.T) {
+	cfg := newConnectConfig(WithRequireParentSpan(true), WithIgnoredCommands("ping", "info"))
+	assert.Len(t, cfg.redisOpts, 2)
+}
+
+func TestNewConnectConfig_NilOptionIgnored(t *testing.T) {
+	cfg := newConnectConfig(nil, WithObservability(fakeObs{}))
+	assert.NotNil(t, cfg.obs, "nil options must be skipped without panicking")
+}
+
+func TestInstrumentCluster_NoObservability_NoError(t *testing.T) {
+	// With no observability configured, instrumentCluster is a no-op and must
+	// not touch the (here nil) client.
+	assert.NoError(t, instrumentCluster(nil, newConnectConfig()))
+}

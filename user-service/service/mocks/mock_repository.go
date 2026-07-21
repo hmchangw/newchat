@@ -201,6 +201,21 @@ func (mr *MockUserRepositoryMockRecorder) GetHRInfoByAccounts(ctx, accounts any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHRInfoByAccounts", reflect.TypeOf((*MockUserRepository)(nil).GetHRInfoByAccounts), ctx, accounts)
 }
 
+// GetUserSettings mocks base method.
+func (m *MockUserRepository) GetUserSettings(ctx context.Context, account string) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserSettings", ctx, account)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserSettings indicates an expected call of GetUserSettings.
+func (mr *MockUserRepositoryMockRecorder) GetUserSettings(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserSettings", reflect.TypeOf((*MockUserRepository)(nil).GetUserSettings), ctx, account)
+}
+
 // GetUserStatus mocks base method.
 func (m *MockUserRepository) GetUserStatus(ctx context.Context, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
@@ -229,6 +244,21 @@ func (m *MockUserRepository) SetUserStatus(ctx context.Context, account, text st
 func (mr *MockUserRepositoryMockRecorder) SetUserStatus(ctx, account, text, isShow any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetUserStatus", reflect.TypeOf((*MockUserRepository)(nil).SetUserStatus), ctx, account, text, isShow)
+}
+
+// UpdateUserSettings mocks base method.
+func (m *MockUserRepository) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, set)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UpdateUserSettings indicates an expected call of UpdateUserSettings.
+func (mr *MockUserRepositoryMockRecorder) UpdateUserSettings(ctx, account, set any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserSettings), ctx, account, set)
 }
 
 // MockAppRepository is a mock of AppRepository interface.
@@ -339,6 +369,20 @@ func (m *MockRoomClient) EXPECT() *MockRoomClientMockRecorder {
 	return m.recorder
 }
 
+// ClearAllThreadUnread mocks base method.
+func (m *MockRoomClient) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearAllThreadUnread", ctx, siteID, account)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ClearAllThreadUnread indicates an expected call of ClearAllThreadUnread.
+func (mr *MockRoomClientMockRecorder) ClearAllThreadUnread(ctx, siteID, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearAllThreadUnread", reflect.TypeOf((*MockRoomClient)(nil).ClearAllThreadUnread), ctx, siteID, account)
+}
+
 // CreateDMRoom mocks base method.
 func (m *MockRoomClient) CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error) {
 	m.ctrl.T.Helper()
@@ -421,6 +465,21 @@ func (m *MockHistoryClient) GetThreadList(ctx context.Context, siteID string, re
 func (mr *MockHistoryClientMockRecorder) GetThreadList(ctx, siteID, req any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetThreadList", reflect.TypeOf((*MockHistoryClient)(nil).GetThreadList), ctx, siteID, req)
+}
+
+// RoomsGet mocks base method.
+func (m *MockHistoryClient) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RoomsGet", ctx, siteID, roomIDs)
+	ret0, _ := ret[0].(map[string]model.LastMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RoomsGet indicates an expected call of RoomsGet.
+func (mr *MockHistoryClientMockRecorder) RoomsGet(ctx, siteID, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RoomsGet", reflect.TypeOf((*MockHistoryClient)(nil).RoomsGet), ctx, siteID, roomIDs)
 }
 
 // MockPresenceClient is a mock of PresenceClient interface.
@@ -537,4 +596,19 @@ func (m *MockThreadSubscriptionRepository) ListByAccount(ctx context.Context, ac
 func (mr *MockThreadSubscriptionRepositoryMockRecorder) ListByAccount(ctx, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByAccount", reflect.TypeOf((*MockThreadSubscriptionRepository)(nil).ListByAccount), ctx, account)
+}
+
+// ListByAccountInRooms mocks base method.
+func (m *MockThreadSubscriptionRepository) ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListByAccountInRooms", ctx, account, roomIDs)
+	ret0, _ := ret[0].([]model.ThreadUnreadRow)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListByAccountInRooms indicates an expected call of ListByAccountInRooms.
+func (mr *MockThreadSubscriptionRepositoryMockRecorder) ListByAccountInRooms(ctx, account, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByAccountInRooms", reflect.TypeOf((*MockThreadSubscriptionRepository)(nil).ListByAccountInRooms), ctx, account, roomIDs)
 }

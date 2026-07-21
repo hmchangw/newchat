@@ -11,6 +11,8 @@ services:
       - path: ../../docker-local/.env
         required: false
     environment:
+      - OTEL_SERVICE_NAME=auth-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - PORT=8080
       # Bypass OIDC; accept any account name. Flip to false to test OIDC.
       - DEV_MODE=${DEV_MODE:-true}

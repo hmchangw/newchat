@@ -17,8 +17,9 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 
 1. [AsyncJobResult — async completion](#asyncjobresult--async-completion)
 2. [subscription.update — membership / state changes](#subscriptionupdate--membership--state-changes)
-3. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
-4. [Room events — per-room live events](#room-events--per-room-live-events)
+3. [settings.update — user settings sync](#settingsupdate--user-settings-sync)
+4. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
+5. [Room events — per-room live events](#room-events--per-room-live-events)
    - [new_message (RoomEvent)](#new_message-roomevent)
    - [message_edited (EditRoomEvent)](#message_edited-editroomevent)
    - [message_deleted (DeleteRoomEvent)](#message_deleted-deleteroomevent)
@@ -29,11 +30,11 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
    - [thread_message_read](#thread_message_read)
    - [room_renamed (RoomRenamedRoomEvent)](#room_renamed-roomrenamedroomevent)
    - [room_restricted (RoomRestrictedRoomEvent)](#room_restricted-roomrestrictedroomevent)
-5. [member — room membership events](#member--room-membership-events)
+6. [member — room membership events](#member--room-membership-events)
    - [member_added (MemberAddEvent)](#member_added-memberaddevent)
    - [member_left / member_removed (MemberRemoveEvent)](#member_left--member_removed-memberremoveevent)
-6. [notification — reaction notification](#notification--reaction-notification)
-7. [Presence events](#presence-events)
+7. [notification — reaction notification](#notification--reaction-notification)
+8. [Presence events](#presence-events)
 
 ---
 
@@ -43,6 +44,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 |---|---|
 | `chat.user.{account}.response.{requestID}` | AsyncJobResult (one-shot async job completion) |
 | `chat.user.{account}.event.subscription.update` | SubscriptionUpdateEvent / SubscriptionRemovedEvent |
+| `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
@@ -157,6 +159,47 @@ fields are sent.
 **Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
 Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
+
+---
+
+## settings.update — user settings sync
+
+**Subject:** `chat.user.{account}.event.settings.update`
+
+Published by user-service after every successful [settings.set](request-reply.md#settingsset)
+— ephemeral core-NATS fan-out to the caller's own connected devices, so other
+logged-in clients sync live. Best-effort: a fan-out failure does not fail the set.
+
+The payload carries the **full post-update settings** — receivers replace their
+local copy, they never merge deltas. A field absent from `settings` was never
+set by the user, and **absent means the client applies its own default** (the
+server never injects defaults).
+
+### Schema (SettingsUpdateEvent)
+
+| Field | Type | Notes |
+|---|---|---|
+| `timestamp` | number | Publish time, Unix ms. |
+| `settings` | UserSettings | Full post-update settings; all seven fields optional. |
+
+UserSettings — every field optional, present only when explicitly set:
+
+| Field | Type |
+|---|---|
+| `fullWidth` | boolean |
+| `translateMessageInto` | string |
+| `showMessagePreviewInSidebarList` | boolean |
+| `muteAllNotifications` | boolean |
+| `showMessagesAndPreviewsInNotifications` | boolean |
+| `showNotificationsDuringCallsAndMeetings` | boolean |
+| `scrollToBottomInChat` | boolean |
+
+```json
+{
+  "timestamp": 1737000000000,
+  "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
+}
+```
 
 ---
 
@@ -665,15 +708,21 @@ the event on the same room stream they already subscribe to.
 
 ### member_added (MemberAddEvent)
 
-Published once when at least one new account or org was added. Triggered by
+Published once whenever the room's member list actually changes: a new account joins, a
+genuinely new org is added, or an existing org member is upgraded to an individual membership
+(see the no-op note below for what does **not** fire). Triggered by
 [Add Members](request-reply.md#add-members) and indirectly by
 [Create Room](request-reply.md#create-room).
 
-A `members_added` system message also flows through the message pipeline as a
-`new_message` room event.
+The event carries no separate account list — member identities are in `members`. When new members
+actually join (or a new org is added), a `members_added` system message also flows through the
+message pipeline as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
-> **No-op:** if every requested account is already a member (or the add only upgrades an
-> existing org member to individual membership), no `member_added` event fires.
+> **No-op:** when the request changes nothing — every requested account already subscribed, no org
+> member upgraded to an individual membership, and every requested org already present — no
+> `member_added` event fires. In particular, re-adding an already-present org is a no-op. An
+> org→individual upgrade is **not** a no-op: `member_added` fires with that individual in `members`
+> (no `members_added` system message, since no one newly joined).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -681,7 +730,7 @@ A `members_added` system message also flows through the message pipeline as a
 | `roomId` | string | |
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
-| `accounts` | string[] | The newly added accounts. |
+| `members` | [RoomMemberEntry](../client-api.md#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](../client-api.md#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](request-reply.md#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |

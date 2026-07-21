@@ -3779,7 +3779,11 @@ func TestHandler_MessageThreadRead_NotRoomMember(t *testing.T) {
 	assert.Equal(t, 0, f.publishCalls)
 }
 
-func TestHandler_MessageThreadRead_ThreadSubNotFound(t *testing.T) {
+// A caller who is a room member but does not follow the thread has no thread-read
+// state to advance; the mark-as-read is an idempotent no-op that returns success
+// rather than an error. No thread-read writes or floor recompute run (strict mock
+// on the update methods and no withNopFloor stub enforce this).
+func TestHandler_MessageThreadRead_NoThreadSub_ReturnsSuccess(t *testing.T) {
 	f := newThreadReadFixture(t)
 	f.store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").
 		Return(nil)
@@ -3787,18 +3791,19 @@ func TestHandler_MessageThreadRead_ThreadSubNotFound(t *testing.T) {
 		Return(nil, model.ErrThreadSubscriptionNotFound)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
 
-	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
-	require.ErrorIs(t, err, errThreadSubNotFound)
+	resp, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", resp.Status)
 	assert.Equal(t, 0, f.publishCalls)
 }
 
 // Regression for the errgroup.WithContext bug: against real Mongo, when one
 // goroutine fails with ErrThreadSubscriptionNotFound, an errgroup.WithContext
-// cancels the others, causing them to return context.Canceled. Earlier code
-// then matched `case subErr != nil` first and surfaced the wrapped
-// context.Canceled as "internal error" instead of errThreadSubNotFound.
+// cancels the others, causing them to return context.Canceled. The tsub-not-found
+// branch must still be evaluated before the generic subErr branch, so a sibling's
+// context.Canceled never masks the success no-op with an internal error.
 // Simulate by returning context.Canceled on the siblings.
-func TestHandler_MessageThreadRead_ThreadSubNotFound_SiblingsCancelled(t *testing.T) {
+func TestHandler_MessageThreadRead_NoThreadSub_SiblingsCancelled(t *testing.T) {
 	f := newThreadReadFixture(t)
 	f.store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").
 		Return(context.Canceled).AnyTimes()
@@ -3807,8 +3812,9 @@ func TestHandler_MessageThreadRead_ThreadSubNotFound_SiblingsCancelled(t *testin
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").
 		Return("", context.Canceled).AnyTimes()
 
-	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
-	require.ErrorIs(t, err, errThreadSubNotFound)
+	resp, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", resp.Status)
 }
 
 func TestHandler_MessageThreadRead_BothMiss_RoomNotMemberWins(t *testing.T) {
@@ -4019,6 +4025,77 @@ func TestHandler_MessageThreadRead_UpdateThreadSubscriptionError(t *testing.T) {
 	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
 	require.Error(t, err)
 	assert.Equal(t, 0, f.publishCalls)
+}
+
+// --- clear-all-thread-read (bulk) tests ---
+
+func unwrapThreadReadAllPayload(t *testing.T, outboxData []byte) model.ThreadReadAllEvent {
+	t.Helper()
+	var fed model.OutboxEvent
+	require.NoError(t, json.Unmarshal(outboxData, &fed))
+	var env model.InboxEvent
+	require.NoError(t, json.Unmarshal(fed.Envelope, &env))
+	require.Equal(t, model.InboxThreadReadAll, env.Type)
+	var ev model.ThreadReadAllEvent
+	require.NoError(t, json.Unmarshal(env.Payload, &ev))
+	return ev
+}
+
+func TestHandler_ClearAllThreadRead_LocalUser_NoFederation(t *testing.T) {
+	f := newThreadReadFixture(t) // fixture handler is scoped to site-a
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil) // user home is the handler's own site
+
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, f.publishCalls) // no cross-site federation for a home-local user
+}
+
+func TestHandler_ClearAllThreadRead_RemoteUser_FederatesOneEvent(t *testing.T) {
+	f := newThreadReadFixture(t)
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil) // remote home
+
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.publishCalls) // one bulk-dismiss event, not one per thread
+
+	ev := unwrapThreadReadAllPayload(t, f.publishedData)
+	assert.Equal(t, "alice", ev.Account)
+	assert.NotZero(t, ev.LastSeenAt)
+}
+
+func TestHandler_ClearAllThreadRead_EmptyAccount_BadRequest(t *testing.T) {
+	f := newThreadReadFixture(t)
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{}), model.RoomThreadReadAllRequest{Account: "  "})
+	require.Error(t, err)
+	assert.Equal(t, 0, f.publishCalls)
+}
+
+func TestHandler_ClearAllThreadRead_ClearThreadSubsError(t *testing.T) {
+	f := newThreadReadFixture(t)
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).
+		Return(fmt.Errorf("mongo down"))
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil).AnyTimes()
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
+
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.Error(t, err)
+	assert.Equal(t, 0, f.publishCalls)
+}
+
+func TestHandler_ClearAllThreadRead_FederatePublishError(t *testing.T) {
+	f := newThreadReadFixture(t)
+	f.publishCallErr = fmt.Errorf("nats down")
+	f.store.EXPECT().ClearThreadSubscriptionsForAccount(gomock.Any(), "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().ClearSubscriptionThreadUnreadForAccount(gomock.Any(), "alice").Return(nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil)
+
+	_, err := f.handler.clearAllThreadRead(ctxParams(map[string]string{"account": "alice"}), model.RoomThreadReadAllRequest{Account: "alice"})
+	require.Error(t, err)
+	assert.Equal(t, 1, f.publishCalls)
 }
 
 // --- thread floor recompute tests ---

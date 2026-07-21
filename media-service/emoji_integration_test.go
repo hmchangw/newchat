@@ -9,10 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -128,7 +130,7 @@ func TestEmojiNATS_EndToEnd(t *testing.T) {
 	require.NoError(t, st.EnsureEmojiIndexes(ctx))
 	bs := newMinioBlobStore(client, bucket)
 
-	nc, err := otelnats.Connect(testutil.NATS(t))
+	nc, err := o11ynats.Connect(context.Background(), testutil.NATS(t), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 

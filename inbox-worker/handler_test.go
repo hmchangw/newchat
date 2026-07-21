@@ -71,24 +71,38 @@ type threadRead struct {
 	lastSeenAt      time.Time
 }
 
+type threadReadAll struct {
+	account    string
+	lastSeenAt time.Time
+}
+
 type stubInboxStore struct {
-	mu                 sync.Mutex
-	subscriptions      []model.Subscription
-	bulkSubscriptions  []*model.Subscription
-	bulkCreateErr      error
-	rooms              []model.Room
-	roleUpdates        []roleUpdate
-	muteUpdates        []muteUpdate
-	favoriteUpdates    []favoriteUpdate
-	nameUpdates        []nameUpdate
-	visibilityUpdates  []visibilityUpdate
-	users              []model.User
-	subReads           []subRead
-	threadSubs         []model.ThreadSubscription
-	threadReads        []threadRead
-	applyThreadReadErr error
-	userStatusUpdates  []userStatusUpdate
-	userStatusErr      error
+	mu                    sync.Mutex
+	subscriptions         []model.Subscription
+	bulkSubscriptions     []*model.Subscription
+	bulkCreateErr         error
+	rooms                 []model.Room
+	roleUpdates           []roleUpdate
+	muteUpdates           []muteUpdate
+	favoriteUpdates       []favoriteUpdate
+	nameUpdates           []nameUpdate
+	visibilityUpdates     []visibilityUpdate
+	users                 []model.User
+	subReads              []subRead
+	threadSubs            []model.ThreadSubscription
+	threadReads           []threadRead
+	applyThreadReadErr    error
+	threadReadAlls        []threadReadAll
+	applyThreadReadAllErr error
+	userStatusUpdates     []userStatusUpdate
+	userStatusErr         error
+	settingsUpdates       []userSettingsUpdate
+}
+
+type userSettingsUpdate struct {
+	account   string
+	settings  *model.UserSettings
+	updatedAt time.Time
 }
 
 type userStatusUpdate struct {
@@ -302,6 +316,16 @@ func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID
 	return nil
 }
 
+func (s *stubInboxStore) ApplyThreadReadAll(_ context.Context, account string, lastSeenAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applyThreadReadAllErr != nil {
+		return s.applyThreadReadAllErr
+	}
+	s.threadReadAlls = append(s.threadReadAlls, threadReadAll{account: account, lastSeenAt: lastSeenAt})
+	return nil
+}
+
 func (s *stubInboxStore) UpsertThreadSubscription(_ context.Context, sub *model.ThreadSubscription) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -376,6 +400,21 @@ func (s *stubInboxStore) getUserStatusUpdates() []userStatusUpdate {
 	defer s.mu.Unlock()
 	cp := make([]userStatusUpdate, len(s.userStatusUpdates))
 	copy(cp, s.userStatusUpdates)
+	return cp
+}
+
+func (s *stubInboxStore) UpdateUserSettings(_ context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsUpdates = append(s.settingsUpdates, userSettingsUpdate{account: account, settings: settings, updatedAt: updatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getSettingsUpdates() []userSettingsUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]userSettingsUpdate, len(s.settingsUpdates))
+	copy(cp, s.settingsUpdates)
 	return cp
 }
 
@@ -1564,6 +1603,44 @@ func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestHandler_HandleEvent_ThreadReadAll_Happy(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	payload := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1735689600000, Timestamp: 1735689600001}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, SiteID: "site-a", DestSiteID: "site-b", Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+	require.Len(t, store.threadReadAlls, 1)
+	assert.Equal(t, "alice", store.threadReadAlls[0].account)
+	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), store.threadReadAlls[0].lastSeenAt)
+}
+
+func TestHandler_HandleEvent_ThreadReadAll_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, Payload: []byte("{")}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+	err = h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+	assert.Len(t, store.threadReadAlls, 0)
+}
+
+func TestHandler_HandleEvent_ThreadReadAll_StoreError(t *testing.T) {
+	store := &stubInboxStore{applyThreadReadAllErr: fmt.Errorf("boom")}
+	h := NewHandler(store)
+	payload := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1}
+	inner, _ := json.Marshal(&payload)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, Payload: inner}
+	data, _ := json.Marshal(&outer)
+	err := h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+}
+
 func TestHandler_SubscriptionMuteToggled(t *testing.T) {
 	store := &stubInboxStore{
 		subscriptions: []model.Subscription{
@@ -1829,4 +1906,44 @@ func TestHandler_UserStatusUpdated_StoreError(t *testing.T) {
 	err = h.HandleEvent(context.Background(), evt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "update user status")
+}
+
+func TestHandler_UserSettingsUpdated(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	mute := true
+	payload, err := json.Marshal(model.UserSettingsUpdated{
+		Account:   "alice",
+		Settings:  model.UserSettings{MuteAllNotifications: &mute},
+		Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserSettingsUpdated, Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	updates := store.getSettingsUpdates()
+	require.Len(t, updates, 1)
+	assert.Equal(t, "alice", updates[0].account)
+	require.NotNil(t, updates[0].settings.MuteAllNotifications)
+	assert.True(t, *updates[0].settings.MuteAllNotifications)
+	assert.Equal(t, time.UnixMilli(12345).UTC(), updates[0].updatedAt)
+}
+
+func TestHandler_UserSettingsUpdated_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type:    model.InboxUserSettingsUpdated,
+		Payload: []byte("not-json"),
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getSettingsUpdates())
 }

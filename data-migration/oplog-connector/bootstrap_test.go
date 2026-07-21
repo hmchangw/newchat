@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 )
 
 type fakeStreamManager struct {
@@ -18,12 +18,12 @@ type fakeStreamManager struct {
 	streamHit []string
 }
 
-func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy the streamManager interface
+func (f *fakeStreamManager) CreateOrUpdateStream(_ context.Context, cfg jetstream.StreamConfig) (o11ynats.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy the streamManager interface
 	f.created = append(f.created, cfg)
 	return nil, nil
 }
 
-func (f *fakeStreamManager) Stream(_ context.Context, name string) (oteljetstream.Stream, error) {
+func (f *fakeStreamManager) Stream(_ context.Context, name string) (o11ynats.Stream, error) {
 	f.streamHit = append(f.streamHit, name)
 	return nil, f.streamErr
 }

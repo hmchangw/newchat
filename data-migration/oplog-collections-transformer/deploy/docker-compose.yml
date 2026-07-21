@@ -46,7 +46,6 @@ services:
       - ROOM_MEMBERS_COLLECTION=company_room_members
       - SOURCE_READ_PREFERENCE=primaryPreferred
       - BOOTSTRAP_STREAMS=true
-      - LOG_LEVEL=info
     networks:
       - oplog-col-local
 

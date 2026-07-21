@@ -17,8 +17,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/model"
@@ -88,10 +88,13 @@ func TestTransformer_InsertToCanonical(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(testutil.NATS(t), "")
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := oteljetstream.New(nc)
+	// Native JetStream context: this verification consumer uses Fetch (batch pull),
+	// which the o11y/nats facade does not wrap. The connection is still the traced
+	// o11y/nats Conn.
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	canonical := stream.MessagesCanonical(site)
@@ -186,7 +189,7 @@ func TestTransformer_SoftDeleteToHistory(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(testutil.NATS(t), "")
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 

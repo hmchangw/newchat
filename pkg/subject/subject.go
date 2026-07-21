@@ -73,6 +73,14 @@ func MsgGetIDs(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.get.ids", account, roomID, siteID)
 }
 
+// RoomsGet is the server-to-server request subject for the rooms.get batch RPC:
+// user-service asks history-service for each room's last message. Account-agnostic
+// (roomIds batch in the body); the publish and subscribe forms are identical, like
+// ThreadRoomInfoBatch.
+func RoomsGet(siteID string) string {
+	return fmt.Sprintf("chat.server.request.history.%s.rooms.get", siteID)
+}
+
 func UserResponse(account, requestID string) string {
 	return fmt.Sprintf("chat.user.%s.response.%s", account, requestID)
 }
@@ -129,6 +137,12 @@ func RoomCanonical(siteID, operation string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.%s", siteID, operation)
 }
 
+// RoomCanonicalTeamsCreate returns the room-canonical subject for a batch of
+// Teams-derived room-creation events for one site. Lands in ROOMS_{siteID}.
+func RoomCanonicalTeamsCreate(siteID string) string {
+	return fmt.Sprintf("chat.room.canonical.%s.teams.create", siteID)
+}
+
 // RoomCanonicalMemberEvent returns the post-mutation member-event subject (mute-only today).
 func RoomCanonicalMemberEvent(siteID, eventType string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.event.member.%s", siteID, eventType)
@@ -167,6 +181,13 @@ func ParseOutbox(subj string) (originSiteID, destSiteID, eventType string, ok bo
 
 func SubscriptionUpdate(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.subscription.update", account)
+}
+
+// SettingsUpdate is the client-facing fanout subject published by
+// user-service after a successful settings.set (same delivery pattern as
+// subscription.update — ephemeral, core NATS).
+func SettingsUpdate(account string) string {
+	return fmt.Sprintf("chat.user.%s.event.settings.update", account)
 }
 
 func RoomMetadataChanged(account string) string {
@@ -276,6 +297,18 @@ func RoomsInfoBatch(siteID string) string {
 // registers its handler on this subject. Mirrors RoomsInfoBatch.
 func ThreadRoomInfoBatch(siteID string) string {
 	return fmt.Sprintf("chat.server.request.room.%s.thread.info.batch", siteID)
+}
+
+// RoomThreadReadAll is the internal server-to-server subject user-service uses to
+// ask a site's room-service to clear all of an account's thread-unread state.
+func RoomThreadReadAll(siteID string) string {
+	return fmt.Sprintf("chat.server.request.room.%s.thread.read.all", siteID)
+}
+
+// RoomThreadReadAllSubscribe is room-service's registration subject — the same
+// concrete subject, mirroring the RoomsInfoBatch/RoomsInfoBatchSubscribe pair.
+func RoomThreadReadAllSubscribe(siteID string) string {
+	return fmt.Sprintf("chat.server.request.room.%s.thread.read.all", siteID)
 }
 
 // ThreadSubscriptionList is the server-to-server request subject for the per-site
@@ -1040,6 +1073,28 @@ func UserSubscriptionListPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.list", siteID)
 }
 
+func UserSettingsGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.get", account, siteID)
+}
+
+func UserSettingsGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.get", siteID)
+}
+
+func UserSettingsSet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.set", account, siteID)
+}
+
+func UserSettingsSetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
+}
+
 // UserThreadList is the concrete client-facing subject for the cross-site thread
 // inbox RPC. siteID is the CALLER's own home site — the site that holds the
 // user's federated subscriptions and runs the aggregator. Pair with
@@ -1072,6 +1127,23 @@ func UserThreadUnreadSummaryPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.thread.unread.summary", siteID)
 }
 
+// UserThreadReadAll is the client-facing subject for the cross-site
+// clear-all-thread-unread RPC. siteID is the CALLER's own home site — the site
+// holding the user's federated thread-subscription replicas and running the
+// aggregator. Pair with UserThreadReadAllPattern for user-service registration.
+func UserThreadReadAll(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.thread.read.all", account, siteID)
+}
+
+// UserThreadReadAllPattern is the natsrouter pattern user-service registers for
+// the clear-all-thread-unread RPC (siteID baked in, account left as {account}).
+func UserThreadReadAllPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.thread.read.all", siteID)
+}
+
 func UserSubscriptionSetAppSubscription(account, siteID string) string {
 	if !isValidAccountToken(account) {
 		panic("invalid account token: contains NATS wildcard characters")
@@ -1098,7 +1170,7 @@ func UserSubscriptionGetByRoomIDPattern(siteID string) string {
 //
 //	chat.user.{account}.request.user.{siteID}.{area}.{action}
 //
-// where area is one of "status", "subscription", "profile", "apps".
+// where area is one of "status", "subscription", "profile", "apps", "settings".
 // Does NOT match the room-scoped form — use ParseRoomSubject for those.
 func ParseUserSubject(subj string) (account, siteID, area, action string, ok bool) {
 	parts := strings.Split(subj, ".")
@@ -1112,7 +1184,7 @@ func ParseUserSubject(subj string) (account, siteID, area, action string, ok boo
 		return "", "", "", "", false
 	}
 	switch parts[6] {
-	case "status", "subscription", "profile", "apps":
+	case "status", "subscription", "profile", "apps", "settings":
 	default:
 		return "", "", "", "", false
 	}

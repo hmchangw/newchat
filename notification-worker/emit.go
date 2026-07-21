@@ -56,7 +56,7 @@ func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEven
 	return nil
 }
 
-// jsPublisher adapts oteljetstream.JetStream to the publisher interface by discarding the PubAck.
+// jsPublisher adapts o11y/nats JetStream to the publisher interface by discarding the PubAck.
 type jsPublisher struct {
 	js interface {
 		PublishMsg(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)

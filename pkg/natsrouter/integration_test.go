@@ -13,19 +13,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-// setupNATS returns an otelnats client connected to the process-shared
+// setupNATS returns an o11y/nats client connected to the process-shared
 // NATS. Required to surface timing races that in-process NATS cannot
 // reproduce (real TCP, real server dispatch goroutines, real latency).
-func setupNATS(t *testing.T) *otelnats.Conn {
+func setupNATS(t *testing.T) *o11ynats.Conn {
 	t.Helper()
-	nc, err := otelnats.Connect(testutil.NATS(t))
+	nc, err := o11ynats.Connect(context.Background(), testutil.NATS(t), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err, "connect to NATS")
 	t.Cleanup(nc.Close)
 	return nc

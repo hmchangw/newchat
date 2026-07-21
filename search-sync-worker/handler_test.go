@@ -12,6 +12,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -191,6 +194,56 @@ func TestHandler_Flush(t *testing.T) {
 		assert.True(t, msgs[1].acked, "409 should be acked")
 		assert.True(t, msgs[2].nacked, "500 should be nacked")
 	})
+}
+
+func TestHandler_FlushLinksSourceMessageSpans(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(recorder),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	tracer := tp.Tracer("search-sync-worker-test")
+
+	store.EXPECT().
+		Bulk(gomock.Any(), gomock.Len(2)).
+		DoAndReturn(func(ctx context.Context, actions []searchengine.BulkAction) ([]searchengine.BulkResult, error) {
+			assert.True(t, oteltrace.SpanContextFromContext(ctx).IsValid(), "bulk store ctx should carry the flush span")
+			return []searchengine.BulkResult{{Status: 201}, {Status: 201}}, nil
+		})
+
+	h := NewHandler(store, newMessageCollection("msgs-v1", time.Time{}, false), 500, tracer)
+	for i := 0; i < 2; i++ {
+		evt := model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID:          fmt.Sprintf("m%d", i),
+				RoomID:      "r1",
+				UserID:      "u1",
+				UserAccount: "alice",
+				Content:     "hello",
+				CreatedAt:   time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		msgCtx, span := tracer.Start(context.Background(), fmt.Sprintf("consume %d", i))
+		span.End()
+		h.AddWithContext(msgCtx, makeStubMsg(t, &evt))
+	}
+
+	h.Flush(context.Background())
+
+	var flush sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		if span.Name() == "search-sync bulk flush" {
+			flush = span
+			break
+		}
+	}
+	require.NotNil(t, flush)
+	assert.Len(t, flush.Links(), 2)
 }
 
 func TestIsBulkItemSuccess(t *testing.T) {

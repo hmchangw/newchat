@@ -34,9 +34,8 @@ var (
 	// Shared sentinel for any membership-gated RPC (list-members,
 	// member.statuses, subscription.mentionable, message.read) and the
 	// add-member channel-source expansion.
-	errNotRoomMember     = errcode.Forbidden("only room members can perform this action", errcode.WithReason(errcode.RoomNotMember))
-	errInvalidThreadID   = errcode.BadRequest("threadId is required")
-	errThreadSubNotFound = errcode.NotFound("thread subscription not found")
+	errNotRoomMember   = errcode.Forbidden("only room members can perform this action", errcode.WithReason(errcode.RoomNotMember))
+	errInvalidThreadID = errcode.BadRequest("threadId is required")
 	// Only subscribers with an individual membership source can hold the owner
 	// role. Remove-member's dual-membership path relies on this invariant:
 	// stripping the owner role during an individual-leave is only sound when

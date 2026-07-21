@@ -31,6 +31,7 @@ type ThreadSubscription struct {
 // survive the join; RoomType feeds the DM tally.
 type ThreadUnreadRow struct {
 	ThreadRoomID string     `json:"threadRoomId" bson:"threadRoomId"`
+	RoomID       string     `json:"roomId"       bson:"roomId"`
 	SiteID       string     `json:"siteId"       bson:"siteId"`
 	RoomType     RoomType   `json:"roomType"     bson:"roomType"`
 	LastSeenAt   *time.Time `json:"lastSeenAt"   bson:"lastSeenAt"`
@@ -51,6 +52,28 @@ type ThreadUnreadSummaryResponse struct {
 	LastMessageAt       *int64   `json:"lastMessageAt,omitempty"` // UnixMilli
 	UnavailableSites    []string `json:"unavailableSites,omitempty"`
 }
+
+// ThreadReadAllRequest is the client-facing clear-all-thread-unread request. The
+// account rides the subject; no body fields.
+type ThreadReadAllRequest struct{}
+
+// ThreadReadAllResponse is the cross-site clear-all-thread-unread result.
+// UnavailableSites lists sites whose bulk-clear RPC failed (their threads may
+// remain unread); the overall call still succeeds. Success is otherwise an empty
+// object — the clear is fire-and-forget from the client's view.
+type ThreadReadAllResponse struct {
+	UnavailableSites []string `json:"unavailableSites,omitempty"`
+}
+
+// RoomThreadReadAllRequest is the server-to-server request user-service sends to a
+// site's room-service to clear all of an account's thread-unread state.
+type RoomThreadReadAllRequest struct {
+	Account string `json:"account"`
+}
+
+// RoomThreadReadAllResponse is the per-site ack. The clear either succeeds or
+// returns an error envelope; there are no payload fields.
+type RoomThreadReadAllResponse struct{}
 
 // ThreadRoomInfoBatchRequest asks room-service for a batch of thread rooms' info.
 type ThreadRoomInfoBatchRequest struct {

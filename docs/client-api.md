@@ -59,7 +59,7 @@ paths.
      - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users)
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
-     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories)
+     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
 4. [Message Send](#4-message-send)
@@ -75,6 +75,8 @@ paths.
 9. [Admin Service](#9-admin-service)
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
+11. [tcard-service](#11-tcard-service)
+    - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/register (admin)](#112-http--post-apiv1cardsregister-admin)
 
 ---
 
@@ -164,7 +166,7 @@ Permissions and connection limits come from the auth-service account's scoped si
 
 **Recommended baseline subscriptions on connect:**
 
-- `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, and subscription updates.
+- `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
 - `chat.room.{roomID}.event` for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel.
 
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
@@ -906,6 +908,20 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
+| `lastMessage` | [LastMessage](#lastmessage) | Optional. The room's latest non-deleted message, resolved server-side at read time. Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+
+##### LastMessage
+
+A room's most-recent **non-deleted** message, resolved at read time and preview-trimmed.
+Soft-deleted messages are skipped (walked back to an earlier survivor); a room with only
+deleted messages omits `lastMessage`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `messageId` | string | |
+| `sender` | [Participant](#participant) | |
+| `content` | string | Preview-trimmed to 256 runes. |
+| `createdAt` | int64 | UTC milliseconds. |
 
 #### AppSubscription
 
@@ -1206,7 +1222,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 
 **3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed account (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once when at least one new account or org was added. Delivered to clients subscribed to `chat.room.>` for the room.
+**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1214,17 +1230,17 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 | `roomId` | string | |
 | `roomName` | string | |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
-| `accounts` | string[] | The newly added accounts. |
+| `members` | [RoomMemberEntry](#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
 | `historySharedSince` | number | Optional. Epoch ms (UTC); present when prior history is shared with the new members. |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
-A `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event.
+The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
 > [!NOTE]
-> **No-op:** if every requested account is already a member (and no new orgs), or the add only upgrades an existing org member to an individual membership, the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow.
+> **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
 
 ##### Triggered events — error path
 
@@ -1548,7 +1564,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 |---|---|---|---|
 | `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. |
 | `offset` | number | no | If set, must be `>= 0`. For pagination. |
-| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
+| `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `orgCode`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
 
 ```json
 { "limit": 50, "enrich": true }
@@ -1582,7 +1598,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 | `employeeId` | string | Optional. The member's employee ID. Populated only when `enrich: true` and entry is an individual. |
 | `name` | string | Optional. Bot/app display name from `apps.name` when the member's account ends with `.bot`. Mutually exclusive with `engName`/`chineseName`. |
 | `isOwner` | boolean | Optional. Populated only when `enrich: true`. |
-| `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback). Populated only when `enrich: true` and entry is an org. |
+| `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback), combined with the TC name when present. Populated only when `enrich: true` and entry is an org. |
+| `orgCode` | string | Optional. Org's plain section/department name (dept-first), without the TC-name combination `orgName` applies and with no orgID fallback. Populated only when `enrich: true` and entry is an org. |
 | `memberCount` | number | Optional. Populated only when `enrich: true` and entry is an org. |
 | `orgDescription` | string | Optional. Org's description, from the same org unit shown in `orgName` (dept-first); omitted when empty. Populated only when `enrich: true` and entry is an org. |
 
@@ -1612,6 +1629,7 @@ When the synchronous reply is an error envelope, the request was rejected before
         "id": "DEPT-100",
         "type": "org",
         "orgName": "Cardiology Department",
+        "orgCode": "Cardiology Department",
         "orgDescription": "Inpatient & outpatient cardiac care",
         "memberCount": 42
       }
@@ -1860,7 +1878,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-A **synchronous RPC** that clears a single thread's unread state for the caller. `room-service` validates room membership and thread-subscription existence, removes the threadId from the user's `Subscription.ThreadUnread`, recomputes the per-subscription `alert` flag, refreshes the `ThreadSubscription` (`lastSeenAt`, `updatedAt`, `hasMention=false`), and — for cross-site users — emits an `OutboxEvent` on the OUTBOX stream; `outbox-worker` forwards the cross-site `thread_read` event to the user's home site (at-least-once) so the destination `inbox-worker` can mirror both updates.
+A **synchronous RPC** that clears a single thread's unread state for the caller. `room-service` validates room membership, then — when the caller follows the thread — removes the threadId from the user's `Subscription.ThreadUnread`, recomputes the per-subscription `alert` flag, refreshes the `ThreadSubscription` (`lastSeenAt`, `updatedAt`, `hasMention=false`), and — for cross-site users — emits an `OutboxEvent` on the OUTBOX stream; `outbox-worker` forwards the cross-site `thread_read` event to the user's home site (at-least-once) so the destination `inbox-worker` can mirror both updates. If the caller has no `ThreadSubscription` for the thread (i.e. does not follow it), there is nothing to clear: the RPC performs no writes and returns `accepted`.
 
 ##### Request body
 
@@ -1887,7 +1905,6 @@ A **synchronous RPC** that clears a single thread's unread state for the caller.
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — the caller has no subscription in the room (sentinel reused across membership-gated RPCs).
-- `"thread subscription not found"` — the caller has no `ThreadSubscription` for the supplied `threadId` in the supplied room. Also returned when the thread exists but belongs to a different room than the one in the subject.
 - `"threadId is required"` — body is missing `threadId` or sends an empty string.
 - `"invalid message-thread-read subject: …"` — the subject is malformed.
 
@@ -1896,7 +1913,8 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 - **Alert recomputation:** `alert = oldSub.alert && len(newThreadUnread) > 0`. A thread-read can only clear an alert, never set one. When the post-removal `threadUnread` is empty, `alert` becomes false. This computation runs atomically inside the MongoDB aggregation pipeline on the handler's site — not derived client-side.
 - **Concurrent local writes:** the room-`Subscription` update and the `ThreadSubscription` update run in parallel inside an `errgroup`. Both must succeed before the handler proceeds.
 - **Cross-site federation:** if the user's home site differs from the handler's site, the handler emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `thread_read` event (at-least-once) to `chat.inbox.{userSite}.external.thread_read` with payload `{account, roomId, threadRoomId, parentMessageId, newThreadUnread, alert, lastSeenAt, timestamp}` (timestamps as `int64` UnixMilli). The destination `inbox-worker` applies the supplied `newThreadUnread`+`alert` to the local Subscription cache and applies `lastSeenAt`+`updatedAt`+`hasMention=false` to the local ThreadSubscription with an `$lt` order-safety guard so out-of-order delivery cannot regress the thread's read position.
-- **Defensive `roomId` filter:** the thread-subscription lookup additionally enforces that the supplied `threadId` belongs to the room named in the subject. Mismatches return `thread subscription not found` (rather than silently clearing an unrelated thread).
+- **Not following the thread:** if the caller holds no `ThreadSubscription` for the supplied `threadId` in the room, the RPC is an idempotent no-op — it runs no `Subscription`/`ThreadSubscription` writes, no cross-site federation, and no floor recompute, and returns `{ "status": "accepted" }`.
+- **Defensive `roomId` filter:** the thread-subscription lookup additionally enforces that the supplied `threadId` belongs to the room named in the subject. A thread that belongs to a different room matches no `ThreadSubscription` and so is treated as the not-following no-op above (rather than clearing an unrelated thread).
 - **Thread-room read-floor recompute:** after both writes succeed, `room-service` recomputes `thread_rooms.minUserLastSeenAt` = `MIN(lastSeenAt)` across all `thread_subscriptions` for the thread room. The floor is set only when every subscriber has a usable `lastSeenAt`; otherwise it is cleared. The recompute is best-effort — a failure is logged but does not fail the RPC. The stored value is also available via [Get Thread Messages](#get-thread-messages).
 - **Read-floor fan-out:** when (and only when) the recompute above changes `thread_rooms.minUserLastSeenAt`, the server publishes a `thread_message_read` event (routed by the **parent** room's type) carrying the new floor, so peers can advance thread read-receipt UI live. Best-effort (a publish failure does not fail the RPC); never fires when the floor is unchanged or the thread room is missing.
 - **No system message:** thread reads are silent; only the requester receives the `accepted` reply.
@@ -4040,9 +4058,9 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 
 ### 3.4 user-service
 
-`user-service` exposes 14 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
+`user-service` exposes 16 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
-> **Events:** these endpoints emit no client-facing events. (`status.set` triggers a server-side cross-site federation update, which is internal and not delivered to clients.)
+> **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` and `settings.set` also trigger a server-side cross-site federation update, which is not delivered to clients.)
 
 | RPC subject | Method |
 |---|---|
@@ -4050,6 +4068,8 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 | `chat.user.{account}.request.user.{siteID}.status.getByName` | [`status.getByName`](#statusgetbyname) |
 | `chat.user.{account}.request.user.{siteID}.profile.getByName` | [`profile.getByName`](#profilegetbyname) |
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
+| `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [`subscription.list`](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [`subscription.getChannels`](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [`subscription.getDM`](#subscriptiongetdm) |
@@ -4060,6 +4080,7 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 | `chat.user.{account}.request.user.{siteID}.apps.categories` | [`apps.categories`](#appscategories) |
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
+| `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
 
 #### me
 
@@ -4237,6 +4258,121 @@ Same shape as `status.getByName`:
 
 ---
 
+#### settings.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns the calling user's stored settings sub-document — **exactly as stored**. The server never injects defaults: a field the user never set is absent from the reply, and **absent means the client applies its own default** (cross-client default consistency is client-owned by design). A user who never set anything gets `{}`.
+
+##### Request body
+
+None (empty payload).
+
+##### Success response
+
+The stored settings object. All seven fields are optional and appear only when the user has explicitly set them:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `fullWidth` | boolean | Full-width layout. |
+| `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
+| `showMessagePreviewInSidebarList` | boolean | Show message previews in the sidebar list. |
+| `muteAllNotifications` | boolean | Mute all notifications. |
+| `showMessagesAndPreviewsInNotifications` | boolean | Show message content and previews in notifications. |
+| `showNotificationsDuringCallsAndMeetings` | boolean | Show notifications during calls and meetings. |
+| `scrollToBottomInChat` | boolean | Scroll to bottom when entering a chat. |
+
+```json
+{
+  "fullWidth": true,
+  "translateMessageInto": "en-US",
+  "showMessagePreviewInSidebarList": true
+}
+```
+
+Never-set user:
+
+```json
+{}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+---
+
+#### settings.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.set`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Partially updates the calling user's settings: **only the fields present in the request are written**; every unsent field keeps its stored value (or stays absent). At least one field is required. Returns the full post-update settings.
+
+##### Request body
+
+Any non-empty subset of the seven settings fields (same types as [`settings.get`](#settingsget)):
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `fullWidth` | boolean | no | |
+| `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); or `""` to explicitly turn translation off. No value whitelist. |
+| `showMessagePreviewInSidebarList` | boolean | no | |
+| `muteAllNotifications` | boolean | no | |
+| `showMessagesAndPreviewsInNotifications` | boolean | no | |
+| `showNotificationsDuringCallsAndMeetings` | boolean | no | |
+| `scrollToBottomInChat` | boolean | no | |
+
+```json
+{ "fullWidth": false, "translateMessageInto": "ja" }
+```
+
+##### Success response
+
+The **full post-update settings** (same shape as [`settings.get`](#settingsget)) — sent fields updated, previously stored fields retained:
+
+```json
+{
+  "fullWidth": false,
+  "translateMessageInto": "ja",
+  "muteAllNotifications": true
+}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| No fields in the request | `bad_request` | — | `{ "code": "bad_request", "error": "no settings provided" }` |
+| Malformed `translateMessageInto` | `bad_request` | — | `{ "code": "bad_request", "error": "invalid translateMessageInto language tag" }` |
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` — nothing is written or published. |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+<a id="settingsupdate-event"></a>
+##### `settings.update` event
+
+**Emits:** `chat.user.{account}.event.settings.update` after every successful set — ephemeral core-NATS fan-out to the caller's own connected devices (same delivery pattern as `subscription.update`), so other logged-in clients sync live. Best-effort: a fan-out failure does not fail the set.
+
+The payload carries the **full post-update settings** (replace, don't merge):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `timestamp` | number | Publish time, Unix ms. |
+| `settings` | UserSettings | The full post-update settings — same seven optional fields as [`settings.get`](#settingsget). |
+
+```json
+{
+  "timestamp": 1737000000000,
+  "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
+}
+```
+
+---
+
 #### subscription.list
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.list`
@@ -4251,6 +4387,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 | `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (botDM rooms). |
 | `favorite`          | boolean | no       | When `true`, filters to favorited subscriptions only **and** moves the self-DM to the front of the list. |
 | `updatedWithinDays` | number  | no       | When set, filters **`rooms`-type** results to rooms **whose last message (`room.lastMsgAt`) is within the last N days** — room activity, not the subscription's update time. Cross-site rooms (no local `lastMsgAt`) fall outside the window. **Ignored for `current`** (always returns the full active set) and for `apps`. Omit for no age filter — the server applies no default; the client supplies any default it wants. Must be non-negative; a negative value is rejected with `bad_request`. |
+| `includeLastMessage` | boolean | no      | Whether to embed each room's [`lastMessage`](#subscriptionroom). Omitted ⇒ include (backward-compatible default); `false` ⇒ skip the per-room last-message resolve (a client that renders no room-list snippet can send `false` to save the server-side work). |
 | `offset`            | integer | no       | Zero-based index of the first record to return. Negative ⇒ `0`. Default `0`. |
 | `limit`             | integer | no       | Page size. Omitted or ≤ 0 ⇒ the server default `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); values above `MAX_SUBSCRIPTION_LIMIT` (default `1000`) are capped to it. |
 
@@ -4324,7 +4461,13 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
         "lastMentionAllAt": "2026-05-30T08:00:00Z",
         "minUserLastSeenAt": "2026-05-30T07:55:00Z",
         "privateKey": "bDM4dGZ5...base64...JjT0g9PQ==",
-        "keyVersion": 3
+        "keyVersion": 3,
+        "lastMessage": {
+          "messageId": "01970a4f8c2d7c9aBB",
+          "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+          "content": "morning team",
+          "createdAt": 1780308000000
+        }
       }
     },
     {
@@ -4609,7 +4752,7 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 
 | Field    | Type    | Required | Notes |
 |----------|---------|----------|-------|
-| `unread` | boolean | no       | When `true`, returns the number of active rooms with unread messages. When `false` or absent, returns the total active-subscription count. |
+| `unread` | boolean | no       | When `true`, returns the number of active rooms with unread messages or unread followed threads. When `false` or absent, returns the total active-subscription count. |
 
 ```json
 { "unread": true }
@@ -4626,6 +4769,8 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 ```
 
 **Unread count behavior:** when `unread: true`, the service fetches the active subscriptions and splits them by site. **Local** subscriptions are counted directly from the room baseline carried on the `$lookup` (comparing the room's `lastMsgAt` against the subscription's `lastSeenAt`) — no RPC is made. Only **cross-site** subscriptions trigger a per-site `GetRoomsInfo` RPC, run in **parallel**. The count **degrades per-site** (matching `subscription.list` enrichment): if a cross-site RPC fails, that site's subscriptions are **skipped** — omitted from the count and logged as a warning — while local subscriptions and the sites that did respond still contribute. The result is a best-effort count that may under-report while a remote site is unreachable, rather than the full active-subscription total.
+
+**Threads:** a room also counts as unread if it has at least one unread followed thread, even when its own messages are all read — at most **+1 per room** (existence, not a per-thread count). Muted rooms are excluded (as with room-level unread), and only rooms within the fetched active-subscription page are considered. For message-read rooms, thread last-activity is resolved per owning site and degrades best-effort: if a site's thread lookup fails, its rooms are simply not bumped.
 
 ##### Error response
 
@@ -4948,6 +5093,51 @@ Empty object.
 ##### Triggered events — success path
 
 `None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### Clear All Thread Unread
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.thread.read.all`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` is the **caller's own home site** — the site that holds the user's federated thread subscriptions and runs the aggregator.
+
+Clears the unread status of **all** of the user's threads across every site the user participates in — the server side of a "mark all threads read" action. `user-service` reads the user's local thread-subscription replicas, determines the distinct owning sites, and asks each site's `room-service` to clear that user's thread-subscription read state (`lastSeenAt` advanced, `hasMention` cleared) and room-subscription thread-unread state (`threadUnread` removed, `alert` cleared). Sites that fail to respond are listed in `unavailableSites` rather than failing the request.
+
+This is a bulk **dismiss**: it clears only the requesting user's own read state. It does **not** advance thread-room read floors or emit `thread_message_read` receipt events, so other participants' read-receipt UI is unaffected.
+
+##### Request body
+
+Empty object.
+
+```json
+{}
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `unavailableSites` | string[] | Optional. Sites whose per-site clear failed; their threads may remain unread. Omitted when all responded. |
+
+```json
+{}
+```
+
+##### Error response
+
+| Condition | `code` | Notes |
+|-----------|--------|-------|
+| Internal failure | `internal` | Local thread-subscription read failed. Per-site RPC failures degrade into `unavailableSites` rather than erroring. |
+
+##### Triggered events — success path
+
+`None — reply only. No thread_message_read receipt events are emitted (bulk dismiss).`
 
 ##### Triggered events — error path
 
@@ -6466,6 +6656,139 @@ This endpoint is intended for **server-to-server use**; bot SDKs do not call it 
 | 400 | `bad_request` | `missing_fields` | `authToken` empty. |
 | 401 | `unauthenticated` | `invalid_token` | Token hash not found. Body carries `{"valid": false, ...}`. |
 | 500 | `internal` | — | Mongo failure. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+---
+
+## 11. tcard-service
+
+Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client publishes new templates (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.
+
+### 11.1 HTTP — GET /api/v1/cards/{path}@{cardVersion}.template.json
+
+**Endpoint:** `GET /api/v1/cards/{path}@{cardVersion}.template.json`
+**Reply:** synchronous HTTP response
+
+Fetches one card template by `path` and `cardVersion`, served from cache with no per-request database read. The filename is a single URL segment: the service strips the `.template.json` suffix, splits the remainder on the **last** `@` into `path` and `cardVersion`, and returns the stored document verbatim minus the Mongo `_id` and the routing `path`.
+
+#### Request
+
+| Field | Source | Type | Required | Notes |
+|---|---|---|---|---|
+| `path` | URL | string | yes | The card path — everything before the last `@`. May contain `@` but never `/`. |
+| `cardVersion` | URL | string | yes | Semantic version `a.b.c` — between the last `@` and the `.template.json` suffix. |
+
+```http
+GET /api/v1/cards/welcome@1.0.0.template.json
+```
+
+#### Success response
+
+`HTTP 200`, `Content-Type: application/json`. The stored card document minus `_id` and `path`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `cardVersion` | string | The document's semantic version. |
+| `cardUsage` | any | Optional usage metadata; absent when the card has none. |
+| `type` | string | `"AdaptiveCard"`. |
+| `schema` | string | `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
+| `version` | string | AdaptiveCard schema version, `"1.5"`. |
+| `body` | array | AdaptiveCard body elements. |
+
+```json
+{
+  "cardVersion": "1.0.0",
+  "cardUsage": "greeting",
+  "type": "AdaptiveCard",
+  "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "version": "1.5",
+  "body": [{ "type": "TextBlock", "text": "Hi" }]
+}
+```
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). HTTP statuses:
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "card template request must include a version: {path}@{cardVersion}.template.json" }` — missing `.template.json` suffix, missing `@` version separator, or empty path/version. |
+| 404 | `not_found` | — | `{ "code": "not_found", "error": "card template not found" }` — no cached card for that `(path, cardVersion)`. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+---
+
+### 11.2 HTTP — POST /api/v1/cards/register (admin)
+
+**Endpoint:** `POST /api/v1/cards/register`
+**Reply:** synchronous HTTP response
+
+**Admin only.** Publishes a new card template: an admin reviews a submitted card and calls this to validate and insert it, after which it is immediately servable via §11.1. Not for end-user browsers. The request body is the full card document.
+
+#### Request
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `path` | string | yes | Card path. Must not contain `/`. |
+| `cardVersion` | string | yes | Semantic version `a.b.c`, no leading zeros. Must be **strictly greater** than the highest existing `cardVersion` for this `path`. |
+| `cardUsage` | any | no | Optional usage metadata. |
+| `type` | string | yes | Must equal `"AdaptiveCard"`. |
+| `schema` | string | yes | Must equal `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
+| `version` | string | yes | Must equal `"1.5"`. |
+| `body` | array | yes | Non-empty AdaptiveCard body array. |
+
+```http
+POST /api/v1/cards/register
+Content-Type: application/json
+```
+
+```json
+{
+  "path": "welcome",
+  "cardVersion": "1.0.0",
+  "cardUsage": "greeting",
+  "type": "AdaptiveCard",
+  "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "version": "1.5",
+  "body": [{ "type": "TextBlock", "text": "Hi" }]
+}
+```
+
+#### Success response
+
+`HTTP 201`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `success` | boolean | Always `true`. |
+
+```json
+{ "success": true }
+```
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). HTTP statuses:
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "body must be a non-empty array" }` — a missing/empty required field, a `path` containing `/`, a non-semver or leading-zero `cardVersion`, a non-array `body`, or a `type`/`schema`/`version` that isn't the pinned value. |
+| 409 | `conflict` | — | `{ "code": "conflict", "error": "cardVersion must be the highest for this path" }` — `cardVersion` isn't strictly higher than the current max, or `(path, cardVersion)` already exists. |
+| 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — Mongo failure. |
 
 #### Triggered events — success path
 

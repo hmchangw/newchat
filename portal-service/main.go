@@ -12,8 +12,11 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
+	o11ygin "github.com/flywindy/o11y/gin"
+
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -57,8 +60,6 @@ type config struct {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
 	if err := run(); err != nil {
 		slog.Error("fatal error", "error", err)
 		os.Exit(1)
@@ -85,7 +86,12 @@ func run() error {
 
 	ctx := context.Background()
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	sdk, obsShutdown, err := obs.Init(ctx)
+	if err != nil {
+		return fmt.Errorf("init observability: %w", err)
+	}
+
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -117,10 +123,14 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// CORS handles preflight before tracing so OPTIONS noise does not pollute Tempo.
+	r.Use(ginutil.CORS())
+	// o11y server-span middleware wraps real requests so downstream slog/handlers
+	// are trace-correlated.
+	r.Use(o11ygin.Middleware("portal-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
-	r.Use(ginutil.CORS())
 	registerRoutes(r, handler)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
@@ -140,14 +150,17 @@ func run() error {
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		shutdown.Wait(ctx, 25*time.Second, func(ctx context.Context) error {
-			slog.Info("shutting down portal service")
-			err := srv.Shutdown(ctx)
-			refreshCancel()
-			refreshWG.Wait()
-			mongoutil.Disconnect(ctx, mongoClient)
-			return err
-		})
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error {
+				slog.Info("shutting down portal service")
+				err := srv.Shutdown(ctx)
+				refreshCancel()
+				refreshWG.Wait()
+				mongoutil.Disconnect(ctx, mongoClient)
+				return err
+			},
+			func(ctx context.Context) error { return obsShutdown(ctx) },
+		)
 	}()
 
 	err = <-srvErr

@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/pipelines"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -527,19 +528,25 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 	return nil
 }
 
+// BulkCreateRoomMembers upserts each row on the (rid, member.type, member.id) unique key. $setOnInsert
+// makes a re-add/redelivery an idempotent no-op that preserves the persisted _id/ts. The filter and the
+// $setOnInsert paths are disjoint dotted leaves (member.type/member.id vs member.account) to avoid a
+// path-conflict on insert.
 func (s *MongoStore) BulkCreateRoomMembers(ctx context.Context, members []*model.RoomMember) error {
 	if len(members) == 0 {
 		return nil
 	}
-	docs := make([]interface{}, len(members))
+	writes := make([]mongo.WriteModel, len(members))
 	for i, m := range members {
-		docs[i] = m
-	}
-	opts := options.InsertMany().SetOrdered(false)
-	if _, err := s.roomMembers.InsertMany(ctx, docs, opts); err != nil {
-		if !mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("bulk create %d room members: %w", len(members), err)
+		set := bson.M{"_id": m.ID, "ts": m.Ts}
+		if m.Member.Account != "" {
+			set["member.account"] = m.Member.Account
 		}
+		filter := bson.M{"rid": m.RoomID, "member.type": m.Member.Type, "member.id": m.Member.ID}
+		writes[i] = mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": set})
+	}
+	if _, err := s.roomMembers.BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("bulk upsert %d room members: %w", len(members), err)
 	}
 	return nil
 }
@@ -548,12 +555,44 @@ func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string)
 	return s.userReader.FindUsersByAccounts(ctx, accounts)
 }
 
-func (s *MongoStore) HasOrgRoomMembers(ctx context.Context, roomID string) (bool, error) {
-	count, err := s.roomMembers.CountDocuments(ctx, bson.M{"rid": roomID, "member.type": model.RoomMemberOrg})
+func (s *MongoStore) FetchOrgDisplayUsers(ctx context.Context, orgIDs []string) ([]orgdisplay.User, error) {
+	return pipelines.OrgDisplayUsers(ctx, s.users, orgIDs)
+}
+
+func (s *MongoStore) HasAnyRoomMembers(ctx context.Context, roomID string) (bool, error) {
+	// Existence check only — cap at 1 so it short-circuits instead of counting every member row.
+	count, err := s.roomMembers.CountDocuments(ctx, bson.M{"rid": roomID}, options.Count().SetLimit(1))
 	if err != nil {
 		return false, fmt.Errorf("count room members for %q: %w", roomID, err)
 	}
 	return count > 0, nil
+}
+
+// ExistingOrgMembers returns the subset of orgIDs that already have an org
+// room_members row for roomID. Indexed on (rid, member.type, member.id).
+func (s *MongoStore) ExistingOrgMembers(ctx context.Context, roomID string, orgIDs []string) (map[string]struct{}, error) {
+	if len(orgIDs) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	cursor, err := s.roomMembers.Find(ctx,
+		bson.M{"rid": roomID, "member.type": string(model.RoomMemberOrg), "member.id": bson.M{"$in": orgIDs}},
+		options.Find().SetProjection(bson.M{"member.id": 1, "_id": 0}))
+	if err != nil {
+		return nil, fmt.Errorf("find existing org members for room %q: %w", roomID, err)
+	}
+	var rows []struct {
+		Member struct {
+			ID string `bson:"id"`
+		} `bson:"member"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode existing org members: %w", err)
+	}
+	set := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		set[r.Member.ID] = struct{}{}
+	}
+	return set, nil
 }
 
 func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, directAccounts []string, roomID string) ([]AddMemberCandidate, error) {
@@ -609,19 +648,11 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 	if err != nil {
 		return nil, err
 	}
-	// 3. Existing individual room_members rows — only consulted when the room
-	// tracks individuals, which the worker gates on writeIndividuals (orgs in
-	// the request OR pre-existing org rows). With no orgs the handler never
-	// reads HasIndividualRoomMember, so skip this room_members read entirely;
-	// for an org-bearing request it always runs. (A no-org add to a room that
-	// formerly had orgs may re-attempt a few individual inserts, which
-	// BulkCreateRoomMembers absorbs as idempotent dup-key no-ops.)
-	var irm map[string]struct{}
-	if len(orgIDs) > 0 {
-		irm, err = s.individualMemberIDs(ctx, roomID, ids)
-		if err != nil {
-			return nil, err
-		}
+	// 3. Existing individual room_members rows — always resolved: the write-gate reads
+	// HasIndividualRoomMember on any tracked room, so a stale false would re-insert an existing row.
+	irm, err := s.individualMemberIDs(ctx, roomID, ids)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]AddMemberCandidate, len(candidates))
 	for i, c := range candidates {

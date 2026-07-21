@@ -112,6 +112,7 @@ func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.RoomRestricted(h.siteID), h.roomRestricted)
 	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), h.roomsInfoBatch)
 	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), h.threadRoomInfoBatch)
+	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), h.clearAllThreadRead)
 	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), h.ensureRoomKey)
 	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), h.createRoom)
 	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), h.teamsRoomCall)
@@ -1528,7 +1529,7 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		return nil, errInvalidThreadID
 	}
 
-	// Manual priority after Wait(): errNotRoomMember > errThreadSubNotFound > internal errors.
+	// Manual priority after Wait(): errNotRoomMember > thread-sub-missing no-op > internal errors.
 	// Plain errgroup.Group (not WithContext) so a NotFound from one goroutine does NOT cancel
 	// the siblings — otherwise context.Canceled in subErr/userSiteErr would outrank tsubErr.
 	var (
@@ -1559,7 +1560,10 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	case errors.Is(subErr, model.ErrSubscriptionNotFound):
 		return nil, errNotRoomMember
 	case errors.Is(tsubErr, model.ErrThreadSubscriptionNotFound):
-		return nil, errThreadSubNotFound
+		// The caller is a room member but does not follow this thread, so there is
+		// no thread-read state to advance. Treat the mark-as-read as an idempotent
+		// no-op and return success rather than surfacing an error to the client.
+		return &model.StatusReply{Status: "accepted"}, nil
 	case subErr != nil:
 		return nil, fmt.Errorf("get subscription: %w", subErr)
 	case tsubErr != nil:
@@ -1622,6 +1626,73 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	}
 
 	return &model.StatusReply{Status: "accepted"}, nil
+}
+
+// clearAllThreadRead clears every one of the account's thread-unread indicators on
+// this site: thread-subscription read state (lastSeenAt=now, hasMention=false) and
+// room-subscription thread-unread state (threadUnread removed, alert=false). It is
+// the per-site leaf of the user-service clear-all-thread-unread aggregator. Unlike
+// the single-thread path it deliberately skips the thread-room read-floor recompute
+// and thread_message_read fan-out (a bulk dismiss must not advance sender receipts).
+// For a cross-site user the whole dismiss rides one thread_read_all event, which
+// inbox-worker applies as the same bulk clear on the user's home replica.
+func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThreadReadAllRequest) (*model.RoomThreadReadAllResponse, error) {
+	var ctx context.Context = c
+	account := strings.TrimSpace(req.Account)
+	if account == "" {
+		return nil, errcode.BadRequest("account is required")
+	}
+	c.WithLogValues("account", account)
+
+	now := time.Now().UTC()
+
+	var (
+		homeSite                  string
+		clearErr, subErr, siteErr error
+	)
+	var g errgroup.Group
+	g.Go(func() error {
+		clearErr = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
+		return clearErr
+	})
+	g.Go(func() error {
+		subErr = h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account)
+		return subErr
+	})
+	g.Go(func() error {
+		homeSite, siteErr = h.store.GetUserSiteID(ctx, account)
+		return siteErr
+	})
+	_ = g.Wait()
+	switch {
+	case clearErr != nil:
+		return nil, fmt.Errorf("clear thread subscriptions: %w", clearErr)
+	case subErr != nil:
+		return nil, fmt.Errorf("clear subscription thread-unread: %w", subErr)
+	case siteErr != nil:
+		return nil, fmt.Errorf("get user siteId: %w", siteErr)
+	}
+
+	switch {
+	case homeSite == "":
+		slog.WarnContext(ctx, "user not found locally; skipping cross-site inbox", "account", account)
+	case homeSite != h.siteID:
+		payload := model.ThreadReadAllEvent{
+			Account:    account,
+			LastSeenAt: now.UnixMilli(),
+			Timestamp:  now.UnixMilli(),
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal thread_read_all payload: %w", err)
+		}
+		// Not room-scoped: one bulk-dismiss event per remote peer, deduped by request ID.
+		if err := h.federateOne(ctx, "", homeSite, model.InboxThreadReadAll, data, account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate thread_read_all: %w", err)
+		}
+	}
+
+	return &model.RoomThreadReadAllResponse{}, nil
 }
 
 // recomputeThreadFloor fetches the thread room document, applies the

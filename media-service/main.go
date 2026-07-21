@@ -12,10 +12,13 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
+	o11ygin "github.com/flywindy/o11y/gin"
+
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -27,7 +30,6 @@ func main() {
 }
 
 func run() error {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	ctx := context.Background()
 
 	cfg, err := env.ParseAs[config]()
@@ -41,7 +43,12 @@ func run() error {
 		return fmt.Errorf("EID_CACHE_TTL must be positive, got %s", cfg.EIDCacheTTL)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	sdk, obsShutdown, err := obs.Init(ctx)
+	if err != nil {
+		return fmt.Errorf("init observability: %w", err)
+	}
+
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -52,13 +59,13 @@ func run() error {
 		return fmt.Errorf("ensure emoji indexes: %w", err)
 	}
 
-	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey)
+	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect minio: %w", err)
 	}
 	blobs := newMinioBlobStore(minioClient, cfg.MinioBucket)
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
@@ -71,10 +78,11 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.Use(corsMiddleware())
+	r.Use(o11ygin.Middleware("media-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	r.Use(corsMiddleware())
 	registerRoutes(r, h)
 
 	srv := &http.Server{
@@ -91,6 +99,8 @@ func run() error {
 			slog.Info("shutting down media-service")
 			return srv.Shutdown(ctx)
 		},
+		// obsShutdown LAST so all prior teardown telemetry is exported.
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 
 	slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)

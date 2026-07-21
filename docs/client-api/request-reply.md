@@ -536,7 +536,9 @@ Synchronous RPC. Advances the caller's `lastSeenAt`, recomputes the per-subscrip
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read`
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Synchronous RPC. Clears one thread's unread state for the caller.
+Synchronous RPC. Clears one thread's unread state for the caller. A caller who does
+not follow the thread (no `ThreadSubscription`) gets an idempotent no-op that still
+returns `accepted`.
 
 #### Request body
 
@@ -550,8 +552,7 @@ Synchronous RPC. Clears one thread's unread state for the caller.
 
 #### Errors
 
-`"only room members can perform this action"`, `"thread subscription not found"`,
-`"threadId is required"`.
+`"only room members can perform this action"`, `"threadId is required"`.
 
 **Emits:** [`thread_message_read`](events.md#thread_message_read) (only when the thread's
 read floor `minUserLastSeenAt` changes; routed by the **parent** room's type) →
@@ -1314,7 +1315,8 @@ Top-level JSON array of `SearchUser` (`account`, `engName`?, `chineseName`?).
 
 All user-service subjects: `chat.user.{account}.request.user.{siteID}.<area>.<action>`,
 except `me` — a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
-No client-facing events are emitted.
+[settings.set](#settingsset) emits [settings.update](events.md#settingsupdate--user-settings-sync);
+no other endpoint emits a client-facing event.
 
 | RPC subject | Method |
 |---|---|
@@ -1322,6 +1324,8 @@ No client-facing events are emitted.
 | `chat.user.{account}.request.user.{siteID}.status.getByName` | [status.getByName](#statusgetbyname) |
 | `chat.user.{account}.request.user.{siteID}.profile.getByName` | [profile.getByName](#profilegetbyname) |
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
+| `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [subscription.list](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [subscription.getChannels](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [subscription.getDM](#subscriptiongetdm) |
@@ -1332,6 +1336,7 @@ No client-facing events are emitted.
 | `chat.user.{account}.request.user.{siteID}.apps.categories` | [apps.categories](#appscategories) |
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
+| `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
 
 ---
 
@@ -1422,6 +1427,74 @@ internally but is not delivered to clients.)
 
 ---
 
+### settings.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
+
+Returns the caller's stored settings **exactly as stored** — `{}` when never set.
+The server never injects defaults; **absent = the client applies its own default**.
+
+#### Request body
+
+None (empty payload).
+
+#### Success response
+
+The stored settings object. All seven fields optional, present only when explicitly set:
+
+| Field | Type |
+|---|---|
+| `fullWidth` | boolean |
+| `translateMessageInto` | string |
+| `showMessagePreviewInSidebarList` | boolean |
+| `muteAllNotifications` | boolean |
+| `showMessagesAndPreviewsInNotifications` | boolean |
+| `showNotificationsDuringCallsAndMeetings` | boolean |
+| `scrollToBottomInChat` | boolean |
+
+`{ "fullWidth": true, "translateMessageInto": "en-US" }`
+
+#### Errors
+
+`"user not found"` (`not_found`).
+
+**Emits:** None.
+
+---
+
+### settings.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.set`
+
+Partial update: **only the fields present in the request are written**; unsent
+fields keep their stored value (or stay absent). At least one field required.
+
+#### Request body
+
+Any non-empty subset of the seven settings fields (same table as
+[settings.get](#settingsget)). `translateMessageInto` must be a language-tag
+shape — hyphen-separated letter/digit subtags, leading subtag letters-only
+(e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`) — or `""` to explicitly turn
+translation off; no value whitelist.
+
+`{ "fullWidth": false, "translateMessageInto": "ja" }`
+
+#### Success response
+
+The **full post-update settings** (same shape as [settings.get](#settingsget)).
+
+#### Errors
+
+`"no settings provided"` (`bad_request`), `"invalid translateMessageInto language tag"`
+(`bad_request`), `"user not found"` (`not_found`).
+
+**Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to the
+caller's other devices, carrying the full post-update settings. A server-side
+cross-site federation update also fires — every other site receives the full
+settings so its notification worker can apply them — but is not delivered to clients.
+
+---
+
 ### subscription.list
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.list`
@@ -1436,6 +1509,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 | `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (botDM). |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
 | `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` is within N days. Non-negative. |
+| `includeLastMessage` | boolean | no | Embed each room's `lastMessage`. Omitted ⇒ include (default); `false` ⇒ skip the last-message resolve. |
 | `offset` | integer | no | Zero-based index of first record. Negative ⇒ `0`. Default `0`. |
 | `limit` | integer | no | Page size. Omitted/≤0 ⇒ `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); capped at `MAX_SUBSCRIPTION_LIMIT` (default `1000`). |
 
@@ -1537,7 +1611,8 @@ botDM). Soft-deleted rooms excluded.
 
 #### Request body
 
-`{ "unread": true }` — when `true`, returns active rooms with unread messages.
+`{ "unread": true }` — when `true`, returns active rooms with unread messages or unread
+followed threads (at most +1 per room; muted excluded).
 
 #### Success response
 
@@ -1665,6 +1740,35 @@ Empty object: `{}`.
 "lastMessageAt"?: number, "unavailableSites"?: string[] }` — see
 [../client-api.md §3.4](../client-api.md#get-thread-unread-summary). Per-site RPC
 failures degrade into `unavailableSites` rather than erroring.
+
+#### Errors
+
+`internal` — local thread-subscription read failed.
+
+**Emits:** None.
+
+---
+
+### Clear All Thread Unread
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.thread.read.all`
+
+`{siteID}` is the **caller's own home site**. Clears the unread status of all of the
+user's threads across every site — the "mark all threads read" action. `user-service`
+asks each owning site's `room-service` to clear that user's thread-subscription read
+state and room-subscription thread-unread state; each remote site converges the user's
+home replica via one `thread_read_all` inbox event.
+
+#### Request body
+
+Empty object: `{}`.
+
+#### Success response
+
+`{ "unavailableSites"?: string[] }` — see
+[../client-api.md §3.4](../client-api.md#clear-all-thread-unread). A bulk dismiss:
+clears only the requester's own read state; does not advance thread read floors or emit
+`thread_message_read`. Per-site RPC failures degrade into `unavailableSites`.
 
 #### Errors
 

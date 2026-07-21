@@ -34,7 +34,7 @@ func CORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, traceparent, tracestate, baggage")
 		c.Header("Access-Control-Max-Age", "300")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -50,7 +50,7 @@ func AccessLog() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 
-		slog.Info("request",
+		slog.InfoContext(c.Request.Context(), "request",
 			"request_id", c.GetString("request_id"),
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,

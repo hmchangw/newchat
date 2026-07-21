@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // threadReadLatencies extracts the latency tape from a sample slice.
@@ -63,7 +61,7 @@ func newThreadReadWorkload(ctx context.Context, cfg *config, preset *HistoryPres
 	if cfg.CassandraHosts == "" {
 		return nil, nil, fmt.Errorf("thread-read workload requires CASSANDRA_HOSTS")
 	}
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
 	}

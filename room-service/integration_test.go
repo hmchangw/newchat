@@ -14,13 +14,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -676,6 +678,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		m := got[0].Member
 		assert.Equal(t, model.RoomMemberOrg, m.Type)
 		assert.Equal(t, "Engineering", m.OrgName)
+		assert.Equal(t, "Engineering", m.OrgCode)
 		assert.Equal(t, 3, m.MemberCount)
 		assert.Empty(t, m.EngName)
 		assert.False(t, m.IsOwner)
@@ -1479,7 +1482,7 @@ func TestAddMembers_TwoSiteEndToEnd(t *testing.T) {
 	storeA := NewMongoStore(dbA)
 	storeB := NewMongoStore(dbB)
 
-	otelNCb, err := otelnats.Connect(natsURLb)
+	otelNCb, err := o11ynats.Connect(context.Background(), natsURLb, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNCb.Drain() })
 
@@ -1562,7 +1565,7 @@ func TestAddMembers_CrossSiteTimeout(t *testing.T) {
 	natsURL := setupNATS(t)
 	keyStore := setupKeyStore(t, db)
 	store := NewMongoStore(db)
-	otelNC, err := otelnats.Connect(natsURL)
+	otelNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
@@ -1613,7 +1616,7 @@ func TestRoomsInfoBatchRPC_NoRequestID(t *testing.T) {
 
 	mustInsertRoom(t, db, &model.Room{ID: "r1", Name: "room-1", Type: model.RoomTypeChannel, SiteID: "site-a"})
 
-	otelNC, err := otelnats.Connect(natsURL)
+	otelNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
@@ -1670,7 +1673,7 @@ func TestRoomsInfoBatchRPC(t *testing.T) {
 	_, err = keyStore.Set(ctx, "r2", roomkeystore.RoomKeyPair{PrivateKey: privKey2})
 	require.NoError(t, err)
 
-	otelNC, err := otelnats.Connect(natsURL)
+	otelNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
@@ -2066,8 +2069,8 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 	assert.Nil(t, got)
 
 	// Room "botdm": a human who has read plus a bot that never reads. Bots are
-	// not special-cased — the bot counts as an unread member, so a botDM room
-	// always resolves to nil even though the human is fully caught up.
+	// excluded from the floor, so the room resolves to the human's lastSeenAt
+	// even though the bot has no read position.
 	mustInsertSub(t, db, &model.Subscription{
 		ID: "s8", User: model.SubscriptionUser{ID: "u8", Account: "heidi"},
 		RoomID: "botdm", JoinedAt: earliest, LastSeenAt: &latest,
@@ -2077,6 +2080,56 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 		RoomID: "botdm", JoinedAt: earliest,
 	})
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "botdm")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, latest, *got, time.Second)
+
+	// Room "passive-bot": every human has read, but a bot member has never read.
+	// The bot must not freeze the floor at nil — the floor is the human MIN.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s10", User: model.SubscriptionUser{ID: "u10", Account: "ivan"},
+		RoomID: "passive-bot", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s11", User: model.SubscriptionUser{ID: "u11", Account: "judy"},
+		RoomID: "passive-bot", JoinedAt: earliest, LastSeenAt: &latest,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s12", User: model.SubscriptionUser{ID: "bot2", Account: "helper.bot", IsBot: true},
+		RoomID: "passive-bot", JoinedAt: earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "passive-bot")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// Room "bot-earlier": a bot has read EARLIER than every human. If bots were
+	// counted the floor would be the bot's (earliest) time; excluded, the floor
+	// is the human MIN (mid).
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s13", User: model.SubscriptionUser{ID: "u13", Account: "ken"},
+		RoomID: "bot-earlier", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s14", User: model.SubscriptionUser{ID: "u14", Account: "laura"},
+		RoomID: "bot-earlier", JoinedAt: earliest, LastSeenAt: &latest,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s15", User: model.SubscriptionUser{ID: "bot3", Account: "early.bot", IsBot: true},
+		RoomID: "bot-earlier", JoinedAt: earliest, LastSeenAt: &earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "bot-earlier")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// Room "bot-only": no human members. With bots excluded there are no
+	// countable subs → nil, even though the bot itself has read.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s16", User: model.SubscriptionUser{ID: "bot4", Account: "solo.bot", IsBot: true},
+		RoomID: "bot-only", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "bot-only")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 
@@ -2228,6 +2281,7 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uA", "account": "alice", "chineseName": "愛麗絲", "engName": "Alice"},
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
+		bson.M{"_id": "uD", "account": "dave.bot", "chineseName": "戴夫", "engName": "Dave"},
 	})
 	require.NoError(t, err)
 
@@ -2236,9 +2290,13 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "sA", "roomId": "r1", "u": bson.M{"_id": "uA", "account": "alice"}, "lastSeenAt": msgTime.Add(time.Hour)},
 		bson.M{"_id": "sB", "roomId": "r1", "u": bson.M{"_id": "uB", "account": "bob"}, "lastSeenAt": msgTime.Add(time.Minute)},
 		bson.M{"_id": "sC", "roomId": "r1", "u": bson.M{"_id": "uC", "account": "carol"}, "lastSeenAt": msgTime.Add(-time.Minute)},
+		// A bot that has read well past the message must never appear as a reader.
+		bson.M{"_id": "sD", "roomId": "r1", "u": bson.M{"_id": "uD", "account": "dave.bot", "isBot": true}, "lastSeenAt": msgTime.Add(30 * time.Minute)},
 	})
 	require.NoError(t, err)
 
+	// Only bob qualifies: alice is the sender, carol read before the message, and
+	// dave.bot is a bot (excluded despite having read after the message).
 	rows, err := store.ListReadReceipts(ctx, "r1", msgTime, "alice", 100)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -2695,6 +2753,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_DeptFirst_Integration(t *testing.
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Engineering 工程部", got[0].Member.OrgName, "dept wins on overlap; name+tcName combined")
+	assert.Equal(t, "Engineering", got[0].Member.OrgCode, "orgCode is the plain dept name, no TC combine")
 }
 
 // TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration verifies
@@ -2722,6 +2781,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration(t *te
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Y", got[0].Member.OrgName, "no matching users → falls back to member.id")
+	assert.Empty(t, got[0].Member.OrgCode, "no matching users → orgCode empty, no orgID fallback")
 }
 
 func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
@@ -3095,7 +3155,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 		js := setupRoomsStream(t, clientNC, siteID)
 
 		// Wire a JetStream-backed publishToStream on the handler.
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3168,7 +3228,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 		store := NewMongoStore(db)
 
 		natsURL := setupNATS(t)
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3230,7 +3290,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = clientNC.Drain() })
 
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3337,7 +3397,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		store := NewMongoStore(db)
 
 		natsURL := setupNATS(t)
-		handlerNC, err := otelnats.Connect(natsURL)
+		handlerNC, err := o11ynats.Connect(context.Background(), natsURL, noop.NewTracerProvider(), propagation.TraceContext{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
@@ -3843,4 +3903,77 @@ func TestEnsureIndexes_UsersAccountIndexOptionsConflict_Integration(t *testing.T
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "drop the old non-unique account_1 index",
 		"error must direct operators to drop the conflicting non-unique index")
+}
+
+func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	_, err := db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "tsA1", "threadRoomId": "tr1", "roomId": "r1", "parentMessageId": "p1", "userId": "uA", "userAccount": "alice", "hasMention": true},
+		bson.M{"_id": "tsA2", "threadRoomId": "tr2", "roomId": "r2", "parentMessageId": "p2", "userId": "uA", "userAccount": "alice", "hasMention": false},
+		bson.M{"_id": "tsB1", "threadRoomId": "tr9", "roomId": "r1", "parentMessageId": "p9", "userId": "uB", "userAccount": "bob", "hasMention": true},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.ClearThreadSubscriptionsForAccount(ctx, "alice", now))
+
+	// alice's docs: lastSeenAt set to now, hasMention cleared.
+	for _, id := range []string{"tsA1", "tsA2"} {
+		var raw bson.M
+		require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": id}).Decode(&raw))
+		ls, ok := raw["lastSeenAt"].(bson.DateTime)
+		require.True(t, ok, "lastSeenAt must be set for %s", id)
+		assert.WithinDuration(t, now, ls.Time(), time.Second)
+		assert.Equal(t, false, raw["hasMention"])
+	}
+
+	// bob untouched: no lastSeenAt, hasMention still true.
+	var bobRaw bson.M
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsB1"}).Decode(&bobRaw))
+	_, present := bobRaw["lastSeenAt"]
+	assert.False(t, present, "bob's thread sub must be untouched")
+	assert.Equal(t, true, bobRaw["hasMention"])
+}
+
+func TestMongoStore_ClearThreadSubscriptionsForAccount_Empty_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+
+	// No rows for the account is a no-op, not an error.
+	require.NoError(t, store.ClearThreadSubscriptionsForAccount(context.Background(), "nobody", time.Now().UTC()))
+}
+
+func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	subs := []model.Subscription{
+		{ID: "sA1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}, Alert: true},
+		{ID: "sA2", RoomID: "r2", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, Alert: false},
+		{ID: "sB1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}, Alert: true},
+	}
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{&subs[0], &subs[1], &subs[2]})
+	require.NoError(t, err)
+
+	require.NoError(t, store.ClearSubscriptionThreadUnreadForAccount(ctx, "alice"))
+
+	// alice r1: threadUnread unset, alert cleared.
+	var r1 bson.M
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA1"}).Decode(&r1))
+	_, present := r1["threadUnread"]
+	assert.False(t, present, "threadUnread must be $unset")
+	assert.Equal(t, false, r1["alert"])
+
+	// bob r1: untouched.
+	var bobRaw model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&bobRaw))
+	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
+	assert.True(t, bobRaw.Alert)
 }

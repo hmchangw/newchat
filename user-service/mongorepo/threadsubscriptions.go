@@ -44,12 +44,35 @@ func (r *ThreadSubscriptionRepo) EnsureIndexes(ctx context.Context) error {
 // ListByAccount returns the account's newest maxThreadSubscriptions accessible
 // thread-subs (across every site), newest-first, each carrying its room type.
 func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account string) ([]model.ThreadUnreadRow, error) {
+	return r.list(ctx, account, nil)
+}
+
+// ListByAccountInRooms returns the account's accessible thread-subs whose parent room
+// is in roomIDs — the read-room candidates for the unread count. Filtering by room in
+// the query (rather than fetching all thread-subs and filtering client-side) returns
+// fewer documents and scopes the newest-N cap to the candidate rooms, so a candidate
+// room's thread can't be crowded out of the cap by threads in other rooms. Returns nil
+// for an empty roomIDs list.
+func (r *ThreadSubscriptionRepo) ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error) {
+	if len(roomIDs) == 0 {
+		return nil, nil
+	}
+	return r.list(ctx, account, roomIDs)
+}
+
+// list runs the account's accessible-thread-sub aggregation, newest-first, optionally
+// restricted to parent rooms in roomIDs (nil ⇒ all rooms).
+func (r *ThreadSubscriptionRepo) list(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error) {
 	// $lookup justification: the join reads three facts off the account's
 	// subscription row — membership (access gate), unsubscribed-app status, and
 	// roomType (DM tally) — and applies the gate BEFORE the limit so an
 	// inaccessible thread can't crowd out a live one. Both keys are indexed.
+	match := bson.M{"userAccount": account}
+	if roomIDs != nil {
+		match["roomId"] = bson.M{"$in": roomIDs}
+	}
 	pipeline := bson.A{
-		bson.M{"$match": bson.M{"userAccount": account}},
+		bson.M{"$match": match},
 		bson.M{"$sort": bson.D{{Key: "createdAt", Value: -1}}},
 		bson.M{"$lookup": bson.M{
 			"from": subscriptionsCollection,
@@ -74,6 +97,7 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 		bson.M{"$project": bson.M{
 			"_id":          0,
 			"threadRoomId": 1,
+			"roomId":       1,
 			"siteId":       1,
 			"lastSeenAt":   1,
 			"hasMention":   1,

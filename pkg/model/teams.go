@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 // Request/reply contracts for the Microsoft Teams integration RPCs handled by
 // room-service. Two endpoints (room call, user call) build a Teams deep link
 // with no external I/O; the meetings endpoint creates a Graph onlineMeeting and
@@ -52,4 +54,32 @@ type TeamsMeetingRecord struct {
 	MeetingID string `bson:"meetingId"`
 	JoinURL   string `bson:"joinUrl"`
 	CreatedAt int64  `bson:"createdAt"`
+}
+
+// TeamsChatTypeOneOnOne is Graph's chatType for 1:1 chats. A oneOnOne chat
+// never changes after creation, so the sync inserts it once and never updates.
+const TeamsChatTypeOneOnOne = "oneOnOne"
+
+// TeamsChatMember is one member of a synced Teams chat. Account is empty when
+// the member is not in teams_user (guests / users outside the system).
+type TeamsChatMember struct {
+	ID                          string    `json:"id" bson:"id"`
+	Account                     string    `json:"account" bson:"account"`
+	VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime" bson:"visibleHistoryStartDateTime"`
+}
+
+// TeamsChat is one document of the teams_chat collection, owned by
+// teams-chat-sync. SiteID is the member-majority site, written only on insert
+// ($setOnInsert) and never changed afterwards.
+type TeamsChat struct {
+	ID                  string            `json:"id" bson:"_id"` // Graph chat id
+	Name                string            `json:"name" bson:"name"`
+	ChatType            string            `json:"chatType" bson:"chatType"` // oneOnOne | group | meeting
+	CreatedDateTime     time.Time         `json:"createdDateTime" bson:"createdDateTime"`
+	LastUpdatedDateTime time.Time         `json:"lastUpdatedDateTime" bson:"lastUpdatedDateTime"`
+	Members             []TeamsChatMember `json:"members" bson:"members"`
+	SiteID              string            `json:"siteId" bson:"siteId"`
+	UpdatedAt           time.Time         `json:"updatedAt" bson:"updatedAt"` // stamped now at build time; written on every upsert
+	NeedMemberSync      bool              `json:"needMemberSync" bson:"needMemberSync"`
+	NeedCreateRoom      bool              `json:"needCreateRoom" bson:"needCreateRoom"` // set true by teams-chat-sync (oneOnOne) or teams-chat-member-sync (group); consumed by room creation
 }

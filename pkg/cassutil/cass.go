@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	o11ycassandra "github.com/flywindy/o11y/cassandra"
 	"github.com/gocql/gocql"
 )
 
@@ -27,10 +28,22 @@ type Config struct {
 	NumConns int // per-host connection count; 0 or negative → defaultNumConns
 }
 
-func Connect(cfg Config) (*gocql.Session, error) {
+func Connect(cfg Config, opts ...Option) (*gocql.Session, error) {
 	cluster := buildCluster(parseHosts(cfg.Hosts), cfg.Keyspace, cfg.Username, cfg.Password, cfg.NumConns)
+	cc := newConnectConfig(opts...)
 
-	session, err := cluster.CreateSession()
+	var (
+		session *gocql.Session
+		err     error
+	)
+	if cc.obs != nil {
+		// gocql attaches observers via the ClusterConfig, so o11y must build the
+		// session rather than wrap a live one. Batch spans additionally require
+		// o11ycassandra.ExecuteBatch at the call site (a Phase 3 concern).
+		session, err = o11ycassandra.NewSession(cluster, cc.obs.TracerProvider(), cc.obs.MeterProvider())
+	} else {
+		session, err = cluster.CreateSession()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cassandra connect: %w", err)
 	}

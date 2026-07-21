@@ -17,7 +17,7 @@ import (
 
 // plainIterAdapter adapts the standard nats.go jetstream iterator (Next returns
 // (Msg, error)) to consumeLoop's messageIterator (which expects the
-// trace-carrying (ctx, Msg, error) shape of the oteljetstream wrapper). The
+// trace-carrying (ctx, Msg, error) shape of the o11y/nats facade). The
 // production wrapper is a thin tracing layer over the same iterator; the panic
 // recovery under test is identical regardless of which one feeds the loop, and
 // the standard client's Stop() is race-safe.

@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('@/lib/runtimeConfig', () => ({ PORTAL_URL: 'http://portal.test' }))
+vi.mock('@/lib/runtimeConfig', async (importOriginal) => ({
+  ...(await importOriginal()),
+  PORTAL_URL: 'http://portal.test',
+}))
 
 import { botLogin } from './botAuth'
 import { AsyncJobError } from '@/api'

@@ -41,6 +41,8 @@ services:
       nats:
         condition: service_started
     environment:
+      - OTEL_SERVICE_NAME=oplog-connector
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - SITE_ID=site-local
       - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
       - SOURCE_DB=rocketchat
@@ -71,7 +73,6 @@ services:
       - WATCH_COLLECTIONS=rocketchat_room,rocketchat_subscription,rocketchat_uploads,company_room_members,company_thread_subscriptions,company_hr_acct_org,users,rocketchat_avatar,company_apps_v,company_bot_cmd_men,company_tsso_tokens,company_bot_authorization,ufsTokens,user_devices
       - READ_PREFERENCE=primaryPreferred
       - BOOTSTRAP_STREAMS=true
-      - LOG_LEVEL=info
     networks:
       - oplog-local
 

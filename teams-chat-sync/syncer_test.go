@@ -1,0 +1,143 @@
+package main
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/msgraph"
+)
+
+func TestStartOfDayUTC(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Time
+		want time.Time
+	}{
+		{"mid-day utc", time.Date(2026, 7, 14, 13, 45, 6, 7, time.UTC), time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)},
+		{"already midnight", time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)},
+		{"non-utc zone normalizes to utc day", time.Date(2026, 7, 14, 1, 0, 0, 0, time.FixedZone("UTC+8", 8*3600)), time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.True(t, startOfDayUTC(tc.in).Equal(tc.want))
+		})
+	}
+}
+
+func member(id string) msgraph.ChatMember { return msgraph.ChatMember{UserID: id} }
+
+func TestVoteSiteID(t *testing.T) {
+	cache := map[string]cachedUser{
+		"a1": {siteID: "site-a", account: "alice"},
+		"a2": {siteID: "site-a", account: "amy"},
+		"b1": {siteID: "site-b", account: "bob"},
+		"c1": {siteID: "site-c", account: "carl"},
+		"e1": {siteID: "", account: "eve"},  // no HR site assignment
+		"e2": {siteID: "", account: "erin"}, // no HR site assignment
+	}
+	tests := []struct {
+		name          string
+		members       []msgraph.ChatMember
+		defaultSiteID string
+		want          string
+	}{
+		{"clear majority", []msgraph.ChatMember{member("a1"), member("a2"), member("b1")}, "", "site-a"},
+		{"tie breaks lexicographically", []msgraph.ChatMember{member("a1"), member("b1")}, "", "site-a"},
+		{"tie c vs b picks b", []msgraph.ChatMember{member("c1"), member("b1")}, "", "site-b"},
+		{"unknown members do not vote", []msgraph.ChatMember{member("ghost"), member("b1")}, "", "site-b"},
+		{"all unknown yields empty", []msgraph.ChatMember{member("ghost")}, "", ""},
+		{"no members yields empty", nil, "", ""},
+		{"all unknown falls back to default", []msgraph.ChatMember{member("ghost")}, "site-default", "site-default"},
+		{"no members falls back to default", nil, "site-default", "site-default"},
+		{"default never overrides a real vote", []msgraph.ChatMember{member("b1")}, "site-default", "site-b"},
+		{"empty siteID does not vote", []msgraph.ChatMember{member("e1"), member("e2"), member("b1")}, "", "site-b"},
+		{"empties do not break a real tie", []msgraph.ChatMember{member("e1"), member("c1"), member("b1")}, "", "site-b"},
+		{"only empty siteIDs yields empty", []msgraph.ChatMember{member("e1"), member("e2")}, "", ""},
+		{"only empty siteIDs falls back to default", []msgraph.ChatMember{member("e1")}, "site-default", "site-default"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, voteSiteID(tc.members, cache, tc.defaultSiteID))
+		})
+	}
+}
+
+func TestBuildChat(t *testing.T) {
+	cache := map[string]cachedUser{
+		"a1": {siteID: "site-a", account: "alice"},
+		"b1": {siteID: "site-b", account: "bob"},
+	}
+	gc := msgraph.Chat{
+		ID: "19:g1", ChatType: "group", Topic: "Project X",
+		CreatedDateTime:     time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		LastUpdatedDateTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		Members: []msgraph.ChatMember{
+			{UserID: "a1", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
+			{UserID: "ghost", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		},
+	}
+	buildNow := time.Date(2026, 7, 14, 9, 30, 0, 0, time.UTC)
+	c := buildChat(gc, cache, buildNow, "")
+	assert.Equal(t, "19:g1", c.ID)
+	assert.Equal(t, "Project X", c.Name)
+	assert.Equal(t, "group", c.ChatType)
+	assert.Equal(t, "site-a", c.SiteID)
+	assert.True(t, c.UpdatedAt.Equal(buildNow), "UpdatedAt stamped with now at build time")
+	assert.False(t, c.NeedMemberSync, "a small group (< inlineMemberThreshold members) is finalized inline, no member sync")
+	assert.Equal(t, []model.TeamsChatMember{
+		{ID: "a1", Account: "alice", VisibleHistoryStartDateTime: gc.Members[0].VisibleHistoryStartDateTime},
+		{ID: "ghost", Account: "", VisibleHistoryStartDateTime: gc.Members[1].VisibleHistoryStartDateTime},
+	}, c.Members, "unknown members kept with empty account")
+}
+
+func TestBuildChat_OneOnOne(t *testing.T) {
+	c := buildChat(msgraph.Chat{ID: "19:one1", ChatType: model.TeamsChatTypeOneOnOne, Topic: ""}, nil, time.Now(), "")
+	assert.Equal(t, "", c.Name)
+	assert.False(t, c.NeedMemberSync, "oneOnOne never needs member sync")
+}
+
+func TestBuildChat_UnknownMembersUseDefaultSiteID(t *testing.T) {
+	gc := msgraph.Chat{ID: "19:g9", ChatType: "group", Members: []msgraph.ChatMember{{UserID: "ghost"}}}
+	c := buildChat(gc, nil, time.Now(), "site-default")
+	assert.Equal(t, "site-default", c.SiteID)
+}
+
+// TestBuildChat_InlineThreshold pins the needMemberSync decision to the inline
+// member count: a non-oneOnOne chat whose expanded roster is below
+// inlineMemberThreshold is finalized inline (needMemberSync=false); at or above
+// the threshold it defers to teams-chat-member-sync (needMemberSync=true).
+func TestBuildChat_InlineThreshold(t *testing.T) {
+	mkMembers := func(n int) []msgraph.ChatMember {
+		ms := make([]msgraph.ChatMember, 0, n)
+		for i := 0; i < n; i++ {
+			ms = append(ms, msgraph.ChatMember{UserID: fmt.Sprintf("u%d", i)})
+		}
+		return ms
+	}
+	tests := []struct {
+		name     string
+		chatType string
+		members  int
+		want     bool // NeedMemberSync
+	}{
+		{"oneOnOne never needs member sync", model.TeamsChatTypeOneOnOne, 2, false},
+		{"empty group finalized inline", "group", 0, false},
+		{"small group finalized inline", "group", 24, false},
+		{"group one below threshold finalized inline", "group", inlineMemberThreshold - 1, false},
+		{"group at threshold defers", "group", inlineMemberThreshold, true},
+		{"large group defers", "group", 100, true},
+		{"meeting under threshold finalized inline", "meeting", 10, false},
+		{"meeting at threshold defers", "meeting", inlineMemberThreshold, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gc := msgraph.Chat{ID: "19:x", ChatType: tc.chatType, Members: mkMembers(tc.members)}
+			c := buildChat(gc, map[string]cachedUser{}, time.Now(), "site-default")
+			assert.Equal(t, tc.want, c.NeedMemberSync)
+		})
+	}
+}

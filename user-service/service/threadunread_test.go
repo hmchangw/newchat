@@ -227,3 +227,66 @@ func TestChunkStrings(t *testing.T) {
 		})
 	}
 }
+
+func TestClearAllThreadUnread_MultiSite(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ts := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	rc := mocks.NewMockRoomClient(ctrl)
+
+	ts.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "tr1", SiteID: "site-a"},
+		{ThreadRoomID: "tr2", SiteID: "site-b"},
+		{ThreadRoomID: "tr3", SiteID: "site-b"},
+	}, nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-a", "alice").Return(nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-b", "alice").Return(nil)
+
+	svc := newThreadUnreadService(t, ts, rc)
+	resp, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
+	require.NoError(t, err)
+	assert.Empty(t, resp.UnavailableSites)
+}
+
+func TestClearAllThreadUnread_NoThreads(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ts := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	rc := mocks.NewMockRoomClient(ctrl)
+
+	ts.EXPECT().ListByAccount(gomock.Any(), "alice").Return(nil, nil)
+	// No ClearAllThreadUnread calls expected.
+
+	svc := newThreadUnreadService(t, ts, rc)
+	resp, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
+	require.NoError(t, err)
+	assert.Empty(t, resp.UnavailableSites)
+}
+
+func TestClearAllThreadUnread_SiteDegrades(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ts := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	rc := mocks.NewMockRoomClient(ctrl)
+
+	ts.EXPECT().ListByAccount(gomock.Any(), "alice").Return([]model.ThreadUnreadRow{
+		{ThreadRoomID: "tr1", SiteID: "site-a"},
+		{ThreadRoomID: "tr2", SiteID: "site-b"},
+	}, nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-a", "alice").Return(nil)
+	rc.EXPECT().ClearAllThreadUnread(gomock.Any(), "site-b", "alice").Return(fmt.Errorf("site down"))
+
+	svc := newThreadUnreadService(t, ts, rc)
+	resp, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"site-b"}, resp.UnavailableSites)
+}
+
+func TestClearAllThreadUnread_ListError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ts := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	rc := mocks.NewMockRoomClient(ctrl)
+
+	ts.EXPECT().ListByAccount(gomock.Any(), "alice").Return(nil, fmt.Errorf("mongo down"))
+
+	svc := newThreadUnreadService(t, ts, rc)
+	_, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
+	require.Error(t, err)
+}

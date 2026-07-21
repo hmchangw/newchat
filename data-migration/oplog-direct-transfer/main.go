@@ -6,23 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/otelutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -35,18 +33,11 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)})))
-
 	ctx := context.Background()
 
-	tracerShutdown, err := otelutil.InitTracer(ctx, "oplog-direct-transfer")
+	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
-		slog.Error("init tracer failed", "error", err)
-		os.Exit(1)
-	}
-	meterShutdown, err := otelutil.InitMeter("oplog-direct-transfer")
-	if err != nil {
-		slog.Error("init meter failed", "error", err)
+		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
 	m, err := newMetrics()
@@ -55,20 +46,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	metricsServer := newMetricsServer()
-	ln, err := net.Listen("tcp", cfg.MetricsAddr)
+	// Bind synchronously so a port conflict fails startup loudly. Metrics are
+	// owned by the o11y SDK's Prometheus endpoint; this is health-only.
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second)
 	if err != nil {
-		slog.Error("metrics listen failed", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("health server failed to start", "addr", cfg.HealthAddr, "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("metrics+health server listening", "addr", cfg.MetricsAddr)
-		if err := metricsServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server failed", "error", err)
-		}
-	}()
 
-	source, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword)
+	source, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceUsername, cfg.SourcePassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("source mongo connect failed", "error", err)
 		os.Exit(1)
@@ -81,7 +67,7 @@ func main() {
 	}
 	sourceDB := source.Database(cfg.SourceDB)
 
-	targetClient, err := mongoutil.Connect(ctx, cfg.TargetMongoURI, cfg.TargetUsername, cfg.TargetPassword)
+	targetClient, err := mongoutil.Connect(ctx, cfg.TargetMongoURI, cfg.TargetUsername, cfg.TargetPassword, mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("target mongo connect failed", "error", err)
 		mongoutil.Disconnect(ctx, source)
@@ -97,14 +83,14 @@ func main() {
 		filterSubjects = append(filterSubjects, subject.MigrationOplog(cfg.SiteID, coll, "*"))
 	}
 
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, targetClient)
 		mongoutil.Disconnect(ctx, source)
 		os.Exit(1)
 	}
-	js, err := oteljetstream.New(nc)
+	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		_ = nc.Drain()
@@ -144,8 +130,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	cc, err := cons.Consume(func(msg oteljetstream.Msg) {
-		processOne(msg.Context(), h, msg, m, cfg.MaxDeliver)
+	cc, err := cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+		processOne(msgCtx, h, msg, m, cfg.MaxDeliver)
 	})
 	if err != nil {
 		slog.Error("consume failed", "stream", streamName, "error", err)
@@ -159,12 +145,11 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { cc.Stop(); return nil },
-		func(ctx context.Context) error { return metricsServer.Shutdown(ctx) },
-		func(ctx context.Context) error { return tracerShutdown(ctx) },
-		func(ctx context.Context) error { return meterShutdown(ctx) },
+		func(ctx context.Context) error { return healthStop(ctx) },
 		func(context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, targetClient); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, source); return nil },
+		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
 
@@ -214,7 +199,7 @@ func processOne(ctx context.Context, h *handler, m jetstream.Msg, mtr *metrics, 
 const streamWaitTimeout = 60 * time.Second
 
 //nolint:gocritic // hugeParam: cfg passed by value to match jetstream.CreateOrUpdateConsumer's signature.
-func createConsumerWithRetry(ctx context.Context, js oteljetstream.JetStream, streamName string, cfg jetstream.ConsumerConfig) (oteljetstream.Consumer, error) {
+func createConsumerWithRetry(ctx context.Context, js o11ynats.JetStream, streamName string, cfg jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
 	deadline := time.Now().Add(streamWaitTimeout)
 	for {
 		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, cfg)
@@ -233,22 +218,6 @@ func createConsumerWithRetry(ctx context.Context, js oteljetstream.JetStream, st
 	}
 }
 
-func newMetricsServer() *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	return &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-}
-
 func readPreference(s string) (*readpref.ReadPref, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "primary":
@@ -263,18 +232,5 @@ func readPreference(s string) (*readpref.ReadPref, error) {
 		return readpref.Nearest(), nil
 	default:
 		return nil, fmt.Errorf("invalid SOURCE_READ_PREFERENCE: %s", s)
-	}
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
 	}
 }

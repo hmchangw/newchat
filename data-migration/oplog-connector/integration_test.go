@@ -18,10 +18,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
-
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -65,7 +64,7 @@ func createSourceCollection(t *testing.T, db *mongo.Database, coll string) *mong
 }
 
 // TestConnector_RealPublishEndToEnd runs the full connector (start → real NATS publish) and reads
-// the envelope back off MIGRATION_OPLOG — covering main.go wiring and the real oteljetstream path.
+// the envelope back off MIGRATION_OPLOG — covering main.go wiring and the real o11y/nats JetStream path.
 func TestConnector_RealPublishEndToEnd(t *testing.T) {
 	const coll = "rocketchat_message"
 	client, uri := startReplicaSet(t)
@@ -87,17 +86,25 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 		Bootstrap:        bootstrapConfig{Enabled: true},
 	}
 
-	conn, err := start(ctx, &cfg, nil)
+	t.Setenv("OTEL_SERVICE_NAME", "oplog-connector-test")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	sdk, sdkShutdown, err := obs.Init(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sdkShutdown(context.Background()) })
+
+	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator)
 	require.NoError(t, err)
 	defer conn.Close()
 
 	_, err = source.InsertOne(ctx, bson.M{"_id": "m1", "msg": "hi"})
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(cfg.NatsURL, "")
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := oteljetstream.New(nc)
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	var gotID string
@@ -329,7 +336,16 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 		StartMode:         "now",
 		Bootstrap:         bootstrapConfig{Enabled: true},
 	}
-	conn, err := start(ctx, &cfg, nil)
+
+	t.Setenv("OTEL_SERVICE_NAME", "oplog-connector-test")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	sdk, sdkShutdown, err := obs.Init(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sdkShutdown(context.Background()) })
+
+	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -338,10 +354,10 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 	_, err = msgs.InsertOne(ctx, bson.M{"_id": "m1", "msg": "hi"}) // no watcher — must not be forwarded
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(cfg.NatsURL, "")
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := oteljetstream.New(nc)
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	var subjects []string

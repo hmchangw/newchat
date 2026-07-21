@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
@@ -21,11 +21,11 @@ const historyRequestTimeout = 2 * time.Second
 // read-receipt lookup through it lets room-service drop its direct Cassandra
 // dependency entirely.
 type historyMessageReader struct {
-	nc     *otelnats.Conn
+	nc     *o11ynats.Conn
 	siteID string
 }
 
-func newHistoryMessageReader(nc *otelnats.Conn, siteID string) *historyMessageReader {
+func newHistoryMessageReader(nc *o11ynats.Conn, siteID string) *historyMessageReader {
 	return &historyMessageReader{nc: nc, siteID: siteID}
 }
 

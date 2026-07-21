@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -18,12 +18,12 @@ const roomRPCTimeout = 5 * time.Second
 
 // Client implements service.RoomClient via NATS request/reply RPCs to room-service and room-worker.
 type Client struct {
-	nc     *otelnats.Conn
+	nc     *o11ynats.Conn
 	siteID string
 }
 
 // New returns a Client wired to nc and scoped to siteID.
-func New(nc *otelnats.Conn, siteID string) *Client { return &Client{nc: nc, siteID: siteID} }
+func New(nc *o11ynats.Conn, siteID string) *Client { return &Client{nc: nc, siteID: siteID} }
 
 // GetRoomsInfo issues a batch room-info RPC; non-OK reply envelopes are relayed via errcode.Parse to preserve the remote classification.
 func (c *Client) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
@@ -66,6 +66,24 @@ func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, thre
 		return nil, fmt.Errorf("decode thread-room-info response: %w", err)
 	}
 	return out.Threads, nil
+}
+
+// ClearAllThreadUnread issues the bulk clear-all-thread-unread RPC to room-service
+// on the given site; non-OK reply envelopes are relayed via errcode.Parse. The
+// reply carries no payload — success is a nil error.
+func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
+	req, err := json.Marshal(model.RoomThreadReadAllRequest{Account: account})
+	if err != nil {
+		return fmt.Errorf("marshal clear-all-thread-unread request: %w", err)
+	}
+	msg, err := c.nc.Request(ctx, subject.RoomThreadReadAll(siteID), req, roomRPCTimeout)
+	if err != nil {
+		return fmt.Errorf("clear-all-thread-unread rpc: %w", err)
+	}
+	if e, ok := errcode.Parse(msg.Data); ok {
+		return e
+	}
+	return nil
 }
 
 // CreateDMRoom issues a DM-room creation RPC to room-worker; non-OK reply envelopes are relayed via errcode.Parse.

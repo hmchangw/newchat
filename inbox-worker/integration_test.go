@@ -747,6 +747,62 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 	assert.False(t, gotTS.HasMention)
 }
 
+func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// alice: two thread subs (one older lastSeenAt, one unread/never seen) + one
+	// thread sub already read in the FUTURE (guard must not regress it).
+	_, err := db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "tsA1", "threadRoomId": "tr1", "roomId": "r1", "parentMessageId": "p1", "userAccount": "alice", "siteId": "site-b", "hasMention": true, "lastSeenAt": now.Add(-time.Hour)},
+		bson.M{"_id": "tsA2", "threadRoomId": "tr2", "roomId": "r2", "parentMessageId": "p2", "userAccount": "alice", "siteId": "site-b", "hasMention": false},
+		bson.M{"_id": "tsA3", "threadRoomId": "tr3", "roomId": "r3", "parentMessageId": "p3", "userAccount": "alice", "siteId": "site-b", "hasMention": true, "lastSeenAt": now.Add(time.Hour)},
+		bson.M{"_id": "tsB1", "threadRoomId": "tr9", "roomId": "r1", "parentMessageId": "p9", "userAccount": "bob", "siteId": "site-b", "hasMention": true},
+	})
+	require.NoError(t, err)
+
+	_, err = db.Collection("subscriptions").InsertMany(ctx, []any{
+		&model.Subscription{ID: "sA1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}, Alert: true},
+		&model.Subscription{ID: "sB1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}, Alert: true},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.ApplyThreadReadAll(ctx, "alice", now))
+
+	// tsA1 (older) + tsA2 (never seen) advanced to now, hasMention cleared.
+	for _, id := range []string{"tsA1", "tsA2"} {
+		var ts model.ThreadSubscription
+		require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": id}).Decode(&ts))
+		require.NotNil(t, ts.LastSeenAt, id)
+		assert.Equal(t, now, ts.LastSeenAt.UTC().Truncate(time.Millisecond), id)
+		assert.False(t, ts.HasMention, id)
+	}
+	// tsA3 (future read) must NOT be regressed by the guard.
+	var ts3 model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsA3"}).Decode(&ts3))
+	assert.Equal(t, now.Add(time.Hour), ts3.LastSeenAt.UTC().Truncate(time.Millisecond))
+
+	// alice's subscription: threadUnread unset, alert cleared.
+	var rawA model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA1"}).Decode(&rawA))
+	assert.Empty(t, rawA.ThreadUnread)
+	assert.False(t, rawA.Alert)
+
+	// bob untouched.
+	var tsB model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsB1"}).Decode(&tsB))
+	assert.Nil(t, tsB.LastSeenAt)
+	var subB model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&subB))
+	assert.Equal(t, []string{"p9"}, subB.ThreadUnread)
+	assert.True(t, subB.Alert)
+}
+
 func TestInboxStore_ApplyThreadRead_EmptyArrayUnsetsField(t *testing.T) {
 	db := setupMongo(t)
 	store := &mongoInboxStore{
@@ -1483,6 +1539,71 @@ func TestInboxWorker_UpdateUserStatus_Integration(t *testing.T) {
 
 	t.Run("unknown account is a no-op", func(t *testing.T) {
 		require.NoError(t, store.UpdateUserStatus(ctx, "ghost", "nope", nil, t2))
+
+		count, err := store.userCol.CountDocuments(ctx, bson.M{"account": "ghost"})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+	})
+}
+
+func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	store := &mongoInboxStore{
+		subCol:  db.Collection("subscriptions"),
+		roomCol: db.Collection("rooms"),
+		userCol: db.Collection("users"),
+	}
+
+	t1 := time.UnixMilli(1000).UTC()
+	t2 := time.UnixMilli(2000).UTC()
+	yes, no := true, false
+
+	// Each subtest owns its own account so it passes standalone under -run.
+	seed := func(t *testing.T, account string) {
+		t.Helper()
+		_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u-" + account, Account: account, SiteID: "site-b"})
+		require.NoError(t, err)
+	}
+
+	t.Run("writes the full settings sub-document", func(t *testing.T) {
+		seed(t, "settings-write")
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-write", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-write"}).Decode(&got))
+		require.NotNil(t, got.Settings)
+		require.NotNil(t, got.Settings.MuteAllNotifications)
+		assert.True(t, *got.Settings.MuteAllNotifications)
+	})
+
+	t.Run("replaces wholesale — a field dropped by the user is dropped here", func(t *testing.T) {
+		seed(t, "settings-replace")
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-replace", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-replace", &model.UserSettings{FullWidth: &no}, t2))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-replace"}).Decode(&got))
+		require.NotNil(t, got.Settings)
+		assert.Nil(t, got.Settings.MuteAllNotifications, "whole-object replace must not merge the previous value")
+		require.NotNil(t, got.Settings.FullWidth)
+		assert.False(t, *got.Settings.FullWidth)
+	})
+
+	t.Run("stale event is rejected by the settingsUpdatedAt high-water guard", func(t *testing.T) {
+		seed(t, "settings-stale")
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-stale", &model.UserSettings{FullWidth: &no}, t2))
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-stale", &model.UserSettings{MuteAllNotifications: &yes}, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-stale"}).Decode(&got))
+		assert.Nil(t, got.Settings.MuteAllNotifications, "stale settings must not overwrite newer ones")
+		require.NotNil(t, got.Settings.FullWidth)
+	})
+
+	t.Run("unknown account is a no-op", func(t *testing.T) {
+		require.NoError(t, store.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: &yes}, t2))
 
 		count, err := store.userCol.CountDocuments(ctx, bson.M{"account": "ghost"})
 		require.NoError(t, err)

@@ -45,6 +45,8 @@ services:
       source-mongo:
         condition: service_healthy
     environment:
+      - OTEL_SERVICE_NAME=oplog-connector
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - SITE_ID=site-local
       - SOURCE_MONGO_URI=mongodb://source-mongo:27017/?replicaSet=rs0
       - SOURCE_DB=rocketchat
@@ -55,7 +57,7 @@ services:
       - WATCH_COLLECTIONS=rocketchat_message
       - READ_PREFERENCE=primaryPreferred
       - BOOTSTRAP_STREAMS=true # owns MIGRATION_OPLOG; creates it in dev
-      - METRICS_ADDR=:9090
+      - HEALTH_ADDR=:9090
       - LOG_LEVEL=info
     volumes:
       - ./backend.creds:/etc/nats/backend.creds:ro
@@ -72,6 +74,8 @@ services:
       source-mongo:
         condition: service_healthy
     environment:
+      - OTEL_SERVICE_NAME=oplog-transformer
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - SITE_ID=site-local
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
@@ -80,7 +84,7 @@ services:
       - SOURCE_DB=rocketchat
       - SOURCE_MESSAGE_COLLECTION=rocketchat_message
       - SOURCE_READ_PREFERENCE=primaryPreferred
-      - METRICS_ADDR=:9090
+      - HEALTH_ADDR=:9090
       - LOG_LEVEL=info
     volumes:
       - ./backend.creds:/etc/nats/backend.creds:ro

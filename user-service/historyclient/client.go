@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -20,11 +20,11 @@ const historyRPCTimeout = 5 * time.Second
 // history-service. The destination site is passed per call, so one Client fans
 // out across sites.
 type Client struct {
-	nc *otelnats.Conn
+	nc *o11ynats.Conn
 }
 
 // New returns a Client wired to nc.
-func New(nc *otelnats.Conn) *Client { return &Client{nc: nc} }
+func New(nc *o11ynats.Conn) *Client { return &Client{nc: nc} }
 
 // GetThreadList issues the per-site thread-list RPC to history-service at
 // siteID; non-OK reply envelopes are relayed via errcode.Parse to preserve the
@@ -46,4 +46,27 @@ func (c *Client) GetThreadList(ctx context.Context, siteID string, req model.Thr
 		return model.ThreadSubscriptionListResponse{}, fmt.Errorf("decode thread-list response: %w", err)
 	}
 	return out, nil
+}
+
+// RoomsGet issues the per-site rooms.get batch RPC to history-service, returning
+// the resolvable last message for each requested room; rooms with no message, or
+// that degraded, are simply absent from the map (mirrors the server's own
+// per-room best-effort degrade).
+func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error) {
+	body, err := json.Marshal(model.RoomsGetRequest{RoomIDs: roomIDs})
+	if err != nil {
+		return nil, fmt.Errorf("marshal rooms-get request: %w", err)
+	}
+	msg, err := c.nc.Request(ctx, subject.RoomsGet(siteID), body, historyRPCTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("rooms-get rpc: %w", err)
+	}
+	if e, ok := errcode.Parse(msg.Data); ok {
+		return nil, e
+	}
+	var out model.RoomsGetResponse
+	if err := json.Unmarshal(msg.Data, &out); err != nil {
+		return nil, fmt.Errorf("decode rooms-get response: %w", err)
+	}
+	return out.Rooms, nil
 }

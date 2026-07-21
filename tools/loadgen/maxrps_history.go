@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // latenciesOf extracts the latency tape from a sample slice.
@@ -44,7 +42,7 @@ func buildHistoryInputs(targetRPS int, hold time.Duration, c *HistoryCollector) 
 }
 
 // historyWorkload drives history-service read requests at a given RPS.
-// As with messagesWorkload, the natsutil connection (*otelnats.Conn) and metrics
+// As with messagesWorkload, the natsutil connection (*o11ynats.Conn) and metrics
 // server are captured by the cleanup closure, not stored on the struct.
 type historyWorkload struct {
 	cfg             *config
@@ -75,7 +73,7 @@ func newHistoryWorkload(ctx context.Context, cfg *config, preset *HistoryPreset,
 	if cfg.CassandraHosts == "" {
 		return nil, nil, fmt.Errorf("history workload requires CASSANDRA_HOSTS")
 	}
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
 	}

@@ -9,9 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/otelnats"
+	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
+
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -25,11 +29,11 @@ var _ service.PresenceClient = (*Client)(nil)
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-// dial returns a connected *otelnats.Conn backed by the shared test NATS
+// dial returns a connected *o11ynats.Conn backed by the shared test NATS
 // server. The connection is drained on test cleanup.
-func dial(t *testing.T) *otelnats.Conn {
+func dial(t *testing.T) *o11ynats.Conn {
 	t.Helper()
-	nc, err := otelnats.Connect(testutil.NATS(t))
+	nc, err := o11ynats.Connect(context.Background(), testutil.NATS(t), noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 	return nc
@@ -39,11 +43,11 @@ func TestQueryPresence_Integration(t *testing.T) {
 	t.Run("happy path — returns states from responder", func(t *testing.T) {
 		nc := dial(t)
 
-		sub, err := nc.Subscribe(subject.PresenceQueryBatchPeer("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-a"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.PresenceQueryResponse{
 				States: []model.PresenceState{{Account: "alice", SiteID: "site-a", Status: model.StatusOnline}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -58,9 +62,9 @@ func TestQueryPresence_Integration(t *testing.T) {
 	t.Run("errcode reply — returns typed errcode error", func(t *testing.T) {
 		nc := dial(t)
 
-		sub, err := nc.Subscribe(subject.PresenceQueryBatchPeer("site-a"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-a"), func(_ context.Context, m *nats.Msg) {
 			data, _ := json.Marshal(errcode.BadRequest("batch exceeds max"))
-			_ = m.Msg.Respond(data)
+			_ = m.Respond(data)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -88,11 +92,11 @@ func TestQueryPresence_Integration(t *testing.T) {
 		nc := dial(t)
 
 		// Responder on "site-b" subject proves the method routes on the siteID param.
-		sub, err := nc.Subscribe(subject.PresenceQueryBatchPeer("site-b"), func(m otelnats.Msg) {
+		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-b"), func(_ context.Context, m *nats.Msg) {
 			out, _ := json.Marshal(model.PresenceQueryResponse{
 				States: []model.PresenceState{{Account: "bob", SiteID: "site-b", Status: model.StatusAway}},
 			})
-			_ = m.Msg.Respond(out)
+			_ = m.Respond(out)
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -108,8 +112,8 @@ func TestQueryPresence_Integration(t *testing.T) {
 
 		// A reply that is neither a parseable errcode envelope nor a valid
 		// PresenceQueryResponse must surface the decode fall-through error.
-		sub, err := nc.Subscribe(subject.PresenceQueryBatchPeer("site-a"), func(m otelnats.Msg) {
-			_ = m.Msg.Respond([]byte(`[`))
+		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-a"), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`[`))
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
@@ -122,8 +126,8 @@ func TestQueryPresence_Integration(t *testing.T) {
 	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
 		nc := dial(t)
 
-		sub, err := nc.Subscribe(subject.PresenceQueryBatchPeer("site-a"), func(m otelnats.Msg) {
-			_ = m.Msg.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
+		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-a"), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })

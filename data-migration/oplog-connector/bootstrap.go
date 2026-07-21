@@ -6,7 +6,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/stream"
 )
@@ -18,8 +18,8 @@ type bootstrapConfig struct {
 
 // streamManager is the minimal JetStream surface bootstrapStreams needs, service-local so tests can fake it without mockgen.
 type streamManager interface {
-	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error)
-	Stream(ctx context.Context, name string) (oteljetstream.Stream, error)
+	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (o11ynats.Stream, error)
+	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
 // bootstrapStreams owns the MIGRATION_OPLOG_{siteID} stream — enabled it creates from schema (Name+Subjects), disabled it verifies existence and fails fast. Federation config stays ops/IaC-owned.

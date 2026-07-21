@@ -30,6 +30,8 @@ type UserRepository interface {
 	GetUserStatus(ctx context.Context, account string) (*model.User, error)
 	SetUserStatus(ctx context.Context, account, text string, isShow *bool) (*model.User, error)
 	GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error)
+	GetUserSettings(ctx context.Context, account string) (*model.User, error)
+	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.
@@ -45,18 +47,21 @@ type RoomClient interface {
 	GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
 	CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error)
 	GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error)
+	ClearAllThreadUnread(ctx context.Context, siteID, account string) error
 }
 
 // ThreadSubscriptionRepository reads the local thread_subscriptions replica for
 // the thread-unread badge.
 type ThreadSubscriptionRepository interface {
 	ListByAccount(ctx context.Context, account string) ([]model.ThreadUnreadRow, error)
+	ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error)
 }
 
 // HistoryClient is the consumer-defined interface for per-site history-service
 // RPCs, fanned out across sites by the thread-inbox aggregator.
 type HistoryClient interface {
 	GetThreadList(ctx context.Context, siteID string, req model.ThreadSubscriptionListRequest) (model.ThreadSubscriptionListResponse, error)
+	RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error)
 }
 
 // PresenceClient is the consumer-defined interface for user-presence-service RPC calls.
@@ -74,14 +79,17 @@ type EventPublisher interface {
 
 // UserService handles all user-related NATS request/reply endpoints.
 type UserService struct {
-	subs            SubscriptionRepository
-	users           UserRepository
-	apps            AppRepository
-	threadSubs      ThreadSubscriptionRepository
-	rooms           RoomClient
-	history         HistoryClient
-	presence        PresenceClient
-	pub             EventPublisher
+	subs       SubscriptionRepository
+	users      UserRepository
+	apps       AppRepository
+	threadSubs ThreadSubscriptionRepository
+	rooms      RoomClient
+	history    HistoryClient
+	presence   PresenceClient
+	pub        EventPublisher
+	// clientPub fans out ephemeral client-facing events (settings.update) over
+	// core NATS — same delivery pattern as room-worker's subscription.update.
+	clientPub       EventPublisher
 	siteID          string
 	allSiteIDs      []string
 	maxSubs         int
@@ -92,7 +100,7 @@ type UserService struct {
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub EventPublisher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, cfg *config.Config) *UserService {
 	return &UserService{
 		subs:            subs,
 		users:           users,
@@ -102,6 +110,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		history:         history,
 		presence:        presence,
 		pub:             pub,
+		clientPub:       clientPub,
 		siteID:          cfg.SiteID,
 		allSiteIDs:      cfg.AllSiteIDs,
 		maxSubs:         cfg.MaxSubscriptionLimit,
@@ -119,9 +128,12 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.UserStatusGetByNamePattern(s.siteID), s.GetStatusByName)
 	natsrouter.Register(r, subject.UserProfileGetByNamePattern(s.siteID), s.GetProfileByName)
 	natsrouter.Register(r, subject.UserStatusSetPattern(s.siteID), s.SetStatus)
+	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), s.GetSettings)
+	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), s.SetSettings)
 	natsrouter.Register(r, subject.UserSubscriptionListPattern(s.siteID), s.ListSubscriptions)
 	natsrouter.Register(r, subject.UserThreadListPattern(s.siteID), s.ListUserThreads)
 	natsrouter.Register(r, subject.UserThreadUnreadSummaryPattern(s.siteID), s.GetThreadUnreadSummary)
+	natsrouter.Register(r, subject.UserThreadReadAllPattern(s.siteID), s.ClearAllThreadUnread)
 	natsrouter.Register(r, subject.UserSubscriptionGetChannelsPattern(s.siteID), s.GetChannels)
 	natsrouter.Register(r, subject.UserSubscriptionGetDMPattern(s.siteID), s.GetDM)
 	natsrouter.Register(r, subject.UserSubscriptionGetByRoomIDPattern(s.siteID), s.GetByRoomID)

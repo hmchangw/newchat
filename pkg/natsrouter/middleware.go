@@ -8,7 +8,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -70,7 +69,7 @@ func RequireRequestID() HandlerFunc {
 			// c.Msg is always set in production (acquireContext); guard so a
 			// nil-Msg test context aborts cleanly instead of panicking in Respond.
 			if c.Msg != nil {
-				errnats.Reply(c, c.Msg, err)
+				c.ReplyError(err)
 			}
 			c.Abort()
 			return
@@ -102,7 +101,7 @@ func Recovery() HandlerFunc {
 				attrs := append(requestAttrs(c), "panic", r)
 				slog.Error("panic recovered", attrs...)
 				// Already logged above; ReplyQuiet avoids a redundant Classify line.
-				errnats.ReplyQuiet(c.Msg, errcode.Internal("internal error"))
+				c.ReplyErrorQuiet(errcode.Internal("internal error"))
 				c.Abort()
 			}
 		}()

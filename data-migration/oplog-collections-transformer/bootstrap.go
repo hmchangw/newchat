@@ -6,14 +6,14 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
 // streamManager is the minimal JetStream surface bootstrapStreams needs, service-local so tests can fake it without mockgen.
 type streamManager interface {
-	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (oteljetstream.Stream, error)
+	CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (o11ynats.Stream, error)
 }
 
 // bootstrapStreams is a no-op in production (this service owns no streams). When Enabled

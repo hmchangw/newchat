@@ -191,6 +191,19 @@ type RoomStore interface {
 
 	UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
 
+	// ClearThreadSubscriptionsForAccount marks every one of account's thread
+	// subscriptions on this site as read (lastSeenAt=now, updatedAt=now,
+	// hasMention=false) in a single account-scoped bulk update. The cross-site
+	// convergence rides one thread_read_all event, so no per-row snapshot is
+	// returned.
+	ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error
+
+	// ClearSubscriptionThreadUnreadForAccount clears thread-unread state on every
+	// one of account's subscriptions that currently has unread threads: removes
+	// threadUnread and sets alert=false. Subscriptions without unread threads are
+	// left untouched so a non-thread alert source is preserved.
+	ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error
+
 	// GetThreadRoomByID returns the thread room document for threadRoomID.
 	// Returns (nil, nil) when no document matches.
 	GetThreadRoomByID(ctx context.Context, threadRoomID string) (*model.ThreadRoom, error)

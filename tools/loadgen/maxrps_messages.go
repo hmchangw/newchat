@@ -13,7 +13,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -74,7 +73,7 @@ func buildMessagesInputs(
 
 // messagesWorkload drives the messaging pipeline at a given RPS.
 // The natsutil connection and metrics server are not stored on the struct
-// (natsutil.Connect returns *otelnats.Conn); they are captured by the cleanup
+// (dialNATS returns *o11ynats.Conn); they are captured by the cleanup
 // closure instead, so the adapter only keeps what RunStep needs.
 type messagesWorkload struct {
 	cfg       *config
@@ -96,7 +95,7 @@ func (w *messagesWorkload) Label() string { return "messages" }
 // and the publisher. The returned cleanup unsubscribes, shuts the metrics server
 // and drains NATS.
 func newMessagesWorkload(ctx context.Context, cfg *config, preset *Preset, inject InjectMode, seed int64) (*messagesWorkload, func(), error) {
-	nc, err := natsutil.Connect(cfg.NatsURL, cfg.NatsCredsFile)
+	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
 	}

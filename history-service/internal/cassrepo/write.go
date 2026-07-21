@@ -285,9 +285,11 @@ func (r *Repository) UpdateMessageContent(ctx context.Context, msg *models.Messa
 // SoftDeleteMessage uses a Cassandra LWT on messages_by_id as a one-shot gate so only
 // the winning goroutine runs mirror-table updates and tcount decrement, preventing double-decrement.
 // `IF deleted != true` matches NULL (message-worker never writes deleted) and false, excluding true.
-func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (time.Time, bool, *int, error) {
+// The returned newThreadLastMsgAt is the newest surviving reply's createdAt (nil when none survive),
+// so the caller can publish it on the canonical event without a second read.
+func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
 	if msg.ThreadParentID != "" && msg.ThreadRoomID == "" {
-		return time.Time{}, false, nil, fmt.Errorf("delete thread message %s: ThreadParentID %q is set but ThreadRoomID is empty", msg.MessageID, msg.ThreadParentID)
+		return time.Time{}, false, nil, nil, fmt.Errorf("delete thread message %s: ThreadParentID %q is set but ThreadRoomID is empty", msg.MessageID, msg.ThreadParentID)
 	}
 
 	isThreadParent := msg.TCount != nil && *msg.TCount > 0
@@ -303,7 +305,7 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 		deletedAt, msg.MessageID,
 	).WithContext(ctx).ScanCAS(&current)
 	if err != nil {
-		return time.Time{}, false, nil, fmt.Errorf("cas update messages_by_id for message %s: %w", msg.MessageID, err)
+		return time.Time{}, false, nil, nil, fmt.Errorf("cas update messages_by_id for message %s: %w", msg.MessageID, err)
 	}
 	if !applied {
 		// Concurrent delete won. Read the existing updated_at so the caller
@@ -315,11 +317,11 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 		).WithContext(ctx).Scan(&existing); err != nil {
 			if errors.Is(err, gocql.ErrNotFound) {
 				// Row vanished between the CAS and the follow-up SELECT — abnormal race.
-				return time.Time{}, false, nil, fmt.Errorf("message %s vanished after cas miss: %w", msg.MessageID, gocql.ErrNotFound)
+				return time.Time{}, false, nil, nil, fmt.Errorf("message %s vanished after cas miss: %w", msg.MessageID, gocql.ErrNotFound)
 			}
-			return time.Time{}, false, nil, fmt.Errorf("read updated_at after cas miss for message %s: %w", msg.MessageID, err)
+			return time.Time{}, false, nil, nil, fmt.Errorf("read updated_at after cas miss for message %s: %w", msg.MessageID, err)
 		}
-		return existing, false, nil, nil
+		return existing, false, nil, nil, nil
 	}
 
 	msgByRoomQ := deleteMsgByRoom
@@ -333,11 +335,11 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 
 	if msg.ThreadParentID == "" {
 		if err := r.deleteInMessagesByRoom(ctx, msgByRoomQ, msg, deletedAt); err != nil {
-			return time.Time{}, false, nil, fmt.Errorf("update messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+			return time.Time{}, false, nil, nil, fmt.Errorf("update messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 		}
 	} else {
 		if err := r.session.Query(threadMsgQ, deletedAt, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec(); err != nil {
-			return time.Time{}, false, nil, fmt.Errorf("update thread_messages_by_thread for message %s thread %s: %w", msg.MessageID, msg.ThreadRoomID, err)
+			return time.Time{}, false, nil, nil, fmt.Errorf("update thread_messages_by_thread for message %s thread %s: %w", msg.MessageID, msg.ThreadRoomID, err)
 		}
 		// A TShow ("also send to channel") thread reply is dual-written into
 		// messages_by_room at create time; soft-delete must also hit that copy
@@ -345,27 +347,27 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 		// thread delete — same shape as the PinnedAt branch below.
 		if msg.TShow {
 			if err := r.deleteInMessagesByRoom(ctx, msgByRoomQ, msg, deletedAt); err != nil {
-				return time.Time{}, false, nil, fmt.Errorf("update messages_by_room for tshow thread message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+				return time.Time{}, false, nil, nil, fmt.Errorf("update messages_by_room for tshow thread message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 			}
 		}
 	}
 
 	if msg.PinnedAt != nil {
 		if err := r.deleteInPinnedMessagesByRoom(ctx, pinnedMsgQ, msg, deletedAt); err != nil {
-			return time.Time{}, false, nil, fmt.Errorf("update pinned_messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+			return time.Time{}, false, nil, nil, fmt.Errorf("update pinned_messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 		}
 	}
 
 	if msg.ThreadParentID == "" {
-		return deletedAt, true, nil, nil
+		return deletedAt, true, nil, nil, nil
 	}
-	newTcount, err := r.countAndSetParentTcount(ctx, msg)
+	newTcount, newTlm, err := r.countAndSetParentTcount(ctx, msg)
 	if err != nil {
 		// The LWT delete already committed — return applied=true so callers correctly
 		// identify this as a count-set failure rather than a concurrent-winner race.
-		return deletedAt, true, nil, fmt.Errorf("count and set parent tcount for message %s: %w", msg.MessageID, err)
+		return deletedAt, true, nil, nil, fmt.Errorf("count and set parent tcount for message %s: %w", msg.MessageID, err)
 	}
-	return deletedAt, true, newTcount, nil
+	return deletedAt, true, newTcount, newTlm, nil
 }
 
 // countThreadReplies returns the bounded, soft-delete-aware reply count and the
@@ -400,17 +402,17 @@ func (r *Repository) setParentTcountAndTlm(ctx context.Context, msg *models.Mess
 }
 
 // countAndSetParentTcount recomputes tcount+tlm from the surviving rows and sets both.
-// Returns (nil, nil) when ThreadParentCreatedAt is unset; tlm nil when no replies survive.
-func (r *Repository) countAndSetParentTcount(ctx context.Context, msg *models.Message) (*int, error) {
+// Returns (nil, nil, nil) when ThreadParentCreatedAt is unset; tlm nil when no replies survive.
+func (r *Repository) countAndSetParentTcount(ctx context.Context, msg *models.Message) (*int, *time.Time, error) {
 	if msg.ThreadParentCreatedAt == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	n, tlm, err := r.countThreadReplies(ctx, msg.ThreadRoomID)
 	if err != nil {
-		return nil, fmt.Errorf("count thread replies: %w", err)
+		return nil, nil, fmt.Errorf("count thread replies: %w", err)
 	}
 	if err := r.setParentTcountAndTlm(ctx, msg, n, tlm); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &n, nil
+	return &n, tlm, nil
 }

@@ -112,7 +112,7 @@ export function useJwtRefresh({ getAuthUrl, ncRef, onSessionLost }) {
     // 2) Re-mint the NATS JWT. Transport failures are transient (retry with
     //    backoff); a 4xx rejection is terminal.
     try {
-      const resp = await fetch(`${getAuthUrl()}/auth`, {
+      const resp = await fetch(`${getAuthUrl()}/api/v1/auth`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(authBody),

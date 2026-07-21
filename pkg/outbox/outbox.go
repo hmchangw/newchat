@@ -1,7 +1,7 @@
 // Package outbox is the cross-site federation relay contract shared by the
-// producers (room-service, room-worker) and the consumer (outbox-worker): which
-// event types ride which OUTBOX consumer lane, and the one way to publish a
-// relay event onto the stream.
+// producers (room-service, room-worker, message-worker) and the consumer
+// (outbox-worker): which event types ride which OUTBOX consumer lane, and the
+// one way to publish a relay event onto the stream.
 package outbox
 
 import (
@@ -16,15 +16,20 @@ import (
 
 // ConcurrentEventTypes are the OUTBOX event types forwarded by outbox-worker's
 // shared concurrent consumer. They are order-insensitive at the destination
-// (inbox-worker applies them under high-water-mark guards), so parallel
-// forwarding is safe.
+// (inbox-worker applies them under high-water-mark / idempotent-upsert guards),
+// so parallel forwarding is safe.
 var ConcurrentEventTypes = []model.InboxEventType{
 	model.InboxRoleUpdated,
 	model.InboxSubscriptionRead,
 	model.InboxThreadRead,
+	model.InboxThreadReadAll,
 	model.InboxSubscriptionMuteToggled,
 	model.InboxSubscriptionFavoriteToggled,
 	model.InboxRoomRestricted,
+	// message-worker: thread-subscription federation. Order-insensitive —
+	// inbox-worker's UpsertThreadSubscription is $setOnInsert (immutable identity)
+	// + $max hasMention (monotonic), so out-of-order/duplicate applies converge.
+	model.InboxThreadSubscriptionUpserted,
 }
 
 // OrderedEventTypes are the OUTBOX event types forwarded by outbox-worker's

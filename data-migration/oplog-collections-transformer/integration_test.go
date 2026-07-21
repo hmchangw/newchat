@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
-
-	"github.com/Marz32onE/instrumentation-go/otel-nats/oteljetstream"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/model"
@@ -138,11 +138,11 @@ func TestInboxPublisher_RoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	nc, err := natsutil.Connect(testutil.NATS(t), "")
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 
-	js, err := oteljetstream.New(nc)
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	// Create the INBOX stream so publishes are captured.
@@ -233,10 +233,10 @@ func TestEndToEnd_UserInsert(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(testutil.NATS(t), "")
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := oteljetstream.New(nc)
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	tgtStore := NewMongoTargetStore(tgtDB)
@@ -294,10 +294,10 @@ func TestEndToEnd_RoomInsert_PublishesRoomSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(testutil.NATS(t), "")
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := oteljetstream.New(nc)
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	// Create the INBOX stream so the room_sync publish is captured.
@@ -396,10 +396,10 @@ func TestEndToEnd_ThreadSub_NakThenResolve(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(testutil.NATS(t), "")
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
-	js, err := oteljetstream.New(nc)
+	js, err := jetstream.New(nc.NatsConn())
 	require.NoError(t, err)
 
 	// Create the INBOX stream.
