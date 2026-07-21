@@ -56,6 +56,33 @@ func RegisterNoBody[Resp any](
 	r.addRoute(pattern, []HandlerFunc{handler})
 }
 
+// RegisterOptionalBody is like Register but treats a zero-length payload as the zero-value request instead of a bad_request (e.g. sso.refresh).
+func RegisterOptionalBody[Req, Resp any](
+	r *Router,
+	pattern string,
+	fn func(c *Context, req Req) (*Resp, error),
+) {
+	handler := HandlerFunc(func(c *Context) {
+		var req Req
+		if len(c.Msg.Data) > 0 {
+			if err := json.Unmarshal(c.Msg.Data, &req); err != nil {
+				replyErr(c, errcode.BadRequest("invalid request payload", errcode.WithCause(err)))
+				return
+			}
+		}
+
+		resp, err := fn(c, req)
+		if err != nil {
+			replyErr(c, err)
+			return
+		}
+
+		c.ReplyJSON(resp)
+	})
+
+	r.addRoute(pattern, []HandlerFunc{handler})
+}
+
 // RegisterVoid subscribes a handler that processes a request without replying.
 func RegisterVoid[Req any](
 	r *Router,

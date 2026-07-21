@@ -317,6 +317,23 @@ func TestCapturePayload_GatedByConfigAndRequest(t *testing.T) {
 		CapturePayload(context.Background(), "request", "chat.x", body)
 		assert.Empty(t, capturedPayloads(rec))
 	})
+
+	t.Run("flag ON + requested but sso subject → silent (credential guard)", func(t *testing.T) {
+		rec := install()
+		Configure(Config{Rate: 1e6, Burst: 1 << 20, Payloads: true})
+		t.Cleanup(restorePayloads)
+		CapturePayload(requested, "request", "chat.user.alice.request.user.s1.sso.set", body)
+		CapturePayload(requested, "reply", "chat.user.alice.request.user.s1.sso.refresh", body)
+		assert.Empty(t, capturedPayloads(rec), "credential-bearing sso endpoints are never captured")
+	})
+
+	t.Run("flag ON + non-sso subject containing 'sso' token → captured (guard is suffix-anchored)", func(t *testing.T) {
+		rec := install()
+		Configure(Config{Rate: 1e6, Burst: 1 << 20, Payloads: true})
+		t.Cleanup(restorePayloads)
+		CapturePayload(requested, "request", "chat.user.alice.request.user.sso.status.getByName", body)
+		assert.Equal(t, []string{string(body)}, capturedPayloads(rec), "a siteID named 'sso' must not suppress capture")
+	})
 }
 
 func TestShouldCapture(t *testing.T) {
