@@ -23,7 +23,7 @@ func (h *Handler) HandleMessage(ctx context.Context, subj string, data []byte) e
 	case strings.HasSuffix(subj, ".employees.upsert"):
 		var employees []model.EmployeeWithChange
 		if err := json.Unmarshal(data, &employees); err != nil {
-			return errcode.Permanent(errcode.BadRequest("malformed employees.upsert payload"))
+			return errcode.Permanent(errcode.BadRequest(fmt.Sprintf("malformed employees.upsert payload: %s", err.Error())))
 		}
 		if len(employees) == 0 {
 			return nil
@@ -34,7 +34,7 @@ func (h *Handler) HandleMessage(ctx context.Context, subj string, data []byte) e
 	case strings.HasSuffix(subj, ".users.upsert"):
 		var users []model.UserWithChange
 		if err := json.Unmarshal(data, &users); err != nil {
-			return errcode.Permanent(errcode.BadRequest("malformed users.upsert payload"))
+			return errcode.Permanent(errcode.BadRequest(fmt.Sprintf("malformed users.upsert payload: %s", err.Error())))
 		}
 		if len(users) == 0 {
 			return nil
@@ -45,7 +45,7 @@ func (h *Handler) HandleMessage(ctx context.Context, subj string, data []byte) e
 	case strings.HasSuffix(subj, ".employees.quit"):
 		var batch model.HRSyncEmployeeQuitBatch
 		if err := json.Unmarshal(data, &batch); err != nil {
-			return errcode.Permanent(errcode.BadRequest("malformed employees.quit payload"))
+			return errcode.Permanent(errcode.BadRequest(fmt.Sprintf("malformed employees.quit payload: %s", err.Error())))
 		}
 		if len(batch.Accounts) == 0 {
 			return nil

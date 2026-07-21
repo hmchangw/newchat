@@ -80,7 +80,7 @@ The converter is injected the same way via `newPublisher(..., yourConverter)`.
 with `FIXTURES_PATH=tools/graphmock/fixtures.sample.json`, then point the sync
 at it:
 
-```
+```bash
 GRAPH_BASE_URL=http://localhost:8080/v1.0
 GRAPH_TOKEN_URL=http://localhost:8080/t/oauth2/v2.0/token
 SYNC_GROUPS=[{"groupId":"g-eng","siteId":"site-a"},{"groupId":"g-sales","siteId":"site-b"}]

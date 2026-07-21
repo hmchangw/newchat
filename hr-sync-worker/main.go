@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -125,7 +126,7 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 			data, err := decodePayload(msg)
 			if err != nil {
 				// a bad frame won't decode on redelivery → poison
-				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("decode payload")))
+				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest(fmt.Sprintf("decode payload: %s", err.Error()))))
 				return
 			}
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))

@@ -4,15 +4,19 @@
 
 ## Overview
 
-A standalone producer that walks configured Teams/Graph **groups**, diffs their
-user members against the persisted HR state, and publishes the HR sync feed to
-JetStream on three subjects. It does **not** persist employees/users — a
-consumer persists the batches. A **reference consumer ships in-repo**
-(`hr-sync-worker`, see its README): the subject contract is now defined here,
-and an external persister can replace it 1:1. It **coexists**
-with the legacy HR syncer (different systems feeding the same `hr_employee`
-store, distinguished by a `source` field; this producer stamps `source:"teams"`
-and never quits another source's rows).
+A standalone service that walks configured Teams/Graph **groups**, diffs their
+user members against the persisted HR state, and persists via one of two modes
+(`HR_SYNC_MODE`):
+
+- **`stream`** (default) — publishes the HR sync feed to JetStream on three
+  subjects; a consumer persists the batches. A **reference consumer ships
+  in-repo** (`hr-sync-worker`, see its README) and an external persister can
+  replace it 1:1.
+- **`direct`** — a one-shot migration/backfill: writes `hr_employee` + `users`
+  straight to the target Mongo via the shared `pkg/hrstore`, skipping JetStream.
+
+`hr_employee` is the unified HR directory — the legacy `hr` collection retires
+and `teams-user-sync` reads `hr_employee`, so a quit deletes by account.
 
 ## Group = Org (section level)
 
@@ -47,7 +51,7 @@ arrays** — no wrapper, no timestamp; quit keeps its wrapper. Empty arrays are
 skipped. search-sync-worker consumes employees.upsert 1:1 (decode the bare
 array → copy each element's inline org fields into `SpotlightOrgIndex`).
 
-## Wire types (`pkg/model/hr.go`)
+## Wire types (`pkg/model/employee.go`)
 
 - `Org` — the nine flat section/dept/division fields (SpotlightOrgIndex shape).
 - `Employee` — inline `Org` + `employeeId/account/engName/chineseName/siteId/source`.
@@ -62,7 +66,7 @@ displayName,givenName,surname,employeeId`, non-user objects skipped):
 `Account` = lowercased UPN local part (same rule as teams-user-sync),
 `EngName` = `TrimSpace(givenName + " " + surname)`, `ChineseName` =
 `displayName`, `EmployeeID` = `employeeId`, `SiteID` = the group's configured
-site, `Source` = `"teams"`, `Org` = the group profile at section level
+site, `Org` = the group profile at section level
 (`SectID`/`SectName`/`SectDescription`). An account appearing in multiple
 groups keeps its first mapping (config order wins).
 
@@ -77,8 +81,7 @@ fields only — `Account/SiteID/EngName/ChineseName/EmployeeID`; every other
 `emitter` (one method consuming the run's diff — `streamEmitter` publishes to
 JetStream via the existing `publisher`; `directEmitter` writes through the
 shared `hrstore.Store` instead, see § Output modes). The change-label
-constants (`ChangeCreated`/`ChangeUpdated`) and `SourceTeams` live in
-`transform` too.
+constants (`ChangeCreated`/`ChangeUpdated`) live in `transform` too.
 
 ## Output modes (`HR_SYNC_MODE`)
 

@@ -87,7 +87,10 @@ func run() error {
 	// naming or derivation conventions (see teams-hr-sync/README.md).
 	mapper := transform.DefaultMapper{}
 
-	logger := slog.With("requestId", idgen.GenerateRequestID())
+	requestID := idgen.GenerateRequestID()
+	// Stamp ctx so outbound messages (natsutil.NewMsg) carry the same X-Request-ID as the logs.
+	ctx = natsutil.WithRequestID(ctx, requestID)
+	logger := slog.With("requestId", requestID)
 	logger.Info("teams hr sync started", "mode", cfg.HRSyncMode)
 	start := time.Now()
 

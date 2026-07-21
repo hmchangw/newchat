@@ -4,13 +4,13 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
 
 ## Phase 1 — `pkg/model` types + `pkg/subject` builders
 
-- `pkg/model/hr.go`: `Org` (nine section/dept/division fields, tag-identical to
+- `pkg/model/employee.go`: `Org` (nine section/dept/division fields, tag-identical to
   `SpotlightOrgIndex`, embedded inline in `Employee`), `Employee` (source of
-  truth for `User`; carries `EngName`/`ChineseName` + `Source`), `ChangeType`
+  truth for `User`; carries `EngName`/`ChineseName`), `ChangeType`
   (`new_hire`/`update`), `EmployeeWithChange`, `UserWithChange`,
   `HRSyncEmployeeQuitBatch` (the only wrapper).
 - `pkg/subject`: `OrgSyncUsersUpsert(central)`, `EmployeesQuit(siteID)`.
-- `hr_test.go`: flat-org shape + bare-array round-trips.
+- `pkg/model/employee_test.go`: flat-org shape + bare-array round-trips.
 
 ## Phase 2 — Graph group surface + service
 
@@ -28,13 +28,12 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
 
 ## Phase 3 — query-first diff + quit detection
 
-- Read-only `hr_employee` reader filtered `{source:"teams"}` with an explicit
-  Employee-field projection.
+- Read-only `hr_employee` reader with an explicit Employee-field projection.
 - Differ keyed by account: created/updated/omitted; store-present-but-absent →
-  quit grouped per stored row's `siteId`; other-source rows never quit.
-- Unit matrix (created/updated/unchanged/quit/empty-store-first-run/
-  legacy-source-never-quit) + integration (seeded read + two full one-shot
-  runs vs httptest Graph + real Mongo/NATS).
+  quit grouped per stored row's `siteId`.
+- Unit matrix (created/updated/unchanged/quit/empty-store-first-run) +
+  integration (seeded read + two full one-shot runs vs httptest Graph + real
+  Mongo/NATS).
 
 ## Phase 4 — dev e2e mock + reference consumer
 
@@ -43,7 +42,7 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
   without a tenant.
 - `hr-sync-worker`: reference persister for the three subjects (in-repo
   contract; an external consumer can replace it). Identity-only `users`
-  writes; source-scoped quits; zstd-aware decode; idempotent.
+  writes; delete-by-account quits; zstd-aware decode; idempotent.
 
 ## Phase 5 — unify org shape + search-sync consume
 

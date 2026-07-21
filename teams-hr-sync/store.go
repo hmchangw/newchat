@@ -12,7 +12,7 @@ import (
 // never writes hr_employee — a downstream consumer persists the published
 // batches.
 type Store interface {
-	// ListTeamsEmployees returns every hr_employee row this producer owns
-	// (source "teams").
+	// ListTeamsEmployees returns the persisted hr_employee rows the diff
+	// compares each run against.
 	ListTeamsEmployees(ctx context.Context) ([]model.Employee, error)
 }

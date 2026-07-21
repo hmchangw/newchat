@@ -20,7 +20,7 @@ type Store interface {
 	// touch roles/services/password/deactivated/status fields — users is the
 	// live auth store.
 	UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error
-	// QuitTeamsEmployees deletes hr_employee rows for the accounts, scoped to
-	// source "teams" — never another feed's rows. users stays untouched.
+	// QuitTeamsEmployees deletes hr_employee rows for the given accounts.
+	// users stays untouched (the user lifecycle is not the HR feed's to end).
 	QuitTeamsEmployees(ctx context.Context, accounts []string) error
 }
