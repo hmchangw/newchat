@@ -145,6 +145,49 @@ func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 	}
 }
 
+// TestHandler_ProcessRemoveMember_BotTarget_RotatesButNoSubUpdate: removing a bot
+// now rotates the room key like any member (bots hold keys) — GetSubscriptionAccounts
+// is called for the survivor fan-out — but still publishes no per-user
+// subscription.update to the bot's subject (bots have no sidebar client).
+func TestHandler_ProcessRemoveMember_BotTarget_RotatesButNoSubUpdate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	const (
+		roomID    = "room-1"
+		botAcct   = "weather.bot"
+		requester = "alice"
+		siteID    = "site-a"
+	)
+
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, botAcct).Return(&UserWithMembership{
+		User: model.User{ID: "u_bot", Account: botAcct, SiteID: siteID, EngName: "Weather"},
+	}, nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, botAcct).Return(int64(1), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// Rotation now runs for a bot removal too — the survivor fan-out reads accounts.
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u1", Account: requester, SiteID: siteID, EngName: "Alice"}, nil)
+
+	var published []publishedMsg
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: requester, Account: botAcct, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	subjSet := map[string]bool{}
+	for _, p := range published {
+		subjSet[p.subj] = true
+	}
+	assert.False(t, subjSet[subject.SubscriptionUpdate(botAcct)], "bot must NOT get a subscription.update on removal")
+	assert.True(t, subjSet[subject.MemberEvent(roomID)], "member event still fires for the removal")
+}
+
 func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -591,6 +634,57 @@ func TestHandler_ProcessAddMembers_PublishesSubscriptionUpdateBeforeRoomKey(t *t
 			"account %s: subscription.update (idx %d) must precede room.key (idx %d)",
 			account, subIdx, keyIdx)
 	}
+}
+
+// TestHandler_ProcessAddMembers_BotGetsKeyNotSubUpdate locks in the delivery
+// model: a bot member DOES receive room.key — on its encoded per-user subject
+// (subject.RoomKeyUpdate encodes weather.bot → chat.user.weather_bot.event.room.key,
+// the token its NATS JWT is scoped to) — but gets NO subscription.update (no
+// sidebar client to consume it). A human added in the same batch gets both.
+func TestHandler_ProcessAddMembers_BotGetsKeyNotSubUpdate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		return pub.Publish(subj, data)
+	}
+	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub))
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob", "weather.bot"}, "r1").
+		Return([]AddMemberCandidate{
+			{Account: "bob", HasSubscription: false, HasIndividualRoomMember: false},
+			{Account: "weather.bot", HasSubscription: false, HasIndividualRoomMember: false},
+		}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "weather.bot"}).Return([]model.User{
+		{ID: "u2", Account: "bob", SiteID: "site-a", EngName: "Bob"},
+		{ID: "u3", Account: "weather.bot", SiteID: "site-a", EngName: "Weather"},
+	}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
+		ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice",
+	}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+
+	req := model.AddMembersRequest{
+		RoomID: "r1", RequesterAccount: "alice", Users: []string{"bob", "weather.bot"},
+		History:   model.HistoryConfig{Mode: model.HistoryModeNone},
+		Timestamp: 1,
+	}
+	reqData, _ := json.Marshal(req)
+	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), reqData))
+
+	published := map[string]bool{}
+	for _, s := range pub.subjects {
+		published[s] = true
+	}
+	assert.True(t, published[subject.SubscriptionUpdate("bob")], "human must get subscription.update")
+	assert.True(t, published[subject.RoomKeyUpdate("bob")], "human must get room.key")
+	// RoomKeyUpdate encodes the account, so this is chat.user.weather_bot.event.room.key.
+	assert.True(t, published[subject.RoomKeyUpdate("weather.bot")], "bot gets room.key on its encoded subject")
+	assert.False(t, published[subject.SubscriptionUpdate("weather.bot")], "bot has no sidebar → no subscription.update")
 }
 
 func TestHandler_ProcessAddMembers_HistoryAll(t *testing.T) {

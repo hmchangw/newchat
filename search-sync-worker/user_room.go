@@ -159,6 +159,10 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 		if account == "" {
 			return nil, fmt.Errorf("build user-room action: empty account at index %d", i)
 		}
+		// Bots are channel members but not searchable principals — skip them.
+		if model.IsBot(account) || model.IsPlatformAdminAccount(account) {
+			continue
+		}
 
 		switch evt.Type {
 		case model.InboxMemberAdded:

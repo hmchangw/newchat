@@ -570,22 +570,19 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 	type candidate struct{ ID, Account string }
 	var candidates []candidate
 	if len(orgIDs) == 0 {
-		// Direct accounts only: resolve via the user reader (cache-friendly) and
-		// filter bots in Go — avoids the users query and the $not regex entirely.
+		// Direct accounts only, cache-friendly. Bots are NOT filtered here —
+		// room-service already validated the explicitly-listed ones.
 		users, err := s.userReader.FindUsersByAccounts(ctx, directAccounts)
 		if err != nil {
 			return nil, fmt.Errorf("find add-member candidate users: %w", err)
 		}
 		for i := range users {
-			if model.IsBot(users[i].Account) || model.IsPlatformAdminAccount(users[i].Account) {
-				continue
-			}
 			candidates = append(candidates, candidate{ID: users[i].ID, Account: users[i].Account})
 		}
 	} else {
-		// Org expansion needs the sectId/deptId query on the users collection,
-		// which the by-account reader cannot serve.
-		filter := pipelines.MatchCandidatesFilter(orgIDs, directAccounts, "")
+		// Org expansion needs the sectId/deptId query. WithDirectBots admits
+		// listed bots while keeping the org arms bot-free.
+		filter := pipelines.MatchCandidatesFilterWithDirectBots(orgIDs, directAccounts, "")
 		cursor, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 1}))
 		if err != nil {
 			return nil, fmt.Errorf("find add-member candidates: %w", err)

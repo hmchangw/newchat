@@ -150,6 +150,29 @@ func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
 	assert.Equal(t, "site-a", doc["siteId"])
 }
 
+func TestSpotlightCollection_BuildAction_SkipsBots(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"alice", "weather.bot", "p_hook"}
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 1, "bot and pseudo accounts must not be indexed")
+	assert.Equal(t, "alice_r-eng", actions[0].DocID)
+}
+
+func TestSpotlightCollection_BuildAction_AllBots_NoActions(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"weather.bot"}
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err, "an all-bot event is a clean no-op, not an error")
+	assert.Empty(t, actions)
+}
+
 func TestSpotlightCollection_BuildAction_MemberRemoved(t *testing.T) {
 	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()

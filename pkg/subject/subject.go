@@ -6,6 +6,16 @@ import (
 	"unicode"
 )
 
+// EncodeAccount maps an account to its NATS subject-token form by replacing the
+// dot separators a dotted account (e.g. a ".bot" account) would otherwise spill
+// across subject tokens. This is the SAME transform auth-service applies when
+// minting a principal's NATS JWT, so a per-user subject built from the encoded
+// form matches the {account} token the principal's JWT is scoped to. A no-op for
+// accounts without dots (all plain human accounts).
+func EncodeAccount(account string) string {
+	return strings.ReplaceAll(account, ".", "_")
+}
+
 // IsValidAccountToken reports whether s can serve as the {account} token of a
 // NATS subject: non-empty, no '.'/'*'/'>' runes, no whitespace or control runes.
 func IsValidAccountToken(s string) bool {
@@ -282,7 +292,9 @@ func UserRoomEvent(account string) string {
 }
 
 func RoomKeyUpdate(account string) string {
-	return fmt.Sprintf("chat.user.%s.event.room.key", account)
+	// Encode the account so the subject matches the {account} token the
+	// recipient's NATS JWT is scoped to (a dotted ".bot" account spans tokens).
+	return fmt.Sprintf("chat.user.%s.event.room.key", EncodeAccount(account))
 }
 
 // --- Room CRUD request builders ---

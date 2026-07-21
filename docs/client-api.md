@@ -1132,7 +1132,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional; the server derives the room ID from the subject and ignores any non-matching value. |
-| `users` | string[] | no | Internal user IDs (or accounts) to add directly. |
+| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include bot accounts (`.bot` suffix / `p_` prefix): each listed bot must resolve to an app with an **enabled assistant** and live on the **local site**, else the request is rejected (see Error response). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and receive the `room.key` event on their encoded per-user subject (see [§5](#5-room-encryption)) — but no `subscription.update`. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
@@ -1162,7 +1162,7 @@ The fields `requesterId`, `requesterAccount`, and `timestamp` on the Go `AddMemb
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, or a `users` entry is a bot — rejected with `"bots cannot be added to a channel"`). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added.
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled, and with `"cross-site bots cannot be added to a channel"` (`bot_cross_site`) when the bot's home site differs from the room's site. Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -1186,7 +1186,7 @@ Error example (e.g. requester not in room):
 }
 ```
 
-**2. `chat.user.{newMember}.event.subscription.update`** — one event per **newly subscribed** member (not the requester, not existing members, not org→individual upgrades).
+**2. `chat.user.{newMember}.event.subscription.update`** — one event per **newly subscribed** human member (not the requester, not existing members, not org→individual upgrades). Bot members receive none.
 
 ###### `subscription.update` event
 
@@ -1220,7 +1220,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 }
 ```
 
-**3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed account (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
+**3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed member (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
@@ -1285,7 +1285,7 @@ Exactly one of `account` or `orgId` must be set. The fields `requester`, `roomTy
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually).
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually). The last-member guard counts **human** members only: removing the last human is rejected even when bot members remain, while removing a bot never trips the guard.
 
 ```json
 { "code": "bad_request", "error": "exactly one of account or orgId must be set" }
@@ -1295,7 +1295,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 **1. `chat.user.{requesterAccount}.response.{requestID}`** — an [`AsyncJobResult`](#asyncjobresult) to the requester when the removal finishes (requires `X-Request-ID`). `operation` is `"room.member.remove"` for single-account removal, `"room.member.remove_org"` for org removal.
 
-**2. `chat.user.{removedAccount}.event.subscription.update`** — one per removed account, `action: "removed"`. The payload is a dedicated `SubscriptionRemovedEvent` (not the full `SubscriptionUpdateEvent`): its `subscription` carries **only** `roomId`, `roomType`, and `u` so no zero-valued `Subscription` fields are sent. On the **org-removal** path `userId` is omitted (only `subscription.u.account` is set).
+**2. `chat.user.{removedAccount}.event.subscription.update`** — one per removed human account, `action: "removed"` (bot members receive none). The payload is a dedicated `SubscriptionRemovedEvent` (not the full `SubscriptionUpdateEvent`): its `subscription` carries **only** `roomId`, `roomType`, and `u` so no zero-valued `Subscription` fields are sent. On the **org-removal** path `userId` is omitted (only `subscription.u.account` is set).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1394,6 +1394,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 - Promote attempt when the target is already an owner.
 - Demote attempt when the target is not an owner.
 - Last-owner guard: an owner cannot demote themselves if they are the only owner.
+- Promote attempt on a bot account — rejected with `"bots cannot be room owners"` (demoting a bot stays allowed).
 - Promote attempt on an org-only member (individual subscription required).
 
 ```json
@@ -5634,8 +5635,9 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 #### When clients receive `RoomKeyEvent`s
 
 - **Room creation (channels only):** sent to every initial member. DM/botDM rooms carry no key, so creation fires no `RoomKeyEvent`.
-- **Add member (channels only):** sent to each newly-added account; existing members do not receive a duplicate event.
+- **Add member (channels only):** sent to each newly-added member; existing members do not receive a duplicate event.
 - **Remove member (channels only):** the server rotates the room key. Surviving members receive a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving events for the room.
+- **Bot members** are key-holders: they receive the `RoomKeyEvent` like any member, addressed to the bot's **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to). Bots do **not** receive `subscription.update` (no sidebar client consumes it).
 
 Removed members keep prior keys for decrypting historical messages but cannot decrypt anything published after the rotation.
 
@@ -5755,12 +5757,14 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `not_room_member` | forbidden | room-service / room-worker (actor not a member) |
 | `not_room_owner` | forbidden | room-service role/admin paths |
 | `last_owner_cannot_leave` | conflict | room-service leave |
-| `bot_in_channel` | bad_request | room-service member-add (bot in a channel room) |
-| `bot_not_available` | not_found | room-service member-add (unknown bot) |
+| `bot_in_channel` | bad_request | room-service create-channel (bot listed in a channel create request) |
+| `bot_not_available` | not_found | room-service member-add (bot with no app record or disabled assistant) and create-botDM (assistant disabled) |
+| `bot_cross_site` | bad_request | room-service member-add (bot's home site differs from the room's site) |
+| `bot_cannot_be_owner` | bad_request | room-service role-update (promote a bot to owner) |
 | `user_not_found` | not_found | room-service / room-worker (account does not resolve to a user) |
 | `invalid_org` | bad_request | room-service create/add (orgId does not resolve to any users) |
 | `self_dm` | bad_request | room-service create (DM to yourself) |
-| `last_member_cannot_remove` | conflict | room-service remove-member (would empty the room) |
+| `last_member_cannot_remove` | conflict | room-service remove-member (would remove the last human member; bots don't count) |
 | `target_not_member` | bad_request | room-service role-update (target is not a room member) |
 | `already_owner` | conflict | room-service role-update (promote a current owner) |
 | `cannot_demote_last_owner` | conflict | room-service role-update (demote the last owner) |

@@ -62,6 +62,8 @@ func TestSubjectBuilders(t *testing.T) {
 		{"UserRoomEvent", subject.UserRoomEvent("alice"), "chat.user.alice.event.room"},
 		{"RoomKeyUpdate", subject.RoomKeyUpdate("alice"),
 			"chat.user.alice.event.room.key"},
+		{"RoomKeyUpdate_dotted_bot_encoded", subject.RoomKeyUpdate("weather.bot"),
+			"chat.user.weather_bot.event.room.key"},
 		{"MemberRemove", subject.MemberRemove("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.member.remove"},
 		{"MemberAdd", subject.MemberAdd("alice", "r1", "site-a"),
@@ -198,6 +200,15 @@ func TestSubjectBuilders(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEncodeAccount(t *testing.T) {
+	// Dotless accounts are untouched; dotted (".bot") accounts collapse to a
+	// single subject token, matching how auth-service mints the NATS JWT.
+	assert.Equal(t, "alice", subject.EncodeAccount("alice"))
+	assert.Equal(t, "weather_bot", subject.EncodeAccount("weather.bot"))
+	assert.Equal(t, "a_b_c_bot", subject.EncodeAccount("a.b.c.bot"))
+	assert.Equal(t, "p_hook", subject.EncodeAccount("p_hook"))
 }
 
 func TestParseUserRoomSubject(t *testing.T) {
