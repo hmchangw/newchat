@@ -95,19 +95,21 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 		hr, ok := hrUsers[c.Account]
 		if !ok {
 			stats.HRUnmatched++
-			s.logger.Info("hr id not found", "account", c.Account, "userId", c.ID)
+			// Log the Graph object id (a GUID), not the UPN-derived account, to
+			// keep human-readable identifiers out of logs at directory scale.
+			s.logger.Info("hr id not found", "userId", c.ID)
 			continue
 		}
 		matched++
 		c.EngName = hr.EngName
 		c.Mail = hr.Mail
 		if hr.LocationURL == "" {
-			s.logger.Warn("hr locationURL is empty", "account", c.Account)
+			s.logger.Warn("hr locationURL is empty", "userId", c.ID)
 		} else {
 			c.SiteID = extractSiteIDFromLocationURL(hr.LocationURL)
 			if c.SiteID == "" {
 				s.logger.Warn("extract siteID from locationURL returned empty",
-					"account", c.Account, "locationURL", hr.LocationURL)
+					"userId", c.ID, "locationURL", hr.LocationURL)
 			}
 		}
 	}
