@@ -16,6 +16,8 @@ type TeamsUser struct {
 	// Account is the lowercased UPN local part (text before '@') — the value
 	// matched against hr.accountName.
 	Account string `json:"account" bson:"account"`
+	// DisplayName is the user's display name as returned by Graph.
+	DisplayName string `json:"displayName" bson:"displayName"`
 	// SiteID is the HR system's site id for the account.
 	SiteID string `json:"siteId" bson:"siteId"`
 	// EngName is the HR system's English name for the account; empty when the

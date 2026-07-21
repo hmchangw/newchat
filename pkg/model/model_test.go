@@ -4450,13 +4450,14 @@ func TestOutboxEvent_RoundTrip(t *testing.T) {
 func TestTeamsUserJSON(t *testing.T) {
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	src := model.TeamsUser{
-		ID:      "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
-		UPN:     "Alice@corp.example",
-		Account: "alice",
-		SiteID:  "site-a",
-		EngName: "Alice Smith",
-		Mail:    "alice@corp.example",
-		From:    &from,
+		ID:          "8f4c9e2a-0b1d-4e5f-9a6b-7c8d9e0f1a2b",
+		UPN:         "Alice@corp.example",
+		Account:     "alice",
+		DisplayName: "Alice Smith",
+		SiteID:      "site-a",
+		EngName:     "Alice Smith",
+		Mail:        "alice@corp.example",
+		From:        &from,
 	}
 	var dst model.TeamsUser
 	roundTrip(t, &src, &dst)
@@ -4470,6 +4471,7 @@ func TestTeamsUserJSON_NoFrom(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &raw))
 	_, has := raw["from"]
 	assert.False(t, has, "nil From must be omitted from JSON")
+	assert.Equal(t, "", raw["displayName"], "empty DisplayName must serialize as empty string, not be omitted")
 	assert.Equal(t, "", raw["engName"], "empty EngName must serialize as empty string, not be omitted")
 	assert.Equal(t, "", raw["mail"], "empty Mail must serialize as empty string, not be omitted")
 }
@@ -4494,7 +4496,7 @@ func TestTeamsChatJSON(t *testing.T) {
 
 func TestTeamsUserBSON(t *testing.T) {
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
-	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", EngName: "Alice Smith", Mail: "alice@corp.example", From: &from}
+	u := model.TeamsUser{ID: "aad-user-1", UPN: "alice@corp.example", SiteID: "site-a", Account: "alice", DisplayName: "Alice Smith", EngName: "Alice Smith", Mail: "alice@corp.example", From: &from}
 	data, err := bson.Marshal(&u)
 	require.NoError(t, err)
 
@@ -4509,6 +4511,7 @@ func TestTeamsUserBSON(t *testing.T) {
 	assert.Equal(t, "aad-user-1", rawDoc["_id"])
 	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, "alice", rawDoc["account"])
+	assert.Equal(t, "Alice Smith", rawDoc["displayName"])
 	assert.Equal(t, "Alice Smith", rawDoc["engName"])
 	assert.Equal(t, "alice@corp.example", rawDoc["mail"])
 
@@ -4518,6 +4521,7 @@ func TestTeamsUserBSON(t *testing.T) {
 	assert.Equal(t, u.ID, dst.ID)
 	assert.Equal(t, u.SiteID, dst.SiteID)
 	assert.Equal(t, u.Account, dst.Account)
+	assert.Equal(t, u.DisplayName, dst.DisplayName)
 	assert.Equal(t, u.EngName, dst.EngName)
 	assert.Equal(t, u.Mail, dst.Mail)
 	require.NotNil(t, dst.From)
@@ -4537,6 +4541,7 @@ func TestTeamsUserBSON_NoFrom(t *testing.T) {
 	assert.Equal(t, "aad-user-2", rawDoc["_id"])
 	assert.Equal(t, "site-b", rawDoc["siteId"])
 	assert.Equal(t, "bob", rawDoc["account"])
+	assert.Equal(t, "", rawDoc["displayName"], "empty DisplayName must be present as empty string (no omitempty)")
 	assert.Equal(t, "", rawDoc["engName"], "empty EngName must be present as empty string (no omitempty)")
 	assert.Equal(t, "", rawDoc["mail"], "empty Mail must be present as empty string (no omitempty)")
 }

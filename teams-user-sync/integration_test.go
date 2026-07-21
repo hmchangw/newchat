@@ -47,8 +47,8 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"value": []map[string]string{
-				{"id": "id-alice", "userPrincipalName": "Alice@corp.example"},
-				{"id": "id-carol", "userPrincipalName": "carol@corp.example"},
+				{"id": "id-alice", "userPrincipalName": "Alice@corp.example", "displayName": "Alice Smith"},
+				{"id": "id-carol", "userPrincipalName": "carol@corp.example", "displayName": "Carol Jones"},
 			},
 			"@odata.nextLink": graphSrv.URL + "/users?page=2",
 		})
@@ -71,8 +71,8 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 	var doc model.TeamsUser
 	require.NoError(t, db.Collection("teams_user").FindOne(ctx, bson.M{"_id": "id-alice"}).Decode(&doc))
 	assert.Equal(t, model.TeamsUser{
-		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", SiteID: "https://site-a.mysite.com",
-		EngName: "Alice Smith", Mail: "alice@corp.example",
+		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", DisplayName: "Alice Smith",
+		SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example",
 	}, doc)
 
 	// the HR-unmatched guest is stored with empty HR-derived fields

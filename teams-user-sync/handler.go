@@ -75,7 +75,7 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 			stats.InvalidUPN++
 			continue
 		}
-		candidates = append(candidates, model.TeamsUser{ID: u.ID, UPN: u.UserPrincipalName, Account: account})
+		candidates = append(candidates, model.TeamsUser{ID: u.ID, UPN: u.UserPrincipalName, Account: account, DisplayName: u.DisplayName})
 	}
 	if len(candidates) == 0 {
 		return nil

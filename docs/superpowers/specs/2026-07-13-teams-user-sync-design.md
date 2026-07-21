@@ -18,13 +18,14 @@ batch-writes the merged records.
 The resulting `teams_user` document is:
 
 ```json
-{ "_id": "<teams user object id>", "upn": "<userPrincipalName>", "account": "<upn local part>", "siteId": "<derived from hr locationURL>", "engName": "<hr engName>", "mail": "<hr mail>" }
+{ "_id": "<teams user object id>", "upn": "<userPrincipalName>", "account": "<upn local part>", "displayName": "<graph displayName>", "siteId": "<derived from hr locationURL>", "engName": "<hr engName>", "mail": "<hr mail>" }
 ```
 
 - `_id` — Teams (Azure AD) user object id, from Graph.
 - `upn` — the user's `userPrincipalName`, from Graph.
 - `account` — the lowercased UPN local part (text before `@`); the same value
   used for the `hr.accountName` lookup.
+- `displayName` — the user's display name, from Graph.
 - `siteId` — derived from the HR row's `locationURL` (see §3.3 step 4); empty
   when the account has no HR row.
 - `engName` — the HR system's English name; empty when the account has no HR row.
@@ -96,7 +97,7 @@ token cache) with paginated user listing:
 // UserLister walks the tenant's user directory page by page.
 type UserLister interface {
     // ListUsers calls fn once per page of up to pageSize users
-    // (GET /users?$select=id,userPrincipalName&$top={pageSize}), following
+    // (GET /users?$select=id,userPrincipalName,displayName&$top={pageSize}), following
     // @odata.nextLink until exhausted. A non-nil error from fn aborts the walk.
     ListUsers(ctx context.Context, pageSize int, fn func([]GraphUser) error) error
 }
@@ -104,7 +105,7 @@ type UserLister interface {
 
 - Implemented on the existing `graphClient`; constructor
   `NewUserListerClient(cfg, opts...)` mirroring `NewDirectoryClient`.
-- Reuses `GraphUser{ID, UserPrincipalName}`.
+- Reuses `GraphUser{ID, UserPrincipalName, DisplayName}`.
 - Non-200 responses surface as wrapped errors with status + sanitized Graph
   error code only (same convention as `CreateOnlineMeeting`); never the raw
   body.
@@ -126,7 +127,7 @@ For each Graph page (≤ `GRAPH_PAGE_SIZE` users):
    → `account → {locationURL, engName, mail}` map. Accounts with no match are
    counted (and logged) but no longer skipped — see step 4.
 4. **Merge + write:** for **every** candidate user, build
-   `TeamsUser{ID, UPN, Account, SiteID, EngName, Mail}` and bulk-**upsert**
+   `TeamsUser{ID, UPN, Account, DisplayName, SiteID, EngName, Mail}` and bulk-**upsert**
    via the **write** client (`mongoutil.UpsertModel` batch keyed on `_id`).
    For an account with an HR row, `EngName`/`Mail` come straight from the row
    and `SiteID` is derived from the row's `locationURL` via
@@ -151,12 +152,13 @@ Shared — `pkg/model/teamsuser.go`, so other services can consume the
 // AD) user joined with the HR system's site assignment (derived from the HR
 // locationURL), English name, and mail by teams-user-sync.
 type TeamsUser struct {
-    ID      string `json:"id" bson:"_id"`
-    UPN     string `json:"upn" bson:"upn"`
-    Account string `json:"account" bson:"account"`
-    SiteID  string `json:"siteId" bson:"siteId"`
-    EngName string `json:"engName" bson:"engName"`
-    Mail    string `json:"mail" bson:"mail"`
+    ID          string `json:"id" bson:"_id"`
+    UPN         string `json:"upn" bson:"upn"`
+    Account     string `json:"account" bson:"account"`
+    DisplayName string `json:"displayName" bson:"displayName"`
+    SiteID      string `json:"siteId" bson:"siteId"`
+    EngName     string `json:"engName" bson:"engName"`
+    Mail        string `json:"mail" bson:"mail"`
 }
 ```
 

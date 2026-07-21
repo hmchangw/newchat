@@ -40,11 +40,11 @@ func TestSyncer_UpdateUsers_HappyPathTwoPages(t *testing.T) {
 	store := NewMockStore(ctrl)
 	lister := &fakeLister{pages: [][]msgraph.GraphUser{
 		{
-			{ID: "u1", UserPrincipalName: "Alice@corp.example"},
-			{ID: "u2", UserPrincipalName: "bob@corp.example"},
+			{ID: "u1", UserPrincipalName: "Alice@corp.example", DisplayName: "Alice Smith"},
+			{ID: "u2", UserPrincipalName: "bob@corp.example", DisplayName: "Bob Wu"},
 		},
 		{
-			{ID: "u3", UserPrincipalName: "carol@corp.example"},
+			{ID: "u3", UserPrincipalName: "carol@corp.example", DisplayName: "Carol Jones"},
 		},
 	}}
 
@@ -54,7 +54,7 @@ func TestSyncer_UpdateUsers_HappyPathTwoPages(t *testing.T) {
 	store.EXPECT().HRUsers(gomock.Any(), []string{"alice"}).
 		Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil)
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", DisplayName: "Alice Smith", SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
 	}).Return(nil)
 	// page 2: u3 new
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u3"}).
@@ -62,7 +62,7 @@ func TestSyncer_UpdateUsers_HappyPathTwoPages(t *testing.T) {
 	store.EXPECT().HRUsers(gomock.Any(), []string{"carol"}).
 		Return(map[string]hrUser{"carol": {LocationURL: "https://site-b.mysite.com", EngName: "Carol Jones", Mail: "carol@corp.example"}}, nil)
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u3", UPN: "carol@corp.example", Account: "carol", SiteID: "https://site-b.mysite.com", EngName: "Carol Jones", Mail: "carol@corp.example"},
+		{ID: "u3", UPN: "carol@corp.example", Account: "carol", DisplayName: "Carol Jones", SiteID: "https://site-b.mysite.com", EngName: "Carol Jones", Mail: "carol@corp.example"},
 	}).Return(nil)
 
 	syncer := NewSyncer(store, lister, 500, discardLogger())

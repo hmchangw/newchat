@@ -322,12 +322,12 @@ func TestListUsers_MultiPageFollowsNextLink(t *testing.T) {
 			return
 		}
 		if r.URL.Query().Get("page") == "2" {
-			_, _ = w.Write([]byte(`{"value":[{"id":"u3","userPrincipalName":"carol@corp.example"}]}`))
+			_, _ = w.Write([]byte(`{"value":[{"id":"u3","userPrincipalName":"carol@corp.example","displayName":"Carol Jones"}]}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"value":[` +
-			`{"id":"u1","userPrincipalName":"alice@corp.example"},` +
-			`{"id":"u2","userPrincipalName":"bob@corp.example"}],` +
+			`{"id":"u1","userPrincipalName":"alice@corp.example","displayName":"Alice Smith"},` +
+			`{"id":"u2","userPrincipalName":"bob@corp.example","displayName":"Bob Wu"}],` +
 			`"@odata.nextLink":"` + graphSrv.URL + `/users?page=2"}`))
 	}))
 	defer graphSrv.Close()
@@ -347,17 +347,17 @@ func TestListUsers_MultiPageFollowsNextLink(t *testing.T) {
 
 	require.Len(t, pages, 2)
 	assert.Equal(t, []GraphUser{
-		{ID: "u1", UserPrincipalName: "alice@corp.example"},
-		{ID: "u2", UserPrincipalName: "bob@corp.example"},
+		{ID: "u1", UserPrincipalName: "alice@corp.example", DisplayName: "Alice Smith"},
+		{ID: "u2", UserPrincipalName: "bob@corp.example", DisplayName: "Bob Wu"},
 	}, pages[0])
-	assert.Equal(t, []GraphUser{{ID: "u3", UserPrincipalName: "carol@corp.example"}}, pages[1])
+	assert.Equal(t, []GraphUser{{ID: "u3", UserPrincipalName: "carol@corp.example", DisplayName: "Carol Jones"}}, pages[1])
 
 	// first request carries $top and $select
 	require.NotEmpty(t, requests)
 	first, err := url.Parse(requests[0])
 	require.NoError(t, err)
 	assert.Equal(t, "500", first.Query().Get("$top"))
-	assert.Equal(t, "id,userPrincipalName", first.Query().Get("$select"))
+	assert.Equal(t, "id,userPrincipalName,displayName", first.Query().Get("$select"))
 }
 
 func TestListUsers_CallbackErrorAbortsWalk(t *testing.T) {
