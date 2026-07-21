@@ -1,11 +1,20 @@
 # teams-hr-sync
 
 One-shot HR-feed producer (K8s CronJob owns schedule + overlap prevention).
-Walks the configured Teams/Graph groups, diffs their user members against the
-persisted `hr_employee` rows (`source:"teams"` only), and publishes the delta
-to JetStream: `employees.upsert` + `users.upsert` on the central site,
-`employees.quit` per site. It never writes the store — a downstream consumer
-persists the batches, so a lost publish self-heals on the next run.
+Walks the configured Teams/Graph groups and diffs their user members. Two
+output modes, picked by `HR_SYNC_MODE`:
+
+- **`stream`** (default) — diffs against the persisted `hr_employee` rows
+  (`source:"teams"` only) and publishes the delta to JetStream:
+  `employees.upsert` + `users.upsert` on the central site, `employees.quit`
+  per site. It never writes the store itself — `hr-sync-worker` consumes the
+  batches, so a lost publish self-heals on the next run.
+- **`direct`** — a one-shot migration/backfill: diffs against an EMPTY
+  baseline (so every collected employee is an upsert, never a quit) and
+  writes straight to the `DIRECT_WRITE_*` Mongo via the shared
+  [`pkg/hrstore`](../pkg/hrstore) `Store`, skipping JetStream + the worker
+  entirely. Reads/writes nothing in the diff-state store. Runs once and
+  exits — no daemon loop.
 
 ## Config
 
@@ -15,24 +24,31 @@ persists the batches, so a lost publish self-heals on the next run.
 | `SYNC_GROUPS` | ✔ | — | JSON `[{"groupId":"…","siteId":"…"}]`; unique groupIds. Each group's `siteId` is the DEFAULT site for its members |
 | `SITE_OVERRIDES` | | `[]` | JSON `[{"account":"…","siteId":"…"}]`; per-account site that WINS over the group default (an override for an account in no group is unused) |
 | `CENTRAL_SITE_ID` | ✔ | — | Scopes the two upsert subjects |
-| `MONGO_READ_URI` | ✔ | — | + optional `MONGO_READ_USERNAME/PASSWORD/DB` (db `chat`) |
-| `NATS_URL` | ✔ | — | + optional `NATS_CREDS_FILE` |
+| `HR_SYNC_MODE` | | `stream` | `stream` (publish a delta) or `direct` (one-shot full write, see above) |
+| `MONGO_READ_URI` | ✔ (`stream`) | — | Diff-state read; + optional `MONGO_READ_USERNAME/PASSWORD/DB` (db `chat`) |
+| `NATS_URL` | ✔ (`stream`) | — | + optional `NATS_CREDS_FILE` |
+| `DIRECT_WRITE_URI` | ✔ (`direct`) | — | Migration target Mongo; + optional `DIRECT_WRITE_USERNAME/PASSWORD/DB` (db `chat`), mirrors `hr-sync-worker`'s `MONGO_WRITE_*` |
 | `GRAPH_PAGE_SIZE` | | `500` | Graph `$top`, 1..999 |
 | `GRAPH_BASE_URL` / `GRAPH_TOKEN_URL` | | public Graph | Test/on-prem overrides |
 | `GRAPH_TLS_INSECURE_SKIP_VERIFY` | | `false` | Opt-in; skips Graph TLS verify for on-prem/self-signed |
 
-## Injecting your own Mapper / Converter
+## Injecting your own Mapper / Converter / Store
 
-All Graph→domain shaping lives behind two interfaces in
-[`transform`](transform/transform.go) — the service only calls the interfaces:
+All Graph→domain shaping lives behind three interfaces — the service only
+calls the interfaces:
 
-- **`transform.Mapper`** — owns name mapping and org placement (a group maps
-  to the section level). `OrgFromGroup` shapes the org node from the group
-  profile; `EmployeeFromMember` derives the Employee (account from the UPN,
-  names, site, `Source`). Returning an Employee with an empty `Account` marks
-  the member unmappable — the service skips it.
+- **`transform.Mapper`** ([`transform`](transform/transform.go)) — owns name
+  mapping and org placement (a group maps to the section level).
+  `OrgFromGroup` shapes the org node from the group profile;
+  `EmployeeFromMember` derives the Employee (account from the UPN, names,
+  site, `Source`). Returning an Employee with an empty `Account` marks the
+  member unmappable — the service skips it.
 - **`transform.EmployeeUserConverter`** — derives the `users.upsert` row from
   an Employee. `DefaultConverter` copies identity fields only.
+- **`hrstore.Store`** ([`pkg/hrstore`](../pkg/hrstore)) — the write surface
+  `direct` mode targets (`UpsertEmployees` / `UpsertUserIdentities` /
+  `QuitTeamsEmployees`). Shared with `hr-sync-worker`, which writes the same
+  interface from the stream-consumer side.
 
 Change labels the differ stamps are `model.ChangeTypeNewHire` /
 `model.ChangeTypeUpdate`; the ownership tag is `transform.SourceTeams`.

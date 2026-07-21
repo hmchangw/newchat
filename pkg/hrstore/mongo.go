@@ -1,4 +1,4 @@
-package main
+package hrstore
 
 import (
 	"context"
@@ -14,23 +14,24 @@ import (
 )
 
 const (
-	hrEmployeeCollection = "hr_employee"
-	usersCollection      = "users"
+	EmployeeCollection = "hr_employee"
+	UserCollection     = "users"
 )
 
-type mongoStore struct {
+// MongoStore implements Store over the target write database.
+type MongoStore struct {
 	employees *mongoutil.Collection[model.Employee]
 	users     *mongoutil.Collection[model.User]
 }
 
-func newMongoStore(db *mongo.Database) *mongoStore {
-	return &mongoStore{
-		employees: mongoutil.NewCollection[model.Employee](db.Collection(hrEmployeeCollection)),
-		users:     mongoutil.NewCollection[model.User](db.Collection(usersCollection)),
+func NewMongoStore(db *mongo.Database) *MongoStore {
+	return &MongoStore{
+		employees: mongoutil.NewCollection[model.Employee](db.Collection(EmployeeCollection)),
+		users:     mongoutil.NewCollection[model.User](db.Collection(UserCollection)),
 	}
 }
 
-func (s *mongoStore) UpsertEmployees(ctx context.Context, employees []model.EmployeeWithChange) error {
+func (s *MongoStore) UpsertEmployees(ctx context.Context, employees []model.EmployeeWithChange) error {
 	rows := make([]model.Employee, 0, len(employees))
 	for i := range employees {
 		rows = append(rows, employees[i].Employee)
@@ -48,7 +49,7 @@ func (s *mongoStore) UpsertEmployees(ctx context.Context, employees []model.Empl
 // UpsertUserIdentities $sets identity fields only; a full-doc replace would
 // wipe roles/password/services on the live auth store, so the update doc is
 // built by hand and never derived from the wire struct.
-func (s *mongoStore) UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error {
+func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error {
 	models := make([]mongo.WriteModel, 0, len(users))
 	for i := range users {
 		u := &users[i].User
@@ -76,7 +77,7 @@ func (s *mongoStore) UpsertUserIdentities(ctx context.Context, users []model.Use
 	return nil
 }
 
-func (s *mongoStore) QuitTeamsEmployees(ctx context.Context, accounts []string) error {
+func (s *MongoStore) QuitTeamsEmployees(ctx context.Context, accounts []string) error {
 	if _, err := s.employees.Raw().DeleteMany(ctx, bson.M{
 		"account": bson.M{"$in": accounts},
 	}); err != nil {

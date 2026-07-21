@@ -52,3 +52,15 @@ See `docs/superpowers/specs/2026-07-14-teams-hr-sync-design.md` for the design.
 - search-sync-worker decodes the bare `[]EmployeeWithChange` and copies each
   element's inline org fields into `SpotlightOrgIndex` (1:1) — the earlier
   flat-vs-nested follow-up is resolved by making the producer shape match.
+
+## Phase 6 — direct-write migration mode
+
+- `pkg/hrstore`: extracted `hr-sync-worker`'s write `Store` interface +
+  `MongoStore` impl (`UpsertEmployees`/`UpsertUserIdentities`/
+  `QuitTeamsEmployees`) into a shared package; `hr-sync-worker` keeps a thin
+  local `Store`/`MockStore` alias.
+- `teams-hr-sync`: `HR_SYNC_MODE` (`stream`|`direct`) + `emitter` seam
+  (`streamEmitter` wraps the existing `publisher`; `directEmitter` writes via
+  `hrstore.Store`). `direct` diffs against an empty baseline (all-upsert,
+  no-quit) and writes straight to `DIRECT_WRITE_*` Mongo, skipping JetStream +
+  the worker — a one-shot idempotent backfill, no diff-state store touched.

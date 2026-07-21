@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/hmchangw/chat/pkg/hrstore"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -47,6 +48,14 @@ func run() error {
 	if cfg.GraphPageSize <= 0 || cfg.GraphPageSize > 999 {
 		return fmt.Errorf("GRAPH_PAGE_SIZE must be in 1..999, got %d", cfg.GraphPageSize)
 	}
+	if cfg.HRSyncMode != modeStream && cfg.HRSyncMode != modeDirect {
+		return fmt.Errorf("HR_SYNC_MODE must be %q or %q, got %q", modeStream, modeDirect, cfg.HRSyncMode)
+	}
+	// DIRECT_WRITE_URI has no env "required" tag because it's conditional on
+	// mode — env doesn't support cross-field required, so enforce it here.
+	if cfg.HRSyncMode == modeDirect && cfg.DirectWriteURI == "" {
+		return fmt.Errorf("DIRECT_WRITE_URI is required when HR_SYNC_MODE=%s", modeDirect)
+	}
 	groups, err := parseSyncGroups(cfg.SyncGroups)
 	if err != nil {
 		return fmt.Errorf("parse sync groups: %w", err)
@@ -61,24 +70,6 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword)
-	if err != nil {
-		return fmt.Errorf("connect mongo read client: %w", err)
-	}
-	defer disconnect(readClient)
-
-	// One-shot job: no obs.Init — a noop tracer keeps natsutil's wiring happy
-	// without dragging the full observability stack into a CronJob binary.
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{})
-	if err != nil {
-		return fmt.Errorf("connect nats: %w", err)
-	}
-	defer nc.Close()
-	js, err := jetstream.New(nc.NatsConn())
-	if err != nil {
-		return fmt.Errorf("init jetstream: %w", err)
-	}
-
 	var opts []msgraph.Option
 	if cfg.GraphBaseURL != "" {
 		opts = append(opts, msgraph.WithBaseURL(cfg.GraphBaseURL))
@@ -92,17 +83,20 @@ func run() error {
 		ClientSecret:          cfg.TeamsClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 	}, opts...)
-
-	store := newMongoStore(readClient.Database(cfg.MongoReadDB))
 	// Injection point: swap DefaultMapper / DefaultConverter for custom
 	// naming or derivation conventions (see teams-hr-sync/README.md).
 	mapper := transform.DefaultMapper{}
-	pub := newPublisher(jetStreamPublish(js), cfg.CentralSiteID, transform.DefaultConverter{})
 
 	logger := slog.With("requestId", idgen.GenerateRequestID())
-	logger.Info("teams hr sync started")
+	logger.Info("teams hr sync started", "mode", cfg.HRSyncMode)
 	start := time.Now()
-	stats, err := runSync(ctx, graph, mapper, store, pub, groups, siteOverrides, cfg.GraphPageSize)
+
+	var stats runStats
+	if cfg.HRSyncMode == modeDirect {
+		stats, err = runDirectMode(ctx, &cfg, graph, mapper, groups, siteOverrides)
+	} else {
+		stats, err = runStreamMode(ctx, &cfg, graph, mapper, groups, siteOverrides)
+	}
 	logger.Info("teams hr sync finished",
 		"groups", stats.Groups,
 		"members", stats.Members,
@@ -121,6 +115,49 @@ func run() error {
 		return fmt.Errorf("sync: %w", err)
 	}
 	return nil
+}
+
+// runStreamMode connects the diff-state Mongo read + JetStream, then runs the
+// existing publish-a-delta pipeline. Behavior unchanged from pre-mode-flag.
+func runStreamMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string) (runStats, error) {
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword)
+	if err != nil {
+		return runStats{}, fmt.Errorf("connect mongo read client: %w", err)
+	}
+	defer disconnect(readClient)
+
+	// One-shot job: no obs.Init — a noop tracer keeps natsutil's wiring happy
+	// without dragging the full observability stack into a CronJob binary.
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{})
+	if err != nil {
+		return runStats{}, fmt.Errorf("connect nats: %w", err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc.NatsConn())
+	if err != nil {
+		return runStats{}, fmt.Errorf("init jetstream: %w", err)
+	}
+
+	store := newMongoStore(readClient.Database(cfg.MongoReadDB))
+	pub := newPublisher(jetStreamPublish(js), cfg.CentralSiteID, transform.DefaultConverter{})
+	return runSync(ctx, graph, mapper, store, pub, groups, siteOverrides, cfg.GraphPageSize)
+}
+
+// runDirectMode connects only the migration target Mongo (never the
+// diff-state store, never NATS) and writes the full collected set straight
+// through hrstore.
+func runDirectMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string) (runStats, error) {
+	writeClient, err := mongoutil.Connect(ctx, cfg.DirectWriteURI, cfg.DirectWriteUsername, cfg.DirectWritePassword)
+	if err != nil {
+		return runStats{}, fmt.Errorf("connect mongo direct-write client: %w", err)
+	}
+	defer disconnect(writeClient)
+
+	emit := directEmitter{
+		store:     hrstore.NewMongoStore(writeClient.Database(cfg.DirectWriteDB)),
+		converter: transform.DefaultConverter{},
+	}
+	return runDirectSync(ctx, graph, mapper, emit, groups, siteOverrides, cfg.GraphPageSize)
 }
 
 // jetStreamPublish is the JetStream publishFunc main wires in. natsutil.NewMsg
@@ -149,18 +186,32 @@ type runStats struct {
 	Published int // JetStream messages sent
 }
 
-// runSync performs one full sync: walk the configured groups, diff against
-// the persisted teams-sourced rows, publish the delta.
+// runSync performs one full stream-mode sync: walk the configured groups,
+// diff against the persisted teams-sourced rows, publish the delta.
 func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, store Store, pub *publisher, groups []syncGroup, siteOverrides map[string]string, pageSize int) (runStats, error) {
+	stored, err := store.ListTeamsEmployees(ctx)
+	if err != nil {
+		return runStats{}, fmt.Errorf("list stored employees: %w", err)
+	}
+	return runSyncCore(ctx, graph, mapper, stored, streamEmitter{pub}, groups, siteOverrides, pageSize)
+}
+
+// runDirectSync performs one direct-mode migration pass: walk the configured
+// groups and write the FULL collected set via emit — no read of the diff-state
+// Store, so every collected employee becomes an upsert (diffEmployees against
+// an empty baseline) and Quits is always empty.
+func runDirectSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, emit emitter, groups []syncGroup, siteOverrides map[string]string, pageSize int) (runStats, error) {
+	return runSyncCore(ctx, graph, mapper, nil, emit, groups, siteOverrides, pageSize)
+}
+
+// runSyncCore is the shared walk-diff-emit pipeline; stored is the diff
+// baseline (persisted teams rows for stream mode, nil for direct mode).
+func runSyncCore(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, stored []model.Employee, emit emitter, groups []syncGroup, siteOverrides map[string]string, pageSize int) (runStats, error) {
 	var stats runStats
 	current, cs, err := collectEmployees(ctx, graph, mapper, groups, siteOverrides, pageSize)
 	stats.collectStats = cs
 	if err != nil {
 		return stats, fmt.Errorf("collect graph employees: %w", err)
-	}
-	stored, err := store.ListTeamsEmployees(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("list stored employees: %w", err)
 	}
 	diff := diffEmployees(current, stored)
 	for i := range diff.Upserts {
@@ -173,10 +224,10 @@ func runSync(ctx context.Context, graph msgraph.GroupReader, mapper transform.Ma
 	for _, accounts := range diff.Quits {
 		stats.Quits += len(accounts)
 	}
-	published, err := pub.publishSync(ctx, diff)
+	published, err := emit.emit(ctx, diff)
 	stats.Published = published
 	if err != nil {
-		return stats, fmt.Errorf("publish sync batches: %w", err)
+		return stats, fmt.Errorf("emit sync batches: %w", err)
 	}
 	return stats, nil
 }

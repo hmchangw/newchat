@@ -42,7 +42,26 @@ type config struct {
 
 	NatsURL       string `env:"NATS_URL,required,notEmpty"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+
+	// HRSyncMode picks the pipeline output: "stream" (default) diffs against
+	// the persisted teams rows and publishes the delta to JetStream, same as
+	// before this flag existed. "direct" is a one-shot migration/backfill —
+	// it writes the full collected set straight to DirectWrite* Mongo,
+	// skipping JetStream + hr-sync-worker entirely.
+	HRSyncMode string `env:"HR_SYNC_MODE" envDefault:"stream"`
+
+	// DirectWrite* configures the migration target Mongo; only read/required
+	// when HRSyncMode is "direct" (mirrors hr-sync-worker's MongoWrite* knobs).
+	DirectWriteURI      string `env:"DIRECT_WRITE_URI" envDefault:""`
+	DirectWriteUsername string `env:"DIRECT_WRITE_USERNAME" envDefault:""`
+	DirectWritePassword string `env:"DIRECT_WRITE_PASSWORD" envDefault:""`
+	DirectWriteDB       string `env:"DIRECT_WRITE_DB" envDefault:"chat"`
 }
+
+const (
+	modeStream = "stream"
+	modeDirect = "direct"
+)
 
 // syncGroup maps one Graph group to the site its members belong to.
 type syncGroup struct {

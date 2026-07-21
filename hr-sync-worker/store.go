@@ -1,24 +1,22 @@
 package main
 
 import (
-	"context"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
-	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/hrstore"
 )
 
-//go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main
+// Store is the write surface this worker persists into. The interface and
+// its Mongo implementation live in pkg/hrstore, shared with teams-hr-sync's
+// direct-write mode; this alias minimizes churn at existing call sites.
+type Store = hrstore.Store
 
-// Store is the write surface the HR feed persists into. All writes are
-// idempotent — the feed is at-least-once.
-type Store interface {
-	// UpsertEmployees replaces hr_employee docs keyed by account.
-	UpsertEmployees(ctx context.Context, employees []model.EmployeeWithChange) error
-	// UpsertUserIdentities upserts users by account, writing IDENTITY FIELDS
-	// ONLY (account, siteId, engName, chineseName, employeeId). It must never
-	// touch roles/services/password/deactivated/status fields — users is the
-	// live auth store.
-	UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error
-	// QuitTeamsEmployees deletes hr_employee rows for the accounts, scoped to
-	// source "teams" — never another feed's rows. users stays untouched.
-	QuitTeamsEmployees(ctx context.Context, accounts []string) error
+// MockStore is re-exported from hrstore so handler_test.go's NewMockStore
+// calls keep working unchanged.
+type MockStore = hrstore.MockStore
+
+var NewMockStore = hrstore.NewMockStore
+
+func newMongoStore(db *mongo.Database) *hrstore.MongoStore {
+	return hrstore.NewMongoStore(db)
 }

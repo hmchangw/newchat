@@ -66,16 +66,35 @@ site, `Source` = `"teams"`, `Org` = the group profile at section level
 (`SectID`/`SectName`/`SectDescription`). An account appearing in multiple
 groups keeps its first mapping (config order wins).
 
-## Injectable seams (`teams-hr-sync/transform`)
+## Injectable seams (`teams-hr-sync/transform` + `emitter`)
 
-Two interfaces, injected in `main.go` (see `teams-hr-sync/README.md` for a
-worked replacement example): `Mapper` (Graph group/member → `Org`/`Employee`;
-owns name mapping + org placement, `DefaultMapper{}`) and
-`EmployeeUserConverter` (one-way; `DefaultConverter` copies identity fields
-only — `Account/SiteID/EngName/ChineseName/EmployeeID`; every other `User`
-field stays zero, the downstream persister owns defaults/merging). The
-change-label constants (`ChangeCreated`/`ChangeUpdated`) and `SourceTeams`
-live here too.
+Three seams, injected in `main.go` (see `teams-hr-sync/README.md` for a worked
+replacement example): `transform.Mapper` (Graph group/member →
+`Org`/`Employee`; owns name mapping + org placement, `DefaultMapper{}`),
+`transform.EmployeeUserConverter` (one-way; `DefaultConverter` copies identity
+fields only — `Account/SiteID/EngName/ChineseName/EmployeeID`; every other
+`User` field stays zero, the downstream persister owns defaults/merging), and
+`emitter` (one method consuming the run's diff — `streamEmitter` publishes to
+JetStream via the existing `publisher`; `directEmitter` writes through the
+shared `hrstore.Store` instead, see § Output modes). The change-label
+constants (`ChangeCreated`/`ChangeUpdated`) and `SourceTeams` live in
+`transform` too.
+
+## Output modes (`HR_SYNC_MODE`)
+
+Two modes select the emitter and the diff baseline in `main.go`:
+
+- **`stream`** (default, unchanged behavior) — diffs the Graph walk against
+  the persisted `hr_employee` rows (§ Change detection) and emits via
+  `streamEmitter`.
+- **`direct`** — a one-shot migration/backfill. Diffs against an **empty**
+  baseline (`diffEmployees(current, nil)`), so every collected employee is a
+  `new_hire` upsert and `Quits` is always empty — a full idempotent write, not
+  a delta. Emits via `directEmitter`, which writes straight to the
+  `DIRECT_WRITE_*` Mongo through the shared `pkg/hrstore.Store` (the same
+  interface + Mongo impl `hr-sync-worker` writes from the consumer side —
+  extracted there in this change). Never reads or writes the diff-state store;
+  runs once and exits, no daemon loop.
 
 ## Change detection (query-first)
 

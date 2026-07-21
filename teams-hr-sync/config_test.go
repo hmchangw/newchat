@@ -27,6 +27,17 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.GraphBaseURL)
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify)
 	assert.Equal(t, "chat", cfg.MongoReadDB)
+	assert.Equal(t, modeStream, cfg.HRSyncMode)
+	assert.Equal(t, "chat", cfg.DirectWriteDB)
+}
+
+func TestConfig_DirectModeRequiresWriteURI(t *testing.T) {
+	e := validEnv()
+	e["HR_SYNC_MODE"] = modeDirect
+	cfg, err := env.ParseAsWithOptions[config](env.Options{Environment: e})
+	require.NoError(t, err) // env parsing alone doesn't enforce this — run() does
+	assert.Equal(t, modeDirect, cfg.HRSyncMode)
+	assert.Empty(t, cfg.DirectWriteURI)
 }
 
 func TestConfig_RequiredVars(t *testing.T) {
