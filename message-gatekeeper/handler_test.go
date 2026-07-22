@@ -832,6 +832,31 @@ func TestHandler_processMessage_RejectsInvalidQuotedParentMessageID(t *testing.T
 	assert.Equal(t, errcode.CodeBadRequest, ee.Code)
 }
 
+func TestHandler_processMessage_RejectsInvalidForwardedFromMessageID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	// No store expectations: validation must fail before any store call.
+
+	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+		return &jetstream.PubAck{}, nil
+	}
+	reply := func(ctx context.Context, msg *nats.Msg) error { return nil }
+	h := NewHandler(store, nil, pub, reply, "site1", nil, 500, 1, 8192, "")
+
+	req := model.SendMessageRequest{
+		ID:                     idgen.GenerateMessageID(),
+		Content:                "fwd",
+		RequestID:              "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		ForwardedFromMessageID: "not-a-valid-msg-id",
+	}
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid forwarded-from message ID")
+	var ee *errcode.Error
+	require.True(t, errors.As(err, &ee))
+	assert.Equal(t, errcode.CodeBadRequest, ee.Code)
+}
+
 func TestHandler_processMessage_PropagatesRequestIDOnCanonicalPublish(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -1380,6 +1405,81 @@ func TestHandler_ProcessMessage_WithQuote(t *testing.T) {
 			}
 			assert.Equal(t, tc.assertUnverified, evt.QuotedParentUnverified,
 				"QuotedParentUnverified marks the message-worker re-projection path")
+		})
+	}
+}
+
+func TestHandler_resolveForwardSnapshot(t *testing.T) {
+	const (
+		account     = "alice"
+		roomID      = "room-1"
+		siteID      = "site-a"
+		chatBaseURL = "http://chat.example"
+	)
+	fwdID := idgen.GenerateMessageID()
+	fixedNow := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name         string
+		fwdID        string
+		setupFetcher func(f *MockParentMessageFetcher)
+		wantSnap     bool
+		assertSnap   func(t *testing.T, snap *cassandra.ForwardedMessage)
+	}{
+		{
+			name:  "empty id — no fetch, no snapshot",
+			fwdID: "",
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				// no EXPECT — fetcher must not be called
+			},
+		},
+		{
+			name:  "authoritative fetch — snapshot mapped from source",
+			fwdID: fwdID,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().FetchQuotedParent(gomock.Any(), account, roomID, siteID, fwdID).
+					Return(&cassandra.QuotedParentMessage{MessageID: fwdID, RoomID: "src-room", Sender: cassandra.Participant{Account: "bob"}, Msg: "source body"}, nil)
+			},
+			wantSnap: true,
+			assertSnap: func(t *testing.T, snap *cassandra.ForwardedMessage) {
+				assert.Equal(t, fwdID, snap.MessageID)
+				assert.Equal(t, "src-room", snap.RoomID)
+				assert.Equal(t, "bob", snap.Sender.Account)
+				assert.Equal(t, "source body", snap.Msg)
+			},
+		},
+		{
+			name:  "unresolvable source — degrades to placeholder, not a hard fail",
+			fwdID: fwdID,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().FetchQuotedParent(gomock.Any(), account, roomID, siteID, fwdID).
+					Return(nil, errcode.NotFound("gone"))
+			},
+			wantSnap: true,
+			assertSnap: func(t *testing.T, snap *cassandra.ForwardedMessage) {
+				assert.Equal(t, fwdID, snap.MessageID)
+				assert.Equal(t, roomID, snap.RoomID)
+				assert.Equal(t, "Content temporarily unavailable", snap.Msg)
+				assert.Equal(t, chatBaseURL+"/"+roomID+"/"+fwdID, snap.MessageLink)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			fetcher := NewMockParentMessageFetcher(ctrl)
+			tc.setupFetcher(fetcher)
+			h := &Handler{parentFetcher: fetcher, chatBaseURL: chatBaseURL}
+
+			snap := h.resolveForwardSnapshot(context.Background(), account, roomID, siteID, tc.fwdID, fixedNow)
+
+			if !tc.wantSnap {
+				assert.Nil(t, snap)
+				return
+			}
+			require.NotNil(t, snap)
+			tc.assertSnap(t, snap)
 		})
 	}
 }

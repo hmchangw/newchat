@@ -2572,6 +2572,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `threadParentId` | string | Optional. Set when this message is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Optional. Embedded snapshot of the quoted message. |
+| `forwarded` | [ForwardedMessage](#forwardedmessage) | Optional. Present when this message is a forward — an embedded snapshot of the forwarded source. An empty-content forward previews as `"Forwarded a message"` in the room list. |
 | `visibleTo` | string | Optional. Visibility scope. |
 | `reactions` | map<emoji, [ReactionUser](#reactionuser)[]> | Optional. Omitted when absent; `{}` when present but empty. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
@@ -2684,6 +2685,21 @@ Embedded snapshot of the quoted message at the time of quoting.
 | `tshow` | boolean | Optional. Mirrors the quoted message's own `tshow` — set when the quoted message is a thread reply also shown in its parent channel room. |
 
 When the reader is in a restricted access window and the quoted parent falls outside it, the embedded snapshot is redacted to `{ "msg": "This message is unavailable" }` — all other quote fields are dropped.
+
+##### ForwardedMessage
+
+Embedded snapshot of a forwarded source message. Non-null marks the message as a forward (mirrors [QuotedParentMessage](#quotedparentmessage), without the thread-context fields).
+
+| Field | Type | Notes |
+|---|---|---|
+| `messageId` | string | |
+| `roomId` | string | |
+| `sender` | [MessageParticipant](#messageparticipant) | |
+| `createdAt` | string | RFC 3339. |
+| `msg` | string | Optional. Body snapshot of the forwarded source. |
+| `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
+| `attachments` | [Attachment](#attachment)[] | Optional. Decoded attachment objects. |
+| `messageLink` | string | Optional. |
 
 ##### ReactionUser
 
@@ -5276,7 +5292,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES_CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
 
-The same subject and request body cover three send variants: plain message, thread reply, and quoted message. The variant is determined by which optional fields are set.
+The same subject and request body cover four send variants: plain message, thread reply, quoted message, and forwarded message. The variant is determined by which optional fields are set.
 
 #### Request body
 
@@ -5289,6 +5305,7 @@ The same subject and request body cover three send variants: plain message, thre
 | `threadParentMessageId` | string | no | Set when posting a thread reply. Must be a valid 20-char base62 message ID. |
 | `tshow` | boolean | no | The "Also send to channel" option. Only meaningful on a thread reply (`threadParentMessageId` set): the reply is persisted into the parent room's channel timeline as well as the thread (dual-write into `messages_by_room` in addition to `thread_messages_by_thread` + `messages_by_id`), and is surfaced with `tshow: true` on the persisted message. On a non-thread send the flag is **ignored and normalized to `false`** — the request is not rejected. |
 | `quotedParentMessageId` | string | no | Set when posting a quoted message. The gatekeeper fetches the authoritative parent snapshot from message history and embeds it in the persisted message. If that fetch fails *transiently* (history briefly unavailable), the message is not dropped: the gatekeeper inserts a placeholder snapshot for live delivery (body `"Content temporarily unavailable"`), and `message-worker` re-projects the authoritative snapshot (or drops the quote) from history before the durable write, so the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
+| `forwardedFromMessageId` | string | no | Set when posting a forward. The gatekeeper resolves the source into a `forwarded` snapshot on the persisted message. Unlike a quote, an unresolvable source does not reject the send — it degrades to a placeholder snapshot (`"Content temporarily unavailable"`) and still ships. An empty-content forward previews as `"Forwarded a message"` in the room list. |
 
 ##### Plain message
 
@@ -5355,6 +5372,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. The body is the persist
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort for a thread reply; absent when the parent's createdAt could not be resolved at send time. |
 | `tshow` | boolean | Present only when the request set `tshow: true` on a thread reply (absent when the flag was normalized away on a non-thread send). |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Present only for a quoted send — the server-fetched snapshot of the quoted parent. |
+| `forwarded` | [ForwardedMessage](#forwardedmessage) | Present only for a forwarded send — the server-resolved snapshot of the forwarded source. |
 
 The gatekeeper does **not** populate `mentions`, `editedAt`/`updatedAt`, `type`, or `sysMsgData` on this reply (all `omitempty`, so they are absent). Mention resolution and the enriched `sender` happen in the broadcast fan-out event ([§4 triggered events](#triggered-events--success-path)), not in this reply.
 

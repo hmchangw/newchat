@@ -84,14 +84,16 @@ func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, se
 	mentions := toMentionSet(msg.Mentions)
 
 	batch := s.cassSession.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+	// forwarded lives on messages_by_room only (the room-list preview reads it);
+	// messages_by_id/thread rows don't carry it — the preview never reads them.
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, msg, site_id, updated_at,
-		    mentions, type, sys_msg_data, tshow, quoted_parent_message,
+		    mentions, type, sys_msg_data, tshow, quoted_parent_message, forwarded,
 		    attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, msg.Content, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
+		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage, msg.Forwarded,
 		msg.Attachments, msg.Card, msg.CardAction,
 	)
 	batch.Query(
@@ -138,12 +140,12 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, site_id, updated_at,
-		    mentions, type, tshow, quoted_parent_message, sys_msg_data,
+		    mentions, type, tshow, quoted_parent_message, forwarded, sys_msg_data,
 		    msg, attachments, card, card_action,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, cm.Forwarded, msg.SysMsgData, payload, encMeta,
 	)
 	batch.Query(
 		`INSERT INTO messages_by_id
@@ -299,8 +301,8 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 
 // buildCassandraMessage projects the user-authored fields of msg into a
 // cassandra.Message for encryption. The encrypted content fields are Msg
-// (Content), Attachments, Card, CardAction and the QuotedParentMessage
-// body. sys_msg_data is not encrypted; columns bound by SaveMessage directly
+// (Content), Attachments, Card, CardAction and the QuotedParentMessage /
+// Forwarded bodies. sys_msg_data is not encrypted; columns bound by SaveMessage directly
 // are left out.
 //
 // The returned QuotedParentMessage is a fresh struct so that
@@ -322,6 +324,11 @@ func buildCassandraMessage(msg *model.Message) cassandra.Message {
 		// it here (before encryption — Attachments is an encrypted field).
 		q.Attachments = cassandra.EncodeAttachments(q.DecodedAttachments)
 		cm.QuotedParentMessage = &q
+	}
+	if msg.Forwarded != nil {
+		f := *msg.Forwarded // fresh copy — StripEncryptedFields must not mutate the caller's message
+		f.Attachments = cassandra.EncodeAttachments(f.DecodedAttachments)
+		cm.Forwarded = &f
 	}
 	return cm
 }

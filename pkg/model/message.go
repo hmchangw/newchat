@@ -33,6 +33,9 @@ type Message struct {
 	Type                         string                         `json:"type,omitempty"                         bson:"type,omitempty"`
 	SysMsgData                   []byte                         `json:"sysMsgData,omitempty"                   bson:"sysMsgData,omitempty"`
 	QuotedParentMessage          *cassandra.QuotedParentMessage `json:"quotedParentMessage,omitempty"          bson:"quotedParentMessage,omitempty"`
+	// Forwarded is non-nil when this message is a forward; it snapshots the source
+	// sender + content so the client can render it (mirrors QuotedParentMessage).
+	Forwarded                    *cassandra.ForwardedMessage    `json:"forwarded,omitempty"                    bson:"forwarded,omitempty"`
 	PinnedAt                     *time.Time                     `json:"pinnedAt,omitempty"                     bson:"pinnedAt,omitempty"`
 	PinnedBy                     *Participant                   `json:"pinnedBy,omitempty"                     bson:"pinnedBy,omitempty"`
 }
@@ -69,6 +72,9 @@ type SendMessageRequest struct {
 	RequestID             string `json:"requestId"`
 	ThreadParentMessageID string `json:"threadParentMessageId,omitempty"`
 	QuotedParentMessageID string `json:"quotedParentMessageId,omitempty"`
+	// ForwardedFromMessageID marks this send as a forward of that source message.
+	// message-gatekeeper resolves it to Message.Forwarded (mirrors the quote path).
+	ForwardedFromMessageID string `json:"forwardedFromMessageId,omitempty"`
 	// TShow requests that a thread reply also appear in the parent room's
 	// channel timeline (the "Also send to channel" option). Only meaningful
 	// when ThreadParentMessageID is set — message-gatekeeper normalizes it to

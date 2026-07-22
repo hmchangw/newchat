@@ -338,6 +338,30 @@ func TestGetMessages_DecryptErrorHaltsWalk(t *testing.T) {
 		"walk must halt on the day-1 malformed-nonce error; surfacing ErrAuthFailed means the walk continued past day1 and let day2 overwrite scanErr")
 }
 
+func TestGetMessagesBefore_ForwardedRoundTrips(t *testing.T) {
+	session := setupCassandra(t)
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, nil)
+	ctx := context.Background()
+
+	roomID := "room-fwd"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+	sender := models.Participant{ID: "u_a", Account: "alice"}
+	fwd := &models.ForwardedMessage{MessageID: "src", RoomID: "src-room", Sender: models.Participant{Account: "frank"}, Msg: "the original"}
+
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, forwarded) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(createdAt), createdAt, "m-fwd", sender, "", fwd,
+	).Exec())
+
+	page, err := repo.GetMessagesBefore(ctx, roomID, createdAt.Add(time.Second), time.Time{}, PageRequest{PageSize: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+	require.NotNil(t, page.Data[0].Forwarded, "forwarded must survive the load-history round-trip")
+	assert.Equal(t, "src", page.Data[0].Forwarded.MessageID)
+	assert.Equal(t, "the original", page.Data[0].Forwarded.Msg)
+}
+
 func TestGetMessagesBefore_SysMsgDataRoundTrips(t *testing.T) {
 	session := setupCassandra(t)
 	sizer := msgbucket.New(24 * time.Hour)

@@ -63,6 +63,22 @@ type QuotedParentMessage struct {
 	TShow bool `json:"tshow,omitempty" cql:"-"`
 }
 
+// ForwardedMessage maps to the Cassandra "ForwardedMessage" UDT — a snapshot of a
+// forwarded source message. Non-nil marks the message as a forward. Mirrors
+// QuotedParentMessage minus the thread-context fields: a forward is not bound to the
+// source's conversation the way a quote is.
+type ForwardedMessage struct {
+	MessageID          string        `json:"messageId"             cql:"message_id"`
+	RoomID             string        `json:"roomId"                cql:"room_id"`
+	Sender             Participant   `json:"sender"                cql:"sender"`
+	CreatedAt          time.Time     `json:"createdAt"             cql:"created_at"`
+	Msg                string        `json:"msg,omitempty"         cql:"msg"`
+	Mentions           []Participant `json:"mentions,omitempty"    cql:"mentions"`
+	Attachments        [][]byte      `json:"-"                     cql:"attachments"`
+	DecodedAttachments []Attachment  `json:"attachments,omitempty" cql:"-"`
+	MessageLink        string        `json:"messageLink,omitempty" cql:"message_link"`
+}
+
 // Message represents a message row in the Cassandra message tables
 // (messages_by_room, messages_by_id, thread_messages_by_thread).
 //
@@ -87,6 +103,7 @@ type Message struct {
 	ThreadParentID        string               `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
 	ThreadParentCreatedAt *time.Time           `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
 	QuotedParentMessage   *QuotedParentMessage `json:"quotedParentMessage,omitempty"   cql:"quoted_parent_message"`
+	Forwarded             *ForwardedMessage    `json:"forwarded,omitempty"             cql:"forwarded"`
 	VisibleTo             string               `json:"visibleTo,omitempty"             cql:"visible_to"`
 	// Reactions is nil when absent (omitted from JSON); not modified by edit/delete paths.
 	Reactions    Reactions    `json:"reactions,omitempty"             cql:"reactions"`

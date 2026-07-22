@@ -98,10 +98,16 @@ func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now
 			if m.Deleted {
 				continue
 			}
+			// An empty-content forward has no body of its own to preview; show a
+			// fixed label. A forward that carries content previews it like any message.
+			content := previewContent(m.Msg)
+			if content == "" && m.Forwarded != nil {
+				content = "Forwarded a message"
+			}
 			return models.LastMessage{
 				MessageID: m.MessageID,
 				Sender:    m.Sender,
-				Content:   previewContent(m.Msg),
+				Content:   content,
 				CreatedAt: m.CreatedAt.UTC().UnixMilli(),
 			}, true
 		}

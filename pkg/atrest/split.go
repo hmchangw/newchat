@@ -20,6 +20,9 @@ func SplitForEncryption(msg *cassandra.Message) EncryptedFields {
 			}
 		}
 	}
+	if f := msg.Forwarded; f != nil && (f.Msg != "" || len(f.Attachments) > 0) {
+		out.ForwardedContent = &QuotedParentEncrypted{Msg: f.Msg, Attachments: f.Attachments}
+	}
 	return out
 }
 
@@ -39,6 +42,10 @@ func StripEncryptedFields(msg *cassandra.Message) {
 		msg.QuotedParentMessage.Msg = ""
 		msg.QuotedParentMessage.Attachments = nil
 	}
+	if msg.Forwarded != nil {
+		msg.Forwarded.Msg = ""
+		msg.Forwarded.Attachments = nil
+	}
 }
 
 // ApplyDecryptedFields copies fields from enc back onto msg. Used by
@@ -55,5 +62,12 @@ func ApplyDecryptedFields(msg *cassandra.Message, enc *EncryptedFields) {
 		}
 		msg.QuotedParentMessage.Msg = enc.QuotedParentContent.Msg
 		msg.QuotedParentMessage.Attachments = enc.QuotedParentContent.Attachments
+	}
+	if enc.ForwardedContent != nil {
+		if msg.Forwarded == nil {
+			msg.Forwarded = &cassandra.ForwardedMessage{}
+		}
+		msg.Forwarded.Msg = enc.ForwardedContent.Msg
+		msg.Forwarded.Attachments = enc.ForwardedContent.Attachments
 	}
 }

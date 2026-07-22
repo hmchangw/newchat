@@ -17,7 +17,9 @@ const baseColumns = "room_id, created_at, message_id, thread_room_id, sender, " 
 	"type, sys_msg_data, site_id, edited_at, updated_at, pinned_at, " +
 	"enc_payload, enc_meta"
 
-const messageByRoomQuery = "SELECT " + baseColumns + " FROM messages_by_room"
+// forwarded lives only on messages_by_room (the room-list preview reads it), so it is
+// appended here rather than in the shared baseColumns (messages_by_id has no such column).
+const messageByRoomQuery = "SELECT " + baseColumns + ", forwarded FROM messages_by_room"
 
 // startBucketFromCursor returns the walk's start bucket and any in-bucket pageState from the cursor.
 // Out-of-range cursor buckets are rejected to prevent tampered cursors from consuming maxBuckets empty reads.

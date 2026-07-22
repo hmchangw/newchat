@@ -160,6 +160,30 @@ func TestHistoryService_RoomsGet_ContentPreviewTrimmed(t *testing.T) {
 	assert.NotEmpty(t, resp.Rooms["r1"].Content)
 }
 
+func TestHistoryService_RoomsGet_EmptyForwardPreviewLabel(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "", CreatedAt: roomLastMsgAt, Forwarded: &models.ForwardedMessage{MessageID: "src"}}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "Forwarded a message", resp.Rooms["r1"].Content)
+}
+
+func TestHistoryService_RoomsGet_ForwardWithContentPreviewsContent(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "look at this", CreatedAt: roomLastMsgAt, Forwarded: &models.ForwardedMessage{MessageID: "src"}}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "look at this", resp.Rooms["r1"].Content)
+}
+
 func TestHistoryService_RoomsGet_EmptyRoomIDs(t *testing.T) {
 	svc, _, _ := newRoomsService(t)
 	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: nil})

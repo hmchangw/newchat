@@ -90,6 +90,16 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			thread_parent_id         TEXT,
 			thread_parent_created_at TIMESTAMP
 		)`, keyspace),
+		fmt.Sprintf(`CREATE TYPE IF NOT EXISTS %s."ForwardedMessage" (
+			message_id   TEXT,
+			room_id      TEXT,
+			sender       FROZEN<"Participant">,
+			created_at   TIMESTAMP,
+			msg          TEXT,
+			mentions     SET<FROZEN<"Participant">>,
+			attachments  LIST<BLOB>,
+			message_link TEXT
+		)`, keyspace),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.messages_by_room (
 			room_id               TEXT,
 			bucket                BIGINT,
@@ -113,6 +123,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			forwarded             FROZEN<"ForwardedMessage">,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
@@ -281,6 +292,39 @@ func TestCassandraStore_SaveMessage(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "r-1", gotRoomID)
 	})
+}
+
+func TestCassandraStore_SaveMessage_Forwarded(t *testing.T) {
+	cassSession := setupCassandra(t)
+	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	sender := &cassParticipant{ID: "u-1", EngName: "Alice Wang", Account: "alice"}
+	// Empty content — the preview path renders the "Forwarded a message" label.
+	msg := &model.Message{
+		ID: "m-fwd", RoomID: "r-1", UserID: "u-1", UserAccount: "alice",
+		Content:   "",
+		CreatedAt: now,
+		Attachments: [][]byte{[]byte(`{"id":"f1"}`)}, // content-empty forwards still need a body to pass gatekeeper; storage doesn't care
+		Forwarded: &cassandra.ForwardedMessage{
+			MessageID: "src-1", RoomID: "src-room",
+			Sender: cassandra.Participant{ID: "u-9", Account: "frank"},
+			Msg:    "the original", CreatedAt: now.Add(-time.Hour),
+		},
+	}
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	b := msgbucket.New(24 * time.Hour).Of(now)
+	var got cassandra.ForwardedMessage
+	err := cassSession.Query(
+		`SELECT forwarded FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		"r-1", b, now, "m-fwd",
+	).Scan(&got)
+	require.NoError(t, err)
+	assert.Equal(t, "src-1", got.MessageID)
+	assert.Equal(t, "frank", got.Sender.Account)
+	assert.Equal(t, "the original", got.Msg)
 }
 
 func TestCassandraStore_SaveThreadMessage(t *testing.T) {

@@ -316,6 +316,7 @@ Cassandra projection).
 | `type` | string | Optional. System-message type. |
 | `sysMsgData` | string | Optional. Base64-encoded raw JSON payload for system messages. |
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Optional. |
+| `forwarded` | [ForwardedMessage](../client-api.md#forwardedmessage) | Optional. Present when the message is a forward. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](../client-api.md#participant) | Optional. |
 

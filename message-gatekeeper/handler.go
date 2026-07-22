@@ -247,6 +247,10 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid quoted parent message ID %q: must be a 20-char base62 string", req.QuotedParentMessageID))
 	}
 
+	if req.ForwardedFromMessageID != "" && !idgen.IsValidMessageID(req.ForwardedFromMessageID) {
+		return nil, errcode.BadRequest(fmt.Sprintf("invalid forwarded-from message ID %q: must be a 20-char base62 string", req.ForwardedFromMessageID))
+	}
+
 	// A message with attachments may carry empty content.
 	if req.Content == "" && len(req.Attachments) == 0 {
 		return nil, errcode.BadRequest("content must not be empty")
@@ -330,6 +334,8 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID, "unverified", quotedUnverified)
 	}
 
+	forwardedSnapshot := h.resolveForwardSnapshot(ctx, account, roomID, siteID, req.ForwardedFromMessageID, now)
+
 	// Resolve the thread parent's createdAt + sender account server-side,
 	// best-effort: a fetch failure ships the event without the values (each
 	// consumer falls back to a store it owns), so a Cassandra outage never blocks
@@ -371,6 +377,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		ThreadParentMessageCreatedAt: threadParentCreatedAt,
 		TShow:                        tshow,
 		QuotedParentMessage:          quotedSnapshot,
+		Forwarded:                    forwardedSnapshot,
 		Attachments:                  req.Attachments,
 	}
 
@@ -477,6 +484,38 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 		return nil, false, cerr
 	}
 	return snap, false, nil
+}
+
+// resolveForwardSnapshot resolves the forwarded source into a snapshot. Unlike a
+// quote, an unresolvable source is NOT a hard fail — it degrades to a placeholder
+// marker so the forward still ships (a forward may legitimately reference a source
+// the sender's room can't authoritatively fetch). Reuses the by-id parent fetch.
+func (h *Handler) resolveForwardSnapshot(ctx context.Context, account, roomID, siteID, forwardedFromMessageID string, now time.Time) *cassandra.ForwardedMessage {
+	if forwardedFromMessageID == "" {
+		return nil
+	}
+	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, forwardedFromMessageID)
+	if err != nil || snap == nil {
+		slog.WarnContext(ctx, "forwarded-source fetch failed; using placeholder snapshot",
+			"request_id", natsutil.RequestIDFromContext(ctx), "forwarded_id", forwardedFromMessageID, "error", err)
+		return &cassandra.ForwardedMessage{
+			MessageID:   forwardedFromMessageID,
+			RoomID:      roomID,
+			CreatedAt:   now,
+			Msg:         quotedParentUnavailablePlaceholder,
+			MessageLink: messageLink(h.chatBaseURL, roomID, forwardedFromMessageID),
+		}
+	}
+	return &cassandra.ForwardedMessage{
+		MessageID:          snap.MessageID,
+		RoomID:             snap.RoomID,
+		Sender:             snap.Sender,
+		CreatedAt:          snap.CreatedAt,
+		Msg:                snap.Msg,
+		Mentions:           snap.Mentions,
+		DecodedAttachments: snap.DecodedAttachments,
+		MessageLink:        snap.MessageLink,
+	}
 }
 
 // quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a
