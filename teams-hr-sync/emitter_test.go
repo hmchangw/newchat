@@ -9,14 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 	gomock "go.uber.org/mock/gomock"
 
-	"github.com/hmchangw/chat/pkg/hrstore"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
 
 func TestDirectEmitter_UpsertsEmployeesAndConvertedUsers(t *testing.T) {
-	store := hrstore.NewMockStore(gomock.NewController(t))
+	store := NewMockWriteStore(gomock.NewController(t))
 	e := directEmitter{store: store, converter: transform.DefaultConverter{}}
 
 	diff := diffResult{
@@ -42,7 +41,7 @@ func TestDirectEmitter_UpsertsEmployeesAndConvertedUsers(t *testing.T) {
 }
 
 func TestDirectEmitter_QuitsWhenPresent(t *testing.T) {
-	store := hrstore.NewMockStore(gomock.NewController(t))
+	store := NewMockWriteStore(gomock.NewController(t))
 	e := directEmitter{store: store, converter: transform.DefaultConverter{}}
 
 	store.EXPECT().QuitTeamsEmployees(gomock.Any(), []string{"eve"}).Return(nil)
@@ -53,7 +52,7 @@ func TestDirectEmitter_QuitsWhenPresent(t *testing.T) {
 }
 
 func TestDirectEmitter_SkipsEmptyDiff(t *testing.T) {
-	store := hrstore.NewMockStore(gomock.NewController(t)) // no EXPECT — any call fails the test
+	store := NewMockWriteStore(gomock.NewController(t)) // no EXPECT — any call fails the test
 	e := directEmitter{store: store, converter: transform.DefaultConverter{}}
 
 	n, err := e.emit(context.Background(), diffResult{})
@@ -63,7 +62,7 @@ func TestDirectEmitter_SkipsEmptyDiff(t *testing.T) {
 
 func TestDirectEmitter_UpsertErrorAborts(t *testing.T) {
 	boom := errors.New("mongo down")
-	store := hrstore.NewMockStore(gomock.NewController(t))
+	store := NewMockWriteStore(gomock.NewController(t))
 	e := directEmitter{store: store, converter: transform.DefaultConverter{}}
 
 	store.EXPECT().UpsertEmployees(gomock.Any(), gomock.Any()).Return(boom)
@@ -91,7 +90,7 @@ func TestRunDirectSync_ModePicksEmitter(t *testing.T) {
 		groups:  map[string]*msgraph.GroupProfile{"g1": {ID: "g1", DisplayName: "Engineering"}},
 		members: map[string][]msgraph.GraphUser{"g1": {{ID: "u1", UserPrincipalName: "alice@corp.com"}}},
 	}
-	store := hrstore.NewMockStore(gomock.NewController(t))
+	store := NewMockWriteStore(gomock.NewController(t))
 	store.EXPECT().UpsertEmployees(gomock.Any(), gomock.Len(1)).Return(nil)
 	store.EXPECT().UpsertUserIdentities(gomock.Any(), gomock.Any()).Return(nil)
 	emit := directEmitter{store: store, converter: transform.DefaultConverter{}}

@@ -16,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/hmchangw/chat/pkg/hrstore"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -148,7 +147,7 @@ func runStreamMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 
 // runDirectMode connects only the migration target Mongo (never the
 // diff-state store, never NATS) and writes the full collected set straight
-// through hrstore.
+// through the WriteStore.
 func runDirectMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string) (runStats, error) {
 	writeClient, err := mongoutil.Connect(ctx, cfg.DirectWriteURI, cfg.DirectWriteUsername, cfg.DirectWritePassword)
 	if err != nil {
@@ -157,7 +156,7 @@ func runDirectMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 	defer disconnect(writeClient)
 
 	emit := directEmitter{
-		store:     hrstore.NewMongoStore(writeClient.Database(cfg.DirectWriteDB)),
+		store:     newMongoWriteStore(writeClient.Database(cfg.DirectWriteDB)),
 		converter: transform.DefaultConverter{},
 	}
 	return runDirectSync(ctx, graph, mapper, emit, groups, siteOverrides, cfg.GraphPageSize)

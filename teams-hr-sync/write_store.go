@@ -13,48 +13,42 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-//go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main
+//go:generate mockgen -source=write_store.go -destination=mock_write_store_test.go -package=main
 
-const (
-	EmployeeCollection = "hr_employee"
-	UserCollection     = "users"
-)
+const usersCollection = "users"
 
-// Store is the write surface this worker persists the HR feed into. Owned by
-// this service — each consumer implements its own; there is no shared store.
-type Store interface {
-	// UpsertEmployees replaces hr_employee docs keyed by employeeId.
+// WriteStore is the direct-mode write surface (the migration/backfill path that
+// bypasses the JetStream feed). Owned by this service — each HR-feed consumer
+// implements its own; there is no shared store package.
+type WriteStore interface {
 	UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error
-	// UpsertUserIdentities upserts users by employeeId, writing IDENTITY FIELDS
-	// ONLY (account, siteId, engName, chineseName, employeeId). It must never
-	// touch roles/services/password/deactivated/status fields — users is the
-	// live auth store.
+	// UpsertUserIdentities upserts IDENTITY FIELDS ONLY (account, siteId,
+	// engName, chineseName, employeeId); it must never touch
+	// roles/services/password on the live auth store.
 	UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error
-	// QuitTeamsEmployees deletes hr_employee rows for the given accounts.
-	// users stays untouched (the user lifecycle is not the HR feed's to end).
 	QuitTeamsEmployees(ctx context.Context, accounts []string) error
 }
 
-// MongoStore implements Store over the target write database.
-type MongoStore struct {
+// mongoWriteStore implements WriteStore over the migration target database.
+type mongoWriteStore struct {
 	employees *mongoutil.Collection[model.IEmployee]
 	users     *mongoutil.Collection[model.User]
 }
 
-func newMongoStore(db *mongo.Database) *MongoStore {
-	return &MongoStore{
-		employees: mongoutil.NewCollection[model.IEmployee](db.Collection(EmployeeCollection)),
-		users:     mongoutil.NewCollection[model.User](db.Collection(UserCollection)),
+func newMongoWriteStore(db *mongo.Database) *mongoWriteStore {
+	return &mongoWriteStore{
+		employees: mongoutil.NewCollection[model.IEmployee](db.Collection(hrEmployeeCollection)),
+		users:     mongoutil.NewCollection[model.User](db.Collection(usersCollection)),
 	}
 }
 
-func (s *MongoStore) UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error {
+func (s *mongoWriteStore) UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error {
 	rows := make([]model.IEmployee, 0, len(employees))
 	for i := range employees {
 		rows = append(rows, employees[i].IEmployee)
 	}
-	// _id = employeeId (the stable per-employee id): keys the upsert and gives
-	// the row a string _id from the filter — the wire strips IEmployee.ID.
+	// _id = employeeId (the stable per-employee id): keys the upsert; the wire
+	// strips IEmployee.ID.
 	if _, err := s.employees.BulkUpsertByID(ctx, rows, func(e model.IEmployee) string {
 		return e.EmployeeID
 	}); err != nil {
@@ -63,10 +57,10 @@ func (s *MongoStore) UpsertEmployees(ctx context.Context, employees []model.IEmp
 	return nil
 }
 
-// UpsertUserIdentities $sets identity fields only; a full-doc replace would
-// wipe roles/password/services on the live auth store, so the update doc is
-// built by hand and never derived from the wire struct.
-func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error {
+// UpsertUserIdentities $sets identity fields only; a full-doc replace would wipe
+// roles/password/services on the live auth store, so the update doc is built by
+// hand and never derived from the wire struct.
+func (s *mongoWriteStore) UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error {
 	models := make([]mongo.WriteModel, 0, len(users))
 	for i := range users {
 		u := &users[i].User
@@ -94,7 +88,7 @@ func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUs
 	return nil
 }
 
-func (s *MongoStore) QuitTeamsEmployees(ctx context.Context, accounts []string) error {
+func (s *mongoWriteStore) QuitTeamsEmployees(ctx context.Context, accounts []string) error {
 	if _, err := s.employees.Raw().DeleteMany(ctx, bson.M{
 		"account": bson.M{"$in": accounts},
 	}); err != nil {
