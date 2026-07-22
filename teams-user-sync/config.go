@@ -6,16 +6,11 @@ package main
 // Forbid). Credentials and connection strings are required with no default
 // (fail fast); operational knobs default to sane dev values.
 type config struct {
-	TeamsTenantID     string `env:"TEAMS_TENANT_ID,required,notEmpty"`
-	TeamsClientID     string `env:"TEAMS_CLIENT_ID,required,notEmpty"`
-	TeamsClientSecret string `env:"TEAMS_CLIENT_SECRET,required,notEmpty"`
+	GraphTenantID     string `env:"GRAPH_TENANT_ID,required,notEmpty"`
+	GraphClientID     string `env:"GRAPH_CLIENT_ID,required,notEmpty"`
+	GraphClientSecret string `env:"GRAPH_CLIENT_SECRET,required,notEmpty"`
 	// GraphPageSize is Graph's $top per page (max 999).
 	GraphPageSize int `env:"GRAPH_PAGE_SIZE" envDefault:"500"`
-	// GraphBaseURL / GraphTokenURL override the Graph API and OAuth2 token
-	// endpoints (integration tests, on-prem gateways); empty means the public
-	// Microsoft Graph.
-	GraphBaseURL  string `env:"GRAPH_BASE_URL" envDefault:""`
-	GraphTokenURL string `env:"GRAPH_TOKEN_URL" envDefault:""`
 	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Defaults to
 	// true because this job runs on-prem behind a TLS-intercepting proxy that
 	// presents its own certificate; set it to false where Graph presents a
@@ -27,12 +22,20 @@ type config struct {
 	// env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
 
-	// One replica set serves both lanes: the teams_user diff + hr lookup read
-	// through a secondary-preferred client and the teams_user upserts write
-	// through a primary client, so they share one URI, DB and credential pair —
-	// only the read preference differs.
-	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
-	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// Two Mongo clients, one per lane: the teams_user diff + hr lookup read
+	// through a secondary-preferred read client, the teams_user upserts write
+	// through a primary write client. Each lane has its own URI, DB and
+	// credential pair so read and write can point at different clusters (they
+	// may be identical in dev).
+	MongoRead  mongoConfig `envPrefix:"MONGO_READ_"`
+	MongoWrite mongoConfig `envPrefix:"MONGO_WRITE_"`
+}
+
+// mongoConfig is one Mongo lane's connection settings. The connection string
+// is required with no default; credentials default to empty.
+type mongoConfig struct {
+	URI      string `env:"URI,required,notEmpty"`
+	DB       string `env:"DB" envDefault:"chat"`
+	Username string `env:"USERNAME" envDefault:""`
+	Password string `env:"PASSWORD" envDefault:""`
 }

@@ -11,10 +11,11 @@ import (
 // setRequiredEnv sets the vars without envDefault; tests override as needed.
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("TEAMS_TENANT_ID", "tenant")
-	t.Setenv("TEAMS_CLIENT_ID", "client")
-	t.Setenv("TEAMS_CLIENT_SECRET", "secret")
-	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
+	t.Setenv("GRAPH_TENANT_ID", "tenant")
+	t.Setenv("GRAPH_CLIENT_ID", "client")
+	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
+	t.Setenv("MONGO_READ_URI", "mongodb://read:27017")
+	t.Setenv("MONGO_WRITE_URI", "mongodb://write:27017")
 }
 
 func TestConfig_Defaults(t *testing.T) {
@@ -24,39 +25,53 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 500, cfg.GraphPageSize)
-	assert.Empty(t, cfg.GraphBaseURL)
-	assert.Empty(t, cfg.GraphTokenURL)
 	assert.True(t, cfg.GraphTLSInsecureSkipVerify, "TLS verification is skipped by default (on-prem behind a TLS-intercepting proxy)")
 	assert.Empty(t, cfg.GraphProxyURL, "GRAPH_PROXY_URL defaults to empty (fall back to HTTPS_PROXY/HTTP_PROXY)")
-	assert.Equal(t, "chat", cfg.MongoDB)
-	assert.Equal(t, "tenant", cfg.TeamsTenantID)
-	assert.Equal(t, "mongodb://mongo:27017", cfg.MongoURI)
+	assert.Equal(t, "tenant", cfg.GraphTenantID)
+
+	assert.Equal(t, mongoConfig{URI: "mongodb://read:27017", DB: "chat"}, cfg.MongoRead)
+	assert.Equal(t, mongoConfig{URI: "mongodb://write:27017", DB: "chat"}, cfg.MongoWrite)
 }
 
 func TestConfig_Overrides(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("GRAPH_PAGE_SIZE", "100")
-	t.Setenv("GRAPH_BASE_URL", "http://graph.local")
-	t.Setenv("GRAPH_TOKEN_URL", "http://token.local")
 	t.Setenv("GRAPH_PROXY_URL", "http://proxy.corp:8080")
 	t.Setenv("GRAPH_TLS_INSECURE_SKIP_VERIFY", "false")
-	t.Setenv("MONGO_DB", "replica")
+	t.Setenv("MONGO_READ_DB", "readdb")
+	t.Setenv("MONGO_READ_USERNAME", "reader")
+	t.Setenv("MONGO_READ_PASSWORD", "readpw")
+	t.Setenv("MONGO_WRITE_DB", "writedb")
+	t.Setenv("MONGO_WRITE_USERNAME", "writer")
+	t.Setenv("MONGO_WRITE_PASSWORD", "writepw")
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
 
 	assert.Equal(t, 100, cfg.GraphPageSize)
-	assert.Equal(t, "http://graph.local", cfg.GraphBaseURL)
-	assert.Equal(t, "http://token.local", cfg.GraphTokenURL)
 	assert.Equal(t, "http://proxy.corp:8080", cfg.GraphProxyURL)
 	assert.False(t, cfg.GraphTLSInsecureSkipVerify, "GRAPH_TLS_INSECURE_SKIP_VERIFY=false overrides the true default")
-	assert.Equal(t, "replica", cfg.MongoDB)
+
+	assert.Equal(t, mongoConfig{URI: "mongodb://read:27017", DB: "readdb", Username: "reader", Password: "readpw"}, cfg.MongoRead)
+	assert.Equal(t, mongoConfig{URI: "mongodb://write:27017", DB: "writedb", Username: "writer", Password: "writepw"}, cfg.MongoWrite)
 }
 
 func TestConfig_MissingRequiredFails(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("TEAMS_CLIENT_SECRET", "") // notEmpty rejects the empty string
+	tests := []struct {
+		name  string
+		unset string
+	}{
+		{"missing client secret", "GRAPH_CLIENT_SECRET"},
+		{"missing read uri", "MONGO_READ_URI"},
+		{"missing write uri", "MONGO_WRITE_URI"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(tt.unset, "") // required,notEmpty rejects the empty string
 
-	_, err := env.ParseAs[config]()
-	require.Error(t, err)
+			_, err := env.ParseAs[config]()
+			require.Error(t, err)
+		})
+	}
 }

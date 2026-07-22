@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -10,16 +11,18 @@ import (
 )
 
 // Syncer runs updateUsers: walk Graph /users page by page, insert the users
-// missing from teams_user that have an HR site assignment.
+// missing from teams_user, joined with their HR data (siteId, engName, mail)
+// when an hr_employee row exists.
 type Syncer struct {
 	store    Store
 	graph    msgraph.UserLister
 	pageSize int
+	logger   *slog.Logger
 }
 
 // NewSyncer builds a Syncer. pageSize is Graph's $top.
-func NewSyncer(store Store, graph msgraph.UserLister, pageSize int) *Syncer {
-	return &Syncer{store: store, graph: graph, pageSize: pageSize}
+func NewSyncer(store Store, graph msgraph.UserLister, pageSize int, logger *slog.Logger) *Syncer {
+	return &Syncer{store: store, graph: graph, pageSize: pageSize, logger: logger}
 }
 
 // RunStats summarizes one UpdateUsers run for the end-of-run log line.
@@ -28,7 +31,7 @@ type RunStats struct {
 	Seen        int // users returned by Graph
 	Existing    int // already present in teams_user, untouched
 	InvalidUPN  int // UPN without a local part and domain; never syncable
-	HRUnmatched int // no hr_employee.account match; retried next run
+	HRUnmatched int // no hr_employee.account match; upserted with empty HR fields
 	Upserted    int // written to teams_user
 }
 
@@ -73,7 +76,12 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 			stats.InvalidUPN++
 			continue
 		}
-		candidates = append(candidates, model.TeamsUser{ID: u.ID, UPN: u.UserPrincipalName, Account: account})
+		candidates = append(candidates, model.TeamsUser{
+			ID:          u.ID,
+			UPN:         u.UserPrincipalName,
+			Account:     account,
+			DisplayName: u.DisplayName,
+		})
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -83,28 +91,35 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	for _, c := range candidates {
 		accounts = append(accounts, c.Account)
 	}
-	siteIDs, err := s.store.HRSiteIDs(ctx, accounts)
+	hrUsers, err := s.store.HRUsers(ctx, accounts)
 	if err != nil {
-		return fmt.Errorf("resolve hr site ids: %w", err)
+		return fmt.Errorf("resolve hr users: %w", err)
 	}
-
-	merged := make([]model.TeamsUser, 0, len(candidates))
-	for _, c := range candidates {
-		siteID, ok := siteIDs[c.Account]
+	matched := 0
+	for i := range candidates {
+		c := &candidates[i]
+		hr, ok := hrUsers[c.Account]
 		if !ok {
 			stats.HRUnmatched++
+			// Log the Graph object id (a GUID), not the UPN-derived account, to
+			// keep human-readable identifiers out of logs at directory scale.
+			s.logger.Info("hr id not found", "userId", c.ID)
 			continue
 		}
-		c.SiteID = siteID
-		merged = append(merged, c)
+		matched++
+		c.SiteID = hr.SiteID
+		c.EngName = hr.EngName
+		c.Mail = hr.Mail
+		if c.SiteID == "" {
+			s.logger.Warn("hr siteId is empty", "userId", c.ID)
+		}
 	}
-	if len(merged) == 0 {
-		return nil
-	}
-	if err := s.store.UpsertTeamsUsers(ctx, merged); err != nil {
+	s.logger.Info("hr site ids lookup result",
+		"requested", len(accounts), "matched", matched, "unmatched", len(accounts)-matched)
+	if err := s.store.UpsertTeamsUsers(ctx, candidates); err != nil {
 		return fmt.Errorf("upsert teams users: %w", err)
 	}
-	stats.Upserted += len(merged)
+	stats.Upserted += len(candidates)
 	return nil
 }
 

@@ -55,7 +55,7 @@ func NewDirectoryClient(cfg Config, opts ...Option) DirectoryReader {
 // use. App-only (User.Read.All).
 type UserLister interface {
 	// ListUsers calls fn once per page of up to pageSize users
-	// (GET /users?$select=id,userPrincipalName&$top={pageSize}), following
+	// (GET /users?$select=id,userPrincipalName,displayName&$top={pageSize}), following
 	// @odata.nextLink until the directory is exhausted. A non-nil error from
 	// fn aborts the walk.
 	ListUsers(ctx context.Context, pageSize int, fn func([]GraphUser) error) error
@@ -73,9 +73,10 @@ func NewUserListerClient(cfg Config, opts ...Option) (UserLister, error) {
 	return g, nil
 }
 
-// GraphUser is the subset of a Graph user resource we decode. The name fields
-// are populated only by walks whose $select requests them (ListGroupMembers);
-// ResolveAccountIDs/ListUsers select id+userPrincipalName only.
+// GraphUser is the subset of a Graph user resource we decode. The name and
+// profile fields are populated only by walks whose $select requests them
+// (ListGroupMembers selects the full set, ListUsers additionally selects
+// displayName); ResolveAccountIDs selects id+userPrincipalName only.
 type GraphUser struct {
 	ID                string `json:"id"`
 	UserPrincipalName string `json:"userPrincipalName"`
@@ -550,7 +551,7 @@ func (g *graphClient) ListUsers(ctx context.Context, pageSize int, fn func([]Gra
 		return fmt.Errorf("acquire graph token: %w", err)
 	}
 	q := url.Values{}
-	q.Set("$select", "id,userPrincipalName")
+	q.Set("$select", "id,userPrincipalName,displayName")
 	q.Set("$top", strconv.Itoa(pageSize))
 	origin, err := url.Parse(g.baseURL)
 	if err != nil {

@@ -46,38 +46,31 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoRead.URI, cfg.MongoRead.Username, cfg.MongoRead.Password)
 	if err != nil {
 		return fmt.Errorf("connect mongo read client: %w", err)
 	}
 	defer disconnect(readClient)
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWrite.URI, cfg.MongoWrite.Username, cfg.MongoWrite.Password)
 	if err != nil {
 		return fmt.Errorf("connect mongo write client: %w", err)
 	}
 	defer disconnect(writeClient)
 
-	var opts []msgraph.Option
-	if cfg.GraphBaseURL != "" {
-		opts = append(opts, msgraph.WithBaseURL(cfg.GraphBaseURL))
-	}
-	if cfg.GraphTokenURL != "" {
-		opts = append(opts, msgraph.WithTokenURL(cfg.GraphTokenURL))
-	}
 	lister, err := msgraph.NewUserListerClient(msgraph.Config{
-		TenantID:              cfg.TeamsTenantID,
-		ClientID:              cfg.TeamsClientID,
-		ClientSecret:          cfg.TeamsClientSecret,
+		TenantID:              cfg.GraphTenantID,
+		ClientID:              cfg.GraphClientID,
+		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
-	}, opts...)
+	})
 	if err != nil {
 		return fmt.Errorf("build user lister client: %w", err)
 	}
-	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
-	syncer := NewSyncer(store, lister, cfg.GraphPageSize)
-
+	store := newMongoStore(readClient.Database(cfg.MongoRead.DB), writeClient.Database(cfg.MongoWrite.DB))
 	logger := slog.With("requestId", idgen.GenerateRequestID())
+	syncer := NewSyncer(store, lister, cfg.GraphPageSize, logger)
+
 	logger.Info("teams user sync started")
 	start := time.Now()
 	stats, err := syncer.UpdateUsers(ctx)

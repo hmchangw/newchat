@@ -21,11 +21,13 @@ type teamsUserID struct {
 	ID string `bson:"_id"`
 }
 
-// hrRow is the projection decoded from hr_employee: the account and its site
-// assignment.
+// hrRow is the projection decoded from hr_employee: the account, its site
+// assignment, English name, and mail.
 type hrRow struct {
 	Account string `bson:"account"`
 	SiteID  string `bson:"siteId"`
+	EngName string `bson:"engName"`
+	Mail    string `bson:"mail"`
 }
 
 // mongoStore implements Store over two databases: readDB (teams_user diff +
@@ -63,19 +65,19 @@ func (s *mongoStore) ExistingIDs(ctx context.Context, ids []string) (map[string]
 	return out, nil
 }
 
-func (s *mongoStore) HRSiteIDs(ctx context.Context, accounts []string) (map[string]string, error) {
-	out := make(map[string]string, len(accounts))
+func (s *mongoStore) HRUsers(ctx context.Context, accounts []string) (map[string]hrUser, error) {
+	out := make(map[string]hrUser, len(accounts))
 	if len(accounts) == 0 {
 		return out, nil
 	}
 	rows, err := s.readHR.FindMany(ctx,
 		bson.M{"account": bson.M{"$in": accounts}},
-		mongoutil.WithProjection(bson.M{"account": 1, "siteId": 1}))
+		mongoutil.WithProjection(bson.M{"account": 1, "siteId": 1, "engName": 1, "mail": 1}))
 	if err != nil {
 		return nil, fmt.Errorf("find hr accounts: %w", err)
 	}
 	for _, r := range rows {
-		out[r.Account] = r.SiteID
+		out[r.Account] = hrUser{SiteID: r.SiteID, EngName: r.EngName, Mail: r.Mail}
 	}
 	return out, nil
 }

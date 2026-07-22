@@ -187,6 +187,8 @@ func (s *syncer) run(ctx context.Context) error {
 
 // effectiveFrom is the user's watermark, falling back to the configured
 // default for users that have never synced.
+//
+//nolint:gocritic // hugeParam: u is read once per user on a batch path; passing by value keeps the accessor pure.
 func (s *syncer) effectiveFrom(u model.TeamsUser) time.Time {
 	if u.From != nil {
 		return *u.From
@@ -197,6 +199,8 @@ func (s *syncer) effectiveFrom(u model.TeamsUser) time.Time {
 // syncUser fetches one user's chat window, upserts every chat it lists, and
 // advances the user's watermark only after everything succeeded — a failed user
 // keeps its old watermark and is retried next run.
+//
+//nolint:gocritic // hugeParam: u is consumed once per user on a batch path; passing by value keeps the worker pure.
 func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, cache map[string]cachedUser, sum *summary) error {
 	graphChats, err := s.graph.ListUserChats(ctx, u.ID, s.effectiveFrom(u), to)
 	if err != nil {

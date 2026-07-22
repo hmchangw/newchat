@@ -21,15 +21,3 @@ func newFakeTokenServer(t *testing.T) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
-
-// setRunEnv wires the environment run() reads: the required Teams credentials
-// (via setRequiredEnv), both Mongo URIs and DB name pointed at an isolated test
-// database, and the Graph/token endpoint overrides.
-func setRunEnv(t *testing.T, mongoURI, dbName, graphURL, tokenURL string) {
-	t.Helper()
-	setRequiredEnv(t)
-	t.Setenv("MONGO_URI", mongoURI)
-	t.Setenv("MONGO_DB", dbName)
-	t.Setenv("GRAPH_BASE_URL", graphURL)
-	t.Setenv("GRAPH_TOKEN_URL", tokenURL)
-}
