@@ -915,9 +915,10 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 
 ##### LastMessage
 
-A room's most-recent **non-deleted** message, resolved at read time and preview-trimmed.
-Soft-deleted, system, and quoted-reply messages are skipped (walked back to an earlier
-survivor); a room with only such messages omits `lastMessage`.
+A room's most-recent **eligible** message, resolved at read time and preview-trimmed.
+Eligible = not soft-deleted, not a system message, not a quoted reply — an ineligible
+tail is walked back to an earlier survivor; a room with only ineligible messages omits
+`lastMessage`.
 
 | Field | Type | Notes |
 |---|---|---|

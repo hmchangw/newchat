@@ -17,7 +17,7 @@ const (
 	maxRoomsGetConcurrency  = 16  // mirrors cassrepo.maxConcurrentIDReads
 	lastMessagePreviewRunes = 256 // room-list snippet cap
 	lastMsgWalkPageSize     = 50  // messages scanned per walk-back page
-	lastMsgWalkMaxPages     = 5   // ponytail: cap the deleted-tail walk; a room with >250 trailing deletes just shows no last message
+	lastMsgWalkMaxPages     = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -107,8 +107,9 @@ func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now
 				CreatedAt: m.CreatedAt.UTC().UnixMilli(),
 			}, true
 		}
-		// Whole page deleted. A short page means the walk is exhausted (no older
-		// messages) — stop. Otherwise page again strictly before the oldest one seen.
+		// Whole page ineligible (deleted/system/quoted). A short page means the walk
+		// is exhausted (no older messages) — stop. Otherwise page again strictly
+		// before the oldest one seen.
 		if len(page.Data) < lastMsgWalkPageSize {
 			return models.LastMessage{}, false
 		}
