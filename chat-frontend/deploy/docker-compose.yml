@@ -20,6 +20,9 @@ services:
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-chat-frontend}
       OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-0.0.1}
       OTEL_DEPLOYMENT_ENVIRONMENT: ${OTEL_DEPLOYMENT_ENVIRONMENT:-local}
+      # Mirrors portal-service's BOT_LOGIN_ENABLED; keep the two in sync when
+      # exercising the disabled-flag path locally.
+      BOT_LOGIN_ENABLED: ${BOT_LOGIN_ENABLED:-true}
     ports:
       - "3000:80"
     networks:

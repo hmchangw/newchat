@@ -40,3 +40,12 @@ export const OTEL_DEPLOYMENT_ENVIRONMENT =
   runtime.OTEL_DEPLOYMENT_ENVIRONMENT ||
   import.meta.env.VITE_OTEL_DEPLOYMENT_ENVIRONMENT ||
   'local'
+
+// Mirrors portal-service's BOT_LOGIN_ENABLED flag (surfaced via /api/settings
+// as botLoginEnabled). Default true: a missing flag (old portal, or a deploy
+// that hasn't wired the var yet) must not silently lock out bots that were
+// working.
+export const BOT_LOGIN_ENABLED = boolConfig(
+  runtime.BOT_LOGIN_ENABLED ?? import.meta.env.VITE_BOT_LOGIN_ENABLED,
+  true,
+)

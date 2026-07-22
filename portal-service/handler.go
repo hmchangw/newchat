@@ -48,10 +48,12 @@ func parseSiteURLs(raw string) (map[string]siteURL, error) {
 }
 
 // settingsResponse is the deployment config served to the frontend: the
-// backend API generation and the OTEL base URL (client appends /trace, /log).
+// backend API generation, the OTEL base URL (client appends /trace, /log),
+// and whether bot-role accounts may log in through this client.
 type settingsResponse struct {
-	APIVersion  string `json:"apiVersion"`
-	OTELBaseURL string `json:"otelBaseUrl"`
+	APIVersion      string `json:"apiVersion"`
+	OTELBaseURL     string `json:"otelBaseUrl"`
+	BotLoginEnabled bool   `json:"botLoginEnabled"`
 }
 
 // parseOTELBaseURL fails startup unless the value is an absolute http(s) URL
@@ -282,6 +284,13 @@ func (h *PortalHandler) HandleLogin(c *gin.Context) {
 		slog.WarnContext(ctx, "login denied", "account", req.Username, "reason", "invalid_credentials")
 		errhttp.Write(ctx, c, errcode.Unauthenticated("invalid credentials",
 			errcode.WithReason(errcode.BotplatformInvalidCredentials)))
+		return
+	}
+
+	if !h.settings.BotLoginEnabled && model.ContainsBotRole(e.Roles) {
+		slog.WarnContext(ctx, "bot login denied by feature flag", "account", req.Username)
+		errhttp.Write(ctx, c, errcode.Forbidden("bot accounts cannot log in through this client",
+			errcode.WithReason(errcode.PortalBotLoginDisabled)))
 		return
 	}
 

@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
 )
 
@@ -114,7 +115,7 @@ func TestHandleLogin_Bot_HappyPath(t *testing.T) {
 	u := botUser(t, "abcdef1234567890x", "name.shortcode.bot", "site-a", "secret")
 	st.EXPECT().FindUserByAccount(gomock.Any(), "name.shortcode.bot").Return(u, nil)
 	st.EXPECT().InsertSession(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, s *session) error {
+		DoAndReturn(func(_ context.Context, s *session.Session) error {
 			assert.Equal(t, sessiontoken.Hash(rawToken), s.ID)
 			assert.Equal(t, u.ID, s.UserID)
 			assert.Equal(t, u.Account, s.Account)
@@ -123,7 +124,7 @@ func TestHandleLogin_Bot_HappyPath(t *testing.T) {
 			assert.Equal(t, int64(1_700_000_000_000), s.IssuedAt)
 			return nil
 		})
-	st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.ID, 100).Return(int64(0), nil)
+	st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.Account, 100).Return(int64(0), nil)
 
 	w := post(t, r, "/api/v1/login", map[string]string{"username": "name.shortcode.bot", "password": "secret"})
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
@@ -152,7 +153,7 @@ func TestHandleLogin_Admin_HappyPath(t *testing.T) {
 	}
 	st.EXPECT().FindUserByAccount(gomock.Any(), "p_admin").Return(u, nil)
 	st.EXPECT().InsertSession(gomock.Any(), gomock.Any()).Return(nil)
-	st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.ID, 100).Return(int64(0), nil)
+	st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.Account, 100).Return(int64(0), nil)
 
 	w := post(t, r, "/api/v1/login", map[string]string{"username": "p_admin", "password": "adminpass"})
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
@@ -173,7 +174,7 @@ func TestHandleLogin_ApiV1Path(t *testing.T) {
 	u := botUser(t, "user000000000000a", "x.y.bot", "site-a", "p")
 	st.EXPECT().FindUserByAccount(gomock.Any(), "x.y.bot").Return(u, nil)
 	st.EXPECT().InsertSession(gomock.Any(), gomock.Any()).Return(nil)
-	st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.ID, 100).Return(int64(0), nil)
+	st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.Account, 100).Return(int64(0), nil)
 
 	w := post(t, r, "/api/v1/login", map[string]string{"username": "x.y.bot", "password": "p"})
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -281,7 +282,7 @@ func TestHandleLogin_CapEviction(t *testing.T) {
 			u := botUser(t, "u1", "x.bot", "site-a", "p")
 			st.EXPECT().FindUserByAccount(gomock.Any(), "x.bot").Return(u, nil)
 			st.EXPECT().InsertSession(gomock.Any(), gomock.Any()).Return(nil)
-			st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.ID, tc.cap).Return(tc.evictedRet, nil)
+			st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.Account, tc.cap).Return(tc.evictedRet, nil)
 
 			w := post(t, r, "/api/v1/login", map[string]string{"username": "x.bot", "password": "p"})
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -293,7 +294,7 @@ func TestHandleValidate_HappyPath(t *testing.T) {
 	r, st, _ := newTestRouter(t)
 	rawToken := strings.Repeat("t", 43)
 	hash := sessiontoken.Hash(rawToken)
-	st.EXPECT().FindSessionByHash(gomock.Any(), hash).Return(&session{
+	st.EXPECT().FindSessionByHash(gomock.Any(), hash).Return(&session.Session{
 		ID:       hash,
 		UserID:   "u1",
 		Account:  "x.bot",
@@ -314,7 +315,7 @@ func TestHandleValidate_HappyPath(t *testing.T) {
 
 func TestHandleValidate_UnknownToken(t *testing.T) {
 	r, st, _ := newTestRouter(t)
-	st.EXPECT().FindSessionByHash(gomock.Any(), gomock.Any()).Return(nil, mongo.ErrNoDocuments)
+	st.EXPECT().FindSessionByHash(gomock.Any(), gomock.Any()).Return(nil, session.ErrNotFound)
 	w := post(t, r, "/api/v1/auth/validate", map[string]string{"authToken": "nope"})
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid_token")
@@ -498,7 +499,7 @@ func TestHandleLogin_DeactivatedAccountRejected(t *testing.T) {
 		// Deactivated defaults to false — active account.
 		st.EXPECT().FindUserByAccount(gomock.Any(), "active.bot").Return(u, nil)
 		st.EXPECT().InsertSession(gomock.Any(), gomock.Any()).Return(nil)
-		st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.ID, 100).Return(int64(0), nil)
+		st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.Account, 100).Return(int64(0), nil)
 
 		w := post(t, r, "/api/v1/login", map[string]string{"username": "active.bot", "password": "correct"})
 		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())

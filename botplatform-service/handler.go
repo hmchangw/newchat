@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/principal"
 	"github.com/hmchangw/chat/pkg/pwhash"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
 )
 
@@ -124,7 +125,7 @@ func (h *handler) HandleLogin(c *gin.Context) {
 		return
 	}
 	roleStrs := rolesToStrings(u.Roles) // shared by the session row and the me block
-	s := &session{
+	s := &session.Session{
 		ID:       sessiontoken.Hash(raw),
 		UserID:   u.ID,
 		Account:  u.Account,
@@ -140,7 +141,7 @@ func (h *handler) HandleLogin(c *gin.Context) {
 	// FIFO cap eviction: Skip-Sort-by-issuedAt lets Mongo return only over-cap
 	// rows, avoiding an extra CountSessions round-trip on every login.
 	if h.cfg.SessionsMaxPerAccount > 0 {
-		if _, err := h.store.DeleteSessionsBeyondCap(ctx, u.ID, h.cfg.SessionsMaxPerAccount); err != nil {
+		if _, err := h.store.DeleteSessionsBeyondCap(ctx, u.Account, h.cfg.SessionsMaxPerAccount); err != nil {
 			// Eviction is best-effort — log but don't fail the login.
 			slog.WarnContext(ctx, "evict sessions failed", "error", err)
 		}
@@ -196,7 +197,7 @@ func (h *handler) HandleValidate(c *gin.Context) {
 
 	s, err := h.store.FindSessionByHash(ctx, sessiontoken.Hash(req.AuthToken))
 	switch {
-	case errors.Is(err, mongo.ErrNoDocuments):
+	case errors.Is(err, session.ErrNotFound):
 		c.Set("validate_outcome", "invalid_token")
 		errhttp.Write(ctx, c, errInvalidToken)
 		return

@@ -57,6 +57,11 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+
+	// BotLoginEnabled gates portal's bot-role password login. Flip to false
+	// once the dedicated bot-devs client (which talks to botplatform directly)
+	// ships — then bot accounts can no longer log in via chat-frontend.
+	BotLoginEnabled bool `env:"BOT_LOGIN_ENABLED" envDefault:"true"`
 }
 
 func main() {
@@ -81,8 +86,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse OTEL base URL: %w", err)
 	}
-	settings := settingsResponse{APIVersion: cfg.APIVersion, OTELBaseURL: otelBaseURL}
-	slog.Info("settings config", "apiVersion", settings.APIVersion, "otelBaseUrl", settings.OTELBaseURL)
+	settings := settingsResponse{APIVersion: cfg.APIVersion, OTELBaseURL: otelBaseURL, BotLoginEnabled: cfg.BotLoginEnabled}
+	slog.Info("settings config", "apiVersion", settings.APIVersion, "otelBaseUrl", settings.OTELBaseURL, "botLoginEnabled", settings.BotLoginEnabled)
 
 	ctx := context.Background()
 

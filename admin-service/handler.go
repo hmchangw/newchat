@@ -16,18 +16,24 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/pwhash"
+	"github.com/hmchangw/chat/pkg/session"
 )
 
-// Handler wires the AdminStore and Config into HTTP handler methods.
+// Handler wires the AdminStore, session.Store, and Config into HTTP handler methods.
 type Handler struct {
-	store AdminStore
-	cfg   Config
+	store    AdminStore
+	sessions session.Store
+	cfg      Config
 }
 
-// newHandler constructs a Handler with the given store and config.
-func newHandler(store AdminStore, cfg Config) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{store: store, cfg: cfg}
+// newHandler constructs a Handler with the given stores and config.
+func newHandler(store AdminStore, sessions session.Store, cfg Config) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	return &Handler{store: store, sessions: sessions, cfg: cfg}
 }
+
+// nowMillis returns the current UTC time in unix milliseconds. Injected as a
+// package-level indirection so tests can stub without a shim on Handler.
+var nowMillis = func() int64 { return time.Now().UTC().UnixMilli() }
 
 // userView is the projection returned to callers — it deliberately excludes
 // the Services/bcrypt field so credential material never reaches the wire.
@@ -256,18 +262,45 @@ func (h *Handler) updateUser(c *gin.Context) {
 		return
 	}
 
-	// UserUpdate and updateUserRequest share an identical field layout, so the conversion is safe (staticcheck S1016).
-	if err := h.store.UpdateUser(ctx, h.cfg.SiteID, account, UserUpdate(req)); err != nil {
-		if errors.Is(err, ErrUserNotFound) {
-			errhttp.Write(ctx, c, errcode.NotFound("user not found",
-				errcode.WithReason(errcode.AdminUserNotFound)))
+	// Deactivation atomically flips the user and revokes every live session
+	// for the account in one Mongo transaction — a partial failure must not
+	// leave a disabled account with a still-valid session. Every other patch
+	// (name/roles) stays a plain, non-transactional update.
+	//
+	// Mixing deactivated=true with other field edits in the same PATCH is
+	// rejected: the deactivate branch would silently drop the other fields,
+	// and the client (admin console) sends deactivation as a distinct action,
+	// so mixed patches indicate a client bug. Reactivation (deactivated=false)
+	// combined with other fields goes through the normal UpdateUser branch
+	// below — no session revoke needed.
+	if req.Deactivated != nil && *req.Deactivated {
+		if req.EngName != nil || req.ChineseName != nil || req.Roles != nil {
+			errhttp.Write(ctx, c, errcode.BadRequest(
+				"deactivated=true cannot be combined with other field updates in a single PATCH",
+				errcode.WithReason(errcode.AdminMixedDeactivatePatch)))
 			return
 		}
-		errhttp.Write(ctx, c, fmt.Errorf("update user: %w", err))
-		return
+		if err := h.store.DeactivateAndRevoke(ctx, h.cfg.SiteID, account); err != nil {
+			if errors.Is(err, ErrUserNotFound) {
+				errhttp.Write(ctx, c, errcode.NotFound("user not found",
+					errcode.WithReason(errcode.AdminUserNotFound)))
+				return
+			}
+			errhttp.Write(ctx, c, fmt.Errorf("deactivate user and revoke sessions: %w", err))
+			return
+		}
+	} else {
+		// UserUpdate and updateUserRequest share an identical field layout, so the conversion is safe (staticcheck S1016).
+		if err := h.store.UpdateUser(ctx, h.cfg.SiteID, account, UserUpdate(req)); err != nil {
+			if errors.Is(err, ErrUserNotFound) {
+				errhttp.Write(ctx, c, errcode.NotFound("user not found",
+					errcode.WithReason(errcode.AdminUserNotFound)))
+				return
+			}
+			errhttp.Write(ctx, c, fmt.Errorf("update user: %w", err))
+			return
+		}
 	}
-	// On deactivation the store revokes the account's sessions atomically with
-	// the update (see UpdateUser), so there is nothing to revoke here.
 
 	details := map[string]string{}
 	if req.Deactivated != nil {
@@ -294,7 +327,7 @@ type sessionView struct {
 	IssuedAt int64  `json:"issuedAt"`
 }
 
-func toSessionView(s *Session) sessionView {
+func toSessionView(s *session.Session) sessionView {
 	return sessionView{
 		ID:       s.ID,
 		UserID:   s.UserID,
@@ -325,7 +358,7 @@ func (h *Handler) listSessions(c *gin.Context) {
 		return
 	}
 
-	sessions, err := h.store.ListSessionsByAccount(ctx, h.cfg.SiteID, account)
+	sessions, err := h.sessions.ListForAccount(ctx, h.cfg.SiteID, account)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("list sessions: %w", err))
 		return
@@ -347,7 +380,7 @@ func (h *Handler) revokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	if _, err := h.store.DeleteSessionsByAccount(ctx, h.cfg.SiteID, account); err != nil {
+	if _, err := h.sessions.DeleteForAccount(ctx, h.cfg.SiteID, account); err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("delete sessions: %w", err))
 		return
 	}
@@ -366,7 +399,7 @@ func (h *Handler) revokeSession(c *gin.Context) {
 	}
 	sessionID := c.Param("sessionId")
 
-	if _, err := h.store.DeleteSession(ctx, h.cfg.SiteID, account, sessionID); err != nil {
+	if _, err := h.sessions.DeleteByID(ctx, h.cfg.SiteID, account, sessionID); err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("delete session: %w", err))
 		return
 	}
@@ -446,17 +479,19 @@ func (h *Handler) setPassword(c *gin.Context) {
 		requireChange = *req.RequirePasswordChange
 	}
 
-	if err := h.store.UpdateUserPassword(ctx, h.cfg.SiteID, account, hash, requireChange); err != nil {
+	// exceptSessionID="" revokes every session for the target account — an
+	// admin-forced reset, unlike self-service change-password, has no caller
+	// session to preserve. The password write and the revoke run in one
+	// Mongo transaction, so a failure leaves neither applied.
+	if err := h.store.UpdateUserPasswordAndRevoke(ctx, h.cfg.SiteID, account, hash, requireChange, ""); err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			errhttp.Write(ctx, c, errcode.NotFound("user not found",
 				errcode.WithReason(errcode.AdminUserNotFound)))
 			return
 		}
-		errhttp.Write(ctx, c, fmt.Errorf("update user password: %w", err))
+		errhttp.Write(ctx, c, fmt.Errorf("update user password and revoke sessions: %w", err))
 		return
 	}
-	// UpdateUserPassword revokes the account's sessions atomically with the
-	// hash change, forcing re-login — no separate revoke needed here.
 
 	h.audit(ctx, c, "user.password.set", "", account, map[string]string{
 		"requirePasswordChange": strconv.FormatBool(requireChange),

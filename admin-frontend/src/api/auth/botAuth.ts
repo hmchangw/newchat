@@ -1,16 +1,15 @@
-import { PORTAL_URL, ADMIN_SERVICE_URL } from '@/lib/runtimeConfig'
+import { ADMIN_SERVICE_URL } from '@/lib/runtimeConfig'
 import { parseHttpEnvelopeError } from '../_transport/httpEnvelope'
 
-/** Session bundle from `botLogin`; only `{authToken, account, siteId}` is ever exposed outside api/auth (see `AuthContext`). */
+/** Session bundle from `botLogin`; `{authToken, account, siteId}` is exposed outside api/auth (see `AuthContext`). */
 export interface Bundle {
-  userId?: string
   authToken: string
   account: string
   siteId: string
   requirePasswordChange: boolean
 }
 
-/** Bot/admin password login via portal-service. @throws {AsyncJobError} on a non-2xx response. */
+/** Admin password login via admin-service. @throws {AsyncJobError} on a non-2xx response. */
 export async function botLogin({
   username,
   password,
@@ -18,7 +17,7 @@ export async function botLogin({
   username: string
   password: string
 }): Promise<Bundle> {
-  const resp = await fetch(`${PORTAL_URL}/api/v1/login`, {
+  const resp = await fetch(`${ADMIN_SERVICE_URL}/v1/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),

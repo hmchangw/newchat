@@ -1,7 +1,7 @@
 # admin-frontend
 
-Internal admin console for the chat platform. Admin operators log in (reusing
-the `/admin-login` flow served by `portal-service`/`auth-service`) and manage
+Internal admin console for the chat platform. Admin operators log in via
+`admin-service`'s `POST /v1/login` (see `docs/client-api.md` §9.10) and manage
 users — search, create, edit roles, set passwords, activate/deactivate,
 inspect/revoke sessions — and review the audit log of admin actions, all over
 `admin-service`'s REST API.
@@ -15,14 +15,12 @@ chat client.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `VITE_PORTAL_URL` | portal-service base URL (login) | `http://localhost:8081` |
 | `VITE_ADMIN_SERVICE_URL` | admin-service base URL (REST API) | `http://localhost:8082` |
 
 **Container (nginx runtime, `/config.js` rendered by `deploy/30-render-config.sh`)**:
 
 | Variable | Purpose | Required |
 |---|---|---|
-| `PORTAL_URL` | portal-service base URL | yes — container fails to start if unset |
 | `ADMIN_SERVICE_URL` | admin-service base URL | yes — container fails to start if unset |
 
 `src/lib/runtimeConfig.js` reads `window.__APP_CONFIG__` first (prod), falling
@@ -49,8 +47,7 @@ docker build -f admin-frontend/deploy/Dockerfile -t admin-frontend .
 
 `deploy/nginx.conf` serves the SPA (`try_files` fallback to `index.html`) and
 `/config.js`. `deploy/30-render-config.sh` renders `deploy/config.js.template`
-via `envsubst` at container start and fails fast if `PORTAL_URL` or
-`ADMIN_SERVICE_URL` is unset.
+via `envsubst` at container start and fails fast if `ADMIN_SERVICE_URL` is unset.
 
 ## Phase 2 (not in this app yet)
 

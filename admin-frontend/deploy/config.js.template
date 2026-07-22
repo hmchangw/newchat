@@ -1,5 +1,4 @@
 // Generated at container start — edit template, not output.
 window.__APP_CONFIG__ = {
-  PORTAL_URL: "${PORTAL_URL}",
   ADMIN_SERVICE_URL: "${ADMIN_SERVICE_URL}"
 };

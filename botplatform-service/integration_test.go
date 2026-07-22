@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -49,8 +50,8 @@ func seedUser(t *testing.T, db *mongo.Database, id, account, siteID, plaintext s
 func newIntegrationRouter(t *testing.T, db *mongo.Database, cfg *config) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	st, err := newMongoStore(context.Background(), db)
-	require.NoError(t, err)
+	require.NoError(t, session.NewMongoStore(db).EnsureIndexes(context.Background()))
+	st := newStoreMongo(db)
 	h := newHandler(st, cfg)
 	r := gin.New()
 	registerRoutes(r, h)
@@ -107,7 +108,7 @@ func TestIntegration_LoginThenValidate(t *testing.T) {
 func TestIntegration_SessionsIndexes(t *testing.T) {
 	db := testutil.MongoDB(t, "bp_idx")
 	cfg := &config{SiteID: "site-a", SessionsMaxPerAccount: 100, BcryptCost: bcrypt.MinCost}
-	_ = newIntegrationRouter(t, db, cfg) // triggers ensureIndexes via newMongoStore
+	_ = newIntegrationRouter(t, db, cfg) // triggers session.MongoStore.EnsureIndexes
 
 	specs, err := db.Collection("sessions").Indexes().ListSpecifications(context.Background())
 	require.NoError(t, err)

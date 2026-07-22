@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -51,10 +52,11 @@ func run() error {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 
-	st, err := newMongoStore(ctx, mongoClient.Database(cfg.MongoDB))
-	if err != nil {
-		return fmt.Errorf("init mongo store: %w", err)
+	db := mongoClient.Database(cfg.MongoDB)
+	if err := session.NewMongoStore(db).EnsureIndexes(ctx); err != nil {
+		return fmt.Errorf("ensure session indexes: %w", err)
 	}
+	st := newStoreMongo(db)
 	h := newHandler(st, &cfg)
 
 	gin.SetMode(gin.ReleaseMode)

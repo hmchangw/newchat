@@ -399,6 +399,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 |---|---|---|---|
 | 400 | `bad_request` | `missing_fields` | `username` or `password` empty. |
 | 401 | `unauthenticated` | `invalid_credentials` | Uniform rejection covering unknown account, wrong password, AND SSO-only accounts attempting password login. Body is byte-identical across the three arms to prevent enumeration. |
+| 403 | `forbidden` | `bot_login_disabled` | Account holds a bot role and portal's `BOT_LOGIN_ENABLED` flag is `false`. Direct the user to the bot developer console instead. |
 | 500 | `internal` | `site_unknown` | The user's `siteId` is missing from `PORTAL_SITE_URLS`. Server misconfiguration. |
 | 503 | `unavailable` | `upstream_unavailable` | Portal cannot reach the home-site botplatform. |
 
@@ -5779,6 +5780,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `invalid_nkey` | bad_request | auth-service (natsPublicKey format) |
 | `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing) |
 | `account_not_ready` | forbidden | portal-service `GET /api/userInfo` (account absent from the HR directory cache, or not provisioned in the users collection) |
+| `bot_login_disabled` | forbidden | portal-service `POST /api/v1/login` (§2.5) — portal is configured (`BOT_LOGIN_ENABLED=false`) to reject bot-account logins. Direct the user to the bot developer console. |
 | `app_not_found` | not_found | user-service `subscription.setAppSubscription` (appId does not resolve to any app) |
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
 | `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or platform account) |
@@ -5786,6 +5788,8 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
+| `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
+| `old_password_mismatch` | unauthenticated | admin-service `POST /v1/password/change` (§9.11) (`oldPassword` does not match) |
 | `emoji_shortcode_reserved` | bad_request | media-service `PUT /api/v1/emoji/…` (shortcode collides with a built-in standard emoji) |
 | `emoji_delete_disabled` | forbidden | media-service `emoji.delete` (kill-switch `EMOJI_DELETE_ENABLED=false`, the default) |
 
@@ -6187,7 +6191,7 @@ send the §8.6 batch query for current values.
 
 ## 9. Admin Service
 
-HTTP REST endpoints served by `admin-service`. All `/v1/admin/…` routes require a valid admin session token in the `Authorization: Bearer <authToken>` header (the `authToken` returned by `POST /api/v1/login` at botplatform-service or portal-service). The token is validated by `requireAdmin` middleware, which checks that the session exists, the session holds the `admin` role, and the session's `siteId` matches the admin-service's configured `SITE_ID`. Callers that fail any of these checks receive `403 not_admin` (role/site mismatch) or `401 invalid_token` (missing or unknown token).
+HTTP REST endpoints served by `admin-service`. Admins obtain an `authToken` via admin-service's own `POST /v1/login` (§9.10, unauthenticated — see also botplatform-service or portal-service `POST /api/v1/login`, which validate against the same shared sessions collection). That token is required as `Authorization: Bearer <authToken>` on `POST /v1/password/change` (§9.11) and every `/v1/admin/…` route below. The token is validated by `requireAdmin` middleware, which checks that the session exists, the session holds the `admin` role, and the session's `siteId` matches the admin-service's configured `SITE_ID`. Callers that fail any of these checks receive `403 not_admin` (role/site mismatch) or `401 invalid_token` (missing or unknown token).
 
 The `userView` returned by all user endpoints is a projected subset — the `services` / bcrypt field is never included.
 
@@ -6470,6 +6474,100 @@ Returns audit entries for the admin's site, newest-first, with optional filterin
   "total": 1
 }
 ```
+
+### 9.10 Admin login
+
+**Endpoint:** `POST /v1/login`
+**Auth:** none — credentials are supplied in the request body.
+
+Password login for platform-admin accounts, served directly by admin-service. Distinct from the SSO flow (§2.2/§2.3) and the bot/portal password login (§2.5/§10.1) — this endpoint is for the admin console only. Verifies the account holds the `admin` role, is not deactivated, and the password matches, then issues a session token in the same shared sessions collection used by `/v1/admin/…` and `/v1/password/change`. Unknown account, wrong password, non-admin account, and deactivated account all collapse to the same `401 invalid_credentials` response (checked in that order, deactivated last) so a caller cannot distinguish the cases by shape, reason, or timing.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `username` | string | yes | Login account name. |
+| `password` | string | yes | Plaintext password. |
+
+```json
+{ "username": "alice", "password": "s3cr3t!" }
+```
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `authToken` | string | Session token. Use as `Authorization: Bearer <authToken>` on `/v1/password/change` (§9.11) and every `/v1/admin/…` endpoint. |
+| `account` | string | Login account name. |
+| `siteId` | string | Site the session was issued for (the admin-service's configured `SITE_ID`). |
+| `requirePasswordChange` | boolean | Whether the caller must change their password before continuing. When `true`, the client should route to §9.11 before normal use; the session token is still valid either way. |
+
+```json
+{
+  "authToken": "sess_tok_9f8e7d6c5b4a",
+  "account": "alice",
+  "siteId": "site-a",
+  "requirePasswordChange": false
+}
+```
+
+#### Error response
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | `username` or `password` empty, or body not valid JSON. |
+| 401 | `unauthenticated` | `invalid_credentials` | Unknown account, wrong password, account lacks the `admin` role, or account is deactivated. Uniform response — cannot be used to enumerate accounts. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+### 9.11 Change password (self-service)
+
+**Endpoint:** `POST /v1/password/change`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Lets the logged-in admin change their own password. Verifies `oldPassword` against the stored hash, updates it to `newPassword`, clears `requirePasswordChange`, and best-effort revokes every other active session for the account — admin-console and chat-frontend sessions live in the same collection, so this signs the account out everywhere else. The caller's own session is preserved. Appends a `password_change_self` audit entry.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `oldPassword` | string | yes | Current plaintext password. |
+| `newPassword` | string | yes | New plaintext password. |
+
+```json
+{ "oldPassword": "s3cr3t!", "newPassword": "newS3cr3t!" }
+```
+
+#### Success response
+
+`HTTP 204` — no body.
+
+#### Error response
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | `oldPassword` or `newPassword` empty, or body not valid JSON. |
+| 401 | `unauthenticated` | `invalid_token` | Bearer token missing, unknown, or session not found. |
+| 401 | `unauthenticated` | `old_password_mismatch` | `oldPassword` does not match the stored password. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
 
 ### UserView
 

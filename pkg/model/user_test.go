@@ -96,3 +96,24 @@ func TestHasLoginRole(t *testing.T) {
 		})
 	}
 }
+
+func TestContainsBotRole(t *testing.T) {
+	tests := []struct {
+		name  string
+		roles []UserRole
+		want  bool
+	}{
+		{"nil", nil, false},
+		{"empty", []UserRole{}, false},
+		{"user only", []UserRole{UserRoleUser}, false},
+		{"admin only", []UserRole{UserRoleAdmin}, false},
+		{"bot only", []UserRole{UserRoleBot}, true},
+		{"user + bot", []UserRole{UserRoleUser, UserRoleBot}, true},
+		{"admin + bot", []UserRole{UserRoleAdmin, UserRoleBot}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ContainsBotRole(tc.roles))
+		})
+	}
+}
