@@ -183,3 +183,76 @@ func TestParseRooms_PreservesOrder(t *testing.T) {
 	got := []string{rooms[0].RoomID, rooms[1].RoomID, rooms[2].RoomID}
 	assert.Equal(t, []string{"r3", "r1", "r2"}, got, "ES relevance order must be preserved")
 }
+
+func TestParseOrgs_HappyPath(t *testing.T) {
+	body := json.RawMessage(`{
+		"hits": {
+			"total": {"value": 2},
+			"hits": [
+				{"_source": {
+					"sectId": "S1", "sectName": "Engineering", "sectTCName": "工程",
+					"deptId": "D1", "deptName": "Technology", "deptTCName": "科技",
+					"divisionId": "DIV1"
+				}},
+				{"_source": {
+					"sectId": "S2", "sectName": "Engineering Ops",
+					"deptId": "D1", "deptName": "Technology", "divisionId": "DIV1"
+				}}
+			]
+		}
+	}`)
+
+	orgs, err := parseOrgs(body)
+	require.NoError(t, err)
+	require.Len(t, orgs, 2)
+	assert.Equal(t, model.SearchOrg{
+		SectID: "S1", SectName: "Engineering", SectTCName: "工程",
+		DeptID: "D1", DeptName: "Technology", DeptTCName: "科技", DivisionID: "DIV1",
+	}, orgs[0])
+	assert.Equal(t, "S2", orgs[1].SectID)
+	assert.Equal(t, "Engineering Ops", orgs[1].SectName)
+}
+
+func TestParseOrgs_Empty(t *testing.T) {
+	body := json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`)
+	orgs, err := parseOrgs(body)
+	require.NoError(t, err)
+	assert.Empty(t, orgs)
+	assert.NotNil(t, orgs, "must be empty slice, not nil")
+}
+
+func TestParseOrgs_Malformed(t *testing.T) {
+	_, err := parseOrgs(json.RawMessage(`{`))
+	assert.Error(t, err)
+}
+
+func TestParseOrgs_PreservesOrder(t *testing.T) {
+	body := json.RawMessage(`{
+		"hits": {
+			"total": {"value": 3},
+			"hits": [
+				{"_source": {"sectId": "S3"}},
+				{"_source": {"sectId": "S1"}},
+				{"_source": {"sectId": "S2"}}
+			]
+		}
+	}`)
+	orgs, err := parseOrgs(body)
+	require.NoError(t, err)
+	got := []string{orgs[0].SectID, orgs[1].SectID, orgs[2].SectID}
+	assert.Equal(t, []string{"S3", "S1", "S2"}, got, "ES relevance order must be preserved")
+}
+
+func TestToSearchOrg_ProjectsAllFields(t *testing.T) {
+	hit := orgSearchHit{
+		SectID: "S1", SectTCName: "工程", SectName: "Engineering", SectDescription: "d1",
+		DeptID: "D1", DeptTCName: "科技", DeptName: "Technology", DeptDescription: "d2",
+		DivisionID: "DIV1",
+	}
+	got := toSearchOrg(&hit)
+	assert.Equal(t, model.SearchOrg{
+		SectID: "S1", SectName: "Engineering", SectTCName: "工程", SectDescription: "d1",
+		DeptID: "D1", DeptName: "Technology", DeptTCName: "科技", DeptDescription: "d2",
+		DivisionID: "DIV1",
+	}, got)
+}

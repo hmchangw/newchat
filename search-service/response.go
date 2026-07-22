@@ -105,3 +105,47 @@ func parseRooms(raw json.RawMessage) ([]model.SearchRoom, error) {
 	}
 	return rooms, nil
 }
+
+// orgSearchHit is the spotlight-org ES `_source` shape for an organization
+// hit. Fields mirror the SpotlightOrgIndex document maintained by
+// search-sync-worker (one doc per sectId); they map onto model.SearchOrg.
+type orgSearchHit struct {
+	SectID          string `json:"sectId"`
+	SectName        string `json:"sectName"`
+	SectTCName      string `json:"sectTCName"`
+	SectDescription string `json:"sectDescription"`
+	DeptID          string `json:"deptId"`
+	DeptName        string `json:"deptName"`
+	DeptTCName      string `json:"deptTCName"`
+	DeptDescription string `json:"deptDescription"`
+	DivisionID      string `json:"divisionId"`
+}
+
+func toSearchOrg(h *orgSearchHit) model.SearchOrg {
+	return model.SearchOrg{
+		SectID:          h.SectID,
+		SectName:        h.SectName,
+		SectTCName:      h.SectTCName,
+		SectDescription: h.SectDescription,
+		DeptID:          h.DeptID,
+		DeptName:        h.DeptName,
+		DeptTCName:      h.DeptTCName,
+		DeptDescription: h.DeptDescription,
+		DivisionID:      h.DivisionID,
+	}
+}
+
+// parseOrgs extracts the ordered list of organizations from a spotlight-org
+// ES response, preserving ES relevance order.
+func parseOrgs(raw json.RawMessage) ([]model.SearchOrg, error) {
+	var rr rawResponse[orgSearchHit]
+	if err := json.Unmarshal(raw, &rr); err != nil {
+		return nil, fmt.Errorf("parse spotlight orgs response: %w", err)
+	}
+
+	orgs := make([]model.SearchOrg, 0, len(rr.Hits.Hits))
+	for i := range rr.Hits.Hits {
+		orgs = append(orgs, toSearchOrg(&rr.Hits.Hits[i].Source))
+	}
+	return orgs, nil
+}

@@ -30,6 +30,7 @@ type handlerConfig struct {
 	RequestTimeout          time.Duration
 	UserRoomIndex           string
 	SpotlightReadPattern    string
+	SpotlightOrgReadPattern string
 }
 
 type handler struct {
@@ -61,6 +62,7 @@ func (h *handler) Register(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.SearchRoomsPattern(h.cfg.SiteID), h.searchRooms)
 	natsrouter.Register(r, subject.SearchAppsPattern(h.cfg.SiteID), h.searchApps)
 	natsrouter.Register(r, subject.SearchUsersPattern(h.cfg.SiteID), h.searchUsers)
+	natsrouter.Register(r, subject.SearchOrgsPattern(h.cfg.SiteID), h.searchOrgs)
 }
 
 func (h *handler) withRequestTimeout(parent context.Context) (context.Context, context.CancelFunc) {
@@ -170,6 +172,52 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 		return nil, fmt.Errorf("parsing spotlight rooms: %w", err)
 	}
 	return &model.SearchRoomsResponse{Rooms: rooms}, nil
+}
+
+// searchOrgs runs a prefix search over the company-wide spotlight-org ES
+// index (one document per section, maintained by search-sync-worker from HR
+// employee events). Unlike searchRooms it applies no per-account filter — the
+// org directory is not user-scoped. The account from the subject is used for
+// logging and metrics only.
+func (h *handler) searchOrgs(c *natsrouter.Context, req model.SearchOrgsRequest) (resp *model.SearchOrgsResponse, err error) {
+	defer observeRequest(c, metricKindOrgs, &err)()
+
+	account, rerr := c.Params.Require("account")
+	if rerr != nil {
+		return nil, rerr
+	}
+	c.WithLogValues("request_id", natsutil.RequestIDFromContext(c), "account", account)
+
+	if err := h.normalizePagination(&req.Size, &req.Offset); err != nil {
+		return nil, err
+	}
+
+	query := strings.TrimSpace(req.Query)
+	if query == "" {
+		return nil, errcode.BadRequest("query is required")
+	}
+	req.Query = query
+
+	ctx, cancel := h.withRequestTimeout(c)
+	defer cancel()
+
+	body, err := buildOrgQuery(req)
+	if err != nil {
+		return nil, fmt.Errorf("building org search query: %w", err)
+	}
+
+	observeESDone := observeES(ctx)
+	raw, err := h.store.Search(ctx, []string{h.cfg.SpotlightOrgReadPattern}, body)
+	observeESDone()
+	if err != nil {
+		return nil, fmt.Errorf("org search backend: %w", err)
+	}
+
+	orgs, err := parseOrgs(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parsing spotlight orgs: %w", err)
+	}
+	return &model.SearchOrgsResponse{Orgs: orgs}, nil
 }
 
 // loadRestricted implements the 2-tier Valkey → ES read. Cache errors

@@ -85,6 +85,7 @@ const (
 	metricKindRooms    = "subscriptions"
 	metricKindApps     = "apps"
 	metricKindUsers    = "users"
+	metricKindOrgs     = "orgs"
 )
 
 // observeRequest captures a handler's total latency and terminal status. The

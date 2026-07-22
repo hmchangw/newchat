@@ -2683,6 +2683,75 @@ func TestMentionableSubscriptionsResponseJSON(t *testing.T) {
 	roundTrip(t, &r, &model.MentionableSubscriptionsResponse{})
 }
 
+func TestSearchOrgsJSON(t *testing.T) {
+	t.Run("request round-trips", func(t *testing.T) {
+		req := model.SearchOrgsRequest{Query: "engineering", Size: 20, Offset: 5}
+		roundTrip(t, &req, &model.SearchOrgsRequest{})
+	})
+
+	t.Run("response round-trips", func(t *testing.T) {
+		resp := model.SearchOrgsResponse{Orgs: []model.SearchOrg{
+			{
+				SectID: "S1", SectName: "Engineering", SectTCName: "工程", SectDescription: "Eng sect",
+				DeptID: "D1", DeptName: "Technology", DeptTCName: "科技", DeptDescription: "Tech dept",
+				DivisionID: "DIV1",
+			},
+		}}
+		roundTrip(t, &resp, &model.SearchOrgsResponse{})
+	})
+
+	t.Run("optional org fields omitted when empty", func(t *testing.T) {
+		data, err := json.Marshal(model.SearchOrg{SectID: "S1", SectName: "Engineering"})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		assert.Equal(t, "S1", raw["sectId"])
+		assert.Equal(t, "Engineering", raw["sectName"])
+		_, hasDesc := raw["sectDescription"]
+		assert.False(t, hasDesc, "empty sectDescription must be omitted")
+		_, hasDeptID := raw["deptId"]
+		assert.False(t, hasDeptID, "empty deptId must be omitted")
+	})
+
+	// Round-trip alone can't catch a self-consistent wrong json tag, so pin the
+	// exact wire keys the client contract depends on.
+	t.Run("request wire keys", func(t *testing.T) {
+		data, err := json.Marshal(model.SearchOrgsRequest{Query: "engineering", Size: 20, Offset: 5})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		assert.Equal(t, "engineering", raw["query"])
+		assert.EqualValues(t, 20, raw["size"])
+		assert.EqualValues(t, 5, raw["offset"])
+	})
+
+	t.Run("response and SearchOrg wire keys", func(t *testing.T) {
+		data, err := json.Marshal(model.SearchOrgsResponse{Orgs: []model.SearchOrg{{
+			SectID: "S1", SectName: "Engineering", SectTCName: "工程", SectDescription: "Eng sect",
+			DeptID: "D1", DeptName: "Technology", DeptTCName: "科技", DeptDescription: "Tech dept",
+			DivisionID: "DIV1",
+		}}})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+
+		orgs, ok := raw["orgs"].([]any)
+		require.True(t, ok, "response must carry the `orgs` key as an array")
+		require.Len(t, orgs, 1)
+
+		org := orgs[0].(map[string]any)
+		assert.Equal(t, "S1", org["sectId"])
+		assert.Equal(t, "Engineering", org["sectName"])
+		assert.Equal(t, "工程", org["sectTCName"])
+		assert.Equal(t, "Eng sect", org["sectDescription"])
+		assert.Equal(t, "D1", org["deptId"])
+		assert.Equal(t, "Technology", org["deptName"])
+		assert.Equal(t, "科技", org["deptTCName"])
+		assert.Equal(t, "Tech dept", org["deptDescription"])
+		assert.Equal(t, "DIV1", org["divisionId"])
+	})
+}
+
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.
 func roundTrip[T any](t *testing.T, src *T, dst *T) {
 	t.Helper()

@@ -112,3 +112,37 @@ type SearchUser struct {
 	ChineseName string `json:"chineseName,omitempty"`
 	// ... more fields per the legacy shape — add here and in the roundTrip test above
 }
+
+// SearchOrgsRequest is the NATS payload for `chat.user.{account}.request.search.{siteID}.orgs`.
+//
+// Query is a non-empty prefix match on the organization name fields
+// (section/department names + division id). Whitespace-only is rejected.
+// The org index is company-wide, so results are NOT scoped to the caller.
+type SearchOrgsRequest struct {
+	Query  string `json:"query"`
+	Size   int    `json:"size,omitempty"`
+	Offset int    `json:"offset,omitempty"`
+}
+
+// SearchOrgsResponse is the NATS reply for `search.orgs`. Orgs is always
+// non-nil (empty slice marshals as []).
+type SearchOrgsResponse struct {
+	Orgs []SearchOrg `json:"orgs"`
+}
+
+// SearchOrg is a single organization result returned by the `search.orgs`
+// RPC, projected directly from the spotlight-org ES index (one document per
+// section, keyed by sectId). Fields mirror the index document maintained by
+// search-sync-worker; optional fields are omitted when the source doc is
+// partial.
+type SearchOrg struct {
+	SectID          string `json:"sectId"`
+	SectName        string `json:"sectName,omitempty"`
+	SectTCName      string `json:"sectTCName,omitempty"`
+	SectDescription string `json:"sectDescription,omitempty"`
+	DeptID          string `json:"deptId,omitempty"`
+	DeptName        string `json:"deptName,omitempty"`
+	DeptTCName      string `json:"deptTCName,omitempty"`
+	DeptDescription string `json:"deptDescription,omitempty"`
+	DivisionID      string `json:"divisionId,omitempty"`
+}

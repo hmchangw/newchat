@@ -1191,6 +1191,7 @@ on filter). Drives a "Threads" tab in the client.
 | `chat.user.{account}.request.search.{siteID}.rooms` | [Search Rooms](#search-rooms) |
 | `chat.user.{account}.request.search.{siteID}.apps` | [Search Apps](#search-apps) |
 | `chat.user.{account}.request.search.{siteID}.users` | [Search Users](#search-users) |
+| `chat.user.{account}.request.search.{siteID}.orgs` | [Search Orgs](#search-orgs) |
 
 `{siteID}` is the requester's home site. The supercluster routes the request to the
 search-service on that site.
@@ -1306,6 +1307,33 @@ Proxy search via third-party HR endpoint. Company-scoping enforced by the HR end
 #### Success response
 
 Top-level JSON array of `SearchUser` (`account`, `engName`?, `chineseName`?).
+
+**Emits:** None — reply only.
+
+---
+
+### Search Orgs
+
+**Subject:** `chat.user.{account}.request.search.{siteID}.orgs`
+**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Prefix search over the company-wide organization directory (sections/departments),
+served from the local spotlight-org ES index. Not user-scoped — the same results for
+every caller.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `query` | string | yes | Case-insensitive prefix on organization fields (`sectName`, `sectTCName`, `deptName`, `deptTCName`, `divisionId`). Whitespace-only rejected. |
+| `size` | integer | no | Default 25, max 100. |
+| `offset` | integer | no | Default 0. |
+
+#### Success response
+
+`{ "orgs": SearchOrg[] }` where `SearchOrg` has: `sectId`, `sectName`?, `sectTCName`?,
+`sectDescription`?, `deptId`?, `deptName`?, `deptTCName`?, `deptDescription`?, `divisionId`?.
+See [../client-api.md §3.3](../client-api.md#search-orgs).
 
 **Emits:** None — reply only.
 

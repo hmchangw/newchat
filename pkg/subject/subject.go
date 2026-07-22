@@ -763,6 +763,16 @@ func SearchUsersPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.search.%s.users", siteID)
 }
 
+// SearchOrgs builds the concrete subject for an organization search request.
+func SearchOrgs(account, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.search.%s.orgs", account, siteID)
+}
+
+// SearchOrgsPattern is the natsrouter pattern for organization search.
+func SearchOrgsPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.search.%s.orgs", siteID)
+}
+
 // --- custom emoji (media-service) ---
 
 // EmojiList builds the concrete subject for listing a site's custom emoji.
