@@ -195,6 +195,36 @@ func WithTokenURL(u string) Option {
 	return func(g *graphClient) { g.tokenURL = u }
 }
 
+// WithMaxIdleConns tunes the client's idle connection pool for the Graph host:
+// it sets MaxIdleConnsPerHost (the idle keep-alives retained for reuse) to n and
+// raises the global MaxIdleConns to at least n. Callers issue one sequential
+// Graph request per worker, so sizing n to the worker count keeps one warm,
+// reused connection per worker; the stdlib default retains only 2 idle
+// connections per host, so every worker beyond the second would pay a fresh TLS
+// handshake per request — costly through a TLS-intercepting proxy. The hard
+// MaxConnsPerHost cap is deliberately left unset: worker concurrency already
+// bounds the number of in-flight requests, so a cap equal to it would add no
+// limiting and only risk briefly blocking a worker while a connection is
+// recycled. Values <= 0 leave the pool at Go's defaults, and a client using a
+// custom (non-*http.Transport) RoundTripper is left untouched.
+func WithMaxIdleConns(n int) Option {
+	return func(g *graphClient) {
+		if n <= 0 {
+			return
+		}
+		tr := mutableTransport(g.httpClient)
+		if tr == nil {
+			return // custom RoundTripper — nothing to tune
+		}
+		tr.MaxIdleConnsPerHost = n
+		// MaxIdleConns == 0 means "unlimited", so only raise a positive finite
+		// value that would otherwise sit below the per-host budget.
+		if tr.MaxIdleConns > 0 && tr.MaxIdleConns < n {
+			tr.MaxIdleConns = n
+		}
+	}
+}
+
 // New constructs a live Graph client for the given config.
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
@@ -229,13 +259,32 @@ func New(cfg Config, opts ...Option) Client {
 	return g
 }
 
+// mutableTransport returns an *http.Transport for tuning hc's connection pool,
+// or nil when hc uses a custom (non-*http.Transport) RoundTripper — that
+// RoundTripper is left untouched, since idle/proxy settings can't be expressed
+// on it and silently replacing it would drop its TLS/auth/tracing/mock behavior.
+// A nil hc.Transport (the stdlib default) is materialized; an existing
+// *http.Transport is cloned — Clone carries its settings forward (e.g. New's
+// TLSInsecureSkipVerify config) so a caller-supplied transport is never mutated
+// in place. When non-nil, the returned transport is installed on hc.
+func mutableTransport(hc *http.Client) *http.Transport {
+	base, ok := hc.Transport.(*http.Transport)
+	if !ok && hc.Transport != nil {
+		return nil // custom RoundTripper: preserve unchanged
+	}
+	if base == nil {
+		base = http.DefaultTransport.(*http.Transport)
+	}
+	tr := base.Clone()
+	hc.Transport = tr
+	return tr
+}
+
 // applyProxyURL points hc's transport at rawProxyURL (overriding
 // HTTPS_PROXY/HTTP_PROXY) when it is non-empty. The URL must include a scheme
 // and host; an invalid value is reported so the caller fails fast at
-// construction rather than surfacing an opaque per-request error. A concrete
-// *http.Transport already on hc (e.g. New's TLSInsecureSkipVerify clone) is
-// reused so its settings survive; otherwise the default transport is cloned so
-// proxy and dial defaults are preserved. No-op when rawProxyURL is empty.
+// construction rather than surfacing an opaque per-request error. No-op when
+// rawProxyURL is empty.
 func applyProxyURL(hc *http.Client, rawProxyURL string) error {
 	if rawProxyURL == "" {
 		return nil
@@ -248,12 +297,11 @@ func applyProxyURL(hc *http.Client, rawProxyURL string) error {
 		// Redacted() masks any embedded proxy credentials before it reaches logs.
 		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
 	}
-	tr, ok := hc.Transport.(*http.Transport)
-	if !ok || tr == nil {
-		tr = http.DefaultTransport.(*http.Transport).Clone()
+	tr := mutableTransport(hc)
+	if tr == nil {
+		return fmt.Errorf("apply graph proxy url: client uses a non-*http.Transport RoundTripper")
 	}
 	tr.Proxy = http.ProxyURL(proxyURL)
-	hc.Transport = tr
 	return nil
 }
 

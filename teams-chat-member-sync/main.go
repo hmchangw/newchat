@@ -97,13 +97,15 @@ func run() error {
 
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
 
+	// Each worker issues one sequential Graph request at a time, so keep one warm
+	// idle Graph connection per worker.
 	graph, err := msgraph.NewChatMembersClient(msgraph.Config{
 		TenantID:              cfg.GraphTenantID,
 		ClientID:              cfg.GraphClientID,
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
-	})
+	}, msgraph.WithMaxIdleConns(cfg.MaxWorkers))
 	if err != nil {
 		return fmt.Errorf("build chat members client: %w", err)
 	}
