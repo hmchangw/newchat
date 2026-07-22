@@ -82,12 +82,11 @@ func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAc
 	// SpotlightOrgIndex's json tags, so we copy them straight across.
 	deduped := make(map[string]*SpotlightOrgIndex, len(employees))
 	for i := range employees {
-		if employees[i].SectID == "" {
+		org := &employees[i].IOrg
+		if org.SectID == "" {
 			continue
 		}
-		// IOrg is tag-identical to Org; convert so orgToSpotlight stays on Org.
-		org := model.Org(employees[i].IOrg)
-		row := orgToSpotlight(&org)
+		row := orgToSpotlight(org)
 		deduped[org.SectID] = &row
 	}
 	if len(deduped) == 0 {
@@ -111,8 +110,8 @@ func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAc
 }
 
 // orgToSpotlight copies the shared nine org fields into the ES doc shape
-// (SpotlightOrgIndex keeps the es: mapping tags; model.Org is tag-identical).
-func orgToSpotlight(o *model.Org) SpotlightOrgIndex {
+// (SpotlightOrgIndex keeps the es: mapping tags; model.IOrg is tag-identical).
+func orgToSpotlight(o *model.IOrg) SpotlightOrgIndex {
 	return SpotlightOrgIndex{
 		SectID:          o.SectID,
 		SectTCName:      o.SectTCName,
