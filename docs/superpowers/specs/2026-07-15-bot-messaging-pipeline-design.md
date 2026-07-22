@@ -150,7 +150,7 @@ HTTP → NATS bridge. Single service, all bot HTTP endpoints in scope.
 | Deployment | 3-5 pods (230 peak rps ÷ 3 pods = ~77 rps/pod, comfortable; scale via HPA on CPU) |
 | HTTP | Gin, `:8080`, `/healthz` |
 | API surface | All bot HTTP endpoints in §3 (send-in-room, send-DM, create-room, add-members, remove-members) unified through the same middleware chain |
-| Auth | `x-user-id` + `x-auth-token` bearer-token headers. BP validates the session against its own Mongo `sessions`-like collection (Meteor / Rocket.Chat pattern). No JWT, no external auth RPC per request. See §7. |
+| Auth | `x-user-id` + `x-auth-token` bearer-token headers. BP validates the session via `pkg/session.Store.FindByHash(sessiontoken.Hash(rawToken))` against the shared `sessions` Mongo collection (same collection used by admin-service). Bot-role gate via `model.ContainsBotRole(session.Roles)`. No JWT, no external auth RPC per request. See §7. |
 | Dependencies | NATS, Valkey (rate-limit + idempotency sentinel), MongoDB (sessions + users lookup per §7) |
 | Middleware order | auth → rate-limit → idempotency → handler |
 | Outbound (msg flow) | NATS req/reply on `chat.server.bot.request.room.*.*.msg.send` and `chat.server.bot.request.dm.*.*.msg.send` → bot-msg-handler (site-scoped) |
@@ -425,36 +425,56 @@ Rooms live at exactly one origin site (see §17). When a target site receives `m
 
 ## 7. Sender identity resolution
 
-Every bot HTTP request carries **`x-user-id` + `x-auth-token`** — a simple bearer-token model, **not JWT**. `x-user-id` is a 17-char Meteor/Rocket.Chat-format user ID identifying the bot account; `x-auth-token` is a session token issued by BP at login time. BP is itself the authority for token validation — sessions are stored in BP's Mongo (Meteor pattern: `sessions`-like collection storing `sha256(authToken)` alongside `userId`, `expiresAt`).
+Every bot HTTP request carries **`x-user-id` + `x-auth-token`** — a simple bearer-token model, **not JWT**. `x-user-id` is a 17-char Meteor/Rocket.Chat-format user ID identifying the bot account; `x-auth-token` is the 43-char opaque bearer token that `botplatform-service`'s `POST /api/v1/login` returned at login time (`sessiontoken.New()` — base64url of 32 random bytes). BP is itself the authority for token validation — sessions live in the shared `sessions` Mongo collection managed by **`pkg/session`** (see `pkg/session/session.go`), which is also used by `admin-service` (a password change on the admin console can revoke sibling chat/bot sessions).
 
-**Attribution note**: auth-service, when it needs to validate a bot session (e.g., during NATS callout for chat-frontend login "as" a bot), calls BP via HTTP `POST /api/v1/auth/validate` and receives back a `Principal` — see `auth-service/bpvalidator.go`. This is the inverse of BP calling auth-service. For BP's own HTTP endpoints, no cross-service auth call is needed at all: BP looks up the session locally.
+**Attribution note**: auth-service, when it needs to validate a bot session during NATS callout for chat-frontend login "as" a bot, calls BP via HTTP `POST /api/v1/auth/validate` and receives back a `Principal` — see `auth-service/bpvalidator.go`. This is the inverse of BP calling auth-service. For BP's own HTTP endpoints, no cross-service auth call is needed at all: BP looks up the session locally in the same `sessions` collection.
+
+**Session record shape** (from `pkg/session/session.go` — do not invent new field names):
+
+```go
+type Session struct {
+    ID       string   `bson:"_id"`       // = sessiontoken.Hash(rawToken); the hash IS the primary key
+    UserID   string   `bson:"userId"`
+    Account  string   `bson:"account"`
+    SiteID   string   `bson:"siteId"`
+    Roles    []string `bson:"roles"`     // strings — includes "bot" for bot accounts (see model.ContainsBotRole)
+    IssuedAt int64    `bson:"issuedAt"`  // unix ms; sort key for cap-eviction only, NOT a TTL
+}
+```
+
+`sessiontoken.Hash(raw)` is `base64.StdEncoding.EncodeToString(sha256.Sum256([]byte(raw)))` — same byte-for-byte across botplatform-service, admin-service, and auth-service (see `pkg/sessiontoken/sessiontoken.go`). No plaintext token ever hits Mongo. There is **no** `expiresAt` field — session lifetime is bounded by `DeleteBeyondCap` (keep newest `SessionsMaxPerAccount` per account), not by TTL.
 
 **Resolution path (BP internal, per request):**
 
 ```text
 BP auth middleware:
   1. Read x-user-id + x-auth-token headers (both required; missing → 401).
-  2. hashedToken = sha256(x-auth-token)
-  3. Local Mongo lookup on the sessions collection:
-       sessions.FindOne({ hashedToken, userId: x-user-id })
-       - Missing / expired / userId mismatch → errcode.Unauthenticated(reason: "invalid_token") → 401
-       - Found → session doc contains the validated userId
-  4. Load full bot Participant from the users collection (or cached):
-       users.FindOne({ _id: userId })
-       → Participant{ ID, Account, AppID, AppName, IsBot, EngName, CompanyName }
-  5. Require Participant.IsBot == true → else errcode.Forbidden(reason: "not_a_bot") → 403.
-  6. Attach Participant to NATS request header `X-Bot-Identity` (JSON-encoded) for bot-msg-handler / bot-room-service to consume.
+  2. hash = sessiontoken.Hash(x-auth-token)
+  3. sess, err := sessionStore.FindByHash(ctx, hash)  // pkg/session.Store method; keyed by _id
+       - session.ErrNotFound  → errcode.Unauthenticated(reason: "invalid_token") → 401
+  4. Defense-in-depth: if sess.UserID != x-user-id → errcode.Unauthenticated(reason: "invalid_token") → 401
+     (headers must be internally consistent; a mismatch means a stale/misrouted token.)
+  5. Role gate: if !model.ContainsBotRole(sess.Roles) → errcode.Forbidden(reason: "not_a_bot") → 403.
+     (The bot-vs-human distinction lives on the session's Roles slice, populated at login from
+      the User record's Roles — no need to re-fetch the User just for this check.)
+  6. Load Participant fields (AppID, AppName, EngName, ChineseName, CompanyName) from
+     users.FindOne({_id: sess.UserID}) — needed for the enriched Message.Sender identity, not for
+     the auth gate itself. Cache is optional (see below).
+  7. Attach the resolved Participant to NATS request header X-Bot-Identity (JSON-encoded)
+     for bot-msg-handler / bot-room-service to consume.
 ```
 
-**Session validation caching**: none. The session lookup is a single Mongo query keyed by `(hashedToken, userId)` with a supporting compound index — ~1ms per lookup at 230 peak rps is 230 tiny queries/sec. No cache; suspension propagation stays immediate.
+**Session validation caching**: none. `FindByHash` is a single Mongo `FindOne` on `_id` — the natural PK — at ~1ms and 230 peak rps that's trivial. No cache; suspension propagation stays immediate.
+
+**Users lookup caching (step 6)**: optional in-process LRU keyed by `userID → Participant` (~5s), since the bot's display fields rarely change during a session. Absence of this cache is fine at v1 scale.
 
 **Suspension propagation — immediate, no broadcast needed**:
 
-- Suspension = delete the session doc from Mongo (BP admin ops or auth-service triggers this).
-- Next request from the bot → Mongo lookup returns nothing → 401.
+- Suspension = delete the session doc from Mongo (admin-service's password-change flow already does this via `DeleteForAccountExcept` / `DeleteForAccount`; a dedicated bot-suspend admin op can call the same store).
+- Next request from the bot → `FindByHash` returns `ErrNotFound` → 401.
 - **Immediate** (bounded by Mongo replication lag, typically single-digit ms). No cache TTL, no revocation broadcast, no `chat.auth.bot.revoked.*` subject.
 
-**Deprecation note (informational)**: bot NATS JWTs (issued via callout for chat-frontend login "as" a bot account) are being feature-flagged off in favor of a separate bot-dev frontend. This spec's auth model doesn't depend on that feature-flag state — BP's `x-auth-token` bearer flow is the sole auth for the pipeline.
+**Chat-frontend deprecation for bots — actual feature flag exists**: `portal-service` gates bot-role password logins to chat-frontend behind **`BOT_LOGIN_ENABLED`** (default `true`, see `portal-service/main.go`). Flipping it to `false` rejects bot logins at portal so bots can't sign into the standard chat client; the flag is surfaced to chat-frontend via `window.__APP_CONFIG__` to hide the `/dev-login` route. A future dedicated bot-devs client will hit `botplatform-service` directly and be unaffected. **This spec's auth model is independent of that flag** — BP's `POST /api/v1/login` + `x-auth-token` bearer flow is the sole auth path for the pipeline, and it stays working regardless of `BOT_LOGIN_ENABLED`.
 
 **Trust model — NATS account permissions** (deployment-side, not an in-code check): the internal-cluster NATS account topology restricts publish permission on `chat.server.bot.request.>` on a per-subject basis so that `X-Bot-Identity` (and any other request header) cannot be forged by an internal-cluster client that shouldn't be issuing that call:
 
@@ -621,8 +641,9 @@ All services use `caarlos0/env` typed structs. Env var prefixes below.
 | `HTTP_PORT` | `8080` | | |
 | `NATS_URL` | — | yes | |
 | `VALKEY_ADDRS` | — | yes | Cluster-mode |
-| `MONGO_URI` | — | yes | For `sessions` + `users` collection lookup (see §7) |
-| `MONGO_DATABASE` | `chat` | | |
+| `MONGO_URI` | — | yes | For the shared `sessions` collection (via `pkg/session`) + `users` collection lookup (see §7) |
+| `MONGO_DATABASE` | `chat` | | Same DB as admin-service so `pkg/session` reads/writes converge on one collection |
+| `SESSIONS_MAX_PER_ACCOUNT` | inherited from botplatform-service default | | Cap for `pkg/session.Store.DeleteBeyondCap` — controls session eviction (no TTL); already an existing botplatform-service config |
 | `RATE_LIMIT_SEND_ROOM_CALLER_RPS` | `50` | | |
 | `RATE_LIMIT_SEND_ROOM_GLOBAL_RPS` | `1000` | | |
 | (similar for each endpoint) | | | |
@@ -1091,8 +1112,9 @@ Per CLAUDE.md §5:
 - **NATS ingress subject prefix** — `chat.server.bot.request.>`, matching existing `chat.server.request.>` convention
 - **Attachments** — bots send text + cards only, no attachments (§14.1)
 - **Display name** — `AppName` verbatim (§7)
-- **Identity resolution** — `x-user-id` + `x-auth-token` bearer flow; BP looks the session up in its own Mongo `sessions` collection (Meteor / Rocket.Chat pattern), then loads the bot `Participant` from `users`. No JWT, no per-request auth-service RPC (§7)
-- **Bot suspension propagation** — session deletion in Mongo is immediate; next request's `sessions.FindOne` misses → 401. No revocation broadcast needed (§7)
+- **Identity resolution** — `x-user-id` + `x-auth-token` bearer flow. BP looks the session up via `pkg/session.Store.FindByHash(sessiontoken.Hash(raw))` in the shared `sessions` Mongo collection (same collection used by admin-service — password change in admin-console revokes sibling chat/bot sessions). Bot-role check via `model.ContainsBotRole(session.Roles)`. Users record loaded only for the enriched Message.Sender fields (AppID/AppName/etc.). No JWT, no per-request auth-service RPC (§7)
+- **Bot suspension propagation** — session deletion in Mongo is immediate; next request's `FindByHash` returns `session.ErrNotFound` → 401. No revocation broadcast needed. No `expiresAt` on the session record — cap-eviction (`DeleteBeyondCap`) handles lifetime (§7)
+- **BOT_LOGIN_ENABLED coexistence** — the `BOT_LOGIN_ENABLED` env var on portal-service (see `portal-service/main.go`) gates bot-role logins into the standard chat client. This spec's auth model is orthogonal: BP's `/api/v1/login` + bearer flow is the sole auth path for the pipeline and stays working regardless of the flag (§7)
 - **messageID + createdAt generation** — BP generates both and forwards to bot-msg-handler via NATS headers `X-Bot-Message-ID` and `X-Bot-Created-At`. bot-msg-handler uses them verbatim. Cassandra PK dedups exact duplicates; BP's sentinel blocks concurrent retries. No Valkey envelope-mapping mechanism (§5.2)
 - **Idempotency — sentinel only, no response cache** — `SET NX idem:{opID} "processing" EX 30`. In-flight retries get 409. Post-completion the sentinel is deleted (200 / 4xx) or expires (5xx). No cached response envelope — retries after the sentinel expires re-execute and downstream dedup (Cassandra PK, `member_added` upsert diff, outbox `dedupID`) keeps the outcome consistent (§9.1)
 - **X-Bot-Identity trust** — NATS account permissions restrict `chat.server.bot.request.>` publish per-subject: BP owns publish for the client-facing ingress subjects; bot-msg-handler owns publish for the internal `.get` and `.dm.ensure` subjects (§7)
