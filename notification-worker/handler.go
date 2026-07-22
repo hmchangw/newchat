@@ -51,10 +51,12 @@ type Handler struct {
 	deps HandlerDeps
 }
 
-// isNotifiable reports whether a message type produces push notifications. Safe-by-default
-// allowlist: new system types never notify; add tcard/tcard_execute/app_execute here as they land.
+// isNotifiable reports whether a message type produces push notifications.
+// Every system type is gated out; the empty regular type and client-set types
+// (e.g. MessageTypeImportant) notify like a normal message. New system types are
+// safe-by-default as long as they join IsSystemMessageType (the single membership list).
 func isNotifiable(msgType string) bool {
-	return msgType == ""
+	return !model.IsSystemMessageType(msgType)
 }
 
 func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one-time constructor arg

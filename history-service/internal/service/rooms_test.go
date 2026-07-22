@@ -194,6 +194,41 @@ func TestHistoryService_RoomsGet_SkipsSystemTail(t *testing.T) {
 	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
 }
 
+// Every system type is skipped in the preview; a client type (important) is not.
+func TestHistoryService_RoomsGet_SkipsEachSystemTypeButKeepsImportant(t *testing.T) {
+	for _, st := range []string{
+		model.MessageTypeRoomCreated, model.MessageTypeMembersAdded,
+		model.MessageTypeMemberRemoved, model.MessageTypeMemberLeft,
+		model.MessageTypeRoomRenamed, model.MessageTypeRoomRestricted,
+		model.MessageTypeTeamsMeetStarted,
+	} {
+		svc, msgs, rooms := newRoomsService(t)
+		rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+		msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(makePage([]models.Message{
+				{MessageID: "m2", RoomID: "r1", Type: st, CreatedAt: roomLastMsgAt},
+				{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+			}, false), nil)
+
+		resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+		require.NoError(t, err)
+		assert.Equal(t, "m1", resp.Rooms["r1"].MessageID, "system type %q must be skipped", st)
+	}
+}
+
+func TestHistoryService_RoomsGet_KeepsImportantMessage(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m2", RoomID: "r1", Msg: "urgent", Type: model.MessageTypeImportant, CreatedAt: roomLastMsgAt},
+		}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "m2", resp.Rooms["r1"].MessageID, "an important (client) message must preview")
+}
+
 // A quoted reply is normal room content and IS eligible as the preview.
 func TestHistoryService_RoomsGet_QuotedReplyEligible(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
