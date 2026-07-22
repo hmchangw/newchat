@@ -2133,6 +2133,24 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 
+	// Room "padmin": a human who has read plus a p_ platform/admin account
+	// (isBot=false) who has never read. The p_ account is excluded by account
+	// prefix, so the floor is the human's lastSeenAt — this exercises the
+	// u.account $not ^p_ predicate, since the isBot predicate alone would count
+	// the p_ account and resolve nil.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s17", User: model.SubscriptionUser{ID: "u17", Account: "mona"},
+		RoomID: "padmin", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s18", User: model.SubscriptionUser{ID: "u18", Account: "p_admin"},
+		RoomID: "padmin", JoinedAt: earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "padmin")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
 	// Room with no subscriptions at all → nil.
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "empty")
 	require.NoError(t, err)
@@ -2208,6 +2226,16 @@ func TestMongoStore_MinThreadSubscriptionLastSeenByThreadRoomID_Integration(t *t
 	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "no-subs")
 	require.NoError(t, err)
 	assert.Nil(t, got)
+
+	// "bot-parent": a human who has read plus a bot (".bot") parent-author who has
+	// never read. The bot is excluded by account, so it must not freeze the thread
+	// floor → floor is the human's lastSeenAt.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts6", ThreadRoomID: "bot-parent", UserAccount: "frank", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts7", ThreadRoomID: "bot-parent", UserAccount: "helper.bot"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "bot-parent")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
 }
 
 func TestMongoStore_UpdateThreadRoomMinUserLastSeenAt_Integration(t *testing.T) {
@@ -2282,6 +2310,7 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
 		bson.M{"_id": "uD", "account": "dave.bot", "chineseName": "戴夫", "engName": "Dave"},
+		bson.M{"_id": "uE", "account": "p_ops", "chineseName": "運維", "engName": "Ops"},
 	})
 	require.NoError(t, err)
 
@@ -2292,11 +2321,16 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "sC", "roomId": "r1", "u": bson.M{"_id": "uC", "account": "carol"}, "lastSeenAt": msgTime.Add(-time.Minute)},
 		// A bot that has read well past the message must never appear as a reader.
 		bson.M{"_id": "sD", "roomId": "r1", "u": bson.M{"_id": "uD", "account": "dave.bot", "isBot": true}, "lastSeenAt": msgTime.Add(30 * time.Minute)},
+		// A p_ platform/admin account (isBot=false) must also be excluded — this
+		// exercises the u.account $not ^p_ predicate, since isBot alone would
+		// surface p_ops.
+		bson.M{"_id": "sE", "roomId": "r1", "u": bson.M{"_id": "uE", "account": "p_ops"}, "lastSeenAt": msgTime.Add(20 * time.Minute)},
 	})
 	require.NoError(t, err)
 
-	// Only bob qualifies: alice is the sender, carol read before the message, and
-	// dave.bot is a bot (excluded despite having read after the message).
+	// Only bob qualifies: alice is the sender, carol read before the message,
+	// dave.bot is a bot, and p_ops is a p_ platform/admin account (both excluded
+	// despite having read after the message).
 	rows, err := store.ListReadReceipts(ctx, "r1", msgTime, "alice", 100)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -2320,6 +2354,7 @@ func TestMongoStore_ListThreadReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uA", "account": "alice", "chineseName": "愛麗絲", "engName": "Alice"},
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
+		bson.M{"_id": "uD", "account": "helper.bot", "chineseName": "機器", "engName": "Helper"},
 	})
 	require.NoError(t, err)
 
@@ -2330,6 +2365,9 @@ func TestMongoStore_ListThreadReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "tsA", "threadRoomId": "tr1", "userId": "uA", "userAccount": "alice", "lastSeenAt": msgTime.Add(time.Hour)},
 		bson.M{"_id": "tsB", "threadRoomId": "tr1", "userId": "uB", "userAccount": "bob", "lastSeenAt": msgTime.Add(time.Minute)},
 		bson.M{"_id": "tsC", "threadRoomId": "tr1", "userId": "uC", "userAccount": "carol", "lastSeenAt": msgTime.Add(-time.Minute)},
+		// A bot (".bot") thread subscriber that read past the reply must not appear
+		// as a reader (excluded by account).
+		bson.M{"_id": "tsD", "threadRoomId": "tr1", "userId": "uD", "userAccount": "helper.bot", "lastSeenAt": msgTime.Add(30 * time.Minute)},
 	})
 	require.NoError(t, err)
 
