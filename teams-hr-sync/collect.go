@@ -23,9 +23,9 @@ type collectStats struct {
 // Employees via the injected mapper. A member appearing in multiple groups
 // keeps its first mapping (config order wins) so the diff sees one row per
 // account.
-func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string, pageSize int) ([]model.Employee, collectStats, error) {
+func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string, pageSize int) ([]model.IEmployee, collectStats, error) {
 	var stats collectStats
-	var out []model.Employee
+	var out []model.IEmployee
 	seen := make(map[string]struct{})
 	for _, sg := range groups {
 		profile, err := graph.GetGroup(ctx, sg.GroupID)

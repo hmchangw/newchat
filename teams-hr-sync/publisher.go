@@ -55,10 +55,10 @@ func (p *publisher) publishSync(ctx context.Context, d diffResult) (int, error) 
 		}
 		published++
 
-		users := make([]model.UserWithChange, 0, len(d.Upserts))
+		users := make([]model.IUserWithChange, 0, len(d.Upserts))
 		for i := range d.Upserts {
-			users = append(users, model.UserWithChange{
-				User:       p.converter.UserFromEmployee(&d.Upserts[i].Employee),
+			users = append(users, model.IUserWithChange{
+				User:       p.converter.UserFromEmployee(&d.Upserts[i].IEmployee),
 				ChangeType: d.Upserts[i].ChangeType,
 			})
 		}
@@ -76,7 +76,7 @@ func (p *publisher) publishSync(ctx context.Context, d diffResult) (int, error) 
 	sort.Strings(siteIDs)
 	for _, siteID := range siteIDs {
 		if err := p.publishZstd(ctx, subject.EmployeesQuit(siteID),
-			model.HRSyncEmployeeQuitBatch{Timestamp: time.Now().UTC().UnixMilli(), SiteID: siteID, Accounts: d.Quits[siteID]}); err != nil {
+			model.IHRSyncEmployeeQuitBatch{Timestamp: time.Now().UTC().UnixMilli(), SiteID: siteID, Accounts: d.Quits[siteID]}); err != nil {
 			return published, fmt.Errorf("publish employees.quit for site %s: %w", siteID, err)
 		}
 		published++

@@ -56,7 +56,7 @@ func (mr *MockStoreMockRecorder) QuitTeamsEmployees(ctx, accounts any) *gomock.C
 }
 
 // UpsertEmployees mocks base method.
-func (m *MockStore) UpsertEmployees(ctx context.Context, employees []model.EmployeeWithChange) error {
+func (m *MockStore) UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpsertEmployees", ctx, employees)
 	ret0, _ := ret[0].(error)
@@ -70,7 +70,7 @@ func (mr *MockStoreMockRecorder) UpsertEmployees(ctx, employees any) *gomock.Cal
 }
 
 // UpsertUserIdentities mocks base method.
-func (m *MockStore) UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error {
+func (m *MockStore) UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpsertUserIdentities", ctx, users)
 	ret0, _ := ret[0].(error)

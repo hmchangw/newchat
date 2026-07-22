@@ -69,7 +69,7 @@ func (c *spotlightOrgCollection) StoredScripts() map[string]json.RawMessage {
 // SpotlightOrgIndex means partial-field publishes preserve stored values for
 // unset fields.
 func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
-	var employees []model.EmployeeWithChange
+	var employees []model.IEmployeeWithChange
 	if err := json.Unmarshal(data, &employees); err != nil {
 		return nil, fmt.Errorf("unmarshal hr employees: %w", err)
 	}
@@ -82,11 +82,12 @@ func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAc
 	// SpotlightOrgIndex's json tags, so we copy them straight across.
 	deduped := make(map[string]*SpotlightOrgIndex, len(employees))
 	for i := range employees {
-		org := &employees[i].Org
-		if org.SectID == "" {
+		if employees[i].SectID == "" {
 			continue
 		}
-		row := orgToSpotlight(org)
+		// IOrg is tag-identical to Org; convert so orgToSpotlight stays on Org.
+		org := model.Org(employees[i].IOrg)
+		row := orgToSpotlight(&org)
 		deduped[org.SectID] = &row
 	}
 	if len(deduped) == 0 {

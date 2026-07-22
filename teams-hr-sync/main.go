@@ -209,7 +209,7 @@ func runDirectSync(ctx context.Context, graph msgraph.GroupReader, mapper transf
 
 // runSyncCore is the shared walk-diff-emit pipeline; stored is the diff
 // baseline (persisted teams rows for stream mode, nil for direct mode).
-func runSyncCore(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, stored []model.Employee, emit emitter, groups []syncGroup, siteOverrides map[string]string, pageSize int) (runStats, error) {
+func runSyncCore(ctx context.Context, graph msgraph.GroupReader, mapper transform.Mapper, stored []model.IEmployee, emit emitter, groups []syncGroup, siteOverrides map[string]string, pageSize int) (runStats, error) {
 	var stats runStats
 	current, cs, err := collectEmployees(ctx, graph, mapper, groups, siteOverrides, pageSize)
 	stats.collectStats = cs
@@ -218,7 +218,7 @@ func runSyncCore(ctx context.Context, graph msgraph.GroupReader, mapper transfor
 	}
 	diff := diffEmployees(current, stored)
 	for i := range diff.Upserts {
-		if diff.Upserts[i].ChangeType == model.ChangeTypeNewHire {
+		if diff.Upserts[i].ChangeType == model.IChangeTypeNewHire {
 			stats.Created++
 		} else {
 			stats.Updated++

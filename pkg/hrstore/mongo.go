@@ -20,25 +20,25 @@ const (
 
 // MongoStore implements Store over the target write database.
 type MongoStore struct {
-	employees *mongoutil.Collection[model.Employee]
+	employees *mongoutil.Collection[model.IEmployee]
 	users     *mongoutil.Collection[model.User]
 }
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
 	return &MongoStore{
-		employees: mongoutil.NewCollection[model.Employee](db.Collection(EmployeeCollection)),
+		employees: mongoutil.NewCollection[model.IEmployee](db.Collection(EmployeeCollection)),
 		users:     mongoutil.NewCollection[model.User](db.Collection(UserCollection)),
 	}
 }
 
-func (s *MongoStore) UpsertEmployees(ctx context.Context, employees []model.EmployeeWithChange) error {
-	rows := make([]model.Employee, 0, len(employees))
+func (s *MongoStore) UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error {
+	rows := make([]model.IEmployee, 0, len(employees))
 	for i := range employees {
-		rows = append(rows, employees[i].Employee)
+		rows = append(rows, employees[i].IEmployee)
 	}
 	// _id = employeeId (the stable per-employee id): keys the upsert and gives
 	// the row a string _id from the filter — the wire strips Employee.ID.
-	if _, err := s.employees.BulkUpsertByID(ctx, rows, func(e model.Employee) string {
+	if _, err := s.employees.BulkUpsertByID(ctx, rows, func(e model.IEmployee) string {
 		return e.EmployeeID
 	}); err != nil {
 		return fmt.Errorf("bulk upsert hr employees: %w", err)
@@ -49,7 +49,7 @@ func (s *MongoStore) UpsertEmployees(ctx context.Context, employees []model.Empl
 // UpsertUserIdentities $sets identity fields only; a full-doc replace would
 // wipe roles/password/services on the live auth store, so the update doc is
 // built by hand and never derived from the wire struct.
-func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error {
+func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error {
 	models := make([]mongo.WriteModel, 0, len(users))
 	for i := range users {
 		u := &users[i].User

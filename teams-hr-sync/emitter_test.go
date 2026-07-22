@@ -20,19 +20,19 @@ func TestDirectEmitter_UpsertsEmployeesAndConvertedUsers(t *testing.T) {
 	e := directEmitter{store: store, converter: transform.DefaultConverter{}}
 
 	diff := diffResult{
-		Upserts: []model.EmployeeWithChange{{
-			Employee:   teamsEmployee("alice", "site-a"),
-			ChangeType: model.ChangeTypeNewHire,
+		Upserts: []model.IEmployeeWithChange{{
+			IEmployee:  teamsEmployee("alice", "site-a"),
+			ChangeType: model.IChangeTypeNewHire,
 		}},
 	}
 
 	store.EXPECT().UpsertEmployees(gomock.Any(), diff.Upserts).Return(nil)
 	store.EXPECT().UpsertUserIdentities(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, users []model.UserWithChange) error {
+		func(_ context.Context, users []model.IUserWithChange) error {
 			require.Len(t, users, 1)
 			assert.Equal(t, "alice", users[0].Account)
 			assert.Equal(t, "site-a", users[0].SiteID)
-			assert.Equal(t, model.ChangeTypeNewHire, users[0].ChangeType)
+			assert.Equal(t, model.IChangeTypeNewHire, users[0].ChangeType)
 			return nil
 		})
 
@@ -69,7 +69,7 @@ func TestDirectEmitter_UpsertErrorAborts(t *testing.T) {
 	store.EXPECT().UpsertEmployees(gomock.Any(), gomock.Any()).Return(boom)
 
 	_, err := e.emit(context.Background(), diffResult{
-		Upserts: []model.EmployeeWithChange{{Employee: teamsEmployee("alice", "site-a")}},
+		Upserts: []model.IEmployeeWithChange{{IEmployee: teamsEmployee("alice", "site-a")}},
 	})
 	require.ErrorIs(t, err, boom)
 }
@@ -79,7 +79,7 @@ func TestStreamEmitter_DelegatesToPublisher(t *testing.T) {
 	pub := newCapturingPublisher(t, &got)
 	e := streamEmitter{pub: pub}
 
-	diff := diffResult{Upserts: []model.EmployeeWithChange{{Employee: teamsEmployee("alice", "site-a"), ChangeType: model.ChangeTypeNewHire}}}
+	diff := diffResult{Upserts: []model.IEmployeeWithChange{{IEmployee: teamsEmployee("alice", "site-a"), ChangeType: model.IChangeTypeNewHire}}}
 	n, err := e.emit(context.Background(), diff)
 	require.NoError(t, err)
 	assert.Equal(t, 2, n) // employees.upsert + users.upsert

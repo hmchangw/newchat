@@ -15,10 +15,10 @@ import (
 
 const hrEmployeeCollection = "hr_employee"
 
-// employeeProjection is derived from model.Employee's bson tags (incl. the
+// employeeProjection is derived from model.IEmployee's bson tags (incl. the
 // inline-embedded Org) so a field rename can't silently drop from the read —
 // the projection tracks the struct.
-var employeeProjection = bsonProjection(reflect.TypeOf(model.Employee{}))
+var employeeProjection = bsonProjection(reflect.TypeOf(model.IEmployee{}))
 
 // bsonProjection walks a struct's bson tags (recursing into inline-embedded
 // structs) into a bson.M{tag:1} projection.
@@ -43,16 +43,16 @@ func bsonProjection(t reflect.Type) bson.M {
 
 // mongoStore implements Store over the read client.
 type mongoStore struct {
-	employees *mongoutil.Collection[model.Employee]
+	employees *mongoutil.Collection[model.IEmployee]
 }
 
 func newMongoStore(readDB *mongo.Database) *mongoStore {
 	return &mongoStore{
-		employees: mongoutil.NewCollection[model.Employee](readDB.Collection(hrEmployeeCollection)),
+		employees: mongoutil.NewCollection[model.IEmployee](readDB.Collection(hrEmployeeCollection)),
 	}
 }
 
-func (s *mongoStore) ListTeamsEmployees(ctx context.Context) ([]model.Employee, error) {
+func (s *mongoStore) ListTeamsEmployees(ctx context.Context) ([]model.IEmployee, error) {
 	rows, err := s.employees.FindMany(ctx,
 		bson.M{},
 		mongoutil.WithProjection(employeeProjection))

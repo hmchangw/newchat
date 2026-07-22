@@ -9,7 +9,7 @@ import (
 // diffResult is one run's delta: rows to upsert (ChangeType new_hire/update)
 // and departed accounts grouped by the stored row's siteId.
 type diffResult struct {
-	Upserts []model.EmployeeWithChange
+	Upserts []model.IEmployeeWithChange
 	Quits   map[string][]string
 }
 
@@ -17,8 +17,8 @@ type diffResult struct {
 // keyed by account. Absent in store → created; present but any field differs
 // (incl. Org) → updated; equal → omitted. Store-present-but-Graph-absent →
 // quit. Output is sorted by account for deterministic publishes.
-func diffEmployees(current, stored []model.Employee) diffResult {
-	storedByAccount := make(map[string]*model.Employee, len(stored))
+func diffEmployees(current, stored []model.IEmployee) diffResult {
+	storedByAccount := make(map[string]*model.IEmployee, len(stored))
 	for i := range stored {
 		storedByAccount[stored[i].Account] = &stored[i]
 	}
@@ -30,9 +30,9 @@ func diffEmployees(current, stored []model.Employee) diffResult {
 		delete(storedByAccount, c.Account)
 		switch {
 		case !exists:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, ChangeType: model.ChangeTypeNewHire})
+			res.Upserts = append(res.Upserts, model.IEmployeeWithChange{IEmployee: *c, ChangeType: model.IChangeTypeNewHire})
 		case *prev != *c:
-			res.Upserts = append(res.Upserts, model.EmployeeWithChange{Employee: *c, ChangeType: model.ChangeTypeUpdate})
+			res.Upserts = append(res.Upserts, model.IEmployeeWithChange{IEmployee: *c, ChangeType: model.IChangeTypeUpdate})
 		}
 	}
 	for _, s := range storedByAccount {

@@ -14,5 +14,5 @@ import (
 type Store interface {
 	// ListTeamsEmployees returns the persisted hr_employee rows the diff
 	// compares each run against.
-	ListTeamsEmployees(ctx context.Context) ([]model.Employee, error)
+	ListTeamsEmployees(ctx context.Context) ([]model.IEmployee, error)
 }

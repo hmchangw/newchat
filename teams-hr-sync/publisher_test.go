@@ -43,9 +43,9 @@ func TestPublishSync_AllThreeBatches(t *testing.T) {
 	p := newCapturingPublisher(t, &got)
 
 	d := diffResult{
-		Upserts: []model.EmployeeWithChange{{
-			Employee:   teamsEmployee("alice", "site-a"),
-			ChangeType: model.ChangeTypeNewHire,
+		Upserts: []model.IEmployeeWithChange{{
+			IEmployee:  teamsEmployee("alice", "site-a"),
+			ChangeType: model.IChangeTypeNewHire,
 		}},
 		Quits: map[string][]string{"site-b": {"bob"}, "site-a": {"eve"}},
 	}
@@ -56,26 +56,26 @@ func TestPublishSync_AllThreeBatches(t *testing.T) {
 
 	// employees.upsert — bare array, no wrapper
 	assert.Equal(t, "chat.hr.central.employees.upsert", got[0].subj)
-	var employees []model.EmployeeWithChange
+	var employees []model.IEmployeeWithChange
 	got[0].decode(t, &employees)
 	require.Len(t, employees, 1)
 	assert.Equal(t, "alice", employees[0].Account)
-	assert.Equal(t, model.ChangeTypeNewHire, employees[0].ChangeType)
+	assert.Equal(t, model.IChangeTypeNewHire, employees[0].ChangeType)
 	assert.Equal(t, "g1", employees[0].SectID)
 
 	// users.upsert — bare array
 	assert.Equal(t, "chat.hr.central.users.upsert", got[1].subj)
-	var users []model.UserWithChange
+	var users []model.IUserWithChange
 	got[1].decode(t, &users)
 	require.Len(t, users, 1)
 	assert.Equal(t, "alice", users[0].Account)
 	assert.Equal(t, "site-a", users[0].SiteID)
-	assert.Equal(t, model.ChangeTypeNewHire, users[0].ChangeType)
+	assert.Equal(t, model.IChangeTypeNewHire, users[0].ChangeType)
 
 	// quit batches in sorted site order
 	assert.Equal(t, "chat.hr.site-a.employees.quit", got[2].subj)
 	assert.Equal(t, "chat.hr.site-b.employees.quit", got[3].subj)
-	var qb model.HRSyncEmployeeQuitBatch
+	var qb model.IHRSyncEmployeeQuitBatch
 	got[2].decode(t, &qb)
 	assert.Equal(t, "site-a", qb.SiteID)
 	assert.Equal(t, []string{"eve"}, qb.Accounts)
@@ -108,7 +108,7 @@ func TestPublishSync_PublishErrorAborts(t *testing.T) {
 		"central", transform.DefaultConverter{})
 
 	_, err := p.publishSync(context.Background(), diffResult{
-		Upserts: []model.EmployeeWithChange{{Employee: teamsEmployee("alice", "site-a"), ChangeType: model.ChangeTypeNewHire}},
+		Upserts: []model.IEmployeeWithChange{{IEmployee: teamsEmployee("alice", "site-a"), ChangeType: model.IChangeTypeNewHire}},
 	})
 	require.ErrorIs(t, err, boom)
 }

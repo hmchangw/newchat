@@ -40,10 +40,10 @@ func (e directEmitter) emit(ctx context.Context, diff diffResult) (int, error) {
 		}
 		written++
 
-		users := make([]model.UserWithChange, 0, len(diff.Upserts))
+		users := make([]model.IUserWithChange, 0, len(diff.Upserts))
 		for i := range diff.Upserts {
-			users = append(users, model.UserWithChange{
-				User:       e.converter.UserFromEmployee(&diff.Upserts[i].Employee),
+			users = append(users, model.IUserWithChange{
+				User:       e.converter.UserFromEmployee(&diff.Upserts[i].IEmployee),
 				ChangeType: diff.Upserts[i].ChangeType,
 			})
 		}

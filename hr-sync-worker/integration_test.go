@@ -83,25 +83,25 @@ func TestWorker_EndToEnd(t *testing.T) {
 	h := NewHandler(newMongoStore(db))
 	startWorker(t, js, h, "site-a")
 
-	emp := func(account string) model.EmployeeWithChange {
-		return model.EmployeeWithChange{
-			Employee: model.Employee{
+	emp := func(account string) model.IEmployeeWithChange {
+		return model.IEmployeeWithChange{
+			IEmployee: model.IEmployee{
 				ID: "E-" + account, EmployeeID: "E-" + account,
 				Account: account, SiteID: "site-a",
 				EngName: "Name " + account,
-				Org:     model.Org{SectID: "g1", SectName: "Engineering"},
+				IOrg:    model.IOrg{SectID: "g1", SectName: "Engineering"},
 			},
-			ChangeType: model.ChangeTypeNewHire,
+			ChangeType: model.IChangeTypeNewHire,
 		}
 	}
-	batch := []model.EmployeeWithChange{emp("alice"), emp("bob")}
+	batch := []model.IEmployeeWithChange{emp("alice"), emp("bob")}
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
-	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.UserWithChange{
-		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.ChangeTypeNewHire},
-		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.ChangeTypeNewHire},
+	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.IUserWithChange{
+		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.IChangeTypeNewHire},
+		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.IChangeTypeNewHire},
 		// no employeeId → skipped, never written (an empty key would match and
 		// clobber every other keyless row); the count assertion below proves it
-		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.ChangeTypeNewHire},
+		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.IChangeTypeNewHire},
 	})
 
 	awaitCount(t, ctx, db, hrstore.EmployeeCollection, bson.M{}, 2)
@@ -125,7 +125,7 @@ func TestWorker_EndToEnd(t *testing.T) {
 	awaitCount(t, ctx, db, hrstore.EmployeeCollection, bson.M{}, 2)
 
 	// quit: alice + bob deleted from hr_employee; users untouched
-	publishJSON(t, js, "chat.hr.site-a.employees.quit", model.HRSyncEmployeeQuitBatch{
+	publishJSON(t, js, "chat.hr.site-a.employees.quit", model.IHRSyncEmployeeQuitBatch{
 		Timestamp: 2, SiteID: "site-a", Accounts: []string{"alice", "bob"},
 	})
 	awaitCount(t, ctx, db, hrstore.EmployeeCollection, bson.M{}, 0)

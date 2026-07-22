@@ -1,10 +1,9 @@
 package model
 
-// Org is the org-hierarchy node an Employee belongs to — the nine
-// section/department/division fields, tags identical to search-sync-worker's
-// SpotlightOrgIndex so the two share one wire shape. Embedded inline in
-// Employee (fields serialize flat at top level).
-type Org struct {
+// IOrg mirrors Org's fields so IEmployee can embed the org hierarchy without
+// depending on Org (a downstream repurposes the generic name). Tags are
+// identical to Org — same JSON + bson shape on the wire.
+type IOrg struct {
 	SectID          string `json:"sectId,omitempty"          bson:"sectId,omitempty"`
 	SectTCName      string `json:"sectTCName,omitempty"      bson:"sectTCName,omitempty"`
 	SectName        string `json:"sectName,omitempty"        bson:"sectName,omitempty"`
@@ -16,22 +15,20 @@ type Org struct {
 	DivisionID      string `json:"divisionId,omitempty"      bson:"divisionId,omitempty"`
 }
 
-// ChangeType marks how a row moved since the last sync.
-type ChangeType string
+// IChangeType marks how a row moved since the last sync.
+type IChangeType string
 
 const (
-	ChangeTypeNewHire ChangeType = "new_hire"
-	ChangeTypeUpdate  ChangeType = "update"
+	IChangeTypeNewHire IChangeType = "new_hire"
+	IChangeTypeUpdate  IChangeType = "update"
 )
 
-// Employee is the shared HR row and the source of truth a downstream service
-// maps into model.User. Org embeds inline so the nine org fields sit flat
-// alongside the identity fields — one row feeds both the ES org index and
-// the hr_employee store.
-type Employee struct {
-	Org `bson:",inline"`
-	// ID is the hr_employee document _id (a string, per the repo convention).
-	// Internal storage key only — never published on the employees.upsert wire.
+// IEmployee is the shared HR-feed row a downstream service maps into User.
+// IOrg embeds inline so the nine org fields serialize flat alongside the
+// identity fields — one row feeds both the ES org index and the hr_employee store.
+type IEmployee struct {
+	IOrg `bson:",inline"`
+	// ID is the hr_employee document _id; json:"-" keeps it off the upsert wire.
 	ID             string `json:"-"              bson:"_id,omitempty"`
 	EmployeeID     string `json:"employeeId"     bson:"employeeId"`
 	Account        string `json:"account"        bson:"account"`
@@ -44,23 +41,22 @@ type Employee struct {
 	SiteID         string `json:"siteId"         bson:"siteId"`
 }
 
-// EmployeeWithChange is one employees.upsert element (published as a bare
-// array, no wrapper).
-type EmployeeWithChange struct {
-	Employee
-	ChangeType ChangeType `json:"changeType,omitempty"`
+// IEmployeeWithChange is one employees.upsert element (bare array, no wrapper).
+type IEmployeeWithChange struct {
+	IEmployee
+	ChangeType IChangeType `json:"changeType,omitempty"`
 }
 
-// UserWithChange is one users.upsert element (bare array).
-type UserWithChange struct {
+// IUserWithChange is one users.upsert element (bare array); embeds the real User.
+type IUserWithChange struct {
 	User
-	ChangeType ChangeType `json:"changeType,omitempty"`
+	ChangeType IChangeType `json:"changeType,omitempty"`
 }
 
-// HRSyncEmployeeQuitBatch lists departed accounts for one site
-// (subject chat.hr.{siteID}.employees.quit). Quit stays a wrapper; only the
-// two upserts go bare.
-type HRSyncEmployeeQuitBatch struct {
+// IHRSyncEmployeeQuitBatch lists departed accounts for one site
+// (subject chat.hr.{siteID}.employees.quit). Quit stays a wrapper; the two
+// upserts go bare.
+type IHRSyncEmployeeQuitBatch struct {
 	Timestamp int64    `json:"timestamp"`
 	SiteID    string   `json:"siteId"`
 	Accounts  []string `json:"accounts"`

@@ -14,12 +14,12 @@ import (
 // Store is the write surface an HR feed persists into.
 type Store interface {
 	// UpsertEmployees replaces hr_employee docs keyed by account.
-	UpsertEmployees(ctx context.Context, employees []model.EmployeeWithChange) error
+	UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error
 	// UpsertUserIdentities upserts users by account, writing IDENTITY FIELDS
 	// ONLY (account, siteId, engName, chineseName, employeeId). It must never
 	// touch roles/services/password/deactivated/status fields — users is the
 	// live auth store.
-	UpsertUserIdentities(ctx context.Context, users []model.UserWithChange) error
+	UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error
 	// QuitTeamsEmployees deletes hr_employee rows for the given accounts.
 	// users stays untouched (the user lifecycle is not the HR feed's to end).
 	QuitTeamsEmployees(ctx context.Context, accounts []string) error
