@@ -146,6 +146,20 @@ func (mr *MockSubscriptionStoreMockRecorder) DeleteSubscriptionsByAccounts(ctx, 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSubscriptionsByAccounts", reflect.TypeOf((*MockSubscriptionStore)(nil).DeleteSubscriptionsByAccounts), ctx, roomID, accounts)
 }
 
+// DeleteThreadSubscriptions mocks base method.
+func (m *MockSubscriptionStore) DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteThreadSubscriptions", ctx, roomID, accounts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteThreadSubscriptions indicates an expected call of DeleteThreadSubscriptions.
+func (mr *MockSubscriptionStoreMockRecorder) DeleteThreadSubscriptions(ctx, roomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteThreadSubscriptions", reflect.TypeOf((*MockSubscriptionStore)(nil).DeleteThreadSubscriptions), ctx, roomID, accounts)
+}
+
 // ExistingOrgMembers mocks base method.
 func (m *MockSubscriptionStore) ExistingOrgMembers(ctx context.Context, roomID string, orgIDs []string) (map[string]struct{}, error) {
 	m.ctrl.T.Helper()
@@ -385,6 +399,20 @@ func (m *MockSubscriptionStore) ListNewMembersForNewRoom(ctx context.Context, or
 func (mr *MockSubscriptionStoreMockRecorder) ListNewMembersForNewRoom(ctx, orgIDs, accounts, excludeAccount any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListNewMembersForNewRoom", reflect.TypeOf((*MockSubscriptionStore)(nil).ListNewMembersForNewRoom), ctx, orgIDs, accounts, excludeAccount)
+}
+
+// PullThreadFollowers mocks base method.
+func (m *MockSubscriptionStore) PullThreadFollowers(ctx context.Context, roomID string, accounts []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PullThreadFollowers", ctx, roomID, accounts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// PullThreadFollowers indicates an expected call of PullThreadFollowers.
+func (mr *MockSubscriptionStoreMockRecorder) PullThreadFollowers(ctx, roomID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PullThreadFollowers", reflect.TypeOf((*MockSubscriptionStore)(nil).PullThreadFollowers), ctx, roomID, accounts)
 }
 
 // ReconcileMemberCounts mocks base method.

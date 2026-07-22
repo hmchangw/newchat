@@ -132,13 +132,18 @@ func (s *stubInboxStore) UpsertRoom(ctx context.Context, room *model.Room) error
 	return nil
 }
 
+func toSet(accounts []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(accounts))
+	for _, a := range accounts {
+		set[a] = struct{}{}
+	}
+	return set
+}
+
 func (s *stubInboxStore) DeleteSubscriptionsByAccounts(_ context.Context, roomID string, accounts []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	want := make(map[string]struct{}, len(accounts))
-	for _, a := range accounts {
-		want[a] = struct{}{}
-	}
+	want := toSet(accounts)
 	filtered := s.subscriptions[:0]
 	for i := range s.subscriptions {
 		if s.subscriptions[i].RoomID == roomID {
@@ -149,6 +154,23 @@ func (s *stubInboxStore) DeleteSubscriptionsByAccounts(_ context.Context, roomID
 		filtered = append(filtered, s.subscriptions[i])
 	}
 	s.subscriptions = filtered
+	return nil
+}
+
+func (s *stubInboxStore) DeleteThreadSubscriptions(_ context.Context, roomID string, accounts []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := toSet(accounts)
+	filtered := s.threadSubs[:0]
+	for i := range s.threadSubs {
+		if s.threadSubs[i].RoomID == roomID {
+			if _, match := want[s.threadSubs[i].UserAccount]; match {
+				continue
+			}
+		}
+		filtered = append(filtered, s.threadSubs[i])
+	}
+	s.threadSubs = filtered
 	return nil
 }
 
@@ -995,6 +1017,39 @@ func TestHandleEvent_MemberRemoved(t *testing.T) {
 
 	subs := store.getSubscriptions()
 	assert.Empty(t, subs)
+}
+
+func TestHandleEvent_MemberRemoved_CleansThreadSubscriptions(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", SiteID: "site-a",
+	})
+	store.threadSubs = append(store.threadSubs,
+		model.ThreadSubscription{ID: "ts1", RoomID: "r1", UserAccount: "bob", ThreadRoomID: "tr1"},
+		model.ThreadSubscription{ID: "ts2", RoomID: "r1", UserAccount: "alice", ThreadRoomID: "tr1"},
+		model.ThreadSubscription{ID: "ts3", RoomID: "r2", UserAccount: "bob", ThreadRoomID: "tr2"},
+	)
+	store.mu.Unlock()
+
+	memberEvt := model.MemberRemoveEvent{Type: "member-removed", RoomID: "r1", Accounts: []string{"bob"}, SiteID: "site-a"}
+	payload, _ := json.Marshal(memberEvt)
+	evt := model.InboxEvent{Type: "member_removed", SiteID: "site-a", DestSiteID: "site-b", Payload: payload, Timestamp: time.Now().UnixMilli()}
+	data, _ := json.Marshal(evt)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	// bob's thread sub in r1 removed; alice (r1) and bob (r2) untouched.
+	remaining := store.getThreadSubs()
+	ids := make(map[string]bool, len(remaining))
+	for _, ts := range remaining {
+		ids[ts.ID] = true
+	}
+	assert.False(t, ids["ts1"], "bob's thread sub in r1 must be deleted")
+	assert.True(t, ids["ts2"], "alice's thread sub must remain")
+	assert.True(t, ids["ts3"], "bob's thread sub in another room must remain")
 }
 
 func TestHandleEvent_MemberRemoved_InvalidPayload(t *testing.T) {

@@ -225,8 +225,9 @@ func TestInboxWorker_BulkCreateSubscriptions_IdempotentUpsert(t *testing.T) {
 func TestInboxWorker_MemberRemoved_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
+		subCol:       db.Collection("subscriptions"),
+		roomCol:      db.Collection("rooms"),
+		threadSubCol: db.Collection("thread_subscriptions"),
 	}
 	h := NewHandler(store)
 
@@ -236,6 +237,13 @@ func TestInboxWorker_MemberRemoved_Integration(t *testing.T) {
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "bob"},
 		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleMember},
 		JoinedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	// bob's thread sub in r1 must be scrubbed; his sub in another room must survive.
+	_, err = store.threadSubCol.InsertMany(ctx, []interface{}{
+		model.ThreadSubscription{ID: "ts1", RoomID: "r1", UserAccount: "bob", ThreadRoomID: "tr1"},
+		model.ThreadSubscription{ID: "ts2", RoomID: "r2", UserAccount: "bob", ThreadRoomID: "tr2"},
 	})
 	require.NoError(t, err)
 
@@ -255,6 +263,15 @@ func TestInboxWorker_MemberRemoved_Integration(t *testing.T) {
 	count, err := store.subCol.CountDocuments(ctx, bson.M{"u._id": "u1", "roomId": "r1"})
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
+
+	// thread_subscriptions scrubbed for r1 (#308); the r2 sub is untouched, so a
+	// wrong roomId/userAccount filter would fail one of these assertions.
+	tsGone, err := store.threadSubCol.CountDocuments(ctx, bson.M{"roomId": "r1", "userAccount": "bob"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), tsGone)
+	tsKept, err := store.threadSubCol.CountDocuments(ctx, bson.M{"roomId": "r2", "userAccount": "bob"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), tsKept)
 
 	// No publish — room-worker handles user notification via NATS supercluster.
 }
