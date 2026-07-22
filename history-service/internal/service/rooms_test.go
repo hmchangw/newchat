@@ -61,10 +61,7 @@ var roomLastMsgAt = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 var roomCreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Mirror the production caps (house pattern — see maxGetByIDsBatchSize in messages_test).
-const (
-	roomsGetMaxBatch     = 100
-	roomsGetPreviewRunes = 256
-)
+const roomsGetMaxBatch = 100
 
 func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
@@ -164,9 +161,10 @@ func TestHistoryService_RoomsGet_DedupsRoomIDs(t *testing.T) {
 	assert.Len(t, resp.Rooms, 1)
 }
 
-func TestHistoryService_RoomsGet_ContentPreviewTrimmed(t *testing.T) {
+// Content is returned in full — the client truncates for display.
+func TestHistoryService_RoomsGet_FullContent(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
-	long := strings.Repeat("世", 1000) // 1000 runes, well over the preview cap
+	long := strings.Repeat("世", 1000)
 
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
@@ -175,8 +173,7 @@ func TestHistoryService_RoomsGet_ContentPreviewTrimmed(t *testing.T) {
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
 	require.Contains(t, resp.Rooms, "r1")
-	assert.LessOrEqual(t, len([]rune(resp.Rooms["r1"].Content)), roomsGetPreviewRunes)
-	assert.NotEmpty(t, resp.Rooms["r1"].Content)
+	assert.Equal(t, long, resp.Rooms["r1"].Content)
 }
 
 // Latest message is a system message → walk back to the first non-system, non-quoted survivor.

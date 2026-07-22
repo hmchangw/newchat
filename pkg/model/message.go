@@ -99,10 +99,10 @@ type RoomsGetRequest struct {
 }
 
 // PreviewMessage is a room's most-recent eligible message, resolved at read time and
-// enriched for the room-list preview. Content is preview-trimmed; sender/mentions carry
-// render-ready wire Participants (a bot sender's displayName is its app name). Shared
-// wire type: history-service's rooms.get RPC produces it, user-service's
-// subscription.list embeds it (SubscriptionRoom.LastMessage).
+// enriched for the room-list preview. Content is the full message body; the client
+// truncates for display. Sender/mentions carry render-ready wire Participants (a bot
+// sender's displayName is its app name). Shared wire type: history-service's rooms.get
+// RPC produces it, user-service's subscription.list embeds it (SubscriptionRoom.LastMessage).
 type PreviewMessage struct {
 	MessageID   string                 `json:"messageId"`
 	Sender      Participant            `json:"sender"`

@@ -915,8 +915,8 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 
 ##### PreviewMessage
 
-A room's most-recent **eligible** message, resolved at read time, preview-trimmed, and
-enriched for room-list rendering. Eligible = not soft-deleted, not a system message, not a
+A room's most-recent **eligible** message, resolved at read time and enriched for
+room-list rendering. Eligible = not soft-deleted, not a system message, not a
 quoted reply — an ineligible tail is walked back to an earlier survivor; a room with only
 ineligible messages omits `lastMessage`.
 
@@ -924,7 +924,7 @@ ineligible messages omits `lastMessage`.
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | Preview-trimmed to 256 runes. |
+| `content` | string | The full message body; the client truncates for display. |
 | `createdAt` | int64 | UTC milliseconds. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |

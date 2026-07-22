@@ -14,11 +14,10 @@ import (
 )
 
 const (
-	maxRoomsGetBatch        = 100 // mirrors maxGetByIDsBatchSize
-	maxRoomsGetConcurrency  = 16  // mirrors cassrepo.maxConcurrentIDReads
-	lastMessagePreviewRunes = 256 // room-list snippet cap
-	lastMsgWalkPageSize     = 50  // messages scanned per walk-back page
-	lastMsgWalkMaxPages     = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
+	maxRoomsGetBatch       = 100 // mirrors maxGetByIDsBatchSize
+	maxRoomsGetConcurrency = 16  // mirrors cassrepo.maxConcurrentIDReads
+	lastMsgWalkPageSize    = 50  // messages scanned per walk-back page
+	lastMsgWalkMaxPages    = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -136,24 +135,12 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 	return models.PreviewMessage{
 		MessageID:   m.MessageID,
 		Sender:      sender,
-		Content:     previewContent(m.Msg),
+		Content:     m.Msg,
 		CreatedAt:   m.CreatedAt.UTC().UnixMilli(),
 		Attachments: m.DecodedAttachments,
 		Mentions:    mentions,
 		VisibleTo:   m.VisibleTo,
 	}
-}
-
-// previewContent trims a message body to a rune-bounded room-list snippet.
-func previewContent(msg string) string {
-	if len(msg) <= lastMessagePreviewRunes {
-		return msg // bytes ≤ cap ⇒ runes ≤ cap; no alloc on the common short case
-	}
-	r := []rune(msg)
-	if len(r) <= lastMessagePreviewRunes {
-		return msg
-	}
-	return string(r[:lastMessagePreviewRunes])
 }
 
 // dedupRoomIDs removes duplicate roomIds, preserving first-seen order.
