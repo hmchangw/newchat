@@ -446,6 +446,45 @@ func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
 	})
 }
 
+func TestBroadcastWorker_FilterRoomMembers_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+
+	// alice and bob are members of r-fm; carol is a member of a different room only.
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []interface{}{
+		model.Subscription{ID: "fm1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r-fm"},
+		model.Subscription{ID: "fm2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r-fm"},
+		model.Subscription{ID: "fm3", User: model.SubscriptionUser{ID: "u3", Account: "carol"}, RoomID: "r-other"},
+	})
+	require.NoError(t, err)
+
+	t.Run("returns only the queried accounts that are members", func(t *testing.T) {
+		// eve is not a member anywhere; carol is a member of a different room.
+		members, err := store.FilterRoomMembers(ctx, "r-fm", []string{"bob", "carol", "eve"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]struct{}{"bob": {}}, members)
+	})
+
+	t.Run("all queried accounts are members", func(t *testing.T) {
+		members, err := store.FilterRoomMembers(ctx, "r-fm", []string{"alice", "bob"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]struct{}{"alice": {}, "bob": {}}, members)
+	})
+
+	t.Run("empty input does not hit the database", func(t *testing.T) {
+		members, err := store.FilterRoomMembers(ctx, "r-fm", nil)
+		require.NoError(t, err)
+		assert.Empty(t, members)
+	})
+
+	t.Run("no matches returns empty map", func(t *testing.T) {
+		members, err := store.FilterRoomMembers(ctx, "r-fm", []string{"eve", "mallory"})
+		require.NoError(t, err)
+		assert.Empty(t, members)
+	})
+}
+
 func TestBroadcastWorker_EnsureIndexes_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()

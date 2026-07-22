@@ -18,6 +18,9 @@ type Store interface {
 	GetRoom(ctx context.Context, roomID string) (*model.Room, error)
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
 	ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error)
+	// FilterRoomMembers returns the subset of accounts that are current members
+	// of roomID, querying only those accounts (index-backed, never the whole room).
+	FilterRoomMembers(ctx context.Context, roomID string, accounts []string) (map[string]struct{}, error)
 	GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error)
 	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error
 	// SetSubscriptionMentions flags accounts as mentioned, unless a given account
