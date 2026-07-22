@@ -88,11 +88,11 @@ func TestSpotlightOrgTemplateProperties_MatchesStruct(t *testing.T) {
 // rows (each org becomes one Employee element).
 func hrBatchJSON(t *testing.T, orgs []SpotlightOrgIndex) []byte {
 	t.Helper()
-	employees := make([]model.EmployeeWithChange, 0, len(orgs))
+	employees := make([]model.IEmployeeWithChange, 0, len(orgs))
 	for i := range orgs {
 		o := &orgs[i]
-		employees = append(employees, model.EmployeeWithChange{
-			Employee: model.Employee{Org: model.Org{
+		employees = append(employees, model.IEmployeeWithChange{
+			IEmployee: model.IEmployee{IOrg: model.IOrg{
 				SectID: o.SectID, SectTCName: o.SectTCName, SectName: o.SectName,
 				SectDescription: o.SectDescription, DeptID: o.DeptID, DeptTCName: o.DeptTCName,
 				DeptName: o.DeptName, DeptDescription: o.DeptDescription, DivisionID: o.DivisionID,

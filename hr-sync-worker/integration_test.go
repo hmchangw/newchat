@@ -16,7 +16,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
-	"github.com/hmchangw/chat/pkg/hrstore"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -76,60 +75,60 @@ func TestWorker_EndToEnd(t *testing.T) {
 	// pre-existing user with auth fields the identity upsert must not touch
 	// carries employeeId E1 — the identity upsert keys on it, so this row is
 	// the one alice's upsert must update in place (not a fresh insert).
-	_, err = db.Collection(hrstore.UserCollection).InsertOne(ctx,
+	_, err = db.Collection(UserCollection).InsertOne(ctx,
 		bson.M{"_id": "u-alice", "account": "alice", "employeeId": "E1", "siteId": "old-site", "roles": []string{"admin"}, "services": bson.M{"password": bson.M{"bcrypt": "hash"}}})
 	require.NoError(t, err)
 
 	h := NewHandler(newMongoStore(db))
 	startWorker(t, js, h, "site-a")
 
-	emp := func(account string) model.EmployeeWithChange {
-		return model.EmployeeWithChange{
-			Employee: model.Employee{
+	emp := func(account string) model.IEmployeeWithChange {
+		return model.IEmployeeWithChange{
+			IEmployee: model.IEmployee{
 				ID: "E-" + account, EmployeeID: "E-" + account,
 				Account: account, SiteID: "site-a",
 				EngName: "Name " + account,
-				Org:     model.Org{SectID: "g1", SectName: "Engineering"},
+				IOrg:    model.IOrg{SectID: "g1", SectName: "Engineering"},
 			},
-			ChangeType: model.ChangeTypeNewHire,
+			ChangeType: model.IChangeTypeNewHire,
 		}
 	}
-	batch := []model.EmployeeWithChange{emp("alice"), emp("bob")}
+	batch := []model.IEmployeeWithChange{emp("alice"), emp("bob")}
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
-	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.UserWithChange{
-		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.ChangeTypeNewHire},
-		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.ChangeTypeNewHire},
+	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.IUserWithChange{
+		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.IChangeTypeNewHire},
+		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.IChangeTypeNewHire},
 		// no employeeId → skipped, never written (an empty key would match and
 		// clobber every other keyless row); the count assertion below proves it
-		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.ChangeTypeNewHire},
+		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.IChangeTypeNewHire},
 	})
 
-	awaitCount(t, ctx, db, hrstore.EmployeeCollection, bson.M{}, 2)
-	awaitCount(t, ctx, db, hrstore.UserCollection, bson.M{}, 2) // alice updated in place, carol inserted
+	awaitCount(t, ctx, db, EmployeeCollection, bson.M{}, 2)
+	awaitCount(t, ctx, db, UserCollection, bson.M{}, 2) // alice updated in place, carol inserted
 
 	// identity upsert: alice's auth fields intact, identity fields updated
 	var alice bson.M
-	require.NoError(t, db.Collection(hrstore.UserCollection).FindOne(ctx, bson.M{"account": "alice"}).Decode(&alice))
+	require.NoError(t, db.Collection(UserCollection).FindOne(ctx, bson.M{"account": "alice"}).Decode(&alice))
 	assert.Equal(t, "u-alice", alice["_id"], "existing user keeps its _id")
 	assert.Equal(t, "site-a", alice["siteId"])
 	assert.Equal(t, "Name alice", alice["engName"])
 	assert.NotNil(t, alice["roles"], "roles must never be touched")
 	assert.NotNil(t, alice["services"], "services must never be touched")
 	var carol bson.M
-	require.NoError(t, db.Collection(hrstore.UserCollection).FindOne(ctx, bson.M{"account": "carol"}).Decode(&carol))
+	require.NoError(t, db.Collection(UserCollection).FindOne(ctx, bson.M{"account": "carol"}).Decode(&carol))
 	assert.NotEmpty(t, carol["_id"], "inserted user gets a generated _id")
 	assert.Equal(t, "卡蘿", carol["chineseName"])
 
 	// re-delivery (same batches again) → no dupes
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
-	awaitCount(t, ctx, db, hrstore.EmployeeCollection, bson.M{}, 2)
+	awaitCount(t, ctx, db, EmployeeCollection, bson.M{}, 2)
 
 	// quit: alice + bob deleted from hr_employee; users untouched
-	publishJSON(t, js, "chat.hr.site-a.employees.quit", model.HRSyncEmployeeQuitBatch{
+	publishJSON(t, js, "chat.hr.site-a.employees.quit", model.IHRSyncEmployeeQuitBatch{
 		Timestamp: 2, SiteID: "site-a", Accounts: []string{"alice", "bob"},
 	})
-	awaitCount(t, ctx, db, hrstore.EmployeeCollection, bson.M{}, 0)
-	awaitCount(t, ctx, db, hrstore.UserCollection, bson.M{}, 2)
+	awaitCount(t, ctx, db, EmployeeCollection, bson.M{}, 0)
+	awaitCount(t, ctx, db, UserCollection, bson.M{}, 2)
 }
 
 // awaitCount polls the collection until filter matches want (consume is async).

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hmchangw/chat/pkg/hrstore"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
@@ -25,10 +24,10 @@ func (e streamEmitter) emit(ctx context.Context, diff diffResult) (int, error) {
 	return e.pub.publishSync(ctx, diff)
 }
 
-// directEmitter writes a diff straight to the target Mongo via the shared
-// hrstore.Store, skipping the JetStream feed + hr-sync-worker entirely.
+// directEmitter writes a diff straight to the target Mongo via this service's
+// own WriteStore, skipping the JetStream feed + hr-sync-worker entirely.
 type directEmitter struct {
-	store     hrstore.Store
+	store     WriteStore
 	converter transform.EmployeeUserConverter
 }
 
@@ -40,10 +39,10 @@ func (e directEmitter) emit(ctx context.Context, diff diffResult) (int, error) {
 		}
 		written++
 
-		users := make([]model.UserWithChange, 0, len(diff.Upserts))
+		users := make([]model.IUserWithChange, 0, len(diff.Upserts))
 		for i := range diff.Upserts {
-			users = append(users, model.UserWithChange{
-				User:       e.converter.UserFromEmployee(&diff.Upserts[i].Employee),
+			users = append(users, model.IUserWithChange{
+				User:       e.converter.UserFromEmployee(&diff.Upserts[i].IEmployee),
 				ChangeType: diff.Upserts[i].ChangeType,
 			})
 		}

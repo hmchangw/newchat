@@ -107,13 +107,13 @@ func TestRunSync_EndToEnd(t *testing.T) {
 
 	msgs := drainStream(t, stream)
 	require.Len(t, msgs, 2)
-	var employees []model.EmployeeWithChange
+	var employees []model.IEmployeeWithChange
 	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.upsert"], &employees))
 	require.Len(t, employees, 2)
 	assert.Equal(t, "alice", employees[0].Account)
-	assert.Equal(t, model.ChangeTypeNewHire, employees[0].ChangeType)
-	assert.Equal(t, model.Org{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, employees[0].Org)
-	var users []model.UserWithChange
+	assert.Equal(t, model.IChangeTypeNewHire, employees[0].ChangeType)
+	assert.Equal(t, model.IOrg{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, employees[0].IOrg)
+	var users []model.IUserWithChange
 	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.users.upsert"], &users))
 	require.Len(t, users, 2)
 	assert.Equal(t, "alice", users[0].Account)
@@ -123,7 +123,7 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	// strips Employee.ID), so stamp it here too.
 	docs := make([]any, 0, len(employees))
 	for _, e := range employees {
-		row := e.Employee
+		row := e.IEmployee
 		row.ID = row.EmployeeID
 		docs = append(docs, row)
 	}
@@ -147,11 +147,11 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.upsert"], &employees))
 	require.Len(t, employees, 2)
 	assert.Equal(t, "bob", employees[0].Account)
-	assert.Equal(t, model.ChangeTypeUpdate, employees[0].ChangeType)
+	assert.Equal(t, model.IChangeTypeUpdate, employees[0].ChangeType)
 	assert.Equal(t, "鮑伯二世", employees[0].ChineseName)
 	assert.Equal(t, "carol", employees[1].Account)
-	assert.Equal(t, model.ChangeTypeNewHire, employees[1].ChangeType)
-	var qb model.HRSyncEmployeeQuitBatch
+	assert.Equal(t, model.IChangeTypeNewHire, employees[1].ChangeType)
+	var qb model.IHRSyncEmployeeQuitBatch
 	require.NoError(t, json.Unmarshal(msgs["chat.hr.site-a.employees.quit"], &qb))
 	assert.Equal(t, "site-a", qb.SiteID)
 	assert.Equal(t, []string{"alice"}, qb.Accounts, "only the teams-sourced departure quits; the legacy row never does")

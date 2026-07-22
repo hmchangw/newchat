@@ -22,7 +22,7 @@ func TestRunSync_DiffAndPublish(t *testing.T) {
 	stored := teamsEmployee("eve", "site-a") // absent from graph -> quit
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().ListTeamsEmployees(gomock.Any()).Return([]model.Employee{stored}, nil)
+	store.EXPECT().ListTeamsEmployees(gomock.Any()).Return([]model.IEmployee{stored}, nil)
 
 	var got []captured
 	pub := newCapturingPublisher(t, &got)

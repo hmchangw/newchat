@@ -42,10 +42,10 @@ func (m *MockStore) EXPECT() *MockStoreMockRecorder {
 }
 
 // ListTeamsEmployees mocks base method.
-func (m *MockStore) ListTeamsEmployees(ctx context.Context) ([]model.Employee, error) {
+func (m *MockStore) ListTeamsEmployees(ctx context.Context) ([]model.IEmployee, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListTeamsEmployees", ctx)
-	ret0, _ := ret[0].([]model.Employee)
+	ret0, _ := ret[0].([]model.IEmployee)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

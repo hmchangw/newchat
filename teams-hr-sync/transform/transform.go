@@ -20,13 +20,13 @@ import (
 // an empty Account is unmappable (no usable UPN or Graph id) and must be
 // skipped by the caller.
 type Mapper interface {
-	OrgFromGroup(g msgraph.GroupProfile) model.Org
-	EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, siteID string) model.Employee
+	OrgFromGroup(g msgraph.GroupProfile) model.IOrg
+	EmployeeFromMember(m *msgraph.GraphUser, org *model.IOrg, siteID string) model.IEmployee
 }
 
 // EmployeeUserConverter maps Employee -> User for the users.upsert feed.
 type EmployeeUserConverter interface {
-	UserFromEmployee(*model.Employee) model.User
+	UserFromEmployee(*model.IEmployee) model.User
 }
 
 // DefaultMapper implements Mapper with the spec'd defaults: a group maps to
@@ -36,18 +36,18 @@ type EmployeeUserConverter interface {
 // stub. ponytail: no OrgType — the new Org has no type field.
 type DefaultMapper struct{}
 
-func (DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.Org {
-	return model.Org{SectID: g.ID, SectName: g.DisplayName, SectDescription: g.Description}
+func (DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.IOrg {
+	return model.IOrg{SectID: g.ID, SectName: g.DisplayName, SectDescription: g.Description}
 }
 
-func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, siteID string) model.Employee {
+func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.IOrg, siteID string) model.IEmployee {
 	account, ok := splitUPN(m.UserPrincipalName)
 	// No stable Graph id → no deterministic employeeId key → unmappable.
 	if !ok || m.ID == "" {
-		return model.Employee{}
+		return model.IEmployee{}
 	}
 	empID := EmployeeIDFromGraphID(m.ID)
-	return model.Employee{
+	return model.IEmployee{
 		ID:             empID, // hr_employee _id = the stable derived id
 		EmployeeID:     empID,
 		Account:        account,
@@ -58,7 +58,7 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.Org, si
 		UserType:       m.UserType,
 		AccountEnabled: m.AccountEnabled,
 		SiteID:         siteID,
-		Org:            *org,
+		IOrg:           *org,
 	}
 }
 
@@ -76,7 +76,7 @@ func EmployeeIDFromGraphID(graphID string) string {
 // stays zero — the downstream persister owns defaults/merging.
 type DefaultConverter struct{}
 
-func (DefaultConverter) UserFromEmployee(e *model.Employee) model.User {
+func (DefaultConverter) UserFromEmployee(e *model.IEmployee) model.User {
 	return model.User{
 		Account:     e.Account,
 		SiteID:      e.SiteID,

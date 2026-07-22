@@ -10,7 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// TestEmployeeProjection_CoversEveryBsonTag fails if any model.Employee bson
+// TestEmployeeProjection_CoversEveryBsonTag fails if any model.IEmployee bson
 // tag (incl. the inline Org fields) is missing from the derived projection —
 // so a rename can't silently drop a field from the read.
 func TestEmployeeProjection_CoversEveryBsonTag(t *testing.T) {
@@ -29,7 +29,7 @@ func TestEmployeeProjection_CoversEveryBsonTag(t *testing.T) {
 			}
 		}
 	}
-	collect(reflect.TypeOf(model.Employee{}))
+	collect(reflect.TypeOf(model.IEmployee{}))
 
 	for tag := range want {
 		_, ok := employeeProjection[tag]

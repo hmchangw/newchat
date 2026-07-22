@@ -14,15 +14,15 @@ var testGroup = msgraph.GroupProfile{ID: "g1", DisplayName: "Engineering", Descr
 
 func TestDefaultMapper_OrgFromGroup(t *testing.T) {
 	got := DefaultMapper{}.OrgFromGroup(testGroup)
-	assert.Equal(t, model.Org{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, got, "group maps to section level")
+	assert.Equal(t, model.IOrg{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, got, "group maps to section level")
 }
 
 func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
-	org := model.Org{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}
+	org := model.IOrg{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}
 	tests := []struct {
 		name string
 		user msgraph.GraphUser
-		want model.Employee
+		want model.IEmployee
 	}{
 		{
 			name: "full identity mapping",
@@ -33,23 +33,23 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 			},
 			// EmployeeID derived from the Graph id (u1), not the AAD EMP1 attribute;
 			// mail/userType/accountEnabled carried through.
-			want: model.Employee{
+			want: model.IEmployee{
 				ID: EmployeeIDFromGraphID("u1"), EmployeeID: EmployeeIDFromGraphID("u1"),
 				Account: "alice.wu", EngName: "Alice Wu",
 				ChineseName: "愛麗絲", Mail: "alice.wu@corp.com", MailNickname: "alice.wu",
 				UserType: "Member", AccountEnabled: true,
-				SiteID: "site-a", Org: org,
+				SiteID: "site-a", IOrg: org,
 			},
 		},
 		{
 			name: "surname only trims the joiner space",
 			user: msgraph.GraphUser{ID: "u2", UserPrincipalName: "bob@corp.com", Surname: "Lin"},
-			want: model.Employee{ID: EmployeeIDFromGraphID("u2"), EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", Org: org},
+			want: model.IEmployee{ID: EmployeeIDFromGraphID("u2"), EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", IOrg: org},
 		},
 		// empty Account or missing Graph id signals unmappable — the caller skips
-		{name: "no at sign", user: msgraph.GraphUser{ID: "u3", UserPrincipalName: "not-a-upn"}, want: model.Employee{}},
-		{name: "empty local part", user: msgraph.GraphUser{ID: "u4", UserPrincipalName: "@corp.com"}, want: model.Employee{}},
-		{name: "no graph id", user: msgraph.GraphUser{UserPrincipalName: "carol@corp.com"}, want: model.Employee{}},
+		{name: "no at sign", user: msgraph.GraphUser{ID: "u3", UserPrincipalName: "not-a-upn"}, want: model.IEmployee{}},
+		{name: "empty local part", user: msgraph.GraphUser{ID: "u4", UserPrincipalName: "@corp.com"}, want: model.IEmployee{}},
+		{name: "no graph id", user: msgraph.GraphUser{UserPrincipalName: "carol@corp.com"}, want: model.IEmployee{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -69,10 +69,10 @@ func TestEmployeeIDFromGraphID(t *testing.T) {
 }
 
 func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {
-	e := model.Employee{
+	e := model.IEmployee{
 		EmployeeID: "EMP1", Account: "alice", EngName: "Alice Wu", ChineseName: "愛麗絲",
 		SiteID: "site-a",
-		Org:    model.Org{SectID: "g1", SectName: "Engineering"},
+		IOrg:   model.IOrg{SectID: "g1", SectName: "Engineering"},
 	}
 	got := DefaultConverter{}.UserFromEmployee(&e)
 	assert.Equal(t, model.User{
@@ -85,5 +85,5 @@ func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {
 }
 
 func TestDefaultConverter_ZeroEmployee(t *testing.T) {
-	assert.Equal(t, model.User{}, DefaultConverter{}.UserFromEmployee(&model.Employee{}))
+	assert.Equal(t, model.User{}, DefaultConverter{}.UserFromEmployee(&model.IEmployee{}))
 }
