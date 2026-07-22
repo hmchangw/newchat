@@ -599,3 +599,53 @@ func TestNewChatsClient_MaxIdleConnsSurvivesProxy(t *testing.T) {
 	assert.Zero(t, tr.MaxConnsPerHost, "no hard connection cap")
 	require.NotNil(t, tr.Proxy, "proxy must still be configured alongside the idle pool")
 }
+
+// stubRoundTripper is a non-*http.Transport RoundTripper, used to verify that
+// connection-pool tuning leaves custom transports untouched.
+type stubRoundTripper struct{}
+
+func (stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("stub round tripper")
+}
+
+func TestWithMaxIdleConns_LeavesCustomRoundTripper(t *testing.T) {
+	// A client whose Transport is not an *http.Transport (a custom RoundTripper
+	// injected via WithHTTPClient) can't have idle-conn fields tuned; the option
+	// must leave it in place rather than replacing it with a default transport,
+	// which would silently drop its TLS/auth/mock behavior.
+	g := New(Config{TenantID: "t"},
+		WithHTTPClient(&http.Client{Transport: stubRoundTripper{}}),
+		WithMaxIdleConns(10),
+	).(*graphClient)
+	assert.IsType(t, stubRoundTripper{}, g.httpClient.Transport, "custom RoundTripper must be preserved unchanged")
+}
+
+func TestWithMaxIdleConns_PreservesUnlimitedAndClonesSupplied(t *testing.T) {
+	// MaxIdleConns == 0 means "unlimited"; raising it to n would turn unlimited
+	// into a finite cap, so it must stay 0. And a caller-supplied transport must
+	// be cloned before tuning, never mutated in place.
+	supplied := &http.Transport{MaxIdleConns: 0} // 0 == unlimited
+	g := New(Config{TenantID: "t"},
+		WithHTTPClient(&http.Client{Transport: supplied}),
+		WithMaxIdleConns(10),
+	).(*graphClient)
+
+	assert.Zero(t, supplied.MaxIdleConnsPerHost, "supplied transport must not be mutated in place")
+	assert.Zero(t, supplied.MaxIdleConns, "supplied transport left untouched")
+
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.NotSame(t, supplied, tr, "tuning must operate on a clone of the supplied transport")
+	assert.Equal(t, 10, tr.MaxIdleConnsPerHost)
+	assert.Zero(t, tr.MaxIdleConns, "unlimited (0) MaxIdleConns must be preserved, not lowered to n")
+}
+
+func TestNewChatsClient_ProxyRejectsCustomRoundTripper(t *testing.T) {
+	// A proxy can only be applied to an *http.Transport; when the caller injected
+	// a custom RoundTripper, construction fails fast rather than discarding it.
+	_, err := NewChatsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"},
+		WithHTTPClient(&http.Client{Transport: stubRoundTripper{}}),
+	)
+	require.Error(t, err)
+}
