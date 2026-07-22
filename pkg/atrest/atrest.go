@@ -29,11 +29,11 @@ type EncryptedFields struct {
 	Card                *cassandra.Card        `json:"card,omitempty"`
 	CardAction          *cassandra.CardAction  `json:"cardAction,omitempty"`
 	QuotedParentContent *QuotedParentEncrypted `json:"quotedParentContent,omitempty"`
+	ForwardedContent    *QuotedParentEncrypted `json:"forwardedContent,omitempty"`
 }
 
-// QuotedParentEncrypted holds the user-authored fields of a quoted parent
-// message. Mentions, sender, timestamps and IDs stay plaintext on the
-// quoted_parent_message UDT.
+// QuotedParentEncrypted holds the user-authored body fields of a quoted-parent or
+// forwarded snapshot. Mentions, sender, timestamps and IDs stay plaintext on the UDT.
 type QuotedParentEncrypted struct {
 	Msg         string   `json:"msg,omitempty"`
 	Attachments [][]byte `json:"attachments,omitempty"`

@@ -61,6 +61,21 @@ CREATE TYPE IF NOT EXISTS "QuotedParentMessage"(
   thread_parent_id TEXT                // set by message-worker when quoted message is a TShow reply
 );
 ```
+#### ForwardedMessage
+```cql
+CREATE TYPE IF NOT EXISTS "ForwardedMessage"(  // snapshot of a forwarded source message; mirrors
+                                               // QuotedParentMessage minus the thread-context fields.
+                                               // Non-null on a row marks that row as a forward.
+  attachments LIST<BLOB>,
+  created_at TIMESTAMP,
+  mentions SET<FROZEN<"Participant">>,
+  message_id TEXT,
+  message_link TEXT,
+  msg TEXT,
+  room_id TEXT,
+  sender FROZEN<"Participant">
+);
+```
 #### reaction_key
 ```cql
 CREATE TYPE IF NOT EXISTS chat.reaction_key (
@@ -138,6 +153,8 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
                                     //   indicator only needs pinned_at; richer pin metadata is a
                                     //   point lookup on messages_by_id.
   quoted_parent_message FROZEN<"QuotedParentMessage">,
+  forwarded FROZEN<"ForwardedMessage">,  // forward marker + source snapshot; only on messages_by_room
+                                         //   (the room-list preview reads it). Null for non-forwards.
   reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
   sender FROZEN<"Participant">,
   site_id TEXT,

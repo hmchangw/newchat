@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS chat.messages_by_room (
   thread_parent_id         TEXT,
   thread_parent_created_at TIMESTAMP, // for FE to query thread parent message when also sent to channel (tshow=true)
   quoted_parent_message    FROZEN<"QuotedParentMessage">,
+  forwarded                FROZEN<"ForwardedMessage">,
   visible_to               TEXT,
   reactions                MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
   deleted                  BOOLEAN,

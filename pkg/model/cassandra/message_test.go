@@ -91,6 +91,26 @@ func TestQuotedParentMessage_JSON(t *testing.T) {
 	assert.Equal(t, threadParent, *got.ThreadParentCreatedAt)
 }
 
+func TestForwardedMessage_JSON(t *testing.T) {
+	f := ForwardedMessage{
+		MessageID:          "m1",
+		RoomID:             "r1",
+		Sender:             Participant{ID: "u1", Account: "alice"},
+		CreatedAt:          time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+		Msg:                "forwarded body",
+		Mentions:           []Participant{{ID: "u2", Account: "bob"}},
+		DecodedAttachments: []Attachment{{ID: "f1", Title: "a.png", Type: "file"}},
+		MessageLink:        "https://chat.example.com/r1/m1",
+	}
+	got := roundTrip(t, f)
+	assert.Equal(t, "m1", got.MessageID)
+	assert.Equal(t, "forwarded body", got.Msg)
+	assert.Equal(t, "alice", got.Sender.Account)
+	assert.Len(t, got.Mentions, 1)
+	assert.Len(t, got.DecodedAttachments, 1)
+	assert.Equal(t, "https://chat.example.com/r1/m1", got.MessageLink)
+}
+
 func TestQuotedParentMessage_JSON_Minimal(t *testing.T) {
 	q := QuotedParentMessage{
 		MessageID: "m1",
@@ -162,6 +182,11 @@ func TestMessage_JSON(t *testing.T) {
 			Sender:    Participant{ID: "u5", Account: "eve"},
 			CreatedAt: now.Add(-30 * time.Minute), Msg: "original",
 		},
+		Forwarded: &ForwardedMessage{
+			MessageID: "m-fwd-src", RoomID: "r2",
+			Sender:    Participant{ID: "u7", Account: "frank"},
+			CreatedAt: now.Add(-1 * time.Hour), Msg: "forwarded body",
+		},
 		VisibleTo:    "u1",
 		Deleted:      false,
 		Type:         "user_joined",
@@ -187,6 +212,9 @@ func TestMessage_JSON(t *testing.T) {
 	assert.Equal(t, threadParent, *got.ThreadParentCreatedAt)
 	require.NotNil(t, got.QuotedParentMessage)
 	assert.Equal(t, "m-quoted", got.QuotedParentMessage.MessageID)
+	require.NotNil(t, got.Forwarded)
+	assert.Equal(t, "m-fwd-src", got.Forwarded.MessageID)
+	assert.Equal(t, "forwarded body", got.Forwarded.Msg)
 	assert.Equal(t, "u1", got.VisibleTo)
 	assert.Equal(t, "user_joined", got.Type)
 	assert.Equal(t, "site-remote", got.SiteID)
@@ -218,6 +246,7 @@ func TestMessage_JSON_Minimal(t *testing.T) {
 	assert.Nil(t, got.UpdatedAt)
 	assert.Nil(t, got.ThreadParentCreatedAt)
 	assert.Nil(t, got.QuotedParentMessage)
+	assert.Nil(t, got.Forwarded)
 	assert.Empty(t, got.ThreadParentID)
 	assert.False(t, got.TShow)
 	assert.False(t, got.Deleted)
