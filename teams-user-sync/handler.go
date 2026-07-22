@@ -11,8 +11,8 @@ import (
 )
 
 // Syncer runs updateUsers: walk Graph /users page by page, insert the users
-// missing from teams_user, joined with their HR data (siteID derived from the
-// HR locationURL) when an hr row exists.
+// missing from teams_user, joined with their HR data (siteId, engName, mail)
+// when an hr_employee row exists.
 type Syncer struct {
 	store    Store
 	graph    msgraph.UserLister
@@ -31,7 +31,7 @@ type RunStats struct {
 	Seen        int // users returned by Graph
 	Existing    int // already present in teams_user, untouched
 	InvalidUPN  int // UPN without a local part and domain; never syncable
-	HRUnmatched int // no hr.accountName match; upserted with empty HR fields
+	HRUnmatched int // no hr_employee.account match; upserted with empty HR fields
 	Upserted    int // written to teams_user
 }
 
@@ -56,8 +56,8 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	}
 
 	ids := make([]string, 0, len(users))
-	for _, u := range users {
-		ids = append(ids, u.ID)
+	for i := range users {
+		ids = append(ids, users[i].ID)
 	}
 	existing, err := s.store.ExistingIDs(ctx, ids)
 	if err != nil {
@@ -66,7 +66,8 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 	stats.Existing += len(existing)
 
 	candidates := make([]model.TeamsUser, 0, len(users)-len(existing))
-	for _, u := range users {
+	for i := range users {
+		u := &users[i]
 		if _, ok := existing[u.ID]; ok {
 			continue
 		}
@@ -106,16 +107,11 @@ func (s *Syncer) syncPage(ctx context.Context, users []msgraph.GraphUser, stats 
 			continue
 		}
 		matched++
+		c.SiteID = hr.SiteID
 		c.EngName = hr.EngName
 		c.Mail = hr.Mail
-		if hr.LocationURL == "" {
-			s.logger.Warn("hr locationURL is empty", "userId", c.ID)
-		} else {
-			c.SiteID = extractSiteIDFromLocationURL(hr.LocationURL)
-			if c.SiteID == "" {
-				s.logger.Warn("extract siteID from locationURL returned empty",
-					"userId", c.ID, "locationURL", hr.LocationURL)
-			}
+		if c.SiteID == "" {
+			s.logger.Warn("hr siteId is empty", "userId", c.ID)
 		}
 	}
 	s.logger.Info("hr site ids lookup result",
@@ -135,11 +131,4 @@ func splitUPN(upn string) (account string, ok bool) {
 		return "", false
 	}
 	return strings.ToLower(upn[:at]), true
-}
-
-// extractSiteIDFromLocationURL derives the siteID from an HR locationURL.
-// TODO: parse the siteID out of the locationURL; for now the raw locationURL
-// is returned unchanged.
-func extractSiteIDFromLocationURL(locationURL string) string {
-	return locationURL
 }

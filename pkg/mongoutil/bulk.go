@@ -41,16 +41,21 @@ func fromDriverResult(r *mongo.BulkWriteResult) *BulkResult {
 	}
 }
 
-// bsonSetWithoutID strips _id from the marshaled $set payload — MongoDB rejects updates that touch immutable _id.
-func bsonSetWithoutID(item any) (bson.M, error) {
+// bsonSetWithoutID marshals item into a $set payload with _id removed (MongoDB
+// rejects updates that touch the immutable _id) and returns the stripped _id
+// separately so an upsert can $setOnInsert it — otherwise a non-_id-filter
+// insert lets Mongo auto-generate an ObjectID, breaking string-_id readers.
+// id is nil when the item carries no _id (e.g. an omitempty field left unset).
+func bsonSetWithoutID(item any) (set bson.M, id any, err error) {
 	raw, err := bson.Marshal(item)
 	if err != nil {
-		return nil, fmt.Errorf("bson marshal: %w", err)
+		return nil, nil, fmt.Errorf("bson marshal: %w", err)
 	}
 	var m bson.M
 	if err := bson.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("bson unmarshal: %w", err)
+		return nil, nil, fmt.Errorf("bson unmarshal: %w", err)
 	}
+	id = m["_id"]
 	delete(m, "_id")
-	return m, nil
+	return m, id, nil
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -62,40 +63,31 @@ func (c *spotlightOrgCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
 
-// hrSyncEmployeeBatch decodes hr-syncer's employees.upsert wire payload.
-// Each employee element is a full Employee struct from hr-syncer's
-// internal repo; we decode straight into SpotlightOrgIndex to pick up
-// only the nine org fields and drop the rest.
-type hrSyncEmployeeBatch struct {
-	Timestamp int64               `json:"timestamp"`
-	Employees []SpotlightOrgIndex `json:"employees"`
-}
-
-// BuildAction parses an HR employees batch, dedupes by SectID (last-wins),
-// and emits one ES _update per unique sectId with doc_as_upsert:true.
-// Doc-merge + omitempty on SpotlightOrgIndex means partial-field publishes
-// preserve stored values for unset fields.
+// BuildAction parses the employees.upsert bare array (already decompressed by
+// the framework), dedupes by SectID (last-wins), and emits one ES _update per
+// unique sectId with doc_as_upsert:true. Doc-merge + omitempty on
+// SpotlightOrgIndex means partial-field publishes preserve stored values for
+// unset fields.
 func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
-	var batch hrSyncEmployeeBatch
-	if err := json.Unmarshal(data, &batch); err != nil {
-		return nil, fmt.Errorf("unmarshal hr batch: %w", err)
+	var employees []model.EmployeeWithChange
+	if err := json.Unmarshal(data, &employees); err != nil {
+		return nil, fmt.Errorf("unmarshal hr employees: %w", err)
 	}
-	if batch.Timestamp <= 0 {
-		return nil, fmt.Errorf("build spotlight-org action: missing timestamp")
-	}
-	if len(batch.Employees) == 0 {
+	if len(employees) == 0 {
 		return nil, nil
 	}
 
 	// Dedup by SectID, last-wins; rows without a SectID are skipped
-	// (employees not yet assigned to a section).
-	deduped := make(map[string]*SpotlightOrgIndex, len(batch.Employees))
-	for i := range batch.Employees {
-		emp := &batch.Employees[i]
-		if emp.SectID == "" {
+	// (employees not yet assigned to a section). The nine org fields share
+	// SpotlightOrgIndex's json tags, so we copy them straight across.
+	deduped := make(map[string]*SpotlightOrgIndex, len(employees))
+	for i := range employees {
+		org := &employees[i].Org
+		if org.SectID == "" {
 			continue
 		}
-		deduped[emp.SectID] = emp
+		row := orgToSpotlight(org)
+		deduped[org.SectID] = &row
 	}
 	if len(deduped) == 0 {
 		return nil, nil
@@ -115,6 +107,22 @@ func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAc
 		})
 	}
 	return actions, nil
+}
+
+// orgToSpotlight copies the shared nine org fields into the ES doc shape
+// (SpotlightOrgIndex keeps the es: mapping tags; model.Org is tag-identical).
+func orgToSpotlight(o *model.Org) SpotlightOrgIndex {
+	return SpotlightOrgIndex{
+		SectID:          o.SectID,
+		SectTCName:      o.SectTCName,
+		SectName:        o.SectName,
+		SectDescription: o.SectDescription,
+		DeptID:          o.DeptID,
+		DeptTCName:      o.DeptTCName,
+		DeptName:        o.DeptName,
+		DeptDescription: o.DeptDescription,
+		DivisionID:      o.DivisionID,
+	}
 }
 
 func buildSpotlightOrgUpdateBody(row *SpotlightOrgIndex) (json.RawMessage, error) {

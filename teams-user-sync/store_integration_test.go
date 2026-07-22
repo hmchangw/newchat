@@ -46,18 +46,18 @@ func TestMongoStore_HRUsers(t *testing.T) {
 	ctx := context.Background()
 	store := newMongoStore(db, db)
 
-	_, err := db.Collection("hr").InsertMany(ctx, []any{
-		bson.M{"accountName": "alice", "locationURL": "https://site-a.mysite.com", "engName": "Alice Smith", "mail": "alice@corp.example", "unrelated": "x"},
-		bson.M{"accountName": "bob", "locationURL": "https://site-b.mysite.com", "engName": "Bob Wu", "mail": "bob@corp.example"},
-		bson.M{"accountName": "dana"}, // hr row with no HR fields at all
+	_, err := db.Collection("hr_employee").InsertMany(ctx, []any{
+		bson.M{"account": "alice", "siteId": "site-a", "engName": "Alice Smith", "mail": "alice@corp.example", "unrelated": "x"},
+		bson.M{"account": "bob", "siteId": "site-b", "engName": "Bob Wu", "mail": "bob@corp.example"},
+		bson.M{"account": "dana"}, // hr row with no HR fields at all
 	})
 	require.NoError(t, err)
 
 	got, err := store.HRUsers(ctx, []string{"alice", "bob", "carol", "dana"})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]hrUser{
-		"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
-		"bob":   {LocationURL: "https://site-b.mysite.com", EngName: "Bob Wu", Mail: "bob@corp.example"},
+		"alice": {SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		"bob":   {SiteID: "site-b", EngName: "Bob Wu", Mail: "bob@corp.example"},
 		"dana":  {},
 	}, got)
 }

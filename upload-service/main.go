@@ -50,6 +50,10 @@ type config struct {
 	// FileDownloadCacheMaxAgeSeconds is the Cache-Control max-age (seconds) on the
 	// MinIO/S3 download response (default 1 year).
 	FileDownloadCacheMaxAgeSeconds int `env:"FILE_DOWNLOAD_CACHE_MAX_AGE_SECONDS" envDefault:"31536000"`
+	// SetCookiePartitioned controls the Partitioned attribute on the sso-token
+	// cookie issued by HandleSetCookie. Off by default: Partitioned breaks the
+	// top-level-navigation download; enable only where the cross-site embed flow needs CHIPS.
+	SetCookiePartitioned bool `env:"SETCOOKIE_PARTITIONED" envDefault:"false"`
 
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
 	OIDCAudiences []string `env:"OIDC_AUDIENCES" envSeparator:","`
@@ -122,7 +126,7 @@ func run() error {
 
 	mimeFilter := newMediaTypeFilter(cfg.FileUploadMediaTypeWhitelist, cfg.FileUploadMediaTypeBlacklist)
 	handler := NewHandler(store, driveClient, s3Store, cfg.MaxImages, cfg.MaxAttachments, cfg.MaxImageSizeBytes,
-		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds)
+		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

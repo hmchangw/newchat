@@ -108,7 +108,7 @@ func TestHistoryService_MigrationDeleteMessage_Success(t *testing.T) {
 		Return(&models.Message{MessageID: "msg-2", RoomID: "r1", CreatedAt: createdAt}, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), migrationLocator("msg-2", "r1", createdAt), deletedAt).
-		Return(deletedAt, true, nil, nil)
+		Return(deletedAt, true, nil, nil, nil)
 
 	pub.EXPECT().
 		PublishMigration(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
@@ -148,7 +148,7 @@ func TestHistoryService_MigrationDeleteMessage_WriterError(t *testing.T) {
 		Return(&models.Message{MessageID: "msg-2", RoomID: "r1", CreatedAt: createdAt}, nil)
 	msgs.EXPECT().
 		SoftDeleteMessage(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(time.Time{}, false, nil, errors.New("cassandra down"))
+		Return(time.Time{}, false, nil, nil, errors.New("cassandra down"))
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	ack, err := svc.MigrationDeleteMessage(c, "site-test", model.MigrationDeleteRequest{

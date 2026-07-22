@@ -25,9 +25,9 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 	db := testutil.MongoDB(t, "teams_user_sync_e2e")
 	ctx := context.Background()
 
-	_, err := db.Collection("hr").InsertMany(ctx, []any{
-		bson.M{"accountName": "alice", "locationURL": "https://site-a.mysite.com", "engName": "Alice Smith", "mail": "alice@corp.example"},
-		bson.M{"accountName": "old", "locationURL": "https://site-a.mysite.com"},
+	_, err := db.Collection("hr_employee").InsertMany(ctx, []any{
+		bson.M{"account": "alice", "siteId": "site-a", "engName": "Alice Smith", "mail": "alice@corp.example"},
+		bson.M{"account": "old", "siteId": "site-a"},
 	})
 	require.NoError(t, err)
 	_, err = db.Collection("teams_user").InsertOne(ctx,
@@ -72,7 +72,7 @@ func TestSyncer_UpdateUsers_EndToEnd(t *testing.T) {
 	require.NoError(t, db.Collection("teams_user").FindOne(ctx, bson.M{"_id": "id-alice"}).Decode(&doc))
 	assert.Equal(t, model.TeamsUser{
 		ID: "id-alice", UPN: "Alice@corp.example", Account: "alice", DisplayName: "Alice Smith",
-		SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example",
+		SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example",
 	}, doc)
 
 	// the HR-unmatched guest is stored with empty HR-derived fields

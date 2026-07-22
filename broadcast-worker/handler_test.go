@@ -2739,16 +2739,19 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 	deletedAt := msgTime.Add(time.Minute)
 	tcount := 4
+	// tlm = the newest surviving reply's createdAt, carried on the canonical delete event.
+	survivingTlm := msgTime.Add(-time.Hour)
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
 
 	evt := model.MessageEvent{
-		Event:     model.EventDeleted,
-		SiteID:    "site-a",
-		Timestamp: deletedAt.UnixMilli(),
-		NewTCount: &tcount,
+		Event:              model.EventDeleted,
+		SiteID:             "site-a",
+		Timestamp:          deletedAt.UnixMilli(),
+		NewTCount:          &tcount,
+		NewThreadLastMsgAt: &survivingTlm,
 		Message: model.Message{
 			ID:                    "reply-1",
 			RoomID:                "r1",
@@ -2775,6 +2778,8 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 			require.NoError(t, json.Unmarshal(r.data, &tmEvt))
 			assert.Equal(t, model.ThreadActionReplyDeleted, tmEvt.Action)
 			assert.Equal(t, 4, tmEvt.NewTCount)
+			require.NotNil(t, tmEvt.NewThreadLastMsgAt, "badge must forward the surviving thread last-message time on delete")
+			assert.True(t, tmEvt.NewThreadLastMsgAt.Equal(survivingTlm), "NewThreadLastMsgAt must equal the newest surviving reply's createdAt")
 			sawBadge = true
 		} else {
 			var roomEvt model.DeleteRoomEvent

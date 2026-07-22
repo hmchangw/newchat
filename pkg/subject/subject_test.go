@@ -1027,3 +1027,11 @@ func TestOrgSyncEmployeesUpsert(t *testing.T) {
 	got := subject.OrgSyncEmployeesUpsert("site-a")
 	assert.Equal(t, "chat.hr.site-a.employees.upsert", got)
 }
+
+func TestOrgSyncUsersUpsert(t *testing.T) {
+	assert.Equal(t, "chat.hr.site-a.users.upsert", subject.OrgSyncUsersUpsert("site-a"))
+}
+
+func TestEmployeesQuit(t *testing.T) {
+	assert.Equal(t, "chat.hr.site-a.employees.quit", subject.EmployeesQuit("site-a"))
+}

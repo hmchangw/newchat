@@ -52,17 +52,17 @@ func TestSyncer_UpdateUsers_HappyPathTwoPages(t *testing.T) {
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1", "u2"}).
 		Return(map[string]struct{}{"u2": {}}, nil)
 	store.EXPECT().HRUsers(gomock.Any(), []string{"alice"}).
-		Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil)
+		Return(map[string]hrUser{"alice": {SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil)
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", DisplayName: "Alice Smith", SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		{ID: "u1", UPN: "Alice@corp.example", Account: "alice", DisplayName: "Alice Smith", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
 	}).Return(nil)
 	// page 2: u3 new
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u3"}).
 		Return(map[string]struct{}{}, nil)
 	store.EXPECT().HRUsers(gomock.Any(), []string{"carol"}).
-		Return(map[string]hrUser{"carol": {LocationURL: "https://site-b.mysite.com", EngName: "Carol Jones", Mail: "carol@corp.example"}}, nil)
+		Return(map[string]hrUser{"carol": {SiteID: "site-b", EngName: "Carol Jones", Mail: "carol@corp.example"}}, nil)
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u3", UPN: "carol@corp.example", Account: "carol", DisplayName: "Carol Jones", SiteID: "https://site-b.mysite.com", EngName: "Carol Jones", Mail: "carol@corp.example"},
+		{ID: "u3", UPN: "carol@corp.example", Account: "carol", DisplayName: "Carol Jones", SiteID: "site-b", EngName: "Carol Jones", Mail: "carol@corp.example"},
 	}).Return(nil)
 
 	syncer := NewSyncer(store, lister, 500, discardLogger())
@@ -100,10 +100,10 @@ func TestSyncer_UpdateUsers_SkipsMalformedUPN(t *testing.T) {
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1", "u2", "u3"}).
 		Return(map[string]struct{}{}, nil)
 	store.EXPECT().HRUsers(gomock.Any(), []string{"guest#ext#", "dave"}).
-		Return(map[string]hrUser{"dave": {LocationURL: "https://site-a.mysite.com", EngName: "Dave Lee", Mail: "dave@corp.example"}}, nil) // guest has no hr row
+		Return(map[string]hrUser{"dave": {SiteID: "site-a", EngName: "Dave Lee", Mail: "dave@corp.example"}}, nil) // guest has no hr row
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
 		{ID: "u1", UPN: "guest#EXT#@other.example", Account: "guest#ext#"},
-		{ID: "u3", UPN: "Dave@CORP.EXAMPLE", Account: "dave", SiteID: "https://site-a.mysite.com", EngName: "Dave Lee", Mail: "dave@corp.example"},
+		{ID: "u3", UPN: "Dave@CORP.EXAMPLE", Account: "dave", SiteID: "site-a", EngName: "Dave Lee", Mail: "dave@corp.example"},
 	}).Return(nil)
 
 	syncer := NewSyncer(store, lister, 500, discardLogger())
@@ -123,9 +123,9 @@ func TestSyncer_UpdateUsers_HRMissUpsertedAndCounted(t *testing.T) {
 	store.EXPECT().ExistingIDs(gomock.Any(), []string{"u1", "u2"}).
 		Return(map[string]struct{}{}, nil)
 	store.EXPECT().HRUsers(gomock.Any(), []string{"alice", "eve"}).
-		Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil) // eve unmatched
+		Return(map[string]hrUser{"alice": {SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"}}, nil) // eve unmatched
 	store.EXPECT().UpsertTeamsUsers(gomock.Any(), []model.TeamsUser{
-		{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+		{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
 		{ID: "u2", UPN: "eve@corp.example", Account: "eve"},
 	}).Return(nil)
 
@@ -135,20 +135,19 @@ func TestSyncer_UpdateUsers_HRMissUpsertedAndCounted(t *testing.T) {
 	assert.Equal(t, RunStats{Pages: 1, Seen: 2, HRUnmatched: 1, Upserted: 2}, stats)
 }
 
-func TestSyncer_UpdateUsers_LocationURLVariants(t *testing.T) {
+func TestSyncer_UpdateUsers_SiteIDVariants(t *testing.T) {
 	tests := []struct {
 		name string
 		hr   hrUser
 		want model.TeamsUser
 	}{
 		{
-			// TODO: siteID is the raw locationURL until the real parser lands.
-			"non-empty locationURL passes through as siteID",
-			hrUser{LocationURL: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
-			model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "https://site-a.mysite.com", EngName: "Alice Smith", Mail: "alice@corp.example"},
+			"hr row with siteId",
+			hrUser{SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
+			model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "site-a", EngName: "Alice Smith", Mail: "alice@corp.example"},
 		},
 		{
-			"empty locationURL keeps empty siteID",
+			"hr row with empty siteId still upserted",
 			hrUser{EngName: "Alice Smith", Mail: "alice@corp.example"},
 			model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", EngName: "Alice Smith", Mail: "alice@corp.example"},
 		},
@@ -259,7 +258,7 @@ func TestSyncer_UpdateUsers_ErrorPaths(t *testing.T) {
 		store.EXPECT().ExistingIDs(gomock.Any(), gomock.Any()).
 			Return(map[string]struct{}{}, nil)
 		store.EXPECT().HRUsers(gomock.Any(), gomock.Any()).
-			Return(map[string]hrUser{"alice": {LocationURL: "https://site-a.mysite.com"}}, nil)
+			Return(map[string]hrUser{"alice": {SiteID: "site-a"}}, nil)
 		store.EXPECT().UpsertTeamsUsers(gomock.Any(), gomock.Any()).
 			Return(errors.New("write down"))
 
@@ -289,24 +288,6 @@ func TestSplitUPN(t *testing.T) {
 			account, ok := splitUPN(tt.upn)
 			assert.Equal(t, tt.wantOK, ok)
 			assert.Equal(t, tt.wantAccount, account)
-		})
-	}
-}
-
-func TestExtractSiteIDFromLocationURL(t *testing.T) {
-	// TODO: tighten these expectations once real locationURL parsing lands;
-	// for now the locationURL is returned unchanged.
-	tests := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{"url returned unchanged", "https://site-a.mysite.com", "https://site-a.mysite.com"},
-		{"empty string", "", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, extractSiteIDFromLocationURL(tt.url))
 		})
 	}
 }

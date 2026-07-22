@@ -13,7 +13,7 @@ import (
 
 const (
 	teamsUserCollection = "teams_user"
-	hrCollection        = "hr"
+	hrCollection        = "hr_employee"
 )
 
 // teamsUserID is the projection decoded by the teams_user diff (only _id).
@@ -21,13 +21,13 @@ type teamsUserID struct {
 	ID string `bson:"_id"`
 }
 
-// hrRow is the projection decoded from the hr collection: the account, its
-// location URL (the siteID source), English name, and mail.
+// hrRow is the projection decoded from hr_employee: the account, its site
+// assignment, English name, and mail.
 type hrRow struct {
-	AccountName string `bson:"accountName"`
-	LocationURL string `bson:"locationURL"`
-	EngName     string `bson:"engName"`
-	Mail        string `bson:"mail"`
+	Account string `bson:"account"`
+	SiteID  string `bson:"siteId"`
+	EngName string `bson:"engName"`
+	Mail    string `bson:"mail"`
 }
 
 // mongoStore implements Store over two databases: readDB (teams_user diff +
@@ -71,13 +71,13 @@ func (s *mongoStore) HRUsers(ctx context.Context, accounts []string) (map[string
 		return out, nil
 	}
 	rows, err := s.readHR.FindMany(ctx,
-		bson.M{"accountName": bson.M{"$in": accounts}},
-		mongoutil.WithProjection(bson.M{"accountName": 1, "locationURL": 1, "engName": 1, "mail": 1}))
+		bson.M{"account": bson.M{"$in": accounts}},
+		mongoutil.WithProjection(bson.M{"account": 1, "siteId": 1, "engName": 1, "mail": 1}))
 	if err != nil {
 		return nil, fmt.Errorf("find hr accounts: %w", err)
 	}
 	for _, r := range rows {
-		out[r.AccountName] = hrUser{LocationURL: r.LocationURL, EngName: r.EngName, Mail: r.Mail}
+		out[r.Account] = hrUser{SiteID: r.SiteID, EngName: r.EngName, Mail: r.Mail}
 	}
 	return out, nil
 }

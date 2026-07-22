@@ -115,7 +115,7 @@ func okUser() *AuthenticatedUser {
 }
 
 func newHandler(store Store, dc driveClient) *Handler {
-	return NewHandler(store, dc, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge)
+	return NewHandler(store, dc, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, true)
 }
 
 func TestUpload_MissingRoomID_400(t *testing.T) {
@@ -194,7 +194,7 @@ func TestUpload_TooManyFiles_400(t *testing.T) {
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
 	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
-	h := NewHandler(store, &fakeDrive{}, &fakeS3{}, 1, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge) // image limit 1
+	h := NewHandler(store, &fakeDrive{}, &fakeS3{}, 1, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, true) // image limit 1
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x"), "b.png": []byte("y")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
 	h.HandleUploadImages(c)
@@ -230,7 +230,7 @@ func TestUpload_OversizeRejectedPerFile(t *testing.T) {
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
 	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
 	fd := &fakeDrive{}
-	h := NewHandler(store, fd, &fakeS3{}, testMaxImages, testMaxAttachments, 4, 0, nil, nil, testCacheMaxAge) // 4-byte per-image ceiling
+	h := NewHandler(store, fd, &fakeS3{}, testMaxImages, testMaxAttachments, 4, 0, nil, nil, testCacheMaxAge, true) // 4-byte per-image ceiling
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("0123456789")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
 	h.HandleUploadImages(c)
@@ -444,7 +444,7 @@ func TestHandleUploadFile_SendsUniqueName_ReturnsOriginal(t *testing.T) {
 			{Status: "success", File: drive.GroupImageObject{FileID: "f1", GroupID: "r1", Filename: "photo_1719312000000_0.png", FileSize: 3}},
 		},
 	}
-	h := NewHandler(store, fd, &fakeS3{}, 0, testMaxAttachments, 0, 100<<20, newMediaTypeFilter("", "image/svg+xml"), imagePreview, testCacheMaxAge)
+	h := NewHandler(store, fd, &fakeS3{}, 0, testMaxAttachments, 0, 100<<20, newMediaTypeFilter("", "image/svg+xml"), imagePreview, testCacheMaxAge, true)
 	h.nowMilli = func() int64 { return 1719312000000 }
 
 	body := &bytes.Buffer{}
@@ -722,7 +722,7 @@ func TestS3Download_S3Error_503(t *testing.T) {
 	store := NewMockStore(ctrl)
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(sampleUpload(), nil)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	h := NewHandler(store, &fakeDrive{}, &fakeS3{err: errors.New("no such key")}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge)
+	h := NewHandler(store, &fakeDrive{}, &fakeS3{err: errors.New("no such key")}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, true)
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
 	h.HandleDownloadMinioS3File(c)
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
@@ -735,7 +735,7 @@ func TestS3Download_Success_StreamsWithHeaders(t *testing.T) {
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(sampleUpload(), nil)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
 	s3 := &fakeS3{body: "PDFDATA"}
-	h := NewHandler(store, &fakeDrive{}, s3, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge)
+	h := NewHandler(store, &fakeDrive{}, s3, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, true)
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
 	h.HandleDownloadMinioS3File(c)
 
@@ -757,7 +757,7 @@ func TestS3Download_EmptyType_DefaultsOctetStream(t *testing.T) {
 	up.Type = ""
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(up, nil)
 	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	h := NewHandler(store, &fakeDrive{}, &fakeS3{body: "PDFDATA"}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge)
+	h := NewHandler(store, &fakeDrive{}, &fakeS3{body: "PDFDATA"}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, true)
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
 	h.HandleDownloadMinioS3File(c)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -806,7 +806,7 @@ func multipartTyped(t *testing.T, field, filename string, data []byte, mime stri
 }
 
 func fileHandler(store Store, fd *fakeDrive) *Handler {
-	return NewHandler(store, fd, &fakeS3{}, 0, testMaxAttachments, 0, 100<<20, newMediaTypeFilter("", "image/svg+xml"), imagePreview, testCacheMaxAge)
+	return NewHandler(store, fd, &fakeS3{}, 0, testMaxAttachments, 0, 100<<20, newMediaTypeFilter("", "image/svg+xml"), imagePreview, testCacheMaxAge, true)
 }
 
 func okFileDrive() *fakeDrive {
@@ -903,7 +903,7 @@ func TestHandleUploadFile_OverSize(t *testing.T) {
 	store := NewMockStore(ctrl)
 	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
 	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
-	h := NewHandler(store, &fakeDrive{baseURL: "http://drive"}, &fakeS3{}, 0, testMaxAttachments, 0, 4, newMediaTypeFilter("", ""), imagePreview, testCacheMaxAge)
+	h := NewHandler(store, &fakeDrive{baseURL: "http://drive"}, &fakeS3{}, 0, testMaxAttachments, 0, 4, newMediaTypeFilter("", ""), imagePreview, testCacheMaxAge, true)
 	body, ct := multipartTyped(t, "file", "big.pdf", []byte("morethan4"), "application/pdf", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
 	h.HandleUploadFile(c)
@@ -1014,7 +1014,7 @@ func TestHandleUploadFile_MissingFile(t *testing.T) {
 
 func TestHandler_HandleSetCookie_SetsCookieAttributes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h := &Handler{}
+	h := &Handler{setCookiePartitioned: true}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/file/setCookie", nil)

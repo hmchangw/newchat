@@ -136,6 +136,39 @@ func TestListUserChats_FollowsNextLink(t *testing.T) {
 	assert.Equal(t, "19:p2", chats[1].ID)
 }
 
+// TestListUserChats_LargeResponseDecodes verifies a realistically large
+// list-chats page — well over the old 4 MiB cap, under the 64 MiB read cap —
+// is read in full and decoded rather than truncated mid-JSON.
+func TestListUserChats_LargeResponseDecodes(t *testing.T) {
+	const n = 40000 // ~5.5 MiB of chat entries — comfortably over 4 MiB
+	var b strings.Builder
+	b.WriteString(`{"value":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":"19:chat-%d@thread.v2","chatType":"group","topic":"t",`+
+			`"createdDateTime":"2026-04-02T08:00:00Z","lastUpdatedDateTime":"2026-07-01T09:00:00Z",`+
+			`"members":[]}`, i)
+	}
+	b.WriteString(`]}`)
+	body := b.String()
+	require.Greater(t, len(body), 1<<22, "test body must exceed 4 MiB to exercise a large response")
+
+	tokenSrv := newChatsTokenServer(t)
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer graphSrv.Close()
+
+	chats, err := newTestChats(t, tokenSrv.URL, graphSrv.URL).
+		ListUserChats(context.Background(), "aad-user-1", chatsFrom, chatsTo)
+	require.NoError(t, err)
+	require.Len(t, chats, n)
+	assert.Equal(t, "19:chat-0@thread.v2", chats[0].ID)
+	assert.Equal(t, fmt.Sprintf("19:chat-%d@thread.v2", n-1), chats[n-1].ID)
+}
+
 func TestListUserChats_RetriesOn429(t *testing.T) {
 	tokenSrv := newChatsTokenServer(t)
 	var calls int

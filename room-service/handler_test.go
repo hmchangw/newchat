@@ -3779,7 +3779,11 @@ func TestHandler_MessageThreadRead_NotRoomMember(t *testing.T) {
 	assert.Equal(t, 0, f.publishCalls)
 }
 
-func TestHandler_MessageThreadRead_ThreadSubNotFound(t *testing.T) {
+// A caller who is a room member but does not follow the thread has no thread-read
+// state to advance; the mark-as-read is an idempotent no-op that returns success
+// rather than an error. No thread-read writes or floor recompute run (strict mock
+// on the update methods and no withNopFloor stub enforce this).
+func TestHandler_MessageThreadRead_NoThreadSub_ReturnsSuccess(t *testing.T) {
 	f := newThreadReadFixture(t)
 	f.store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").
 		Return(nil)
@@ -3787,18 +3791,19 @@ func TestHandler_MessageThreadRead_ThreadSubNotFound(t *testing.T) {
 		Return(nil, model.ErrThreadSubscriptionNotFound)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
 
-	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
-	require.ErrorIs(t, err, errThreadSubNotFound)
+	resp, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", resp.Status)
 	assert.Equal(t, 0, f.publishCalls)
 }
 
 // Regression for the errgroup.WithContext bug: against real Mongo, when one
 // goroutine fails with ErrThreadSubscriptionNotFound, an errgroup.WithContext
-// cancels the others, causing them to return context.Canceled. Earlier code
-// then matched `case subErr != nil` first and surfaced the wrapped
-// context.Canceled as "internal error" instead of errThreadSubNotFound.
+// cancels the others, causing them to return context.Canceled. The tsub-not-found
+// branch must still be evaluated before the generic subErr branch, so a sibling's
+// context.Canceled never masks the success no-op with an internal error.
 // Simulate by returning context.Canceled on the siblings.
-func TestHandler_MessageThreadRead_ThreadSubNotFound_SiblingsCancelled(t *testing.T) {
+func TestHandler_MessageThreadRead_NoThreadSub_SiblingsCancelled(t *testing.T) {
 	f := newThreadReadFixture(t)
 	f.store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").
 		Return(context.Canceled).AnyTimes()
@@ -3807,8 +3812,9 @@ func TestHandler_MessageThreadRead_ThreadSubNotFound_SiblingsCancelled(t *testin
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").
 		Return("", context.Canceled).AnyTimes()
 
-	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
-	require.ErrorIs(t, err, errThreadSubNotFound)
+	resp, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", resp.Status)
 }
 
 func TestHandler_MessageThreadRead_BothMiss_RoomNotMemberWins(t *testing.T) {
