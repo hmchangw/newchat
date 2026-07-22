@@ -22,6 +22,7 @@ func TestConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 8, cfg.MaxWorkers)
+	assert.Equal(t, 500, cfg.BatchSize, "BATCH_SIZE defaults to 500 chats per bulk write")
 	assert.True(t, cfg.GraphTLSInsecureSkipVerify, "TLS verification is skipped by default (on-prem behind a TLS-intercepting proxy)")
 	assert.Empty(t, cfg.GraphProxyURL, "GRAPH_PROXY_URL defaults to empty (fall back to HTTPS_PROXY/HTTP_PROXY)")
 }
@@ -46,7 +47,7 @@ func TestConfig_MissingRequired(t *testing.T) {
 func baseConfig() Config {
 	return Config{
 		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
-		MaxWorkers:    8,
+		MaxWorkers: 8, BatchSize: 500,
 		GraphTenantID: "tenant", GraphClientID: "client", GraphClientSecret: "secret",
 	}
 }
@@ -59,6 +60,8 @@ func TestValidateConfig(t *testing.T) {
 	}{
 		{"valid", func(c *Config) {}, false},
 		{"zero max workers", func(c *Config) { c.MaxWorkers = 0 }, true},
+		{"zero batch size", func(c *Config) { c.BatchSize = 0 }, true},
+		{"negative batch size", func(c *Config) { c.BatchSize = -1 }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -76,20 +76,20 @@ func TestAccountCache_ConcurrentResolveNoRace(t *testing.T) {
 	wg.Wait()
 }
 
-func newTestSyncer(t *testing.T, workers int) (*syncer, *MockTeamsChatStore, *MockTeamsUserStore, *MockmembersFetcher) {
+func newTestSyncer(t *testing.T, workers, batchSize int) (*syncer, *MockTeamsChatStore, *MockTeamsUserStore, *MockmembersFetcher) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	chats := NewMockTeamsChatStore(ctrl)
 	users := NewMockTeamsUserStore(ctrl)
 	graph := NewMockmembersFetcher(ctrl)
-	s := newSyncer(chats, users, graph, syncConfig{MaxWorkers: workers, Now: func() time.Time {
+	s := newSyncer(chats, users, graph, syncConfig{MaxWorkers: workers, BatchSize: batchSize, Now: func() time.Time {
 		return time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	}})
 	return s, chats, users, graph
 }
 
 func TestBuildMembers_ResolvesAllViaLookup(t *testing.T) {
-	s, _, users, _ := newTestSyncer(t, 1)
+	s, _, users, _ := newTestSyncer(t, 1, 500)
 	// Every member is resolved from teams_user by userId in one batched call.
 	// ghost is not in teams_user, so it comes back absent -> account "".
 	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).DoAndReturn(

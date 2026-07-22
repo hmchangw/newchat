@@ -9,6 +9,7 @@ services:
       - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
       - MONGO_DB=${MONGO_DB:-chat}
       - MAX_WORKERS=${MAX_WORKERS:-8}
+      - BATCH_SIZE=${BATCH_SIZE:-500}
       - GRAPH_TENANT_ID=${GRAPH_TENANT_ID}
       - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
       - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}

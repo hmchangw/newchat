@@ -57,20 +57,39 @@ func installRecorder(t *testing.T) *recordingHandler {
 	return rec
 }
 
-func TestSyncChat_LogsMemberCountSet(t *testing.T) {
+func TestRun_LogsBatchWritten(t *testing.T) {
 	rec := installRecorder(t)
-	s, chats, users, graph := newTestSyncer(t, 1)
+	s, chats, users, graph := newTestSyncer(t, 1, 500)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: wtNow}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
 		Return([]msgraph.ChatMemberDetail{member("u1"), member("u2")}, nil)
 	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
 		Return(map[string]string{"u1": "alice", "u2": "bob"}, nil)
-	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", wtNow, gomock.Len(2), wtNow).Return(nil)
+	chats.EXPECT().SetMembersSyncedBatch(gomock.Any(), gomock.Len(1), wtNow).Return(int64(1), nil)
 
 	require.NoError(t, s.run(context.Background()))
 
-	attrs, ok := rec.find(slog.LevelInfo, "members set")
-	require.True(t, ok, "an info log must record how many members were set for the chat")
-	assert.Equal(t, "19:g1", attrs["chatID"])
+	attrs, ok := rec.find(slog.LevelInfo, "batch written")
+	require.True(t, ok, "an info log must record each flushed batch")
+	assert.EqualValues(t, 1, attrs["chats"], "the log carries the batch size")
+	assert.EqualValues(t, 1, attrs["chatsMatched"])
+	assert.EqualValues(t, 0, attrs["chatsSuperseded"])
 	assert.EqualValues(t, 2, attrs["members"], "the log carries the member count written")
+}
+
+func TestRun_LogsSupersededWarning(t *testing.T) {
+	rec := installRecorder(t)
+	s, chats, users, graph := newTestSyncer(t, 1, 500)
+	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: wtNow}, {ID: "19:g2", UpdatedAt: wtNow}}, nil)
+	graph.EXPECT().ListChatMembers(gomock.Any(), gomock.Any()).
+		Return([]msgraph.ChatMemberDetail{member("u1")}, nil).Times(2)
+	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]string{"u1": "a"}, nil).AnyTimes()
+	chats.EXPECT().SetMembersSyncedBatch(gomock.Any(), gomock.Len(2), wtNow).Return(int64(1), nil)
+
+	require.NoError(t, s.run(context.Background()))
+
+	attrs, ok := rec.find(slog.LevelWarn, "superseded")
+	require.True(t, ok, "a warn log must record superseded chats in the batch")
+	assert.EqualValues(t, 1, attrs["chatsSuperseded"], "the log carries how many chats were superseded")
 }

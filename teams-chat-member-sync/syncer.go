@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -16,6 +15,7 @@ import (
 // syncConfig carries the orchestration knobs. Now is injectable for tests.
 type syncConfig struct {
 	MaxWorkers int
+	BatchSize  int
 	Now        func() time.Time
 }
 
@@ -107,7 +107,10 @@ func (s *syncer) buildMembers(ctx context.Context, raw []msgraph.ChatMemberDetai
 }
 
 // summary is the per-run outcome. Total is written only by the dispatching
-// goroutine; the atomics are updated by workers.
+// goroutine; the atomics are updated by workers (Failed) and the batch
+// collector (all counters). MembersWritten counts the members submitted in
+// successful batch writes; a bulk write cannot attribute per-chat outcomes,
+// so members of superseded chats within a successful batch are included.
 type summary struct {
 	Total                         int
 	Succeeded, Failed, Superseded atomic.Int64
@@ -115,10 +118,12 @@ type summary struct {
 }
 
 // run executes one full member sync: load the flagged chats, fan them out to
-// MaxWorkers workers, wait, and report. It returns an error when any chat
-// failed so main exits non-zero and the CronJob records the failure.
-// Superseded chats (concurrent teams-chat-sync rewrite) are benign — they keep
-// needMemberSync=true and retry next run — and do not fail the run.
+// MaxWorkers workers that resolve each chat's members, collect the resolved
+// lists, and write them back in bulk batches of BatchSize. It returns an
+// error when any chat failed so main exits non-zero and the CronJob records
+// the failure. Superseded chats (concurrent teams-chat-sync rewrite) are
+// benign — they keep needMemberSync=true and retry next run — and do not
+// fail the run.
 func (s *syncer) run(ctx context.Context) error {
 	chats, err := s.chats.ListChatsToSync(ctx)
 	if err != nil {
@@ -129,31 +134,47 @@ func (s *syncer) run(ctx context.Context) error {
 	sum.Total = len(chats)
 
 	jobs := make(chan ChatToSync)
+	results := make(chan ChatMembersUpdate)
 	var wg sync.WaitGroup
 	for i := 0; i < s.cfg.MaxWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for chat := range jobs {
-				err := s.syncChat(ctx, chat, &sum)
-				switch {
-				case err == nil:
-					sum.Succeeded.Add(1)
-				case errors.Is(err, errSuperseded):
-					sum.Superseded.Add(1)
-					slog.Warn("teams chat member sync: chat superseded by concurrent update, will retry next run", "chatID", chat.ID)
-				default:
+				update, err := s.resolveChat(ctx, chat)
+				if err != nil {
 					sum.Failed.Add(1)
 					slog.Error("teams chat member sync: chat failed", "chatID", chat.ID, "error", err)
+					continue
 				}
+				results <- update
 			}
 		}()
 	}
+
+	// A single collector serializes the bulk writes: it buffers resolved chats
+	// and flushes each full batch while workers keep resolving the next ones.
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		batch := make([]ChatMembersUpdate, 0, s.cfg.BatchSize)
+		for update := range results {
+			batch = append(batch, update)
+			if len(batch) == s.cfg.BatchSize {
+				s.flush(ctx, batch, &sum)
+				batch = batch[:0]
+			}
+		}
+		s.flush(ctx, batch, &sum)
+	}()
+
 	for _, chat := range chats {
 		jobs <- chat
 	}
 	close(jobs)
 	wg.Wait()
+	close(results)
+	<-collectorDone
 
 	slog.Info("teams chat member sync: run complete",
 		"chatsTotal", sum.Total, "chatsSucceeded", sum.Succeeded.Load(),
@@ -166,23 +187,47 @@ func (s *syncer) run(ctx context.Context) error {
 	return nil
 }
 
-// syncChat fetches one chat's members, resolves accounts, and writes the list
-// back. On any error the chat's needMemberSync is left true (no SetMembersSynced)
-// so it is retried next run. A superseded write (errSuperseded) is likewise
-// left for retry but is not a failure — see run.
-func (s *syncer) syncChat(ctx context.Context, chat ChatToSync, sum *summary) error {
+// resolveChat fetches one chat's members and resolves their accounts. On any
+// error the chat never reaches a batch, so its needMemberSync is left true
+// and it is retried next run.
+func (s *syncer) resolveChat(ctx context.Context, chat ChatToSync) (ChatMembersUpdate, error) {
 	raw, err := s.graph.ListChatMembers(ctx, chat.ID)
 	if err != nil {
-		return fmt.Errorf("list chat members: %w", err)
+		return ChatMembersUpdate{}, fmt.Errorf("list chat members: %w", err)
 	}
 	members, err := s.buildMembers(ctx, raw)
 	if err != nil {
-		return fmt.Errorf("build members: %w", err)
+		return ChatMembersUpdate{}, fmt.Errorf("build members: %w", err)
 	}
-	if err := s.chats.SetMembersSynced(ctx, chat.ID, chat.UpdatedAt, members, s.cfg.Now()); err != nil {
-		return fmt.Errorf("set members synced: %w", err)
+	return ChatMembersUpdate{ChatID: chat.ID, SeenUpdatedAt: chat.UpdatedAt, Members: members}, nil
+}
+
+// flush writes one batch back in a single bulk write and folds the outcome
+// into sum. Unmatched chats were superseded by a concurrent rewrite — benign,
+// they keep needMemberSync=true for retry. On a (possibly partial) bulk-write
+// error the matched chats still count as succeeded and only the remainder as
+// failed; failed chats likewise keep needMemberSync=true.
+func (s *syncer) flush(ctx context.Context, batch []ChatMembersUpdate, sum *summary) {
+	if len(batch) == 0 {
+		return
 	}
-	sum.MembersWritten.Add(int64(len(members)))
-	slog.Info("teams chat member sync: members set", "chatID", chat.ID, "members", len(members))
-	return nil
+	var members int64
+	for i := range batch {
+		members += int64(len(batch[i].Members))
+	}
+	matched, err := s.chats.SetMembersSyncedBatch(ctx, batch, s.cfg.Now())
+	sum.Succeeded.Add(matched)
+	if err != nil {
+		sum.Failed.Add(int64(len(batch)) - matched)
+		slog.Error("teams chat member sync: batch write failed", "chats", len(batch), "chatsMatched", matched, "error", err)
+		return
+	}
+	superseded := int64(len(batch)) - matched
+	sum.Superseded.Add(superseded)
+	sum.MembersWritten.Add(members)
+	if superseded > 0 {
+		slog.Warn("teams chat member sync: batch had chats superseded by concurrent updates, will retry next run", "chatsSuperseded", superseded)
+	}
+	slog.Info("teams chat member sync: batch written",
+		"chats", len(batch), "chatsMatched", matched, "chatsSuperseded", superseded, "members", members)
 }

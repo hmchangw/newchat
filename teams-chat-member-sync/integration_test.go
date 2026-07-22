@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -53,23 +52,37 @@ func TestMongoStore_ListChatsToSync(t *testing.T) {
 	assert.True(t, byID["19:need2"].UpdatedAt.Equal(updatedAt2))
 }
 
-func TestMongoStore_SetMembersSynced(t *testing.T) {
+func TestMongoStore_SetMembersSyncedBatch(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsmembersync")
 	store := newMongoStore(db, db)
 	ctx := context.Background()
-	seededUpdatedAt := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	seedChats(t, store, model.TeamsChat{
-		ID: "19:g1", ChatType: "group", NeedMemberSync: true, NeedCreateRoom: false,
-		Members:   []model.TeamsChatMember{{ID: "old", Account: "old"}},
-		UpdatedAt: seededUpdatedAt,
-	})
+	seededUpdatedAt1 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	seededUpdatedAt2 := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	seedChats(t, store,
+		model.TeamsChat{
+			ID: "19:g1", ChatType: "group", NeedMemberSync: true, NeedCreateRoom: false,
+			Members:   []model.TeamsChatMember{{ID: "old", Account: "old"}},
+			UpdatedAt: seededUpdatedAt1,
+		},
+		model.TeamsChat{
+			ID: "19:g2", ChatType: "meeting", NeedMemberSync: true, NeedCreateRoom: false,
+			UpdatedAt: seededUpdatedAt2,
+		},
+	)
 
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
-	members := []model.TeamsChatMember{
+	members1 := []model.TeamsChatMember{
 		{ID: "u1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
 		{ID: "u2", Account: "bob"},
 	}
-	require.NoError(t, store.SetMembersSynced(ctx, "19:g1", seededUpdatedAt, members, now))
+	members2 := []model.TeamsChatMember{{ID: "u3", Account: "carol"}}
+
+	matched, err := store.SetMembersSyncedBatch(ctx, []ChatMembersUpdate{
+		{ChatID: "19:g1", SeenUpdatedAt: seededUpdatedAt1, Members: members1},
+		{ChatID: "19:g2", SeenUpdatedAt: seededUpdatedAt2, Members: members2},
+	}, now)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, matched, "both chats updated in one bulk write")
 
 	got, err := store.writeChats.FindByID(ctx, "19:g1")
 	require.NoError(t, err)
@@ -80,35 +93,65 @@ func TestMongoStore_SetMembersSynced(t *testing.T) {
 	require.Len(t, got.Members, 2, "members fully replaced")
 	assert.Equal(t, "u1", got.Members[0].ID)
 	assert.Equal(t, "alice", got.Members[0].Account)
-	assert.True(t, got.Members[0].VisibleHistoryStartDateTime.Equal(members[0].VisibleHistoryStartDateTime))
+	assert.True(t, got.Members[0].VisibleHistoryStartDateTime.Equal(members1[0].VisibleHistoryStartDateTime))
+
+	got2, err := store.writeChats.FindByID(ctx, "19:g2")
+	require.NoError(t, err)
+	require.NotNil(t, got2)
+	assert.False(t, got2.NeedMemberSync)
+	assert.True(t, got2.NeedCreateRoom)
+	require.Len(t, got2.Members, 1)
+	assert.Equal(t, "u3", got2.Members[0].ID)
 }
 
-func TestMongoStore_SetMembersSynced_Superseded(t *testing.T) {
+func TestMongoStore_SetMembersSyncedBatch_SupersededCounted(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsmembersync")
 	store := newMongoStore(db, db)
 	ctx := context.Background()
 	seededUpdatedAt := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
 	seededMembers := []model.TeamsChatMember{{ID: "old", Account: "old"}}
-	seedChats(t, store, model.TeamsChat{
-		ID: "19:g1", ChatType: "group", NeedMemberSync: true, NeedCreateRoom: false,
-		Members:   seededMembers,
-		UpdatedAt: seededUpdatedAt,
-	})
+	seedChats(t, store,
+		model.TeamsChat{
+			ID: "19:fresh", ChatType: "group", NeedMemberSync: true, NeedCreateRoom: false,
+			UpdatedAt: seededUpdatedAt,
+		},
+		model.TeamsChat{
+			ID: "19:stale", ChatType: "group", NeedMemberSync: true, NeedCreateRoom: false,
+			Members:   seededMembers,
+			UpdatedAt: seededUpdatedAt,
+		},
+	)
 
-	staleSeenAt := seededUpdatedAt.Add(-time.Hour)
 	now := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
-	members := []model.TeamsChatMember{{ID: "u1", Account: "alice"}}
-
-	err := store.SetMembersSynced(ctx, "19:g1", staleSeenAt, members, now)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, errSuperseded))
-
-	got, err := store.writeChats.FindByID(ctx, "19:g1")
+	matched, err := store.SetMembersSyncedBatch(ctx, []ChatMembersUpdate{
+		{ChatID: "19:fresh", SeenUpdatedAt: seededUpdatedAt, Members: []model.TeamsChatMember{{ID: "u1", Account: "alice"}}},
+		// Stale token: this chat was rewritten concurrently after it was read.
+		{ChatID: "19:stale", SeenUpdatedAt: seededUpdatedAt.Add(-time.Hour), Members: []model.TeamsChatMember{{ID: "u2", Account: "bob"}}},
+	}, now)
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.True(t, got.NeedMemberSync, "needMemberSync left true for retry")
-	assert.True(t, got.UpdatedAt.Equal(seededUpdatedAt), "updatedAt unchanged")
-	assert.Equal(t, seededMembers, got.Members, "members unchanged")
+	assert.EqualValues(t, 1, matched, "only the chat whose updatedAt still matches is updated")
+
+	fresh, err := store.writeChats.FindByID(ctx, "19:fresh")
+	require.NoError(t, err)
+	require.NotNil(t, fresh)
+	assert.False(t, fresh.NeedMemberSync)
+	assert.True(t, fresh.NeedCreateRoom)
+
+	stale, err := store.writeChats.FindByID(ctx, "19:stale")
+	require.NoError(t, err)
+	require.NotNil(t, stale)
+	assert.True(t, stale.NeedMemberSync, "needMemberSync left true for retry")
+	assert.True(t, stale.UpdatedAt.Equal(seededUpdatedAt), "updatedAt unchanged")
+	assert.Equal(t, seededMembers, stale.Members, "members unchanged")
+}
+
+func TestMongoStore_SetMembersSyncedBatch_EmptyIsNoOp(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsmembersync")
+	store := newMongoStore(db, db)
+
+	matched, err := store.SetMembersSyncedBatch(context.Background(), nil, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Zero(t, matched)
 }
 
 func TestMongoStore_AccountsByIDs(t *testing.T) {

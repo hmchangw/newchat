@@ -14,7 +14,6 @@ import (
 	reflect "reflect"
 	time "time"
 
-	model "github.com/hmchangw/chat/pkg/model"
 	msgraph "github.com/hmchangw/chat/pkg/msgraph"
 	gomock "go.uber.org/mock/gomock"
 )
@@ -58,18 +57,19 @@ func (mr *MockTeamsChatStoreMockRecorder) ListChatsToSync(ctx any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListChatsToSync", reflect.TypeOf((*MockTeamsChatStore)(nil).ListChatsToSync), ctx)
 }
 
-// SetMembersSynced mocks base method.
-func (m *MockTeamsChatStore) SetMembersSynced(ctx context.Context, chatID string, seenUpdatedAt time.Time, members []model.TeamsChatMember, now time.Time) error {
+// SetMembersSyncedBatch mocks base method.
+func (m *MockTeamsChatStore) SetMembersSyncedBatch(ctx context.Context, updates []ChatMembersUpdate, now time.Time) (int64, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetMembersSynced", ctx, chatID, seenUpdatedAt, members, now)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "SetMembersSyncedBatch", ctx, updates, now)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
-// SetMembersSynced indicates an expected call of SetMembersSynced.
-func (mr *MockTeamsChatStoreMockRecorder) SetMembersSynced(ctx, chatID, seenUpdatedAt, members, now any) *gomock.Call {
+// SetMembersSyncedBatch indicates an expected call of SetMembersSyncedBatch.
+func (mr *MockTeamsChatStoreMockRecorder) SetMembersSyncedBatch(ctx, updates, now any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMembersSynced", reflect.TypeOf((*MockTeamsChatStore)(nil).SetMembersSynced), ctx, chatID, seenUpdatedAt, members, now)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMembersSyncedBatch", reflect.TypeOf((*MockTeamsChatStore)(nil).SetMembersSyncedBatch), ctx, updates, now)
 }
 
 // MockTeamsUserStore is a mock of TeamsUserStore interface.

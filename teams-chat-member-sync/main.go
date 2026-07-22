@@ -31,6 +31,10 @@ type Config struct {
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
 
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
+	// BatchSize is how many resolved chats are written back per bulk write.
+	// With millions of flagged chats, per-chat updates would mean millions of
+	// round trips; batching amortizes them.
+	BatchSize int `env:"BATCH_SIZE" envDefault:"500"`
 
 	GraphTenantID     string `env:"GRAPH_TENANT_ID,required"`
 	GraphClientID     string `env:"GRAPH_CLIENT_ID,required"`
@@ -62,6 +66,9 @@ func main() {
 func validateConfig(cfg Config) error {
 	if cfg.MaxWorkers <= 0 {
 		return fmt.Errorf("invalid config: MAX_WORKERS must be positive")
+	}
+	if cfg.BatchSize <= 0 {
+		return fmt.Errorf("invalid config: BATCH_SIZE must be positive")
 	}
 	return nil
 }
@@ -112,6 +119,7 @@ func run() error {
 
 	s := newSyncer(store, store, graph, syncConfig{
 		MaxWorkers: cfg.MaxWorkers,
+		BatchSize:  cfg.BatchSize,
 		Now:        time.Now,
 	})
 	if err := s.run(ctx); err != nil {

@@ -45,20 +45,35 @@ func (s *mongoStore) ListChatsToSync(ctx context.Context) ([]ChatToSync, error) 
 	return out, nil
 }
 
-// SetMembersSynced writes the resolved member list and advances the chat to
-// the room-creation stage, but only if the chat's updatedAt still equals
-// seenUpdatedAt (optimistic conditional write). Written by the write client.
-func (s *mongoStore) SetMembersSynced(ctx context.Context, chatID string, seenUpdatedAt time.Time, members []model.TeamsChatMember, now time.Time) error {
-	res, err := s.writeChats.Raw().UpdateOne(ctx,
-		bson.M{"_id": chatID, "updatedAt": seenUpdatedAt},
-		setMembersSyncedUpdate(members, now))
+// SetMembersSyncedBatch writes every resolved member list in one unordered
+// bulk write and advances the matched chats to the room-creation stage. Each
+// chat's update is conditional on its updatedAt still equaling SeenUpdatedAt
+// (optimistic conditional write); unmatched chats were rewritten concurrently
+// and keep needMemberSync=true. Returns the matched count — possibly partial
+// alongside an error, since an unordered bulk write can land some operations
+// and fail others. Written by the write client.
+func (s *mongoStore) SetMembersSyncedBatch(ctx context.Context, updates []ChatMembersUpdate, now time.Time) (int64, error) {
+	res, err := s.writeChats.BulkWrite(ctx, setMembersSyncedModels(updates, now))
+	var matched int64
+	if res != nil {
+		matched = res.Matched
+	}
 	if err != nil {
-		return fmt.Errorf("set chat members synced: %w", err)
+		return matched, fmt.Errorf("bulk set chat members synced: %w", err)
 	}
-	if res.MatchedCount == 0 {
-		return errSuperseded
+	return matched, nil
+}
+
+// setMembersSyncedModels builds one conditional single-document update per
+// chat for the bulk write, each carrying its own optimistic-concurrency token.
+func setMembersSyncedModels(updates []ChatMembersUpdate, now time.Time) []mongo.WriteModel {
+	models := make([]mongo.WriteModel, 0, len(updates))
+	for i := range updates {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": updates[i].ChatID, "updatedAt": updates[i].SeenUpdatedAt}).
+			SetUpdate(setMembersSyncedUpdate(updates[i].Members, now)))
 	}
-	return nil
+	return models
 }
 
 // setMembersSyncedUpdate builds the $set document for a completed member sync.
