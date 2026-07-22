@@ -160,6 +160,73 @@ func TestHistoryService_RoomsGet_ContentPreviewTrimmed(t *testing.T) {
 	assert.NotEmpty(t, resp.Rooms["r1"].Content)
 }
 
+// Latest message is a system message → walk back to the first non-system, non-quoted survivor.
+func TestHistoryService_RoomsGet_SkipsSystemTail(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m2", RoomID: "r1", Type: "call_ended", CreatedAt: roomLastMsgAt},
+			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+		}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// Latest message quotes another message → walk back to the first non-quoted survivor.
+func TestHistoryService_RoomsGet_SkipsQuotedTail(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m2", RoomID: "r1", Msg: "re: x", QuotedParentMessage: &models.QuotedParentMessage{MessageID: "m0"}, CreatedAt: roomLastMsgAt},
+			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+		}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// Mixed tail: system + quoted + deleted before a real message → returns the real one.
+func TestHistoryService_RoomsGet_MixedTailSkipsAllIneligible(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m4", RoomID: "r1", Type: "call_started", CreatedAt: roomLastMsgAt},
+			{MessageID: "m3", RoomID: "r1", QuotedParentMessage: &models.QuotedParentMessage{MessageID: "m0"}, CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+			{MessageID: "m2", RoomID: "r1", Deleted: true, CreatedAt: roomLastMsgAt.Add(-2 * time.Minute)},
+			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-3 * time.Minute)},
+		}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// A normal message (no type, no quote, not deleted) is returned as-is.
+func TestHistoryService_RoomsGet_NormalMessageUnaffected(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
 func TestHistoryService_RoomsGet_EmptyRoomIDs(t *testing.T) {
 	svc, _, _ := newRoomsService(t)
 	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: nil})
