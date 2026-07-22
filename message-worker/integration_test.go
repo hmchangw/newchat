@@ -304,8 +304,8 @@ func TestCassandraStore_SaveMessage_Forwarded(t *testing.T) {
 	// Empty content — the preview path renders the "Forwarded a message" label.
 	msg := &model.Message{
 		ID: "m-fwd", RoomID: "r-1", UserID: "u-1", UserAccount: "alice",
-		Content:   "",
-		CreatedAt: now,
+		Content:     "",
+		CreatedAt:   now,
 		Attachments: [][]byte{[]byte(`{"id":"f1"}`)}, // content-empty forwards still need a body to pass gatekeeper; storage doesn't care
 		Forwarded: &cassandra.ForwardedMessage{
 			MessageID: "src-1", RoomID: "src-room",

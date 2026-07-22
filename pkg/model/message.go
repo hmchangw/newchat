@@ -35,9 +35,9 @@ type Message struct {
 	QuotedParentMessage          *cassandra.QuotedParentMessage `json:"quotedParentMessage,omitempty"          bson:"quotedParentMessage,omitempty"`
 	// Forwarded is non-nil when this message is a forward; it snapshots the source
 	// sender + content so the client can render it (mirrors QuotedParentMessage).
-	Forwarded                    *cassandra.ForwardedMessage    `json:"forwarded,omitempty"                    bson:"forwarded,omitempty"`
-	PinnedAt                     *time.Time                     `json:"pinnedAt,omitempty"                     bson:"pinnedAt,omitempty"`
-	PinnedBy                     *Participant                   `json:"pinnedBy,omitempty"                     bson:"pinnedBy,omitempty"`
+	Forwarded *cassandra.ForwardedMessage `json:"forwarded,omitempty"                    bson:"forwarded,omitempty"`
+	PinnedAt  *time.Time                  `json:"pinnedAt,omitempty"                     bson:"pinnedAt,omitempty"`
+	PinnedBy  *Participant                `json:"pinnedBy,omitempty"                     bson:"pinnedBy,omitempty"`
 }
 
 // RoomRenamedSysData is the JSON payload stored in Message.SysMsgData
