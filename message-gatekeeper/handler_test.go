@@ -878,6 +878,8 @@ func TestHandler_processMessage_RejectsClientSystemAndUnknownTypes(t *testing.T)
 		assert.Equal(t, errcode.CodeBadRequest, ee.Code)
 		ctrl.Finish()
 	}
+}
+
 func TestHandler_processMessage_RejectsInvalidForwardedFromMessageID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
