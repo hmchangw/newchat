@@ -67,7 +67,7 @@ func (s *mongoWriteStore) UpsertUserIdentities(ctx context.Context, users []mode
 		// employeeId is the identity key; an empty one would match every other
 		// keyless row and clobber it, so skip rather than corrupt.
 		if u.EmployeeID == "" {
-			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId", "account", u.Account)
+			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId")
 			continue
 		}
 		models = append(models, mongo.NewUpdateOneModel().
@@ -81,6 +81,11 @@ func (s *mongoWriteStore) UpsertUserIdentities(ctx context.Context, users []mode
 				"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
 			}).
 			SetUpsert(true))
+	}
+	// All inputs had an empty employeeId → nothing to write; BulkWrite errors on
+	// an empty slice (mongo.ErrEmptySlice), so no-op cleanly instead.
+	if len(models) == 0 {
+		return nil
 	}
 	if _, err := s.users.BulkWrite(ctx, models); err != nil {
 		return fmt.Errorf("bulk upsert user identities: %w", err)
