@@ -3,6 +3,7 @@ package drive
 import (
 	"crypto/tls"
 	"fmt"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"time"
@@ -142,5 +143,22 @@ func (c *Client) GetGroupImage(host, groupID, fileID string) (*GetGroupImageResp
 		Reader:        resp.RawBody(),
 		ContentType:   contentType,
 		ContentLength: contentLength,
+		Filename:      filenameFromDisposition(resp.Header().Get("Content-Disposition")),
 	}, nil
+}
+
+// filenameFromDisposition parses the filename from a Content-Disposition
+// header value, preferring RFC 5987 filename*; returns "" when absent or unparseable.
+func filenameFromDisposition(v string) string {
+	if v == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(v)
+	if err != nil {
+		return ""
+	}
+	if name := params["filename*"]; name != "" {
+		return name
+	}
+	return params["filename"]
 }

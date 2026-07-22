@@ -33,6 +33,7 @@ type GetGroupImageResponse struct {
 	Reader        io.ReadCloser
 	ContentType   string
 	ContentLength int64
+	Filename      string
 }
 
 // File is one staged upload file.
