@@ -185,18 +185,20 @@ func (mr *MockThreadStoreMockRecorder) AdvanceThreadSubscriptionLastSeen(ctx, th
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AdvanceThreadSubscriptionLastSeen", reflect.TypeOf((*MockThreadStore)(nil).AdvanceThreadSubscriptionLastSeen), ctx, threadRoomID, account, at)
 }
 
-// CreateThreadRoom mocks base method.
-func (m *MockThreadStore) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
+// EnsureThreadRoom mocks base method.
+func (m *MockThreadStore) EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (*model.ThreadRoom, bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreateThreadRoom", ctx, room)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "EnsureThreadRoom", ctx, room)
+	ret0, _ := ret[0].(*model.ThreadRoom)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
-// CreateThreadRoom indicates an expected call of CreateThreadRoom.
-func (mr *MockThreadStoreMockRecorder) CreateThreadRoom(ctx, room any) *gomock.Call {
+// EnsureThreadRoom indicates an expected call of EnsureThreadRoom.
+func (mr *MockThreadStoreMockRecorder) EnsureThreadRoom(ctx, room any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateThreadRoom", reflect.TypeOf((*MockThreadStore)(nil).CreateThreadRoom), ctx, room)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureThreadRoom", reflect.TypeOf((*MockThreadStore)(nil).EnsureThreadRoom), ctx, room)
 }
 
 // GetHistorySharedSince mocks base method.
@@ -212,21 +214,6 @@ func (m *MockThreadStore) GetHistorySharedSince(ctx context.Context, roomID stri
 func (mr *MockThreadStoreMockRecorder) GetHistorySharedSince(ctx, roomID, accounts any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHistorySharedSince", reflect.TypeOf((*MockThreadStore)(nil).GetHistorySharedSince), ctx, roomID, accounts)
-}
-
-// GetThreadRoomByParentMessageID mocks base method.
-func (m *MockThreadStore) GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetThreadRoomByParentMessageID", ctx, parentMessageID)
-	ret0, _ := ret[0].(*model.ThreadRoom)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// GetThreadRoomByParentMessageID indicates an expected call of GetThreadRoomByParentMessageID.
-func (mr *MockThreadStoreMockRecorder) GetThreadRoomByParentMessageID(ctx, parentMessageID any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetThreadRoomByParentMessageID", reflect.TypeOf((*MockThreadStore)(nil).GetThreadRoomByParentMessageID), ctx, parentMessageID)
 }
 
 // InsertThreadSubscription mocks base method.
@@ -283,4 +270,18 @@ func (m *MockThreadStore) UpsertThreadSubscription(ctx context.Context, sub *mod
 func (mr *MockThreadStoreMockRecorder) UpsertThreadSubscription(ctx, sub any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertThreadSubscription", reflect.TypeOf((*MockThreadStore)(nil).UpsertThreadSubscription), ctx, sub)
+}
+
+// UpsertThreadSubscriptionAdvancingLastSeen mocks base method.
+func (m *MockThreadStore) UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpsertThreadSubscriptionAdvancingLastSeen", ctx, sub, at)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpsertThreadSubscriptionAdvancingLastSeen indicates an expected call of UpsertThreadSubscriptionAdvancingLastSeen.
+func (mr *MockThreadStoreMockRecorder) UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, at any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertThreadSubscriptionAdvancingLastSeen", reflect.TypeOf((*MockThreadStore)(nil).UpsertThreadSubscriptionAdvancingLastSeen), ctx, sub, at)
 }

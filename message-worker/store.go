@@ -30,8 +30,11 @@ type Store interface {
 
 // ThreadStore defines MongoDB operations for thread room and subscription management.
 type ThreadStore interface {
-	CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error
-	GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error)
+	// EnsureThreadRoom returns the thread room for room.ParentMessageID, atomically creating
+	// it from room when absent — a single round trip via an upserting FindOneAndUpdate, so the
+	// hot subsequent-reply path never attempts (and fails) an insert against the unique index.
+	// created is true iff this call inserted the room (i.e. this is the first reply).
+	EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (stored *model.ThreadRoom, created bool, err error)
 	InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// MarkThreadSubscriptionMention flags sub as mentioned, unless the account
@@ -54,4 +57,11 @@ type ThreadStore interface {
 	// implies they've seen up to their own reply, keeping the thread read-floor
 	// (minUserLastSeenAt) from counting the replier against it (#396).
 	AdvanceThreadSubscriptionLastSeen(ctx context.Context, threadRoomID, account string, at time.Time) error
+	// UpsertThreadSubscriptionAdvancingLastSeen creates sub's (threadRoomId, userAccount)
+	// subscription when missing and advances its lastSeenAt to at via $max, in a single
+	// write. It merges UpsertThreadSubscription + AdvanceThreadSubscriptionLastSeen for the
+	// replier on the hot path: replying implies the replier has seen up to their own reply
+	// (#396), so the new sub is seeded with lastSeenAt=at and an existing one is moved
+	// forward (never backward).
+	UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error
 }
