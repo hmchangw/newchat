@@ -4745,3 +4745,39 @@ func TestSSOToken_SecretsNeverSerialize(t *testing.T) {
 		t.Errorf("token material leaked into String(): %s", s)
 	}
 }
+
+func TestIsSystemMessageType(t *testing.T) {
+	for _, st := range []string{
+		model.MessageTypeRoomCreated, model.MessageTypeMembersAdded,
+		model.MessageTypeMemberRemoved, model.MessageTypeMemberLeft,
+		model.MessageTypeRoomRenamed, model.MessageTypeRoomRestricted,
+		model.MessageTypeTeamsMeetStarted,
+	} {
+		assert.True(t, model.IsSystemMessageType(st), "%q is a system type", st)
+	}
+	assert.False(t, model.IsSystemMessageType(""), "empty is a normal message, not system")
+	assert.False(t, model.IsSystemMessageType(model.MessageTypeImportant), "important is a client type, not system")
+	assert.False(t, model.IsSystemMessageType("unknown"), "unknown is not a system type")
+}
+
+func TestSendMessageRequest_TypeRoundTripAndOmitEmpty(t *testing.T) {
+	// omitempty: absent Type serializes to no "type" key (json + bson).
+	jbytes, err := json.Marshal(&model.SendMessageRequest{ID: "m1", Content: "hi", RequestID: "r1"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(jbytes), "type")
+
+	src := model.SendMessageRequest{ID: "m1", Content: "hi", RequestID: "r1", Type: model.MessageTypeImportant}
+	var dst model.SendMessageRequest
+	roundTrip(t, &src, &dst)
+	assert.Equal(t, model.MessageTypeImportant, dst.Type)
+}
+
+func TestMessage_TypeBSONOmitEmpty(t *testing.T) {
+	// Message.Type carries bson:"type,omitempty" — absent Type must not write the key.
+	b, err := bson.Marshal(&model.Message{ID: "m1"})
+	require.NoError(t, err)
+	var raw bson.M
+	require.NoError(t, bson.Unmarshal(b, &raw))
+	_, ok := raw["type"]
+	assert.False(t, ok, "empty Type must be absent in BSON")
+}

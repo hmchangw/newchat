@@ -313,7 +313,7 @@ Cassandra projection).
 | `threadParentMessageId` | string | Optional. Set for a thread reply. |
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort; absent when unresolved at send time. |
 | `tshow` | boolean | Optional. Whether a thread reply is also shown in the parent room. |
-| `type` | string | Optional. System-message type. |
+| `type` | string | Optional. Message type — a server-set system type (`room_created`, etc.) or the client-settable `"important"`. Absent for a normal message. |
 | `sysMsgData` | string | Optional. Base64-encoded raw JSON payload for system messages. |
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |

@@ -832,6 +832,54 @@ func TestHandler_processMessage_RejectsInvalidQuotedParentMessageID(t *testing.T
 	assert.Equal(t, errcode.CodeBadRequest, ee.Code)
 }
 
+func TestHandler_processMessage_AcceptsImportantTypeAndSetsCanonical(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "room-1").
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}}, nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
+		Return(roommetacache.Meta{ID: "room-1", UserCount: 1}, nil)
+
+	var captured publishedMsg
+	pub := func(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+		captured = publishedMsg{subject: msg.Subject, data: msg.Data}
+		return &jetstream.PubAck{}, nil
+	}
+	reply := func(_ context.Context, _ *nats.Msg) error { return nil }
+	h := NewHandler(store, nil, pub, reply, "site1", nil, 500, 1, 8192, "")
+
+	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f", Type: model.MessageTypeImportant}
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	require.NoError(t, err)
+
+	var evt model.MessageEvent
+	require.NoError(t, json.Unmarshal(captured.data, &evt))
+	assert.Equal(t, model.MessageTypeImportant, evt.Message.Type)
+}
+
+func TestHandler_processMessage_RejectsClientSystemAndUnknownTypes(t *testing.T) {
+	// A client must not be able to inject a system type, nor an unknown one.
+	// Validation fails before any store call, so no store expectations.
+	for _, badType := range []string{model.MessageTypeRoomCreated, "totally_unknown"} {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		pub := func(context.Context, *nats.Msg, ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+			return &jetstream.PubAck{}, nil
+		}
+		reply := func(context.Context, *nats.Msg) error { return nil }
+		h := NewHandler(store, nil, pub, reply, "site1", nil, 500, 1, 8192, "")
+
+		req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f", Type: badType}
+		_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+		require.Error(t, err, "type %q must be rejected", badType)
+		assert.Contains(t, err.Error(), "invalid message type")
+		var ee *errcode.Error
+		require.True(t, errors.As(err, &ee))
+		assert.Equal(t, errcode.CodeBadRequest, ee.Code)
+		ctrl.Finish()
+	}
+}
+
 func TestHandler_processMessage_PropagatesRequestIDOnCanonicalPublish(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)

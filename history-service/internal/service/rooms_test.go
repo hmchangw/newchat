@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
+	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
@@ -183,7 +184,7 @@ func TestHistoryService_RoomsGet_SkipsSystemTail(t *testing.T) {
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
-			{MessageID: "m2", RoomID: "r1", Type: "call_ended", CreatedAt: roomLastMsgAt},
+			{MessageID: "m2", RoomID: "r1", Type: pkgmodel.MessageTypeTeamsMeetStarted, CreatedAt: roomLastMsgAt},
 			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute)},
 		}, false), nil)
 
@@ -191,6 +192,41 @@ func TestHistoryService_RoomsGet_SkipsSystemTail(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, resp.Rooms, "r1")
 	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// Every system type is skipped in the preview; a client type (important) is not.
+func TestHistoryService_RoomsGet_SkipsEachSystemTypeButKeepsImportant(t *testing.T) {
+	for _, st := range []string{
+		pkgmodel.MessageTypeRoomCreated, pkgmodel.MessageTypeMembersAdded,
+		pkgmodel.MessageTypeMemberRemoved, pkgmodel.MessageTypeMemberLeft,
+		pkgmodel.MessageTypeRoomRenamed, pkgmodel.MessageTypeRoomRestricted,
+		pkgmodel.MessageTypeTeamsMeetStarted,
+	} {
+		svc, msgs, rooms := newRoomsService(t)
+		rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+		msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(makePage([]models.Message{
+				{MessageID: "m2", RoomID: "r1", Type: st, CreatedAt: roomLastMsgAt},
+				{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+			}, false), nil)
+
+		resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+		require.NoError(t, err)
+		assert.Equal(t, "m1", resp.Rooms["r1"].MessageID, "system type %q must be skipped", st)
+	}
+}
+
+func TestHistoryService_RoomsGet_KeepsImportantMessage(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m2", RoomID: "r1", Msg: "urgent", Type: pkgmodel.MessageTypeImportant, CreatedAt: roomLastMsgAt},
+		}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "m2", resp.Rooms["r1"].MessageID, "an important (client) message must preview")
 }
 
 // Latest message quotes another message → walk back to the first non-quoted survivor.
@@ -217,7 +253,7 @@ func TestHistoryService_RoomsGet_MixedTailSkipsAllIneligible(t *testing.T) {
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
-			{MessageID: "m4", RoomID: "r1", Type: "call_started", CreatedAt: roomLastMsgAt},
+			{MessageID: "m4", RoomID: "r1", Type: pkgmodel.MessageTypeRoomRenamed, CreatedAt: roomLastMsgAt},
 			{MessageID: "m3", RoomID: "r1", QuotedParentMessage: &models.QuotedParentMessage{MessageID: "m0"}, CreatedAt: roomLastMsgAt.Add(-time.Minute)},
 			{MessageID: "m2", RoomID: "r1", Deleted: true, CreatedAt: roomLastMsgAt.Add(-2 * time.Minute)},
 			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-3 * time.Minute)},

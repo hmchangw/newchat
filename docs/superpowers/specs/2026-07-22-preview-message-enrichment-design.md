@@ -4,7 +4,7 @@
 
 ## Problem
 
-The room-list preview (`rooms.get` → `SubscriptionRoom.LastMessage`) carried only
+The room-list preview (`rooms.get` → `SubscriptionRoom.PreviewMessage`) carried only
 `{messageId, sender, content, createdAt}`, and `sender` was the raw `cassandra.Participant`
 (`id`/`account` only). The frontend can't render an attachment icon, mentioned names, or a
 bot's app name from that. Every needed source field is already read by the walk's
@@ -35,7 +35,7 @@ Replace the minimal `LastMessage` wire type with a dedicated **`PreviewMessage`*
 - No Cassandra/Mongo schema or projection change (columns already projected).
 - The `LastMessage` → `PreviewMessage` rename ripples through the shared wire type and its
   consumers (history models alias, `user-service` `RoomsGet` signature + `SubscriptionRoom`
-  field, historyclient, mocks). The `SubscriptionRoom.LastMessage` **field name is kept**;
+  field, historyclient, mocks). The `SubscriptionRoom.PreviewMessage` **field** (renamed from `LastMessage` per review);
   only its type changes.
 
 ## Out of scope

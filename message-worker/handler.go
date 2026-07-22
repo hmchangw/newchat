@@ -87,8 +87,10 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 	var sender *cassParticipant
 	user, err := h.userStore.FindUserByID(ctx, evt.Message.UserID)
 	if err != nil {
-		if evt.Message.Type != "" {
+		if model.IsSystemMessageType(evt.Message.Type) {
 			// System messages may have no real user; proceed with nil sender.
+			// A client type (e.g. important) has a real sender, so a lookup failure
+			// there falls through to the error branch like a normal message.
 			slog.WarnContext(ctx, "user not found for system message, using nil sender",
 				"user_id", evt.Message.UserID, "type", evt.Message.Type,
 				"request_id", natsutil.RequestIDFromContext(ctx))
