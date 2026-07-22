@@ -336,7 +336,7 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
-	lastMsgBySite := make([]map[string]model.LastMessage, len(sites)) // nil ⇒ site degraded
+	lastMsgBySite := make([]map[string]model.PreviewMessage, len(sites)) // nil ⇒ site degraded
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {

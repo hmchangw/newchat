@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,14 +90,7 @@ func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req 
 	}
 
 	// Bot reactor: prefer the app's display name; degrade to composed on miss/error.
-	displayName := displayfmt.CombineWithFallback(actor.EngName, actor.ChineseName, actor.Account)
-	if pkgmodel.IsBot(actor.Account) {
-		if appName, err := s.apps.AppNameByAccount(c, actor.Account); err != nil {
-			slog.WarnContext(c, "react: app name lookup failed, using composed name", "account", actor.Account, "error", err)
-		} else if appName != "" {
-			displayName = appName
-		}
-	}
+	displayName := s.botAwareDisplayName(c, actor.EngName, actor.ChineseName, actor.Account)
 
 	canonicalEvt := pkgmodel.MessageEvent{
 		Event:     pkgmodel.EventReacted,
@@ -172,4 +166,18 @@ func toWireMessage(msg *cassandra.Message, updatedAt *time.Time) pkgmodel.Messag
 // SiteID/DisplayName have no Cassandra source.
 func toWireParticipant(p *cassandra.Participant) pkgmodel.Participant {
 	return pkgmodel.Participant{UserID: p.ID, Account: p.Account, EngName: p.EngName, ChineseName: p.CompanyName}
+}
+
+// botAwareDisplayName composes a render-ready name; for a bot account it prefers the
+// app's display name, degrading to the composed name on lookup miss/error.
+func (s *HistoryService) botAwareDisplayName(ctx context.Context, engName, chineseName, account string) string {
+	name := displayfmt.CombineWithFallback(engName, chineseName, account)
+	if pkgmodel.IsBot(account) {
+		if appName, err := s.apps.AppNameByAccount(ctx, account); err != nil {
+			slog.WarnContext(ctx, "app name lookup failed, using composed name", "account", account, "error", err)
+		} else if appName != "" {
+			name = appName
+		}
+	}
+	return name
 }

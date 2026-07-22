@@ -1006,7 +1006,7 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}).
-		Return(map[string]model.LastMessage{"r1": {MessageID: "m9", Content: "hi", CreatedAt: 123}}, nil)
+		Return(map[string]model.PreviewMessage{"r1": {MessageID: "m9", Content: "hi", CreatedAt: 123}}, nil)
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err)
 	require.Len(t, resp.Subscriptions, 1)

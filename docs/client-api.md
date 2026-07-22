@@ -911,21 +911,24 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
-| `lastMessage` | [LastMessage](#lastmessage) | Optional. The room's latest non-deleted message, resolved server-side at read time. Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+| `lastMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time. Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
 
-##### LastMessage
+##### PreviewMessage
 
-A room's most-recent **eligible** message, resolved at read time and preview-trimmed.
-Eligible = not soft-deleted, not a system message, not a quoted reply — an ineligible
-tail is walked back to an earlier survivor; a room with only ineligible messages omits
-`lastMessage`.
+A room's most-recent **eligible** message, resolved at read time, preview-trimmed, and
+enriched for room-list rendering. Eligible = not soft-deleted, not a system message, not a
+quoted reply — an ineligible tail is walked back to an earlier survivor; a room with only
+ineligible messages omits `lastMessage`.
 
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | |
-| `sender` | [Participant](#participant) | |
+| `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
 | `content` | string | Preview-trimmed to 256 runes. |
 | `createdAt` | int64 | UTC milliseconds. |
+| `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
+| `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
+| `visibleTo` | string | Optional. Currently empty until its write-path lands (surfaced now for forward-compat). |
 
 #### AppSubscription
 
@@ -4549,7 +4552,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
         "keyVersion": 3,
         "lastMessage": {
           "messageId": "01970a4f8c2d7c9aBB",
-          "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+          "sender": { "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "chineseName": "愛麗絲", "displayName": "Alice 愛麗絲" },
           "content": "morning team",
           "createdAt": 1780308000000
         }

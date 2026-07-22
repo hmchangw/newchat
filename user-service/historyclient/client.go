@@ -52,7 +52,7 @@ func (c *Client) GetThreadList(ctx context.Context, siteID string, req model.Thr
 // the resolvable last message for each requested room; rooms with no message, or
 // that degraded, are simply absent from the map (mirrors the server's own
 // per-room best-effort degrade).
-func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error) {
+func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.PreviewMessage, error) {
 	body, err := json.Marshal(model.RoomsGetRequest{RoomIDs: roomIDs})
 	if err != nil {
 		return nil, fmt.Errorf("marshal rooms-get request: %w", err)

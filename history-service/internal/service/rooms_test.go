@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
@@ -32,6 +34,23 @@ func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageR
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms
+}
+
+// newRoomsServiceWithApps also exposes the AppStore mock, needed by the preview
+// enrichment tests (bot sender → app name).
+func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository, *mocks.MockAppStore) {
+	ctrl := gomock.NewController(t)
+	msgs := mocks.NewMockMessageRepository(ctrl)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomRepository(ctrl)
+	pub := mocks.NewMockEventPublisher(ctrl)
+	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	users := mocks.NewMockUserStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
+	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
+	return svc, msgs, rooms, apps
 }
 
 func roomsCtx() *natsrouter.Context {
@@ -241,4 +260,78 @@ func TestHistoryService_RoomsGet_TooManyRoomIDs(t *testing.T) {
 	}
 	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: ids})
 	assertBadRequestErr(t, err, "too many roomIds")
+}
+
+// Preview enrichment: attachments, mentions (wire Participants), and visibleTo are
+// carried; a non-bot sender's chineseName comes from the Cassandra company_name and no
+// app lookup happens.
+func TestHistoryService_RoomsGet_EnrichesPreview(t *testing.T) {
+	svc, msgs, rooms, apps := newRoomsServiceWithApps(t)
+	apps.EXPECT().AppNameByAccount(gomock.Any(), gomock.Any()).Times(0) // no bot → no lookup
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{
+			MessageID:   "m1",
+			RoomID:      "r1",
+			Msg:         "hi",
+			CreatedAt:   roomLastMsgAt,
+			Sender:      models.Participant{ID: "u1", Account: "alice", EngName: "Alice", CompanyName: "愛麗絲"},
+			Attachments: cassandra.EncodeAttachments([]cassandra.Attachment{{ID: "f1", Title: "a.png", Type: "file"}}),
+			Mentions:    []models.Participant{{ID: "u2", Account: "bob", CompanyName: "小明"}},
+			VisibleTo:   "u1",
+		}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	pm := resp.Rooms["r1"]
+	assert.Equal(t, "愛麗絲", pm.Sender.ChineseName)       // company_name → chineseName
+	assert.Equal(t, "Alice 愛麗絲", pm.Sender.DisplayName) // composed, not a bot
+	assert.Equal(t, "u1", pm.Sender.UserID)
+	require.Len(t, pm.Attachments, 1)
+	assert.Equal(t, "a.png", pm.Attachments[0].Title)
+	require.Len(t, pm.Mentions, 1)
+	assert.Equal(t, "bob", pm.Mentions[0].Account)
+	assert.Equal(t, "小明", pm.Mentions[0].ChineseName)
+	assert.Equal(t, "u1", pm.VisibleTo)
+}
+
+// A bot sender's displayName is its app name (mirrors the reaction actor path).
+func TestHistoryService_RoomsGet_BotSenderAppName(t *testing.T) {
+	svc, msgs, rooms, apps := newRoomsServiceWithApps(t)
+	apps.EXPECT().AppNameByAccount(gomock.Any(), "acme.bot").Return("Acme Assistant", nil)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{
+			MessageID: "m1", RoomID: "r1", Msg: "beep", CreatedAt: roomLastMsgAt,
+			Sender: models.Participant{ID: "b1", Account: "acme.bot", EngName: "acme"},
+		}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "Acme Assistant", resp.Rooms["r1"].Sender.DisplayName)
+}
+
+// Empty attachments/mentions serialize away (omitempty) — no [] noise in the preview.
+func TestHistoryService_RoomsGet_EmptyCollectionsOmitted(t *testing.T) {
+	svc, msgs, rooms, _ := newRoomsServiceWithApps(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	pm := resp.Rooms["r1"]
+	assert.Nil(t, pm.Attachments)
+	assert.Nil(t, pm.Mentions)
+
+	data, err := json.Marshal(pm)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "attachments")
+	assert.NotContains(t, string(data), "mentions")
+	assert.NotContains(t, string(data), "visibleTo")
 }
