@@ -1366,3 +1366,16 @@ func OrgSyncUsersUpsert(centralSiteID string) string {
 func EmployeesQuit(siteID string) string {
 	return fmt.Sprintf("chat.hr.%s.employees.quit", siteID)
 }
+
+// TranslateRequest is the subject a client publishes a TranslateRequest to.
+// The service registers TranslateRequestPattern; the async result is published
+// to UserResponse(account, requestID).
+func TranslateRequest(account, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.translate.%s", account, siteID)
+}
+
+// TranslateRequestPattern is the natsrouter registration pattern; {account} is a
+// named token read via c.Param("account").
+func TranslateRequestPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.translate.%s", siteID)
+}

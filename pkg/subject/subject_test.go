@@ -1045,3 +1045,10 @@ func TestOrgSyncUsersUpsert(t *testing.T) {
 func TestEmployeesQuit(t *testing.T) {
 	assert.Equal(t, "chat.hr.site-a.employees.quit", subject.EmployeesQuit("site-a"))
 }
+
+func TestTranslateSubjects(t *testing.T) {
+	assert.Equal(t, "chat.user.alice.request.translate.site-a",
+		subject.TranslateRequest("alice", "site-a"))
+	assert.Equal(t, "chat.user.{account}.request.translate.site-a",
+		subject.TranslateRequestPattern("site-a"))
+}
