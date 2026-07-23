@@ -69,6 +69,10 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 		if account == "" {
 			return nil, fmt.Errorf("build spotlight action: empty account at index %d", i)
 		}
+		// Bots are channel members but not searchable principals — skip them.
+		if model.IsBot(account) || model.IsPlatformAdminAccount(account) {
+			continue
+		}
 		docID := fmt.Sprintf("%s_%s", account, payload.RoomID)
 
 		switch evt.Type {

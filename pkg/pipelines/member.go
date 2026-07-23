@@ -1,8 +1,10 @@
 // Package pipelines holds shared MongoDB candidate-resolution helpers used by
-// more than one service — both the query predicate (MatchCandidatesFilter) and
-// the companion read (SubscribedAccounts). Centralizing them keeps room-service
-// (capacity check) and room-worker (candidate resolution) in lock-step on org
-// expansion, bot exclusion, and the already-subscribed subtraction.
+// more than one service — the query predicates (MatchCandidatesFilter and its
+// direct-bots variant) and the companion read (SubscribedAccounts).
+// Centralizing them keeps room-service and room-worker in lock-step on org
+// expansion and the already-subscribed subtraction; bot handling deliberately
+// differs per caller (capacity/create exclude bots everywhere, member.add
+// resolution admits explicitly listed ones — see each predicate's doc).
 package pipelines
 
 import (
@@ -41,4 +43,26 @@ func MatchCandidatesFilter(orgIDs, directAccounts []string, excludeAccount strin
 		accountFilter["$ne"] = excludeAccount
 	}
 	return bson.M{"$or": orFilter, "account": accountFilter}
+}
+
+// MatchCandidatesFilterWithDirectBots narrows the bot exclusion to the org
+// arms: directly named accounts may be bots (member.add validated them), while
+// org expansion stays bot-free. Same non-empty-input contract.
+func MatchCandidatesFilterWithDirectBots(orgIDs, directAccounts []string, excludeAccount string) bson.M {
+	notBot := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex, Options: ""}}
+	orFilter := bson.A{}
+	if len(orgIDs) > 0 {
+		orFilter = append(orFilter,
+			bson.M{"sectId": bson.M{"$in": orgIDs}, "account": notBot},
+			bson.M{"deptId": bson.M{"$in": orgIDs}, "account": notBot},
+		)
+	}
+	if len(directAccounts) > 0 {
+		orFilter = append(orFilter, bson.M{"account": bson.M{"$in": directAccounts}})
+	}
+	filter := bson.M{"$or": orFilter}
+	if excludeAccount != "" {
+		filter["account"] = bson.M{"$ne": excludeAccount}
+	}
+	return filter
 }
