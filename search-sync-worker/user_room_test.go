@@ -235,6 +235,65 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 	assert.False(t, hasUpsert, "remove update body must not contain upsert")
 }
 
+// TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp verifies that
+// bot / platform-admin removals are NOT skipped: a remove-room update must still
+// be emitted so a user-room doc indexed by legacy behavior (or during a rolling
+// deploy) gets cleaned up. The update is idempotent — a 404 with
+// document_missing_exception on a never-indexed doc is a benign ack (see
+// isBulkItemSuccess).
+func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T) {
+	coll := newUserRoomCollection("user-room-site-a")
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"weather.bot", "p_tchatadmin_siteA"}
+	const ts int64 = 1735689800000
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, ts)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2, "bot and platform-admin removals must still emit cleanup updates")
+
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		assert.Equal(t, searchengine.ActionUpdate, action.Action)
+		assert.Equal(t, "user-room-site-a", action.Index)
+		require.NotNil(t, action.Doc)
+
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(action.Doc, &body))
+		script := body["script"].(map[string]any)
+		assert.Equal(t, removeRoomScriptID, script["id"])
+		_, hasUpsert := body["upsert"]
+		assert.False(t, hasUpsert, "remove update must not contain an upsert")
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"weather.bot", "p_tchatadmin_siteA"}, docIDs)
+}
+
+// TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot verifies a
+// mixed removal fans out to a remove-room update for BOTH the human and the bot
+// — the human because they were indexed, the bot as defensive cleanup.
+func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testing.T) {
+	coll := newUserRoomCollection("user-room-site-a")
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"alice", "weather.bot"}
+	const ts int64 = 1735689800000
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, ts)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2)
+
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		assert.Equal(t, searchengine.ActionUpdate, action.Action)
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(action.Doc, &body))
+		assert.Equal(t, removeRoomScriptID, body["script"].(map[string]any)["id"])
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"alice", "weather.bot"}, docIDs)
+}
+
 // TestUserRoomCollection_BuildAction_BulkMixed_AllRestricted verifies that a
 // restricted bulk fans out: every account in the bulk gets its own upsert
 // seeded with `restrictedRooms[rid] = hss` and an empty `rooms[]`. All
