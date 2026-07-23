@@ -1368,6 +1368,8 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
 | `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
+| `chat.user.{account}.request.user.{siteID}.sso.set` | [sso.set](#ssoset) |
+| `chat.user.{account}.request.user.{siteID}.sso.refresh` | [sso.refresh](#ssorefresh) |
 
 ---
 
@@ -1804,6 +1806,63 @@ clears only the requester's own read state; does not advance thread read floors 
 #### Errors
 
 `internal` — local thread-subscription read failed.
+
+**Emits:** None.
+
+---
+
+### sso.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.sso.set`
+
+Store (upsert) the caller's own SSO token pair in the site-local MongoDB store.
+Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated
+identity; the frontend calls this on every login. The submitted `ssoToken` is
+verified against the site's OIDC issuer; its `preferred_username` must equal the
+caller. Expiry is derived server-side from the token's `exp` claim.
+
+#### Request body
+
+`{ "ssoToken": string, "refreshToken": string }`
+
+#### Success response
+
+`{ "success": true }`
+
+#### Errors
+
+`missing_fields` (`bad_request`, `ssoToken`/`refreshToken` missing),
+`preferred_username` mismatch (`bad_request`), `sso_token_expired`
+(`unauthenticated`), `invalid_sso_token` (`unauthenticated`),
+`upstream_unavailable` (`unavailable`, SSO not configured on this site),
+`internal` (local store failure).
+
+**Emits:** None.
+
+---
+
+### sso.refresh
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.sso.refresh`
+
+Returns the caller's stored `ssoToken`, transparently refreshing it against the
+OIDC issuer when within the refresh window (default 1h) of expiry or already
+expired. Self-service — the `{account}` subject token is the caller's
+NATS-JWT-authenticated identity. The request body is empty.
+
+#### Request body
+
+None — the request body is empty (`{}`).
+
+#### Success response
+
+`{ "ssoToken": string }`
+
+#### Errors
+
+`sso_token_not_found` (`not_found`, no token pair stored), `sso_token_expired`
+(`unauthenticated`, refresh failed or refreshed token not owned by the caller — re-login),
+`upstream_unavailable` (`unavailable`, SSO not configured on this site), `internal` (local store failure).
 
 **Emits:** None.
 

@@ -3,6 +3,7 @@ package logctx
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/nats-io/nats.go"
 	"golang.org/x/time/rate"
@@ -84,6 +85,10 @@ func ShouldCapture(ctx context.Context) bool {
 // metadata-admission gate; the body is the `payload` field.
 func CapturePayload(ctx context.Context, direction, subject string, data []byte) {
 	if !ShouldCapture(ctx) {
+		return
+	}
+	// Never capture credential-bearing bodies (sso.set/sso.refresh carry raw tokens).
+	if strings.HasSuffix(subject, ".sso.set") || strings.HasSuffix(subject, ".sso.refresh") {
 		return
 	}
 	slog.InfoContext(ctx, "debug payload",

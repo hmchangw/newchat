@@ -14,7 +14,7 @@ var allReasons = []Reason{
 	RoomNonChannelOperation,
 	MessageLargeRoomPostRestricted, MessageNotSubscribed, MessageOutsideAccessWindow,
 	PinDisabled, PinLimitReached, PinRoomTooLarge,
-	UserAppNotFound, UserAppDisabled, UserInvalidDMTarget, UserSubscriptionNotFound,
+	UserAppNotFound, UserAppDisabled, UserInvalidDMTarget, UserSubscriptionNotFound, UserSSOTokenNotFound,
 	AuthTokenExpired, AuthInvalidToken, AuthInvalidRequest, AuthInvalidNKey, AuthMissingFields,
 	PortalAccountNotReady,
 	RequestIDRequired,

@@ -8,6 +8,7 @@ func TestUserReasons(t *testing.T) {
 		UserAppDisabled:          "app_disabled",
 		UserInvalidDMTarget:      "invalid_dm_target",
 		UserSubscriptionNotFound: "subscription_not_found",
+		UserSSOTokenNotFound:     "sso_token_not_found",
 	}
 	for r, want := range cases {
 		if string(r) != want {

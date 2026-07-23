@@ -1024,6 +1024,20 @@ func UserAppsCategories(account, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.user.%s.apps.categories", account, siteID)
 }
 
+func UserSSOSet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.sso.set", account, siteID)
+}
+
+func UserSSORefresh(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.sso.refresh", account, siteID)
+}
+
 // --- natsrouter pattern builders (siteID baked in, account left as {account} placeholder) ---
 
 func UserStatusGetByNamePattern(siteID string) string {
@@ -1056,6 +1070,14 @@ func UserAppsListPattern(siteID string) string {
 
 func UserAppsCategoriesPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.apps.categories", siteID)
+}
+
+func UserSSOSetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.sso.set", siteID)
+}
+
+func UserSSORefreshPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.sso.refresh", siteID)
 }
 
 // UserMe is the concrete subject for the /me self-info endpoint — a deliberate

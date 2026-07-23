@@ -60,6 +60,7 @@ paths.
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
+     - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
 4. [Message Send](#4-message-send)
@@ -4142,7 +4143,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 ### 3.4 user-service
 
-`user-service` exposes 16 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
+`user-service` exposes 19 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
 > **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` and `settings.set` also trigger a server-side cross-site federation update, which is not delivered to clients.)
 
@@ -4165,6 +4166,8 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.user.{siteID}.thread.list` | [List User Threads](#list-user-threads) |
 | `chat.user.{account}.request.user.{siteID}.thread.unread.summary` | [Get Thread Unread Summary](#get-thread-unread-summary) |
 | `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
+| `chat.user.{account}.request.user.{siteID}.sso.set` | [`sso.set`](#ssoset) |
+| `chat.user.{account}.request.user.{siteID}.sso.refresh` | [`sso.refresh`](#ssorefresh) |
 
 #### me
 
@@ -5229,6 +5232,100 @@ Empty object.
 
 ---
 
+#### sso.set
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.sso.set`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Store (upsert) the caller's own SSO token pair in the site-local MongoDB store. Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated identity; the frontend calls this on every login. The submitted `ssoToken` is verified against the site's OIDC issuer; its `preferred_username` must equal the caller. The stored expiry is derived server-side from the token's `exp` claim.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `ssoToken` | string | yes | The SSO token (Keycloak access token) to store. |
+| `refreshToken` | string | yes | The matching refresh token. |
+
+```json
+{ "ssoToken": "eyJhbGciOiJSUzI1NiIs...", "refreshToken": "eyJhbGciOiJSUzI1NiIs..." }
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `success` | boolean | Always `true`. |
+
+```json
+{ "success": true }
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| `ssoToken` or `refreshToken` missing | `bad_request` | `missing_fields` | — |
+| Token's `preferred_username` ≠ the caller | `bad_request` | — | — |
+| Submitted token is expired | `unauthenticated` | `sso_token_expired` | — |
+| Submitted token fails verification | `unauthenticated` | `invalid_sso_token` | — |
+| SSO is not configured on this site | `unavailable` | `upstream_unavailable` | — |
+| Internal failure | `internal` | — | — |
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
+#### sso.refresh
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.sso.refresh`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Return the caller's stored `ssoToken`, transparently refreshing it against the OIDC issuer when it is within the refresh window (default 1h) of expiry or already expired. Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated identity. The request body is empty.
+
+##### Request body
+
+None — the request body is empty.
+
+```json
+{}
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `ssoToken` | string | The stored or freshly-refreshed SSO token. |
+
+```json
+{ "ssoToken": "eyJhbGciOiJSUzI1NiIs..." }
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| Refreshed token does not belong to the caller | `unauthenticated` | `sso_token_expired` | Stored refresh token minted a different identity; client re-logins (re-runs `sso.set`) |
+| No token pair stored for the caller | `not_found` | `sso_token_not_found` | — |
+| Token needed refreshing and the refresh failed (re-login) | `unauthenticated` | `sso_token_expired` | — |
+| SSO is not configured on this site | `unavailable` | `upstream_unavailable` | — |
+| Internal failure | `internal` | — | — |
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 ### 3.5 media-service
 
 | RPC subject | Method |
@@ -5855,17 +5952,19 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `pin_disabled` | forbidden | history-service pin/unpin/list (kill-switch `PIN_ENABLED=false`) |
 | `pin_limit_reached` | forbidden | history-service pin (room at `MAX_PINNED_PER_ROOM` hard cap) |
 | `pin_room_too_large` | forbidden | history-service pin/unpin (non-owner/admin/bot in a room above `LARGE_ROOM_THRESHOLD`) |
-| `sso_token_expired` | unauthenticated | auth-service `POST /api/v1/auth` |
-| `invalid_sso_token` | unauthenticated | auth-service `POST /api/v1/auth` |
+| `sso_token_expired` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token expired), `sso.refresh` (refresh failed, re-login required) |
+| `invalid_sso_token` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token fails verification) |
+| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site) |
 | `invalid_request` | bad_request | auth-service (body parse / required field missing) |
 | `invalid_nkey` | bad_request | auth-service (natsPublicKey format) |
-| `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing) |
+| `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing); user-service `sso.set` (ssoToken/refreshToken missing) |
 | `account_not_ready` | forbidden | portal-service `GET /api/userInfo` (account absent from the HR directory cache, or not provisioned in the users collection) |
 | `bot_login_disabled` | forbidden | portal-service `POST /api/v1/login` (§2.5) — portal is configured (`BOT_LOGIN_ENABLED=false`) to reject bot-account logins. Direct the user to the bot developer console. |
 | `app_not_found` | not_found | user-service `subscription.setAppSubscription` (appId does not resolve to any app) |
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
 | `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or platform account) |
 | `subscription_not_found` | not_found | user-service `subscription.getDM` (no DM subscription exists for the account pair) |
+| `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the caller) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |

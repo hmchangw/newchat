@@ -32,8 +32,16 @@ type Config struct {
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
 	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
 	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
-	Mongo                    MongoConfig   `envPrefix:"MONGO_"`
-	NATS                     NATSConfig    `envPrefix:"NATS_"`
+	// OIDC settings for the SSO token vault — optional as a unit: unset OIDC_ISSUER_URL disables the endpoints; the rest is validated in Load.
+	OIDCIssuerURL string `env:"OIDC_ISSUER_URL" envDefault:""`
+	// OIDCAudiences must include the access-token `aud` — refresh re-verifies the minted
+	// access token against this allow-list, so a missing aud fails every refresh.
+	OIDCAudiences    []string      `env:"OIDC_AUDIENCES"     envDefault:"" envSeparator:","`
+	TLSSkipVerify    bool          `env:"OIDC_TLS_SKIP_VERIFY" envDefault:"false"`
+	OIDCClientID     string        `env:"OIDC_CLIENT_ID"     envDefault:""`
+	SSORefreshWindow time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
+	Mongo            MongoConfig   `envPrefix:"MONGO_"`
+	NATS             NATSConfig    `envPrefix:"NATS_"`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.
@@ -59,6 +67,17 @@ func Load() (Config, error) {
 	}
 	if cfg.DefaultAppsLimit > cfg.MaxAppsLimit {
 		return Config{}, fmt.Errorf("APPS_DEFAULT_LIMIT (%d) must be <= APPS_MAX_LIMIT (%d)", cfg.DefaultAppsLimit, cfg.MaxAppsLimit)
+	}
+	if cfg.OIDCIssuerURL != "" {
+		if len(cfg.OIDCAudiences) == 0 {
+			return Config{}, fmt.Errorf("OIDC_AUDIENCES is required when OIDC_ISSUER_URL is set")
+		}
+		if cfg.OIDCClientID == "" {
+			return Config{}, fmt.Errorf("OIDC_CLIENT_ID is required when OIDC_ISSUER_URL is set")
+		}
+		if cfg.SSORefreshWindow <= 0 {
+			return Config{}, fmt.Errorf("SSO_REFRESH_WINDOW must be > 0, got %s", cfg.SSORefreshWindow)
+		}
 	}
 	return cfg, nil
 }

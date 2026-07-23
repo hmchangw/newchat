@@ -4701,3 +4701,32 @@ func TestTeamsRoomCreateEventJSON(t *testing.T) {
 	}
 	roundTrip(t, &e, &model.TeamsRoomCreateEvent{})
 }
+
+func TestSSOTokenJSON(t *testing.T) {
+	// Secrets carry json:"-" so a src with them unset round-trips cleanly.
+	src := model.SSOToken{
+		ID:         "abc123",
+		Username:   "alice",
+		IDTokenExp: 1735689600000,
+		UpdatedAt:  time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC),
+	}
+	var dst model.SSOToken
+	roundTrip(t, &src, &dst)
+}
+
+func TestSSOToken_SecretsNeverSerialize(t *testing.T) {
+	tok := model.SSOToken{
+		ID: "abc123", Username: "alice",
+		IDToken: "SECRET-ACCESS-TOKEN", RefreshToken: "SECRET-REFRESH-TOKEN",
+	}
+	data, err := json.Marshal(tok)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "SECRET") {
+		t.Errorf("token material leaked into JSON: %s", data)
+	}
+	if s := tok.String(); strings.Contains(s, "SECRET") {
+		t.Errorf("token material leaked into String(): %s", s)
+	}
+}

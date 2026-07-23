@@ -734,3 +734,55 @@ func TestRegister_PayloadCapture(t *testing.T) {
 		assert.Empty(t, rec.payloads(), "prod invariant: no body when DEBUG_LOG_PAYLOADS is off")
 	})
 }
+
+func TestRegisterOptionalBody_EmptyPayloadYieldsZeroValue(t *testing.T) {
+	nc := startTestNATS(t)
+	r := New(nc, "test-service")
+
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt.test",
+		func(c *Context, req testReq) (*testResp, error) {
+			return &testResp{Greeting: "name=" + req.Name}, nil
+		})
+
+	resp, err := nc.Request(context.Background(), "chat.user.alice.request.user.s1.opt.test", nil, 2*time.Second)
+	require.NoError(t, err)
+	var out testResp
+	require.NoError(t, json.Unmarshal(resp.Data, &out))
+	assert.Equal(t, "name=", out.Greeting)
+}
+
+func TestRegisterOptionalBody_NonEmptyPayloadUnmarshals(t *testing.T) {
+	nc := startTestNATS(t)
+	r := New(nc, "test-service")
+
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt2.test",
+		func(c *Context, req testReq) (*testResp, error) {
+			return &testResp{Greeting: "name=" + req.Name}, nil
+		})
+
+	data, _ := json.Marshal(testReq{Name: "bob"})
+	resp, err := nc.Request(context.Background(), "chat.user.alice.request.user.s1.opt2.test", data, 2*time.Second)
+	require.NoError(t, err)
+	var out testResp
+	require.NoError(t, json.Unmarshal(resp.Data, &out))
+	assert.Equal(t, "name=bob", out.Greeting)
+}
+
+func TestRegisterOptionalBody_MalformedPayloadIsBadRequest(t *testing.T) {
+	nc := startTestNATS(t)
+	r := New(nc, "test-service")
+
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt3.test",
+		func(c *Context, req testReq) (*testResp, error) {
+			t.Fatal("handler must not run on malformed payload")
+			return nil, nil
+		})
+
+	resp, err := nc.Request(context.Background(), "chat.user.alice.request.user.s1.opt3.test", []byte("{not json"), 2*time.Second)
+	require.NoError(t, err)
+	var envelope struct {
+		Code string `json:"code"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Data, &envelope))
+	assert.Equal(t, "bad_request", envelope.Code)
+}
