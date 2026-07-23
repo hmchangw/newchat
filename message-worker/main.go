@@ -203,10 +203,10 @@ func main() {
 	}()
 
 	// Teams message-history batch migration: a durable consumer on the canonical
-	// stream, filtered to .teams.batch. Each batch is transformed + fed through the
-	// existing persist pipeline (isMigration=true) — NOT re-published to canonical,
-	// so broadcast/notification/search-sync never fire (silent no-fan-out migration).
-	teamsMigration := newTeamsBatchHandler(newMongoHRIdentityStore(db), cfg.SiteID, handler.processMessage)
+	// stream, filtered to .teams.batch. Each batch is transformed + written straight
+	// to Cassandra — NOT re-published to canonical, so broadcast/notification never
+	// fire (silent no-fan-out migration); search-sync indexes it off the same subject.
+	teamsMigration := newTeamsBatchHandler(store, newMongoHRIdentityStore(db), cfg.SiteID)
 	teamsCons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildTeamsBatchConsumerConfig(cfg.Consumer, cfg.SiteID))
 	if err != nil {
 		slog.Error("create teams-batch consumer failed", "error", err)

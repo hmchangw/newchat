@@ -38,14 +38,13 @@ func TestEmployeeIDFromGraphID_Deterministic(t *testing.T) {
 	a := EmployeeIDFromGraphID("graph-1")
 	assert.Equal(t, a, EmployeeIDFromGraphID("graph-1"), "same graph id → same key")
 	assert.NotEqual(t, a, EmployeeIDFromGraphID("graph-2"))
-	assert.Len(t, a, 24, "24-hex ObjectID")
+	assert.Len(t, a, 17, "17-char base62 (native-user id shape)")
 }
 
 func TestDeterministicMessageID_Stable(t *testing.T) {
-	a := DeterministicMessageID("chatA", "tm-1")
-	assert.Equal(t, a, DeterministicMessageID("chatA", "tm-1"), "same (chat, id) → same message id")
-	assert.NotEqual(t, a, DeterministicMessageID("chatB", "tm-1"), "same teams id in a different chat → different id")
-	assert.NotEqual(t, a, DeterministicMessageID("chatA", "tm-2"))
+	a := DeterministicMessageID("tm-1")
+	assert.Equal(t, a, DeterministicMessageID("tm-1"), "same teams id → same message id")
+	assert.NotEqual(t, a, DeterministicMessageID("tm-2"))
 	assert.True(t, isValidBase62MessageID(a), "valid message-id format: %q", a)
 }
 

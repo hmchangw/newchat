@@ -61,7 +61,7 @@ func benchMemberData(b *testing.B, n int) []byte {
 // 1:1 messages collection — the CPU work a pipelined flush would overlap with
 // the previous batch's ES round-trip.
 func BenchmarkBuildAction_Message(b *testing.B) {
-	coll := newMessageCollection("messages-site-a-v1", time.Time{}, false)
+	coll := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
 	data := benchMessageData(b)
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -258,7 +258,7 @@ func TestSearchSyncIntegration(t *testing.T) {
 	// Wait for cluster to be green before creating indices.
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newMessageCollection(prefix, time.Time{}, true)
+	coll := newMessageCollection(prefix, "site-a", time.Time{}, true)
 	err = engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody()))
 	require.NoError(t, err, "upsert template")
 
@@ -505,7 +505,7 @@ func TestCustomAnalyzer(t *testing.T) {
 
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newMessageCollection(prefix, time.Time{}, true)
+	coll := newMessageCollection(prefix, "site-a", time.Time{}, true)
 	err = engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody()))
 	require.NoError(t, err, "upsert template")
 

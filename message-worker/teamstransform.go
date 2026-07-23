@@ -92,15 +92,15 @@ func (t *DefaultTransformer) resolveMentions(ctx context.Context, mentions []tea
 }
 
 // roomID is the OUTER reply's room — the conversation the quote belongs to. The
-// nested parent payload's own roomId may be absent, so scope by roomID for both the
-// parent's deterministic id and its RoomID.
+// nested parent payload's own roomId may be absent, so the outer roomID is its RoomID;
+// the parent's id derives from its Teams message id alone (globally unique).
 func (t *DefaultTransformer) buildQuotedParent(ctx context.Context, roomID string, parent *teamsmigrate.Message) (*cassandra.QuotedParentMessage, error) {
 	s, err := t.resolver.resolve(ctx, parent.From.ID, parent.From.DisplayName)
 	if err != nil {
 		return nil, fmt.Errorf("resolve quoted sender: %w", err)
 	}
 	return &cassandra.QuotedParentMessage{
-		MessageID: teamsmigrate.DeterministicMessageID(roomID, parent.ID),
+		MessageID: teamsmigrate.DeterministicMessageID(parent.ID),
 		RoomID:    roomID,
 		Sender:    cassandra.Participant{ID: s.UserID, Account: s.Account, EngName: s.EngName},
 		CreatedAt: parent.CreatedDateTime,

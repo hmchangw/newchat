@@ -15,12 +15,11 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
-	"github.com/hmchangw/chat/pkg/userstore"
 )
 
-// TestTeamsBatch_Integration drives the batch through the real transform + the real
-// message-worker persist pipeline (isMigration=true suppresses thread side-effects),
-// asserting persistence and an idempotent re-run (no dup row from the deterministic id).
+// TestTeamsBatch_Integration drives the batch through the real transform + a direct
+// Cassandra write, asserting persistence and an idempotent re-run (no dup row from the
+// deterministic id).
 func TestTeamsBatch_Integration(t *testing.T) {
 	ctx := context.Background()
 	cass := setupCassandra(t)
@@ -35,12 +34,7 @@ func TestTeamsBatch_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	store := NewCassandraStore(cass, msgbucket.New(24*time.Hour), nil)
-	us := userstore.NewMongoStore(userCol)
-	threadStore := newThreadStoreMongo(mongoDB)
-	persister := NewHandler(store, us, threadStore, "site-a",
-		func(context.Context, string, []byte, string) error { return nil })
-
-	teams := newTeamsBatchHandler(newMongoHRIdentityStore(mongoDB), "site-a", persister.processMessage)
+	teams := newTeamsBatchHandler(store, newMongoHRIdentityStore(mongoDB), "site-a")
 
 	raw := mustJSON(teamsmigrate.Message{
 		ID: "tm-1", RoomID: "room-1", MessageType: "message",
@@ -49,7 +43,7 @@ func TestTeamsBatch_Integration(t *testing.T) {
 		CreatedDateTime: time.Now().UTC().Truncate(time.Millisecond),
 	})
 	req := model.TeamsBatchRequest{Messages: []json.RawMessage{raw}}
-	wantID := teamsmigrate.DeterministicMessageID("room-1", "tm-1")
+	wantID := teamsmigrate.DeterministicMessageID("tm-1")
 
 	// Run twice: same batch → same deterministic id → idempotent.
 	for i := 0; i < 2; i++ {

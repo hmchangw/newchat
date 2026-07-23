@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
@@ -38,15 +40,15 @@ type HRIdentityStore interface {
 }
 
 // senderResolver reuses the #70 HR store to map Teams users to nextgen identities.
-// One instance per batch, so its cache is per-batch.
+// The cache is process-wide (injected), shared across every batch the handler runs.
 type senderResolver struct {
 	store  HRIdentityStore
 	siteID string
-	cache  map[string]resolvedSender
+	cache  *lru.Cache[string, resolvedSender]
 }
 
-func newSenderResolver(store HRIdentityStore, siteID string) *senderResolver {
-	return &senderResolver{store: store, siteID: siteID, cache: map[string]resolvedSender{}}
+func newSenderResolver(store HRIdentityStore, siteID string, cache *lru.Cache[string, resolvedSender]) *senderResolver {
+	return &senderResolver{store: store, siteID: siteID, cache: cache}
 }
 
 // resolve order: (1) read by employeeId — the authoritative key the HR sync shares,
@@ -58,7 +60,7 @@ func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName s
 	if teamsUserID == "" {
 		return resolvedSender{}, fmt.Errorf("empty teams user id")
 	}
-	if s, ok := r.cache[teamsUserID]; ok {
+	if s, ok := r.cache.Get(teamsUserID); ok {
 		return s, nil
 	}
 
@@ -74,7 +76,7 @@ func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName s
 	}
 	if u != nil {
 		s := senderFromUser(u)
-		r.cache[teamsUserID] = s
+		r.cache.Add(teamsUserID, s)
 		return s, nil
 	}
 
@@ -96,7 +98,7 @@ func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName s
 	} else {
 		s = resolvedSender{Account: empID, ChineseName: displayName, DisplayName: displayfmt.CombineWithFallback("", displayName, empID)}
 	}
-	r.cache[teamsUserID] = s
+	r.cache.Add(teamsUserID, s)
 	return s, nil
 }
 

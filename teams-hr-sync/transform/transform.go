@@ -6,11 +6,9 @@
 package transform
 
 import (
-	"crypto/sha256"
 	"strings"
 
-	"go.mongodb.org/mongo-driver/v2/bson"
-
+	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
 )
@@ -62,14 +60,12 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.IOrg, s
 	}
 }
 
-// EmployeeIDFromGraphID derives a deterministic bson.ObjectID (24-hex) from the
-// immutable Graph object id, so the downstream employeeId-keyed upsert resolves
-// the same user on every sync instead of colliding on a blank AAD attribute.
+// EmployeeIDFromGraphID derives a deterministic 17-char base62 id (native-user shape)
+// from the immutable Graph object id, so the downstream employeeId-keyed upsert resolves
+// the same user on every sync instead of colliding on a blank AAD attribute. Must match
+// teamsmigrate.EmployeeIDFromGraphID so message-migration and HR-sync agree on one id.
 func EmployeeIDFromGraphID(graphID string) string {
-	sum := sha256.Sum256([]byte(graphID))
-	var oid bson.ObjectID
-	copy(oid[:], sum[:12])
-	return oid.Hex()
+	return idgen.DeterministicID([]byte(graphID))
 }
 
 // DefaultConverter copies the identity fields only; every other User field

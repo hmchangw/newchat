@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/bytedance/sonic"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -14,34 +15,36 @@ import (
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
-// messageProcessor persists a canonical MessageEvent through message-worker's own
-// pipeline (satisfied by Handler.processMessage). isMigration=true suppresses the
-// thread side-effects the source already produced.
-type messageProcessor func(ctx context.Context, data []byte, isMigration bool) error
+// ponytail: fixed cap; an evicted sender just re-resolves (a Mongo point-read),
+// so bump only if a migration's distinct-sender count routinely exceeds this.
+const teamsSenderCacheSize = 10_000
 
-// teamsBatchHandler transforms Teams message-history batches and feeds each message
-// through the existing persist pipeline with isMigration=true. It never re-publishes to
-// canonical, so broadcast/notification/search-sync (all keyed on the .created event)
-// stay silent — the no-fan-out migration by design (search is a phase-1 gap, see the design doc).
+// teamsBatchHandler transforms Teams message-history batches and writes each message
+// straight into Cassandra via the Store. It never re-publishes to canonical, so
+// broadcast/notification stay silent and thread/mention/quote side-effects are
+// intentionally dropped — the no-fan-out migration by design (see the design doc).
+// The resolver + transformer are built once; the sender cache is process-wide.
 type teamsBatchHandler struct {
-	store          HRIdentityStore
-	siteID         string
-	process        messageProcessor
-	newTransformer func(identityResolver) MessageTransformer // injectable seam; default wraps DefaultTransformer
+	store    Store
+	siteID   string
+	resolver identityResolver
+	tr       MessageTransformer
 }
 
-func newTeamsBatchHandler(store HRIdentityStore, siteID string, process messageProcessor) *teamsBatchHandler {
+func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string) *teamsBatchHandler {
+	cache, _ := lru.New[string, resolvedSender](teamsSenderCacheSize) // errors only on size<=0
+	resolver := newSenderResolver(hrStore, siteID, cache)
 	return &teamsBatchHandler{
-		store:          store,
-		siteID:         siteID,
-		process:        process,
-		newTransformer: func(r identityResolver) MessageTransformer { return NewDefaultTransformer(r) },
+		store:    store,
+		siteID:   siteID,
+		resolver: resolver,
+		tr:       NewDefaultTransformer(resolver),
 	}
 }
 
 // consume decodes one batch message and settles it: Ack when every message was
-// handled (per-message transform errors are logged, not redelivered), Nak on an
-// infra failure so at-least-once redelivery re-runs the idempotent batch.
+// handled (per-message errors are logged, not redelivered), Nak on an infra
+// failure so at-least-once redelivery re-runs the idempotent batch.
 func (h *teamsBatchHandler) consume(ctx context.Context, msg jetstream.Msg) {
 	var req model.TeamsBatchRequest
 	if err := sonic.Unmarshal(msg.Data(), &req); err != nil {
@@ -52,16 +55,12 @@ func (h *teamsBatchHandler) consume(ctx context.Context, msg jetstream.Msg) {
 	jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, h.handleBatch(ctx, req))
 }
 
-// handleBatch runs each message; a fresh resolver per call scopes the sender cache to
-// the batch. Returns the first infra error so the caller Naks — per-message transform
-// errors are logged and don't block the batch.
+// handleBatch runs each message. Returns the first infra error so the caller Naks —
+// per-message transform/resolve errors are logged and don't block the batch.
 func (h *teamsBatchHandler) handleBatch(ctx context.Context, req model.TeamsBatchRequest) error {
-	resolver := newSenderResolver(h.store, h.siteID)
-	tr := h.newTransformer(resolver)
-
 	var persisted, skipped, failed int
 	for _, raw := range req.Messages {
-		res, err := h.migrateOne(ctx, tr, raw)
+		res, err := h.migrateOne(ctx, raw)
 		if err != nil {
 			return err // infra failure → Nak, the idempotent batch replays
 		}
@@ -79,62 +78,65 @@ func (h *teamsBatchHandler) handleBatch(ctx context.Context, req model.TeamsBatc
 	return nil
 }
 
-func (h *teamsBatchHandler) migrateOne(ctx context.Context, tr MessageTransformer, raw json.RawMessage) (model.TeamsBatchResult, error) {
+func (h *teamsBatchHandler) migrateOne(ctx context.Context, raw json.RawMessage) (model.TeamsBatchResult, error) {
 	head, ok := peekTeamsHead(raw)
 	res := model.TeamsBatchResult{TeamsMsgID: head.ID}
 	if !ok {
-		slog.WarnContext(ctx, "teams batch: malformed message payload")
+		slog.WarnContext(ctx, "teams batch: skip malformed message payload")
 		res.Status, res.Error = model.TeamsBatchError, "malformed message payload"
 		return res, nil
 	}
 	if head.ID == "" {
-		slog.DebugContext(ctx, "teams batch: skip message with no id")
+		slog.WarnContext(ctx, "teams batch: skip message with no id")
 		res.Status = model.TeamsBatchSkipped
 		return res, nil
 	}
-	// No target room → the deterministic id would collide across conversations and the
-	// message would orphan; skip rather than persist it.
 	if head.RoomID == "" {
-		slog.DebugContext(ctx, "teams batch: skip message with no roomId", "teamsMsgId", head.ID)
+		slog.WarnContext(ctx, "teams batch: skip message with no roomId", "teamsMsgId", head.ID)
 		res.Status = model.TeamsBatchSkipped
 		return res, nil
 	}
 
-	msg, err := tr.Transform(ctx, raw)
+	msg, err := h.tr.Transform(ctx, raw)
 	if err != nil {
-		// Per-message, deterministic → log the chain, record error, but don't Nak the batch.
-		slog.ErrorContext(ctx, "teams batch: transform failed", "teamsMsgId", head.ID, "error", err)
+		slog.WarnContext(ctx, "teams batch: skip message, transform failed", "teamsMsgId", head.ID, "error", err)
 		res.Status, res.Error = model.TeamsBatchError, "transform failed"
 		return res, nil //nolint:nilerr // per-message transform error is isolated, not a batch Nak
 	}
-	// Teams ids are unique only per conversation → scope by roomId to avoid collisions.
-	msg.ID = teamsmigrate.DeterministicMessageID(head.RoomID, head.ID)
+	// Teams message ids are globally unique → hash the id alone for a stable, idempotent row id.
+	msg.ID = teamsmigrate.DeterministicMessageID(head.ID)
 
-	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: h.siteID}
-	data, err := sonic.Marshal(evt)
+	// Cache hit after Transform (same sender key), so it adds no store round trip.
+	sender, err := h.resolver.resolve(ctx, head.From.ID, head.From.DisplayName)
 	if err != nil {
-		slog.ErrorContext(ctx, "teams batch: marshal event failed", "teamsMsgId", head.ID, "error", err)
-		res.Status, res.Error = model.TeamsBatchError, "marshal event failed"
-		return res, nil //nolint:nilerr // marshalling our own struct is deterministic → per-message, not infra
+		slog.WarnContext(ctx, "teams batch: skip message, resolve sender failed", "teamsMsgId", head.ID, "error", err)
+		res.Status, res.Error = model.TeamsBatchError, "resolve sender failed"
+		return res, nil //nolint:nilerr // per-message resolve error is isolated, not a batch Nak
 	}
-	if err := h.process(ctx, data, true); err != nil {
-		// Persist-pipeline failure is infra: surface it so the batch Naks and replays.
-		slog.ErrorContext(ctx, "teams batch: process failed", "teamsMsgId", head.ID, "error", err)
-		res.Status, res.Error = model.TeamsBatchError, "process failed"
+	cass := &cassParticipant{ID: sender.UserID, EngName: sender.EngName, CompanyName: sender.ChineseName, Account: sender.Account}
+
+	if err := h.store.SaveMessage(ctx, &msg, cass, h.siteID); err != nil {
+		// A persist failure is infra: surface it so the batch Naks and replays.
+		slog.ErrorContext(ctx, "teams batch: save message failed", "teamsMsgId", head.ID, "error", err)
+		res.Status, res.Error = model.TeamsBatchError, "save message failed"
 		return res, err
 	}
 	res.Status = model.TeamsBatchPersisted
 	return res, nil
 }
 
-// teamsHead is the minimal envelope needed before transforming: the source id and
-// its conversation scope (roomId).
+// teamsHead is the minimal envelope needed before transforming: the source id, its
+// conversation scope (roomId), and the sender identity (from) for the Cassandra write.
 type teamsHead struct {
 	ID     string `json:"id"`
 	RoomID string `json:"roomId"`
+	From   struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"displayName"`
+	} `json:"from"`
 }
 
-// peekTeamsHead reads the id + roomId; ok is false on malformed JSON (an error
+// peekTeamsHead reads the id + roomId + from; ok is false on malformed JSON (an error
 // result), true with an empty id when the field is absent (a skip).
 func peekTeamsHead(raw json.RawMessage) (h teamsHead, ok bool) {
 	if err := json.Unmarshal(raw, &h); err != nil {

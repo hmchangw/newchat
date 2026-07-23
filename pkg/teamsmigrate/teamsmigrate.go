@@ -6,13 +6,10 @@
 package teamsmigrate
 
 import (
-	"crypto/sha256"
 	"html"
 	"regexp"
 	"strings"
 	"time"
-
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/idgen"
 )
@@ -61,22 +58,18 @@ func BodyToContent(b Body) string {
 	return b.Content
 }
 
-// EmployeeIDFromGraphID derives a deterministic 24-hex bson.ObjectID from the Graph
-// object id — the same hash the HR sync uses, so a person resolved by either path is
-// one identity. The indexer reuses it to derive the author key without a Mongo read.
+// EmployeeIDFromGraphID derives a deterministic 17-char base62 id from the Graph
+// object id — the same id shape as native users, and the same hash the HR sync uses,
+// so a person resolved by either path is one identity. The indexer reuses it to derive
+// the author key without a Mongo read.
 func EmployeeIDFromGraphID(graphID string) string {
-	sum := sha256.Sum256([]byte(graphID))
-	var oid bson.ObjectID
-	copy(oid[:], sum[:12])
-	return oid.Hex()
+	return idgen.DeterministicID([]byte(graphID))
 }
 
-// DeterministicMessageID is a stable, valid message id derived from the Teams id
-// scoped by conversation, so a batch re-run overwrites the same row (idempotent).
-// Teams message ids are unique only within a conversation, so roomId (the nextgen
-// room, 1:1 with the Teams chat) is folded into the seed to avoid cross-chat collisions.
-func DeterministicMessageID(chatScope, teamsID string) string {
-	return idgen.MessageIDFromRequestID(chatScope+":"+teamsID, "teams")
+// DeterministicMessageID is a stable, valid message id derived from the Teams message
+// id alone (globally unique), so a batch re-run overwrites the same row (idempotent).
+func DeterministicMessageID(teamsID string) string {
+	return idgen.MessageIDFromRequestID(teamsID, "teams")
 }
 
 // MessageType returns "" for a normal user message; any other Teams type is a
