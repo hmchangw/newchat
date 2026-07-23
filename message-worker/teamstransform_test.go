@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // stubResolver echoes the teams user id as the account, so transform tests need no store.
@@ -27,10 +29,10 @@ func TestDefaultTransformer_Shapes(t *testing.T) {
 	tr := NewDefaultTransformer(stubResolver{})
 
 	t.Run("user message", func(t *testing.T) {
-		raw := transformJSON(t, teamsMessage{
+		raw := transformJSON(t, teamsmigrate.Message{
 			ID: "m1", RoomID: "r1", MessageType: "message",
-			From: teamsUser{ID: "u1", DisplayName: "Al"},
-			Body: teamsBody{ContentType: "text", Content: "hello"},
+			From: teamsmigrate.User{ID: "u1", DisplayName: "Al"},
+			Body: teamsmigrate.Body{ContentType: "text", Content: "hello"},
 		})
 		msg, err := tr.Transform(context.Background(), raw)
 		require.NoError(t, err)
@@ -41,9 +43,9 @@ func TestDefaultTransformer_Shapes(t *testing.T) {
 	})
 
 	t.Run("system message", func(t *testing.T) {
-		raw := transformJSON(t, teamsMessage{
+		raw := transformJSON(t, teamsmigrate.Message{
 			ID: "m2", MessageType: "systemEventMessage",
-			From: teamsUser{ID: "u1"}, Body: teamsBody{ContentType: "text", Content: "x joined"},
+			From: teamsmigrate.User{ID: "u1"}, Body: teamsmigrate.Body{ContentType: "text", Content: "x joined"},
 		})
 		msg, err := tr.Transform(context.Background(), raw)
 		require.NoError(t, err)
@@ -51,27 +53,27 @@ func TestDefaultTransformer_Shapes(t *testing.T) {
 	})
 
 	t.Run("reply(quote) shape", func(t *testing.T) {
-		raw := transformJSON(t, teamsMessage{
-			ID: "m3", RoomID: "r1", From: teamsUser{ID: "u1"},
-			Body: teamsBody{ContentType: "text", Content: "re"},
-			ReplyToMessage: &teamsMessage{
-				ID: "p1", From: teamsUser{ID: "u2", DisplayName: "Bo"}, // no roomId → scoped by the outer reply's room
-				Body: teamsBody{ContentType: "text", Content: "parent"},
+		raw := transformJSON(t, teamsmigrate.Message{
+			ID: "m3", RoomID: "r1", From: teamsmigrate.User{ID: "u1"},
+			Body: teamsmigrate.Body{ContentType: "text", Content: "re"},
+			ReplyToMessage: &teamsmigrate.Message{
+				ID: "p1", From: teamsmigrate.User{ID: "u2", DisplayName: "Bo"}, // no roomId → scoped by the outer reply's room
+				Body: teamsmigrate.Body{ContentType: "text", Content: "parent"},
 			},
 		})
 		msg, err := tr.Transform(context.Background(), raw)
 		require.NoError(t, err)
 		require.NotNil(t, msg.QuotedParentMessage)
-		assert.Equal(t, deterministicMessageID("r1", "p1"), msg.QuotedParentMessage.MessageID)
+		assert.Equal(t, teamsmigrate.DeterministicMessageID("r1", "p1"), msg.QuotedParentMessage.MessageID)
 		assert.Equal(t, "r1", msg.QuotedParentMessage.RoomID)
 		assert.Equal(t, "parent", msg.QuotedParentMessage.Msg)
 		assert.Equal(t, "u2", msg.QuotedParentMessage.Sender.Account)
 	})
 
 	t.Run("mentions resolved", func(t *testing.T) {
-		raw := transformJSON(t, teamsMessage{
-			ID: "m4", From: teamsUser{ID: "u1"}, Body: teamsBody{Content: "hi @b"},
-			Mentions: []teamsMention{{UserID: "u2", DisplayName: "Bo"}},
+		raw := transformJSON(t, teamsmigrate.Message{
+			ID: "m4", From: teamsmigrate.User{ID: "u1"}, Body: teamsmigrate.Body{Content: "hi @b"},
+			Mentions: []teamsmigrate.Mention{{UserID: "u2", DisplayName: "Bo"}},
 		})
 		msg, err := tr.Transform(context.Background(), raw)
 		require.NoError(t, err)
@@ -80,9 +82,9 @@ func TestDefaultTransformer_Shapes(t *testing.T) {
 	})
 
 	t.Run("forward is not marked (stubbed)", func(t *testing.T) {
-		raw := transformJSON(t, teamsMessage{
-			ID: "m5", From: teamsUser{ID: "u1"}, Forwarded: true,
-			Body: teamsBody{Content: "fwd"},
+		raw := transformJSON(t, teamsmigrate.Message{
+			ID: "m5", From: teamsmigrate.User{ID: "u1"}, Forwarded: true,
+			Body: teamsmigrate.Body{Content: "fwd"},
 		})
 		msg, err := tr.Transform(context.Background(), raw)
 		require.NoError(t, err)
@@ -95,27 +97,6 @@ func TestDefaultTransformer_Shapes(t *testing.T) {
 	})
 }
 
-func TestHTMLToMarkdown(t *testing.T) {
-	cases := map[string]struct{ in, want string }{
-		"bold":               {"<b>hi</b>", "**hi**"},
-		"strong":             {"<strong>hi</strong>", "**hi**"},
-		"italic":             {"<i>hi</i>", "*hi*"},
-		"link":               {`<a href="http://x">t</a>`, "[t](http://x)"},
-		"break":              {"a<br>b", "a\nb"},
-		"unsupported to raw": {"<div><span>plain</span></div>", "plain"},
-		"entities":           {"a &amp; b &lt;c&gt;", "a & b <c>"},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, htmlToMarkdown(tc.in))
-		})
-	}
-}
-
-func TestBodyToContent_TextPassthrough(t *testing.T) {
-	assert.Equal(t, "*raw* text", bodyToContent(teamsBody{ContentType: "text", Content: "*raw* text"}))
-}
-
 func TestReactionShortcode(t *testing.T) {
 	cases := map[string]string{
 		"like": ":thumbsup:", "heart": ":heart:", "laugh": ":laughing:",
@@ -124,26 +105,4 @@ func TestReactionShortcode(t *testing.T) {
 	for in, want := range cases {
 		assert.Equal(t, want, reactionShortcode(in), in)
 	}
-}
-
-func TestDeterministicMessageID_Stable(t *testing.T) {
-	a := deterministicMessageID("chatA", "tm-1")
-	assert.Equal(t, a, deterministicMessageID("chatA", "tm-1"), "same (chat, id) → same message id")
-	assert.NotEqual(t, a, deterministicMessageID("chatB", "tm-1"), "same teams id in a different chat → different id (no cross-chat collision)")
-	assert.NotEqual(t, a, deterministicMessageID("chatA", "tm-2"))
-	assert.True(t, isValidBase62MessageID(a), "valid message-id format: %q", a)
-}
-
-// isValidBase62MessageID mirrors idgen's 20-char base62 message-id shape.
-func isValidBase62MessageID(s string) bool {
-	if len(s) != 20 {
-		return false
-	}
-	for _, c := range s {
-		isBase62 := (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-		if !isBase62 {
-			return false
-		}
-	}
-	return true
 }

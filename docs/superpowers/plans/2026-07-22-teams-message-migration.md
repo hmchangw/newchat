@@ -43,16 +43,22 @@ scope here).
 - [x] Consumer: decode batch → transform → set deterministic id → feed through `processMessage` (`isMigration=true`); Ack on success, Nak on an infra failure.
 - [x] Per-message error isolation (logged); wire a durable consumer + iterator shutdown into `message-worker` main.
 
-## Task 6: Tests
+## Task 6: Search indexing (dedicated consumer, no Mongo)
+
+- [x] Extract the payload types + payload-only helpers to `pkg/teamsmigrate` (shared by the persist + index paths).
+- [x] `message-worker` writes the migrated user's `_id = employeeId`, so the persisted `UserID` equals the hash the indexer derives.
+- [x] `search-sync-worker` `message-sync-teams` consumer on `.teams.batch`: one index action per message, author key = `EmployeeIDFromGraphID(from.id)`, same skips as the persist path, shares the message index.
+
+## Task 7: Tests
 
 - [x] Unit: transformer shapes, HTML→md, reaction map, sender matrix, deterministic id, per-message status + Nak-on-infra.
+- [x] Unit: `message-sync-teams` `BuildAction` — batch → derived-id/UserID index actions; empty-id / empty-roomId / system skipped.
 - [x] Integration: batch → persist through the real pipeline + idempotent re-run (single row).
 
-## Task 7: Docs
+## Task 8: Docs
 
 - [x] This plan + the design spec (the batch subject is server-only, not in `client-api.md`).
 
 ## Deferred / follow-ups
 
-- [ ] **Search indexing** of migrated messages — this path does not emit the `.created` canonical event search-sync keys on (see the design § Known limitation).
 - [ ] Forward branch → `Forwarded` snapshot (after the forward feature lands).

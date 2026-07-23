@@ -15,7 +15,7 @@ services:
       # deployments (Task 6) override these to bind the same binary to the
       # bot pipeline instead.
       - INPUT_STREAM=MESSAGES_CANONICAL_site-local
-      - INPUT_SUBJECT_FILTER=chat.msg.canonical.site-local.>
+      - INPUT_SUBJECT_FILTER=chat.msg.canonical.site-local.*
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}

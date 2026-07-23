@@ -11,6 +11,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // messageProcessor persists a canonical MessageEvent through message-worker's own
@@ -107,7 +108,7 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, tr MessageTransforme
 		return res, nil //nolint:nilerr // per-message transform error is isolated, not a batch Nak
 	}
 	// Teams ids are unique only per conversation → scope by roomId to avoid collisions.
-	msg.ID = deterministicMessageID(head.RoomID, head.ID)
+	msg.ID = teamsmigrate.DeterministicMessageID(head.RoomID, head.ID)
 
 	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: h.siteID}
 	data, err := sonic.Marshal(evt)

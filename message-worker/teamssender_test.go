@@ -9,12 +9,13 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 func TestSenderResolver_EmployeeIdHit(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	empID := employeeIDFromGraphID("graph-1")
+	empID := teamsmigrate.EmployeeIDFromGraphID("graph-1")
 	existing := &model.User{ID: "uid1", Account: "alice", SiteID: "s1", EngName: "Alice", ChineseName: "愛麗絲"}
 	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(existing, nil)
 	// employeeId is authoritative: no display-name lookup, no upsert.
@@ -30,7 +31,7 @@ func TestSenderResolver_EmployeeIdHit(t *testing.T) {
 func TestSenderResolver_DisplayNameFallback(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	empID := employeeIDFromGraphID("graph-1")
+	empID := teamsmigrate.EmployeeIDFromGraphID("graph-1")
 	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(nil, nil) // employeeId miss
 	store.EXPECT().FindUserByDisplayName(gomock.Any(), "愛麗絲").
 		Return(&model.User{Account: "alice"}, nil)
@@ -44,7 +45,7 @@ func TestSenderResolver_DisplayNameFallback(t *testing.T) {
 func TestSenderResolver_NoMatchCreates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	wantEmp := employeeIDFromGraphID("graph-2")
+	wantEmp := teamsmigrate.EmployeeIDFromGraphID("graph-2")
 	created := &model.User{ID: "new-uid", Account: wantEmp, SiteID: "s1", ChineseName: "Bob"}
 	// Order: employeeId miss → displayName miss → upsert → read back the created row.
 	gomock.InOrder(
@@ -73,7 +74,7 @@ func TestSenderResolver_NoMatchCreates(t *testing.T) {
 func TestSenderResolver_EmptyDisplayNameSkipsNameLookup(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	wantEmp := employeeIDFromGraphID("graph-3")
+	wantEmp := teamsmigrate.EmployeeIDFromGraphID("graph-3")
 	created := &model.User{ID: "nu", Account: wantEmp, SiteID: "s1"}
 	// No FindUserByDisplayName call when displayName is empty; upsert then read back.
 	gomock.InOrder(
@@ -92,7 +93,7 @@ func TestSenderResolver_EmptyDisplayNameSkipsNameLookup(t *testing.T) {
 func TestSenderResolver_CacheHitSkipsStore(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	empID := employeeIDFromGraphID("graph-1")
+	empID := teamsmigrate.EmployeeIDFromGraphID("graph-1")
 	// Exactly one round of lookups for two resolves.
 	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(&model.User{Account: "al"}, nil).Times(1)
 
