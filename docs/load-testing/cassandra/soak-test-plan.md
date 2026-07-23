@@ -1,5 +1,9 @@
 # Cassandra Load Test Plan (Soak Test)
 
+> This is the authoritative specification for the Cassandra Run A soak test.
+> The engineering work breakdown is maintained in
+> [`run-a-implementation-plan.md`](run-a-implementation-plan.md).
+
 A production-like soak test to validate the Cassandra **schema design** and
 **access patterns** of this project before release. **Run A (a soak through the
 real service path) is the primary test**; the pathological/direct-CQL
