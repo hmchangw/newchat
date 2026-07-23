@@ -34,7 +34,6 @@ type UserRepository interface {
 	GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error)
 	GetUserSettings(ctx context.Context, account string) (*model.User, error)
 	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
-	GetUserRoles(ctx context.Context, account string) (*model.User, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.

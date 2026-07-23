@@ -202,21 +202,6 @@ func (mr *MockUserRepositoryMockRecorder) GetHRInfoByAccounts(ctx, accounts any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHRInfoByAccounts", reflect.TypeOf((*MockUserRepository)(nil).GetHRInfoByAccounts), ctx, accounts)
 }
 
-// GetUserRoles mocks base method.
-func (m *MockUserRepository) GetUserRoles(ctx context.Context, account string) (*model.User, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetUserRoles", ctx, account)
-	ret0, _ := ret[0].(*model.User)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// GetUserRoles indicates an expected call of GetUserRoles.
-func (mr *MockUserRepositoryMockRecorder) GetUserRoles(ctx, account any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserRoles", reflect.TypeOf((*MockUserRepository)(nil).GetUserRoles), ctx, account)
-}
-
 // GetUserSettings mocks base method.
 func (m *MockUserRepository) GetUserSettings(ctx context.Context, account string) (*model.User, error) {
 	m.ctrl.T.Helper()

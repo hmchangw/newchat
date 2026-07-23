@@ -1787,15 +1787,15 @@ clears only the requester's own read state; does not advance thread read floors 
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.sso.set`
 
-Store (upsert) a user's SSO token pair in the site-local vault. **Platform-admin
-only.** The submitted `ssoToken` is verified against the site's OIDC issuer; its
-`preferred_username` must equal the target account. Expiry is derived server-side
-from the token's `exp` claim.
+Store (upsert) the caller's own SSO token pair in the site-local MongoDB store.
+Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated
+identity; the frontend calls this on every login. The submitted `ssoToken` is
+verified against the site's OIDC issuer; its `preferred_username` must equal the
+caller. Expiry is derived server-side from the token's `exp` claim.
 
 #### Request body
 
-`{ "ssoToken": string, "refreshToken": string, "account"?: string }` — `account`
-defaults to the caller (admin on-behalf-of).
+`{ "ssoToken": string, "refreshToken": string }`
 
 #### Success response
 
@@ -1803,10 +1803,9 @@ defaults to the caller (admin on-behalf-of).
 
 #### Errors
 
-`missing_fields` (`bad_request`, `ssoToken`/`refreshToken` missing), invalid
-`account` or `preferred_username` mismatch (`bad_request`), non-admin caller
-(`forbidden`), target account not found/deactivated (`not_found`),
-`sso_token_expired` (`unauthenticated`), `invalid_sso_token` (`unauthenticated`),
+`missing_fields` (`bad_request`, `ssoToken`/`refreshToken` missing),
+`preferred_username` mismatch (`bad_request`), `sso_token_expired`
+(`unauthenticated`), `invalid_sso_token` (`unauthenticated`),
 `upstream_unavailable` (`unavailable`, SSO not configured on this site),
 `internal` (local store failure).
 
@@ -1820,12 +1819,12 @@ defaults to the caller (admin on-behalf-of).
 
 Returns the caller's stored `ssoToken`, transparently refreshing it against the
 OIDC issuer when within the refresh window (default 1h) of expiry or already
-expired. Self-service; platform admins may target another account. The request
-body is optional — an empty payload means self.
+expired. Self-service — the `{account}` subject token is the caller's
+NATS-JWT-authenticated identity. The request body is empty.
 
 #### Request body
 
-`{ "account"?: string }` — optional, empty payload means self.
+None — the request body is empty (`{}`).
 
 #### Success response
 
@@ -1833,10 +1832,8 @@ body is optional — an empty payload means self.
 
 #### Errors
 
-Invalid `account` (`bad_request`), non-admin caller targeting another account
-(`forbidden`), caller/target not found/deactivated (`not_found`),
 `sso_token_not_found` (`not_found`, no token pair stored), `sso_token_expired`
-(`unauthenticated`, refresh failed or refreshed token not owned by the account — re-login),
+(`unauthenticated`, refresh failed or refreshed token not owned by the caller — re-login),
 `upstream_unavailable` (`unavailable`, SSO not configured on this site), `internal` (local store failure).
 
 **Emits:** None.

@@ -6,61 +6,33 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/oidc"
-	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-// Reason-less forbidden per room-service precedent; the not-configured sentinel reuses upstream_unavailable (auth-service BOTPLATFORM_URL-unset precedent).
+// The not-configured sentinel reuses upstream_unavailable (auth-service BOTPLATFORM_URL-unset precedent).
 var (
 	errSSONotConfigured = errcode.Unavailable("sso is not configured on this site", errcode.WithReason(errcode.BotplatformUpstreamUnavailable))
-	errSSOAdminOnly     = errcode.Forbidden("admin role required")
-	errSSOTokenMismatch = errcode.BadRequest("sso token does not belong to the target account")
-	errSSOInvalidTarget = errcode.BadRequest("invalid account")
-	errSSOUserNotFound  = errcode.NotFound("user not found")
+	errSSOTokenMismatch = errcode.BadRequest("sso token does not belong to this account")
 	// On refresh a mismatch means the STORED refresh token minted another identity's token —
 	// a server-side integrity anomaly, not a client error; drive re-login per spec §8.
 	errSSORefreshMismatch = errcode.Unauthenticated("refreshed sso token does not belong to this account, please re-login", errcode.WithReason(errcode.AuthTokenExpired))
 )
 
-// SSOSet verifies and stores a user's SSO token pair (admin-only always).
+// SSOSet verifies and stores the caller's own SSO token pair. The {account} subject token is the
+// NATS-JWT-authenticated caller, so no admin gate or user lookup is needed — the frontend calls
+// this on every login.
 func (s *UserService) SSOSet(c *natsrouter.Context, req models.SSOSetRequest) (*models.OKResponse, error) {
 	// ssoTokens is nil only in unit tests — prod wires the repo unconditionally.
 	if s.tokenValidator == nil || s.ssoTokens == nil {
 		return nil, errSSONotConfigured
 	}
-	caller := c.Param("account")
-	c.WithLogValues("account", caller)
+	account := c.Param("account")
+	c.WithLogValues("account", account)
 
 	if req.SSOToken == "" || req.RefreshToken == "" {
 		return nil, errcode.BadRequest("ssoToken and refreshToken are required", errcode.WithReason(errcode.AuthMissingFields))
-	}
-	target := caller
-	if req.Account != "" {
-		target = req.Account
-	}
-	c.WithLogValues("target", target)
-	if !subject.IsValidAccountToken(target) {
-		return nil, errSSOInvalidTarget
-	}
-
-	callerUser, err := s.users.GetUserRoles(c, caller)
-	if err != nil {
-		return nil, fmt.Errorf("get caller roles: %w", err)
-	}
-	if !model.IsPlatformAdmin(callerUser) { // nil-safe: missing/deactivated caller is not admin
-		return nil, errSSOAdminOnly
-	}
-	if target != caller {
-		targetUser, err := s.users.GetUserRoles(c, target)
-		if err != nil {
-			return nil, fmt.Errorf("get target user: %w", err)
-		}
-		if targetUser == nil {
-			return nil, errSSOUserNotFound
-		}
 	}
 
 	claims, err := s.tokenValidator.Validate(c, req.SSOToken)
@@ -71,52 +43,28 @@ func (s *UserService) SSOSet(c *natsrouter.Context, req models.SSOSetRequest) (*
 		// Cause carries the verification error (never token bytes) to the server log only — auth-service handleSSO precedent.
 		return nil, errcode.Unauthenticated("invalid sso token", errcode.WithReason(errcode.AuthInvalidToken), errcode.WithCause(err))
 	}
-	if claims.Account() != target {
+	// Token-owner integrity: the verified token must belong to the caller storing it.
+	if claims.Account() != account {
 		return nil, errSSOTokenMismatch
 	}
 
-	if err := s.ssoTokens.Upsert(c, target, req.SSOToken, claims.Expiry.UnixMilli(), req.RefreshToken); err != nil {
+	if err := s.ssoTokens.Upsert(c, account, req.SSOToken, claims.Expiry.UnixMilli(), req.RefreshToken); err != nil {
 		return nil, fmt.Errorf("store sso token: %w", err)
 	}
 	return &models.OKResponse{Success: true}, nil
 }
 
-// SSORefresh returns the stored ssoToken, refreshing when within ssoRefreshWindow of expiry. Self-service by default; admin role required to target another account.
-func (s *UserService) SSORefresh(c *natsrouter.Context, req models.SSORefreshRequest) (*models.SSORefreshResponse, error) {
+// SSORefresh returns the caller's stored ssoToken, refreshing when within ssoRefreshWindow of
+// expiry. Self-service only — the {account} subject token is the NATS-JWT-authenticated caller.
+func (s *UserService) SSORefresh(c *natsrouter.Context, _ models.SSORefreshRequest) (*models.SSORefreshResponse, error) {
 	// ssoTokens is nil only in unit tests — prod wires the repo unconditionally.
 	if s.tokenRefresher == nil || s.ssoTokens == nil {
 		return nil, errSSONotConfigured
 	}
-	caller := c.Param("account")
-	target := caller
-	if req.Account != "" {
-		target = req.Account
-	}
-	c.WithLogValues("account", caller, "target", target)
-	if !subject.IsValidAccountToken(target) {
-		return nil, errSSOInvalidTarget
-	}
+	account := c.Param("account")
+	c.WithLogValues("account", account)
 
-	callerUser, err := s.users.GetUserRoles(c, caller)
-	if err != nil {
-		return nil, fmt.Errorf("get caller roles: %w", err)
-	}
-	if target != caller {
-		if !model.IsPlatformAdmin(callerUser) {
-			return nil, errSSOAdminOnly
-		}
-		targetUser, err := s.users.GetUserRoles(c, target)
-		if err != nil {
-			return nil, fmt.Errorf("get target user: %w", err)
-		}
-		if targetUser == nil {
-			return nil, errSSOUserNotFound
-		}
-	} else if callerUser == nil {
-		return nil, errSSOUserNotFound
-	}
-
-	stored, err := s.ssoTokens.GetByUsername(c, target)
+	stored, err := s.ssoTokens.GetByUsername(c, account)
 	if err != nil {
 		return nil, fmt.Errorf("get sso token: %w", err)
 	}
@@ -134,7 +82,7 @@ func (s *UserService) SSORefresh(c *natsrouter.Context, req models.SSORefreshReq
 		return nil, errcode.Unauthenticated("sso token has expired, please re-login", errcode.WithReason(errcode.AuthTokenExpired), errcode.WithCause(err))
 	}
 	// Owner integrity at refresh time: a mismatched stored refresh token must never mint another identity's tokens under this account.
-	if ts.Account != target {
+	if ts.Account != account {
 		return nil, errSSORefreshMismatch
 	}
 	// Keep the stored refresh token if the response omits a rotated one.
@@ -142,7 +90,7 @@ func (s *UserService) SSORefresh(c *natsrouter.Context, req models.SSORefreshReq
 	if newRefresh == "" {
 		newRefresh = stored.RefreshToken
 	}
-	if err := s.ssoTokens.Upsert(c, target, ts.SSOToken, ts.Expiry.UnixMilli(), newRefresh); err != nil {
+	if err := s.ssoTokens.Upsert(c, account, ts.SSOToken, ts.Expiry.UnixMilli(), newRefresh); err != nil {
 		return nil, fmt.Errorf("store refreshed sso token: %w", err)
 	}
 	return &models.SSORefreshResponse{SSOToken: ts.SSOToken}, nil

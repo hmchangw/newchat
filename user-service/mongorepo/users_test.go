@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
-
-	"github.com/hmchangw/chat/pkg/model"
 )
 
 func TestGetUserStatus_Integration(t *testing.T) {
@@ -162,33 +160,4 @@ func TestSetUserStatus_Integration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, u, "active:false user is excluded by the filter ⇒ nil")
 	})
-}
-
-func TestUserRepo_GetUserRoles(t *testing.T) {
-	r, db := newTestUserRepo(t)
-	seed(t, db, "users",
-		bson.M{"_id": "u1", "account": "admin-user", "roles": bson.A{"admin"}, "statusText": "hi"},
-		bson.M{"_id": "u2", "account": "plain-user"},
-		bson.M{"_id": "u3", "account": "gone-user", "roles": bson.A{"admin"}, "active": false},
-	)
-
-	u, err := r.GetUserRoles(context.Background(), "admin-user")
-	require.NoError(t, err)
-	require.NotNil(t, u)
-	assert.Equal(t, "admin-user", u.Account)
-	assert.True(t, model.IsPlatformAdmin(u))
-	assert.Empty(t, u.StatusText, "statusText is outside the roles projection")
-
-	u, err = r.GetUserRoles(context.Background(), "plain-user")
-	require.NoError(t, err)
-	require.NotNil(t, u)
-	assert.False(t, model.IsPlatformAdmin(u))
-
-	u, err = r.GetUserRoles(context.Background(), "gone-user")
-	require.NoError(t, err)
-	assert.Nil(t, u, "deactivated users are filtered by activeUserFilter")
-
-	u, err = r.GetUserRoles(context.Background(), "missing")
-	require.NoError(t, err)
-	assert.Nil(t, u)
 }

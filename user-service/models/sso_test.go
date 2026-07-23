@@ -10,16 +10,14 @@ import (
 
 func TestSSOSetRequest_JSON(t *testing.T) {
 	var req SSOSetRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"ssoToken":"at","refreshToken":"rt","account":"bob"}`), &req))
+	require.NoError(t, json.Unmarshal([]byte(`{"ssoToken":"at","refreshToken":"rt"}`), &req))
 	assert.Equal(t, "at", req.SSOToken)
 	assert.Equal(t, "rt", req.RefreshToken)
-	assert.Equal(t, "bob", req.Account)
 }
 
-func TestSSORefreshRequest_AccountOptional(t *testing.T) {
+func TestSSORefreshRequest_EmptyBody(t *testing.T) {
 	var req SSORefreshRequest
 	require.NoError(t, json.Unmarshal([]byte(`{}`), &req))
-	assert.Empty(t, req.Account)
 }
 
 func TestSSORefreshResponse_JSON(t *testing.T) {

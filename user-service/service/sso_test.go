@@ -36,14 +36,9 @@ func newSSOSvc(t *testing.T) (*UserService, *mocks.MockUserRepository, *mocks.Mo
 	return svc, users, ssoTokens, validator, refresher
 }
 
-func adminUser(account string) *model.User {
-	return &model.User{Account: account, Roles: []model.UserRole{model.UserRoleAdmin}}
-}
-
-func TestSSOSet_HappyPath_Self(t *testing.T) {
-	svc, users, ssoTokens, validator, _ := newSSOSvc(t)
+func TestSSOSet_HappyPath(t *testing.T) {
+	svc, _, ssoTokens, validator, _ := newSSOSvc(t)
 	exp := time.Now().Add(30 * time.Minute)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
 	validator.EXPECT().Validate(gomock.Any(), "access-tok").
 		Return(oidc.Claims{PreferredUsername: "alice", Expiry: exp}, nil)
 	ssoTokens.EXPECT().Upsert(gomock.Any(), "alice", "access-tok", exp.UnixMilli(), "refresh-tok").Return(nil)
@@ -51,19 +46,6 @@ func TestSSOSet_HappyPath_Self(t *testing.T) {
 	resp, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "access-tok", RefreshToken: "refresh-tok"})
 	require.NoError(t, err)
 	assert.True(t, resp.Success)
-}
-
-func TestSSOSet_HappyPath_OnBehalfOf(t *testing.T) {
-	svc, users, ssoTokens, validator, _ := newSSOSvc(t)
-	exp := time.Now().Add(30 * time.Minute)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
-	users.EXPECT().GetUserRoles(gomock.Any(), "bob").Return(&model.User{Account: "bob"}, nil)
-	validator.EXPECT().Validate(gomock.Any(), "bob-tok").
-		Return(oidc.Claims{PreferredUsername: "bob", Expiry: exp}, nil)
-	ssoTokens.EXPECT().Upsert(gomock.Any(), "bob", "bob-tok", exp.UnixMilli(), "bob-refresh").Return(nil)
-
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "bob-tok", RefreshToken: "bob-refresh", Account: "bob"})
-	require.NoError(t, err)
 }
 
 func TestSSOSet_MissingFields(t *testing.T) {
@@ -80,37 +62,8 @@ func TestSSOSet_MissingFields(t *testing.T) {
 	}
 }
 
-func TestSSOSet_NonAdminForbidden(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "a", RefreshToken: "r"})
-	requireCode(t, err, errcode.CodeForbidden)
-}
-
-func TestSSOSet_DeactivatedCallerForbidden(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(nil, nil) // activeUserFilter miss
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "a", RefreshToken: "r"})
-	requireCode(t, err, errcode.CodeForbidden)
-}
-
-func TestSSOSet_InvalidTargetAccount(t *testing.T) {
-	svc, _, _, _, _ := newSSOSvc(t)
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "a", RefreshToken: "r", Account: "evil.*"})
-	requireCode(t, err, errcode.CodeBadRequest)
-}
-
-func TestSSOSet_TargetNotFound(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
-	users.EXPECT().GetUserRoles(gomock.Any(), "ghost").Return(nil, nil)
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "a", RefreshToken: "r", Account: "ghost"})
-	requireCode(t, err, errcode.CodeNotFound)
-}
-
 func TestSSOSet_ExpiredToken(t *testing.T) {
-	svc, users, _, validator, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
+	svc, _, _, validator, _ := newSSOSvc(t)
 	validator.EXPECT().Validate(gomock.Any(), "old").Return(oidc.Claims{}, oidc.ErrTokenExpired)
 	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "old", RefreshToken: "r"})
 	requireCode(t, err, errcode.CodeUnauthenticated)
@@ -120,8 +73,7 @@ func TestSSOSet_ExpiredToken(t *testing.T) {
 }
 
 func TestSSOSet_InvalidToken(t *testing.T) {
-	svc, users, _, validator, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
+	svc, _, _, validator, _ := newSSOSvc(t)
 	validator.EXPECT().Validate(gomock.Any(), "junk").Return(oidc.Claims{}, errors.New("bad signature"))
 	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "junk", RefreshToken: "r"})
 	requireCode(t, err, errcode.CodeUnauthenticated)
@@ -131,8 +83,8 @@ func TestSSOSet_InvalidToken(t *testing.T) {
 }
 
 func TestSSOSet_TokenOwnerMismatch(t *testing.T) {
-	svc, users, _, validator, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
+	svc, _, _, validator, _ := newSSOSvc(t)
+	// The submitted token belongs to a different identity than the caller storing it.
 	validator.EXPECT().Validate(gomock.Any(), "tok").
 		Return(oidc.Claims{PreferredUsername: "mallory", Expiry: time.Now().Add(time.Hour)}, nil)
 	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "tok", RefreshToken: "r"})
@@ -140,8 +92,7 @@ func TestSSOSet_TokenOwnerMismatch(t *testing.T) {
 }
 
 func TestSSOSet_StoreErrorIsInternal(t *testing.T) {
-	svc, users, ssoTokens, validator, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
+	svc, _, ssoTokens, validator, _ := newSSOSvc(t)
 	validator.EXPECT().Validate(gomock.Any(), "tok").
 		Return(oidc.Claims{PreferredUsername: "alice", Expiry: time.Now().Add(time.Hour)}, nil)
 	ssoTokens.EXPECT().Upsert(gomock.Any(), "alice", "tok", gomock.Any(), "r").Return(errors.New("mongo down"))
@@ -157,8 +108,7 @@ func TestSSOSet_FeatureOffUnavailable(t *testing.T) {
 }
 
 func TestSSORefresh_FreshTokenReturnedUnchanged(t *testing.T) {
-	svc, users, ssoTokens, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	svc, _, ssoTokens, _, _ := newSSOSvc(t)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(&model.SSOToken{
 		Username: "alice", IDToken: "stored-access",
 		IDTokenExp:   time.Now().Add(2 * time.Hour).UnixMilli(), // beyond 1h window
@@ -171,9 +121,8 @@ func TestSSORefresh_FreshTokenReturnedUnchanged(t *testing.T) {
 }
 
 func TestSSORefresh_WithinWindowRefreshes(t *testing.T) {
-	svc, users, ssoTokens, _, refresher := newSSOSvc(t)
+	svc, _, ssoTokens, _, refresher := newSSOSvc(t)
 	newExp := time.Now().Add(30 * time.Minute)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(&model.SSOToken{
 		Username: "alice", IDToken: "stale-access",
 		IDTokenExp:   time.Now().Add(10 * time.Minute).UnixMilli(), // inside 1h window
@@ -189,9 +138,8 @@ func TestSSORefresh_WithinWindowRefreshes(t *testing.T) {
 }
 
 func TestSSORefresh_AlreadyExpiredRefreshes(t *testing.T) {
-	svc, users, ssoTokens, _, refresher := newSSOSvc(t)
+	svc, _, ssoTokens, _, refresher := newSSOSvc(t)
 	newExp := time.Now().Add(30 * time.Minute)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(&model.SSOToken{
 		Username: "alice", IDToken: "dead-access",
 		IDTokenExp:   time.Now().Add(-time.Hour).UnixMilli(), // already expired
@@ -207,8 +155,7 @@ func TestSSORefresh_AlreadyExpiredRefreshes(t *testing.T) {
 }
 
 func TestSSORefresh_RefreshFailureIsTokenExpired(t *testing.T) {
-	svc, users, ssoTokens, _, refresher := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	svc, _, ssoTokens, _, refresher := newSSOSvc(t)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(&model.SSOToken{
 		Username: "alice", IDToken: "x",
 		IDTokenExp: 1, RefreshToken: "dead-refresh",
@@ -224,8 +171,7 @@ func TestSSORefresh_RefreshFailureIsTokenExpired(t *testing.T) {
 }
 
 func TestSSORefresh_NoStoredToken(t *testing.T) {
-	svc, users, ssoTokens, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	svc, _, ssoTokens, _, _ := newSSOSvc(t)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(nil, nil)
 
 	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{})
@@ -235,37 +181,8 @@ func TestSSORefresh_NoStoredToken(t *testing.T) {
 	assert.Equal(t, errcode.UserSSOTokenNotFound, ee.Reason)
 }
 
-func TestSSORefresh_CallerNotFound(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(nil, nil)
-	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{})
-	requireCode(t, err, errcode.CodeNotFound)
-}
-
-func TestSSORefresh_AdminForOther(t *testing.T) {
-	svc, users, ssoTokens, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
-	users.EXPECT().GetUserRoles(gomock.Any(), "bob").Return(&model.User{Account: "bob"}, nil)
-	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "bob").Return(&model.SSOToken{
-		Username: "bob", IDToken: "bob-access",
-		IDTokenExp: time.Now().Add(2 * time.Hour).UnixMilli(), RefreshToken: "r",
-	}, nil)
-
-	resp, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{Account: "bob"})
-	require.NoError(t, err)
-	assert.Equal(t, "bob-access", resp.SSOToken)
-}
-
-func TestSSORefresh_NonAdminForOtherForbidden(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{Account: "bob"})
-	requireCode(t, err, errcode.CodeForbidden)
-}
-
 func TestSSORefresh_StoreErrorIsInternal(t *testing.T) {
-	svc, users, ssoTokens, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	svc, _, ssoTokens, _, _ := newSSOSvc(t)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
 	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{})
 	requireCode(t, err, errcode.CodeInternal)
@@ -278,16 +195,9 @@ func TestSSORefresh_FeatureOffUnavailable(t *testing.T) {
 	requireCode(t, err, errcode.CodeUnavailable)
 }
 
-func TestSSORefresh_InvalidTargetAccount(t *testing.T) {
-	svc, _, _, _, _ := newSSOSvc(t)
-	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{Account: "evil.>"})
-	requireCode(t, err, errcode.CodeBadRequest)
-}
-
 func TestSSORefresh_PreservesRefreshTokenWhenResponseOmitsIt(t *testing.T) {
-	svc, users, ssoTokens, _, refresher := newSSOSvc(t)
+	svc, _, ssoTokens, _, refresher := newSSOSvc(t)
 	newExp := time.Now().Add(30 * time.Minute)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(&model.SSOToken{
 		Username: "alice", IDToken: "stale", IDTokenExp: 1, RefreshToken: "kept-refresh",
 	}, nil)
@@ -302,8 +212,7 @@ func TestSSORefresh_PreservesRefreshTokenWhenResponseOmitsIt(t *testing.T) {
 }
 
 func TestSSORefresh_RefreshedTokenOwnerMismatch(t *testing.T) {
-	svc, users, ssoTokens, _, refresher := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	svc, _, ssoTokens, _, refresher := newSSOSvc(t)
 	ssoTokens.EXPECT().GetByUsername(gomock.Any(), "alice").Return(&model.SSOToken{
 		Username: "alice", IDToken: "stale", IDTokenExp: 1, RefreshToken: "y-refresh",
 	}, nil)
@@ -314,34 +223,4 @@ func TestSSORefresh_RefreshedTokenOwnerMismatch(t *testing.T) {
 	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{})
 	// Server-side integrity anomaly on refresh ⇒ re-login (unauthenticated), not bad_request.
 	requireCode(t, err, errcode.CodeUnauthenticated)
-}
-
-func TestSSOSet_CallerRolesLookupErrorIsInternal(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "a", RefreshToken: "r"})
-	requireCode(t, err, errcode.CodeInternal)
-}
-
-func TestSSOSet_TargetLookupErrorIsInternal(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
-	users.EXPECT().GetUserRoles(gomock.Any(), "bob").Return(nil, errors.New("mongo down"))
-	_, err := svc.SSOSet(ctx("alice", "site-a"), models.SSOSetRequest{SSOToken: "a", RefreshToken: "r", Account: "bob"})
-	requireCode(t, err, errcode.CodeInternal)
-}
-
-func TestSSORefresh_CallerRolesLookupErrorIsInternal(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
-	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{})
-	requireCode(t, err, errcode.CodeInternal)
-}
-
-func TestSSORefresh_TargetLookupErrorIsInternal(t *testing.T) {
-	svc, users, _, _, _ := newSSOSvc(t)
-	users.EXPECT().GetUserRoles(gomock.Any(), "alice").Return(adminUser("alice"), nil)
-	users.EXPECT().GetUserRoles(gomock.Any(), "bob").Return(nil, errors.New("mongo down"))
-	_, err := svc.SSORefresh(ctx("alice", "site-a"), models.SSORefreshRequest{Account: "bob"})
-	requireCode(t, err, errcode.CodeInternal)
 }

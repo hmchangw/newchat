@@ -146,13 +146,6 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	return &u, nil
 }
 
-// GetUserRoles returns the active user's account + roles (other fields zero-valued) for platform-admin checks, or (nil, nil) when unmatched.
-func (r *UserRepo) GetUserRoles(ctx context.Context, account string) (*model.User, error) {
-	return r.users.FindOne(ctx, activeUserFilter(account),
-		mongoutil.WithProjection(bson.M{"_id": 0, "account": 1, "roles": 1}),
-	)
-}
-
 // SetUserStatus updates status fields (isShow only written when non-nil) and
 // returns the updated user in one round-trip via FindOneAndUpdate(After),
 // projected to the UserStatusView fields; returns (nil, nil) when no active user matched.

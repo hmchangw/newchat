@@ -5156,7 +5156,7 @@ Empty object.
 **Subject:** `chat.user.{account}.request.user.{siteID}.sso.set`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Store (upsert) a user's SSO token pair in the site-local vault. **Platform-admin only.** The submitted `ssoToken` is verified against the site's OIDC issuer; its `preferred_username` must equal the target account. The stored expiry is derived server-side from the token's `exp` claim.
+Store (upsert) the caller's own SSO token pair in the site-local MongoDB store. Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated identity; the frontend calls this on every login. The submitted `ssoToken` is verified against the site's OIDC issuer; its `preferred_username` must equal the caller. The stored expiry is derived server-side from the token's `exp` claim.
 
 ##### Request body
 
@@ -5164,7 +5164,6 @@ Store (upsert) a user's SSO token pair in the site-local vault. **Platform-admin
 |---|---|---|---|
 | `ssoToken` | string | yes | The SSO token (Keycloak access token) to store. |
 | `refreshToken` | string | yes | The matching refresh token. |
-| `account` | string | no | Target account (admin on-behalf-of); defaults to the caller. |
 
 ```json
 { "ssoToken": "eyJhbGciOiJSUzI1NiIs...", "refreshToken": "eyJhbGciOiJSUzI1NiIs..." }
@@ -5185,9 +5184,7 @@ Store (upsert) a user's SSO token pair in the site-local vault. **Platform-admin
 | Condition | `code` | `reason` | Notes |
 |-----------|--------|----------|-------|
 | `ssoToken` or `refreshToken` missing | `bad_request` | `missing_fields` | — |
-| Invalid `account` value, or token's `preferred_username` ≠ target account | `bad_request` | — | — |
-| Caller lacks the platform admin role (or is deactivated) | `forbidden` | — | — |
-| Target account does not exist or is deactivated | `not_found` | — | — |
+| Token's `preferred_username` ≠ the caller | `bad_request` | — | — |
 | Submitted token is expired | `unauthenticated` | `sso_token_expired` | — |
 | Submitted token fails verification | `unauthenticated` | `invalid_sso_token` | — |
 | SSO is not configured on this site | `unavailable` | `upstream_unavailable` | — |
@@ -5208,15 +5205,11 @@ Store (upsert) a user's SSO token pair in the site-local vault. **Platform-admin
 **Subject:** `chat.user.{account}.request.user.{siteID}.sso.refresh`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Return the caller's stored `ssoToken`, transparently refreshing it against the OIDC issuer when it is within the refresh window (default 1h) of expiry or already expired. Self-service; platform admins may target another account. The request body is optional — an empty payload means self.
+Return the caller's stored `ssoToken`, transparently refreshing it against the OIDC issuer when it is within the refresh window (default 1h) of expiry or already expired. Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated identity. The request body is empty.
 
 ##### Request body
 
-Optional — an empty payload means self.
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `account` | string | no | Target account (admin only); defaults to the caller. |
+None — the request body is empty.
 
 ```json
 {}
@@ -5236,11 +5229,8 @@ Optional — an empty payload means self.
 
 | Condition | `code` | `reason` | Notes |
 |-----------|--------|----------|-------|
-| Invalid `account` value | `bad_request` | — | — |
-| Refreshed token does not belong to the target account | `unauthenticated` | `sso_token_expired` | Stored refresh token minted a different identity; client re-logins (admin re-runs `sso.set`) |
-| Non-admin caller targeting another account | `forbidden` | — | — |
-| Caller/target account does not exist or is deactivated | `not_found` | — | — |
-| No token pair stored for the target account | `not_found` | `sso_token_not_found` | — |
+| Refreshed token does not belong to the caller | `unauthenticated` | `sso_token_expired` | Stored refresh token minted a different identity; client re-logins (re-runs `sso.set`) |
+| No token pair stored for the caller | `not_found` | `sso_token_not_found` | — |
 | Token needed refreshing and the refresh failed (re-login) | `unauthenticated` | `sso_token_expired` | — |
 | SSO is not configured on this site | `unavailable` | `upstream_unavailable` | — |
 | Internal failure | `internal` | — | — |
@@ -5893,7 +5883,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
 | `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or platform account) |
 | `subscription_not_found` | not_found | user-service `subscription.getDM` (no DM subscription exists for the account pair) |
-| `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the target account) |
+| `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the caller) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
