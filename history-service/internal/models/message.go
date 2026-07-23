@@ -10,6 +10,7 @@ type Participant = cassandra.Participant
 type Card = cassandra.Card
 type CardAction = cassandra.CardAction
 type QuotedParentMessage = cassandra.QuotedParentMessage
+type ForwardedMessage = cassandra.ForwardedMessage
 type Reactions = cassandra.Reactions
 type ReactionKey = cassandra.ReactionKey
 type ReactorInfo = cassandra.ReactorInfo
