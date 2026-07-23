@@ -21,13 +21,27 @@ import (
 )
 
 type handler struct {
-	store BotplatformStore
-	cfg   *config
+	store     BotplatformStore
+	cfg       *config
+	forwarder botRPCForwarder
+	subs      subscriptionStore
+	dmEnsurer dmEnsurer
 
-	// Test seams; production callers leave these at newHandler's defaults.
+	// Test seams; production leaves these at defaults.
 	tokenGen func() (string, error)
-	now      func() int64 // unix ms
+	now      func() int64
 }
+
+// botRPCForwarder is the narrow surface bot HTTP handlers use to reach the bot services.
+type botRPCForwarder interface {
+	sendRoom(ctx context.Context, sess *session.Session, siteID, roomID string, body []byte) (*model.Message, error)
+	sendDM(ctx context.Context, sess *session.Session, siteID, targetUserID string, body []byte) (*model.Message, error)
+	createRoom(ctx context.Context, sess *session.Session, siteID string, body []byte) ([]byte, error)
+	addMembers(ctx context.Context, sess *session.Session, siteID, roomID string, body []byte) ([]byte, error)
+	removeMembers(ctx context.Context, sess *session.Session, siteID, roomID string, body []byte) ([]byte, error)
+}
+
+var _ botRPCForwarder = (*botForwarder)(nil)
 
 func newHandler(s BotplatformStore, cfg *config) *handler {
 	return &handler{
@@ -38,8 +52,6 @@ func newHandler(s BotplatformStore, cfg *config) *handler {
 	}
 }
 
-// ----- /healthz ------------------------------------------------------------
-
 func (h *handler) HandleHealth(c *gin.Context) {
 	if err := h.store.Ping(c.Request.Context()); err != nil {
 		slog.WarnContext(c.Request.Context(), "healthz ping failed", "error", err)
@@ -48,8 +60,6 @@ func (h *handler) HandleHealth(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
-
-// ----- /v1/login -----------------------------------------------------------
 
 type loginRequest struct {
 	Username string `json:"username"`
@@ -102,7 +112,6 @@ func (h *handler) HandleLogin(c *gin.Context) {
 		return
 	}
 
-	// Role gate — only bot/admin roles may password-login.
 	if !model.HasLoginRole(u.Roles) {
 		h.denied(c, ctx, req.Username, "invalid_credentials")
 		return
@@ -113,7 +122,7 @@ func (h *handler) HandleLogin(c *gin.Context) {
 		return
 	}
 
-	// Checked after password verification so timing stays indistinguishable from wrong-password.
+	// Deactivation check runs after password verify so timing matches wrong-password.
 	if u.Deactivated {
 		h.denied(c, ctx, req.Username, "invalid_credentials")
 		return
@@ -124,7 +133,7 @@ func (h *handler) HandleLogin(c *gin.Context) {
 		errhttp.Write(ctx, c, fmt.Errorf("generate token: %w", err))
 		return
 	}
-	roleStrs := rolesToStrings(u.Roles) // shared by the session row and the me block
+	roleStrs := rolesToStrings(u.Roles)
 	s := &session.Session{
 		ID:       sessiontoken.Hash(raw),
 		UserID:   u.ID,
@@ -138,11 +147,10 @@ func (h *handler) HandleLogin(c *gin.Context) {
 		return
 	}
 
-	// FIFO cap eviction: Skip-Sort-by-issuedAt lets Mongo return only over-cap
-	// rows, avoiding an extra CountSessions round-trip on every login.
+	// FIFO cap: Skip-Sort-by-issuedAt returns only over-cap rows, avoiding a Count round-trip.
 	if h.cfg.SessionsMaxPerAccount > 0 {
 		if _, err := h.store.DeleteSessionsBeyondCap(ctx, u.Account, h.cfg.SessionsMaxPerAccount); err != nil {
-			// Eviction is best-effort — log but don't fail the login.
+			// Best-effort; don't fail login on eviction failure.
 			slog.WarnContext(ctx, "evict sessions failed", "error", err)
 		}
 	}
@@ -166,15 +174,12 @@ func (h *handler) HandleLogin(c *gin.Context) {
 	})
 }
 
-// denied writes the uniform 401 envelope and logs the failure, using the
-// caller's ctx so its log-values (request_id, account) thread through.
+// denied writes the uniform 401 envelope; uses ctx so log-values (request_id, account) thread through.
 func (h *handler) denied(c *gin.Context, ctx context.Context, account, reason string) {
 	c.Set("login_outcome", reason)
 	slog.WarnContext(ctx, "login denied", "account", account, "reason", reason)
 	errhttp.Write(ctx, c, errInvalidCredentials)
 }
-
-// ----- /v1/auth/validate ---------------------------------------------------
 
 type validateRequest struct {
 	AuthToken string `json:"authToken"`
@@ -218,16 +223,12 @@ func (h *handler) HandleValidate(c *gin.Context) {
 	})
 }
 
-// ----- helpers -------------------------------------------------------------
-
 // verifyPassword checks plaintext against the stored bcrypt(sha256hex) hash.
 func verifyPassword(stored, plaintext string) bool {
 	return pwhash.Verify(stored, plaintext)
 }
 
-// rolesToStrings converts []UserRole (typed) to []string (wire shape).
-// `make([]string, 0)` for the nil/empty case marshals as `[]` not `null`,
-// matching what bot SDKs expect for the legacy roles field.
+// rolesToStrings converts []UserRole to []string; nil/empty becomes `[]` not `null`.
 func rolesToStrings(roles []model.UserRole) []string {
 	out := make([]string, len(roles))
 	for i, r := range roles {

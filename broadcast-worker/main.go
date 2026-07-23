@@ -57,6 +57,9 @@ type config struct {
 	HealthAddr           string                  `env:"HEALTH_ADDR"              envDefault:":8081"`
 	PProfEnabled         bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr          string                  `env:"METRICS_ADDR"             envDefault:":9090"`
+	InputStream          string                  `env:"INPUT_STREAM,required"`
+	InputSubjectFilter   string                  `env:"INPUT_SUBJECT_FILTER,required"`
+	ConsumerName         string                  `env:"CONSUMER_NAME"             envDefault:"broadcast-worker"`
 	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
@@ -141,23 +144,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, js, cfg.InputStream, cfg.InputSubjectFilter, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildConsumerConfig(cfg.Consumer))
+	cons, err := js.CreateOrUpdateConsumer(ctx, cfg.InputStream, buildConsumerConfig(cfg.Consumer, cfg.ConsumerName, cfg.InputSubjectFilter))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
 
 	publisher := &natsPublisher{nc: nc}
-	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites.
-	// The handler still calls UpdateRoomLastMessage; the coalescing wrapper
-	// buffers it and drains via flushCtx/Run.
+	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
+	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
 	coalescer := newCoalescingStore(cachedStore, store)
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	go coalescer.Run(flushCtx, cfg.LastMsgFlushInterval, 5*time.Second)
@@ -171,8 +171,7 @@ func main() {
 	case cfg.RoomKeyCacheTTL <= 0 || cfg.RoomKeyCacheSize <= 0:
 		slog.Info("room-key cache disabled", "ttl", cfg.RoomKeyCacheTTL, "size", cfg.RoomKeyCacheSize)
 	case !keyCacheTTLSafe(cfg.RoomKeyCacheTTL, cfg.RoomKeyGracePeriod):
-		// Caching beyond the grace period could serve a rotated-out key that
-		// clients can no longer decrypt; refuse to cache rather than risk it.
+		// Caching beyond the grace period could serve a rotated-out key that clients can no longer decrypt; refuse to cache rather than risk it.
 		slog.Warn("room-key cache disabled: TTL must be below key grace period",
 			"ttl", cfg.RoomKeyCacheTTL, "grace_period", cfg.RoomKeyGracePeriod)
 	default:
@@ -235,8 +234,7 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
-		// Stop the coalescer AFTER in-flight handlers drain so any final
-		// buffered UpdateRoomLastMessage calls land in this last flush.
+		// Stop the coalescer AFTER in-flight handlers drain so any final buffered UpdateRoomLastMessage calls land in this last flush.
 		func(_ context.Context) error {
 			flushCancel()
 			return nil
@@ -272,17 +270,14 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 // messageProcessor handles one consumed message, performing its own Ack/Nak.
 type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
 
-// messageIterator is the slice of o11y/nats MessagesContext that
-// consumeLoop drives — an interface so the loop is testable against a real
-// embedded JetStream consumer.
+// messageIterator is the slice of o11y/nats MessagesContext that consumeLoop drives —
+// an interface so the loop is testable against a real embedded JetStream consumer.
 type messageIterator interface {
 	Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error)
 }
 
-// broadcastProcessor builds the per-message processing closure for the
-// canonical consumer: stamp the request ID, run the handler, then settle via
-// jsretry. Fan-out is latency-sensitive — short first retry; malformed events
-// Ack-drop.
+// broadcastProcessor builds the per-message processing closure: stamp the request ID, run
+// the handler, then settle via jsretry (short first retry; malformed events Ack-drop).
 func broadcastProcessor(handler *Handler) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
@@ -297,9 +292,8 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 		}
 		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-		// flow: hop entry with the stream-wait latency time-diffing can't see.
-		// Gate the block so msg.Metadata() and arg-building are skipped on the
-		// unflagged hot path (slog.Log builds its args before Enabled runs).
+		// flow: hop entry with stream-wait latency time-diffing can't see. Gate the block so
+		// msg.Metadata() and arg-building are skipped on the hot path (slog.Log builds args before Enabled runs).
 		if logctx.Enabled(handlerCtx, logctx.LevelFlow) {
 			streamWaitMs := int64(-1)
 			if meta, mErr := msg.Metadata(); mErr == nil && meta != nil {
@@ -309,21 +303,12 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 				"phase", "received", "request_id", natsutil.RequestIDFromContext(handlerCtx),
 				"subject", msg.Subject(), "bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
 		}
-		// Fan-out is latency-sensitive — short first retry; malformed events Ack-drop.
 		jsretry.Settle(handlerCtx, msg, jsretry.LowLatencyBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 	}
 }
 
-// consumeLoop drains iter, dispatching each message to process under a
-// maxWorkers-bounded semaphore. In-flight handlers are tracked on wg so
-// shutdown can wait for them. It returns when iter.Next reports an error (e.g.
-// after iter.Stop()).
-//
-// jobguard.Run recovers handler panics: this dispatch runs outside
-// natsrouter's Recovery middleware, so an unrecovered panic would crash the
-// worker and — because the message would be left un-acked — crash-loop on
-// JetStream redelivery. The recover runs before the semaphore slot is released
-// and wg.Done fires.
+// consumeLoop drains iter under a maxWorkers-bounded semaphore, tracking in-flight handlers on wg
+// so shutdown can wait; jobguard.Run recovers handler panics to avoid an un-acked crash-loop on JetStream redelivery.
 func consumeLoop(iter messageIterator, process messageProcessor, maxWorkers int, wg *sync.WaitGroup) {
 	sem := make(chan struct{}, maxWorkers)
 	for {
@@ -343,10 +328,11 @@ func consumeLoop(iter messageIterator, process messageProcessor, maxWorkers int,
 	}
 }
 
-// buildConsumerConfig returns the durable consumer config for
-// broadcast-worker. Centralized so it is unit-testable without NATS.
-func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+// buildConsumerConfig returns the durable consumer config, centralized so it's unit-testable
+// without NATS; durable/filterSubject are env-driven so the binary can bind to user or bot streams.
+func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
-	cc.Durable = "broadcast-worker"
+	cc.Durable = durable
+	cc.FilterSubject = filterSubject
 	return cc
 }

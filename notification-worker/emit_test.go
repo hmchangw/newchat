@@ -50,7 +50,7 @@ func (f *fakePublisher) PublishMsg(_ context.Context, msg *nats.Msg) error {
 
 func TestMobileEmitter_PublishesRawJSONBatch(t *testing.T) {
 	pub := &fakePublisher{}
-	em := newMobileEmitter(pub, "site-a", 0)
+	em := newMobileEmitter(pub, "chat.server.notification.push.site-a", 0)
 	evt := model.PushNotificationEvent{
 		ID:       "m1-b0",
 		Accounts: []string{"alice", "bob"},
@@ -73,14 +73,14 @@ func TestMobileEmitter_PublishesRawJSONBatch(t *testing.T) {
 
 func TestMobileEmitter_PropagatesError(t *testing.T) {
 	pub := &fakePublisher{failNext: errors.New("nats: full")}
-	em := newMobileEmitter(pub, "site-a", 0)
+	em := newMobileEmitter(pub, "chat.server.notification.push.site-a", 0)
 	err := em.Emit(context.Background(), model.PushNotificationEvent{ID: "m1-b0", Accounts: []string{"bob"}})
 	assert.Error(t, err)
 }
 
 func TestMobileEmitter_RejectsOversizedBatch(t *testing.T) {
 	pub := &fakePublisher{}
-	em := newMobileEmitter(pub, "site-a", 64) // absurdly low cap to force rejection
+	em := newMobileEmitter(pub, "chat.server.notification.push.site-a", 64) // absurdly low cap to force rejection
 	err := em.Emit(context.Background(), model.PushNotificationEvent{
 		ID:       "m1-b0",
 		Accounts: []string{"alice", "bob", "carol", "dave"},

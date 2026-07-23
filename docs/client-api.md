@@ -6947,6 +6947,171 @@ This endpoint is intended for **server-to-server use**; bot SDKs do not call it 
 
 ---
 
+### 10.3 Bot HTTP endpoints — routing model
+
+The 5 bot endpoints below all resolve to a target site before forwarding to
+`bot-msg-handler` / `bot-room-service` over NATS. BP reads the bot's local
+Mongo subscription for the operation's key (`roomID` for room-scoped ops,
+`otherAccount` for DMs) and forwards to the site the subscription's
+`siteId` names. **The message canonical stream, Cassandra write, and any
+local `sysmsg` all happen at the room's home site** — the same rule the
+user pipeline follows via `chat.user.{account}.request.room.{roomID}.{siteID}.…`.
+
+| Endpoint | Sub lookup | Site the RPC runs at | Missing sub |
+|---|---|---|---|
+| `POST /rooms/:roomID/messages` | `(bot, roomID)` | `sub.siteId` | 403 `not_a_room_member` |
+| `POST /dms/:userID/messages` | `(bot, otherAccount)` | `sub.siteId`; else BP's own site (first-DM auto-created there) | Triggers DM-ensure at BP's own site |
+| `POST /rooms` | n/a — creating | BP's own site (new rooms live where the creator lives) | n/a |
+| `POST /rooms/:roomID/members` | `(bot, roomID)` | `sub.siteId` | 403 `not_a_room_member` |
+| `DELETE /rooms/:roomID/members` | `(bot, roomID)` | `sub.siteId` | 403 `not_a_room_member` |
+
+All 5 endpoints require an authenticated bot session via `X-User-Id` +
+`X-Auth-Token` (see §10.1). Per-caller and global token-bucket rate
+limits apply (Valkey `IncrEx`); an idempotency sentinel keyed on
+`(siteID, endpoint, opID)` (Valkey `SetNX`) rejects duplicates inside
+its TTL window (30 s for message flow, 60 s for room management).
+Request bodies are capped at 96 KiB; oversized payloads are rejected
+during read via `http.MaxBytesReader`.
+
+---
+
+### 10.4 HTTP — POST /api/v1/rooms/:roomID/messages
+
+**Endpoint:** `POST /api/v1/rooms/:roomID/messages`
+**Reply:** synchronous HTTP response
+
+Sends a message into an existing room the bot is a member of. Returns
+the canonical `Message` document that landed on
+`BOT_MESSAGES_CANONICAL_{sub.siteId}`.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `content` | string | yes | 1 ≤ length ≤ 20 KiB (bytes). Empty rejected as `content_invalid`. |
+| `mentions` | `Participant[]` | no | Server re-canonicalises against the users collection; any mention not a room member rejects the whole request. |
+| `card` | `Card` | no | Optional AdaptiveCard payload (same shape as user messages). |
+| `threadParentMessageId` | string | no | If set, this is a thread reply. |
+| `threadParentMessageCreatedAt` | timestamp | no | Optional; server re-resolves if absent. |
+| `tshow` | boolean | no | Only meaningful when `threadParentMessageId` is set. |
+
+Attachments are rejected as `unknown_field` — bots send text and cards only.
+
+#### Success response
+
+`HTTP 200` — the canonical `Message` document.
+
+#### Error response
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `content_invalid` | Empty / oversized content, malformed JSON, empty body. |
+| 400 | `bad_request` | `unknown_field` | Body contained a field not in the schema (e.g. `attachments`). |
+| 400 | `bad_request` | `mention_invalid` | A mention userId is missing or not a room member. |
+| 400 | `bad_request` | `invalid_header` | Missing / malformed `X-Bot-Identity` (BP wiring bug). |
+| 401 | `unauthenticated` | `invalid_token` | Session token missing / hash unknown / lacks bot role. |
+| 403 | `forbidden` | `not_a_room_member` | Bot has no subscription to `roomID`. |
+| 404 | `not_found` | `room_not_found` | Room disappeared between subscription lookup and forward. |
+| 409 | `conflict` | `in_flight` | Duplicate op detected inside the idempotency window. |
+| 429 | `resource_exhausted` | `rate_limited_caller` \| `rate_limited_global` | Per-caller or global RPM cap exceeded. |
+| 503 | `unavailable` | `handler_timeout` | Downstream NATS request timed out (3 s budget). |
+
+---
+
+### 10.5 HTTP — POST /api/v1/dms/:userID/messages
+
+**Endpoint:** `POST /api/v1/dms/:userID/messages`
+**Reply:** synchronous HTTP response
+
+Sends a DM to `userID` (the counterparty's user ID). First-time DM
+auto-creates the room at BP's own site with a deterministic ID from
+`idgen.BuildDMRoomID(botID, otherID)` — both parties converge on the
+same `_id` if they race. Subsequent messages route to the room's home
+site via subscription lookup.
+
+Request body: identical to §10.4.
+Success response: identical to §10.4.
+
+Error response: identical to §10.4 with these additions:
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `cannot_dm_self` | Target user is the bot itself. |
+| 404 | `not_found` | `dm_target_not_found` | Counterparty user does not exist at any site. |
+| 503 | `unavailable` | `dm_ensure_unavailable` | DM-ensure client wiring gap. |
+
+---
+
+### 10.6 HTTP — POST /api/v1/rooms
+
+**Endpoint:** `POST /api/v1/rooms`
+**Reply:** synchronous HTTP response
+
+Creates a new channel room at BP's own site with the bot as owner.
+Optional seed members / orgs. For remote members, subscriptions federate
+through OUTBOX → inbox-worker at their home site.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | Room name; empty rejected as `content_invalid`. |
+| `topic` | string | no | Optional room topic. |
+| `members` | string[] | no | Seed user IDs. Max 100. |
+| `orgs` | string[] | no | Seed org IDs. Max 5. Org expansion not yet supported (rejected as `unsupported`). |
+
+#### Success response
+
+`HTTP 200` — endpoint-specific envelope from `bot-room-service` passed
+through verbatim: `{ id, name, owner, members[], createdAt }`.
+
+#### Error response
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `content_invalid` | Missing name, malformed body. |
+| 400 | `bad_request` | `batch_too_large` | `members` > 100 or `orgs` > 5. |
+| 400 | `bad_request` | `unsupported` | Non-empty `orgs` (Phase 3+). |
+| 409 | `conflict` | `room_exists` | Deterministic room ID collision. |
+| 429 / 503 | | | Same as §10.4. |
+
+---
+
+### 10.7 HTTP — POST /api/v1/rooms/:roomID/members and DELETE /api/v1/rooms/:roomID/members
+
+**Endpoints:**
+- `POST   /api/v1/rooms/:roomID/members` — add members
+- `DELETE /api/v1/rooms/:roomID/members` — remove members
+
+Both operate on the same body shape and follow the room-anchored
+routing rule (§10.3): the RPC runs at the room's home site and OUTBOX
+federates the subscription delta to each affected remote site.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `userIds` | string[] | at least one of `userIds` / `orgIds` non-empty | Max 100. |
+| `orgIds` | string[] | | Max 5. Not yet supported (rejected as `unsupported`). |
+
+#### Success response
+
+`HTTP 200` — endpoint-specific envelope from `bot-room-service`:
+- add: `{ "added": { "userIds": [...], "orgIds": [...] } }`
+- remove: `{ "removed": { "userIds": [...], "orgIds": [...] } }`
+
+#### Error response
+
+Same catalogue as §10.4 plus:
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 403 | `forbidden` | `not_a_room_owner` | Caller is not the room's owning bot. |
+| 403 | `forbidden` | `cannot_remove_self` | Bot cannot remove itself from its own room. |
+| 404 | `not_found` | `member_not_found` | A user in `userIds` does not exist. |
+
+---
+
 ## 11. tcard-service
 
 Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client publishes new templates (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.

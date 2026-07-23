@@ -3,7 +3,7 @@ services:
     image: nats:2.11-alpine
     command: ["-c", "/etc/nats/nats.conf"]
     volumes:
-      - ./test/nats/nats-site1.conf:/etc/nats/nats.conf:ro
+      - ../test/nats/nats-site1.conf:/etc/nats/nats.conf:ro
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -12,7 +12,7 @@ services:
     image: nats:2.11-alpine
     command: ["-c", "/etc/nats/nats.conf"]
     volumes:
-      - ./test/nats/nats-site2.conf:/etc/nats/nats.conf:ro
+      - ../test/nats/nats-site2.conf:/etc/nats/nats.conf:ro
     ports:
       - "4223:4222"
       - "8223:8222"
@@ -24,13 +24,15 @@ services:
 
   broadcast-worker:
     build:
-      context: ../..
-      dockerfile: broadcast-worker/deploy/Dockerfile
+      context: ../../..
+      dockerfile: broadcast-worker/deploy/user/Dockerfile
     environment:
       - NATS_URL=nats://nats_site1:4222
       - SITE_ID=site1
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      - INPUT_STREAM=MESSAGES_CANONICAL_site1
+      - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.>
     depends_on:
       - nats_site1
       - mongodb

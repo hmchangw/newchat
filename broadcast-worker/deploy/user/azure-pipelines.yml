@@ -61,7 +61,7 @@ stages:
               containerRegistry: '$(containerRegistry)'
               repository: 'chat/$(SERVICE_NAME)'
               command: 'buildAndPush'
-              Dockerfile: '$(SERVICE_NAME)/deploy/Dockerfile'
+              Dockerfile: '$(SERVICE_NAME)/deploy/user/Dockerfile'
               buildContext: '.'
               tags: |
                 $(Build.BuildId)

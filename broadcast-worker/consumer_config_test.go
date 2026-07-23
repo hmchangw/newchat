@@ -17,9 +17,10 @@ func TestBuildConsumerConfig(t *testing.T) {
 			MaxDeliver:    5,
 			MaxWaiting:    512,
 			MaxAckPending: 1000,
-		})
+		}, "broadcast-worker", "chat.msg.canonical.site-a.>")
 
 		assert.Equal(t, "broadcast-worker", cc.Durable)
+		assert.Equal(t, "chat.msg.canonical.site-a.>", cc.FilterSubject)
 		assert.Equal(t, 1000, cc.MaxAckPending)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
@@ -34,12 +35,24 @@ func TestBuildConsumerConfig(t *testing.T) {
 			MaxDeliver:    3,
 			MaxWaiting:    256,
 			MaxAckPending: 250,
-		})
+		}, "broadcast-worker", "chat.msg.canonical.site-a.>")
 
 		assert.Equal(t, "broadcast-worker", cc.Durable)
 		assert.Equal(t, 250, cc.MaxAckPending)
 		assert.Equal(t, 45*time.Second, cc.AckWait)
 		assert.Equal(t, 3, cc.MaxDeliver)
 		assert.Equal(t, 256, cc.MaxWaiting)
+	})
+
+	t.Run("durable and filter subject are env-driven", func(t *testing.T) {
+		cc := buildConsumerConfig(stream.ConsumerSettings{
+			AckWait:       30 * time.Second,
+			MaxDeliver:    5,
+			MaxWaiting:    512,
+			MaxAckPending: 1000,
+		}, "bot-broadcast-worker", "chat.bot.msg.canonical.site-a.>")
+
+		assert.Equal(t, "bot-broadcast-worker", cc.Durable)
+		assert.Equal(t, "chat.bot.msg.canonical.site-a.>", cc.FilterSubject)
 	})
 }

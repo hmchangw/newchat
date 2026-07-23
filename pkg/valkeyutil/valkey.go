@@ -1,10 +1,5 @@
-// Package valkeyutil provides thin connection + JSON helpers around the
-// Valkey (Redis-compatible) client. Modeled on pkg/mongoutil so services
-// get a one-call Connect + Disconnect pair plus typed get/set helpers for
-// the common JSON-over-Valkey pattern.
-//
-// The underlying client is go-redis/v9 — Valkey is wire-compatible with
-// Redis so no Valkey-specific driver is needed.
+// Package valkeyutil provides thin connection + JSON helpers around the Valkey (Redis-compatible)
+// client, modeled on pkg/mongoutil. Uses go-redis/v9 — Valkey is wire-compatible so no separate driver is needed.
 package valkeyutil
 
 import (
@@ -19,11 +14,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Client is the interface exposed by ConnectCluster. Tests can substitute
-// their own implementation without depending on go-redis directly.
+// Client is the interface exposed by ConnectCluster. Tests can substitute their own implementation without depending on go-redis directly.
 type Client interface {
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
+	// SetNX atomically sets key to value with ttl iff key is absent: (true,nil) acquired,
+	// (false,nil) refused, (false,err) transport failure. ttl must be > 0 — a zero ttl stores without expiry.
+	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
+	// IncrEx atomically increments key by 1, returning the post-increment count. ttl applies only
+	// on the 0->1 transition (standard fixed-window rate-limit recipe), via INCR + conditional EXPIRE.
+	IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Del(ctx context.Context, keys ...string) error
 	Close() error
 }
@@ -35,8 +35,7 @@ type clusterClient struct {
 	c *redis.ClusterClient
 }
 
-// ConnectCluster dials a Valkey cluster via the provided seed addresses,
-// verifies connectivity with PING, and returns a Client.
+// ConnectCluster dials a Valkey cluster via the provided seed addresses, verifies connectivity with PING, and returns a Client.
 func ConnectCluster(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
 	c := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:    addrs,
@@ -51,8 +50,7 @@ func ConnectCluster(ctx context.Context, addrs []string, password string, opts .
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := c.Ping(pingCtx).Err(); err != nil {
-		// Close the half-constructed client on the ping-failure path so
-		// unreachable addrs don't leak internal go-redis pool state.
+		// Close the half-constructed client on the ping-failure path so unreachable addrs don't leak internal go-redis pool state.
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed connect", "error", closeErr)
 		}
@@ -62,10 +60,8 @@ func ConnectCluster(ctx context.Context, addrs []string, password string, opts .
 	return &clusterClient{c: c}, nil
 }
 
-// instrumentCluster attaches o11y/redis tracing and metrics hooks to c when
-// observability is configured. o11yredis.Wrap mutates the client in place
-// (adding hooks) and is idempotent, registering its own metrics teardown via a
-// runtime cleanup — so Disconnect needs no extra handling.
+// instrumentCluster attaches o11y/redis tracing+metrics hooks when observability is configured.
+// o11yredis.Wrap mutates the client in place and is idempotent, registering its own teardown — Disconnect needs no extra handling.
 func instrumentCluster(c *redis.ClusterClient, cc connectConfig) error {
 	if cc.obs == nil {
 		return nil
@@ -76,9 +72,8 @@ func instrumentCluster(c *redis.ClusterClient, cc connectConfig) error {
 	return nil
 }
 
-// WrapClusterClient wraps a pre-built *redis.ClusterClient as a Client.
-// Intended for tests that need to inject a client configured with a
-// ClusterSlots override (testcontainer port-mapping workaround).
+// WrapClusterClient wraps a pre-built *redis.ClusterClient as a Client; intended for tests that
+// need a client configured with a ClusterSlots override (testcontainer port-mapping workaround).
 func WrapClusterClient(c *redis.ClusterClient) Client {
 	return &clusterClient{c: c}
 }
@@ -111,6 +106,32 @@ func (r *clusterClient) Set(ctx context.Context, key, value string, ttl time.Dur
 	return nil
 }
 
+func (r *clusterClient) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	// SetArgs with Mode:"NX" replaces deprecated SetNX; redis.Nil = refusal, surfaced as (false, nil).
+	res, err := r.c.SetArgs(ctx, key, value, redis.SetArgs{Mode: "NX", TTL: ttl}).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("valkey set nx: %w", err)
+	}
+	return res == "OK", nil
+}
+
+func (r *clusterClient) IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	n, err := r.c.Incr(ctx, key).Result()
+	if err != nil {
+		return 0, fmt.Errorf("valkey incr: %w", err)
+	}
+	if n == 1 && ttl > 0 {
+		// Only the 0->1 caller sets TTL; failure would let the key persist past the window, so surface it.
+		if err := r.c.Expire(ctx, key, ttl).Err(); err != nil {
+			return n, fmt.Errorf("valkey incr expire: %w", err)
+		}
+	}
+	return n, nil
+}
+
 func (r *clusterClient) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
@@ -125,10 +146,8 @@ func (r *clusterClient) Close() error {
 	return r.c.Close()
 }
 
-// GetJSON reads `key` from Valkey and unmarshals the stored JSON into
-// `out`. Returns ErrCacheMiss (wrapped) if the key is not set so callers
-// can `errors.Is` it; all other failures (transport, malformed JSON) wrap
-// as "valkey get json: …".
+// GetJSON reads `key` from Valkey and unmarshals the stored JSON into `out`. Returns ErrCacheMiss
+// (wrapped, errors.Is-able) if unset; other failures wrap as "valkey get json: …".
 func GetJSON(ctx context.Context, client Client, key string, out any) error {
 	raw, err := client.Get(ctx, key)
 	if err != nil {
@@ -140,8 +159,7 @@ func GetJSON(ctx context.Context, client Client, key string, out any) error {
 	return nil
 }
 
-// SetJSONWithTTL marshals `value` to JSON and stores it under `key` with
-// the given TTL. Zero ttl stores the key without expiry.
+// SetJSONWithTTL marshals `value` to JSON and stores it under `key` with the given TTL. Zero ttl stores the key without expiry.
 func SetJSONWithTTL(ctx context.Context, client Client, key string, value any, ttl time.Duration) error {
 	data, err := json.Marshal(value)
 	if err != nil {

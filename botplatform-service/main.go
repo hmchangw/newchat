@@ -16,9 +16,11 @@ import (
 
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 func main() {
@@ -53,11 +55,51 @@ func run() error {
 	}
 
 	db := mongoClient.Database(cfg.MongoDB)
-	if err := session.NewMongoStore(db).EnsureIndexes(ctx); err != nil {
+	sessionStore := session.NewMongoStore(db)
+	if err := sessionStore.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure session indexes: %w", err)
 	}
 	st := newStoreMongo(db)
+	subStore := newMongoSubscriptionStore(db)
 	h := newHandler(st, &cfg)
+	h.subs = subStore
+
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	if err != nil {
+		return fmt.Errorf("connect nats: %w", err)
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("init jetstream: %w", err)
+	}
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+		return fmt.Errorf("bootstrap bot streams: %w", err)
+	}
+
+	// 3s msg-flow timeout; bot-msg-handler receives req/reply on the shared NATS conn.
+	h.forwarder = newBotForwarder(nc.NatsConn(), 3*time.Second)
+	// 15s DM-ensure timeout (room-mgmt budget) — first-DM creates room + federates member_added.
+	h.dmEnsurer = newNATSDMEnsurer(nc.NatsConn(), cfg.SiteID, 15*time.Second)
+
+	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency (dev only; prod must supply).
+	var valkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		valkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if err != nil {
+			return fmt.Errorf("connect valkey: %w", err)
+		}
+		slog.Info("bot rate-limit + idempotency enabled",
+			"per_caller_per_min", cfg.BotRateLimitPerCallerPerMin,
+			"global_per_min", cfg.BotRateLimitGlobalPerMin,
+			"msg_ttl", cfg.BotIdempotencyMsgTTL,
+			"room_mgmt_ttl", cfg.BotIdempotencyRoomMgmtTTL,
+		)
+	} else {
+		slog.Warn("bot rate-limit + idempotency DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -67,6 +109,7 @@ func run() error {
 	r.Use(ginutil.RequestID())
 	r.Use(accessLogMiddleware())
 	registerRoutes(r, h)
+	registerBotRoutes(r, sessionStore, valkey, &cfg, h)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
@@ -88,6 +131,10 @@ func run() error {
 			func(ctx context.Context) error {
 				slog.Info("shutting down botplatform-service")
 				err := srv.Shutdown(ctx)
+				if drainErr := nc.Drain(); drainErr != nil {
+					slog.Warn("nats drain failed", "error", drainErr)
+				}
+				valkeyutil.Disconnect(valkey)
 				mongoutil.Disconnect(ctx, mongoClient)
 				return err
 			},

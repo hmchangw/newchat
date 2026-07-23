@@ -1,4 +1,4 @@
-COMPOSE ?= docker compose -f docker-compose.test.yml
+COMPOSE ?= docker compose -f user/docker-compose.test.yml
 
 .PHONY: up seed send verify down logs
 

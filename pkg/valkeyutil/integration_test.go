@@ -56,3 +56,39 @@ func TestClusterRedisClient_Integration_DelEmpty(t *testing.T) {
 
 	require.NoError(t, client.Del(ctx))
 }
+
+// TestClusterRedisClient_Integration_SetNX: first caller acquires; second is refused; value preserved.
+func TestClusterRedisClient_Integration_SetNX(t *testing.T) {
+	client := setupClusterClient(t)
+	ctx := context.Background()
+
+	acquired, err := client.SetNX(ctx, "sentinel", "first", time.Hour)
+	require.NoError(t, err)
+	assert.True(t, acquired, "unset key must be acquired")
+
+	acquired, err = client.SetNX(ctx, "sentinel", "second", time.Hour)
+	require.NoError(t, err)
+	assert.False(t, acquired, "already-set key must be refused")
+
+	got, err := client.Get(ctx, "sentinel")
+	require.NoError(t, err)
+	assert.Equal(t, "first", got, "existing value must be preserved on NX refusal")
+}
+
+// TestClusterRedisClient_Integration_IncrEx: fixed-window recipe against real Valkey.
+func TestClusterRedisClient_Integration_IncrEx(t *testing.T) {
+	client := setupClusterClient(t)
+	ctx := context.Background()
+
+	n, err := client.IncrEx(ctx, "rl:alice", 10*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	n, err = client.IncrEx(ctx, "rl:alice", 10*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+
+	n, err = client.IncrEx(ctx, "rl:alice", 10*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), n)
+}

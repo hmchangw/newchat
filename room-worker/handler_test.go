@@ -5958,6 +5958,14 @@ func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
 }
 func (f *fakeBustClient) Close() error { return nil }
 
+// SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.
+func (f *fakeBustClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
+	panic("fakeBustClient.SetNX not implemented")
+}
+func (f *fakeBustClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
+	panic("fakeBustClient.IncrEx not implemented")
+}
+
 func TestHandler_bustRoomMeta_CallsDel(t *testing.T) {
 	fake := &fakeBustClient{}
 	h := &Handler{valkey: fake}

@@ -1947,3 +1947,79 @@ func TestHandler_UserSettingsUpdated_MalformedPayload(t *testing.T) {
 	require.Error(t, h.HandleEvent(context.Background(), evt))
 	assert.Empty(t, store.getSettingsUpdates())
 }
+
+// A bot-DM member_added at the target MUST upsert a subscription only, never a rooms doc
+// (DM origin lives at exactly one site). Subscription name comes from RequesterAccount.
+func TestHandleEvent_MemberAdded_BotDM_SubscriptionOnly(t *testing.T) {
+	store := &stubInboxStore{
+		users: []model.User{
+			{ID: "uid-alice", Account: "alice", SiteID: "site-a"},
+		},
+	}
+	h := NewHandler(store)
+
+	dmRoomID := "dmA_dmB_botroom"
+	change := model.MemberAddEvent{
+		Type:             "member_added",
+		RoomID:           dmRoomID,
+		RoomType:         model.RoomTypeBotDM,
+		Accounts:         []string{"alice"},
+		SiteID:           "site-b",
+		RequesterAccount: "myapp.bot",
+		JoinedAt:         time.Now().UnixMilli(),
+		Timestamp:        time.Now().UnixMilli(),
+	}
+	payload, err := json.Marshal(change)
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: "member_added", SiteID: "site-b", DestSiteID: "site-a", Payload: payload,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	subs := store.getSubscriptions()
+	require.Len(t, subs, 1, "one subscription created for the target user")
+	sub := subs[0]
+	assert.Equal(t, dmRoomID, sub.RoomID)
+	assert.Equal(t, model.RoomTypeBotDM, sub.RoomType, "target subscription must carry the botDM room type")
+	assert.Equal(t, "site-b", sub.SiteID, "subscription siteId points at DM origin (bot's site)")
+	assert.Equal(t, "myapp.bot", sub.Name, "DM subscription Name is the counterparty account")
+
+	// NO local rooms doc: DM origin lives at exactly one site.
+	rooms := store.getRooms()
+	assert.Empty(t, rooms, "target site must NOT materialize a rooms doc for a DM member_added")
+}
+
+func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
+	store := &stubInboxStore{
+		users: []model.User{
+			{ID: "uid-alice", Account: "alice", SiteID: "site-a"},
+		},
+	}
+	h := NewHandler(store)
+
+	change := model.MemberAddEvent{
+		Type:             "member_added",
+		RoomID:           "room-abc",
+		RoomType:         model.RoomTypeChannel,
+		RoomName:         "deployments",
+		Accounts:         []string{"alice"},
+		SiteID:           "site-b",
+		RequesterAccount: "myapp.bot",
+		JoinedAt:         time.Now().UnixMilli(),
+		Timestamp:        time.Now().UnixMilli(),
+	}
+	payload, err := json.Marshal(change)
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: "member_added", SiteID: "site-b", DestSiteID: "site-a", Payload: payload,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+	subs := store.getSubscriptions()
+	require.Len(t, subs, 1)
+	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
+	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
+}

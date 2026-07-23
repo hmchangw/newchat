@@ -33,8 +33,7 @@ func Rooms(siteID string) Config {
 	}
 }
 
-// PushNotification returns the PUSH_NOTIFICATION_{siteID} stream config.
-// Owned by ops in production; notification-worker bootstraps it in dev only.
+// PushNotification returns the PUSH_NOTIFICATION_{siteID} stream config; ops-owned in prod.
 func PushNotification(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("PUSH_NOTIFICATION_%s", siteID),
@@ -42,27 +41,8 @@ func PushNotification(siteID string) Config {
 	}
 }
 
-// Inbox returns the canonical config for the `INBOX_{siteID}` stream that
-// carries federation events for a site.
-//
-// The stream declares TWO non-overlapping subject patterns so the
-// internal (same-site) vs. external (cross-site) split is explicit in the
-// stream schema itself:
-//
-//   - `chat.inbox.{siteID}.internal.>`
-//     Local-origin publishes from same-site services (e.g., room-worker
-//     publishing `chat.inbox.{siteID}.internal.member_added`). This is a
-//     search-indexing feed only; inbox-worker does NOT consume it because the
-//     originating service already applied the change to the local DB.
-//
-//   - `chat.inbox.{siteID}.external.>`
-//     Remote-origin events published directly by a service at another site
-//     via a cross-supercluster JetStream publish to
-//     `chat.inbox.{siteID}.external.{eventType}`. inbox-worker consumes this
-//     lane and applies each event to the local DB.
-//
-// There is no Sources/SubjectTransform federation wiring: remote sites write
-// the external lane directly. Consumers only need Name + Subjects to bind.
+// Inbox returns the INBOX_{siteID} stream, with two non-overlapping lanes (internal same-site
+// search feed vs external cross-site) — no sourcing/SubjectTransform; remote sites publish the external lane directly.
 func Inbox(siteID string) Config {
 	return Config{
 		Name: fmt.Sprintf("INBOX_%s", siteID),
@@ -73,11 +53,7 @@ func Inbox(siteID string) Config {
 	}
 }
 
-// Outbox returns the OUTBOX_{siteID} stream config: the durable federation-relay
-// lane. room-service (and other same-site publishers) write OutboxEvents
-// on chat.outbox.{siteID}.{eventType}; outbox-worker consumes the stream and
-// forwards each target to the destination site's INBOX. Owned by outbox-worker
-// (dev bootstrap; ops/IaC in prod).
+// Outbox returns OUTBOX_{siteID}: durable federation-relay lane; outbox-worker owns bootstrap.
 func Outbox(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("OUTBOX_%s", siteID),
@@ -85,7 +61,7 @@ func Outbox(siteID string) Config {
 	}
 }
 
-// MigrationOplog returns the MIGRATION_OPLOG_{siteID} stream config: raw CDC events from the legacy source Mongo. Owned by the oplog-connector (dev bootstrap; ops/IaC in prod).
+// MigrationOplog returns MIGRATION_OPLOG_{siteID}: raw CDC events from legacy source Mongo.
 func MigrationOplog(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("MIGRATION_OPLOG_%s", siteID),
@@ -93,9 +69,24 @@ func MigrationOplog(siteID string) Config {
 	}
 }
 
-// OrgSyncStream is the HR_{centralSiteID} stream populated by hr-syncer's
-// daily publishes on chat.hr.{centralSiteID}.>. hr-syncer runs at one
-// central site; every fab site's search-sync-worker consumes from it.
+// BotMessagesCanonical returns BOT_MESSAGES_CANONICAL_{siteID}, published by bot-msg-handler.
+// Consumed by bot-msg-worker, bot-broadcast-worker, bot-notification-worker, search-sync-worker.
+func BotMessagesCanonical(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("BOT_MESSAGES_CANONICAL_%s", siteID),
+		Subjects: []string{subject.BotCanonicalWildcard(siteID)},
+	}
+}
+
+// BotPushNotif returns BOT_PUSH_NOTIF_{siteID}, isolated from user PUSH_NOTIFICATION so a bot-notification incident cannot touch user push delivery.
+func BotPushNotif(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("BOT_PUSH_NOTIF_%s", siteID),
+		Subjects: []string{subject.BotPushNotificationWildcard(siteID)},
+	}
+}
+
+// OrgSyncStream is HR_{centralSiteID}, populated daily by hr-syncer at the central site.
 func OrgSyncStream(centralSiteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("HR_%s", centralSiteID),

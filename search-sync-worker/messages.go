@@ -14,45 +14,59 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// parentCreatedAtResolver resolves a thread parent's authoritative createdAt;
-// ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
+// parentCreatedAtResolver resolves a thread parent's authoritative createdAt; ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
 type parentCreatedAtResolver interface {
 	ResolveParentCreatedAt(ctx context.Context, messageID string) (time.Time, bool)
 }
 
-// messageCollection implements Collection for message search sync.
-//
-// syncFrom is the SYNC_MESSAGES_FROM cutoff (UTC); a zero value disables
-// it. When set, BuildAction skips any event whose Message.CreatedAt
-// predates the cutoff. This is the legacy-migration filter: a migrator
-// replaying historical data into JetStream stamps evt.Timestamp at
-// publish-time, so we compare against the message's own CreatedAt to
-// reflect original data age. Only the messages collection has a cutoff —
-// spotlight and user-room remain unfiltered so a user can still discover
-// and search rooms they joined before the date.
+// messageCollection implements Collection for message search sync; streamCfg + consumerName are
+// parameterized so one type consumes user or bot canonical streams. syncFrom is the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
-	indexPrefix string
-	syncFrom    time.Time
-	devMode     bool
-	// parentResolver re-resolves the thread parent's createdAt from ES before
-	// indexing (search-service needs it for restricted-room access); nil disables it.
+	indexPrefix    string
+	syncFrom       time.Time
+	devMode        bool
+	streamCfg      func(siteID string) jetstream.StreamConfig
+	consumerName   string
 	parentResolver parentCreatedAtResolver
 }
 
+// newMessageCollection binds to the user MESSAGES_CANONICAL stream.
 func newMessageCollection(indexPrefix string, syncFrom time.Time, devMode bool) *messageCollection {
-	return &messageCollection{indexPrefix: indexPrefix, syncFrom: syncFrom, devMode: devMode}
-}
-
-func (c *messageCollection) StreamConfig(siteID string) jetstream.StreamConfig {
-	cfg := stream.MessagesCanonical(siteID)
-	return jetstream.StreamConfig{
-		Name:     cfg.Name,
-		Subjects: cfg.Subjects,
+	return &messageCollection{
+		indexPrefix:  indexPrefix,
+		syncFrom:     syncFrom,
+		devMode:      devMode,
+		streamCfg:    userMessagesStreamCfg,
+		consumerName: "message-sync",
 	}
 }
 
+// newBotMessageCollection binds to BOT_MESSAGES_CANONICAL and shares BuildAction with the user flow.
+func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollection {
+	return &messageCollection{
+		indexPrefix:  indexPrefix,
+		devMode:      devMode,
+		streamCfg:    botMessagesStreamCfg,
+		consumerName: "bot-message-sync",
+	}
+}
+
+func userMessagesStreamCfg(siteID string) jetstream.StreamConfig {
+	cfg := stream.MessagesCanonical(siteID)
+	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
+}
+
+func botMessagesStreamCfg(siteID string) jetstream.StreamConfig {
+	cfg := stream.BotMessagesCanonical(siteID)
+	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
+}
+
+func (c *messageCollection) StreamConfig(siteID string) jetstream.StreamConfig {
+	return c.streamCfg(siteID)
+}
+
 func (c *messageCollection) ConsumerName() string {
-	return "message-sync"
+	return c.consumerName
 }
 
 func (c *messageCollection) FilterSubjects(_ string) []string {
@@ -68,8 +82,7 @@ func (c *messageCollection) TemplateBody() json.RawMessage {
 	return messageTemplateBody(c.indexPrefix, c.devMode)
 }
 
-// StoredScripts returns nil — message indexing uses plain index/delete bulk
-// actions with no painless scripts.
+// StoredScripts returns nil — message indexing uses plain index/delete bulk actions with no painless scripts.
 func (c *messageCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
@@ -91,8 +104,7 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if !c.syncFrom.IsZero() && evt.Message.CreatedAt.Before(c.syncFrom) {
 		return nil, nil
 	}
-	// Reactions don't change indexed content; skip rather than re-upserting
-	// the same document with a bumped updatedAt.
+	// Reactions don't change indexed content; skip rather than re-upserting the same document with a bumped updatedAt.
 	if evt.Event == model.EventReacted {
 		return nil, nil
 	}
@@ -100,10 +112,8 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
 }
 
-// resolveThreadParentCreatedAt fills the parent createdAt for a thread reply.
-// The gatekeeper's best-effort resolution rides the canonical event and wins
-// when present; only re-resolve from the ES index when it is absent. No-op for
-// nil resolver/non-thread/delete; a miss leaves the field unset.
+// resolveThreadParentCreatedAt fills the parent createdAt for a thread reply; the gatekeeper's
+// value wins when present, else re-resolve from the ES index. No-op for nil resolver/non-thread/delete.
 func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent) {
 	if c.parentResolver == nil || evt.Message.ThreadParentMessageID == "" || evt.Event == model.EventDeleted {
 		return
@@ -118,20 +128,16 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 
 // --- Message-specific internals ---
 
-// MessageSearchIndex defines the Elasticsearch document structure for messages.
-// Fields mirror pkg/model.Message plus SiteID from the event envelope.
-// The `es` struct tag drives the index template mapping via messageTemplateProperties():
-//   - "keyword", "text", "date", "boolean" → ES field type
-//   - "text,custom_analyzer" → text field with named analyzer
-//
-// When adding fields to Message (pkg/model), add them here with an `es` tag
-// and populate them in newMessageSearchIndex(). The template auto-updates.
+// MessageSearchIndex is the Elasticsearch document for messages, mirroring pkg/model.Message; the
+// `es` struct tag (keyword/text/date/boolean, or text,custom_analyzer) drives the template — add new Message fields here with an `es` tag and populate them in newMessageSearchIndex().
 type MessageSearchIndex struct {
-	MessageID             string     `json:"messageId"                              es:"keyword"`
-	RoomID                string     `json:"roomId"                                 es:"keyword"`
-	SiteID                string     `json:"siteId"                                 es:"keyword"`
-	UserID                string     `json:"userId"                                 es:"keyword"`
-	UserAccount           string     `json:"userAccount"                            es:"keyword"`
+	MessageID   string `json:"messageId"                              es:"keyword"`
+	RoomID      string `json:"roomId"                                 es:"keyword"`
+	SiteID      string `json:"siteId"                                 es:"keyword"`
+	UserID      string `json:"userId"                                 es:"keyword"`
+	UserAccount string `json:"userAccount"                            es:"keyword"`
+	// IsBot flags bot-authored messages so search-service can filter/facet by source.
+	IsBot                 bool       `json:"isBot,omitempty"                        es:"boolean"`
 	Content               string     `json:"content,omitempty"                      es:"text,custom_analyzer"`
 	CreatedAt             time.Time  `json:"createdAt"                              es:"date"`
 	EditedAt              *time.Time `json:"editedAt,omitempty"                     es:"date"`
@@ -149,6 +155,7 @@ func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
 		SiteID:                evt.SiteID,
 		UserID:                evt.Message.UserID,
 		UserAccount:           evt.Message.UserAccount,
+		IsBot:                 model.IsBot(evt.Message.UserAccount),
 		Content:               evt.Message.Content,
 		CreatedAt:             evt.Message.CreatedAt,
 		EditedAt:              evt.Message.EditedAt,
@@ -166,8 +173,7 @@ func indexName(prefix string, createdAt time.Time) string {
 func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengine.BulkAction {
 	index := indexName(indexPrefix, evt.Message.CreatedAt)
 
-	// Only an explicit EventDeleted removes the doc; created/updated (and any
-	// unstamped legacy/replayed event) take the index upsert path.
+	// Only an explicit EventDeleted removes the doc; created/updated (and any unstamped legacy/replayed event) take the index upsert path.
 	if evt.Event == model.EventDeleted {
 		return searchengine.BulkAction{
 			Action:  searchengine.ActionDelete,
@@ -193,8 +199,7 @@ func buildDocument(evt *model.MessageEvent) json.RawMessage {
 	return data
 }
 
-// messageTemplateProperties generates ES mapping properties from
-// MessageSearchIndex struct tags. The `es` tag is the source of truth.
+// messageTemplateProperties generates ES mapping properties from MessageSearchIndex struct tags. The `es` tag is the source of truth.
 func messageTemplateProperties() map[string]any {
 	return esPropertiesFromStruct[MessageSearchIndex]()
 }
