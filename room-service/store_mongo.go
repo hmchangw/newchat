@@ -19,7 +19,8 @@ import (
 )
 
 // botAccountRegex matches bot/app accounts by the ".bot" suffix only — it excludes
-// "p_" platform-admin accounts, which have user records and are looked up as users here.
+// every "p_" account (both the "p_tchatadmin_" pseudo-account and QA test users),
+// all of which have user records and are looked up as users here.
 const botAccountRegex = `\.bot$`
 
 var botAccountPattern = regexp.MustCompile(botAccountRegex)
@@ -1503,8 +1504,9 @@ func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limi
 // roomID whose dash-joined keyword (account, engName, chineseName, app.name,
 // app.assistant.name) matches escapedFilter under case-insensitive regex.
 // excludeAccount is dropped at the $match stage so the caller never sees
-// themselves. Platform-admin / webhook accounts (`p_` prefix; see
-// platformAdminRegex) are also dropped — they are not mentionable.
+// themselves. The platform-admin pseudo-account (`p_tchatadmin_` prefix; see
+// platformAdminRegex) is also dropped — it is not mentionable; plain `p_` QA
+// test accounts are ordinary users and stay mentionable.
 // `.bot` accounts classify as `app` and emit a non-nil App + empty SiteID;
 // human accounts classify as `user` with a non-nil HRInfo. Orphan rows
 // (bot sub with no apps doc, or human sub with no users doc) return empty

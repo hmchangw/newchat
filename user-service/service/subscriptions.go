@@ -24,13 +24,6 @@ var validListTypes = map[string]bool{"current": true, "rooms": true, "apps": tru
 // heavily-federated ALL_SITE_IDS fans one request into N simultaneous 5s RPCs.
 const maxSiteFanout = 8
 
-// DM-target markers rejected by GetDM: platform/system accounts are prefixed
-// "p_" and bot accounts end in ".bot" — neither is a valid human DM counterpart.
-const (
-	dmTargetSystemPrefix = "p_"
-	dmTargetBotSuffix    = ".bot"
-)
-
 // deletedRoomNamePrefix marks a soft-deleted room (room-service renames it to
 // "Del-"+name); such rooms are surfaced on the subscription with no room object.
 const deletedRoomNamePrefix = "Del-"
@@ -496,7 +489,10 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	if req.AccountName == "" {
 		return nil, errcode.BadRequest("accountName required")
 	}
-	if strings.HasPrefix(req.AccountName, dmTargetSystemPrefix) || strings.HasSuffix(req.AccountName, dmTargetBotSuffix) {
+	// Real bots (".bot") and the platform-admin pseudo-account ("p_tchatadmin_")
+	// are botDM targets, not human DM counterparts. Plain "p_" QA test accounts
+	// are ordinary users and remain valid DM targets.
+	if model.IsBot(req.AccountName) || model.IsPlatformAdminAccount(req.AccountName) {
 		return nil, errcode.BadRequest("invalid DM target", errcode.WithReason(errcode.UserInvalidDMTarget))
 	}
 	dm, err := s.subs.GetDMSubscription(c, account, req.AccountName)

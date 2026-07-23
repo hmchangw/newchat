@@ -5,19 +5,22 @@ import (
 	"hash/fnv"
 	"html"
 	"net/url"
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 const svgTemplateVersion = "v1"
 
-// botPattern mirrors room-service / message-gatekeeper: an account is a bot if
-// it ends in ".bot" or begins with "p_".
-var botPattern = regexp.MustCompile(`\.bot$|^p_`)
-
-func isBot(account string) bool { return botPattern.MatchString(account) }
+// isBot reports whether account uses the bot avatar path (bot subject type,
+// no employee photo): real ".bot" bots and the "p_tchatadmin_" platform-admin
+// pseudo-account. Routed through the model taxonomy so plain "p_" QA test
+// accounts — ordinary users — are served via the user avatar path instead.
+func isBot(account string) bool {
+	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
+}
 
 var palette = []string{
 	"#1abc9c", "#2ecc71", "#3498db", "#9b59b6",

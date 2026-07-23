@@ -1625,9 +1625,10 @@ func TestIsBot(t *testing.T) {
 		want    bool
 	}{
 		{name: ".bot suffix", account: "helper.bot", want: true},
-		{name: "p_ prefix", account: "p_scheduler", want: true},
+		{name: "platform-admin pseudo-account", account: "p_tchatadmin_siteA", want: true},
 		{name: "another bot suffix", account: "scheduler.bot", want: true},
-		{name: "another p_ prefix", account: "p_webhook", want: true},
+		{name: "QA p_ account is an ordinary user", account: "p_webhook", want: false},
+		{name: "QA p_ scheduler is an ordinary user", account: "p_scheduler", want: false},
 		{name: "plain account", account: "alice", want: false},
 		{name: "contains bot but not suffix", account: "botmaster", want: false},
 		{name: "empty string", account: "", want: false},
@@ -1670,8 +1671,9 @@ func TestCanBypassLargeRoomCap(t *testing.T) {
 		{name: "admin + member bypasses", roles: []model.Role{model.RoleMember, model.RoleAdmin}, account: "alice", want: true},
 		{name: "empty roles, plain account", roles: nil, account: "alice", want: false},
 		{name: "bot account .bot suffix bypasses regardless of roles", roles: []model.Role{model.RoleMember}, account: "helper.bot", want: true},
-		{name: "bot account p_ prefix bypasses regardless of roles", roles: []model.Role{model.RoleMember}, account: "p_scheduler", want: true},
-		{name: "bot account with empty roles bypasses", roles: nil, account: "p_webhook", want: true},
+		{name: "platform-admin pseudo-account bypasses regardless of roles", roles: []model.Role{model.RoleMember}, account: "p_tchatadmin_siteA", want: true},
+		{name: "QA p_ member does not bypass (ordinary user)", roles: []model.Role{model.RoleMember}, account: "p_scheduler", want: false},
+		{name: "QA p_ with empty roles does not bypass", roles: nil, account: "p_webhook", want: false},
 		{name: "unknown role string with plain account", roles: []model.Role{"superuser"}, account: "alice", want: false},
 	}
 	for _, tc := range cases {

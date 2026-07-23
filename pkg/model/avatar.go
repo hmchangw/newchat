@@ -18,7 +18,7 @@ type Avatar struct {
 	ID          string            `json:"id"          bson:"_id"`
 	SubjectType AvatarSubjectType `json:"subjectType" bson:"subjectType"`
 	// SubjectID is the id the service looks the subject up by:
-	//   room → roomID;  bot → bot account (".bot" / "p_…").
+	//   room → roomID;  bot → bot account (".bot" / "p_tchatadmin_…").
 	SubjectID   string    `json:"subjectId"   bson:"subjectId"`
 	MinioKey    string    `json:"minioKey"    bson:"minioKey"`
 	ContentType string    `json:"contentType" bson:"contentType"`

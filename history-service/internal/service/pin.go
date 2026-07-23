@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"regexp"
 	"time"
 
 	"github.com/hmchangw/chat/history-service/internal/models"
@@ -12,11 +11,12 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// botPattern matches bot account names. Equivalent rules live in room-service,
-// room-worker (regexp), broadcast-worker, message-gatekeeper, inbox-worker (HasSuffix/HasPrefix), pkg/pipelines (bson regex) — keep all in sync.
-var botPattern = regexp.MustCompile(`\.bot$|^p_`)
-
-func isBot(account string) bool { return botPattern.MatchString(account) }
+// isBot reports whether account is bot-like — a real ".bot" bot or the
+// "p_tchatadmin_" platform-admin pseudo-account — via the model taxonomy. Plain
+// "p_" QA test accounts are ordinary users and return false.
+func isBot(account string) bool {
+	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
+}
 
 // canBypassLargeRoomPin: owners, admins, bots bypass the large-room pin restriction.
 func canBypassLargeRoomPin(sub *model.Subscription) bool {

@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // messageLink builds the canonical deep link to a message from trusted inputs.
@@ -15,12 +16,9 @@ func messageLink(baseURL, roomID, messageID string) string {
 	return fmt.Sprintf("%s/%s/%s", strings.TrimRight(baseURL, "/"), roomID, messageID)
 }
 
-// botPattern matches account names treated as bots. Mirrors
-// room-service/helper.go:32. Promotion to a shared pkg/botid is a future
-// cleanup — keep both copies in sync if this regex changes here, since the
-// other copy is owned by a separate developer.
-var botPattern = regexp.MustCompile(`\.bot$|^p_`)
-
-// isBot returns true if an account name matches the bot naming pattern
-// (suffix `.bot` or prefix `p_`).
-func isBot(account string) bool { return botPattern.MatchString(account) }
+// isBot reports whether account is bot-like — a real ".bot" bot or the
+// "p_tchatadmin_" platform-admin pseudo-account — via the model taxonomy. Plain
+// "p_" QA test accounts are ordinary users and return false.
+func isBot(account string) bool {
+	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
+}

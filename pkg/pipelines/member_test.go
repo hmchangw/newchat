@@ -1,12 +1,36 @@
 package pipelines
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
+
+// TestBotOrPseudoAccountRegex pins the wire-side residual filter to the model
+// taxonomy: it must exclude ".bot" bots and the "p_tchatadmin_" platform-admin
+// pseudo-account, but ADMIT plain "p_" QA test accounts (ordinary users now).
+func TestBotOrPseudoAccountRegex(t *testing.T) {
+	assert.Equal(t, `(\.bot$|^p_tchatadmin_)`, botOrPseudoAccountRegex)
+	rx := regexp.MustCompile(botOrPseudoAccountRegex)
+	cases := []struct {
+		account string
+		match   bool
+	}{
+		{"weather.bot", true},
+		{"p_tchatadmin_siteA", true},
+		{"p_tchatadmin_", true},
+		{"p_qa1", false},
+		{"p_webhook", false},
+		{"p_", false},
+		{"alice", false},
+	}
+	for _, c := range cases {
+		assert.Equalf(t, c.match, rx.MatchString(c.account), "account %q", c.account)
+	}
+}
 
 func TestMatchCandidatesFilter(t *testing.T) {
 	t.Run("orgs and accounts produce three $or branches", func(t *testing.T) {

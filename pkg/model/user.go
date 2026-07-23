@@ -89,10 +89,21 @@ func IsPlatformAdmin(u *User) bool {
 	return false
 }
 
-// IsPlatformAdminAccount reports whether account is a platform-admin account
-// (a "p_" prefix).
+// IsPlatformAdminAccount reports whether account is the platform-admin
+// pseudo-account (a "p_tchatadmin_{siteID}" name, e.g. "p_tchatadmin_siteA").
+//
+// The "p_" prefix covers two distinct account types that must NOT be conflated:
+//   - Platform-admin pseudo-account ("p_tchatadmin_…") — bot-like: it has a user
+//     record (roles include "admin") but NO app and NO assistant. It counts into
+//     a room's appCount, is excluded from read-receipt floors and search
+//     indexing, cannot be a room owner, and a DM with it is a botDM. This
+//     predicate matches only this type.
+//   - QA test accounts (any other "p_…", e.g. "p_qa1", "p_webhook") — ordinary
+//     users, manually created: they count into userCount, participate in read
+//     floors, are indexed in search, and are DM'd as regular users. This
+//     predicate returns false for them.
 func IsPlatformAdminAccount(account string) bool {
-	return strings.HasPrefix(account, "p_")
+	return strings.HasPrefix(account, "p_tchatadmin_")
 }
 
 // HasLoginRole reports whether the role slice contains a role that may

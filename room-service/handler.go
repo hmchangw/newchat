@@ -872,11 +872,15 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, errRoomIDMismatch
 	}
 
-	// Explicitly listed bots are admitted (create-channel still rejects them).
-	// Each must resolve to an enabled app assistant and be same-site (the feed
-	// is site-local). Deduped so a repeated bot costs one validation.
+	// Explicitly listed ".bot" bots are admitted (create-channel still rejects
+	// them). Each must resolve to an enabled app assistant and be same-site (the
+	// feed is site-local). Deduped so a repeated bot costs one validation. The
+	// "p_tchatadmin_" platform-admin pseudo-account has NO app/assistant, so it
+	// is NOT validated here — it flows through as an ordinary candidate (its
+	// existence is enforced by validateMembershipRefs). QA "p_" accounts are
+	// plain users and likewise skip this loop.
 	for _, a := range dedup(req.Users) {
-		if !model.IsBot(a) && !model.IsPlatformAdminAccount(a) {
+		if !model.IsBot(a) {
 			continue
 		}
 		app, err := h.store.GetApp(ctx, a)

@@ -141,13 +141,16 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 func TestUserRoomCollection_BuildAction_SkipsBots(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
-	payload.Accounts = []string{"alice", "weather.bot", "p_hook"}
+	// Real bots and the platform-admin pseudo-account are skipped; QA p_
+	// accounts are ordinary users and DO enter the user-room index.
+	payload.Accounts = []string{"alice", "weather.bot", "p_tchatadmin_siteA", "p_qa1"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
-	require.Len(t, actions, 1, "bot and pseudo accounts must not enter the user-room index")
-	assert.Equal(t, "alice", actions[0].DocID)
+	require.Len(t, actions, 2, "bots and the platform-admin pseudo-account must not enter the user-room index")
+	docIDs := []string{actions[0].DocID, actions[1].DocID}
+	assert.ElementsMatch(t, []string{"alice", "p_qa1"}, docIDs)
 }
 
 func TestUserRoomCollection_BuildAction_AllBots_NoActions(t *testing.T) {
