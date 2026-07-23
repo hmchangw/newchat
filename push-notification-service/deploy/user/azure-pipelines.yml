@@ -5,7 +5,7 @@ trigger:
       - develop
   paths:
     include:
-      - push-service/
+      - push-notification-service/
       - pkg/
 
 pr:
@@ -14,13 +14,12 @@ pr:
       - main
   paths:
     include:
-      - push-service/
+      - push-notification-service/
       - pkg/
 
 variables:
   GO_VERSION: '1.25.12'
-  SERVICE_NAME: push-service
-  IMAGE_NAME: bot-push-service
+  SERVICE_NAME: push-notification-service
   REGISTRY: '$(containerRegistry)'
 
 stages:
@@ -60,11 +59,11 @@ stages:
           - task: Docker@2
             inputs:
               containerRegistry: '$(containerRegistry)'
-              repository: 'chat/$(IMAGE_NAME)'
+              repository: 'chat/$(SERVICE_NAME)'
               command: 'buildAndPush'
-              Dockerfile: '$(SERVICE_NAME)/deploy/bot/Dockerfile'
+              Dockerfile: '$(SERVICE_NAME)/deploy/user/Dockerfile'
               buildContext: '.'
               tags: |
                 $(Build.BuildId)
                 latest
-            displayName: 'Build & push $(IMAGE_NAME)'
+            displayName: 'Build & push $(SERVICE_NAME)'

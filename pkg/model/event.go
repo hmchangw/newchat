@@ -261,7 +261,7 @@ type MemberAddEvent struct {
 
 // Participant represents a user with display name info for client rendering.
 // DisplayName is the render-ready composed name (see pkg/displayfmt.CombineWithFallback)
-// and is the field push-service uses to render notifications; it is populated only
+// and is the field push-notification-service uses to render notifications; it is populated only
 // where pre-composition is meaningful (push event senders), left empty in
 // fan-out shapes that carry raw EngName/ChineseName (mentions, ClientMessage).
 type Participant struct {

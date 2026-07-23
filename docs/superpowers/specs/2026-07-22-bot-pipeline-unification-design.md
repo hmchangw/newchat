@@ -6,7 +6,7 @@
 
 ## Context
 
-PR #109 introduced a parallel bot messaging pipeline. Three of its fan-out services (`bot-broadcast-worker`, `bot-notification-worker`, `bot-push-service`) reimplemented shrunken versions of the user pipeline's downstream services. Two consequences surfaced during review:
+PR #109 introduced a parallel bot messaging pipeline. Three of its fan-out services (`bot-broadcast-worker`, `bot-notification-worker`, `bot-push-notification-service`) reimplemented shrunken versions of the user pipeline's downstream services. Two consequences surfaced during review:
 
 1. **Feature gaps vs user pipeline:** bot broadcasts skip client-facing room-key encryption; bot notifications don't filter bot recipients; bot-room-service doesn't rotate room keys on member churn or fan out keys on add. If a bot-owned room contains human members (the point of bots), these gaps break parity with user rooms.
 2. **Structural duplication:** once we bring bot services to full behavioral parity with the user pipeline, the code is identical apart from which JetStream stream feeds it. Maintaining two copies is negative-value.
@@ -15,8 +15,8 @@ PR #109 introduced a parallel bot messaging pipeline. Three of its fan-out servi
 
 ## Goals
 
-- Delete `bot-broadcast-worker/` and `bot-notification-worker/`; rename `bot-push-service/` → `push-service/`.
-- Parameterize `broadcast-worker`, `notification-worker`, and `push-service` on stream/subject/consumer via env.
+- Delete `bot-broadcast-worker/` and `bot-notification-worker/`; rename `bot-push-notification-service/` → `push-notification-service/`.
+- Parameterize `broadcast-worker`, `notification-worker`, and `push-notification-service` on stream/subject/consumer via env.
 - Deploy each unified binary twice (user + bot); same image, different env overrides.
 - Bot pipeline adopts existing user-pipeline wire shapes verbatim — delete `model.BotNotification`.
 - Add room-key creation to bot-room-service on room-create and DM-ensure.
@@ -51,7 +51,7 @@ broadcast-worker/           # single binary
 
 notification-worker/        # same shape; adds OUTPUT_STREAM / OUTPUT_SUBJECT_PREFIX
 
-push-service/               # renamed from bot-push-service
+push-notification-service/               # renamed from bot-push-notification-service
 ```
 
 ### Config surface
@@ -66,9 +66,9 @@ Env vars added to each service's `Config` struct (via `caarlos0/env`):
 | notification-worker | (broadcast-worker's three) + | | |
 | notification-worker | `OUTPUT_STREAM` | `PUSH_NOTIF_<site>` | `BOT_PUSH_NOTIF_<site>` |
 | notification-worker | `OUTPUT_SUBJECT_PREFIX` | `chat.push.notification.<site>` | `chat.bot.notification.push.<site>` |
-| push-service | `INPUT_STREAM` | `PUSH_NOTIF_<site>` | `BOT_PUSH_NOTIF_<site>` |
-| push-service | `INPUT_SUBJECT_FILTER` | `chat.push.notification.<site>.>` | `chat.bot.notification.push.<site>.>` |
-| push-service | `CONSUMER_NAME` | `push-service` | `bot-push-service` |
+| push-notification-service | `INPUT_STREAM` | `PUSH_NOTIF_<site>` | `BOT_PUSH_NOTIF_<site>` |
+| push-notification-service | `INPUT_SUBJECT_FILTER` | `chat.push.notification.<site>.>` | `chat.bot.notification.push.<site>.>` |
+| push-notification-service | `CONSUMER_NAME` | `push-notification-service` | `bot-push-notification-service` |
 
 `SERVICE_NAME` env is already exported to OTel resource attributes by `pkg/obs.Init`; Grafana distinguishes deployments by `service.name`. Metric names stay uniform in code.
 
@@ -132,7 +132,7 @@ BP (HTTP) ──req/reply──> bot-msg-handler ──publish──> BOT_MESSAG
                                                            ├──> bot-msg-worker
                                                            └──> search-sync-worker (existing)
 
-                       BOT_PUSH_NOTIF ──> push-service[bot deployment] ──> Dispatcher (APNs/FCM)
+                       BOT_PUSH_NOTIF ──> push-notification-service[bot deployment] ──> Dispatcher (APNs/FCM)
 ```
 
 ## Testing strategy
@@ -143,7 +143,7 @@ BP (HTTP) ──req/reply──> bot-msg-handler ──publish──> BOT_MESSAG
 - New bot-room-service tests for the room-key lifecycle: `MockKeyStore` + `MockKeySender` on create/DM-ensure/add/remove.
 
 ### Integration tests
-- For each unified service (`broadcast-worker`, `notification-worker`, `push-service`), one new integration test running the handler against the bot canonical stream, asserting the same handler produces expected downstream events.
+- For each unified service (`broadcast-worker`, `notification-worker`, `push-notification-service`), one new integration test running the handler against the bot canonical stream, asserting the same handler produces expected downstream events.
 - `bot-room-service`: integration test that add-member fans out the current key to new members and remove-member rotates + fans out v+1 to survivors, hitting real `pkg/roomkeystore` on Mongo.
 
 ### Compatibility spot-checks
@@ -164,7 +164,7 @@ Each numbered slice is independently reviewable:
 3. **Delete `bot-broadcast-worker/`**, add `broadcast-worker/deploy/bot/`, update root `docker-compose.yml`.
 4. **Parameterize `notification-worker`** on `INPUT_STREAM` / `OUTPUT_STREAM` / `CONSUMER_NAME` env.
 5. **Delete `bot-notification-worker/` + `model.BotNotification`**, add `notification-worker/deploy/bot/`.
-6. **Rename `bot-push-service/` → `push-service/`**, parameterize on env, add `push-service/deploy/{user,bot}/`.
+6. **Rename `bot-push-notification-service/` → `push-notification-service/`**, parameterize on env, add `push-notification-service/deploy/{user,bot}/`.
 7. **Update `docs/superpowers/specs/2026-07-22-bot-cross-site-routing-design.md`** to reflect the unified architecture; update `docs/client-api.md` if any client-observable wire changes surface (expected: none, since push wire shape is server-internal).
 
 ## Rollback

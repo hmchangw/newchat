@@ -1,12 +1,12 @@
-name: push-service
+name: push-notification-service
 
 services:
-  push-service:
+  push-notification-service:
     build:
       context: ../../..
-      dockerfile: push-service/deploy/user/Dockerfile
+      dockerfile: push-notification-service/deploy/user/Dockerfile
     environment:
-      - OTEL_SERVICE_NAME=push-service
+      - OTEL_SERVICE_NAME=push-notification-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
@@ -16,7 +16,7 @@ services:
       # overrides these to bind the same binary to the bot pipeline instead.
       - INPUT_STREAM=PUSH_NOTIFICATION_site-local
       - INPUT_SUBJECT_FILTER=chat.server.notification.push.site-local.>
-      - CONSUMER_NAME=push-service
+      - CONSUMER_NAME=push-notification-service
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}

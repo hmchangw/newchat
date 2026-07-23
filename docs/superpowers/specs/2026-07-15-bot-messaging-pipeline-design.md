@@ -1,6 +1,6 @@
 # Bot Messaging Pipeline
 
-**Status:** Original design spec. Superseded for downstream fan-out services by [`2026-07-22-bot-pipeline-unification-design.md`](2026-07-22-bot-pipeline-unification-design.md) — `bot-broadcast-worker`, `bot-notification-worker`, and `bot-push-service` were removed and replaced by env-parameterized second deployments of `broadcast-worker`, `notification-worker`, and `push-service`; `model.BotNotification` was replaced by `model.PushNotificationEvent`. The bot HTTP ingress + `bot-msg-handler` + `bot-msg-worker` + `bot-room-service` sections remain accurate.
+**Status:** Original design spec. Superseded for downstream fan-out services by [`2026-07-22-bot-pipeline-unification-design.md`](2026-07-22-bot-pipeline-unification-design.md) — `bot-broadcast-worker`, `bot-notification-worker`, and `bot-push-notification-service` were removed and replaced by env-parameterized second deployments of `broadcast-worker`, `notification-worker`, and `push-notification-service`; `model.BotNotification` was replaced by `model.PushNotificationEvent`. The bot HTTP ingress + `bot-msg-handler` + `bot-msg-worker` + `bot-room-service` sections remain accurate.
 
 ## 1. Overview
 
@@ -95,7 +95,7 @@ bot-msg-worker  search-sync-worker    bot-broadcast-worker  bot-notification-wor
                                                     subject: chat.bot.notification.push.{siteID}.>
                                                                 │
                                                                 ▼
-                                                        bot-push-service (thin wrapper, APNs/FCM)
+                                                        bot-push-notification-service (thin wrapper, APNs/FCM)
 ```
 
 ### 4.2 Room management — create room / add member / remove member
@@ -281,7 +281,7 @@ Publishes push events **directly** to `BOT_PUSH_NOTIF_{siteID}` — no intermedi
 
 **Trade-off**: single-pod deployment means no HA — a pod crash pauses notification emission until the pod is rescheduled. Downstream persistence and broadcast continue (their workers have their own pods). Accepted trade-off inherited from user notification-worker convention.
 
-### 5.6 bot-push-service
+### 5.6 bot-push-notification-service
 
 Consumes `BOT_PUSH_NOTIF_{siteID}`, dispatches to APNs/FCM. Thin wrapper mirroring the user push notification service.
 
@@ -290,7 +290,7 @@ Consumes `BOT_PUSH_NOTIF_{siteID}`, dispatches to APNs/FCM. Thin wrapper mirrori
 | Deployment | 2 pods |
 | Consumer | Parallel pull, `MaxWorkers=100`, semaphore + `PullMaxMessages=200` (high-throughput pattern) |
 | Ordering | **Best-effort per-device**. See ordering note below. |
-| Consumer name | `bot-push-service` |
+| Consumer name | `bot-push-notification-service` |
 | Filter subject | `chat.bot.notification.push.{siteID}.>` |
 
 **Ordering — honest statement**: JetStream distributes messages randomly across the 2 pods via the queue group, so per-user in-process sharding within a pod cannot guarantee global per-recipient FIFO — the same recipient's pushes can land on different pods. This is an inherent property of the deployment shape.
@@ -680,7 +680,7 @@ No Valkey dependency: bot-msg-handler holds only an in-process LRU (60s TTL) for
 | `MAX_WORKERS` | `100` | |
 | `LOG_LEVEL` | `info` | |
 
-### 11.3 Workers (bot-msg-worker, bot-broadcast-worker, bot-notification-worker, bot-push-service)
+### 11.3 Workers (bot-msg-worker, bot-broadcast-worker, bot-notification-worker, bot-push-notification-service)
 
 Standard consumer config env vars per existing worker services: `NATS_URL`, `MAX_WORKERS=100`, `SITE_ID`, backend-specific config (Cassandra, Valkey, push credentials, etc.).
 
@@ -708,7 +708,7 @@ Standard consumer config env vars per existing worker services: `NATS_URL`, `MAX
 | Storage | File-backed |
 | Owning service (bootstrap) | `bot-notification-worker` |
 | Producer | `bot-notification-worker` publishes push events directly (no intermediate stream) |
-| Consumer | `bot-push-service` (thin wrapper, mirrors user push notification service) |
+| Consumer | `bot-push-notification-service` (thin wrapper, mirrors user push notification service) |
 
 ### 12.3 Reused streams (unchanged)
 
@@ -1073,7 +1073,7 @@ Sequenced phases; each is a separately-shippable milestone.
 | Phase | Work | Ships |
 |---|---|---|
 | 1 | `bot-platform-service` (session-token auth against Mongo `sessions` + rate-limit + idempotency middleware; passthrough handler stubs); NATS subject builders for `chat.server.bot.request.>`; stream bootstrap wiring | BP accepting requests, returning stub responses |
-| 2 | `bot-msg-handler` (send-to-room only, no DM yet); `bot-msg-worker` (origin-site Cassandra write only, no cross-site publish); `bot-broadcast-worker` (publishes to `subject.RoomEvent` / `subject.UserRoomEvent`; supercluster handles cross-site routing); `bot-notification-worker`; `bot-push-service`; search-sync-worker second consumer added | Send-to-room end-to-end functional in dev |
+| 2 | `bot-msg-handler` (send-to-room only, no DM yet); `bot-msg-worker` (origin-site Cassandra write only, no cross-site publish); `bot-broadcast-worker` (publishes to `subject.RoomEvent` / `subject.UserRoomEvent`; supercluster handles cross-site routing); `bot-notification-worker`; `bot-push-notification-service`; search-sync-worker second consumer added | Send-to-room end-to-end functional in dev |
 | 3 | `bot-room-service` (create-room, add-member/org, remove-member/org, DM-ensure, room.get); room management endpoints wired in BP; cross-site room-info fetch subject `chat.server.bot.request.room.*.get` | Room management ops functional; DM-ensure endpoint available |
 | 4 | Same-site DM support (bot-msg-handler DM path calls bot-room-service DM-ensure) | Same-site DMs functional |
 | 5 | Cross-site DM support: `inbox-worker` DM `member_added` handling upserts target-site subscription only (no local rooms doc; DM origin lives at bot's site) per §6.1 + §17; cross-site OUTBOX flow verified | Cross-site DMs functional |

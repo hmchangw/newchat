@@ -4,7 +4,7 @@
 
 **Goal:** Collapse three parallel bot fan-out services into env-parameterized single-binary two-deployment counterparts of the user pipeline, and fill the room-key lifecycle gap in bot-room-service so unified broadcast can encrypt bot messages.
 
-**Architecture:** For each of `broadcast-worker`, `notification-worker`, `push-service`: one binary reads `INPUT_STREAM` / `INPUT_SUBJECT_FILTER` / `CONSUMER_NAME` (+ `OUTPUT_STREAM` for notification-worker) from env, wires one JS consumer, and is deployed twice (user + bot) with different env overrides — same image. Delete `bot-broadcast-worker/`, `bot-notification-worker/`; rename `bot-push-service/` → `push-service/`. Bot pipeline adopts `model.PushNotificationEvent` verbatim; delete `model.BotNotification`. Bot-room-service gains room-key generation on create/DM-ensure, fan-out on add-member, rotation on remove-member.
+**Architecture:** For each of `broadcast-worker`, `notification-worker`, `push-notification-service`: one binary reads `INPUT_STREAM` / `INPUT_SUBJECT_FILTER` / `CONSUMER_NAME` (+ `OUTPUT_STREAM` for notification-worker) from env, wires one JS consumer, and is deployed twice (user + bot) with different env overrides — same image. Delete `bot-broadcast-worker/`, `bot-notification-worker/`; rename `bot-push-notification-service/` → `push-notification-service/`. Bot pipeline adopts `model.PushNotificationEvent` verbatim; delete `model.BotNotification`. Bot-room-service gains room-key generation on create/DM-ensure, fan-out on add-member, rotation on remove-member.
 
 **Tech Stack:** Go 1.25, `github.com/nats-io/nats.go/jetstream`, `caarlos0/env`, `pkg/roomkeystore`, `pkg/roomkeysender`, `go.uber.org/mock`, `stretchr/testify`, `testcontainers-go`.
 
@@ -25,7 +25,7 @@
 - `broadcast-worker/main_test.go` (or new `config_test.go`) — verify env wiring
 - `notification-worker/main.go` — env-driven INPUT + OUTPUT stream/subject/consumer
 - `notification-worker/main_test.go` — verify env wiring
-- `bot-push-service/*` → **rename** dir to `push-service/`; parameterize main.go on env
+- `bot-push-notification-service/*` → **rename** dir to `push-notification-service/`; parameterize main.go on env
 - Root `docker-compose.yml` — spin up both deployments of each unified service for local dev
 - `docs/superpowers/specs/2026-07-22-bot-cross-site-routing-design.md` — reflect unified architecture
 
@@ -33,7 +33,7 @@
 - `broadcast-worker/deploy/user/{Dockerfile, docker-compose.yml, azure-pipelines.yml}` — move existing files here
 - `broadcast-worker/deploy/bot/{Dockerfile, docker-compose.yml, azure-pipelines.yml}` — bot env
 - `notification-worker/deploy/user/…`, `notification-worker/deploy/bot/…`
-- `push-service/deploy/user/…`, `push-service/deploy/bot/…`
+- `push-notification-service/deploy/user/…`, `push-notification-service/deploy/bot/…`
 - `bot-room-service/keys.go` — thin helpers for key lifecycle (or inline in handler.go if trivial)
 - `bot-room-service/keys_test.go` — tests for the helpers
 
@@ -416,7 +416,7 @@ SERVICE_NAME: bot-notification-worker
 
 - [ ] **Step 3: Delete `bot-notification-worker/`** — `git rm -rf bot-notification-worker/`.
 
-- [ ] **Step 4: Delete `model.BotNotification`** — remove the type from `pkg/model/bot.go`. Grep repo for `model.BotNotification` and `BotNotification{` to ensure no remaining references outside bot-push-service (fixed in Task 9).
+- [ ] **Step 4: Delete `model.BotNotification`** — remove the type from `pkg/model/bot.go`. Grep repo for `model.BotNotification` and `BotNotification{` to ensure no remaining references outside bot-push-notification-service (fixed in Task 9).
 
 - [ ] **Step 5: Update root docker-compose.yml** to include both notification-worker deployments.
 
@@ -430,27 +430,27 @@ git commit -am "refactor(notification-worker): delete bot-notification-worker + 
 
 ---
 
-## Task 9: Rename bot-push-service → push-service; parameterize
+## Task 9: Rename bot-push-notification-service → push-notification-service; parameterize
 
 **Files:**
-- Rename: `bot-push-service/` → `push-service/`
-- Modify: `push-service/main.go` — env-driven INPUT stream/subject/consumer; consume `model.PushNotificationEvent`
-- Modify: `push-service/handler.go` — switch dispatcher wire type from `BotNotification` to `PushNotificationEvent`
-- Modify: `push-service/handler_test.go` — update fixtures
-- Create: `push-service/deploy/user/…`, `push-service/deploy/bot/…`
+- Rename: `bot-push-notification-service/` → `push-notification-service/`
+- Modify: `push-notification-service/main.go` — env-driven INPUT stream/subject/consumer; consume `model.PushNotificationEvent`
+- Modify: `push-notification-service/handler.go` — switch dispatcher wire type from `BotNotification` to `PushNotificationEvent`
+- Modify: `push-notification-service/handler_test.go` — update fixtures
+- Create: `push-notification-service/deploy/user/…`, `push-notification-service/deploy/bot/…`
 - Modify: root `docker-compose.yml`
 
 - [ ] **Step 1: Rename directory + Go module path**
 
 ```bash
-git mv bot-push-service push-service
-find push-service -name '*.go' -exec sed -i 's|bot-push-service|push-service|g' {} +
+git mv bot-push-notification-service push-notification-service
+find push-notification-service -name '*.go' -exec sed -i 's|bot-push-notification-service|push-notification-service|g' {} +
 ```
 
 - [ ] **Step 2: Switch handler wire type**
 
 ```go
-// push-service/handler.go
+// push-notification-service/handler.go
 type Dispatcher interface {
     Dispatch(ctx context.Context, evt *model.PushNotificationEvent) error
 }
@@ -468,7 +468,7 @@ if err := h.dispatcher.Dispatch(ctx, &evt); err != nil { … }
 ```go
 InputStream        string `env:"INPUT_STREAM"`
 InputSubjectFilter string `env:"INPUT_SUBJECT_FILTER"`
-ConsumerName       string `env:"CONSUMER_NAME" envDefault:"push-service"`
+ConsumerName       string `env:"CONSUMER_NAME" envDefault:"push-notification-service"`
 ```
 
 Replace hardcoded stream/subject/consumer in main.go.
@@ -480,18 +480,18 @@ Replace hardcoded stream/subject/consumer in main.go.
 ```yaml
 INPUT_STREAM: BOT_PUSH_NOTIF_site-a
 INPUT_SUBJECT_FILTER: chat.bot.notification.push.site-a.>
-CONSUMER_NAME: bot-push-service
-SERVICE_NAME: bot-push-service
+CONSUMER_NAME: bot-push-notification-service
+SERVICE_NAME: bot-push-notification-service
 ```
 
-- [ ] **Step 6: Update root docker-compose.yml** to include both push-service deployments.
+- [ ] **Step 6: Update root docker-compose.yml** to include both push-notification-service deployments.
 
 - [ ] **Step 7: Run full build + tests + lint** — `make fmt && make lint && make test`.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git commit -am "refactor(push-service): rename from bot-push-service; parameterize on env; consume PushNotificationEvent"
+git commit -am "refactor(push-notification-service): rename from bot-push-notification-service; parameterize on env; consume PushNotificationEvent"
 ```
 
 ---
@@ -499,7 +499,7 @@ git commit -am "refactor(push-service): rename from bot-push-service; parameteri
 ## Task 10: Docs update
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-07-22-bot-cross-site-routing-design.md` — replace `bot-broadcast-worker`/`bot-notification-worker`/`bot-push-service` references with unified `broadcast-worker[bot]`/`notification-worker[bot]`/`push-service[bot]` naming
+- Modify: `docs/superpowers/specs/2026-07-22-bot-cross-site-routing-design.md` — replace `bot-broadcast-worker`/`bot-notification-worker`/`bot-push-notification-service` references with unified `broadcast-worker[bot]`/`notification-worker[bot]`/`push-notification-service[bot]` naming
 - Verify: `docs/client-api.md` — push shape is server-internal; likely no client-visible wire change, but grep for `BotNotification` references
 
 - [ ] **Step 1: Update routing design doc** — sequence diagram + prose. Reflect unified architecture.
@@ -524,7 +524,7 @@ git commit -am "docs: update routing design + client-api references for unified 
 
 - [ ] **Step 4: Squash into logical commits** — target 2-4 commits max:
   1. `feat(bot-room-service): room key lifecycle (create/DM-ensure/add/remove)`
-  2. `refactor: unify broadcast + notification + push into single-binary two-deployment (delete bot-broadcast-worker + bot-notification-worker + BotNotification; rename bot-push-service→push-service; parameterize on env)`
+  2. `refactor: unify broadcast + notification + push into single-binary two-deployment (delete bot-broadcast-worker + bot-notification-worker + BotNotification; rename bot-push-notification-service→push-notification-service; parameterize on env)`
   3. `docs: unified pipeline design + routing refresh`
 
   Use interactive rebase or `git reset --soft origin/claude/bot-implementation-8d2ctl && git commit -m …` per group.
@@ -540,7 +540,7 @@ git commit -am "docs: update routing design + client-api references for unified 
 **Spec coverage** — walking the spec:
 - ✅ Delete `bot-broadcast-worker/` — Task 6
 - ✅ Delete `bot-notification-worker/` — Task 8
-- ✅ Rename `bot-push-service/` → `push-service/` — Task 9
+- ✅ Rename `bot-push-notification-service/` → `push-notification-service/` — Task 9
 - ✅ Parameterize each on env — Tasks 5, 7, 9
 - ✅ Two deployments per service — Tasks 6, 8, 9
 - ✅ Bot adopts `PushNotificationEvent`; delete `BotNotification` — Task 8, 9

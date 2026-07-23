@@ -27,25 +27,25 @@ func newHandler(d Dispatcher) *handler {
 func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	var evt model.PushNotificationEvent
 	if err := json.Unmarshal(msg.Data(), &evt); err != nil {
-		slog.ErrorContext(ctx, "push-service unmarshal — ack-drop",
+		slog.ErrorContext(ctx, "push-notification-service unmarshal — ack-drop",
 			"subject", msg.Subject(), "error", err)
 		_ = msg.Ack()
 		return
 	}
 	if err := h.dispatcher.Dispatch(ctx, &evt); err != nil {
 		if _, permanent := errcode.IsPermanent(err); permanent {
-			slog.WarnContext(ctx, "push-service permanent — ack-drop",
+			slog.WarnContext(ctx, "push-notification-service permanent — ack-drop",
 				"id", evt.ID, "roomID", evt.RoomID, "error", err)
 			_ = msg.Ack()
 			return
 		}
-		slog.WarnContext(ctx, "push-service transient — nak",
+		slog.WarnContext(ctx, "push-notification-service transient — nak",
 			"id", evt.ID, "roomID", evt.RoomID, "error", err)
 		_ = msg.NakWithDelay(0)
 		return
 	}
 	if err := msg.Ack(); err != nil {
-		slog.WarnContext(ctx, "push-service ack failed",
+		slog.WarnContext(ctx, "push-notification-service ack failed",
 			"id", evt.ID, "error", err)
 	}
 }

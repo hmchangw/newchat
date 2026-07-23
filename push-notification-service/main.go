@@ -27,12 +27,12 @@ type config struct {
 	PProfEnabled       bool   `env:"PPROF_ENABLED" envDefault:"false"`
 	InputStream        string `env:"INPUT_STREAM,required"`
 	InputSubjectFilter string `env:"INPUT_SUBJECT_FILTER,required"`
-	ConsumerName       string `env:"CONSUMER_NAME" envDefault:"push-service"`
+	ConsumerName       string `env:"CONSUMER_NAME" envDefault:"push-notification-service"`
 }
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("push-service exited", "error", err)
+		slog.Error("push-notification-service exited", "error", err)
 		os.Exit(1)
 	}
 }
@@ -100,7 +100,7 @@ func run() error {
 		return fmt.Errorf("health server: %w", err)
 	}
 
-	slog.Info("push-service running", "site", cfg.SiteID)
+	slog.Info("push-notification-service running", "site", cfg.SiteID)
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error { iter.Stop(); return nil },
 		func(dctx context.Context) error {

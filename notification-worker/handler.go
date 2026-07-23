@@ -27,7 +27,7 @@ type MemberCache interface {
 	Invalidate(ctx context.Context, roomID string)
 }
 
-// RoomMetaGetter returns cached room metadata so push-service doesn't hit Mongo.
+// RoomMetaGetter returns cached room metadata so push-notification-service doesn't hit Mongo.
 type RoomMetaGetter interface {
 	Get(ctx context.Context, roomID string) (roommetacache.Meta, error)
 }
@@ -310,7 +310,7 @@ func shortRoomType(t model.RoomType) string {
 
 // resolveTitle returns the room name when present, else the sender's account (the legacy rule).
 // DM/botDM rooms skip the cache lookup — they never have names. RoomMeta failures fall back to
-// the sender so push-service still gets a usable title.
+// the sender so push-notification-service still gets a usable title.
 func (h *Handler) resolveTitle(ctx context.Context, roomID string, roomType model.RoomType, sender *model.Participant) string {
 	if h.deps.RoomMeta != nil && roomType != model.RoomTypeDM && roomType != model.RoomTypeBotDM {
 		meta, err := h.deps.RoomMeta.Get(ctx, roomID)

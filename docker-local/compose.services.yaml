@@ -22,8 +22,8 @@ include:
   - ../notification-worker/deploy/bot/docker-compose.yml
   - ../outbox-worker/deploy/docker-compose.yml
   - ../portal-service/deploy/docker-compose.yml
-  - ../push-service/deploy/user/docker-compose.yml
-  - ../push-service/deploy/bot/docker-compose.yml
+  - ../push-notification-service/deploy/user/docker-compose.yml
+  - ../push-notification-service/deploy/bot/docker-compose.yml
   - ../room-service/deploy/docker-compose.yml
   - ../room-worker/deploy/docker-compose.yml
   - ../search-service/deploy/docker-compose.yml
@@ -55,8 +55,8 @@ services:
   bot-notification-worker: *local-o11y
   outbox-worker: *local-o11y
   portal-service: *local-o11y
-  push-service: *local-o11y
-  bot-push-service: *local-o11y
+  push-notification-service: *local-o11y
+  bot-push-notification-service: *local-o11y
   room-service: *local-o11y
   room-worker: *local-o11y
   search-service: *local-o11y
