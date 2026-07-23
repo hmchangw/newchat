@@ -108,3 +108,18 @@ func TestHandler_Translate_MissingRequestID_NoPublish(t *testing.T) {
 	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "", Text: "hi", TargetLang: "en"}))
 	assert.Equal(t, 0, cap.n) // cannot address a response subject without requestId
 }
+
+func TestHandler_Translate_PublishErrorIsLoggedNotReturned(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	tr := NewMockTranslator(ctrl)
+	tr.EXPECT().Translate(gomock.Any(), "hi", "en").Return("hola", nil)
+
+	h := NewHandler(tr, func(_ context.Context, _ string, _ []byte) error {
+		return errors.New("nats down")
+	})
+	h.now = func() int64 { return 1 }
+	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+
+	// A publish failure is best-effort: logged, never returned to the router.
+	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-5", Text: "hi", TargetLang: "en"}))
+}

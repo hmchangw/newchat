@@ -1,0 +1,34 @@
+package main
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNewTranslator_Mock(t *testing.T) {
+	tr, err := newTranslator(&Config{Backend: "mock"})
+	require.NoError(t, err)
+	_, ok := tr.(mockTranslator)
+	assert.True(t, ok)
+}
+
+func TestNewTranslator_StreamRequiresEndpoint(t *testing.T) {
+	_, err := newTranslator(&Config{Backend: "stream", Endpoint: ""})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TRANSLATION_ENDPOINT")
+}
+
+func TestNewTranslator_Stream(t *testing.T) {
+	tr, err := newTranslator(&Config{Backend: "stream", Endpoint: "http://x", HTTPTimeout: time.Second})
+	require.NoError(t, err)
+	_, ok := tr.(*streamTranslator)
+	assert.True(t, ok)
+}
+
+func TestNewTranslator_Unknown(t *testing.T) {
+	_, err := newTranslator(&Config{Backend: "bogus"})
+	require.Error(t, err)
+}

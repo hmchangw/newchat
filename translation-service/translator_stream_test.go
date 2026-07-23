@@ -71,3 +71,28 @@ func TestStreamTranslator_MissingDoneErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "[DONE]")
 }
+
+func TestStreamTranslator_HTTPErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	tr := newStreamTranslator(srv.URL, "", 5*time.Second)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 500")
+}
+
+func TestStreamTranslator_MalformedChunkErrors(t *testing.T) {
+	srv := sseServer(t, []string{
+		`data: {not-json}`,
+		`data: [DONE]`,
+	}, nil)
+	defer srv.Close()
+
+	tr := newStreamTranslator(srv.URL, "", 5*time.Second)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode stream chunk")
+}
