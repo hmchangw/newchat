@@ -587,19 +587,50 @@ func PresenceState(account string) string {
 // MsgHistory is the concrete-subject form clients publish on to invoke
 // LoadHistory. Pair with MsgHistoryPattern for the server-side registration.
 func MsgHistory(account, roomID, siteID string) string {
-	if !isValidAccountToken(account) {
-		panic("invalid account token: contains NATS wildcard characters")
-	}
-	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.history", account, roomID, siteID)
+	return msgRequest(account, roomID, siteID, "history")
 }
 
 // MsgThread is the concrete-subject form clients publish on to invoke
 // GetThreadMessages. Pair with MsgThreadPattern for the server-side registration.
 func MsgThread(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "thread")
+}
+
+// MsgEdit returns the concrete subject for editing a message.
+func MsgEdit(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "edit")
+}
+
+// MsgDelete returns the concrete subject for soft-deleting a message.
+func MsgDelete(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "delete")
+}
+
+// MsgPin returns the concrete subject for pinning a message.
+func MsgPin(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "pin")
+}
+
+// MsgUnpin returns the concrete subject for unpinning a message.
+func MsgUnpin(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "unpin")
+}
+
+// MsgPinnedList returns the concrete subject for listing a room's pinned messages.
+func MsgPinnedList(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "pinned.list")
+}
+
+// MsgReact returns the concrete subject for toggling a reaction on a message.
+func MsgReact(account, roomID, siteID string) string {
+	return msgRequest(account, roomID, siteID, "react")
+}
+
+func msgRequest(account, roomID, siteID, action string) string {
 	if !isValidAccountToken(account) {
 		panic("invalid account token: contains NATS wildcard characters")
 	}
-	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.thread", account, roomID, siteID)
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.%s", account, roomID, siteID, action)
 }
 
 func MemberAdd(account, roomID, siteID string) string {

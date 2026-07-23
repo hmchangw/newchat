@@ -90,6 +90,18 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.user.alice.request.room.r1.site-a.msg.history"},
 		{"MsgThread", subject.MsgThread("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.msg.thread"},
+		{"MsgEdit", subject.MsgEdit("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.msg.edit"},
+		{"MsgDelete", subject.MsgDelete("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.msg.delete"},
+		{"MsgPin", subject.MsgPin("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.msg.pin"},
+		{"MsgUnpin", subject.MsgUnpin("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.msg.unpin"},
+		{"MsgPinnedList", subject.MsgPinnedList("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.msg.pinned.list"},
+		{"MsgReact", subject.MsgReact("alice", "r1", "site-a"),
+			"chat.user.alice.request.room.r1.site-a.msg.react"},
 		{"SearchMessages", subject.SearchMessages("alice", "site-a"),
 			"chat.user.alice.request.search.site-a.messages"},
 		{"SearchRooms", subject.SearchRooms("alice", "site-a"),
@@ -724,6 +736,25 @@ func TestUserServiceBuildersRejectWildcardAccounts(t *testing.T) {
 		{"UserMe", func() { subject.UserMe("*", "s1") }},
 		{"UserSettingsGet", func() { subject.UserSettingsGet("*", "s1") }},
 		{"UserSettingsSet", func() { subject.UserSettingsSet(">", "s1") }},
+	}
+	for _, b := range builders {
+		t.Run(b.name, func(t *testing.T) {
+			assert.Panics(t, b.fn)
+		})
+	}
+}
+
+func TestHistoryMutationBuildersRejectInvalidAccounts(t *testing.T) {
+	builders := []struct {
+		name string
+		fn   func()
+	}{
+		{"MsgEdit", func() { subject.MsgEdit("*", "r1", "s1") }},
+		{"MsgDelete", func() { subject.MsgDelete("alice.smith", "r1", "s1") }},
+		{"MsgPin", func() { subject.MsgPin(">", "r1", "s1") }},
+		{"MsgUnpin", func() { subject.MsgUnpin("alice smith", "r1", "s1") }},
+		{"MsgPinnedList", func() { subject.MsgPinnedList("", "r1", "s1") }},
+		{"MsgReact", func() { subject.MsgReact("alice\t", "r1", "s1") }},
 	}
 	for _, b := range builders {
 		t.Run(b.name, func(t *testing.T) {
