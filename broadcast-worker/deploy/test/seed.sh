@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMPOSE_FILES=(-f "$DEPLOY_DIR/docker-compose.test.yml")
+COMPOSE_FILES=(-f "$DEPLOY_DIR/user/docker-compose.test.yml")
 if [[ -n "${COMPOSE_OVERRIDE:-}" ]]; then
   COMPOSE_FILES+=(-f "$COMPOSE_OVERRIDE")
 fi

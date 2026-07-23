@@ -55,7 +55,7 @@ func TestBootstrapStreams(t *testing.T) {
 			name:       "disabled - fails when stream missing",
 			enabled:    false,
 			existing:   map[string]bool{},
-			wantErrSub: "verify MESSAGES_CANONICAL stream",
+			wantErrSub: "verify stream MESSAGES_CANONICAL_test",
 		},
 		{
 			name:        "enabled - creates MESSAGES_CANONICAL",
@@ -69,13 +69,13 @@ func TestBootstrapStreams(t *testing.T) {
 			existing:   map[string]bool{},
 			failOn:     "MESSAGES_CANONICAL_test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create MESSAGES_CANONICAL stream",
+			wantErrSub: "create stream MESSAGES_CANONICAL_test",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing}
-			err := bootstrapStreams(context.Background(), fake, "test", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "MESSAGES_CANONICAL_test", "chat.msg.canonical.test.>", tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)

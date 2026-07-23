@@ -5,7 +5,7 @@ trigger:
       - develop
   paths:
     include:
-      - notification-worker/
+      - broadcast-worker/
       - pkg/
 
 pr:
@@ -14,12 +14,12 @@ pr:
       - main
   paths:
     include:
-      - notification-worker/
+      - broadcast-worker/
       - pkg/
 
 variables:
   GO_VERSION: '1.25.12'
-  SERVICE_NAME: notification-worker
+  SERVICE_NAME: broadcast-worker
   REGISTRY: '$(containerRegistry)'
 
 stages:
@@ -61,7 +61,7 @@ stages:
               containerRegistry: '$(containerRegistry)'
               repository: 'chat/$(SERVICE_NAME)'
               command: 'buildAndPush'
-              Dockerfile: '$(SERVICE_NAME)/deploy/Dockerfile'
+              Dockerfile: '$(SERVICE_NAME)/deploy/user/Dockerfile'
               buildContext: '.'
               tags: |
                 $(Build.BuildId)

@@ -56,6 +56,15 @@ func (s *stubValkey) Del(_ context.Context, keys ...string) error {
 
 func (s *stubValkey) Close() error { return nil }
 
+// SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.
+func (s *stubValkey) SetNX(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
+	panic("stubValkey.SetNX not implemented")
+}
+
+func (s *stubValkey) IncrEx(_ context.Context, _ string, _ time.Duration) (int64, error) {
+	panic("stubValkey.IncrEx not implemented")
+}
+
 func TestValkeyCache_SetThenGet(t *testing.T) {
 	ctx := context.Background()
 	c := newValkeyCache(newStubValkey())

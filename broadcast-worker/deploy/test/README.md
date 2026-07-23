@@ -63,7 +63,7 @@ make -C broadcast-worker/deploy up
 Verify services:
 
 ```
-docker compose -f broadcast-worker/deploy/docker-compose.test.yml ps
+docker compose -f broadcast-worker/deploy/user/docker-compose.test.yml ps
 ```
 
 Expected: `nats_site1`, `nats_site2`, `mongodb`, `broadcast-worker`, `tools`

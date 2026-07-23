@@ -45,44 +45,44 @@ func TestBootstrapStreams(t *testing.T) {
 		wantErrSub  string
 	}{
 		{
-			name:        "disabled - verifies existing stream",
+			name:        "disabled - verifies existing input stream",
 			enabled:     false,
 			existing:    map[string]bool{"MESSAGES_CANONICAL_test": true},
 			wantCreated: nil,
 		},
 		{
-			name:       "disabled - fails when stream missing",
+			name:       "disabled - fails when input stream missing",
 			enabled:    false,
 			existing:   map[string]bool{},
-			wantErrSub: "verify MESSAGES_CANONICAL stream",
+			wantErrSub: "verify stream MESSAGES_CANONICAL_test",
 		},
 		{
-			name:        "enabled - creates MESSAGES_CANONICAL and PUSH_NOTIFICATION",
+			name:        "enabled - creates input + output streams",
 			enabled:     true,
 			existing:    map[string]bool{},
 			wantCreated: []string{"MESSAGES_CANONICAL_test", "PUSH_NOTIFICATION_test"},
 		},
 		{
-			name:       "enabled - wraps MESSAGES_CANONICAL creator error",
+			name:       "enabled - wraps input stream creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
 			failOn:     "MESSAGES_CANONICAL_test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create MESSAGES_CANONICAL stream",
+			wantErrSub: "create stream MESSAGES_CANONICAL_test",
 		},
 		{
-			name:       "enabled - wraps PUSH_NOTIFICATION creator error",
+			name:       "enabled - wraps output stream creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
 			failOn:     "PUSH_NOTIFICATION_test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create PUSH_NOTIFICATION stream",
+			wantErrSub: "create stream PUSH_NOTIFICATION_test",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing}
-			err := bootstrapStreams(context.Background(), fake, "test", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "MESSAGES_CANONICAL_test", "chat.msg.canonical.test.>", "PUSH_NOTIFICATION_test", "chat.push.notification.test", tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)

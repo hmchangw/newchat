@@ -63,7 +63,7 @@ func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetS
 		MaxDeliver:    10,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
-	})
+	}, "broadcast-worker", sc.Subjects[0])
 	cons, err := js.CreateOrUpdateConsumer(context.Background(), sc.Name, cc)
 	require.NoError(t, err)
 

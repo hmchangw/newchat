@@ -53,6 +53,11 @@ type config struct {
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
 	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
+	InputStream            string                  `env:"INPUT_STREAM,required"`
+	InputSubjectFilter     string                  `env:"INPUT_SUBJECT_FILTER,required"`
+	ConsumerName           string                  `env:"CONSUMER_NAME"             envDefault:"notification-worker"`
+	OutputStream           string                  `env:"OUTPUT_STREAM,required"`
+	OutputSubjectPrefix    string                  `env:"OUTPUT_SUBJECT_PREFIX,required"` // e.g. chat.server.notification.push.<site>; ".send" is appended at publish
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
@@ -179,19 +184,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, otelJS, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, otelJS, cfg.InputStream, cfg.InputSubjectFilter, cfg.OutputStream, cfg.OutputSubjectPrefix, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
+	cons, err := otelJS.CreateOrUpdateConsumer(ctx, cfg.InputStream, buildConsumerConfig(cfg.Consumer, cfg.ConsumerName, cfg.InputSubjectFilter))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
 
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, cfg.SiteID, cfg.NatsMaxPayloadBytes)
+	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, cfg.OutputSubjectPrefix, cfg.NatsMaxPayloadBytes)
 
 	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
 	if cfg.PresenceEnabled {
@@ -369,12 +373,14 @@ func main() {
 	)
 }
 
-// buildConsumerConfig returns the durable; FilterSubjects = {created} only (reacted moved to broadcast-worker).
-func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+// buildConsumerConfig returns the durable consumer config for the canonical
+// message consumer. Centralized so it is unit-testable without NATS. durable
+// and filterSubject are env-driven (cfg.ConsumerName / cfg.InputSubjectFilter)
+// so the same binary can bind to either the user or bot canonical pipeline.
+// Single filter only — reacted moved to broadcast-worker.
+func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
-	cc.Durable = "notification-worker"
-	cc.FilterSubjects = []string{
-		subject.MsgCanonicalCreated(siteID),
-	}
+	cc.Durable = durable
+	cc.FilterSubjects = []string{filterSubject}
 	return cc
 }

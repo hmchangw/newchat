@@ -7,8 +7,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	o11ynats "github.com/flywindy/o11y/nats"
-
-	"github.com/hmchangw/chat/pkg/stream"
 )
 
 // bootstrapConfig groups every field that is ONLY meaningful when the
@@ -31,31 +29,26 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams handles the JetStream MESSAGES_CANONICAL stream this
-// service uses. When enabled (dev/integration), it creates the stream via
-// CreateOrUpdateStream. When disabled (production), it verifies the stream
-// exists via Stream() and returns an error if it doesn't — fail-fast so a
-// misprovisioned deploy surfaces at startup rather than at first publish.
+// bootstrapStreams handles the JetStream input stream this service consumes.
+// The stream identity is env-driven so both user and bot deployments verify
+// their own stream. When enabled (dev/integration), creates the stream via
+// CreateOrUpdateStream over (streamName, [subjectFilter]). When disabled
+// (production), verifies the stream exists — fail-fast so a misprovisioned
+// deploy surfaces at startup rather than at first consume.
 //
-// Ownership rule: this helper sets only the stream schema (Name + Subjects)
-// from pkg/stream.MessagesCanonical. Federation config belongs to ops/IaC and
-// is layered on in production. App code never sets it.
-func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
-	canonicalCfg := stream.MessagesCanonical(siteID)
+// Federation config is not set here — that belongs to ops/IaC.
+func bootstrapStreams(ctx context.Context, js streamManager, streamName, subjectFilter string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     canonicalCfg.Name,
-			Subjects: canonicalCfg.Subjects,
+			Name:     streamName,
+			Subjects: []string{subjectFilter},
 		}); err != nil {
-			return fmt.Errorf("create MESSAGES_CANONICAL stream: %w", err)
+			return fmt.Errorf("create stream %s: %w", streamName, err)
 		}
 		return nil
 	}
-	// Production path: verify the stream exists. Fail fast if it doesn't —
-	// ops/IaC owns provisioning, and a missing stream means the deploy is
-	// broken before the first publish or consume.
-	if _, err := js.Stream(ctx, canonicalCfg.Name); err != nil {
-		return fmt.Errorf("verify MESSAGES_CANONICAL stream: %w", err)
+	if _, err := js.Stream(ctx, streamName); err != nil {
+		return fmt.Errorf("verify stream %s: %w", streamName, err)
 	}
 	return nil
 }

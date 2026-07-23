@@ -66,6 +66,15 @@ func (f *fakeClient) Del(_ context.Context, keys ...string) error {
 
 func (f *fakeClient) Close() error { return nil }
 
+// SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.
+func (f *fakeClient) SetNX(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
+	panic("roomsubcache.fakeClient.SetNX not implemented")
+}
+
+func (f *fakeClient) IncrEx(_ context.Context, _ string, _ time.Duration) (int64, error) {
+	panic("roomsubcache.fakeClient.IncrEx not implemented")
+}
+
 func TestValkeyCache_SetThenGet_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeClient()

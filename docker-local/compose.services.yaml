@@ -11,15 +11,19 @@ include:
   - ../admin-service/deploy/docker-compose.yml
   - ../auth-service/deploy/docker-compose.yml
   - ../botplatform-service/deploy/docker-compose.yml
-  - ../broadcast-worker/deploy/docker-compose.yml
+  - ../broadcast-worker/deploy/user/docker-compose.yml
+  - ../broadcast-worker/deploy/bot/docker-compose.yml
   - ../history-service/deploy/docker-compose.yml
   - ../inbox-worker/deploy/docker-compose.yml
   - ../media-service/deploy/docker-compose.yml
   - ../message-gatekeeper/deploy/docker-compose.yml
   - ../message-worker/deploy/docker-compose.yml
-  - ../notification-worker/deploy/docker-compose.yml
+  - ../notification-worker/deploy/user/docker-compose.yml
+  - ../notification-worker/deploy/bot/docker-compose.yml
   - ../outbox-worker/deploy/docker-compose.yml
   - ../portal-service/deploy/docker-compose.yml
+  - ../push-service/deploy/user/docker-compose.yml
+  - ../push-service/deploy/bot/docker-compose.yml
   - ../room-service/deploy/docker-compose.yml
   - ../room-worker/deploy/docker-compose.yml
   - ../search-service/deploy/docker-compose.yml
@@ -41,14 +45,18 @@ services:
   auth-service: *local-o11y
   botplatform-service: *local-o11y
   broadcast-worker: *local-o11y
+  bot-broadcast-worker: *local-o11y
   history-service: *local-o11y
   inbox-worker: *local-o11y
   media-service: *local-o11y
   message-gatekeeper: *local-o11y
   message-worker: *local-o11y
   notification-worker: *local-o11y
+  bot-notification-worker: *local-o11y
   outbox-worker: *local-o11y
   portal-service: *local-o11y
+  push-service: *local-o11y
+  bot-push-service: *local-o11y
   room-service: *local-o11y
   room-worker: *local-o11y
   search-service: *local-o11y

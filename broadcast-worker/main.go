@@ -57,6 +57,9 @@ type config struct {
 	HealthAddr           string                  `env:"HEALTH_ADDR"              envDefault:":8081"`
 	PProfEnabled         bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr          string                  `env:"METRICS_ADDR"             envDefault:":9090"`
+	InputStream          string                  `env:"INPUT_STREAM,required"`
+	InputSubjectFilter   string                  `env:"INPUT_SUBJECT_FILTER,required"`
+	ConsumerName         string                  `env:"CONSUMER_NAME"             envDefault:"broadcast-worker"`
 	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
@@ -141,14 +144,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, js, cfg.InputStream, cfg.InputSubjectFilter, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildConsumerConfig(cfg.Consumer))
+	cons, err := js.CreateOrUpdateConsumer(ctx, cfg.InputStream, buildConsumerConfig(cfg.Consumer, cfg.ConsumerName, cfg.InputSubjectFilter))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -343,10 +344,13 @@ func consumeLoop(iter messageIterator, process messageProcessor, maxWorkers int,
 	}
 }
 
-// buildConsumerConfig returns the durable consumer config for
-// broadcast-worker. Centralized so it is unit-testable without NATS.
-func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+// buildConsumerConfig returns the durable consumer config for the canonical
+// message consumer. Centralized so it is unit-testable without NATS. durable
+// and filterSubject are env-driven (cfg.ConsumerName / cfg.InputSubjectFilter)
+// so the same binary can bind to either the user or bot canonical stream.
+func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
-	cc.Durable = "broadcast-worker"
+	cc.Durable = durable
+	cc.FilterSubject = filterSubject
 	return cc
 }

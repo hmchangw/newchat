@@ -18,7 +18,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 			MaxDeliver:    5,
 			MaxWaiting:    512,
 			MaxAckPending: 1000,
-		}, "site-a")
+		}, "notification-worker", subject.MsgCanonicalCreated("site-a"))
 
 		assert.Equal(t, "notification-worker", cc.Durable)
 		assert.Equal(t, 1000, cc.MaxAckPending)
@@ -35,7 +35,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 			MaxDeliver:    3,
 			MaxWaiting:    256,
 			MaxAckPending: 500,
-		}, "site-a")
+		}, "notification-worker", subject.MsgCanonicalCreated("site-a"))
 
 		assert.Equal(t, "notification-worker", cc.Durable)
 		assert.Equal(t, 500, cc.MaxAckPending)
@@ -45,7 +45,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 	})
 
 	t.Run("filters to created subject only", func(t *testing.T) {
-		cc := buildConsumerConfig(stream.ConsumerSettings{}, "site-a")
+		cc := buildConsumerConfig(stream.ConsumerSettings{}, "notification-worker", subject.MsgCanonicalCreated("site-a"))
 
 		// The worker only acts on created (push fan-out); reacted moved to
 		// broadcast-worker. updated/deleted/pinned/unpinned are excluded at
@@ -53,5 +53,17 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.ElementsMatch(t, []string{
 			subject.MsgCanonicalCreated("site-a"),
 		}, cc.FilterSubjects)
+	})
+
+	t.Run("durable and filter subject are env-driven", func(t *testing.T) {
+		cc := buildConsumerConfig(stream.ConsumerSettings{
+			AckWait:       30 * time.Second,
+			MaxDeliver:    5,
+			MaxWaiting:    512,
+			MaxAckPending: 1000,
+		}, "bot-notification-worker", "chat.bot.canonical.site-a.created")
+
+		assert.Equal(t, "bot-notification-worker", cc.Durable)
+		assert.ElementsMatch(t, []string{"chat.bot.canonical.site-a.created"}, cc.FilterSubjects)
 	})
 }
