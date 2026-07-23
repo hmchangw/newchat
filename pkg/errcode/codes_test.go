@@ -8,6 +8,7 @@ import (
 var allReasons = []Reason{
 	RoomMaxSizeReached, RoomNotMember, RoomNotOwner,
 	RoomLastOwnerCannotLeave, RoomBotInChannel, RoomBotNotAvailable,
+	RoomBotCrossSite, RoomBotCannotBeOwner,
 	RoomUserNotFound, RoomInvalidOrg,
 	RoomSelfDM, RoomLastMemberCannotRemove, RoomTargetNotMember,
 	RoomAlreadyOwner, RoomCannotDemoteLastOwner, RoomPromoteRequiresIndividual,

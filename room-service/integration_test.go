@@ -275,13 +275,15 @@ func TestMongoStore_CountMembersAndOwners_Integration(t *testing.T) {
 		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleOwner, model.RoleMember}},
 		model.Subscription{ID: "s3", User: model.SubscriptionUser{ID: "u3", Account: "carol"}, RoomID: "r1", Roles: []model.Role{model.RoleMember}},
 		model.Subscription{ID: "s4", User: model.SubscriptionUser{ID: "u4", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleOwner}},
+		model.Subscription{ID: "s5", User: model.SubscriptionUser{ID: "u5", Account: "weather.bot", IsBot: true}, RoomID: "r1", Roles: []model.Role{model.RoleMember}},
 	})
 	require.NoError(t, err)
 
-	t.Run("counts members and owners", func(t *testing.T) {
+	t.Run("counts members, humans and owners — bots excluded from humans", func(t *testing.T) {
 		counts, err := store.CountMembersAndOwners(ctx, "r1")
 		require.NoError(t, err)
-		assert.Equal(t, 3, counts.MemberCount)
+		assert.Equal(t, 4, counts.MemberCount)
+		assert.Equal(t, 3, counts.HumanCount, "bot sub must not count as human")
 		assert.Equal(t, 2, counts.OwnerCount)
 	})
 
@@ -289,6 +291,7 @@ func TestMongoStore_CountMembersAndOwners_Integration(t *testing.T) {
 		counts, err := store.CountMembersAndOwners(ctx, "r2")
 		require.NoError(t, err)
 		assert.Equal(t, 1, counts.MemberCount)
+		assert.Equal(t, 1, counts.HumanCount, "legacy sub without isBot counts as human")
 		assert.Equal(t, 1, counts.OwnerCount)
 	})
 

@@ -43,9 +43,13 @@ var (
 	errPromoteRequiresIndividual = errcode.BadRequest("only individual members can be promoted to owner", errcode.WithReason(errcode.RoomPromoteRequiresIndividual))
 
 	// Sentinels for create-room validation.
-	errEmptyCreateRequest  = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
-	errBotInChannel        = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
-	errBotNotAvailable     = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
+	errEmptyCreateRequest = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
+	errBotInChannel       = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
+	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
+	// member.add admits only same-site bots — the join/leave feed is site-local.
+	errBotCrossSite = errcode.BadRequest("cross-site bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotCrossSite))
+	// Bots hold plain member roles only.
+	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
 	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")

@@ -397,9 +397,8 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Rotate after delete + reconcile; GetSubscriptionAccounts returns the
-	// post-deletion survivor accounts (projected — fan-out only needs accounts,
-	// not full subscription docs).
+	// Rotate after delete + reconcile; survivors are the post-deletion accounts.
+	// Bots hold keys too, so a bot removal rotates like any other member.
 	survivorAccounts, listErr := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 	if listErr != nil {
 		return fmt.Errorf("list survivors for key fan-out (room %s): %w", req.RoomID, listErr)
@@ -410,20 +409,23 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 
 	now := time.Now().UTC()
 
-	// Subscription update event. RoomType is fixed to channel: room-service
-	// rejects member.remove for any other room kind.
-	subEvt := model.SubscriptionRemovedEvent{
-		UserID: user.ID,
-		Subscription: model.RemovedSubscriptionRef{
-			RoomID:   req.RoomID,
-			RoomType: model.RoomTypeChannel,
-			U:        model.SubscriptionUser{ID: user.ID, Account: req.Account},
-		},
-		Action:    "removed",
-		Timestamp: now.UnixMilli(),
+	// Subscription update event (channel-only handler). Skipped for bots: they
+	// have no client consuming it on the per-user subject.
+	targetIsBot := model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)
+	if !targetIsBot {
+		subEvt := model.SubscriptionRemovedEvent{
+			UserID: user.ID,
+			Subscription: model.RemovedSubscriptionRef{
+				RoomID:   req.RoomID,
+				RoomType: model.RoomTypeChannel,
+				U:        model.SubscriptionUser{ID: user.ID, Account: req.Account},
+			},
+			Action:    "removed",
+			Timestamp: now.UnixMilli(),
+		}
+		subEvtData, _ := json.Marshal(subEvt)
+		h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
 	}
-	subEvtData, _ := json.Marshal(subEvt)
-	h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
 
 	// Member change event
 	evtType := model.MessageTypeMemberLeft
@@ -621,8 +623,12 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 
 	now := time.Now().UTC()
 
-	// Publish per-account subscription update and collect cross-site accounts
+	// Non-bot members get a per-account subscription.update; bots are skipped
+	// (no client consuming it on the per-user subject).
 	for _, m := range toRemove {
+		if model.IsBot(m.Account) || model.IsPlatformAdminAccount(m.Account) {
+			continue
+		}
 		subEvt := model.SubscriptionRemovedEvent{
 			Subscription: model.RemovedSubscriptionRef{
 				RoomID:   req.RoomID,
@@ -1065,8 +1071,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	h.bustRoomMeta(ctx, req.RoomID)
 
 	// Publish subscription.update BEFORE room.key so clients have a sub entry to store the key under.
-	// Channel-only handler: roomName is the already-fetched channel name.
+	// Bots are skipped: no client consuming it on the per-user subject.
 	for _, sub := range subs {
+		if sub.User.IsBot {
+			continue
+		}
 		subEvt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: *sub,
@@ -2295,6 +2304,10 @@ func (h *Handler) buildAndFanOutRoomKey(ctx context.Context, roomID string, pair
 // evt is taken by pointer so the 80-byte struct isn't copied per fan-out call;
 // callers must not mutate it after passing it in.
 func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []string, evt *model.RoomKeyEvent) {
+	// Bots receive room keys like any member: the key subject is built via
+	// subject.RoomKeyUpdate, which encodes the account (dots→underscores) so a
+	// dotted ".bot" account maps to the single subject token its NATS JWT is
+	// scoped to (chat.user.weather_bot.>) — no raw-subject spill, no disclosure.
 	if len(accounts) == 0 {
 		return
 	}

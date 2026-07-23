@@ -49,3 +49,32 @@ func TestMatchCandidatesFilter(t *testing.T) {
 		assert.True(t, hasNot, "bot filter is retained alongside $ne")
 	})
 }
+
+func TestMatchCandidatesFilterWithDirectBots(t *testing.T) {
+	botNot := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex, Options: ""}}
+
+	t.Run("org arms keep the bot exclusion, direct arm does not", func(t *testing.T) {
+		f := MatchCandidatesFilterWithDirectBots([]string{"org1"}, []string{"alice", "weather.bot"}, "")
+		or, ok := f["$or"].(bson.A)
+		require.True(t, ok, "$or must be a bson.A")
+		assert.Equal(t, bson.A{
+			bson.M{"sectId": bson.M{"$in": []string{"org1"}}, "account": botNot},
+			bson.M{"deptId": bson.M{"$in": []string{"org1"}}, "account": botNot},
+			bson.M{"account": bson.M{"$in": []string{"alice", "weather.bot"}}},
+		}, or)
+		_, hasTopAccount := f["account"]
+		assert.False(t, hasTopAccount, "no top-level account filter without excludeAccount")
+	})
+
+	t.Run("accounts only produces a single unfiltered arm", func(t *testing.T) {
+		f := MatchCandidatesFilterWithDirectBots(nil, []string{"helper.bot"}, "")
+		assert.Equal(t, bson.A{bson.M{"account": bson.M{"$in": []string{"helper.bot"}}}}, f["$or"])
+	})
+
+	t.Run("excludeAccount adds a top-level $ne only", func(t *testing.T) {
+		f := MatchCandidatesFilterWithDirectBots([]string{"org1"}, nil, "exclude-me")
+		acct, ok := f["account"].(bson.M)
+		require.True(t, ok)
+		assert.Equal(t, bson.M{"$ne": "exclude-me"}, acct)
+	})
+}

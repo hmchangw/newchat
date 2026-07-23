@@ -396,6 +396,11 @@ func (s *MongoStore) CountMembersAndOwners(ctx context.Context, roomID string) (
 		{{Key: "$match", Value: bson.M{"roomId": roomID}}},
 		{{Key: "$facet", Value: bson.M{
 			"members": bson.A{bson.M{"$count": "count"}},
+			// $ne true also matches pre-flag legacy subs (counted as humans).
+			"humans": bson.A{
+				bson.M{"$match": bson.M{"u.isBot": bson.M{"$ne": true}}},
+				bson.M{"$count": "count"},
+			},
 			"owners": bson.A{
 				bson.M{"$match": bson.M{"roles": model.RoleOwner}},
 				bson.M{"$count": "count"},
@@ -412,6 +417,9 @@ func (s *MongoStore) CountMembersAndOwners(ctx context.Context, roomID string) (
 		Members []struct {
 			Count int `bson:"count"`
 		} `bson:"members"`
+		Humans []struct {
+			Count int `bson:"count"`
+		} `bson:"humans"`
 		Owners []struct {
 			Count int `bson:"count"`
 		} `bson:"owners"`
@@ -428,6 +436,9 @@ func (s *MongoStore) CountMembersAndOwners(ctx context.Context, roomID string) (
 	counts := &RoomCounts{}
 	if len(result.Members) > 0 {
 		counts.MemberCount = result.Members[0].Count
+	}
+	if len(result.Humans) > 0 {
+		counts.HumanCount = result.Humans[0].Count
 	}
 	if len(result.Owners) > 0 {
 		counts.OwnerCount = result.Owners[0].Count

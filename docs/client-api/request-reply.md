@@ -323,8 +323,8 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional echo; server derives from subject. |
-| `users` | string[] | no | Internal user IDs or accounts to add. |
-| `orgs` | string[] | no | Org IDs to add (expanded to all members). |
+| `users` | string[] | no | Internal user IDs or accounts to add. May include bots (`.bot` / `p_`): each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and get the `room.key` (on their encoded per-user subject) but no `subscription.update`. |
+| `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
 
@@ -334,14 +334,14 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 
 #### Errors
 
-Synchronous: requester not in room, room full, restricted + not owner, bots in channel,
-user/org not found.
+Synchronous: requester not in room, room full, restricted + not owner, bot not
+available (no app record / disabled assistant), cross-site bot (`bot_cross_site`), user/org not found.
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
 ```
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed human member; bots receive none), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — every new member, bots included, on the encoded per-user subject), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -369,9 +369,10 @@ Exactly one of `account` or `orgId` must be set.
 #### Errors
 
 Synchronous: neither/both of `account`/`orgId` set; requester not an owner; target is
-last member; org member cannot leave individually.
+last **human** member (bots don't count, and a bot target skips the guard); org member
+cannot leave individually.
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`), `new_message` system message → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed human account; bots receive none), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`), `new_message` system message → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -396,7 +397,7 @@ last member; org member cannot leave individually.
 
 #### Errors
 
-Not an owner; target not a member; invalid `newRole`; already owner (promote); not owner (demote); last-owner guard; org-only member cannot be promoted.
+Not an owner; target not a member; invalid `newRole`; already owner (promote); bot account cannot be promoted to owner (demote stays allowed); not owner (demote); last-owner guard; org-only member cannot be promoted.
 
 **Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "role_updated"` — to the target user only) → [events.md](events.md#subscriptionupdate--membership--state-changes)
 

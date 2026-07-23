@@ -51,9 +51,8 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 		}
 		return nil
 	}
-	// Production path: verify the stream exists. Fail fast if it doesn't —
-	// ops/IaC owns provisioning, and a missing stream means the deploy is
-	// broken before the first publish or consume.
+	// Verify the ROOMS stream this service CONSUMES — fail fast if ops didn't
+	// provision it.
 	if _, err := js.Stream(ctx, roomsCfg.Name); err != nil {
 		return fmt.Errorf("verify ROOMS stream: %w", err)
 	}
