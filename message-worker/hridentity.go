@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
-	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
@@ -72,7 +70,10 @@ func (s *mongoHRIdentityStore) UpsertUserIdentities(ctx context.Context, users [
 					"engName": u.EngName, "chineseName": u.ChineseName,
 					"employeeId": u.EmployeeID,
 				},
-				"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
+				// _id = employeeId (the identity key) so a migrated user's persisted
+				// UserID equals the hash search-sync derives from the Teams id — matching
+				// the HR-sync employee design and letting the indexer skip a Mongo read.
+				"$setOnInsert": bson.M{"_id": u.EmployeeID},
 			}).
 			SetUpsert(true))
 	}
@@ -83,14 +84,4 @@ func (s *mongoHRIdentityStore) UpsertUserIdentities(ctx context.Context, users [
 		return fmt.Errorf("bulk upsert user identities: %w", err)
 	}
 	return nil
-}
-
-// employeeIDFromGraphID derives a deterministic 24-hex bson.ObjectID from the Graph
-// object id — the same hash the HR sync uses, so a person resolved by either path is
-// one identity. Per-service copy (no shared pkg since the store split).
-func employeeIDFromGraphID(graphID string) string {
-	sum := sha256.Sum256([]byte(graphID))
-	var oid bson.ObjectID
-	copy(oid[:], sum[:12])
-	return oid.Hex()
 }

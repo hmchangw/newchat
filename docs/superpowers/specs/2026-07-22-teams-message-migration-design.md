@@ -1,7 +1,8 @@
 # Teams Message-History Migration — Design
 
 **Goal:** ingest Teams message history into nextgen during a bounded, multi-day bulk
-sync — idempotently, reusing the persistence pipeline; search indexing is deferred (see Known limitation).
+sync — idempotently, reusing the persistence pipeline. Migrated messages are indexed by
+a dedicated search-sync consumer on the batch subject (no re-publish, no Mongo).
 
 ## Overview
 
@@ -18,8 +19,9 @@ no reply.
 Feeding the transformed message through `processMessage(ctx, evt, isMigration=true)`
 reuses the entire persistence path (Cassandra insert, thread materialization, quote
 re-projection) with the source's live side-effects suppressed. Nothing is re-published
-to the `.created` event, so no fan-out, notification, or indexing happens — the silent
-migration by design.
+to the `.created` event, so no fan-out or notification happens. Search indexing is not
+driven off `.created` here; it is handled separately by a dedicated search-sync consumer
+on the batch subject (see below).
 
 **Cross-consumer isolation (the `.teams.batch` subject rides the canonical wildcard).**
 `.teams.batch` is a two-token tail under `chat.msg.canonical.{siteID}.>`, whereas every
@@ -27,9 +29,11 @@ per-message event (`.created`/`.updated`/`.deleted`/`.pinned`/`.unpinned`/`.reac
 single-token. Consumers that handle message events therefore bind
 `chat.msg.canonical.{siteID}.*` (single-token, via `subject.MsgCanonicalMessageWildcard`)
 so the batch envelope is never delivered to them: `message-worker`'s message consumer and
-`notification-worker` were already filtered to `.created`; this PR narrows
-`broadcast-worker` and `search-sync-worker` from `.>` to `.*` for the same reason.
-Only `message-worker`'s dedicated `.teams.batch` consumer receives the batch.
+`notification-worker` were already filtered to `.created`; `broadcast-worker` (via its
+`INPUT_SUBJECT_FILTER` env, defaulted to `.*`) and `search-sync-worker`'s message consumer
+narrow from `.>` to `.*` for the same reason. The batch is received by two dedicated
+consumers: `message-worker`'s `.teams.batch` consumer, which persists it, and
+`search-sync-worker`'s new `message-sync-teams` consumer, which indexes it.
 
 **Delivery + retries:** the consumer Acks a batch once every message has been handled.
 A per-message transform error is logged as that message's result and does **not** block
@@ -93,12 +97,16 @@ message's `status: error` and the batch continues (Ack) — a deterministic bad 
 must not poison-loop the whole batch. A message with no id, or no roomId, is `skipped`.
 An infra failure in the persist pipeline Naks the batch for redelivery.
 
-## Known limitation
+## Search indexing (dedicated consumer, no Mongo)
 
-Migrated messages are **persisted but NOT indexed in search**. Search indexing keys on
-the `.created` canonical NATS event, which this path intentionally does not emit (that
-is what gives the silent no-fan-out migration). A search backfill for migrated history
-is a follow-up.
+Because the migration emits no `.created` event, search-sync indexes migrated messages via
+a second consumer, `message-sync-teams`, bound to `.teams.batch` on the same
+`MESSAGES_CANONICAL` stream and writing the same message index. It derives every field from
+the raw payload — crucially the author key `UserID = employeeIDFromGraphID(from.id)`, the
+same hash the migration writes as the user's `_id` — so it needs no Mongo lookup. It applies
+the same skips as the persist consumer (no id / no roomId; system messages) so the index
+matches what was persisted, and reuses the deterministic message id + `createdAt` as the ES
+external version, making a batch replay idempotent.
 
 ## Testing
 

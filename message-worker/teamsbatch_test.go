@@ -12,13 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // fakeTransformer errors on a message whose id is in errIDs; otherwise echoes content.
 type fakeTransformer struct{ errIDs map[string]bool }
 
 func (f fakeTransformer) Transform(_ context.Context, raw json.RawMessage) (model.Message, error) {
-	var tm teamsMessage
+	var tm teamsmigrate.Message
 	if err := json.Unmarshal(raw, &tm); err != nil {
 		return model.Message{}, fmt.Errorf("decode fake teams message: %w", err)
 	}
@@ -64,11 +65,11 @@ func TestMigrateOne_PerMessageStatus(t *testing.T) {
 		raw  json.RawMessage
 		want string
 	}{
-		{"ok", mustJSON(teamsMessage{ID: "ok1", RoomID: "r1", Body: teamsBody{Content: "a"}}), model.TeamsBatchPersisted},
-		{"transform error", mustJSON(teamsMessage{ID: "bad", RoomID: "r1"}), model.TeamsBatchError},
+		{"ok", mustJSON(teamsmigrate.Message{ID: "ok1", RoomID: "r1", Body: teamsmigrate.Body{Content: "a"}}), model.TeamsBatchPersisted},
+		{"transform error", mustJSON(teamsmigrate.Message{ID: "bad", RoomID: "r1"}), model.TeamsBatchError},
 		{"malformed", json.RawMessage(`{`), model.TeamsBatchError},
-		{"no id skipped", mustJSON(teamsMessage{ID: "", RoomID: "r1"}), model.TeamsBatchSkipped},
-		{"no roomId skipped", mustJSON(teamsMessage{ID: "ok2", Body: teamsBody{Content: "b"}}), model.TeamsBatchSkipped},
+		{"no id skipped", mustJSON(teamsmigrate.Message{ID: "", RoomID: "r1"}), model.TeamsBatchSkipped},
+		{"no roomId skipped", mustJSON(teamsmigrate.Message{ID: "ok2", Body: teamsmigrate.Body{Content: "b"}}), model.TeamsBatchSkipped},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,7 +81,7 @@ func TestMigrateOne_PerMessageStatus(t *testing.T) {
 
 	// Only the good, roomId-bearing message reached the pipeline — with the deterministic id + migration flag.
 	require.Len(t, proc.events, 1)
-	assert.Equal(t, deterministicMessageID("r1", "ok1"), proc.events[0].Message.ID)
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("r1", "ok1"), proc.events[0].Message.ID)
 	assert.True(t, proc.isMigration[0])
 }
 
@@ -88,7 +89,7 @@ func TestHandleBatch_ProcessErrorNaks(t *testing.T) {
 	proc := &captureProcessor{err: errors.New("cassandra down")}
 	h := newTestHandler(proc, fakeTransformer{})
 	req := model.TeamsBatchRequest{Messages: []json.RawMessage{
-		mustJSON(teamsMessage{ID: "x", RoomID: "r1", Body: teamsBody{Content: "a"}}),
+		mustJSON(teamsmigrate.Message{ID: "x", RoomID: "r1", Body: teamsmigrate.Body{Content: "a"}}),
 	}}
 	require.Error(t, h.handleBatch(context.Background(), req), "an infra failure must surface so the consumer Naks")
 }
@@ -97,8 +98,8 @@ func TestHandleBatch_TransformErrorDoesNotNak(t *testing.T) {
 	proc := &captureProcessor{}
 	h := newTestHandler(proc, fakeTransformer{errIDs: map[string]bool{"bad": true}})
 	req := model.TeamsBatchRequest{Messages: []json.RawMessage{
-		mustJSON(teamsMessage{ID: "bad", RoomID: "r1"}),
-		mustJSON(teamsMessage{ID: "ok", RoomID: "r1", Body: teamsBody{Content: "a"}}),
+		mustJSON(teamsmigrate.Message{ID: "bad", RoomID: "r1"}),
+		mustJSON(teamsmigrate.Message{ID: "ok", RoomID: "r1", Body: teamsmigrate.Body{Content: "a"}}),
 	}}
 	require.NoError(t, h.handleBatch(context.Background(), req)) // bad message logged; batch Acks
 	require.Len(t, proc.events, 1)                               // the good one still processed

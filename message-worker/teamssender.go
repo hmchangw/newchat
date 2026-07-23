@@ -6,6 +6,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // resolvedSender is the nextgen identity a Teams sender or mention maps onto.
@@ -61,7 +62,7 @@ func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName s
 		return s, nil
 	}
 
-	empID := employeeIDFromGraphID(teamsUserID)
+	empID := teamsmigrate.EmployeeIDFromGraphID(teamsUserID)
 	u, err := r.store.FindUserByEmployeeId(ctx, empID)
 	if err != nil {
 		return resolvedSender{}, fmt.Errorf("find by employeeId: %w", err)
@@ -83,7 +84,7 @@ func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName s
 	if err := r.store.UpsertUserIdentities(ctx, []model.IUserWithChange{{User: nu}}); err != nil {
 		return resolvedSender{}, fmt.Errorf("upsert user identity: %w", err)
 	}
-	// Read back so the sender carries the UserID the upsert generated ($setOnInsert uuidv7),
+	// Read back so the sender carries the UserID the upsert set (_id = employeeId),
 	// matching the found path; a nil read-back is defensive-only (the row was just written).
 	created, err := r.store.FindUserByEmployeeId(ctx, empID)
 	if err != nil {

@@ -148,6 +148,9 @@ func main() {
 	collections := []Collection{
 		msgColl,
 		botMsgColl,
+		// Indexes migrated Teams history off .teams.batch (message-worker persists it with
+		// no .created event, so msgColl's .* filter never sees it); shares the message index.
+		newTeamsMigrationCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode),
 		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
 		newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
 		newUserRoomCollection(cfg.UserRoomIndex),

@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
 
@@ -41,14 +42,14 @@ func TestTeamsBatch_Integration(t *testing.T) {
 
 	teams := newTeamsBatchHandler(newMongoHRIdentityStore(mongoDB), "site-a", persister.processMessage)
 
-	raw := mustJSON(teamsMessage{
+	raw := mustJSON(teamsmigrate.Message{
 		ID: "tm-1", RoomID: "room-1", MessageType: "message",
-		From:            teamsUser{ID: "graph-1", DisplayName: "Alice"},
-		Body:            teamsBody{ContentType: "text", Content: "history line"},
+		From:            teamsmigrate.User{ID: "graph-1", DisplayName: "Alice"},
+		Body:            teamsmigrate.Body{ContentType: "text", Content: "history line"},
 		CreatedDateTime: time.Now().UTC().Truncate(time.Millisecond),
 	})
 	req := model.TeamsBatchRequest{Messages: []json.RawMessage{raw}}
-	wantID := deterministicMessageID("room-1", "tm-1")
+	wantID := teamsmigrate.DeterministicMessageID("room-1", "tm-1")
 
 	// Run twice: same batch → same deterministic id → idempotent.
 	for i := 0; i < 2; i++ {
