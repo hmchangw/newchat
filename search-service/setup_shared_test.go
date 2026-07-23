@@ -36,6 +36,7 @@ const (
 	testQueueGroup     = "search-service-test"      // apps, users, CCS
 	testQueueGroupSubs = "search-service-test-subs" // rooms
 	testQueueGroupV2   = "search-service-test-v2"   // messages v2
+	testQueueGroupOrgs = "search-service-test-orgs" // orgs
 )
 
 // Bounded HTTP client for ES control-plane calls.

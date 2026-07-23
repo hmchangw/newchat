@@ -56,7 +56,7 @@ paths.
      - [Edit Message](#edit-message) · [Delete Message](#delete-message) · [Pin Message](#pin-message) · [Unpin Message](#unpin-message) · [List Pinned Messages](#list-pinned-messages) · [React to Message](#react-to-message)
      - [Get Thread Messages](#get-thread-messages) · [Get Thread Parent Messages](#get-thread-parent-messages)
    - [3.3 search-service](#33-search-service)
-     - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users)
+     - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users) · [Search Orgs](#search-orgs)
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
@@ -3736,6 +3736,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.search.{siteID}.rooms` | [Search Rooms](#search-rooms) |
 | `chat.user.{account}.request.search.{siteID}.apps` | [Search Apps](#search-apps) |
 | `chat.user.{account}.request.search.{siteID}.users` | [Search Users](#search-users) |
+| `chat.user.{account}.request.search.{siteID}.orgs` | [Search Orgs](#search-orgs) |
 
 #### `search.messages` — full-text message search
 
@@ -4056,6 +4057,86 @@ Additional legacy fields may be present, mirroring the `GET /api/v3/users` respo
 |---|---|
 | `bad_request` | `query` is missing, empty, or whitespace-only. |
 | `internal` | Third-party HR endpoint unavailable or returned a non-2xx status. The raw third-party error is never forwarded to the caller. |
+
+---
+
+#### Search Orgs
+
+**Subject:** `chat.user.{account}.request.search.{siteID}.orgs`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+`{siteID}` is the requester's home site; the supercluster routes the request to that site's search-service. Prefix search across the organization directory (sections and departments), served directly from the local spotlight-org ES index (one document per section, keyed by `sectId`, maintained by `search-sync-worker` from HR employee events). The directory is **company-wide**: results are the same for every caller. The `{account}` in the subject is the authenticated identity (enforced by the NATS auth callout) and is used for logging/metrics only — it does **not** scope the result set.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `query` | string | **yes** | Case-insensitive prefix match on the organization fields (`sectName`, `sectTCName`, `deptName`, `deptTCName`, `divisionId`). Whitespace-only is rejected. |
+| `size` | integer | no | Page size. Default `25`, capped at `100`. |
+| `offset` | integer | no | Page offset. Default `0`. |
+
+```json
+{
+  "query": "engineering",
+  "size": 25,
+  "offset": 0
+}
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `orgs` | [SearchOrg](#searchorg)[] | Page of org results, in ES relevance order. Empty array when no matches, never null. |
+
+###### SearchOrg
+
+Projection of the spotlight-org ES document. Optional fields are omitted when the source document is partial.
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectId` | string | Section ID (the document key). |
+| `sectName` | string | Optional. Section name. |
+| `sectTCName` | string | Optional. Section name (Traditional Chinese). |
+| `sectDescription` | string | Optional. Section description. |
+| `deptId` | string | Optional. Department ID. |
+| `deptName` | string | Optional. Department name. |
+| `deptTCName` | string | Optional. Department name (Traditional Chinese). |
+| `deptDescription` | string | Optional. Department description. |
+| `divisionId` | string | Optional. Division ID. |
+
+```json
+{
+  "orgs": [
+    {
+      "sectId": "S1",
+      "sectName": "engineering-platform",
+      "sectTCName": "平台",
+      "deptId": "D1",
+      "deptName": "technology",
+      "deptTCName": "科技",
+      "divisionId": "DIV1"
+    }
+  ]
+}
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference).
+
+| Code | Reason |
+|---|---|
+| `bad_request` | `query` is missing, empty, or whitespace-only; or `size`/`offset` is negative. |
+| `internal` | Elasticsearch backend failure (transient or permanent). The raw error is never leaked to the client. |
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
 
 ---
 

@@ -72,6 +72,7 @@ type SearchConfig struct {
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
 	UserRoomIndex           string        `env:"USER_ROOM_INDEX,required"`
 	SpotlightIndex          string        `env:"SPOTLIGHT_INDEX,required"`
+	SpotlightOrgIndex       string        `env:"SPOTLIGHT_ORG_INDEX,required"`
 	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
 }
 
@@ -108,6 +109,13 @@ func main() {
 		os.Exit(1)
 	}
 	spotlightReadPattern := fmt.Sprintf("%s-*", spotlightBase)
+
+	spotlightOrgBase, _, ok := searchindex.StripVersion(cfg.Search.SpotlightOrgIndex)
+	if !ok {
+		slog.Error("invalid config", "name", "SEARCH_SPOTLIGHT_ORG_INDEX", "value", cfg.Search.SpotlightOrgIndex, "reason", "must end with -v<N>, e.g. spotlightorg-site-a-v1")
+		os.Exit(1)
+	}
+	spotlightOrgReadPattern := fmt.Sprintf("%s-*", spotlightOrgBase)
 
 	ctx := context.Background()
 
@@ -183,6 +191,7 @@ func main() {
 		RequestTimeout:          cfg.Search.RequestTimeout,
 		UserRoomIndex:           cfg.Search.UserRoomIndex,
 		SpotlightReadPattern:    spotlightReadPattern,
+		SpotlightOrgReadPattern: spotlightOrgReadPattern,
 	})
 
 	router := natsrouter.New(nc, "search-service")

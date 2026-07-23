@@ -16,6 +16,7 @@ import (
 )
 
 const testSpotlightIndex = "spotlight-*"
+const testSpotlightOrgIndex = "spotlightorg-*"
 
 type fakeStore struct {
 	searchCalls   []searchCall
@@ -88,6 +89,7 @@ func newTestHandler(store SearchStore, mongo MongoStore, users SearchUsersClient
 		RestrictedRoomsCacheTTL: 5 * time.Minute,
 		RecentWindow:            365 * 24 * time.Hour,
 		SpotlightReadPattern:    testSpotlightIndex,
+		SpotlightOrgReadPattern: testSpotlightOrgIndex,
 	})
 }
 
@@ -727,4 +729,109 @@ func TestHandler_SearchMessages_WithRoomIDsBuildsScopedQuery(t *testing.T) {
 	shoulds := roomAccess["should"].([]any)
 	// rx is restricted → 2 clauses (A+B); r1 is unrestricted + terms-lookup AND → 1 clause
 	assert.Greater(t, len(shoulds), 1, "scoped query must have more than 1 should clause")
+}
+
+func TestHandler_SearchOrgs_HappyPath(t *testing.T) {
+	store := &fakeStore{
+		searchBody: json.RawMessage(`{"hits":{"total":{"value":2},"hits":[` +
+			`{"_source":{"sectId":"S1","sectName":"Engineering","sectTCName":"工程","deptId":"D1","deptName":"Technology","deptTCName":"科技","divisionId":"DIV1"}},` +
+			`{"_source":{"sectId":"S2","sectName":"Engineering Ops","deptId":"D1","deptName":"Technology","divisionId":"DIV1"}}]}}`),
+	}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+
+	resp, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "engineering"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Len(t, resp.Orgs, 2)
+	assert.Equal(t, model.SearchOrg{
+		SectID: "S1", SectName: "Engineering", SectTCName: "工程",
+		DeptID: "D1", DeptName: "Technology", DeptTCName: "科技", DivisionID: "DIV1",
+	}, resp.Orgs[0])
+	assert.Equal(t, "S2", resp.Orgs[1].SectID)
+
+	require.Len(t, store.searchCalls, 1)
+	assert.Equal(t, []string{testSpotlightOrgIndex}, store.searchCalls[0].indices,
+		"org search must hit only the spotlight-org index")
+}
+
+func TestHandler_SearchOrgs_EmptyQueryRejected(t *testing.T) {
+	store := &fakeStore{}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+	_, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{})
+	require.Error(t, err)
+	var rerr *errcode.Error
+	require.True(t, errors.As(err, &rerr))
+	assert.Equal(t, errcode.CodeBadRequest, rerr.Code)
+	assert.Empty(t, store.searchCalls, "validation must short-circuit before backend call")
+}
+
+func TestHandler_SearchOrgs_WhitespaceQueryRejected(t *testing.T) {
+	store := &fakeStore{}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+	_, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "   \t  "})
+	require.Error(t, err)
+	var rerr *errcode.Error
+	require.True(t, errors.As(err, &rerr))
+	assert.Equal(t, errcode.CodeBadRequest, rerr.Code)
+	assert.Empty(t, store.searchCalls)
+}
+
+func TestHandler_SearchOrgs_ESErrorSanitized(t *testing.T) {
+	store := &fakeStore{searchErr: errors.New("es failed")}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+	_, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "engineering"})
+	require.Error(t, err)
+	classified := errcode.Classify(context.Background(), err)
+	assert.Equal(t, errcode.CodeInternal, classified.Code)
+	assert.NotContains(t, classified.Message, "es failed", "internal error text must not surface to client")
+}
+
+func TestHandler_SearchOrgs_EmptyESResultReturnsEmptySlice(t *testing.T) {
+	store := &fakeStore{searchBody: json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`)}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+
+	resp, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "nope"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.NotNil(t, resp.Orgs, "must be empty slice, never nil — to marshal as [] not null")
+	assert.Empty(t, resp.Orgs)
+}
+
+func TestHandler_SearchOrgs_SizeClamped(t *testing.T) {
+	store := &fakeStore{}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+
+	_, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "engineering", Size: 500})
+	require.NoError(t, err)
+
+	require.Len(t, store.searchCalls, 1)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(store.searchCalls[0].body, &body))
+	assert.Equal(t, float64(100), body["size"], "Size > MaxDocCounts must be clamped")
+}
+
+func TestHandler_SearchOrgs_NegativeSizeRejected(t *testing.T) {
+	store := &fakeStore{}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+
+	_, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "x", Size: -1})
+	require.Error(t, err)
+	var rerr *errcode.Error
+	require.True(t, errors.As(err, &rerr))
+	assert.Equal(t, errcode.CodeBadRequest, rerr.Code)
+	assert.Empty(t, store.searchCalls)
+}
+
+func TestHandler_SearchOrgs_QueryTrimmedBeforeQueryBuild(t *testing.T) {
+	store := &fakeStore{}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+
+	_, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "  engineering  "})
+	require.NoError(t, err)
+
+	require.Len(t, store.searchCalls, 1)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(store.searchCalls[0].body, &body))
+	mm := body["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)[0].(map[string]any)["multi_match"].(map[string]any)
+	assert.Equal(t, "engineering", mm["query"], "trimmed query must flow to the ES body, not the padded string")
 }
