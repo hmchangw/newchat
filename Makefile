@@ -1,6 +1,6 @@
 .PHONY: lint fmt test test-integration generate build deps-up deps-down \
         require-deps up up-detached down dev \
-        obs-up obs-down profile tools sast sast-gosec sast-vuln sast-semgrep
+        obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
 DEPS_COMPOSE     := docker-local/compose.deps.yaml
 SERVICES_COMPOSE := docker-local/compose.services.yaml
@@ -28,6 +28,7 @@ TOOLS_GO_TOOLCHAIN    := go1.25.12
 GOLANGCI_LINT_VERSION := v2.11.4
 GOSEC_VERSION         := v2.26.1
 GOVULNCHECK_VERSION   := v1.3.0
+MOCKGEN_VERSION       := v0.6.0
 SEMGREP_VERSION       := 1.163.0
 
 GOSEC       := $(GOBIN_DIR)/gosec
@@ -197,6 +198,7 @@ tools:
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	$(MAKE) --no-print-directory tools-mockgen
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install github.com/air-verse/air@v1.62.0
 	@if command -v pipx >/dev/null 2>&1; then \
 	  pipx install --force semgrep==$(SEMGREP_VERSION) \
@@ -207,6 +209,9 @@ tools:
 	  echo "pipx not found and semgrep not on PATH — install pipx, or: pip install --user semgrep==$(SEMGREP_VERSION)" >&2; \
 	  exit 1; \
 	fi
+
+tools-mockgen:
+	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install go.uber.org/mock/mockgen@$(MOCKGEN_VERSION)
 
 # Run all SAST scans (gosec, govulncheck, semgrep). All three always run
 # (no fail-fast) so every category is reported in one pass; exits non-zero
