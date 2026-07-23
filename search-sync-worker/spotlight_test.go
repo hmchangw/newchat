@@ -193,6 +193,54 @@ func TestSpotlightCollection_BuildAction_MemberRemoved(t *testing.T) {
 	assert.Nil(t, action.Doc)
 }
 
+// TestSpotlightCollection_BuildAction_MemberRemoved_BotsCleanedUp verifies that
+// bot / platform-admin removals are NOT skipped: a delete action must still be
+// emitted so a bot doc indexed by legacy behavior (or during a rolling deploy)
+// gets cleaned up. The delete is idempotent — a 404 on a never-indexed doc is a
+// benign ack (see isBulkItemSuccess).
+func TestSpotlightCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"weather.bot", "p_tchatadmin_siteA"}
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, 3000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2, "bot and platform-admin removals must still emit cleanup deletes")
+
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		assert.Equal(t, searchengine.ActionDelete, action.Action)
+		assert.Equal(t, "spotlight-site-a-v1-chat", action.Index)
+		assert.Equal(t, int64(3000), action.Version)
+		assert.Nil(t, action.Doc)
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"weather.bot_r-eng", "p_tchatadmin_siteA_r-eng"}, docIDs)
+}
+
+// TestSpotlightCollection_BuildAction_MemberRemoved_MixedHumanAndBot verifies a
+// mixed removal fans out to a delete for BOTH the human and the bot — the human
+// because they were indexed, the bot as defensive cleanup of any stale doc.
+func TestSpotlightCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"alice", "weather.bot"}
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, 4000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2)
+
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		assert.Equal(t, searchengine.ActionDelete, action.Action)
+		assert.Nil(t, action.Doc)
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"alice_r-eng", "weather.bot_r-eng"}, docIDs)
+}
+
 func TestSpotlightCollection_BuildAction_RestrictedRoomIndexedLikeAnyOther(t *testing.T) {
 	// See spotlightCollection.BuildAction docstring for the room-name
 	// vs message-content access boundary.
