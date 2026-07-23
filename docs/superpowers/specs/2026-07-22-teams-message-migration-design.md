@@ -21,15 +21,15 @@ re-projection) with the source's live side-effects suppressed. Nothing is re-pub
 to the `.created` event, so no fan-out, notification, or indexing happens — the silent
 migration by design.
 
-**Cross-consumer note (the `.teams.batch` subject rides the canonical wildcard).**
-`notification-worker` and message-worker's own message consumer are filtered to
-`.created`, so they never receive `.teams.batch`. `broadcast-worker` and
-`search-sync-worker`, however, bind the whole `chat.msg.canonical.{siteID}.>` and so
-*do* receive each `.teams.batch` message; each decodes it as an invalid message event
-(no message id) and **Ack-drops it** — no re-broadcast, no index write, no redelivery
-loop (verified live: both consumers Ack the batch with zero redelivery). This is benign
-today but is per-message wasted work at scale; narrowing those two consumers' filters to
-the message subjects they actually handle (excluding `.teams.batch`) is a clean follow-up.
+**Cross-consumer isolation (the `.teams.batch` subject rides the canonical wildcard).**
+`.teams.batch` is a two-token tail under `chat.msg.canonical.{siteID}.>`, whereas every
+per-message event (`.created`/`.updated`/`.deleted`/`.pinned`/`.unpinned`/`.reacted`) is
+single-token. Consumers that handle message events therefore bind
+`chat.msg.canonical.{siteID}.*` (single-token, via `subject.MsgCanonicalMessageWildcard`)
+so the batch envelope is never delivered to them: `message-worker`'s message consumer and
+`notification-worker` were already filtered to `.created`; this PR narrows
+`broadcast-worker` and `search-sync-worker` from `.>` to `.*` for the same reason.
+Only `message-worker`'s dedicated `.teams.batch` consumer receives the batch.
 
 **Delivery + retries:** the consumer Acks a batch once every message has been handled.
 A per-message transform error is logged as that message's result and does **not** block
