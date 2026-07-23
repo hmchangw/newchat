@@ -7,8 +7,7 @@ import (
 // Package-level sentinels so handlers can errors.Is and tests can assert without reconstructing.
 
 var (
-	// errInvalidCredentials covers unknown account, wrong password, and SSO-only accounts.
-	// Uniform so the wire never reveals which accounts are password-eligible.
+	// errInvalidCredentials covers unknown account, wrong password, and SSO-only accounts. Uniform so the wire never reveals which accounts are password-eligible.
 	errInvalidCredentials = errcode.Unauthenticated("invalid credentials",
 		errcode.WithReason(errcode.BotplatformInvalidCredentials))
 

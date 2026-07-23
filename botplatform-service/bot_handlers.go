@@ -27,8 +27,7 @@ const (
 	botBatchMaxOrgIDs  = 5
 )
 
-// botSendRoomMessage routes to the room's home site via subscription lookup
-// (design 2026-07-22-bot-cross-site-routing §3).
+// botSendRoomMessage routes to the room's home site via subscription lookup (design 2026-07-22-bot-cross-site-routing §3).
 func (h *handler) botSendRoomMessage(c *gin.Context) {
 	var req botSendMessageRequest
 	if !bindStrict(c, &req) {
@@ -57,9 +56,8 @@ func (h *handler) botSendRoomMessage(c *gin.Context) {
 	c.JSON(http.StatusOK, msg)
 }
 
-// botSendDMMessage looks up the DM subscription and routes to that site.
-// On miss (first-time DM) it calls dm.ensure at BP's own site to create the
-// room, then forwards send-DM to that same local site.
+// botSendDMMessage looks up the DM subscription and routes to that site. On miss (first-time
+// DM) it calls dm.ensure at BP's own site to create the room, then forwards send-DM locally.
 func (h *handler) botSendDMMessage(c *gin.Context) {
 	var req botSendMessageRequest
 	if !bindStrict(c, &req) {
@@ -178,8 +176,7 @@ func (h *handler) handleMembersBatch(c *gin.Context, op memberBatchOp) {
 	c.Data(http.StatusOK, "application/json", replyData)
 }
 
-// notMemberOrInternal maps a subscription lookup error to the wire envelope:
-// a miss surfaces as 403 not_a_room_member; anything else is infra.
+// notMemberOrInternal maps a subscription lookup error to the wire envelope: a miss surfaces as 403 not_a_room_member; anything else is infra.
 func notMemberOrInternal(err error) error {
 	if errors.Is(err, model.ErrSubscriptionNotFound) {
 		return errcode.Forbidden("bot is not a room member",

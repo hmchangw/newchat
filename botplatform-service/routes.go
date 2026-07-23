@@ -14,9 +14,8 @@ func registerRoutes(r *gin.Engine, h *handler) {
 	r.POST("/api/v1/auth/validate", h.HandleValidate)
 }
 
-// registerBotRoutes attaches bot endpoints with the auth → rate-limit → idempotency → handler chain.
-// Login/validate routes stay on a different auth model and MUST NOT share the bot buckets.
-// Nil valkey (dev) omits rate-limit + idempotency; requireBot is unconditional.
+// registerBotRoutes attaches bot endpoints with the auth → rate-limit → idempotency → handler chain
+// (login/validate use a different auth model). Nil valkey (dev) omits rate-limit + idempotency.
 func registerBotRoutes(r *gin.Engine, sessions session.Store, valkey valkeyutil.Client, cfg *config, h *handler) {
 	auth := requireBot(sessions)
 

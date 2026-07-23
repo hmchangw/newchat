@@ -21,8 +21,7 @@ const (
 	// BotplatformSiteUnknown: 500 when PORTAL_SITE_URLS has no entry for the user's siteId.
 	BotplatformSiteUnknown Reason = "site_unknown"
 
-	// BotNotABot: 403 when the session lacks the bot role, or x-user-id disagrees with the session.
-	// Merged so the wire doesn't reveal which mismatched.
+	// BotNotABot: 403 when the session lacks the bot role, or x-user-id disagrees with the session. Merged so the wire doesn't reveal which mismatched.
 	BotNotABot Reason = "not_a_bot"
 
 	// BotInFlight: 409 when an identical bot request (same opID) is already in flight. Retry-After: 1.

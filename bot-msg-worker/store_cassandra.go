@@ -96,8 +96,7 @@ func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, si
 	return nil
 }
 
-// saveEncrypted binds body columns NULL and stores ciphertext in enc_payload/enc_meta;
-// NULLs defeat hybrid states on redelivery of pre-encryption rows.
+// saveEncrypted binds body columns NULL and stores ciphertext in enc_payload/enc_meta; NULLs defeat hybrid states on redelivery of pre-encryption rows.
 func (s *CassandraStore) saveEncrypted(ctx context.Context, msg *model.Message, siteID string) error {
 	cm := buildCassandraMessage(msg)
 	enc := atrest.SplitForEncryption(&cm)
@@ -138,9 +137,8 @@ func (s *CassandraStore) saveEncrypted(ctx context.Context, msg *model.Message, 
 	return nil
 }
 
-// SaveThreadMessage inserts into messages_by_id + thread_messages_by_thread,
-// mirroring to messages_by_room when TShow is true, then blind-SETs tcount/tlm
-// on the parent from a bounded partition COUNT (see pkg/threadcount).
+// SaveThreadMessage inserts into messages_by_id + thread_messages_by_thread, mirroring to
+// messages_by_room when TShow is true, then blind-SETs tcount/tlm from a bounded partition COUNT.
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, siteID, threadRoomID string) error {
 	if s.cipher != nil {
 		return s.saveThreadEncrypted(ctx, msg, siteID, threadRoomID)
@@ -243,12 +241,8 @@ func (s *CassandraStore) saveThreadEncrypted(ctx context.Context, msg *model.Mes
 	return s.countAndSetParentTcount(ctx, msg, threadRoomID)
 }
 
-// countAndSetParentTcount recomputes tcount from the partition COUNT and
-// co-sets tcount + thread_last_msg_at on the parent row in both message
-// tables. Blind SET from an authoritative COUNT is idempotent on redelivery.
-// tlm is the reply's own CreatedAt (always newest on the add path).
-// No-op when ThreadParentMessageCreatedAt is nil (legacy replies without
-// the parent-createdAt carrier).
+// countAndSetParentTcount blind-SETs tcount/thread_last_msg_at on the parent from an
+// authoritative partition COUNT (idempotent on redelivery); no-op for legacy replies without ThreadParentMessageCreatedAt.
 func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model.Message, threadRoomID string) error {
 	if msg.ThreadParentMessageCreatedAt == nil {
 		return nil

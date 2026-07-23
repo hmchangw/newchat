@@ -13,10 +13,8 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// Sysmsg emission — LOCAL ONLY, never federated via OUTBOX.
-// Remote members learn membership from the member_added event instead.
-// Add/remove emit only when the diff is non-empty; create always emits (owner is the seed).
-// Wire shape is a raw model.Message, matching bot-msg-handler on the same subject.
+// Sysmsg emission is LOCAL ONLY, never federated via OUTBOX — remote members learn membership
+// from member_added instead. Wire shape is a raw model.Message on the same subject as bot-msg-handler.
 
 // jsPublishAdapter narrows o11ynats.JetStream to sysmsgPublisher.
 type jsPublishAdapter struct {

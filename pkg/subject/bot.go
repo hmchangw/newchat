@@ -2,16 +2,14 @@ package subject
 
 import "fmt"
 
-// Bot messaging pipeline subjects.
-// Req/reply lives under chat.server.bot.request.>; JetStream lives under chat.bot.>.
+// Bot messaging pipeline subjects. Req/reply lives under chat.server.bot.request.>; JetStream lives under chat.bot.>.
 
 // ServerBotMsgRoomSend is BP's publish subject for a bot send-in-room request.
 func ServerBotMsgRoomSend(siteID, roomID string) string {
 	return fmt.Sprintf("chat.server.bot.request.room.%s.%s.msg.send", siteID, roomID)
 }
 
-// ServerBotDMSend is BP's publish subject for a bot send-DM request.
-// bot-msg-handler derives the roomID from userID via idgen.BuildDMRoomID.
+// ServerBotDMSend is BP's publish subject for a bot send-DM request. bot-msg-handler derives the roomID from userID via idgen.BuildDMRoomID.
 func ServerBotDMSend(siteID, userID string) string {
 	return fmt.Sprintf("chat.server.bot.request.dm.%s.%s.msg.send", siteID, userID)
 }
@@ -36,9 +34,8 @@ func ServerBotRoomGet(siteID string) string {
 	return fmt.Sprintf("chat.server.bot.request.room.%s.get", siteID)
 }
 
-// ServerBotRoomDMEnsure is the subject BP's natsDMEnsurer publishes on to
-// materialize a DM room via bot-room-service. Always scoped to the bot's
-// site (DM origin lives at the bot's site).
+// ServerBotRoomDMEnsure is the subject BP's natsDMEnsurer publishes on to materialize a DM room
+// via bot-room-service; always scoped to the bot's site (DM origin lives there).
 func ServerBotRoomDMEnsure(siteID string) string {
 	return fmt.Sprintf("chat.server.bot.request.room.%s.dm.ensure", siteID)
 }

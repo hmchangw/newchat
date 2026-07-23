@@ -13,12 +13,10 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// Reuses model.model.ErrSubscriptionNotFound as the miss sentinel — same shape
-// user room-service already uses (errors.Is friendly).
+// Reuses model.model.ErrSubscriptionNotFound as the miss sentinel — same shape user room-service already uses (errors.Is friendly).
 
-// BotSub is the routing-relevant projection of a subscription row.
-// Deliberately minimal: BP needs only what it takes to decide which
-// site's downstream service the RPC forwards to.
+// BotSub is the routing-relevant projection of a subscription row. Deliberately minimal: BP
+// needs only what it takes to decide which site's downstream service the RPC forwards to.
 type BotSub struct {
 	RoomID   string
 	SiteID   string
@@ -27,11 +25,9 @@ type BotSub struct {
 
 // subscriptionStore is the read-only surface BP uses to route bot RPCs.
 type subscriptionStore interface {
-	// FindForBot returns the bot's subscription to a channel room, or
-	// model.ErrSubscriptionNotFound when the bot is not a member.
+	// FindForBot returns the bot's subscription to a channel room, or model.ErrSubscriptionNotFound when the bot is not a member.
 	FindForBot(ctx context.Context, botID, roomID string) (*BotSub, error)
-	// FindDMForBot returns the bot's DM subscription with otherAccount, or
-	// model.ErrSubscriptionNotFound on first-time DM (caller triggers ensure).
+	// FindDMForBot returns the bot's DM subscription with otherAccount, or model.ErrSubscriptionNotFound on first-time DM (caller triggers ensure).
 	FindDMForBot(ctx context.Context, botID, otherID string) (*BotSub, error)
 }
 
@@ -51,8 +47,7 @@ func (s *mongoSubscriptionStore) FindForBot(ctx context.Context, botID, roomID s
 }
 
 func (s *mongoSubscriptionStore) FindDMForBot(ctx context.Context, botID, otherID string) (*BotSub, error) {
-	// Deterministic DM room ID: same sorted-concat both sides use, matching
-	// bot-room-service.dm.ensure and user-pipeline SyncCreateDMRequest.
+	// Deterministic DM room ID: same sorted-concat both sides use, matching bot-room-service.dm.ensure and user-pipeline SyncCreateDMRequest.
 	roomID := idgen.BuildDMRoomID(botID, otherID)
 	filter := bson.M{"u._id": botID, "roomId": roomID, "roomType": string(model.RoomTypeDM)}
 	return s.findOne(ctx, filter)

@@ -20,10 +20,8 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams creates the input + output streams this service uses when
-// enabled (dev/integration), otherwise verifies the input stream exists so
-// a misconfigured deploy fails at startup. Stream identities come from env
-// so user and bot deployments target their own streams.
+// bootstrapStreams creates the input+output streams when enabled (dev/integration), otherwise
+// verifies the input stream exists so a misconfigured deploy fails at startup; identities are env-driven.
 func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubjectPrefix string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
@@ -35,8 +33,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputS
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     outputStream,
 			Subjects: []string{outputSubjectPrefix + ".>"},
-			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON
-			// at near-zero CPU. Shrinks inter-replica wire bytes and on-disk bytes.
+			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON at near-zero CPU. Shrinks inter-replica wire bytes and on-disk bytes.
 			Compression: jetstream.S2Compression,
 		}); err != nil {
 			return fmt.Errorf("create stream %s: %w", outputStream, err)

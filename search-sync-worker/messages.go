@@ -14,16 +14,13 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// parentCreatedAtResolver resolves a thread parent's authoritative createdAt;
-// ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
+// parentCreatedAtResolver resolves a thread parent's authoritative createdAt; ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
 type parentCreatedAtResolver interface {
 	ResolveParentCreatedAt(ctx context.Context, messageID string) (time.Time, bool)
 }
 
-// messageCollection implements Collection for message search sync.
-// streamCfg + consumerName are parameterized so one type consumes user or bot canonical streams
-// (both carry model.MessageEvent). syncFrom is the SYNC_MESSAGES_FROM legacy-replay cutoff;
-// zero disables it (bot flow always zero).
+// messageCollection implements Collection for message search sync; streamCfg + consumerName are
+// parameterized so one type consumes user or bot canonical streams. syncFrom is the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
 	indexPrefix    string
 	syncFrom       time.Time
@@ -85,8 +82,7 @@ func (c *messageCollection) TemplateBody() json.RawMessage {
 	return messageTemplateBody(c.indexPrefix, c.devMode)
 }
 
-// StoredScripts returns nil — message indexing uses plain index/delete bulk
-// actions with no painless scripts.
+// StoredScripts returns nil — message indexing uses plain index/delete bulk actions with no painless scripts.
 func (c *messageCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
@@ -108,8 +104,7 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if !c.syncFrom.IsZero() && evt.Message.CreatedAt.Before(c.syncFrom) {
 		return nil, nil
 	}
-	// Reactions don't change indexed content; skip rather than re-upserting
-	// the same document with a bumped updatedAt.
+	// Reactions don't change indexed content; skip rather than re-upserting the same document with a bumped updatedAt.
 	if evt.Event == model.EventReacted {
 		return nil, nil
 	}
@@ -117,10 +112,8 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
 }
 
-// resolveThreadParentCreatedAt fills the parent createdAt for a thread reply.
-// The gatekeeper's best-effort resolution rides the canonical event and wins
-// when present; only re-resolve from the ES index when it is absent. No-op for
-// nil resolver/non-thread/delete; a miss leaves the field unset.
+// resolveThreadParentCreatedAt fills the parent createdAt for a thread reply; the gatekeeper's
+// value wins when present, else re-resolve from the ES index. No-op for nil resolver/non-thread/delete.
 func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent) {
 	if c.parentResolver == nil || evt.Message.ThreadParentMessageID == "" || evt.Event == model.EventDeleted {
 		return
@@ -135,14 +128,8 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 
 // --- Message-specific internals ---
 
-// MessageSearchIndex defines the Elasticsearch document structure for messages.
-// Fields mirror pkg/model.Message plus SiteID from the event envelope.
-// The `es` struct tag drives the index template mapping via messageTemplateProperties():
-//   - "keyword", "text", "date", "boolean" → ES field type
-//   - "text,custom_analyzer" → text field with named analyzer
-//
-// When adding fields to Message (pkg/model), add them here with an `es` tag
-// and populate them in newMessageSearchIndex(). The template auto-updates.
+// MessageSearchIndex is the Elasticsearch document for messages, mirroring pkg/model.Message; the
+// `es` struct tag (keyword/text/date/boolean, or text,custom_analyzer) drives the template — add new Message fields here with an `es` tag and populate them in newMessageSearchIndex().
 type MessageSearchIndex struct {
 	MessageID   string `json:"messageId"                              es:"keyword"`
 	RoomID      string `json:"roomId"                                 es:"keyword"`
@@ -186,8 +173,7 @@ func indexName(prefix string, createdAt time.Time) string {
 func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengine.BulkAction {
 	index := indexName(indexPrefix, evt.Message.CreatedAt)
 
-	// Only an explicit EventDeleted removes the doc; created/updated (and any
-	// unstamped legacy/replayed event) take the index upsert path.
+	// Only an explicit EventDeleted removes the doc; created/updated (and any unstamped legacy/replayed event) take the index upsert path.
 	if evt.Event == model.EventDeleted {
 		return searchengine.BulkAction{
 			Action:  searchengine.ActionDelete,
@@ -213,8 +199,7 @@ func buildDocument(evt *model.MessageEvent) json.RawMessage {
 	return data
 }
 
-// messageTemplateProperties generates ES mapping properties from
-// MessageSearchIndex struct tags. The `es` tag is the source of truth.
+// messageTemplateProperties generates ES mapping properties from MessageSearchIndex struct tags. The `es` tag is the source of truth.
 func messageTemplateProperties() map[string]any {
 	return esPropertiesFromStruct[MessageSearchIndex]()
 }

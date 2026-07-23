@@ -219,8 +219,7 @@ func main() {
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 	})
 
-	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch;
-	// drops are safe because TTLs reconcile staleness.
+	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
 	invalCtx, invalCancel := context.WithCancel(ctx)
 	invalCh := make(chan string, 256)
 	var invalWG sync.WaitGroup
@@ -295,9 +294,8 @@ func main() {
 					<-sem
 					wg.Done()
 				}()
-				// jobguard recovers handler panics — this goroutine runs outside
-				// natsrouter's Recovery middleware, so an unrecovered panic would
-				// crash the worker and crash-loop on JetStream redelivery.
+				// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
+				// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
 				jobguard.Run(msg, func() {
 					handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 					// Migrated events carry X-Migration: live — the source already delivered them, so
@@ -309,8 +307,7 @@ func main() {
 						}
 						return
 					}
-					// Transient failures retry with backoff (never drop); malformed
-					// events Ack-drop as poison.
+					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
 					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 				})
 			}()
@@ -373,11 +370,8 @@ func main() {
 	)
 }
 
-// buildConsumerConfig returns the durable consumer config for the canonical
-// message consumer. Centralized so it is unit-testable without NATS. durable
-// and filterSubject are env-driven (cfg.ConsumerName / cfg.InputSubjectFilter)
-// so the same binary can bind to either the user or bot canonical pipeline.
-// Single filter only — reacted moved to broadcast-worker.
+// buildConsumerConfig returns the durable consumer config, centralized so it's unit-testable
+// without NATS; durable/filterSubject are env-driven so the binary can bind to user or bot pipelines.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = durable

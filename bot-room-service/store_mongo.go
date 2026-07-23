@@ -77,9 +77,8 @@ func (s *storeMongo) FindRoom(ctx context.Context, roomID string) (*Room, error)
 	}, nil
 }
 
-// UpsertSubscription uses $setOnInsert; re-execute is a no-op returning created=false.
-// Uses the canonical u._id/u.account SubscriptionUser shape so notification-worker,
-// broadcast-worker, inbox-worker, and room-service all read bot subscriptions.
+// UpsertSubscription uses $setOnInsert; re-execute is a no-op returning created=false. Uses the
+// canonical u._id/u.account shape so notification-worker/broadcast-worker/inbox-worker/room-service all read it.
 func (s *storeMongo) UpsertSubscription(ctx context.Context, sub *Subscription) (bool, error) {
 	filter := bson.M{"roomId": sub.RoomID, "u._id": sub.UserID}
 	update := bson.M{

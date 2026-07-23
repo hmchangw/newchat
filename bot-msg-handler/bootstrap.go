@@ -20,8 +20,7 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams owns BOT_MESSAGES_CANONICAL_{siteID}.
-// When disabled, verifies the stream exists so a missing stream fails at startup, not at first publish.
+// bootstrapStreams owns BOT_MESSAGES_CANONICAL_{siteID}. When disabled, verifies the stream exists so a missing stream fails at startup, not at first publish.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	cfg := stream.BotMessagesCanonical(siteID)
 	if enabled {

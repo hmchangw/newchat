@@ -12,9 +12,8 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// publisher is the narrow sync-publish surface mobileEmitter needs.
-// Sync semantics let the handler nak on publish failure; {messageId}-b{N} dedup
-// protects against duplicate emission of batches that already succeeded.
+// publisher is the narrow sync-publish surface mobileEmitter needs; sync semantics let the
+// handler nak on publish failure, and {messageId}-b{N} dedup protects already-succeeded batches.
 type publisher interface {
 	PublishMsg(ctx context.Context, msg *nats.Msg) error
 }
@@ -30,9 +29,8 @@ type mobileEmitter struct {
 	maxPayloadBytes     int
 }
 
-// newMobileEmitter builds an Emitter. outputSubjectPrefix is env-driven
-// (cfg.OutputSubjectPrefix) so the same binary can publish onto either the
-// user or bot push-notification subject; ".send" is appended per publish.
+// newMobileEmitter builds an Emitter. outputSubjectPrefix is env-driven so the same binary
+// can publish onto either the user or bot push-notification subject; ".send" is appended per publish.
 func newMobileEmitter(pub publisher, outputSubjectPrefix string, maxPayloadBytes int) *mobileEmitter {
 	return &mobileEmitter{pub: pub, outputSubjectPrefix: outputSubjectPrefix, maxPayloadBytes: maxPayloadBytes}
 }

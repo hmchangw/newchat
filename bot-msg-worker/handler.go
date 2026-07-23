@@ -21,8 +21,7 @@ func newHandler(store Store, siteID string) *handler {
 	return &handler{store: store, siteID: siteID}
 }
 
-// HandleJetStreamMsg processes one canonical message.
-// Ack on success, Nak on transient error, Ack-drop on permanent/unmarshal error.
+// HandleJetStreamMsg processes one canonical message. Ack on success, Nak on transient error, Ack-drop on permanent/unmarshal error.
 func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	var evt model.MessageEvent
 	if err := json.Unmarshal(msg.Data(), &evt); err != nil {

@@ -50,8 +50,7 @@ type sysmsgPublisher interface {
 	PublishWithMsgID(ctx context.Context, subj string, data []byte, msgID string) error
 }
 
-// handler wires the room/member endpoints.
-// Cross-site membership federates through OUTBOX; sysmsgs stay local.
+// handler wires the room/member endpoints. Cross-site membership federates through OUTBOX; sysmsgs stay local.
 type handler struct {
 	store      RoomStore
 	siteID     string
@@ -137,9 +136,7 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 		return nil, fmt.Errorf("upsert bot dm subscription: %w", err)
 	}
 
-	// Same-site target (or unset SiteID → treated as local since we have no
-	// remote address to federate to): upsert the subscription directly.
-	// Remote: federate via OUTBOX so the target-site inbox-worker upserts it.
+	// Same-site target (or unset SiteID, treated as local): upsert the subscription directly. Remote: federate via OUTBOX so the target-site inbox-worker upserts it.
 	if target.SiteID == "" || target.SiteID == h.siteID {
 		if _, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: target.ID, Account: target.Account,
@@ -148,8 +145,7 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 			return nil, fmt.Errorf("upsert target dm subscription: %w", err)
 		}
 	} else {
-		// DM member_added carries roomType=botDM + RequesterAccount=bot so the
-		// target names the subscription after the counterparty; subscription-only, no rooms doc.
+		// DM member_added carries roomType=botDM + RequesterAccount=bot so the target names the subscription after the counterparty; subscription-only, no rooms doc.
 		if err := h.federateMemberAdded(c, roomID, target.ID, target.Account, target.SiteID, createdAt,
 			model.RoomTypeBotDM, "", ident.Account); err != nil {
 			return nil, err
@@ -200,11 +196,8 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 		return nil, fmt.Errorf("upsert owner subscription: %w", err)
 	}
 
-	// Channel rooms are always encrypted (mirrors room-service/room-worker):
-	// generate + durably store the room key, then fan it out to the owner.
-	// A fan-out publish failure is logged, not fatal — the key is already
-	// stored, so a later ensure/get RPC (added in a follow-up task) can
-	// recover it.
+	// Channel rooms are always encrypted (mirrors room-service/room-worker): generate+store
+	// the room key, then fan out to the owner; a publish failure is logged only — the key is already stored.
 	pair, err := roomkeystore.GenerateKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("generate room key: %w", err)
@@ -322,10 +315,8 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		}
 	}
 
-	// Fan out the room's current key to newly-subscribed accounts only —
-	// duplicate adds already have the key from their original add. The key
-	// was created at room-create time and is not re-rotated for adds
-	// (mirrors room-worker.buildAndFanOutRoomKey).
+	// Fan out the room's current key only to newly-subscribed accounts — duplicate adds already
+	// have it from their original add; the key isn't re-rotated for adds (mirrors room-worker.buildAndFanOutRoomKey).
 	if len(newAccounts) > 0 {
 		pair, err := h.keyStore.Get(c, roomID)
 		if err != nil {
@@ -382,8 +373,7 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		return nil, err
 	}
 
-	// Pre-validate the whole batch so a mid-loop self-ID doesn't leave
-	// earlier removals committed before the request fails.
+	// Pre-validate the whole batch so a mid-loop self-ID doesn't leave earlier removals committed before the request fails.
 	for _, userID := range req.UserIDs {
 		if userID == ident.ID {
 			return nil, errcode.Forbidden("bot cannot remove itself",
@@ -409,9 +399,8 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 				// User doc is gone (best-effort federation is fine).
 				continue
 			}
-			// Transient store error — the local removal already committed
-			// but federation would be lost. Log so an operator can see it;
-			// don't fail the outer op (matches sysmsg best-effort semantics).
+			// Transient store error — local removal already committed but federation would be lost;
+			// log for an operator and don't fail the outer op (matches sysmsg best-effort semantics).
 			slog.WarnContext(c, "bot-room-service find user for federation failed",
 				"userID", userID, "roomID", roomID, "error", err)
 			continue
@@ -422,8 +411,7 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 			}
 		}
 	}
-	// Only rotate when at least one subscription was actually deleted — a
-	// no-op remove must not rotate the room key (matches user pipeline).
+	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
 	if len(removed) > 0 {
 		if err := h.rotateAndFanOut(c, roomID); err != nil {
 			return nil, err
@@ -439,10 +427,8 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	return &BotRemoveResponse{Removed: AddedRemoved{UserIDs: removed, OrgIDs: nil}}, nil
 }
 
-// fanOutKey marshals evt once and best-effort delivers it to every account.
-// A per-recipient publish failure is logged with `warnMsg` + account and does
-// not abort the fan-out — key delivery is recoverable via room-service.getRoomKey
-// on the client's next decrypt-miss.
+// fanOutKey marshals evt once and best-effort delivers to every account; a per-recipient
+// publish failure is logged and doesn't abort — recoverable via room-service.getRoomKey on next decrypt-miss.
 func (h *handler) fanOutKey(ctx context.Context, roomID string, accounts []string, evt model.RoomKeyEvent, warnMsg string) {
 	if len(accounts) == 0 {
 		return
@@ -459,14 +445,8 @@ func (h *handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 	}
 }
 
-// rotateAndFanOut generates v+1 for roomID, fans it out to the post-deletion
-// survivor snapshot, then commits it via Rotate. Fan-out happens BEFORE
-// Rotate so survivors hold v+1 before broadcast-worker starts encrypting
-// under it (mirrors room-worker.rotateAndFanOut).
-//
-// If the room has no current key (legacy/broken channel), the fan-out is
-// skipped entirely and the new pair is stored via Set so the room lands with
-// a valid v1 key.
+// rotateAndFanOut fans the new key to survivors BEFORE committing via Rotate, so they hold
+// v+1 before broadcast-worker encrypts under it; no-current-key rooms just Set a fresh v1.
 func (h *handler) rotateAndFanOut(ctx context.Context, roomID string) error {
 	survivors, err := h.store.ListRoomMemberAccounts(ctx, roomID)
 	if err != nil {
@@ -498,8 +478,7 @@ func (h *handler) rotateAndFanOut(ctx context.Context, roomID string) error {
 
 	if _, err := h.keyStore.Rotate(ctx, roomID, *newPair); err != nil {
 		if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-			// Fan-out already committed survivors to predictedVersion; persist at
-			// the same version so broadcast-worker reads under the key clients hold.
+			// Fan-out already committed survivors to predictedVersion; persist at the same version so broadcast-worker reads under the key clients hold.
 			if setErr := h.keyStore.SetWithVersion(ctx, roomID, *newPair, predictedVersion); setErr != nil {
 				return fmt.Errorf("store new key (fallback): %w", setErr)
 			}

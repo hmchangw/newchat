@@ -9,20 +9,8 @@ import (
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
 
-// userRoomCollection implements Collection for the user-room access-control
-// index. It maintains a per-user rooms array (one doc per user) used by the
-// search service as a terms filter on message search queries.
-//
-// Concurrency model: the collection is safe to run with multiple search-sync
-// worker pods sharing the same durable consumer. Out-of-order delivery of
-// (added, removed) pairs for the same (user, room) is handled by an
-// application-level timestamp guard inside the painless scripts — each update
-// carries the InboxEvent timestamp in `params.ts` and compares against the
-// per-room stored timestamp in `ctx._source.roomTimestamps`, skipping the
-// write (via `ctx.op = 'none'`) if the incoming event is stale. Concurrent
-// writers from different pods serialize on the primary shard's per-doc lock,
-// so the guard converges on last-write-wins-by-event-timestamp regardless of
-// physical arrival order.
+// userRoomCollection implements Collection for the user-room access-control index (per-user rooms
+// array). Safe across multiple pods on the same consumer: painless scripts apply a params.ts timestamp guard (ctx.op='none' on stale), converging on last-write-wins regardless of arrival order.
 type userRoomCollection struct {
 	inboxMemberCollection
 	indexName string
@@ -44,9 +32,8 @@ func (c *userRoomCollection) TemplateBody() json.RawMessage {
 	return userRoomTemplateBody(c.indexName)
 }
 
-// StoredScripts registers the add/remove painless scripts as ES stored
-// scripts. BuildAction references them by id so fan-out member updates don't
-// repeat the full source per action.
+// StoredScripts registers the add/remove painless scripts as ES stored scripts; BuildAction
+// references them by id so fan-out member updates don't repeat the full source per action.
 func (c *userRoomCollection) StoredScripts() map[string]json.RawMessage {
 	return map[string]json.RawMessage{
 		addRoomScriptID:    storedScriptBody(addRoomScript),
@@ -54,8 +41,7 @@ func (c *userRoomCollection) StoredScripts() map[string]json.RawMessage {
 	}
 }
 
-// storedScriptBody wraps a painless source string in the `PUT /_scripts/{id}`
-// request envelope ES expects.
+// storedScriptBody wraps a painless source string in the `PUT /_scripts/{id}` request envelope ES expects.
 func storedScriptBody(source string) json.RawMessage {
 	body := map[string]any{
 		"script": map[string]any{
@@ -68,35 +54,15 @@ func storedScriptBody(source string) json.RawMessage {
 	return data
 }
 
-// addRoomScript / removeRoomScript implement application-level last-write-wins
-// on (user, room) using `params.ts` (InboxEvent.Timestamp in millis). Stale
-// events short-circuit via `ctx.op = 'none'` which tells ES to skip the write
-// entirely — no version bump, no disk I/O.
-//
-// addRoomScript additionally routes by `params.hss`:
-//   - hss > 0 → rid lives in `restrictedRooms{rid: hss}` and is removed from `rooms[]`
-//   - hss <= 0 → rid lives in `rooms[]` and is removed from `restrictedRooms{}`
-//
-// This makes admin-driven restriction transitions atomic inside a single
-// update: the rid always ends up in exactly one of the two slots.
-//
-// Painless lacks nullable primitives in script params, so the Go side passes
-// `hss = 0` for unrestricted and `hss = *event.HistorySharedSince` otherwise.
-// The Go↔painless contract: publishers MUST emit nil for unrestricted rooms
-// on the wire — a `&0` is treated as unrestricted by this script and would be
-// a silent contract violation.
-// addRoomScriptID / removeRoomScriptID are the ES stored-script ids under
-// which addRoomScript / removeRoomScript are registered at startup. Bulk
-// member updates reference these ids instead of inlining the ~600-byte
-// source per action, so an N-account fan-out ships one id reference per
-// action rather than N copies of the script body. If a script's source ever
-// changes incompatibly during a rolling deploy, bump the id suffix so old and
-// new pods don't share a single mutated definition.
+// addRoomScriptID / removeRoomScriptID are the ES stored-script ids for addRoomScript/removeRoomScript,
+// referenced instead of inlining ~600 bytes per action; bump the suffix if a script's source changes incompatibly during a rolling deploy.
 const (
 	addRoomScriptID    = "search-sync-user-room-add-v1"
 	removeRoomScriptID = "search-sync-user-room-remove-v1"
 )
 
+// addRoomScript/removeRoomScript apply application-level LWW via params.ts, skipping stale writes
+// via ctx.op='none'. addRoomScript also routes by params.hss (>0 → restrictedRooms{}, <=0 → rooms[]) — Go passes hss=0 for nil HistorySharedSince, so publishers MUST emit nil, never &0, on the wire.
 const (
 	addRoomScript = `if (ctx._source.roomTimestamps == null) { ctx._source.roomTimestamps = [:]; } ` +
 		`if (ctx._source.rooms == null) { ctx._source.rooms = []; } ` +
@@ -127,14 +93,8 @@ const (
 		`} else { ctx.op = 'none'; }`
 )
 
-// BuildAction fans a member_added / member_removed event out into one ES
-// update per account in the payload. Bulk invites produce N distinct
-// user-room doc updates from a single event (each account touches a
-// different user's doc, keyed by account).
-//
-// Restricted rooms (HistorySharedSince != nil on the event) are routed into
-// `restrictedRooms{}` on the user-room doc — the search service reads both
-// `rooms[]` and `restrictedRooms{}` directly from ES at query time.
+// BuildAction fans a member_added/member_removed event into one ES update per account (bulk
+// invites yield N doc updates from one event); restricted rooms route into restrictedRooms{}, read alongside rooms[] by search-service.
 func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
 	evt, payload, err := parseMemberEvent(data)
 	if err != nil {
@@ -194,13 +154,8 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 	return actions, nil
 }
 
-// userRoomUpsertDoc is the full document inserted when the user has no prior
-// user-room entry (i.e., the first time a room is added for this user).
-//
-// Rooms holds unrestricted room IDs; RestrictedRooms maps rid →
-// historySharedSince (millis) for rooms the user joined with a history
-// restriction. RoomTimestamps seeds the per-room LWW timestamp guard used
-// uniformly across both paths.
+// userRoomUpsertDoc is the full document inserted on a user's first room (no prior user-room
+// entry). Rooms holds unrestricted IDs; RestrictedRooms maps rid→historySharedSince; RoomTimestamps seeds the LWW guard.
 type userRoomUpsertDoc struct {
 	UserAccount     string           `json:"userAccount"`
 	Rooms           []string         `json:"rooms"`
@@ -213,9 +168,8 @@ type userRoomUpsertDoc struct {
 func buildAddRoomUpdateBody(account, roomID string, ts, hss int64) (json.RawMessage, error) {
 	now := time.UnixMilli(ts).UTC().Format(time.RFC3339Nano)
 
-	// Seed the upsert document so the first-insert shape matches the
-	// painless-updated shape: restricted rooms go straight into
-	// restrictedRooms{}, unrestricted rooms go straight into rooms[].
+	// Seed the upsert document so the first-insert shape matches the painless-updated shape:
+	// restricted rooms go straight into restrictedRooms{}, unrestricted into rooms[].
 	upsert := userRoomUpsertDoc{
 		UserAccount:     account,
 		Rooms:           []string{},
@@ -266,11 +220,8 @@ func buildRemoveRoomUpdateBody(roomID string, ts int64) (json.RawMessage, error)
 	return data, nil
 }
 
-// userRoomTemplateBody builds the ES index template for the user-room
-// collection. The `index_patterns` field is set to the exact configured
-// index name so a custom USER_ROOM_INDEX value still receives the correct
-// mapping. The `roomTimestamps` field is mapped as `flattened` so new
-// roomIds don't balloon the mapping with per-key dynamic sub-fields.
+// userRoomTemplateBody builds the ES index template for user-room; index_patterns is the exact
+// configured index name so a custom USER_ROOM_INDEX still maps correctly, and roomTimestamps is `flattened` to avoid per-key mapping bloat.
 func userRoomTemplateBody(indexName string) json.RawMessage {
 	tmpl := map[string]any{
 		"index_patterns": []string{indexName},
@@ -291,10 +242,7 @@ func userRoomTemplateBody(indexName string) json.RawMessage {
 							"keyword": map[string]any{"type": "keyword", "ignore_above": 256},
 						},
 					},
-					// restrictedRooms is a rid → historySharedSince (millis)
-					// map. `flattened` keeps the mapping stable regardless of
-					// how many restricted rids show up — same approach as
-					// roomTimestamps.
+					// restrictedRooms is a rid→historySharedSince map; `flattened` keeps the mapping stable regardless of rid count — same approach as roomTimestamps.
 					"restrictedRooms": map[string]any{"type": "flattened"},
 					"roomTimestamps":  map[string]any{"type": "flattened"},
 					"createdAt":       map[string]any{"type": "date"},

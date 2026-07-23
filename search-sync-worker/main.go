@@ -20,23 +20,11 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// bootstrapConfig groups every field that is ONLY meaningful when the worker
-// is being stood up in dev or integration tests without its normal upstream
-// services. In production Enabled must remain false — streams are owned by
-// their publisher services (message-gatekeeper for MESSAGES_CANONICAL,
-// inbox-worker for INBOX) and search-sync-worker only manages its own
-// durable consumers.
-//
-// search-sync-worker NEVER bootstraps INBOX, even when Enabled=true; that
-// stream's schema is owned by inbox-worker and its federation by ops/IaC.
-//
-// Env vars in this group are all prefixed `BOOTSTRAP_` so they're easy to
-// spot in deployment manifests and obvious to grep.
+// bootstrapConfig groups fields only meaningful in dev/integration; in production Enabled must
+// stay false — streams are owned by their publishers, and search-sync-worker NEVER bootstraps INBOX (owned by inbox-worker).
 type bootstrapConfig struct {
-	// Enabled (BOOTSTRAP_STREAMS) toggles whether the worker calls
-	// CreateOrUpdateStream at startup for each collection's stream. Leave
-	// false in production. INBOX is intentionally excluded from this loop
-	// — inbox-worker owns INBOX schema bootstrap.
+	// Enabled (BOOTSTRAP_STREAMS) toggles CreateOrUpdateStream at startup for each collection's
+	// stream; leave false in production. INBOX is always excluded — inbox-worker owns its schema.
 	Enabled bool `env:"STREAMS" envDefault:"false"`
 }
 
@@ -53,48 +41,28 @@ type config struct {
 	SpotlightIndex      string `env:"SPOTLIGHT_INDEX,required"`
 	SpotlightOrgIndex   string `env:"SPOTLIGHT_ORG_INDEX,required"`
 	HRCentralSiteID     string `env:"HR_CENTRAL_SITE_ID,required"`
-	// HRJetStreamDomain, when set, is the JetStream domain of the remote NATS
-	// cluster that owns OrgSyncStream (hr-syncer's HR stream). The spotlight-org
-	// consumer is created against a domain-scoped JetStream context so a worker
-	// at one site can consume the HR stream in another site's domain. Empty
-	// (default) means the HR stream is in this worker's local domain and the
-	// shared, otel-traced JetStream context is used.
+	// HRJetStreamDomain, when set, is the remote NATS domain owning OrgSyncStream (hr-syncer's HR
+	// stream), letting a worker at one site consume it in another's domain; empty means local domain.
 	HRJetStreamDomain string `env:"HR_JETSTREAM_DOMAIN" envDefault:""`
 	UserRoomIndex     string `env:"USER_ROOM_INDEX,required"`
 	DevMode           bool   `env:"DEV_MODE" envDefault:"false"`
 	HealthAddr        string `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled      bool   `env:"PPROF_ENABLED" envDefault:"false"`
 
-	// SyncMessagesFrom is an optional YYYY-MM-DD cutoff (UTC) that the
-	// messages collection compares against Message.CreatedAt. Events
-	// before the date are skipped — used to keep legacy-migration replays
-	// of old chat messages out of the message index. Empty string
-	// disables the filter. Spotlight and user-room are NOT filtered: a
-	// user must still be able to discover and search rooms they joined
-	// before the cutoff.
+	// SyncMessagesFrom is an optional YYYY-MM-DD (UTC) cutoff for Message.CreatedAt, skipping
+	// legacy-migration replays from the message index; empty disables it. Spotlight/user-room are NOT filtered.
 	SyncMessagesFrom string `env:"SYNC_MESSAGES_FROM" envDefault:""`
 
-	// FetchBatchSize is the maximum number of JetStream messages to pull
-	// per Fetch() round-trip. Smaller values give lower latency per message
-	// but more round-trips; larger values amortize the per-Fetch overhead.
-	// This is a JetStream-client concern — it does NOT bound ES bulk
-	// request size.
+	// FetchBatchSize is the max JetStream messages pulled per Fetch() round-trip (smaller = lower
+	// latency, larger = amortized overhead); a JetStream-client concern that does NOT bound ES bulk size.
 	FetchBatchSize int `env:"FETCH_BATCH_SIZE" envDefault:"100"`
 
-	// BulkBatchSize is the soft cap on buffered ES bulk actions before the
-	// worker flushes to Elasticsearch. This is counted in actions, not
-	// messages: fan-out collections (bulk invites producing N actions per
-	// JetStream message) can reach this threshold with far fewer messages
-	// than the count suggests. The consumer loop checks handler.ActionCount()
-	// against this value and triggers a flush mid-Fetch if a single fat
-	// message pushes the buffer over the cap.
+	// BulkBatchSize is the soft cap on buffered ES bulk actions (counted in actions, not messages —
+	// fan-out collections can reach it with far fewer messages); handler.ActionCount() triggers a mid-Fetch flush if exceeded.
 	BulkBatchSize int `env:"BULK_BATCH_SIZE" envDefault:"500"`
 
-	// BulkFlushInterval is the maximum seconds between ES bulk flushes, even
-	// if the action buffer hasn't hit BulkBatchSize. It's the time-based
-	// counterpart to the size-based BulkBatchSize trigger — either
-	// condition can fire a flush. Keeps write latency bounded during
-	// idle / low-traffic periods.
+	// BulkFlushInterval is the max seconds between ES bulk flushes even if BulkBatchSize isn't hit —
+	// the time-based counterpart to the size trigger, bounding write latency during idle periods.
 	BulkFlushInterval int `env:"BULK_FLUSH_INTERVAL" envDefault:"5"`
 
 	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -108,12 +76,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Fail fast on non-positive batch/interval settings. Zero or negative
-	// values degenerate runConsumer into busy loops (`Fetch(0)`, constant
-	// flush checks) or stall it forever (`remaining <= 0` on every
-	// iteration). Reject at startup so an operator gets a clear signal
-	// instead of silent misbehavior. Matches the repo-wide "fail fast on
-	// bad config" rule in CLAUDE.md.
+	// Fail fast on non-positive batch/interval settings — zero/negative values degenerate runConsumer
+	// into busy loops (Fetch(0)) or stall it forever (remaining <= 0 every iteration); reject at startup for a clear signal.
 	if cfg.FetchBatchSize <= 0 {
 		slog.Error("invalid config", "name", "FETCH_BATCH_SIZE", "value", cfg.FetchBatchSize, "reason", "must be > 0")
 		os.Exit(1)
@@ -144,8 +108,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Warn (don't fail) if the bulk batch size can't be reached under the
-	// consumer's ack-pending ceiling — see checkBatchAckCoupling.
+	// Warn (don't fail) if the bulk batch size can't be reached under the consumer's ack-pending ceiling — see checkBatchAckCoupling.
 	if warning := checkBatchAckCoupling(cfg.BulkBatchSize, cfg.Consumer.MaxAckPending); warning != "" {
 		slog.Warn("batch/ack-pending config coupling",
 			"bulkBatchSize", cfg.BulkBatchSize,
@@ -175,12 +138,10 @@ func main() {
 	}
 
 	msgColl := newMessageCollection(cfg.MsgIndexPrefix, syncMessagesFrom, cfg.DevMode)
-	// search-service filters restricted-room access by threadParentMessageCreatedAt,
-	// so re-resolve it from the parent's indexed createdAt (the event omits it).
+	// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
 	msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
-	// Second consumer over messageCollection, bound to BOT_MESSAGES_CANONICAL.
-	// isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
+	// Second consumer over messageCollection, bound to BOT_MESSAGES_CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
 	botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
 	botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
@@ -205,9 +166,8 @@ func main() {
 		slog.Info("index template upserted", "name", name)
 	}
 
-	// Register stored scripts before any consumer starts so the first
-	// scripted update already resolves the script id. Idempotent across
-	// pods (PUT _scripts is last-write-wins on identical bodies).
+	// Register stored scripts before any consumer starts so the first scripted update already
+	// resolves the script id; idempotent across pods (PUT _scripts is last-write-wins).
 	for _, coll := range collections {
 		for id, body := range coll.StoredScripts() {
 			if err := engine.PutScript(ctx, id, body); err != nil {
@@ -223,22 +183,16 @@ func main() {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
-	// Local JetStream consumers use the o11y facade so Fetch deliveries carry
-	// consumer spans. The HR domain path below stays raw because the facade has
-	// no domain-scoped constructor.
+	// Local JetStream consumers use the o11y facade so Fetch deliveries carry consumer spans;
+	// the HR domain path below stays raw because the facade has no domain-scoped constructor.
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
 		os.Exit(1)
 	}
 
-	// When HR_JETSTREAM_DOMAIN is set, the HR stream (OrgSyncStream) lives in a
-	// remote NATS domain. Build a raw domain-scoped JetStream context for the
-	// spotlight-org consumer: oteljetstream has no domain variant, and this
-	// worker already discards the per-message otel trace context on the consume
-	// path, so the raw context loses nothing in use. NewWithDomain only sets the
-	// API prefix (no I/O), so an error here is a config error, not a
-	// reachability failure. Empty domain keeps the shared js for the HR consumer.
+	// When HR_JETSTREAM_DOMAIN is set, build a raw domain-scoped JetStream context for the
+	// spotlight-org consumer (oteljetstream has no domain variant); NewWithDomain only sets the API prefix, so an error here is a config error, not reachability.
 	var hrJS jetstream.JetStream
 	if cfg.HRJetStreamDomain != "" {
 		hrJS, err = jetstream.NewWithDomain(nc.NatsConn(), cfg.HRJetStreamDomain)
@@ -253,22 +207,18 @@ func main() {
 	stopCh := make(chan struct{})
 	doneChs := make([]chan struct{}, 0, len(collections))
 
-	// Multiple collections can share the same stream (spotlight + user-room
-	// both consume INBOX). Track which streams have already been created so
-	// we don't redundantly call CreateOrUpdateStream per collection.
+	// Multiple collections can share the same stream (spotlight + user-room both consume INBOX);
+	// track which streams have already been created to avoid redundant CreateOrUpdateStream calls.
 	createdStreams := make(map[string]struct{}, len(collections))
 
-	// INBOX is owned by inbox-worker; HR is owned by hr-syncer.
-	// search-sync-worker is a pure consumer of both and must not create
-	// their schemas.
+	// INBOX is owned by inbox-worker; HR is owned by hr-syncer. search-sync-worker is a pure consumer of both and must not create their schemas.
 	inboxName := stream.Inbox(cfg.SiteID).Name
 	hrName := stream.OrgSyncStream(cfg.HRCentralSiteID).Name
 
 	for _, coll := range collections {
 		streamCfg := coll.StreamConfig(cfg.SiteID)
-		// Skip INBOX and HR bootstrap — those streams are owned by other
-		// services (inbox-worker / hr-syncer). Consumer creation still
-		// runs for collections that read from them.
+		// Skip INBOX and HR bootstrap — those streams are owned by other services (inbox-worker /
+		// hr-syncer); consumer creation still runs for collections that read from them.
 		if cfg.Bootstrap.Enabled && streamCfg.Name != inboxName && streamCfg.Name != hrName {
 			if _, alreadyCreated := createdStreams[streamCfg.Name]; !alreadyCreated {
 				if _, err := js.CreateOrUpdateStream(ctx, streamCfg); err != nil {
@@ -282,9 +232,8 @@ func main() {
 
 		consumerCfg := buildConsumerConfig(cfg.Consumer, coll, cfg.SiteID)
 
-		// The HR (spotlight-org) collection reads OrgSyncStream. When a remote HR
-		// domain is configured, create its consumer against the domain-scoped
-		// context; every other collection uses the shared otel-traced js.
+		// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is configured,
+		// create its consumer against the domain-scoped context — every other collection uses the shared js.
 		var fetcher msgFetcher
 		if streamCfg.Name == hrName && hrJS != nil {
 			cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
@@ -372,34 +321,8 @@ func main() {
 	)
 }
 
-// runConsumer is the batch-flush consumer loop for a single collection.
-//
-// Two batch sizes apply at different layers:
-//
-//   - fetchBatchSize bounds how many JetStream messages are pulled per
-//     `cons.Fetch(...)` round-trip. This is purely a JetStream-client tuning
-//     knob — larger = fewer round-trips, smaller = lower per-message latency.
-//
-//   - bulkBatchSize is the soft cap on buffered ES bulk actions before a
-//     flush is triggered. This is the real ES-side bound: a fan-out
-//     collection (bulk invite producing N actions per message) can hit it
-//     with far fewer messages than the count suggests, so the loop checks
-//     handler.ActionCount() — not message count — against it.
-//
-// The two caps interact: the loop clamps the per-Fetch count to
-// `min(fetchBatchSize, bulkBatchSize - ActionCount())` so we never pull
-// more messages than the remaining bulk capacity can absorb under a 1:1
-// assumption. Fan-out messages can still push the buffer past bulkBatchSize
-// mid-loop (a single N-subscription event produces N actions on its own),
-// which is handled by a mid-batch flush inside the message loop.
-//
-// Flushes happen on three triggers:
-//  1. `stopCh` signalled (graceful shutdown): drain whatever is buffered.
-//  2. `handler.ActionCount() >= bulkBatchSize`: size-based flush.
-//  3. `time.Since(lastFlush) >= bulkFlushInterval` with a non-empty buffer:
-//     time-based flush to bound write latency during idle periods.
-//
-// Bulk flush spans many client requests, so per-message X-Request-ID is intentionally NOT propagated; mint a per-flush bulkID if per-batch traceability becomes a need.
+// runConsumer is the batch-flush consumer loop: fetchBatchSize bounds JetStream Fetch() pulls
+// (client-tuning only), bulkBatchSize caps buffered ES actions (flushed on stopCh, size, or bulkFlushInterval; the loop clamps fetch to remaining bulk capacity, but a fan-out message can still overshoot mid-loop and triggers its own flush).
 func runConsumer(
 	ctx context.Context,
 	cons msgFetcher,
@@ -412,10 +335,8 @@ func runConsumer(
 	defer close(doneCh)
 	lastFlush := time.Now()
 
-	// jobguard recovers panics from the batch handler so a single poison
-	// message or a malformed bulk response can't crash this collection's
-	// consumer goroutine for good. On a recovered panic the in-flight messages
-	// are left un-acked and JetStream redelivers them after AckWait.
+	// jobguard recovers panics from the batch handler so a poison message or malformed bulk response
+	// can't crash this collection's consumer goroutine; in-flight messages stay un-acked and JetStream redelivers after AckWait.
 	flush := func() { jobguard.Guard("search-sync flush", func() { handler.Flush(ctx) }) }
 	add := func(msgCtx context.Context, m jetstream.Msg) {
 		jobguard.Guard("search-sync add: "+m.Subject(), func() { handler.AddWithContext(msgCtx, m) })
@@ -429,9 +350,8 @@ func runConsumer(
 		default:
 		}
 
-		// Bound the next Fetch by remaining bulk capacity so a steady stream
-		// of 1:1 messages can't overshoot bulkBatchSize. Fan-out messages
-		// may still push us over — that's handled mid-loop below.
+		// Bound the next Fetch by remaining bulk capacity so a steady stream of 1:1 messages can't
+		// overshoot bulkBatchSize; fan-out messages may still push us over, handled mid-loop below.
 		remaining := bulkBatchSize - handler.ActionCount()
 		if remaining <= 0 {
 			flush()
@@ -458,17 +378,12 @@ func runConsumer(
 			continue
 		}
 
-		// Always drain batch.Messages() to completion. The raw domain adapter
-		// (consumer_source.go) re-channels via a goroutine that blocks on an
-		// unbuffered send until the channel is drained; an early break here
-		// would leak that goroutine and stall shutdown. Bound work via
-		// fetchCount above, not by abandoning a batch mid-range.
+		// Always drain batch.Messages() to completion — the raw domain adapter re-channels via a
+		// goroutine blocked on an unbuffered send; an early break would leak it and stall shutdown.
 		for msg := range batch.Messages() {
 			add(msg.Ctx, msg.Msg)
-			// Mid-batch flush: if a single fan-out message just pushed the
-			// buffer over the bulk cap, flush immediately instead of waiting
-			// for the outer loop — otherwise the next message's actions
-			// would add to an already-oversized bulk request.
+			// Mid-batch flush: if a fan-out message just pushed the buffer over the bulk cap, flush
+			// immediately — otherwise the next message's actions add to an already-oversized request.
 			if handler.ActionCount() >= bulkBatchSize {
 				flush()
 				lastFlush = time.Now()
@@ -485,14 +400,8 @@ func runConsumer(
 	}
 }
 
-// checkBatchAckCoupling returns a non-empty warning when bulkBatchSize exceeds
-// maxAckPending. In that regime a 1:1 collection (e.g. messages) stalls at
-// maxAckPending un-acked messages — JetStream stops delivering — before
-// ActionCount() can ever reach bulkBatchSize, so the size-based flush trigger
-// (main loop) never fires and every flush falls back to the BulkFlushInterval
-// timer. The result is undersized batches plus a fixed per-flush latency floor.
-// Fan-out collections are unaffected (one message yields many actions), so this
-// is a warning rather than a hard failure. Empty string = no coupling issue.
+// checkBatchAckCoupling warns when bulkBatchSize exceeds maxAckPending: a 1:1 collection then
+// stalls at maxAckPending un-acked messages before the size-based flush can fire, undersizing every batch. Fan-out collections are unaffected. Empty string = no issue.
 func checkBatchAckCoupling(bulkBatchSize, maxAckPending int) string {
 	if bulkBatchSize > maxAckPending {
 		return fmt.Sprintf(
@@ -515,19 +424,14 @@ func (a *engineAdapter) Bulk(ctx context.Context, actions []searchengine.BulkAct
 	return a.engine.Bulk(ctx, actions)
 }
 
-// consumerSource is the subset of Collection that buildConsumerConfig
-// needs. Narrowing keeps the helper unit-testable with a small fake.
+// consumerSource is the subset of Collection that buildConsumerConfig needs. Narrowing keeps the helper unit-testable with a small fake.
 type consumerSource interface {
 	ConsumerName() string
 	FilterSubjects(siteID string) []string
 }
 
-// buildConsumerConfig returns the durable consumer config for one
-// search-sync-worker collection. Custom BackOff is intentional: ES
-// indexing benefits from progressive retries on transient failures.
-// With MaxDeliver=5 from defaults and 3 BackOff entries, NATS reuses
-// the last entry (30s) for the 4th and 5th retries — do not extend
-// BackOff to length 5 to "fix" this; the reuse is the intended pattern.
+// buildConsumerConfig returns the durable consumer config for one collection; custom BackOff gives
+// progressive retries. With MaxDeliver=5 and 3 BackOff entries, NATS reuses the last (30s) for retries 4-5 — intended, don't extend to length 5.
 func buildConsumerConfig(s stream.ConsumerSettings, coll consumerSource, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = coll.ConsumerName()

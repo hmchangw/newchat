@@ -20,8 +20,7 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams creates/verifies the bot streams.
-// Sets only Name + Subjects; retention/replicas/storage stay with ops/IaC.
+// bootstrapStreams creates/verifies the bot streams. Sets only Name + Subjects; retention/replicas/storage stay with ops/IaC.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	streams := []stream.Config{
 		stream.BotMessagesCanonical(siteID),

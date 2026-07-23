@@ -19,8 +19,7 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams verifies BOT_MESSAGES_CANONICAL_{siteID} exists.
-// This worker is a consumer; bot-msg-handler owns the stream. Enabled=true is a dev convenience.
+// bootstrapStreams verifies BOT_MESSAGES_CANONICAL_{siteID} exists. This worker is a consumer; bot-msg-handler owns the stream. Enabled=true is a dev convenience.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	cfg := stream.BotMessagesCanonical(siteID)
 	if enabled {

@@ -41,10 +41,8 @@ func PushNotification(siteID string) Config {
 	}
 }
 
-// Inbox returns the INBOX_{siteID} stream carrying federation events.
-// Declares two non-overlapping lanes so the internal (same-site search feed) vs
-// external (cross-site) split is explicit in the schema. No sourcing/SubjectTransform:
-// remote sites JetStream-publish the external lane directly.
+// Inbox returns the INBOX_{siteID} stream, with two non-overlapping lanes (internal same-site
+// search feed vs external cross-site) — no sourcing/SubjectTransform; remote sites publish the external lane directly.
 func Inbox(siteID string) Config {
 	return Config{
 		Name: fmt.Sprintf("INBOX_%s", siteID),
@@ -80,8 +78,7 @@ func BotMessagesCanonical(siteID string) Config {
 	}
 }
 
-// BotPushNotif returns BOT_PUSH_NOTIF_{siteID}, isolated from user PUSH_NOTIFICATION so a
-// bot-notification incident cannot touch user push delivery.
+// BotPushNotif returns BOT_PUSH_NOTIF_{siteID}, isolated from user PUSH_NOTIFICATION so a bot-notification incident cannot touch user push delivery.
 func BotPushNotif(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("BOT_PUSH_NOTIF_%s", siteID),

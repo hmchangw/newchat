@@ -16,9 +16,8 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// dmEnsurer materializes a DM room at BP's site on first-DM subscription
-// miss, then returns so the caller can forward the actual send. Kept as an
-// interface so tests substitute a fake.
+// dmEnsurer materializes a DM room at BP's site on first-DM subscription miss, then returns
+// so the caller can forward the actual send; kept as an interface so tests substitute a fake.
 type dmEnsurer interface {
 	Ensure(ctx context.Context, sess *session.Session, targetUserID string) (roomID string, err error)
 }

@@ -30,8 +30,7 @@ type BotIdentity struct {
 	AppName     string `json:"appName,omitempty"     bson:"appName,omitempty"`
 }
 
-// BotSendMessageRequest is the send-in-room and send-DM body.
-// Sender comes from X-Bot-Identity; attachments are omitted and strict decoders reject them.
+// BotSendMessageRequest is the send-in-room and send-DM body. Sender comes from X-Bot-Identity; attachments are omitted and strict decoders reject them.
 type BotSendMessageRequest struct {
 	Content  string          `json:"content"            bson:"content"`
 	Mentions []Participant   `json:"mentions,omitempty" bson:"mentions,omitempty"`

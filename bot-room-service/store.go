@@ -9,8 +9,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 )
 
-// RoomStore is the narrow Mongo surface bot-room-service writes to.
-// Sync req/reply must write directly (no JS-worker materialization).
+// RoomStore is the narrow Mongo surface bot-room-service writes to. Sync req/reply must write directly (no JS-worker materialization).
 type RoomStore interface {
 	// InsertRoom returns ErrDuplicate when the ID already exists (idempotent retry).
 	InsertRoom(ctx context.Context, room *Room) error
@@ -27,9 +26,8 @@ type RoomStore interface {
 	// FindUser enriches the owner Participant on create-room.
 	FindUser(ctx context.Context, userID string) (*model.User, error)
 
-	// ListRoomMemberAccounts returns the accounts currently subscribed to
-	// roomID. RemoveMember snapshots this AFTER all deletes complete but
-	// BEFORE key rotation, so the fan-out reaches only survivors.
+	// ListRoomMemberAccounts returns the accounts subscribed to roomID. RemoveMember snapshots this
+	// AFTER deletes but BEFORE key rotation, so fan-out reaches only survivors.
 	ListRoomMemberAccounts(ctx context.Context, roomID string) ([]string, error)
 }
 
@@ -38,25 +36,19 @@ var (
 	ErrDuplicate = errors.New("bot-room-service: duplicate")
 )
 
-// RoomKeyStore is the narrow room-key store surface bot-room-service needs.
-// Task 1 generates+stores a key on CreateChannel (Set); Task 3 adds Get to
-// fan the current key out to newly-added channel members; Task 4 adds
-// Rotate/SetWithVersion for the RemoveMember key-rotation path.
+// RoomKeyStore is the narrow room-key store surface bot-room-service needs: Set on create,
+// Get to fan the current key to new members, Rotate/SetWithVersion on remove.
 type RoomKeyStore interface {
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
 
-	// Get returns the room's current key pair, or roomkeystore.ErrNoCurrentKey
-	// if the room has no key (legacy/broken room).
+	// Get returns the room's current key pair, or roomkeystore.ErrNoCurrentKey if the room has no key (legacy/broken room).
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
 
-	// Rotate is the normal remove-member path: swaps in newPair as the room's
-	// current key. Returns roomkeystore.ErrNoCurrentKey if the key was
-	// concurrently deleted mid-rotation.
+	// Rotate is the normal remove-member path: swaps in newPair as the room's current key.
+	// Returns roomkeystore.ErrNoCurrentKey if the key was concurrently deleted mid-rotation.
 	Rotate(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
 
-	// SetWithVersion is the Rotate-ErrNoCurrentKey fallback: it stamps newPair
-	// at the caller-supplied version so the stored version matches what was
-	// already fanned out to survivors before Rotate was attempted.
+	// SetWithVersion is the Rotate-ErrNoCurrentKey fallback: stamps newPair at the caller-supplied version so it matches what was already fanned out to survivors.
 	SetWithVersion(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair, version int) error
 }
 

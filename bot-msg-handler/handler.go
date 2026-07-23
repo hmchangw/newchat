@@ -54,8 +54,7 @@ func newHandler(store Store, pub Publisher, siteID string) *handler {
 	return &handler{store: store, pub: pub, siteID: siteID}
 }
 
-// verifyRoomExists is a defence-in-depth local-Mongo check.
-// BP routes to the room's home site, so a miss indicates a dangling subscription.
+// verifyRoomExists is a defence-in-depth local-Mongo check. BP routes to the room's home site, so a miss indicates a dangling subscription.
 func (h *handler) verifyRoomExists(ctx context.Context, roomID string) error {
 	if _, err := h.store.FindRoom(ctx, roomID); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -75,9 +74,7 @@ func (h *handler) Register(r *natsrouter.Router) {
 		subject.ServerBotDMSendPattern(h.siteID), h.handleSendDM)
 }
 
-// handleSendDM sends to a DM room. BP has already ensured the room exists
-// (calling bot-room-service.dm.ensure on first-DM before forwarding), so the
-// subscription check here is defence-in-depth and never triggers DM-ensure.
+// handleSendDM sends to a DM room. BP already ensures the room exists via bot-room-service.dm.ensure before forwarding, so checks here are defence-in-depth.
 func (h *handler) handleSendDM(c *natsrouter.Context, req BotSendRoomRequest) (*BotSendResponse, error) { //nolint:gocritic // hugeParam: natsrouter contract
 	targetUserID := c.Params.Get("userID")
 	if targetUserID == "" {
@@ -126,8 +123,7 @@ func (h *handler) handleSendDM(c *natsrouter.Context, req BotSendRoomRequest) (*
 	return &BotSendResponse{Message: msg}, nil
 }
 
-// handleSendRoom sends into an existing room.
-// BP has already routed to the room's home site, so subscription/room checks are defence-in-depth.
+// handleSendRoom sends into an existing room. BP has already routed to the room's home site, so subscription/room checks are defence-in-depth.
 func (h *handler) handleSendRoom(c *natsrouter.Context, req BotSendRoomRequest) (*BotSendResponse, error) { //nolint:gocritic // hugeParam: natsrouter.Register signature requires the request by value
 	roomID := c.Params.Get("roomID")
 	if roomID == "" {
@@ -206,8 +202,7 @@ func (h *handler) publishCanonical(ctx context.Context, msg *model.Message) erro
 	return nil
 }
 
-// parseIdentity decodes the X-Bot-Identity header.
-// Missing/malformed is a BP wiring bug (only BP can publish here), so the envelope surfaces it.
+// parseIdentity decodes the X-Bot-Identity header. Missing/malformed is a BP wiring bug (only BP can publish here), so the envelope surfaces it.
 func parseIdentity(h nats.Header) (*BotIdentity, error) {
 	raw := h.Get(model.HeaderBotIdentity)
 	if raw == "" {

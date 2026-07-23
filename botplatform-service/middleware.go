@@ -38,10 +38,8 @@ func accessLogMiddleware() gin.HandlerFunc {
 	}
 }
 
-// requireBot enforces plain-bearer identity: x-user-id + x-auth-token must resolve to a live session
-// whose UserID matches and whose Roles include bot.
-// The three token-shape failures collapse to one 401/invalid_token so the wire doesn't leak which.
-// The role gate is a distinct 403/not_a_bot so callers can tell wrong-audience from wrong-token.
+// requireBot enforces plain-bearer identity via x-user-id + x-auth-token; the three token-shape
+// failures collapse to one 401/invalid_token, but a distinct 403/not_a_bot tells wrong-audience from wrong-token.
 func requireBot(sessions session.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()

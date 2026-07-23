@@ -32,8 +32,7 @@ type config struct {
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
 
-	// RoomKeyGracePeriod governs how long a rotated-out room key stays
-	// readable (roomkeystore.NewMongoStore); matches room-service/room-worker.
+	// RoomKeyGracePeriod governs how long a rotated-out room key stays readable (roomkeystore.NewMongoStore); matches room-service/room-worker.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
 
 	MaxConcurrency int    `env:"MAX_CONCURRENCY" envDefault:"200"`

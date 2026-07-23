@@ -35,9 +35,8 @@ func (realTime) Now() time.Time { return time.Now() }
 // resourceIDFunc extracts the endpoint's resource identifier (roomID, targetUserID, or "").
 type resourceIDFunc func(c *gin.Context) string
 
-// botIdempotency is a Valkey-backed sentinel: SET NX per opID, then Del on non-5xx.
-// 5xx keeps the sentinel so a retry cannot race the still-running original (TTL absorbs).
-// Response body is NOT cached; downstream dedup keeps terminal state consistent.
+// botIdempotency is a Valkey-backed sentinel: SET NX per opID, then Del on non-5xx (5xx keeps
+// the sentinel so a retry can't race the still-running original). Response body is not cached.
 func botIdempotency(
 	client sentinelClient,
 	siteID, endpoint string,
