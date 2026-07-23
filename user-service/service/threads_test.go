@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/service/mocks"
 )
@@ -49,6 +51,33 @@ func item(site, threadRoomID string, lastMsgAt int64) model.ThreadListItem {
 func expectThreadList(history *mocks.MockHistoryClient, site string, items []model.ThreadListItem, hasMore bool) {
 	history.EXPECT().GetThreadList(gomock.Any(), site, gomock.Any()).
 		Return(model.ThreadSubscriptionListResponse{Items: items, HasMore: hasMore}, nil)
+}
+
+// A message body carrying reactions is aggregated and forwarded verbatim: the
+// old typed field would have failed the leaf-response decode inside historyclient;
+// with json.RawMessage the bytes pass straight through the merge and re-encode.
+func TestUserService_ListUserThreads_ForwardsMessageBodiesWithReactions(t *testing.T) {
+	svc, history, _, _ := newThreadSvc(t)
+	body, err := json.Marshal(&cassandra.Message{
+		MessageID: "p1", RoomID: "r1", Msg: "parent",
+		Reactions: cassandra.Reactions{
+			{Emoji: "👍", UserAccount: "bob"}: {Account: "bob", EngName: "Bob Chen"},
+		},
+	})
+	require.NoError(t, err)
+	items := []model.ThreadListItem{{
+		SiteID: "site-a", RoomID: "r1", RoomType: model.RoomTypeChannel, ThreadRoomID: "tr-1",
+		ParentMessageID: "p1", LastMsgAt: 100, ParentMessage: body, LastMessage: body,
+	}}
+	expectThreadList(history, "site-a", items, false)
+	expectThreadList(history, "site-b", nil, false)
+
+	resp, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	// Bytes forwarded unchanged — no re-encode, no reactions parse.
+	assert.Equal(t, body, []byte(resp.Items[0].ParentMessage))
+	assert.Equal(t, body, []byte(resp.Items[0].LastMessage))
 }
 
 func TestUserService_ListUserThreads_MergeAcrossSites(t *testing.T) {

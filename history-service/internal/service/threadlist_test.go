@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -18,6 +19,15 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 )
+
+// decodeThreadMsg decodes an opaque ThreadListItem body back into a message for
+// assertion; the RPC carries these bodies as pre-marshaled json.RawMessage.
+func decodeThreadMsg(t *testing.T, raw json.RawMessage) models.Message {
+	t.Helper()
+	var m models.Message
+	require.NoError(t, json.Unmarshal(raw, &m))
+	return m
+}
 
 func newThreadListService(t *testing.T) (
 	*service.HistoryService,
@@ -72,16 +82,47 @@ func TestHistoryService_ListThreadSubscriptions_Success(t *testing.T) {
 	require.NotNil(t, first.LastSeenAt)
 	assert.Equal(t, base.Add(2*time.Hour).UnixMilli(), *first.LastSeenAt)
 	require.NotNil(t, first.ParentMessage)
-	assert.Equal(t, "p1", first.ParentMessage.MessageID)
-	require.NotNil(t, first.ParentMessage.TCount)
-	assert.Equal(t, 4, *first.ParentMessage.TCount) // reply count rides on the parent
+	parent := decodeThreadMsg(t, first.ParentMessage)
+	assert.Equal(t, "p1", parent.MessageID)
+	require.NotNil(t, parent.TCount)
+	assert.Equal(t, 4, *parent.TCount) // reply count rides on the parent
 	require.NotNil(t, first.LastMessage)
-	assert.Equal(t, "m1", first.LastMessage.MessageID)
+	assert.Equal(t, "m1", decodeThreadMsg(t, first.LastMessage).MessageID)
 	assert.True(t, first.Unread) // lastMsgAt 5h > lastSeenAt 2h
 
 	second := resp.Items[1]
 	assert.Nil(t, second.LastSeenAt)
 	assert.True(t, second.Unread) // never-seen ⇒ unread
+}
+
+// A parent carrying reactions still builds and its body rides through as the
+// grouped-by-emoji wire form (guards the user-service forward path).
+func TestHistoryService_ListThreadSubscriptions_ParentWithReactions(t *testing.T) {
+	svc, msgs, _, _, threadSubs := newThreadListService(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := []mongorepo.ThreadSubRow{
+		{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+	}
+	threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+		{MessageID: "p1", RoomID: "r1", Msg: "parent", Reactions: models.Reactions{
+			{Emoji: "👍", UserAccount: "bob"}: {Account: "bob", EngName: "Bob Chen", ReactedAt: base},
+		}},
+		{MessageID: "m1", RoomID: "r1", Msg: "last"},
+	}, nil)
+
+	resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	// The body is carried opaque; a reactions-bearing body cannot be decoded back
+	// into a Message (that is exactly the parse this change avoids), so assert on
+	// the raw wire JSON only — messageId plus the grouped-by-emoji reactions form.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(resp.Items[0].ParentMessage, &raw))
+	assert.Equal(t, "p1", raw["messageId"])
+	reactions, ok := raw["reactions"].(map[string]any)
+	require.True(t, ok, "reactions must be present in the built body")
+	assert.Contains(t, reactions, "👍")
 }
 
 func TestHistoryService_ListThreadSubscriptions_Empty(t *testing.T) {

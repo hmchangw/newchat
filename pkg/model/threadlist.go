@@ -1,6 +1,6 @@
 package model
 
-import "github.com/hmchangw/chat/pkg/model/cassandra"
+import "encoding/json"
 
 // ThreadListItem is one row of a user's cross-site thread inbox: a thread the
 // user is subscribed to, enriched with its parent and last message plus the
@@ -22,9 +22,12 @@ type ThreadListItem struct {
 	// key for the inbox. Reply count rides on ParentMessage.TCount.
 	LastMsgAt int64 `json:"lastMsgAt" bson:"lastMsgAt"`
 
-	// Hydrated message bodies, subject to the thread access window.
-	ParentMessage *cassandra.Message `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
-	LastMessage   *cassandra.Message `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
+	// Hydrated message bodies, subject to the thread access window. Carried opaque:
+	// history-service emits them pre-marshaled from *cassandra.Message and user-service
+	// forwards them to the client verbatim, never decoding the Message (avoids parsing
+	// Reactions, whose struct-keyed map has no JSON decoder).
+	ParentMessage json.RawMessage `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
+	LastMessage   json.RawMessage `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
 
 	// HRInfo carries the DM counterpart's HR-directory record (native + English
 	// name). The user-service aggregator resolves it from RoomName (which holds the

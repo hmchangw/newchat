@@ -3,6 +3,7 @@ package model_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,10 +64,13 @@ func TestThreadListItemJSON_OmitsNilLastSeenAt(t *testing.T) {
 	assert.False(t, hasParent, "nil parentMessage must be omitted")
 }
 
-// The hydrated parent/last message bodies survive a JSON round trip.
+// The hydrated parent/last message bodies are carried opaque and survive a JSON
+// round trip; user-service forwards these bytes without decoding the Message.
 func TestThreadListItemJSON_WithMessages(t *testing.T) {
-	parent := &cassandra.Message{MessageID: "msg-parent", RoomID: "room-1", Msg: "anyone?"}
-	last := &cassandra.Message{MessageID: "msg-last", RoomID: "room-1", Msg: "on it"}
+	parent, err := json.Marshal(&cassandra.Message{MessageID: "msg-parent", RoomID: "room-1", Msg: "anyone?"})
+	require.NoError(t, err)
+	last, err := json.Marshal(&cassandra.Message{MessageID: "msg-last", RoomID: "room-1", Msg: "on it"})
+	require.NoError(t, err)
 	src := model.ThreadListItem{
 		SiteID: "site-a", RoomID: "room-1", ThreadRoomID: "thr-1",
 		ParentMessageID: "msg-parent", LastMsgAt: 1746518400000,
@@ -78,8 +82,39 @@ func TestThreadListItemJSON_WithMessages(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &dst))
 	require.NotNil(t, dst.ParentMessage)
 	require.NotNil(t, dst.LastMessage)
-	assert.Equal(t, "msg-parent", dst.ParentMessage.MessageID)
-	assert.Equal(t, "on it", dst.LastMessage.Msg)
+	var gotParent, gotLast cassandra.Message
+	require.NoError(t, json.Unmarshal(dst.ParentMessage, &gotParent))
+	require.NoError(t, json.Unmarshal(dst.LastMessage, &gotLast))
+	assert.Equal(t, "msg-parent", gotParent.MessageID)
+	assert.Equal(t, "on it", gotLast.Msg)
+}
+
+// Regression: a parent/last body carrying reactions must round-trip through
+// ThreadListItem without a decode error. The old *cassandra.Message field failed
+// here because Reactions is a struct-keyed map with no JSON decoder.
+func TestThreadListItemJSON_MessageWithReactions_RoundTrips(t *testing.T) {
+	body, err := json.Marshal(&cassandra.Message{
+		MessageID: "msg-parent", RoomID: "room-1", Msg: "anyone?",
+		Reactions: cassandra.Reactions{
+			{Emoji: "👍", UserAccount: "bob"}: {Account: "bob", EngName: "Bob Chen", ReactedAt: time.UnixMilli(1746518400000).UTC()},
+		},
+	})
+	require.NoError(t, err)
+	src := model.ThreadListItem{
+		SiteID: "site-a", RoomID: "room-1", ThreadRoomID: "thr-1",
+		ParentMessageID: "msg-parent", LastMsgAt: 1746518400000,
+		ParentMessage: body, LastMessage: body,
+	}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+	var dst model.ThreadListItem
+	require.NoError(t, json.Unmarshal(data, &dst)) // must NOT error on reactions
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(dst.ParentMessage, &got))
+	assert.Equal(t, "msg-parent", got["messageId"])
+	reactions, ok := got["reactions"].(map[string]any)
+	require.True(t, ok, "reactions must survive in the forwarded body")
+	assert.Contains(t, reactions, "👍")
 }
 
 func TestThreadSubscriptionListRequestJSON(t *testing.T) {
