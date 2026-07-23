@@ -244,6 +244,44 @@ func TestRunSeed_RejectsUnknownWorkload(t *testing.T) {
 	assert.Equal(t, 2, code)
 }
 
+func TestDispatch_SoakRoutes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"run", []string{"loadgen", "soak"}},
+		{"seed", []string{"loadgen", "seed", "--workload=soak"}},
+		{"teardown", []string{"loadgen", "teardown", "--workload=soak"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldArgs := os.Args
+			defer func() { os.Args = oldArgs }()
+			os.Args = tt.args
+
+			cfg := &config{
+				CassandraKeyspace: "chat",
+				Soak:              validSoakConfig(t),
+			}
+			assert.Equal(t, 1, dispatch(context.Background(), cfg))
+		})
+	}
+}
+
+func TestRunSeedAndTeardown_RejectDeferredSoakWorkloads(t *testing.T) {
+	for _, workload := range []string{"run-b", "run-c", "direct-cql"} {
+		t.Run("seed "+workload, func(t *testing.T) {
+			code := runSeed(context.Background(), &config{}, []string{"--workload=" + workload})
+			assert.Equal(t, 2, code)
+		})
+		t.Run("teardown "+workload, func(t *testing.T) {
+			code := runTeardown(context.Background(), &config{}, []string{"--workload=" + workload})
+			assert.Equal(t, 2, code)
+		})
+	}
+}
+
 func TestRunSeed_RejectsUnknownMembersPreset(t *testing.T) {
 	cfg := &config{}
 	code := runSeed(context.Background(), cfg, []string{"--workload=members", "--preset=nope"})
