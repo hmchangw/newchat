@@ -451,6 +451,14 @@ func MsgCanonicalWildcard(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.>", siteID)
 }
 
+// MsgCanonicalMessageWildcard matches the single-token per-message event subjects
+// (created/updated/deleted/pinned/unpinned/reacted) but NOT the two-token
+// `.teams.batch` migration envelope — consumers that handle message events bind this
+// so the batch subject is never delivered to them.
+func MsgCanonicalMessageWildcard(siteID string) string {
+	return fmt.Sprintf("chat.msg.canonical.%s.*", siteID)
+}
+
 // RoomsInfoBatchSubscribe is the per-site subscription subject for room-service.
 func RoomsInfoBatchSubscribe(siteID string) string {
 	return fmt.Sprintf("chat.server.request.room.%s.info.batch", siteID)

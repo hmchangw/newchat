@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // parentCreatedAtResolver resolves a thread parent's authoritative createdAt; ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
@@ -71,9 +72,10 @@ func (c *messageCollection) ConsumerName() string {
 	return c.consumerName
 }
 
-func (c *messageCollection) FilterSubjects(_ string) []string {
-	// Stream has a single subject pattern — no extra filtering needed.
-	return nil
+func (c *messageCollection) FilterSubjects(siteID string) []string {
+	// Single-token message events only — excludes the two-token `.teams.batch`
+	// migration envelope (persisted by message-worker, never indexed live).
+	return []string{subject.MsgCanonicalMessageWildcard(siteID)}
 }
 
 func (c *messageCollection) TemplateName() string {

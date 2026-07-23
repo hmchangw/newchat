@@ -56,4 +56,3 @@ scope here).
 
 - [ ] **Search indexing** of migrated messages — this path does not emit the `.created` canonical event search-sync keys on (see the design § Known limitation).
 - [ ] Forward branch → `Forwarded` snapshot (after the forward feature lands).
-- [ ] Narrow `broadcast-worker` + `search-sync-worker` filters to exclude `.teams.batch` (they currently receive + Ack-drop it — see the design § Cross-consumer note).
