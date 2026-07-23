@@ -179,8 +179,14 @@ func main() {
 	// so re-resolve it from the parent's indexed createdAt (the event omits it).
 	msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
+	// Second consumer over messageCollection, bound to BOT_MESSAGES_CANONICAL.
+	// isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
+	botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
+	botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+
 	collections := []Collection{
 		msgColl,
+		botMsgColl,
 		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
 		newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
 		newUserRoomCollection(cfg.UserRoomIndex),

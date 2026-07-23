@@ -159,6 +159,10 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 		if account == "" {
 			return nil, fmt.Errorf("build user-room action: empty account at index %d", i)
 		}
+		// Bot accounts don't search; skip so they don't inflate the per-user access-control view.
+		if model.IsBot(account) {
+			continue
+		}
 
 		switch evt.Type {
 		case model.InboxMemberAdded:

@@ -9,9 +9,7 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// TestStreamConfigs covers single-subject streams where one pattern is the
-// full story. Multi-subject streams (currently just Inbox) get their own
-// dedicated test so both patterns are asserted explicitly.
+// TestStreamConfigs covers single-subject streams; multi-subject streams get dedicated tests.
 func TestStreamConfigs(t *testing.T) {
 	siteID := "site-a"
 
@@ -27,6 +25,8 @@ func TestStreamConfigs(t *testing.T) {
 		{"Outbox", stream.Outbox(siteID), "OUTBOX_site-a", "chat.outbox.site-a.>"},
 		{"PushNotification", stream.PushNotification(siteID), "PUSH_NOTIFICATION_site-a", "chat.server.notification.push.site-a.>"},
 		{"OrgSyncStream", stream.OrgSyncStream(siteID), "HR_site-a", "chat.hr.site-a.>"},
+		{"BotMessagesCanonical", stream.BotMessagesCanonical(siteID), "BOT_MESSAGES_CANONICAL_site-a", "chat.bot.canonical.site-a.>"},
+		{"BotPushNotif", stream.BotPushNotif(siteID), "BOT_PUSH_NOTIF_site-a", "chat.bot.notification.push.site-a.>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

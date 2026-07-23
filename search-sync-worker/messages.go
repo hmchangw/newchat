@@ -21,38 +21,55 @@ type parentCreatedAtResolver interface {
 }
 
 // messageCollection implements Collection for message search sync.
-//
-// syncFrom is the SYNC_MESSAGES_FROM cutoff (UTC); a zero value disables
-// it. When set, BuildAction skips any event whose Message.CreatedAt
-// predates the cutoff. This is the legacy-migration filter: a migrator
-// replaying historical data into JetStream stamps evt.Timestamp at
-// publish-time, so we compare against the message's own CreatedAt to
-// reflect original data age. Only the messages collection has a cutoff —
-// spotlight and user-room remain unfiltered so a user can still discover
-// and search rooms they joined before the date.
+// streamCfg + consumerName are parameterized so one type consumes user or bot canonical streams
+// (both carry model.MessageEvent). syncFrom is the SYNC_MESSAGES_FROM legacy-replay cutoff;
+// zero disables it (bot flow always zero).
 type messageCollection struct {
-	indexPrefix string
-	syncFrom    time.Time
-	devMode     bool
-	// parentResolver re-resolves the thread parent's createdAt from ES before
-	// indexing (search-service needs it for restricted-room access); nil disables it.
+	indexPrefix    string
+	syncFrom       time.Time
+	devMode        bool
+	streamCfg      func(siteID string) jetstream.StreamConfig
+	consumerName   string
 	parentResolver parentCreatedAtResolver
 }
 
+// newMessageCollection binds to the user MESSAGES_CANONICAL stream.
 func newMessageCollection(indexPrefix string, syncFrom time.Time, devMode bool) *messageCollection {
-	return &messageCollection{indexPrefix: indexPrefix, syncFrom: syncFrom, devMode: devMode}
-}
-
-func (c *messageCollection) StreamConfig(siteID string) jetstream.StreamConfig {
-	cfg := stream.MessagesCanonical(siteID)
-	return jetstream.StreamConfig{
-		Name:     cfg.Name,
-		Subjects: cfg.Subjects,
+	return &messageCollection{
+		indexPrefix:  indexPrefix,
+		syncFrom:     syncFrom,
+		devMode:      devMode,
+		streamCfg:    userMessagesStreamCfg,
+		consumerName: "message-sync",
 	}
 }
 
+// newBotMessageCollection binds to BOT_MESSAGES_CANONICAL and shares BuildAction with the user flow.
+func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollection {
+	return &messageCollection{
+		indexPrefix:  indexPrefix,
+		devMode:      devMode,
+		streamCfg:    botMessagesStreamCfg,
+		consumerName: "bot-message-sync",
+	}
+}
+
+func userMessagesStreamCfg(siteID string) jetstream.StreamConfig {
+	cfg := stream.MessagesCanonical(siteID)
+	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
+}
+
+func botMessagesStreamCfg(siteID string) jetstream.StreamConfig {
+	cfg := stream.BotMessagesCanonical(siteID)
+	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
+}
+
+func (c *messageCollection) StreamConfig(siteID string) jetstream.StreamConfig {
+	return c.streamCfg(siteID)
+}
+
 func (c *messageCollection) ConsumerName() string {
-	return "message-sync"
+	return c.consumerName
 }
 
 func (c *messageCollection) FilterSubjects(_ string) []string {
@@ -127,11 +144,13 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 // When adding fields to Message (pkg/model), add them here with an `es` tag
 // and populate them in newMessageSearchIndex(). The template auto-updates.
 type MessageSearchIndex struct {
-	MessageID             string     `json:"messageId"                              es:"keyword"`
-	RoomID                string     `json:"roomId"                                 es:"keyword"`
-	SiteID                string     `json:"siteId"                                 es:"keyword"`
-	UserID                string     `json:"userId"                                 es:"keyword"`
-	UserAccount           string     `json:"userAccount"                            es:"keyword"`
+	MessageID   string `json:"messageId"                              es:"keyword"`
+	RoomID      string `json:"roomId"                                 es:"keyword"`
+	SiteID      string `json:"siteId"                                 es:"keyword"`
+	UserID      string `json:"userId"                                 es:"keyword"`
+	UserAccount string `json:"userAccount"                            es:"keyword"`
+	// IsBot flags bot-authored messages so search-service can filter/facet by source.
+	IsBot                 bool       `json:"isBot,omitempty"                        es:"boolean"`
 	Content               string     `json:"content,omitempty"                      es:"text,custom_analyzer"`
 	CreatedAt             time.Time  `json:"createdAt"                              es:"date"`
 	EditedAt              *time.Time `json:"editedAt,omitempty"                     es:"date"`
@@ -149,6 +168,7 @@ func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
 		SiteID:                evt.SiteID,
 		UserID:                evt.Message.UserID,
 		UserAccount:           evt.Message.UserAccount,
+		IsBot:                 model.IsBot(evt.Message.UserAccount),
 		Content:               evt.Message.Content,
 		CreatedAt:             evt.Message.CreatedAt,
 		EditedAt:              evt.Message.EditedAt,

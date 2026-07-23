@@ -24,6 +24,14 @@ import (
 type Client interface {
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
+	// SetNX atomically sets key to value with ttl iff key is absent.
+	// (true, nil) acquired; (false, nil) refused (already held); (false, err) transport failure.
+	// ttl must be > 0; a zero ttl stores the key without expiry, rarely what callers want.
+	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
+	// IncrEx atomically increments key by 1 and returns the post-increment count.
+	// ttl is applied only on the 0->1 transition, so hits within the window don't reset it
+	// (standard fixed-window rate-limit recipe). Implemented as INCR + conditional EXPIRE.
+	IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Del(ctx context.Context, keys ...string) error
 	Close() error
 }
@@ -109,6 +117,32 @@ func (r *clusterClient) Set(ctx context.Context, key, value string, ttl time.Dur
 		return fmt.Errorf("valkey set: %w", err)
 	}
 	return nil
+}
+
+func (r *clusterClient) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	// SetArgs with Mode:"NX" replaces deprecated SetNX; redis.Nil = refusal, surfaced as (false, nil).
+	res, err := r.c.SetArgs(ctx, key, value, redis.SetArgs{Mode: "NX", TTL: ttl}).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("valkey set nx: %w", err)
+	}
+	return res == "OK", nil
+}
+
+func (r *clusterClient) IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	n, err := r.c.Incr(ctx, key).Result()
+	if err != nil {
+		return 0, fmt.Errorf("valkey incr: %w", err)
+	}
+	if n == 1 && ttl > 0 {
+		// Only the 0->1 caller sets TTL; failure would let the key persist past the window, so surface it.
+		if err := r.c.Expire(ctx, key, ttl).Err(); err != nil {
+			return n, fmt.Errorf("valkey incr expire: %w", err)
+		}
+	}
+	return n, nil
 }
 
 func (r *clusterClient) Del(ctx context.Context, keys ...string) error {

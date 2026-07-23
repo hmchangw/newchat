@@ -3,6 +3,7 @@ package valkeyutil_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ type fakeClient struct {
 	ttls        map[string]time.Duration
 	setErr      error
 	getErr      error
+	setNXErr    error
+	incrErr     error
 	delCalls    [][]string
 	closeCalled int
 	closeErr    error
@@ -28,6 +31,8 @@ func newFake() *fakeClient {
 		ttls:  make(map[string]time.Duration),
 	}
 }
+
+var _ valkeyutil.Client = (*fakeClient)(nil)
 
 func (f *fakeClient) Get(_ context.Context, key string) (string, error) {
 	if f.getErr != nil {
@@ -47,6 +52,38 @@ func (f *fakeClient) Set(_ context.Context, key, value string, ttl time.Duration
 	f.store[key] = value
 	f.ttls[key] = ttl
 	return nil
+}
+
+func (f *fakeClient) SetNX(_ context.Context, key, value string, ttl time.Duration) (bool, error) {
+	if f.setNXErr != nil {
+		return false, f.setNXErr
+	}
+	if _, exists := f.store[key]; exists {
+		return false, nil
+	}
+	f.store[key] = value
+	f.ttls[key] = ttl
+	return true, nil
+}
+
+func (f *fakeClient) IncrEx(_ context.Context, key string, ttl time.Duration) (int64, error) {
+	if f.incrErr != nil {
+		return 0, f.incrErr
+	}
+	var n int64
+	if v, ok := f.store[key]; ok {
+		var parsed int64
+		_, _ = fmt.Sscan(v, &parsed)
+		n = parsed + 1
+	} else {
+		n = 1
+	}
+	f.store[key] = fmt.Sprintf("%d", n)
+	// TTL applied only on 0->1 (fixed-window recipe).
+	if n == 1 {
+		f.ttls[key] = ttl
+	}
+	return n, nil
 }
 
 func (f *fakeClient) Del(_ context.Context, keys ...string) error {
@@ -125,6 +162,68 @@ func TestDisconnect(t *testing.T) {
 		// that Close WAS called — the error path doesn't skip or retry.
 		valkeyutil.Disconnect(f)
 		assert.Equal(t, 1, f.closeCalled)
+	})
+}
+
+// TestSetNXFakeSemantics documents the interface contract SetNX callers depend on.
+func TestSetNXFakeSemantics(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("first call to unset key acquires and returns true", func(t *testing.T) {
+		f := newFake()
+		acquired, err := f.SetNX(ctx, "idem:1", "processing", time.Second)
+		require.NoError(t, err)
+		assert.True(t, acquired)
+		assert.Equal(t, "processing", f.store["idem:1"])
+		assert.Equal(t, time.Second, f.ttls["idem:1"])
+	})
+
+	t.Run("second call to same key does not overwrite and returns false", func(t *testing.T) {
+		f := newFake()
+		_, _ = f.SetNX(ctx, "idem:1", "first", time.Second)
+		acquired, err := f.SetNX(ctx, "idem:1", "second", 2*time.Second)
+		require.NoError(t, err)
+		assert.False(t, acquired)
+		assert.Equal(t, "first", f.store["idem:1"], "value must be immutable while the key exists")
+	})
+
+	t.Run("transport error propagates", func(t *testing.T) {
+		f := newFake()
+		f.setNXErr = errors.New("boom")
+		acquired, err := f.SetNX(ctx, "k", "v", time.Second)
+		assert.Error(t, err)
+		assert.False(t, acquired)
+	})
+}
+
+// TestIncrExFakeSemantics: TTL set only on 0->1 so subsequent hits don't reset the window.
+func TestIncrExFakeSemantics(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("first hit sets TTL and returns 1", func(t *testing.T) {
+		f := newFake()
+		n, err := f.IncrEx(ctx, "rl:alice", time.Minute)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), n)
+		assert.Equal(t, time.Minute, f.ttls["rl:alice"])
+	})
+
+	t.Run("second hit does not reset TTL and returns 2", func(t *testing.T) {
+		f := newFake()
+		_, _ = f.IncrEx(ctx, "rl:alice", time.Minute)
+		f.ttls["rl:alice"] = 30 * time.Second
+		n, err := f.IncrEx(ctx, "rl:alice", time.Minute)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), n)
+		assert.Equal(t, 30*time.Second, f.ttls["rl:alice"], "TTL must not reset on subsequent hits")
+	})
+
+	t.Run("transport error propagates", func(t *testing.T) {
+		f := newFake()
+		f.incrErr = errors.New("boom")
+		n, err := f.IncrEx(ctx, "k", time.Second)
+		assert.Error(t, err)
+		assert.Zero(t, n)
 	})
 }
 
