@@ -1136,7 +1136,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional; the server derives the room ID from the subject and ignores any non-matching value. |
-| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant** and live on the **local site**, else the request is rejected (see Error response). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and receive the `room.key` event on their encoded per-user subject (see [§5](#5-room-encryption)) — but no `subscription.update`. The `p_tchatadmin_` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant/site validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
+| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant** and live on the **local site**, else the request is rejected (see Error response). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive both the `subscription.update` and the `room.key` event on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_tchatadmin_` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant/site validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
@@ -1190,7 +1190,7 @@ Error example (e.g. requester not in room):
 }
 ```
 
-**2. `chat.user.{newMember}.event.subscription.update`** — one event per **newly subscribed** human member (not the requester, not existing members, not org→individual upgrades). Bot members receive none.
+**2. `chat.user.{newMember}.event.subscription.update`** — one event per **newly subscribed** member (not the requester, not existing members, not org→individual upgrades). Bot members receive it too, delivered on their **encoded** per-user subject (`chat.user.{encodedAccount}.event.subscription.update`, dots→underscores — the same transform as their NATS JWT scope and `room.key` delivery), since a bot can log into the chat frontend.
 
 ###### `subscription.update` event
 
@@ -1299,7 +1299,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 **1. `chat.user.{requesterAccount}.response.{requestID}`** — an [`AsyncJobResult`](#asyncjobresult) to the requester when the removal finishes (requires `X-Request-ID`). `operation` is `"room.member.remove"` for single-account removal, `"room.member.remove_org"` for org removal.
 
-**2. `chat.user.{removedAccount}.event.subscription.update`** — one per removed human account, `action: "removed"` (bot members receive none). The payload is a dedicated `SubscriptionRemovedEvent` (not the full `SubscriptionUpdateEvent`): its `subscription` carries **only** `roomId`, `roomType`, and `u` so no zero-valued `Subscription` fields are sent. On the **org-removal** path `userId` is omitted (only `subscription.u.account` is set).
+**2. `chat.user.{removedAccount}.event.subscription.update`** — one per removed account, `action: "removed"`. Bot members receive it too, on their **encoded** per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores), since a bot can log into the chat frontend. The payload is a dedicated `SubscriptionRemovedEvent` (not the full `SubscriptionUpdateEvent`): its `subscription` carries **only** `roomId`, `roomType`, and `u` so no zero-valued `Subscription` fields are sent. On the **org-removal** path `userId` is omitted (only `subscription.u.account` is set).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -5818,7 +5818,7 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 - **Room creation (channels only):** sent to every initial member. DM/botDM rooms carry no key, so creation fires no `RoomKeyEvent`.
 - **Add member (channels only):** sent to each newly-added member; existing members do not receive a duplicate event.
 - **Remove member (channels only):** the server rotates the room key. Surviving members receive a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving events for the room.
-- **Bot members** are key-holders: they receive the `RoomKeyEvent` like any member, addressed to the bot's **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to). Bots do **not** receive `subscription.update` (no sidebar client consumes it).
+- **Bot members** are key-holders: they receive the `RoomKeyEvent` like any member, addressed to the bot's **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend), delivered **before** the `room.key` so the client has a sub entry to store the key under.
 
 Removed members keep prior keys for decrypting historical messages but cannot decrypt anything published after the rotation.
 

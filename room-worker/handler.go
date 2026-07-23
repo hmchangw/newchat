@@ -409,23 +409,23 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 
 	now := time.Now().UTC()
 
-	// Subscription update event (channel-only handler). Skipped for bots: they
-	// have no client consuming it on the per-user subject.
-	targetIsBot := model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)
-	if !targetIsBot {
-		subEvt := model.SubscriptionRemovedEvent{
-			UserID: user.ID,
-			Subscription: model.RemovedSubscriptionRef{
-				RoomID:   req.RoomID,
-				RoomType: model.RoomTypeChannel,
-				U:        model.SubscriptionUser{ID: user.ID, Account: req.Account},
-			},
-			Action:    "removed",
-			Timestamp: now.UnixMilli(),
-		}
-		subEvtData, _ := json.Marshal(subEvt)
-		h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
+	// Subscription update event (channel-only handler). Published for every
+	// removed member, bots included: a bot can log into the chat frontend, so it
+	// needs its sidebar cache updated. publishSubscriptionUpdate encodes the
+	// per-user subject so a dotted ".bot" account lands on the token its NATS JWT
+	// is scoped to.
+	subEvt := model.SubscriptionRemovedEvent{
+		UserID: user.ID,
+		Subscription: model.RemovedSubscriptionRef{
+			RoomID:   req.RoomID,
+			RoomType: model.RoomTypeChannel,
+			U:        model.SubscriptionUser{ID: user.ID, Account: req.Account},
+		},
+		Action:    "removed",
+		Timestamp: now.UnixMilli(),
 	}
+	subEvtData, _ := json.Marshal(subEvt)
+	h.publishSubscriptionUpdate(ctx, req.Account, subEvtData)
 
 	// Member change event
 	evtType := model.MessageTypeMemberLeft
@@ -623,12 +623,11 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 
 	now := time.Now().UTC()
 
-	// Non-bot members get a per-account subscription.update; bots are skipped
-	// (no client consuming it on the per-user subject).
+	// Every removed member gets a per-account subscription.update, bots included:
+	// a bot can log into the chat frontend, so it needs its sidebar cache updated.
+	// publishSubscriptionUpdate encodes the per-user subject to match the token
+	// the recipient's NATS JWT is scoped to.
 	for _, m := range toRemove {
-		if model.IsBot(m.Account) || model.IsPlatformAdminAccount(m.Account) {
-			continue
-		}
 		subEvt := model.SubscriptionRemovedEvent{
 			Subscription: model.RemovedSubscriptionRef{
 				RoomID:   req.RoomID,
@@ -1070,12 +1069,12 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Publish subscription.update BEFORE room.key so clients have a sub entry to store the key under.
-	// Bots are skipped: no client consuming it on the per-user subject.
+	// Publish subscription.update BEFORE room.key so clients have a sub entry to
+	// store the key under. Applies to bots too: a bot can log into the chat
+	// frontend, so it needs the sub entry as well before the key arrives.
+	// publishSubscriptionUpdate encodes the per-user subject so a dotted ".bot"
+	// account lands on the token its NATS JWT is scoped to.
 	for _, sub := range subs {
-		if sub.User.IsBot {
-			continue
-		}
 		subEvt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: *sub,

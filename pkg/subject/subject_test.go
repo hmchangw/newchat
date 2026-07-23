@@ -36,6 +36,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.room.canonical.site-a.teams.create"},
 		{"SubscriptionUpdate", subject.SubscriptionUpdate("alice"),
 			"chat.user.alice.event.subscription.update"},
+		{"SubscriptionUpdate_dotted_bot_encoded", subject.SubscriptionUpdate("weather.bot"),
+			"chat.user.weather_bot.event.subscription.update"},
 		{"SettingsUpdate", subject.SettingsUpdate("alice"),
 			"chat.user.alice.event.settings.update"},
 		{"RoomMetadataChanged", subject.RoomMetadataChanged("alice"),
