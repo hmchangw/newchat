@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -238,8 +239,22 @@ func (s *HistoryService) buildThreadItems(c *natsrouter.Context, rows []mongorep
 			ms := row.LastSeenAt.UTC().UnixMilli()
 			item.LastSeenAt = &ms
 		}
-		item.ParentMessage = &parent
-		item.LastMessage = &last
+		parentJSON, err := json.Marshal(&parent)
+		if err != nil {
+			slog.WarnContext(c, "thread-list: marshaling parent message, skipping row",
+				"request_id", natsutil.RequestIDFromContext(c),
+				"thread_room_id", row.ThreadRoomID, "parent_message_id", row.ParentMessageID, "error", err)
+			continue
+		}
+		lastJSON, err := json.Marshal(&last)
+		if err != nil {
+			slog.WarnContext(c, "thread-list: marshaling last message, skipping row",
+				"request_id", natsutil.RequestIDFromContext(c),
+				"thread_room_id", row.ThreadRoomID, "last_message_id", row.LastMsgID, "error", err)
+			continue
+		}
+		item.ParentMessage = parentJSON
+		item.LastMessage = lastJSON
 		items = append(items, item)
 	}
 	return items, nil
