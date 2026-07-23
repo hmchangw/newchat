@@ -1,8 +1,9 @@
 package main
 
 import (
-	"strings"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // mentionVisible reports whether a mentionee whose subscription carries
@@ -18,13 +19,12 @@ func mentionVisible(historySharedSince, parentCreatedAt *time.Time) bool {
 	return !parentCreatedAt.Before(*historySharedSince)
 }
 
-// isBot returns true if account follows the bot naming convention used across
-// the codebase (suffix `.bot` or prefix `p_`). Mirrors the predicate in
-// message-gatekeeper/helper.go and room-service/helper.go — promoting to a
-// shared pkg/botid is a future cleanup; keep these copies in sync if the
-// convention changes.
+// isBot reports whether account has no live UI client and so must be skipped for
+// event fan-out: real ".bot" bots and the "p_tchatadmin_" platform-admin
+// pseudo-account. It routes through the model taxonomy so plain "p_" QA test
+// accounts — ordinary users with a client — are NOT skipped.
 func isBot(account string) bool {
-	return strings.HasSuffix(account, ".bot") || strings.HasPrefix(account, "p_")
+	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
 }
 
 // dedupedAccounts prepends sender to mentions, dropping later duplicates.

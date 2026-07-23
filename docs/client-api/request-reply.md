@@ -323,7 +323,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional echo; server derives from subject. |
-| `users` | string[] | no | Internal user IDs or accounts to add. May include bots (`.bot` / `p_`): each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and get the `room.key` (on their encoded per-user subject) but no `subscription.update`. |
+| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and get the `room.key` (on their encoded per-user subject) but no `subscription.update`. The `p_tchatadmin_` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
@@ -492,8 +492,9 @@ See `MemberStatus` schema in [../client-api.md §3.1](../client-api.md#get-membe
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.subscription.mentionable`
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Used by the message composer's `@…` mention autocomplete. Caller and platform-admin
-accounts are excluded. Returns `user` and `app` rows.
+Used by the message composer's `@…` mention autocomplete. The caller and the
+`p_tchatadmin_` platform-admin pseudo-account are excluded (QA `p_` accounts are
+ordinary, mentionable users). Returns `user` and `app` rows.
 
 #### Request body
 
@@ -1598,7 +1599,7 @@ Returns the DM subscription with a named counterpart. Room-info-enriched.
 
 #### Request body
 
-`{ "accountName": "bob" }` — must not be a bot (`.bot` suffix) or platform (`p_` prefix) account.
+`{ "accountName": "bob" }` — must not be a bot (`.bot` suffix) or the `p_tchatadmin_` platform-admin pseudo-account (QA `p_` accounts are valid DM targets).
 
 #### Success response
 

@@ -11,11 +11,13 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// botOrPseudoAccountRegex matches bot (".bot" suffix) and pseudo ("p_" prefix)
-// accounts. It is the wire-side equivalent of model.IsBot / model.IsPlatformAdminAccount,
-// applied as a residual filter so org-expanded candidates — whose accounts the
-// caller does not know up front — are excluded server-side.
-const botOrPseudoAccountRegex = `(\.bot$|^p_)`
+// botOrPseudoAccountRegex matches bot (".bot" suffix) accounts and the
+// platform-admin pseudo-account ("p_tchatadmin_" prefix). It is the wire-side
+// equivalent of model.IsBot / model.IsPlatformAdminAccount, applied as a
+// residual filter so org-expanded candidates — whose accounts the caller does
+// not know up front — are excluded server-side. Plain "p_" QA test accounts are
+// ordinary users and are NOT matched (they resolve through org expansion).
+const botOrPseudoAccountRegex = `(\.bot$|^p_tchatadmin_)`
 
 // MatchCandidatesFilter returns the query predicate selecting the users an
 // add/create-member request resolves to: members of any of orgIDs (by sectId or

@@ -1566,7 +1566,9 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 }
 
 // determineRoomTypeFromPayload mirrors room-service's determineRoomType: a single
-// ".bot"/"p_" counterpart is a botDM (consistent with room-service + pkg/pipelines).
+// counterpart that is a ".bot" bot or the "p_tchatadmin_" platform-admin
+// pseudo-account is a botDM (consistent with room-service + pkg/pipelines); a QA
+// "p_" counterpart is an ordinary user, so it yields a regular DM.
 func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
 		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
@@ -2029,7 +2031,9 @@ func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subsc
 	switch sub.RoomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		cp := sub.Name
-		// Platform-admin (p_) accounts are users, not bots, for naming — only .bot takes the app path.
+		// For naming, only ".bot" accounts take the app path; every "p_" account
+		// (the p_tchatadmin_ pseudo-account and QA users) has a user record and
+		// resolves via the user map.
 		if model.IsBot(cp) {
 			app, err := h.store.GetApp(ctx, cp)
 			if err == nil && app.Name != "" {

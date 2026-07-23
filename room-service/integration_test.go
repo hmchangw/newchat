@@ -3773,13 +3773,19 @@ func TestMongoStore_ListMentionableSubscriptions_Integration(t *testing.T) {
 		assert.Equal(t, "helper.bot", got[0].Account)
 	})
 
-	t.Run("p_ prefix is hidden from mentionable results", func(t *testing.T) {
+	t.Run("platform-admin pseudo-account is hidden but QA p_ users are mentionable", func(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
-		mustInsertUser(t, db, &model.User{ID: "u-pa", Account: "p_admin", EngName: "Platform Admin"})
+		// p_tchatadmin_ is the platform-admin pseudo-account: hidden. p_qa1 is a QA
+		// test account — an ordinary user — so it must appear in mentionable results.
+		mustInsertUser(t, db, &model.User{ID: "u-pa", Account: "p_tchatadmin_siteA", EngName: "Platform Admin"})
+		mustInsertUser(t, db, &model.User{ID: "u-qa", Account: "p_qa1", EngName: "QA One"})
 		mustInsertUser(t, db, &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"})
 		mustInsertSub(t, db, &model.Subscription{ID: "sub-pa",
-			User:   model.SubscriptionUser{ID: "u-pa", Account: "p_admin"},
+			User:   model.SubscriptionUser{ID: "u-pa", Account: "p_tchatadmin_siteA"},
+			RoomID: "r1", SiteID: "site-a"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-qa",
+			User:   model.SubscriptionUser{ID: "u-qa", Account: "p_qa1"},
 			RoomID: "r1", SiteID: "site-a"})
 		mustInsertSub(t, db, &model.Subscription{ID: "sub-alice",
 			User:   model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -3787,9 +3793,14 @@ func TestMongoStore_ListMentionableSubscriptions_Integration(t *testing.T) {
 
 		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", 10)
 		require.NoError(t, err)
-		require.Len(t, got, 1, "p_ accounts must be excluded from mentionable results")
-		assert.Equal(t, "alice", got[0].Account)
-		assert.Equal(t, "user", got[0].OptionType)
+		accts := map[string]string{}
+		for _, s := range got {
+			accts[s.Account] = s.OptionType
+		}
+		assert.NotContains(t, accts, "p_tchatadmin_siteA", "platform-admin pseudo-account must be hidden")
+		assert.Equal(t, "user", accts["alice"])
+		assert.Equal(t, "user", accts["p_qa1"], "QA p_ accounts are ordinary mentionable users")
+		assert.Len(t, got, 2)
 	})
 
 	t.Run("limit caps the result count", func(t *testing.T) {

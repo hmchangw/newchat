@@ -106,10 +106,11 @@ var (
 	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size")
 )
 
-// platformAdminRegex matches platform-admin / webhook accounts by their `p_`
-// prefix. Mentionable autocomplete hides these accounts entirely so they do
-// not appear as `@`-mention targets.
-const platformAdminRegex = `^p_`
+// platformAdminRegex matches the platform-admin pseudo-account by its
+// `p_tchatadmin_` prefix. Mentionable autocomplete hides this account so it does
+// not appear as an `@`-mention target. Plain `p_` QA test accounts are ordinary
+// users and remain mentionable, so they are deliberately NOT matched here.
+const platformAdminRegex = `^p_tchatadmin_`
 
 // sameFloor reports whether two read-floor pointers represent the same instant.
 // Two nil pointers are equal (both "no floor"); a nil and a non-nil differ; two
@@ -161,8 +162,9 @@ func dedup(items []string) []string {
 }
 
 // determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM with a bot (".bot") or platform-admin ("p_") counterpart is a botDM —
-// the same union enforced by the channel-membership guards (filterBots, errBotInChannel).
+// A single-user DM whose counterpart is a bot (".bot") or the "p_tchatadmin_" platform-admin
+// pseudo-account is a botDM — the same union enforced by the channel-membership guards
+// (filterBots, errBotInChannel). A QA "p_" counterpart is an ordinary user, so it is a regular DM.
 func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
 		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {

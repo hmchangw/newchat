@@ -31,6 +31,24 @@ func TestMentionVisible(t *testing.T) {
 	}
 }
 
+func TestIsBot(t *testing.T) {
+	cases := []struct {
+		account string
+		want    bool
+	}{
+		{"weather.bot", true},
+		{"p_tchatadmin_siteA", true}, // platform-admin pseudo-account: no client
+		{"p_webhook", false},         // QA test account: an ordinary user with a client
+		{"p_qa1", false},
+		{"alice", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.account, func(t *testing.T) {
+			assert.Equal(t, tc.want, isBot(tc.account))
+		})
+	}
+}
+
 func TestDedupedAccounts(t *testing.T) {
 	cases := []struct {
 		name     string

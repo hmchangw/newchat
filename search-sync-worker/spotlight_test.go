@@ -153,13 +153,16 @@ func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
 func TestSpotlightCollection_BuildAction_SkipsBots(t *testing.T) {
 	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
-	payload.Accounts = []string{"alice", "weather.bot", "p_hook"}
+	// Real bots and the platform-admin pseudo-account are not searchable
+	// principals; QA p_ accounts are ordinary users and ARE indexed.
+	payload.Accounts = []string{"alice", "weather.bot", "p_tchatadmin_siteA", "p_qa1"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
-	require.Len(t, actions, 1, "bot and pseudo accounts must not be indexed")
-	assert.Equal(t, "alice_r-eng", actions[0].DocID)
+	require.Len(t, actions, 2, "bots and the platform-admin pseudo-account must not be indexed")
+	docIDs := []string{actions[0].DocID, actions[1].DocID}
+	assert.ElementsMatch(t, []string{"alice_r-eng", "p_qa1_r-eng"}, docIDs)
 }
 
 func TestSpotlightCollection_BuildAction_AllBots_NoActions(t *testing.T) {

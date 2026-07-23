@@ -2337,6 +2337,25 @@ func TestResolveRoomName(t *testing.T) {
 	}
 }
 
+func TestDetermineRoomTypeFromPayload(t *testing.T) {
+	tests := map[string]struct {
+		req  model.CreateRoomRequest
+		want model.RoomType
+	}{
+		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
+		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
+		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_tchatadmin_siteA"}}, model.RoomTypeBotDM},
+		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
+		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
+		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, determineRoomTypeFromPayload(&tc.req))
+		})
+	}
+}
+
 func TestNewSubSetsAllFields(t *testing.T) {
 	user := &model.User{ID: "u1", Account: "alice"}
 	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeChannel}
@@ -6147,13 +6166,19 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 			want:    "Alice 愛麗絲",
 		},
 		{
-			name:    "botDM platform-admin (p_) counterpart resolves as a user from map",
+			name:    "botDM p_ counterpart resolves as a user from map (has a user record)",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_admin"},
 			userMap: map[string]*model.User{"p_admin": {Account: "p_admin", EngName: "Pat", ChineseName: "派特"}},
 			want:    "Pat 派特",
 		},
 		{
-			name:    "botDM platform-admin (p_) counterpart missing from map falls back to account",
+			name:    "botDM platform-admin pseudo-account resolves via user map, not GetApp",
+			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_tchatadmin_siteA"},
+			userMap: map[string]*model.User{"p_tchatadmin_siteA": {Account: "p_tchatadmin_siteA", EngName: "Admin", ChineseName: "管理"}},
+			want:    "Admin 管理",
+		},
+		{
+			name:    "botDM p_ counterpart missing from map falls back to account",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_admin"},
 			userMap: users,
 			want:    "p_admin",

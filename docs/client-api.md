@@ -904,8 +904,8 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 |---|---|---|
 | `siteId` | string | The room's home site. |
 | `name` | string | The room's canonical name (may differ from the subscription `name`). |
-| `userCount` | number | Member count. |
-| `appCount` | number | App (bot) count. |
+| `userCount` | number | Member count — human members, including QA `p_` test accounts (ordinary users). |
+| `appCount` | number | App count — `.bot` bots plus the `p_tchatadmin_` platform-admin pseudo-account. |
 | `lastMsgAt` | RFC3339 timestamp | The room's last-message time. |
 | `lastMsgId` | string | Last message ID. |
 | `lastMentionAllAt` | RFC3339 timestamp | The last room-wide mention time. |
@@ -1040,7 +1040,7 @@ This is an **async-job RPC**: the synchronous reply only confirms acceptance. Th
 The room **type is inferred server-side** from the payload shape — the client does not send it:
 
 - `name` set → `channel`
-- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a bot)
+- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a `.bot` bot or the `p_tchatadmin_` platform-admin pseudo-account; a QA `p_` account is an ordinary user, so it yields a regular `dm`)
 - `name` empty + `users` is just the caller (e.g. `[caller]` or empty) → **self-DM** (note-to-self): a single-member `dm` room, created through the same async path as any other room. The subscription is **favorited**, and it is **one-per-user** — a repeat create returns the existing room with `status: "exists"`.
 
 The creator's account and the site come from the subject (`chat.user.{account}.request.room.{siteID}.create`); the client does not pass them in the body.
@@ -1136,7 +1136,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional; the server derives the room ID from the subject and ignores any non-matching value. |
-| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include bot accounts (`.bot` suffix / `p_` prefix): each listed bot must resolve to an app with an **enabled assistant** and live on the **local site**, else the request is rejected (see Error response). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and receive the `room.key` event on their encoded per-user subject (see [§5](#5-room-encryption)) — but no `subscription.update`. |
+| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant** and live on the **local site**, else the request is rejected (see Error response). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and receive the `room.key` event on their encoded per-user subject (see [§5](#5-room-encryption)) — but no `subscription.update`. The `p_tchatadmin_` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant/site validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
@@ -1728,7 +1728,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `{siteID}` must be the room's **origin `siteID`**.
 
-Used by the message composer's `@…` mention autocomplete. Returns subscriptions discriminated as `user` or `app`. The caller is always excluded from the result set. Platform-admin / webhook accounts (those whose `account` is prefixed `p_`) are also excluded — they are not `@`-mentionable.
+Used by the message composer's `@…` mention autocomplete. Returns subscriptions discriminated as `user` or `app`. The caller is always excluded from the result set. The `p_tchatadmin_` platform-admin pseudo-account is also excluded — it is not `@`-mentionable. Plain `p_` QA test accounts are ordinary users and remain mentionable.
 
 ##### Request body
 
@@ -4708,7 +4708,7 @@ Returns the calling user's DM subscription with the named counterpart. The reply
 
 | Field         | Type   | Required | Notes |
 |---------------|--------|----------|-------|
-| `accountName` | string | yes      | The counterpart's account. Must not be a bot account (`.bot` suffix) or platform account (`p_` prefix). |
+| `accountName` | string | yes      | The counterpart's account. Must not be a bot account (`.bot` suffix) or the `p_tchatadmin_` platform-admin pseudo-account. A QA `p_` account is an ordinary user and is a valid DM target. |
 
 ```json
 { "accountName": "bob" }
@@ -4757,7 +4757,7 @@ Returns the calling user's DM subscription with the named counterpart. The reply
 | Condition | `code` | `reason` | Notes |
 |-----------|--------|----------|-------|
 | `accountName` empty | `bad_request` | — | `"accountName required"` |
-| Bot or platform account | `bad_request` | `invalid_dm_target` | `"invalid DM target"` |
+| Bot or `p_tchatadmin_` pseudo-account | `bad_request` | `invalid_dm_target` | `"invalid DM target"` |
 | DM subscription not found | `not_found` | `subscription_not_found` | `"dm not found"` |
 | Internal failure | `internal` | — | — |
 

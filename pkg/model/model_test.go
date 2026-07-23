@@ -77,12 +77,15 @@ func TestIsPlatformAdminAccount(t *testing.T) {
 		account string
 		want    bool
 	}{
-		{"p_ prefix webhook", "p_webhook", true},
-		{"bare p_ prefix", "p_", true},
+		{"platform-admin pseudo-account", "p_tchatadmin_siteA", true},
+		{"bare p_tchatadmin_ prefix", "p_tchatadmin_", true},
+		{"QA webhook is an ordinary user", "p_webhook", false},
+		{"QA test account is an ordinary user", "p_qa1", false},
+		{"bare p_ is not the admin pseudo-account", "p_", false},
+		{"case-sensitive prefix (P_tchatadmin_)", "P_tchatadmin_x", false},
 		{"plain human account", "alice", false},
 		{"bot account", "weather.bot", false},
-		{"case-sensitive prefix (P_)", "P_upper", false},
-		{"p underscore not at start", "alice_p_x", false},
+		{"tchatadmin prefix not at start", "x_p_tchatadmin_siteA", false},
 		{"empty", "", false},
 	}
 	for _, tt := range tests {

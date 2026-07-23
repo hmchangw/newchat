@@ -34,13 +34,15 @@ func TestHasRole(t *testing.T) {
 }
 
 func TestFilterBots(t *testing.T) {
-	input := []string{"alice", "helper.bot", "bob", "p_scheduler"}
+	// Real bots and the platform-admin pseudo-account are filtered; QA p_
+	// accounts are ordinary users and are retained.
+	input := []string{"alice", "helper.bot", "bob", "p_scheduler", "p_tchatadmin_siteA"}
 	got := filterBots(input)
-	assert.Equal(t, []string{"alice", "bob"}, got)
+	assert.Equal(t, []string{"alice", "bob", "p_scheduler"}, got)
 }
 
 func TestFilterBots_AllBots(t *testing.T) {
-	input := []string{"helper.bot", "p_scheduler"}
+	input := []string{"helper.bot", "p_tchatadmin_siteA"}
 	got := filterBots(input)
 	assert.Nil(t, got)
 }
@@ -185,6 +187,16 @@ func TestDetermineRoomType(t *testing.T) {
 			name: "single bot user no name → botDM",
 			req:  model.CreateRoomRequest{Users: []string{"helper.bot"}},
 			want: model.RoomTypeBotDM,
+		},
+		{
+			name: "single platform-admin pseudo-account no name → botDM",
+			req:  model.CreateRoomRequest{Users: []string{"p_tchatadmin_siteA"}},
+			want: model.RoomTypeBotDM,
+		},
+		{
+			name: "single QA p_ user no name → regular DM",
+			req:  model.CreateRoomRequest{Users: []string{"p_qa1"}},
+			want: model.RoomTypeDM,
 		},
 		{
 			name: "single user with name → channel",
