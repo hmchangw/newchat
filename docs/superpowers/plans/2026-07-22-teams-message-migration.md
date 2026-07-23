@@ -1,12 +1,13 @@
-# Teams Message-History Migration — Implementation Plan (Phase 1)
+# Teams Message-History Migration — Implementation Plan
 
 **Goal:** a durable consumer on the canonical stream (filtered to `.teams.batch`)
 that transforms Teams-history messages and feeds them through message-worker's own
 persist pipeline with `isMigration=true` — no re-publish, no reply. Design:
 `docs/superpowers/specs/2026-07-22-teams-message-migration-design.md`.
 
-**Scope:** Phase 1 (messages) only. The forward branch is stubbed pending the
-`Forwarded` model field; room + subscription replace is Phase 2.
+**Scope:** messages only. The forward branch is stubbed pending the `Forwarded` model
+field; room + subscription creation is handled by the Teams onboarding pipeline (out of
+scope here).
 
 ---
 
@@ -51,8 +52,8 @@ persist pipeline with `isMigration=true` — no re-publish, no reply. Design:
 
 - [x] This plan + the design spec (the batch subject is server-only, not in `client-api.md`).
 
-## Deferred (out of Phase 1)
+## Deferred / follow-ups
 
 - [ ] **Search indexing** of migrated messages — this path does not emit the `.created` canonical event search-sync keys on (see the design § Known limitation).
 - [ ] Forward branch → `Forwarded` snapshot (after the forward feature lands).
-- [ ] Phase 2: room + subscription replace RPC to `room-service`.
+- [ ] Narrow `broadcast-worker` + `search-sync-worker` filters to exclude `.teams.batch` (they currently receive + Ack-drop it — see the design § Cross-consumer note).
