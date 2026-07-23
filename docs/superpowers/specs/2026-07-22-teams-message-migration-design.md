@@ -1,7 +1,7 @@
-# Teams Message-History Migration — Design (Phase 1)
+# Teams Message-History Migration — Design
 
 **Goal:** ingest Teams message history into nextgen during a bounded, multi-day bulk
-sync — idempotently, reusing the persistence pipeline; search indexing is deferred in Phase 1.
+sync — idempotently, reusing the persistence pipeline; search indexing is deferred (see Known limitation).
 
 ## Overview
 
@@ -17,9 +17,19 @@ no reply.
 
 Feeding the transformed message through `processMessage(ctx, evt, isMigration=true)`
 reuses the entire persistence path (Cassandra insert, thread materialization, quote
-re-projection) with the source's live side-effects suppressed. Because nothing is
-re-published to the `.created` NATS event, broadcast, notification, **and** search-sync
-never fire — the silent no-fan-out migration by design.
+re-projection) with the source's live side-effects suppressed. Nothing is re-published
+to the `.created` event, so no fan-out, notification, or indexing happens — the silent
+migration by design.
+
+**Cross-consumer note (the `.teams.batch` subject rides the canonical wildcard).**
+`notification-worker` and message-worker's own message consumer are filtered to
+`.created`, so they never receive `.teams.batch`. `broadcast-worker` and
+`search-sync-worker`, however, bind the whole `chat.msg.canonical.{siteID}.>` and so
+*do* receive each `.teams.batch` message; each decodes it as an invalid message event
+(no message id) and **Ack-drops it** — no re-broadcast, no index write, no redelivery
+loop (verified live: both consumers Ack the batch with zero redelivery). This is benign
+today but is per-message wasted work at scale; narrowing those two consumers' filters to
+the message subjects they actually handle (excluding `.teams.batch`) is a clean follow-up.
 
 **Delivery + retries:** the consumer Acks a batch once every message has been handled.
 A per-message transform error is logged as that message's result and does **not** block
@@ -83,7 +93,7 @@ message's `status: error` and the batch continues (Ack) — a deterministic bad 
 must not poison-loop the whole batch. A message with no id, or no roomId, is `skipped`.
 An infra failure in the persist pipeline Naks the batch for redelivery.
 
-## Known limitation (phase 1)
+## Known limitation
 
 Migrated messages are **persisted but NOT indexed in search**. Search indexing keys on
 the `.created` canonical NATS event, which this path intentionally does not emit (that
