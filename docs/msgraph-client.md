@@ -24,6 +24,7 @@ derive organizer/attendee addresses):
 | `TEAMS_CLIENT_ID` | App registration (client) id |
 | `TEAMS_CLIENT_SECRET` | App registration client secret |
 | `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev |
+| `GRAPH_PROXY_URL` | Optional. Routes the meetings Graph client through this proxy (scheme+host, e.g. `http://proxy.corp:8080`), overriding `HTTPS_PROXY`/`HTTP_PROXY`. Empty falls back to the standard proxy env vars. |
 
 When the Teams credentials are unset, the deep-link call RPCs still work (they
 need only `TEAMS_EMAIL_DOMAIN`); the meetings RPC returns a not-configured
@@ -50,6 +51,10 @@ otherwise creates one. `room-service` sets `externalId` to a stable per-room key
 (`siteID:roomID`), so repeated or concurrent `teams.meeting` calls for the same
 room return the same meeting. `externalId` is required — the client rejects an
 empty value.
+
+room-service constructs this client via `NewMeetingsClient(cfg)`, which honors
+`Config.ProxyURL` (from `GRAPH_PROXY_URL`) and fails fast on a malformed proxy
+value at startup.
 
 ## Listing users (paginated)
 

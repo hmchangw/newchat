@@ -55,7 +55,12 @@ type config struct {
 	// GraphUserAgent overrides the User-Agent header on Graph requests (meetings
 	// path). Empty falls back to the msgraph browser default. Named GRAPH_USER_AGENT
 	// for consistency with user-presence-service.
-	GraphUserAgent       string `env:"GRAPH_USER_AGENT" envDefault:""`
+	GraphUserAgent string `env:"GRAPH_USER_AGENT" envDefault:""`
+	// GraphProxyURL, when set, routes the meetings Graph client through this
+	// proxy explicitly (overriding HTTPS_PROXY/HTTP_PROXY). Must include a scheme
+	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
+	// proxy env vars.
+	GraphProxyURL        string `env:"GRAPH_PROXY_URL" envDefault:""`
 	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
 	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
@@ -153,13 +158,18 @@ func main() {
 		if cfg.TeamsTLSInsecure {
 			slog.Warn("Graph TLS verification disabled — dev/on-prem only, never production", "TEAMS_TLS_INSECURE", true)
 		}
-		graphClient = msgraph.New(msgraph.Config{
+		graphClient, err = msgraph.NewMeetingsClient(msgraph.Config{
 			TenantID:              cfg.TeamsTenantID,
 			ClientID:              cfg.TeamsClientID,
 			ClientSecret:          cfg.TeamsClientSecret,
 			TLSInsecureSkipVerify: cfg.TeamsTLSInsecure,
+			ProxyURL:              cfg.GraphProxyURL,
 			UserAgent:             cfg.GraphUserAgent,
 		})
+		if err != nil {
+			slog.Error("build graph meetings client", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Eager at-rest DEK provisioning: when enabled, room creation provisions
