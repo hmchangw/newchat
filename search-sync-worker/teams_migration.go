@@ -64,10 +64,10 @@ func (c *teamsMigrationCollection) BuildAction(data []byte) ([]searchengine.Bulk
 	for _, raw := range req.Messages {
 		var tm teamsmigrate.Message
 		if err := json.Unmarshal(raw, &tm); err != nil {
-			return nil, fmt.Errorf("unmarshal teams message: %w", err)
+			continue // one malformed record must not drop its valid siblings
 		}
-		if tm.ID == "" || tm.RoomID == "" {
-			continue
+		if tm.ID == "" || tm.RoomID == "" || tm.CreatedDateTime.IsZero() {
+			continue // can't address idempotently / no index bucket
 		}
 		if teamsmigrate.MessageType(tm.MessageType) != "" {
 			continue // system message — not indexed content

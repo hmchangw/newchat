@@ -34,7 +34,7 @@ scope here).
 
 ## Task 4: Deterministic message id
 
-- [x] Stable hash of the Teams id in valid `idgen` message-id format (idempotent re-run).
+- [x] Stable hash of `roomID + ":" + teamsID` (room-scoped, so ids don't collide across conversations) in valid `idgen` message-id format (idempotent re-run).
 
 ## Task 5: `message-worker` batch consumer
 
