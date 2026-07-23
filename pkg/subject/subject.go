@@ -242,6 +242,13 @@ func MsgCanonicalCreated(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.created", siteID)
 }
 
+// MsgCanonicalTeamsBatch is the server-only publish/consume subject for Teams
+// message-history batch migration (server-produced; message-worker consumes it off
+// the canonical stream). Lock to server identities in NATS permissions — no client access.
+func MsgCanonicalTeamsBatch(siteID string) string {
+	return fmt.Sprintf("chat.msg.canonical.%s.teams.batch", siteID)
+}
+
 func MsgCanonicalUpdated(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.updated", siteID)
 }

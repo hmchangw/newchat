@@ -202,6 +202,43 @@ func main() {
 		}
 	}()
 
+	// Teams message-history batch migration: a durable consumer on the canonical
+	// stream, filtered to .teams.batch. Each batch is transformed + fed through the
+	// existing persist pipeline (isMigration=true) — NOT re-published to canonical,
+	// so broadcast/notification/search-sync never fire (silent no-fan-out migration).
+	teamsMigration := newTeamsBatchHandler(newMongoHRIdentityStore(db), cfg.SiteID, handler.processMessage)
+	teamsCons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildTeamsBatchConsumerConfig(cfg.Consumer, cfg.SiteID))
+	if err != nil {
+		slog.Error("create teams-batch consumer failed", "error", err)
+		os.Exit(1)
+	}
+	teamsIter, err := teamsCons.Messages(ctx, jetstream.PullMaxMessages(cfg.MaxWorkers))
+	if err != nil {
+		slog.Error("teams-batch messages failed", "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		for {
+			msgCtx, msg, err := teamsIter.Next()
+			if err != nil {
+				return
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func() {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				jobguard.Run(msg, func() {
+					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+					handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+					teamsMigration.consume(handlerCtx, msg)
+				})
+			}()
+		}
+	}()
+
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
 	)
@@ -215,6 +252,7 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error {
 			iter.Stop()
+			teamsIter.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -249,5 +287,15 @@ func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.Con
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "message-worker"
 	cc.FilterSubject = subject.MsgCanonicalCreated(siteID)
+	return cc
+}
+
+// buildTeamsBatchConsumerConfig scopes a second durable to the .teams.batch subject
+// on the same canonical stream, so the message-history migration consumes batches
+// independently of the live .created feed.
+func buildTeamsBatchConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "message-worker-teams-batch"
+	cc.FilterSubject = subject.MsgCanonicalTeamsBatch(siteID)
 	return cc
 }
