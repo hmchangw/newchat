@@ -190,7 +190,9 @@ func ParseOutbox(subj string) (originSiteID, destSiteID, eventType string, ok bo
 }
 
 func SubscriptionUpdate(account string) string {
-	return fmt.Sprintf("chat.user.%s.event.subscription.update", account)
+	// Encode the account so the subject matches the {account} token the
+	// recipient's NATS JWT is scoped to (a dotted ".bot" account spans tokens).
+	return fmt.Sprintf("chat.user.%s.event.subscription.update", EncodeAccount(account))
 }
 
 // SettingsUpdate is the client-facing fanout subject published by

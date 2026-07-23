@@ -323,7 +323,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional echo; server derives from subject. |
-| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and get the `room.key` (on their encoded per-user subject) but no `subscription.update`. The `p_tchatadmin_` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
+| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get both `subscription.update` and `room.key` on their encoded per-user subject (dots→underscores). The `p_tchatadmin_` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
@@ -341,7 +341,7 @@ available (no app record / disabled assistant), cross-site bot (`bot_cross_site`
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
 ```
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed human member; bots receive none), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — every new member, bots included, on the encoded per-user subject), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — every new member, bots included, on the encoded per-user subject), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -372,7 +372,7 @@ Synchronous: neither/both of `account`/`orgId` set; requester not an owner; targ
 last **human** member (bots don't count, and a bot target skips the guard); org member
 cannot leave individually.
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed human account; bots receive none), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`), `new_message` system message → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`), `new_message` system message → [events.md](events.md#new_message-roomevent)
 
 ---
 
