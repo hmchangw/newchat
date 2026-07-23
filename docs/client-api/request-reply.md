@@ -1995,6 +1995,32 @@ error table. Key errors:
 
 ---
 
+### Translate Text
+
+**Subject:** `chat.user.{account}.request.translate.{siteID}`
+**Async result:** `chat.user.{account}.response.{requestID}` (subscribe to `chat.user.{account}.>` to receive it)
+
+Publish + async-reply pattern — no `_INBOX.>` reply. `translation-service` translates
+`text` into `targetLang` and publishes a [`TranslateResult`](events.md#translateresult--async-completion).
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `requestId` | string | yes | 36-char hyphenated UUID. Async result delivered to `…response.{requestId}`. Empty ⇒ no result. |
+| `text` | string | yes | Text to translate. No length cap. |
+| `targetLang` | string | yes | One of `zhTW`, `zhCN`, `en`, `de`, `ja`. Passed through to the backend unchanged. |
+
+#### Async result
+
+Delivered on `chat.user.{account}.response.{requestId}` as a [`TranslateResult`](events.md#translateresult--async-completion): `status: "ok"` with `translatedText`, or `status: "error"` with the error envelope (`code`/`reason`).
+
+Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `internal` for a backend failure. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+
+**Emits:** none — the `TranslateResult` on the response subject is the only output.
+
+---
+
 ### Room Encryption Key Get
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.key.get`
