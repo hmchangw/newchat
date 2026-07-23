@@ -123,10 +123,12 @@ type Config struct {
 	TLSInsecureSkipVerify bool
 	// ProxyURL, when non-empty, routes the client's HTTP requests through this
 	// proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored by the presence, chats,
-	// chat-members and user-lister clients — each NewXxxClient applies it and
-	// reports an invalid value at construction. The directory and meetings clients
-	// (NewDirectoryClient / New) ignore it and rely on the standard proxy env
-	// vars. Must include a scheme and host (e.g. "http://proxy.corp:8080").
+	// chat-members, user-lister and meetings clients — each NewXxxClient
+	// (NewPresenceClient / NewChatsClient / NewChatMembersClient /
+	// NewUserListerClient / NewMeetingsClient) applies it and reports an invalid
+	// value at construction. The bare New and NewDirectoryClient constructors
+	// ignore it and rely on the standard proxy env vars. Must include a scheme
+	// and host (e.g. "http://proxy.corp:8080").
 	ProxyURL string
 	// UserAgent overrides the User-Agent header sent on every Graph request. When
 	// empty the client falls back to defaultUserAgent (a browser string). Honored
@@ -257,6 +259,21 @@ func New(cfg Config, opts ...Option) Client {
 		opt(g)
 	}
 	return g
+}
+
+// NewMeetingsClient returns an app-only meetings client that honors
+// cfg.ProxyURL (unlike New, which ignores it and relies on the standard proxy
+// env vars). It mirrors NewUserListerClient: it applies the proxy after
+// construction and reports an invalid value at construction rather than
+// surfacing an opaque per-request error.
+//
+//nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
+func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // mutableTransport returns an *http.Transport for tuning hc's connection pool,

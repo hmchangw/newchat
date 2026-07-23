@@ -458,8 +458,59 @@ func TestGraphClients_InvalidProxyURL(t *testing.T) {
 			require.Error(t, err)
 			_, err = NewUserListerClient(cfg)
 			require.Error(t, err)
+			_, err = NewMeetingsClient(cfg)
+			require.Error(t, err)
 		})
 	}
+}
+
+func TestNewMeetingsClient_RoutesThroughProxy(t *testing.T) {
+	c, err := NewMeetingsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"},
+	)
+	require.NoError(t, err)
+	g := c.(*graphClient)
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.Proxy, "proxy must be configured on the transport")
+
+	req, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me", nil)
+	require.NoError(t, err)
+	proxyURL, err := tr.Proxy(req)
+	require.NoError(t, err)
+	require.NotNil(t, proxyURL)
+	assert.Equal(t, "http://proxy.corp:8080", proxyURL.String())
+}
+
+func TestNewMeetingsClient_EmptyProxyIsNoOp(t *testing.T) {
+	c, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"})
+	require.NoError(t, err)
+	require.NotNil(t, c)
+}
+
+func TestNewMeetingsClient_TLSInsecureAndProxyCompose(t *testing.T) {
+	c, err := NewMeetingsClient(Config{
+		TenantID:              "t",
+		ClientID:              "c",
+		ClientSecret:          "s",
+		TLSInsecureSkipVerify: true,
+		ProxyURL:              "http://proxy.corp:8080",
+	})
+	require.NoError(t, err)
+	g := c.(*graphClient)
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.TLSClientConfig)
+	assert.True(t, tr.TLSClientConfig.InsecureSkipVerify, "TLS-insecure must survive proxy application")
+	require.NotNil(t, tr.Proxy, "proxy must be configured alongside TLS-insecure")
+}
+
+func TestNewMeetingsClient_ProxyRejectsCustomRoundTripper(t *testing.T) {
+	_, err := NewMeetingsClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"},
+		WithHTTPClient(&http.Client{Transport: stubRoundTripper{}}),
+	)
+	require.Error(t, err)
 }
 
 func TestCreateOnlineMeeting_SendsDefaultUserAgent(t *testing.T) {
