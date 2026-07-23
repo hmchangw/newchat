@@ -129,6 +129,57 @@ func TestMongoStore_Integration(t *testing.T) {
 	}
 }
 
+func TestMongoStore_ThreadCleanup_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	// Two threads in r1; one in r2 which must stay untouched.
+	_, err := db.Collection("thread_rooms").InsertMany(ctx, []interface{}{
+		bson.M{"_id": "tr1", "roomId": "r1", "parentMessageId": "p1", "replyAccounts": []string{"alice", "bob", "carol"}},
+		bson.M{"_id": "tr2", "roomId": "r1", "parentMessageId": "p2", "replyAccounts": []string{"bob", "dave"}},
+		bson.M{"_id": "tr3", "roomId": "r2", "parentMessageId": "p3", "replyAccounts": []string{"bob"}},
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []interface{}{
+		bson.M{"_id": "ts1", "roomId": "r1", "userAccount": "bob", "threadRoomId": "tr1"},
+		bson.M{"_id": "ts2", "roomId": "r1", "userAccount": "carol", "threadRoomId": "tr1"},
+		bson.M{"_id": "ts3", "roomId": "r1", "userAccount": "alice", "threadRoomId": "tr2"},
+		bson.M{"_id": "ts4", "roomId": "r2", "userAccount": "bob", "threadRoomId": "tr3"},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.PullThreadFollowers(ctx, "r1", []string{"bob", "carol"}))
+	require.NoError(t, store.DeleteThreadSubscriptions(ctx, "r1", []string{"bob", "carol"}))
+
+	replyAccounts := func(id string) []string {
+		var doc struct {
+			ReplyAccounts []string `bson:"replyAccounts"`
+		}
+		require.NoError(t, db.Collection("thread_rooms").FindOne(ctx, bson.M{"_id": id}).Decode(&doc))
+		return doc.ReplyAccounts
+	}
+	// bob + carol pulled from r1's threads; survivors kept; r2 thread untouched.
+	assert.Equal(t, []string{"alice"}, replyAccounts("tr1"))
+	assert.Equal(t, []string{"dave"}, replyAccounts("tr2"))
+	assert.Equal(t, []string{"bob"}, replyAccounts("tr3"))
+
+	count := func(filter bson.M) int64 {
+		n, err := db.Collection("thread_subscriptions").CountDocuments(ctx, filter)
+		require.NoError(t, err)
+		return n
+	}
+	// bob + carol thread subs in r1 deleted; alice (r1) and bob (r2) remain.
+	assert.Equal(t, int64(0), count(bson.M{"roomId": "r1", "userAccount": bson.M{"$in": []string{"bob", "carol"}}}))
+	assert.Equal(t, int64(1), count(bson.M{"roomId": "r1", "userAccount": "alice"}))
+	assert.Equal(t, int64(1), count(bson.M{"roomId": "r2", "userAccount": "bob"}))
+
+	// Empty account list is a no-op.
+	require.NoError(t, store.PullThreadFollowers(ctx, "r1", nil))
+	require.NoError(t, store.DeleteThreadSubscriptions(ctx, "r1", nil))
+	assert.Equal(t, []string{"alice"}, replyAccounts("tr1"))
+}
+
 // TestMongoStore_ApplyMemberCountDelta covers the add-member hot path: the $inc
 // applies the delta atomically, and reconcileDue follows the per-room TTL —
 // true when never reconciled or once the TTL has elapsed, false within it.

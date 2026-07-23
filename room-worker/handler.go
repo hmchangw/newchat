@@ -340,6 +340,17 @@ func (h *Handler) rotateAndFanOut(ctx context.Context, roomID string, currentPai
 	return nil
 }
 
+// cleanupThreadMembership scrubs departed accounts from roomID's replyAccounts and thread_subscriptions (#308); no-op on empty.
+func (h *Handler) cleanupThreadMembership(ctx context.Context, roomID string, accounts []string) error {
+	if err := h.store.PullThreadFollowers(ctx, roomID, accounts); err != nil {
+		return fmt.Errorf("pull thread followers after remove: %w", err)
+	}
+	if err := h.store.DeleteThreadSubscriptions(ctx, roomID, accounts); err != nil {
+		return fmt.Errorf("delete thread subscriptions after remove: %w", err)
+	}
+	return nil
+}
+
 func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.RemoveMemberRequest, currentPair *roomkeystore.VersionedKeyPair) (err error) {
 	if req.Timestamp <= 0 {
 		req.Timestamp = time.Now().UTC().UnixMilli()
@@ -373,6 +384,12 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	// Individual-only: delete sub, reconcile userCount, publish leave/removed events.
 	if _, err := h.store.DeleteSubscription(ctx, req.RoomID, req.Account); err != nil {
 		return fmt.Errorf("delete subscription: %w", err)
+	}
+
+	// Individual-only branch (dual-members returned above), so the account has
+	// truly left: scrub its thread footprint (#308).
+	if err := h.cleanupThreadMembership(ctx, req.RoomID, []string{req.Account}); err != nil {
+		return err
 	}
 
 	if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
@@ -572,6 +589,11 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 	if len(accounts) > 0 {
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts); err != nil {
 			return fmt.Errorf("delete subscriptions by accounts: %w", err)
+		}
+		// accounts is exactly the set that truly lost membership (survivors
+		// filtered out above), so scrub their thread footprint too (#308).
+		if err := h.cleanupThreadMembership(ctx, req.RoomID, accounts); err != nil {
+			return err
 		}
 	}
 

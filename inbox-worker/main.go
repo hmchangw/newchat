@@ -148,6 +148,17 @@ func (s *mongoInboxStore) DeleteSubscriptionsByAccounts(ctx context.Context, roo
 	return nil
 }
 
+func (s *mongoInboxStore) DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	_, err := s.threadSubCol.DeleteMany(ctx, bson.M{"roomId": roomID, "userAccount": bson.M{"$in": accounts}})
+	if err != nil {
+		return fmt.Errorf("delete thread subscriptions in room %q: %w", roomID, err)
+	}
+	return nil
+}
+
 func (s *mongoInboxStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
 	if len(accounts) == 0 {
 		return nil, nil

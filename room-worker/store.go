@@ -104,6 +104,10 @@ type SubscriptionStore interface {
 	DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) (int64, error)
 	DeleteRoomMember(ctx context.Context, roomID string, memberType model.RoomMemberType, memberID string) error
 
+	// --- thread-state cleanup (remove flow): scrub departed accounts so they no longer fan out as followers (#308); no-op on empty ---
+	PullThreadFollowers(ctx context.Context, roomID string, accounts []string) error
+	DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error
+
 	// --- add-member flow ---
 	// BulkCreateRoomMembers upserts each row on the (rid, member.type, member.id) unique key — a re-add/redelivery is an idempotent no-op.
 	BulkCreateRoomMembers(ctx context.Context, members []*model.RoomMember) error
