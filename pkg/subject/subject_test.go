@@ -52,6 +52,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.inbox.site-a.internal.member_removed"},
 		{"MsgCanonicalCreated", subject.MsgCanonicalCreated("site-a"),
 			"chat.msg.canonical.site-a.created"},
+		{"MsgCanonicalTeamsBatch", subject.MsgCanonicalTeamsBatch("site-a"),
+			"chat.msg.canonical.site-a.teams.batch"},
 		{"MsgCanonicalUpdated", subject.MsgCanonicalUpdated("site-a"),
 			"chat.msg.canonical.site-a.updated"},
 		{"MsgCanonicalDeleted", subject.MsgCanonicalDeleted("site-a"),
