@@ -1,7 +1,7 @@
 # Teams Message-History Migration — Design (Phase 1)
 
 **Goal:** ingest Teams message history into nextgen during a bounded, multi-day bulk
-sync — idempotently, reusing the entire persistence + indexing pipeline.
+sync — idempotently, reusing the persistence pipeline; search indexing is deferred in Phase 1.
 
 ## Overview
 
@@ -58,8 +58,9 @@ alone (no site term).
 
 1. Read by `employeeId = employeeIDFromGraphID(graphId)` (the same hash the HR sync
    uses) — the authoritative key. Found → reuse (a `FindUserByEmployeeId` read).
-2. Else a unique in-site display-name match (`FindUserByDisplayName` exactly-one;
-   ambiguous/zero falls through) — the fuzzy fallback.
+2. Else a unique display-name match (`FindUserByDisplayName` exactly-one across all
+   sites; ambiguous/zero falls through) — the fuzzy fallback. `employeeId` being global,
+   the name lookup is global too (no site term).
 3. Else create via `UpsertUserIdentities`, keyed on `employeeId`. Reaching this only for
    genuinely-new users means the upsert never overwrites an existing identity — no clobber.
 

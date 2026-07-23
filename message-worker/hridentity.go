@@ -58,7 +58,8 @@ func (s *mongoHRIdentityStore) UpsertUserIdentities(ctx context.Context, users [
 		u := &users[i].User
 		if u.EmployeeID == "" {
 			// employeeId is the identity key; an empty one would clobber every keyless row.
-			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId", "account", u.Account)
+			// account omitted — it may be an employee identifier (privacy).
+			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId")
 			continue
 		}
 		models = append(models, mongo.NewUpdateOneModel().

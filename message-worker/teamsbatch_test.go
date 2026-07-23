@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -18,7 +19,9 @@ type fakeTransformer struct{ errIDs map[string]bool }
 
 func (f fakeTransformer) Transform(_ context.Context, raw json.RawMessage) (model.Message, error) {
 	var tm teamsMessage
-	_ = json.Unmarshal(raw, &tm)
+	if err := json.Unmarshal(raw, &tm); err != nil {
+		return model.Message{}, fmt.Errorf("decode fake teams message: %w", err)
+	}
 	if f.errIDs[tm.ID] {
 		return model.Message{}, errors.New("boom")
 	}
@@ -37,7 +40,9 @@ func (c *captureProcessor) process(_ context.Context, data []byte, isMigration b
 		return c.err
 	}
 	var evt model.MessageEvent
-	_ = sonic.Unmarshal(data, &evt)
+	if err := sonic.Unmarshal(data, &evt); err != nil {
+		return fmt.Errorf("decode captured message event: %w", err)
+	}
 	c.events = append(c.events, evt)
 	c.isMigration = append(c.isMigration, isMigration)
 	return nil
