@@ -50,7 +50,7 @@ func newSenderResolver(store HRIdentityStore, siteID string) *senderResolver {
 
 // resolve order: (1) read by employeeId — the authoritative key the HR sync shares,
 // so an existing (synced or prior-migrated) user is reused without touching its fields;
-// (2) else a unique in-site display-name match (fuzzy fallback); (3) else create via the
+// (2) else a unique display-name match (fuzzy fallback); (3) else create via the
 // employeeId-keyed upsert. Reaching (3) only for genuinely-new users means the upsert
 // never overwrites an existing identity.
 func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName string) (resolvedSender, error) {

@@ -6,7 +6,7 @@ import "encoding/json"
 // is a source-shaped payload the injected MessageTransformer decodes — kept as raw
 // JSON so the seam stays source-agnostic.
 type TeamsBatchRequest struct {
-	Messages []json.RawMessage `json:"messages"`
+	Messages []json.RawMessage `json:"messages" bson:"messages"`
 }
 
 // Per-message migration outcomes reported back to the caller so it retries only failures.
@@ -19,7 +19,7 @@ const (
 // TeamsBatchResult is the per-message outcome, logged as the batch is consumed.
 // TeamsMsgID echoes the source id; Error is set only when Status == error.
 type TeamsBatchResult struct {
-	TeamsMsgID string `json:"teamsMsgId"`
-	Status     string `json:"status"`
-	Error      string `json:"error,omitempty"`
+	TeamsMsgID string `json:"teamsMsgId" bson:"teamsMsgId"`
+	Status     string `json:"status" bson:"status"`
+	Error      string `json:"error,omitempty" bson:"error,omitempty"`
 }

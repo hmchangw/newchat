@@ -58,11 +58,23 @@ func (h *teamsBatchHandler) handleBatch(ctx context.Context, req model.TeamsBatc
 	resolver := newSenderResolver(h.store, h.siteID)
 	tr := h.newTransformer(resolver)
 
+	var persisted, skipped, failed int
 	for _, raw := range req.Messages {
-		if _, err := h.migrateOne(ctx, tr, raw); err != nil {
-			return err
+		res, err := h.migrateOne(ctx, tr, raw)
+		if err != nil {
+			return err // infra failure → Nak, the idempotent batch replays
+		}
+		switch res.Status {
+		case model.TeamsBatchPersisted:
+			persisted++
+		case model.TeamsBatchSkipped:
+			skipped++
+		default:
+			failed++
 		}
 	}
+	// No RPC reply exists (consumer, not request/reply); the summary is how outcomes surface.
+	slog.InfoContext(ctx, "teams batch migrated", "persisted", persisted, "skipped", skipped, "error", failed)
 	return nil
 }
 
@@ -70,16 +82,19 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, tr MessageTransforme
 	head, ok := peekTeamsHead(raw)
 	res := model.TeamsBatchResult{TeamsMsgID: head.ID}
 	if !ok {
+		slog.WarnContext(ctx, "teams batch: malformed message payload")
 		res.Status, res.Error = model.TeamsBatchError, "malformed message payload"
 		return res, nil
 	}
 	if head.ID == "" {
+		slog.DebugContext(ctx, "teams batch: skip message with no id")
 		res.Status = model.TeamsBatchSkipped
 		return res, nil
 	}
 	// No target room → the deterministic id would collide across conversations and the
 	// message would orphan; skip rather than persist it.
 	if head.RoomID == "" {
+		slog.DebugContext(ctx, "teams batch: skip message with no roomId", "teamsMsgId", head.ID)
 		res.Status = model.TeamsBatchSkipped
 		return res, nil
 	}
