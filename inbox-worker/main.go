@@ -40,6 +40,8 @@ type config struct {
 	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
 }
 
 // mongoInboxStore implements InboxStore using MongoDB.
@@ -507,6 +509,11 @@ func main() {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+
+	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
+		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
 	}
 

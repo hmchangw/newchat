@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -67,6 +68,9 @@ type config struct {
 	// DM rooms. When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest atrest.Config      // env vars already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars already prefixed (VAULT_*, ATREST_VAULT_*)
+
+	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
 }
 
 func main() {
@@ -78,6 +82,11 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+
+	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
+		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
+		os.Exit(1)
+	}
 
 	if cfg.RoomKeyGracePeriod <= 0 {
 		slog.Error("ROOM_KEY_GRACE_PERIOD must be a positive duration",

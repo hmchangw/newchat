@@ -873,8 +873,9 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	}
 
 	// Explicitly listed ".bot" bots are admitted (create-channel still rejects
-	// them). Each must resolve to an enabled app assistant and be same-site (the
-	// feed is site-local). Deduped so a repeated bot costs one validation. The
+	// them). Each must resolve to an enabled app assistant and be same-site (bot
+	// membership isn't federated cross-site). Deduped so a repeated bot costs one
+	// validation. The
 	// "p_tchatadmin_" platform-admin pseudo-account has NO app/assistant, so it
 	// is NOT validated here — it flows through as an ordinary candidate (its
 	// existence is enforced by validateMembershipRefs). QA "p_" accounts are
@@ -897,8 +898,13 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		if err != nil {
 			return nil, fmt.Errorf("get bot siteId: %w", err)
 		}
-		// Empty siteId is treated as local (legacy bot docs); a phantom account
-		// is still rejected later by validateMembershipRefs.
+		// An empty siteId is impossible per the domain owner (no such bot docs
+		// exist), so if we see one it's a data anomaly. We fail open — treat it as
+		// local and let the add proceed — while logging an alarm rather than
+		// blocking; a phantom account is still rejected later by validateMembershipRefs.
+		if botSiteID == "" {
+			slog.ErrorContext(ctx, "bot has empty siteId", "account", a, "roomId", roomID)
+		}
 		if botSiteID != "" && botSiteID != h.siteID {
 			return nil, errBotCrossSite
 		}

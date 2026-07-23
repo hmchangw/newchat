@@ -18,9 +18,8 @@ import (
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
-// botAccountRegex matches bot/app accounts by the ".bot" suffix only — it excludes
-// every "p_" account (both the "p_tchatadmin_" pseudo-account and QA test users),
-// all of which have user records and are looked up as users here.
+// botAccountRegex matches bot/app accounts by the ".bot" suffix only — all "p_"
+// accounts have user records and resolve as users here.
 const botAccountRegex = `\.bot$`
 
 var botAccountPattern = regexp.MustCompile(botAccountRegex)
@@ -397,9 +396,13 @@ func (s *MongoStore) CountMembersAndOwners(ctx context.Context, roomID string) (
 		{{Key: "$match", Value: bson.M{"roomId": roomID}}},
 		{{Key: "$facet", Value: bson.M{
 			"members": bson.A{bson.M{"$count": "count"}},
-			// $ne true also matches pre-flag legacy subs (counted as humans).
+			// Humans = not a bot AND not the platform-admin pseudo-account, so the
+			// last-human guard is correct even for a legacy p_tchatadmin_ sub with isBot unset.
 			"humans": bson.A{
-				bson.M{"$match": bson.M{"u.isBot": bson.M{"$ne": true}}},
+				bson.M{"$match": bson.M{
+					"u.isBot":   bson.M{"$ne": true},
+					"u.account": bson.M{"$not": bson.Regex{Pattern: platformAdminRegex()}},
+				}},
 				bson.M{"$count": "count"},
 			},
 			"owners": bson.A{
@@ -1127,14 +1130,9 @@ func (s *MongoStore) GetUserSiteID(ctx context.Context, account string) (string,
 	return doc.SiteID, nil
 }
 
-// pseudoAccountRegex matches p_ accounts, which represent both platform and
-// admin accounts. botOrPseudoAccountRegex additionally matches ".bot" accounts.
-// They are the query-side equivalents of model.IsPlatformAdminAccount / IsBot,
-// used to exclude non-human participants from read state directly by account.
-const (
-	pseudoAccountRegex      = `^p_`
-	botOrPseudoAccountRegex = `(\.bot$|^p_)`
-)
+// Read-state queries exclude bots and the platform-admin pseudo-account via
+// platformAdminRegex() / botOrPlatformAdminRegex() (helper.go). Plain `p_` QA
+// accounts are ordinary users and DO hold the read floor.
 
 // MinSubscriptionLastSeenByRoomID returns the room's strict read floor: the
 // minimum lastSeenAt across the room's ordinary-member subscriptions, but only
@@ -1142,13 +1140,13 @@ const (
 // usable lastSeenAt — missing, null, or the BSON zero date, i.e. a member who
 // was invited but has never opened the room — it returns nil, meaning "not
 // everyone has read yet". It also returns nil for a room with no subscriptions.
-// Bots (u.isBot) and p_ platform/admin accounts (u.account prefix) are excluded,
-// so a passive bot/admin never freezes the floor and a botDM resolves to the
-// human's lastSeenAt. A room with only such subscriptions resolves to nil. The
-// caller $unsets rooms.minUserLastSeenAt on a nil result.
+// Bots (u.isBot) and the platform-admin pseudo-account (platformAdminRegex()) are
+// excluded, so a passive bot/admin never freezes the floor and a botDM resolves to
+// the human's lastSeenAt. A room with only excluded subscriptions resolves to nil.
+// The caller $unsets rooms.minUserLastSeenAt on a nil result.
 func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID string) (*time.Time, error) {
 	// The whole result is determined by a single document: the room's ordinary
-	// (non-bot, non-p_) subscription with the smallest lastSeenAt. The
+	// (non-bot, non-admin) subscription with the smallest lastSeenAt. The
 	// (roomId, lastSeenAt) index
 	// (non-sparse, so missing fields are indexed as null) returns the room's
 	// subscriptions in ascending lastSeenAt order, and BSON sorts missing/null
@@ -1159,17 +1157,17 @@ func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID
 	//   - smallest value is a real post-zero date → every member has read and
 	//     that value IS the minimum → the floor.
 	// The (roomId, lastSeenAt) index still serves the sort; the u.isBot and
-	// u.account predicates are applied as residual filters (bots/p_ are few per
+	// u.account predicates are applied as residual filters (bots/admin are few per
 	// room), so this stays a bounded index seek on the message-read hot path
 	// rather than the prior full-room $group scan.
 	var doc struct {
 		LastSeenAt time.Time `bson:"lastSeenAt"`
 	}
 	err := s.subscriptions.FindOne(ctx,
-		// u.isBot excludes bots (and p_ subs stamped locally); the u.account $not
-		// ^p_ predicate additionally excludes p_ platform/admin accounts whose
-		// isBot may be unset (e.g. cross-site mirror subs), no stored flag needed.
-		bson.M{"roomId": roomID, "u.isBot": bson.M{"$ne": true}, "u.account": bson.M{"$not": bson.Regex{Pattern: pseudoAccountRegex}}},
+		// u.isBot excludes bots; the u.account $not predicate additionally excludes
+		// the platform-admin pseudo-account whose isBot may be unset (cross-site
+		// mirror subs).
+		bson.M{"roomId": roomID, "u.isBot": bson.M{"$ne": true}, "u.account": bson.M{"$not": bson.Regex{Pattern: platformAdminRegex()}}},
 		options.FindOne().
 			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
 			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),
@@ -1214,9 +1212,9 @@ func (s *MongoStore) ListReadReceipts(
 		{{Key: "$match", Value: bson.M{
 			"roomId":     roomID,
 			"lastSeenAt": bson.M{"$gte": since},
-			// Bots (u.isBot) and p_ platform/admin accounts (u.account prefix) are
-			// never surfaced as readers, in addition to excluding the sender.
-			"u.account": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: pseudoAccountRegex}},
+			// Bots (u.isBot) and the platform-admin pseudo-account (platformAdminRegex())
+			// are never surfaced as readers, in addition to excluding the sender.
+			"u.account": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: platformAdminRegex()}},
 			"u.isBot":   bson.M{"$ne": true},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
@@ -1270,9 +1268,9 @@ func (s *MongoStore) ListThreadReadReceipts(
 		{{Key: "$match", Value: bson.M{
 			"threadRoomId": threadRoomID,
 			"lastSeenAt":   bson.M{"$gte": since},
-			// Bot (".bot") and p_ platform/admin subscribers are never surfaced as
-			// readers, in addition to excluding the sender.
-			"userAccount": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: botOrPseudoAccountRegex}},
+			// Bot and platform-admin subscribers are never surfaced as readers, in
+			// addition to excluding the sender.
+			"userAccount": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: botOrPlatformAdminRegex()}},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
@@ -1504,9 +1502,8 @@ func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limi
 // roomID whose dash-joined keyword (account, engName, chineseName, app.name,
 // app.assistant.name) matches escapedFilter under case-insensitive regex.
 // excludeAccount is dropped at the $match stage so the caller never sees
-// themselves. The platform-admin pseudo-account (`p_tchatadmin_` prefix; see
-// platformAdminRegex) is also dropped — it is not mentionable; plain `p_` QA
-// test accounts are ordinary users and stay mentionable.
+// themselves. The platform-admin pseudo-account (platformAdminRegex) is also
+// dropped — it is not mentionable.
 // `.bot` accounts classify as `app` and emit a non-nil App + empty SiteID;
 // human accounts classify as `user` with a non-nil HRInfo. Orphan rows
 // (bot sub with no apps doc, or human sub with no users doc) return empty
@@ -1519,7 +1516,7 @@ func (s *MongoStore) ListMentionableSubscriptions(
 			"roomId": roomID,
 			"u.account": bson.M{
 				"$ne":  excludeAccount,
-				"$not": bson.M{"$regex": platformAdminRegex},
+				"$not": bson.M{"$regex": platformAdminRegex()},
 			},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
@@ -1784,9 +1781,10 @@ func (s *MongoStore) GetThreadRoomByID(ctx context.Context, threadRoomID string)
 // MinThreadSubscriptionLastSeenByThreadRoomID returns the thread room's strict
 // read floor: the minimum lastSeenAt across the thread's ordinary-member
 // thread_subscriptions for threadRoomID, but only when every such subscriber has
-// a usable lastSeenAt (> zero). Bot (".bot") and p_ platform/admin subscribers
-// are excluded by account, so a bot that authored a threaded message cannot
-// freeze the floor via its never-read parent-author subscription.
+// a usable lastSeenAt (> zero). Bot (".bot") and platform-admin (p_tchatadmin_
+// prefix) subscribers are excluded by account, so a bot that authored a threaded
+// message cannot freeze the floor via its never-read parent-author subscription.
+// QA p_ accounts are ordinary users and DO hold the floor.
 // Returns nil when any subscriber has never read, or when there are no subscribers.
 // The (threadRoomId, lastSeenAt) index (non-sparse) returns the smallest value
 // first — a missing/null/zero lastSeenAt sorts before real dates, so the first
@@ -1796,10 +1794,10 @@ func (s *MongoStore) MinThreadSubscriptionLastSeenByThreadRoomID(ctx context.Con
 		LastSeenAt time.Time `bson:"lastSeenAt"`
 	}
 	err := s.threadSubscriptions.FindOne(ctx,
-		// Bot/p_ thread subs don't hold the floor: excluded by account so a bot
+		// Bot/admin thread subs don't hold the floor: excluded by account so a bot
 		// that authored a threaded message can't freeze it via its never-read
 		// parent-author subscription.
-		bson.M{"threadRoomId": threadRoomID, "userAccount": bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex}}},
+		bson.M{"threadRoomId": threadRoomID, "userAccount": bson.M{"$not": bson.Regex{Pattern: botOrPlatformAdminRegex()}}},
 		options.FindOne().
 			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
 			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),

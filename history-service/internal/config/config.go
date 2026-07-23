@@ -50,6 +50,9 @@ type Config struct {
 	MaxPinnedPerRoom        int             `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
 	PinEnabled              bool            `env:"PIN_ENABLED"                 envDefault:"true"`
 
+	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
+
 	// Subscription access-check cache. Only positive subscriptions are cached,
 	// so the TTL bounds how long revoked access can stay readable. Set size or
 	// ttl to 0 to disable.

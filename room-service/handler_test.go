@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"testing"
@@ -1220,6 +1221,45 @@ func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
 			assert.Contains(t, published.Users, tc.botAccount)
 		})
 	}
+}
+
+// An empty siteId for a bot is a data anomaly (per the domain owner no empty-siteId
+// bot docs exist). We fail open: the bot is still admitted as local, and an
+// error-level line is logged as an anomaly alarm rather than rejecting the add.
+func TestHandler_AddMembers_ExplicitBot_EmptySiteID_AdmittedWithErrorLog(t *testing.T) {
+	rec := installRecorder(t)
+
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+		User:  model.SubscriptionUser{ID: "u1", Account: "alice"},
+		Roles: []model.Role{model.RoleOwner},
+	}, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Type: model.RoomTypeChannel, UserCount: 1,
+	}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(
+		&model.App{ID: "app1", Assistant: &model.AppAssistant{Enabled: true, Name: "weather.bot"}}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("", nil)
+	expectAllAccountsExist(store)
+
+	var publishedPayload []byte
+	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
+		publishToStream: func(_ context.Context, _ string, data []byte, _ string) error {
+			publishedPayload = data
+			return nil
+		},
+	}
+	_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+		model.AddMembersRequest{Users: []string{"weather.bot"}})
+	require.NoError(t, err)
+
+	var published model.AddMembersRequest
+	require.NoError(t, json.Unmarshal(publishedPayload, &published))
+	assert.Contains(t, published.Users, "weather.bot", "empty-siteId bot is admitted as local")
+
+	assert.True(t, rec.has(slog.LevelError, "bot has empty siteId"),
+		"empty-siteId bot must emit an error-level anomaly log")
 }
 
 // A bot listed twice costs one GetApp + one GetUserSiteID (dedup before validate).

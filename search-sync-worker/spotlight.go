@@ -69,11 +69,8 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 		if account == "" {
 			return nil, fmt.Errorf("build spotlight action: empty account at index %d", i)
 		}
-		// Bots are channel members but not searchable principals — never index
-		// them. Removals still fall through: a bot doc indexed by legacy
-		// behavior (or during a rolling deploy) must be cleaned up, and the
-		// delete is idempotent (404 on a never-indexed doc is a benign ack —
-		// see isBulkItemSuccess).
+		// Bots aren't searchable principals — never index them. Removals still fall
+		// through to clean up a stale doc (idempotent 404 on a never-indexed doc — see isBulkItemSuccess).
 		if (model.IsBot(account) || model.IsPlatformAdminAccount(account)) && evt.Type == model.InboxMemberAdded {
 			continue
 		}

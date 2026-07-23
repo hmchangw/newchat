@@ -83,3 +83,28 @@ at/above the 80% floor.
 - **Backward compatible.** Pure query change; no schema, no field, no migration.
 - **Behavior:** rooms/threads with a bot or `p_` member stop being frozen by that
   member; floors recompute on the next read.
+
+## Addendum (2026-07-23) — `p_` taxonomy split
+
+This note's §2 exclusion ("Platform/admin accounts — `p_` prefix (covers both
+platform and admin)") predates the `p_` taxonomy split landed on branch
+`claude/bot-add-remove-cv9pa0` (commit "refactor(model): split p_ taxonomy").
+Under the split, the blanket `^p_` exclusion is **narrowed to the platform-admin
+pseudo-account only**:
+
+- **Excluded from read floors & receipts** — the platform-admin pseudo-account,
+  identified by the configurable prefix `model.PlatformAdminAccountPrefix()`
+  (env `ADMIN_ACCT_PREFIX`, default `p_tchatadmin_`). Bot-like; `IsBot` / admin
+  prefix.
+- **Counted like ordinary users** — every other `p_…` account (QA test users,
+  e.g. `p_qa1`, `p_webhook`). Their unread state **holds** the read floor and
+  they **surface** as read-receipt readers, exactly like a human member.
+
+The two hardcoded regex constants from §2 (`pseudoAccountRegex = "^p_"`,
+`botOrPseudoAccountRegex = "(\.bot$|^p_)"`) are therefore replaced in
+`room-service/store_mongo.go` by the derived, `regexp.QuoteMeta`-escaped forms
+`platformAdminRegex()` / `botOrPlatformAdminRegex()` (helper.go), which track the
+configured prefix — the query-side mirrors of `model.IsPlatformAdminAccount` /
+`model.IsBot`. The four query sites and the integration tests are updated to the
+narrowed taxonomy; the queries are otherwise unchanged (same indexes, same
+`u.isBot` predicate on the main-room paths).
