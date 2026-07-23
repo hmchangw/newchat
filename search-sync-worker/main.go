@@ -137,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	msgColl := newMessageCollection(cfg.MsgIndexPrefix, syncMessagesFrom, cfg.DevMode)
+	msgColl := newMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, syncMessagesFrom, cfg.DevMode)
 	// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
 	msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
@@ -146,11 +146,10 @@ func main() {
 	botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
 	collections := []Collection{
+		// msgColl also indexes migrated Teams history off .teams.batch (message-worker
+		// persists it with no .created event) — one consumer covers both.
 		msgColl,
 		botMsgColl,
-		// Indexes migrated Teams history off .teams.batch (message-worker persists it with
-		// no .created event, so msgColl's .* filter never sees it); shares the message index.
-		newTeamsMigrationCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode),
 		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
 		newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
 		newUserRoomCollection(cfg.UserRoomIndex),

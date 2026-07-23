@@ -80,6 +80,14 @@ func MessageIDFromRequestID(requestID, suffix string) string {
 	return encodeBase62(new(big.Int).SetBytes(h[:16]), messageIDLength)
 }
 
+// DeterministicID renders a stable 17-char base62 id from seed (SHA-256 → base62),
+// the same shape as GenerateID. Same seed → same id, so an external key (e.g. a
+// Graph object id) maps to one identity without a lookup.
+func DeterministicID(seed []byte) string {
+	h := sha256.Sum256(seed)
+	return encodeBase62(new(big.Int).SetBytes(h[:16]), idLength)
+}
+
 // IsValidMessageID reports whether s is a well-formed base62 message ID. Accepts
 // both the current 20-char form and the legacy 17-char form so pre-cutover
 // messages keep flowing through federation replays, JetStream redeliveries, and

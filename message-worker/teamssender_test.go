@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -11,6 +12,13 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
+
+func testSenderCache(t *testing.T) *lru.Cache[string, resolvedSender] {
+	t.Helper()
+	c, err := lru.New[string, resolvedSender](8)
+	require.NoError(t, err)
+	return c
+}
 
 func TestSenderResolver_EmployeeIdHit(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -20,7 +28,7 @@ func TestSenderResolver_EmployeeIdHit(t *testing.T) {
 	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(existing, nil)
 	// employeeId is authoritative: no display-name lookup, no upsert.
 
-	r := newSenderResolver(store, "s1")
+	r := newSenderResolver(store, "s1", testSenderCache(t))
 	got, err := r.resolve(context.Background(), "graph-1", "愛麗絲")
 	require.NoError(t, err)
 	assert.Equal(t, "alice", got.Account)
@@ -36,7 +44,7 @@ func TestSenderResolver_DisplayNameFallback(t *testing.T) {
 	store.EXPECT().FindUserByDisplayName(gomock.Any(), "愛麗絲").
 		Return(&model.User{Account: "alice"}, nil)
 
-	r := newSenderResolver(store, "s1")
+	r := newSenderResolver(store, "s1", testSenderCache(t))
 	got, err := r.resolve(context.Background(), "graph-1", "愛麗絲")
 	require.NoError(t, err)
 	assert.Equal(t, "alice", got.Account)
@@ -63,7 +71,7 @@ func TestSenderResolver_NoMatchCreates(t *testing.T) {
 		store.EXPECT().FindUserByEmployeeId(gomock.Any(), wantEmp).Return(created, nil),
 	)
 
-	r := newSenderResolver(store, "s1")
+	r := newSenderResolver(store, "s1", testSenderCache(t))
 	got, err := r.resolve(context.Background(), "graph-2", "Bob")
 	require.NoError(t, err)
 	assert.Equal(t, wantEmp, got.Account)
@@ -83,7 +91,7 @@ func TestSenderResolver_EmptyDisplayNameSkipsNameLookup(t *testing.T) {
 		store.EXPECT().FindUserByEmployeeId(gomock.Any(), wantEmp).Return(created, nil),
 	)
 
-	r := newSenderResolver(store, "s1")
+	r := newSenderResolver(store, "s1", testSenderCache(t))
 	got, err := r.resolve(context.Background(), "graph-3", "")
 	require.NoError(t, err)
 	assert.Equal(t, wantEmp, got.Account)
@@ -97,7 +105,7 @@ func TestSenderResolver_CacheHitSkipsStore(t *testing.T) {
 	// Exactly one round of lookups for two resolves.
 	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(&model.User{Account: "al"}, nil).Times(1)
 
-	r := newSenderResolver(store, "s1")
+	r := newSenderResolver(store, "s1", testSenderCache(t))
 	for i := 0; i < 2; i++ {
 		got, err := r.resolve(context.Background(), "graph-1", "Al")
 		require.NoError(t, err)
@@ -106,7 +114,7 @@ func TestSenderResolver_CacheHitSkipsStore(t *testing.T) {
 }
 
 func TestSenderResolver_EmptyTeamsIDErrors(t *testing.T) {
-	r := newSenderResolver(NewMockHRIdentityStore(gomock.NewController(t)), "s1")
+	r := newSenderResolver(NewMockHRIdentityStore(gomock.NewController(t)), "s1", testSenderCache(t))
 	_, err := r.resolve(context.Background(), "", "x")
 	require.Error(t, err)
 }
