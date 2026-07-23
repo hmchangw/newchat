@@ -43,3 +43,11 @@ bot app name — on top of the #104 system/quoted skip. Design: `../specs/2026-0
 - [ ] Keep #104's filter tests green.
 
 **Verify:** `chat-lint.sh ./...` clean; `go test ./history-service/... ./user-service/service/...`; `go vet -tags integration ./history-service/internal/service/`.
+
+### Wire-level verification (dev stack)
+
+Beyond the in-repo unit + integration tests, the preview was verified end-to-end at
+the NATS request/reply layer on our dev stack: drove the real `rooms.get` (via
+`subscription.getChannels`) against a room whose latest message is a quoted reply, and
+confirmed the preview resolves to the non-quoted survivor (system + quoted skipped) with
+the enriched fields present on the wire. The harness lives in our tooling, not this repo.
