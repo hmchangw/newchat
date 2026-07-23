@@ -125,18 +125,23 @@ func TestMatchCandidatesFilterWithDirectBots_Mongo(t *testing.T) {
 	}
 
 	t.Run("direct bots match, org-covered bots stay excluded", func(t *testing.T) {
+		// org1 also contributes the QA p_ user p_qa1 (an ordinary user), alongside
+		// the directly-listed bots; only the org-covered bot orgbound.bot drops out.
 		got := fetch(t, MatchCandidatesFilterWithDirectBots([]string{"org1"}, []string{"weather.bot", "p_hook", "bob"}, ""))
-		assert.ElementsMatch(t, []string{"alice", "weather.bot", "p_hook", "bob"}, got)
+		assert.ElementsMatch(t, []string{"alice", "weather.bot", "p_hook", "bob", "p_qa1"}, got)
 	})
 
 	t.Run("excludeAccount still applies on top", func(t *testing.T) {
+		// org1 admits alice (excluded here) and p_qa1 (QA user); weather.bot is direct.
 		got := fetch(t, MatchCandidatesFilterWithDirectBots([]string{"org1"}, []string{"weather.bot"}, "alice"))
-		assert.ElementsMatch(t, []string{"weather.bot"}, got)
+		assert.ElementsMatch(t, []string{"weather.bot", "p_qa1"}, got)
 	})
 
 	t.Run("legacy filter keeps excluding direct bots", func(t *testing.T) {
+		// The strict filter excludes even direct bots (weather.bot) but admits the
+		// QA p_ user p_qa1 from org1 — it is an ordinary user, not a pseudo-account.
 		got := fetch(t, MatchCandidatesFilter([]string{"org1"}, []string{"weather.bot", "bob"}, ""))
-		assert.ElementsMatch(t, []string{"alice", "bob"}, got)
+		assert.ElementsMatch(t, []string{"alice", "bob", "p_qa1"}, got)
 	})
 
 	t.Run("org expansion excludes bots + p_tchatadmin_ but admits QA p_ users", func(t *testing.T) {

@@ -119,11 +119,8 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 		if account == "" {
 			return nil, fmt.Errorf("build user-room action: empty account at index %d", i)
 		}
-		// Bots are channel members but not searchable principals — never index
-		// them. Removals still fall through: a user-room doc indexed by legacy
-		// behavior (or during a rolling deploy) must be cleaned up, and the
-		// remove-path update is idempotent (404 document_missing_exception on a
-		// never-indexed doc is a benign ack — see isBulkItemSuccess).
+		// Bots aren't searchable principals — never index them. Removals still fall
+		// through to clean up a stale doc (idempotent 404 on a never-indexed doc — see isBulkItemSuccess).
 		if (model.IsBot(account) || model.IsPlatformAdminAccount(account)) && evt.Type == model.InboxMemberAdded {
 			continue
 		}

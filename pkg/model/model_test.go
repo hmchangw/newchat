@@ -95,6 +95,42 @@ func TestIsPlatformAdminAccount(t *testing.T) {
 	}
 }
 
+// TestPlatformAdminAccountPrefix_Default pins the built-in default that holds
+// when no deployment override is applied.
+func TestPlatformAdminAccountPrefix_Default(t *testing.T) {
+	assert.Equal(t, "p_tchatadmin_", model.PlatformAdminAccountPrefix())
+}
+
+// TestSetPlatformAdminAccountPrefix_RejectsEmpty verifies an empty prefix is
+// rejected (it would classify EVERY account as a platform admin) and leaves the
+// active prefix unchanged.
+func TestSetPlatformAdminAccountPrefix_RejectsEmpty(t *testing.T) {
+	err := model.SetPlatformAdminAccountPrefix("")
+	require.Error(t, err)
+	assert.Equal(t, "p_tchatadmin_", model.PlatformAdminAccountPrefix(),
+		"a rejected set must not mutate the active prefix")
+}
+
+// TestSetPlatformAdminAccountPrefix_Override verifies a custom prefix is honored
+// by both the accessor and IsPlatformAdminAccount, and that the default no longer
+// matches once overridden. Restores the default via t.Cleanup. Deliberately NOT
+// parallel: it mutates process-global state shared with the other model tests.
+func TestSetPlatformAdminAccountPrefix_Override(t *testing.T) {
+	orig := model.PlatformAdminAccountPrefix()
+	t.Cleanup(func() {
+		if err := model.SetPlatformAdminAccountPrefix(orig); err != nil {
+			t.Fatalf("restore default prefix: %v", err)
+		}
+	})
+
+	require.NoError(t, model.SetPlatformAdminAccountPrefix("admin_"))
+	assert.Equal(t, "admin_", model.PlatformAdminAccountPrefix())
+	assert.True(t, model.IsPlatformAdminAccount("admin_siteA"),
+		"account under the overridden prefix must be a platform admin")
+	assert.False(t, model.IsPlatformAdminAccount("p_tchatadmin_siteA"),
+		"the old default prefix must no longer match after override")
+}
+
 func TestIsBot(t *testing.T) {
 	tests := []struct {
 		name    string

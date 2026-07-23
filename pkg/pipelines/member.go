@@ -8,16 +8,19 @@
 package pipelines
 
 import (
+	"regexp"
+
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
-// botOrPseudoAccountRegex matches bot (".bot" suffix) accounts and the
-// platform-admin pseudo-account ("p_tchatadmin_" prefix). It is the wire-side
-// equivalent of model.IsBot / model.IsPlatformAdminAccount, applied as a
-// residual filter so org-expanded candidates — whose accounts the caller does
-// not know up front — are excluded server-side. Plain "p_" QA test accounts are
-// ordinary users and are NOT matched (they resolve through org expansion).
-const botOrPseudoAccountRegex = `(\.bot$|^p_tchatadmin_)`
+// botOrPseudoAccountRegex is the wire-side equivalent of model.IsBot /
+// model.IsPlatformAdminAccount: it matches bot (".bot" suffix) and platform-admin
+// (prefix QuoteMeta-escaped) accounts. Plain "p_" QA accounts are NOT matched.
+func botOrPseudoAccountRegex() string {
+	return `(\.bot$|^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix()) + `)`
+}
 
 // MatchCandidatesFilter returns the query predicate selecting the users an
 // add/create-member request resolves to: members of any of orgIDs (by sectId or
@@ -40,7 +43,7 @@ func MatchCandidatesFilter(orgIDs, directAccounts []string, excludeAccount strin
 	if len(directAccounts) > 0 {
 		orFilter = append(orFilter, bson.M{"account": bson.M{"$in": directAccounts}})
 	}
-	accountFilter := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex, Options: ""}}
+	accountFilter := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex(), Options: ""}}
 	if excludeAccount != "" {
 		accountFilter["$ne"] = excludeAccount
 	}
@@ -51,7 +54,7 @@ func MatchCandidatesFilter(orgIDs, directAccounts []string, excludeAccount strin
 // arms: directly named accounts may be bots (member.add validated them), while
 // org expansion stays bot-free. Same non-empty-input contract.
 func MatchCandidatesFilterWithDirectBots(orgIDs, directAccounts []string, excludeAccount string) bson.M {
-	notBot := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex, Options: ""}}
+	notBot := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex(), Options: ""}}
 	orFilter := bson.A{}
 	if len(orgIDs) > 0 {
 		orFilter = append(orFilter,

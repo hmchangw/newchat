@@ -772,6 +772,11 @@ The handler has no error path (both values are validated at portal startup). The
 Reusable payload types referenced by name throughout §3–§5. Each RPC links
 here instead of repeating the table.
 
+> **Platform-admin pseudo-account prefix.** The `p_tchatadmin_` prefix used
+> throughout (e.g. `p_tchatadmin_{siteID}`) is configurable per deployment via
+> the `ADMIN_ACCT_PREFIX` env var (default `p_tchatadmin_`) and MUST be set to
+> the same value in every service.
+
 #### Participant
 
 Actor / sender identity embedded in room and message events.
@@ -1841,7 +1846,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - **Alert recomputation:** new `alert = oldSub.alert && len(oldSub.threadUnread) > 0`. Reading the room clears the alert when there are no unread thread mentions; it stays set when thread-level unreads remain.
 - **No `JoinedAt` fallback for the early-return:** if `subscription.lastSeenAt` is null (the user was invited but has never opened the room), the handler does **not** treat `joinedAt` as a synthetic read position — being invited isn't reading. The room-floor recompute runs in this case so a member who has just read for the first time is reflected in the floor.
-- **Room-floor recompute (`Room.MinUserLastSeenAt`):** the room's read floor (surfaced as `minUserLastSeenAt` in history responses) is a **strict "everyone has read" marker**: `MIN(lastSeenAt)` across **all** of the room's subscriptions, set **only when every subscription has a usable `lastSeenAt`**. If **any** member has never read the room (no/zero `lastSeenAt` — e.g. invited but never opened), the floor is `$unset` (null). Bots are counted like any other member, so a **botDM room — where the bot never reads — always has a null floor**. Reading a room can advance the floor (or, if this was the last unread member, raise it from null to a value).
+- **Room-floor recompute (`Room.MinUserLastSeenAt`):** the room's read floor (surfaced as `minUserLastSeenAt` in history responses) is a **strict "everyone has read" marker**: `MIN(lastSeenAt)` across the room's **human** subscriptions — bots (`u.isBot`) and the `p_tchatadmin_` platform-admin pseudo-account are excluded — set **only when every counted subscription has a usable `lastSeenAt`**. If **any** counted member has never read the room (no/zero `lastSeenAt` — e.g. invited but never opened), the floor is `$unset` (null). Because bots and the admin pseudo-account are excluded, a **botDM room resolves to the human's `lastSeenAt`** rather than being forced null by a never-reading bot; plain `p_` QA accounts are ordinary members and do count. Reading a room can advance the floor (or, if this was the last unread member, raise it from null to a value).
 - **Recompute trigger & a known gap:** the floor is recomputed only on this Mark Read path, and only when the caller was not already past `room.lastMsgAt` (the early-return above). Adding a member does not itself recompute the floor, so a newly-invited, never-read member will not flip an existing non-null floor to null until the next recompute is triggered (e.g. that member reads, or another member reads while the room has content).
 - **Read-floor fan-out:** when (and only when) the recompute above changes `Room.MinUserLastSeenAt`, the server publishes a `message_read` room event carrying the new floor, so peers can advance read-receipt / unread UI live. Fan-out is best-effort (a publish failure does not fail the RPC) and never fires on the early-return paths or when the floor is unchanged. No system message is written.
 
@@ -4702,7 +4707,7 @@ Same paginated shape as `subscription.list` — `{ "subscriptions": [...], "hasM
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.getDM`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Returns the calling user's DM subscription with the named counterpart. The reply is **room-info-enriched** (same behavior as `subscription.list`). Bots and platform-prefixed accounts are rejected.
+Returns the calling user's DM subscription with the named counterpart. The reply is **room-info-enriched** (same behavior as `subscription.list`). Bots and the `p_tchatadmin_` platform-admin pseudo-account are rejected (plain `p_` QA accounts are ordinary users and are valid DM targets).
 
 ##### Request body
 
@@ -5966,7 +5971,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `bot_login_disabled` | forbidden | portal-service `POST /api/v1/login` (§2.5) — portal is configured (`BOT_LOGIN_ENABLED=false`) to reject bot-account logins. Direct the user to the bot developer console. |
 | `app_not_found` | not_found | user-service `subscription.setAppSubscription` (appId does not resolve to any app) |
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
-| `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or platform account) |
+| `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or the `p_tchatadmin_` platform-admin pseudo-account) |
 | `subscription_not_found` | not_found | user-service `subscription.getDM` (no DM subscription exists for the account pair) |
 | `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the caller) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
@@ -5993,7 +5998,7 @@ Compute the trigger as `reason ?? code` and branch on that. Use `code` for gener
 
 Public HTTP endpoints served by `media-service`. GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
 
-**Bot detection:** an account is a bot if it ends in `.bot` **or** begins with `p_`. Everything else is a user.
+**Bot detection:** an account takes the bot avatar path if it ends in `.bot` **or** is the `p_tchatadmin_` platform-admin pseudo-account. Everything else — including plain `p_` QA test accounts — is a user.
 
 **Default image:** when no custom image exists (and for users with no `employeeId`), the service returns a deterministic SVG "initials" avatar (`Content-Type: image/svg+xml`) generated on the fly — never stored. The SVG is cacheable: it carries a stable `ETag` and `Cache-Control: public, max-age=<cfg>`.
 
@@ -6030,7 +6035,7 @@ Resolves a user or bot avatar. The frontend also routes DM/botDM room avatars he
 ```
 GET /api/v1/avatar/alice          → 307 to employee-photo host
 GET /api/v1/avatar/helper.bot     → 200 (custom image) or 200 (default SVG)
-GET /api/v1/avatar/p_webhook      → 200 (custom image) or 200 (default SVG)
+GET /api/v1/avatar/p_tchatadmin_hk → 200 (custom image) or 200 (default SVG)
 ```
 
 ---
@@ -6084,7 +6089,7 @@ Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; 
 
 | | Notes |
 |---|---|
-| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or begins with `p_`). |
+| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or is the `p_tchatadmin_` platform-admin pseudo-account). |
 | Body | Raw image bytes (PNG or JPEG). SVG and non-image payloads are rejected. |
 | `Content-Type` header | Advisory. Validation is by decoding the body — a valid PNG or JPEG is accepted regardless of the declared header; non-images are rejected. |
 | Max size | `MAX_UPLOAD_BYTES` (default 1 MiB). |

@@ -7,14 +7,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // TestBotOrPseudoAccountRegex pins the wire-side residual filter to the model
 // taxonomy: it must exclude ".bot" bots and the "p_tchatadmin_" platform-admin
 // pseudo-account, but ADMIT plain "p_" QA test accounts (ordinary users now).
 func TestBotOrPseudoAccountRegex(t *testing.T) {
-	assert.Equal(t, `(\.bot$|^p_tchatadmin_)`, botOrPseudoAccountRegex)
-	rx := regexp.MustCompile(botOrPseudoAccountRegex)
+	assert.Equal(t, `(\.bot$|^p_tchatadmin_)`, botOrPseudoAccountRegex())
+	rx := regexp.MustCompile(botOrPseudoAccountRegex())
 	cases := []struct {
 		account string
 		match   bool
@@ -30,6 +32,36 @@ func TestBotOrPseudoAccountRegex(t *testing.T) {
 	for _, c := range cases {
 		assert.Equalf(t, c.match, rx.MatchString(c.account), "account %q", c.account)
 	}
+}
+
+// TestBotOrPseudoAccountRegex_HonorsOverriddenPrefix verifies the wire-side
+// filter tracks a deployment override of the platform-admin prefix (ADMIN_ACCT_PREFIX)
+// so it stays the mirror of model.IsPlatformAdminAccount. Restores the default
+// via t.Cleanup; not parallel (mutates process-global model state).
+func TestBotOrPseudoAccountRegex_HonorsOverriddenPrefix(t *testing.T) {
+	orig := model.PlatformAdminAccountPrefix()
+	t.Cleanup(func() { require.NoError(t, model.SetPlatformAdminAccountPrefix(orig)) })
+
+	require.NoError(t, model.SetPlatformAdminAccountPrefix("admin_"))
+	assert.Equal(t, `(\.bot$|^admin_)`, botOrPseudoAccountRegex())
+	rx := regexp.MustCompile(botOrPseudoAccountRegex())
+	assert.True(t, rx.MatchString("admin_siteA"), "overridden-prefix admin must match")
+	assert.True(t, rx.MatchString("weather.bot"), "bots still match")
+	assert.False(t, rx.MatchString("p_tchatadmin_siteA"), "old default prefix no longer matches")
+}
+
+// TestBotOrPseudoAccountRegex_QuoteMetaEscapesPrefix verifies a prefix carrying
+// regex metacharacters is QuoteMeta-escaped so it is matched literally rather
+// than being interpreted as a pattern.
+func TestBotOrPseudoAccountRegex_QuoteMetaEscapesPrefix(t *testing.T) {
+	orig := model.PlatformAdminAccountPrefix()
+	t.Cleanup(func() { require.NoError(t, model.SetPlatformAdminAccountPrefix(orig)) })
+
+	require.NoError(t, model.SetPlatformAdminAccountPrefix("p.admin["))
+	assert.Equal(t, `(\.bot$|^p\.admin\[)`, botOrPseudoAccountRegex())
+	rx := regexp.MustCompile(botOrPseudoAccountRegex())
+	assert.True(t, rx.MatchString("p.admin[siteA"), "literal metachar prefix must match")
+	assert.False(t, rx.MatchString("pXadmin[siteA"), "'.' must not be treated as a wildcard")
 }
 
 func TestMatchCandidatesFilter(t *testing.T) {
@@ -60,7 +92,7 @@ func TestMatchCandidatesFilter(t *testing.T) {
 		require.True(t, ok)
 		rx, ok := acct["$not"].(bson.Regex)
 		require.True(t, ok, "account.$not must be a regex")
-		assert.Equal(t, botOrPseudoAccountRegex, rx.Pattern)
+		assert.Equal(t, botOrPseudoAccountRegex(), rx.Pattern)
 		_, hasNe := acct["$ne"]
 		assert.False(t, hasNe, "no $ne when excludeAccount is empty")
 	})
@@ -75,7 +107,7 @@ func TestMatchCandidatesFilter(t *testing.T) {
 }
 
 func TestMatchCandidatesFilterWithDirectBots(t *testing.T) {
-	botNot := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex, Options: ""}}
+	botNot := bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex(), Options: ""}}
 
 	t.Run("org arms keep the bot exclusion, direct arm does not", func(t *testing.T) {
 		f := MatchCandidatesFilterWithDirectBots([]string{"org1"}, []string{"alice", "weather.bot"}, "")

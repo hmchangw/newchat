@@ -13,6 +13,10 @@ This document covers all client-initiated interactions:
 For the event payloads these operations trigger, see [events.md](events.md).
 For connection, auth, shared schemas, and error reference, see [../client-api.md](../client-api.md).
 
+> **Platform-admin pseudo-account prefix.** The `p_tchatadmin_` prefix used
+> throughout is configurable per deployment via the `ADMIN_ACCT_PREFIX` env var
+> (default `p_tchatadmin_`) and MUST be set to the same value in every service.
+
 ---
 
 ## Table of contents

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -46,7 +47,7 @@ var (
 	errEmptyCreateRequest = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
 	errBotInChannel       = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
-	// member.add admits only same-site bots — the join/leave feed is site-local.
+	// member.add admits only same-site bots — bot membership isn't federated cross-site.
 	errBotCrossSite = errcode.BadRequest("cross-site bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotCrossSite))
 	// Bots hold plain member roles only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
@@ -106,11 +107,18 @@ var (
 	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size")
 )
 
-// platformAdminRegex matches the platform-admin pseudo-account by its
-// `p_tchatadmin_` prefix. Mentionable autocomplete hides this account so it does
-// not appear as an `@`-mention target. Plain `p_` QA test accounts are ordinary
-// users and remain mentionable, so they are deliberately NOT matched here.
-const platformAdminRegex = `^p_tchatadmin_`
+// platformAdminRegex matches the platform-admin pseudo-account by its configured
+// prefix (QuoteMeta-escaped) to hide it from mentions; plain `p_` QA accounts are NOT matched.
+func platformAdminRegex() string {
+	return `^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix())
+}
+
+// botOrPlatformAdminRegex matches bot (".bot") and platform-admin (configured
+// prefix, QuoteMeta-escaped) accounts, excluding them from thread read state
+// (thread_subscriptions carry no isBot flag); plain `p_` QA accounts are NOT matched.
+func botOrPlatformAdminRegex() string {
+	return `(\.bot$|^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix()) + `)`
+}
 
 // sameFloor reports whether two read-floor pointers represent the same instant.
 // Two nil pointers are equal (both "no floor"); a nil and a non-nil differ; two
