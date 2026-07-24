@@ -82,6 +82,7 @@ var (
 	errTeamsCallTooManyMembers    = errcode.Conflict("room has too many members to start a call", errcode.WithReason(errcode.RoomMaxSizeReached))
 	errTeamsMeetingTooManyMembers = errcode.Conflict("room has too many members to start a meeting", errcode.WithReason(errcode.RoomMaxSizeReached))
 	errTeamsNotConfigured         = errcode.Internal("teams meetings are not configured")
+	errTeamsOrganizerUnresolved   = errcode.Internal("could not resolve meeting organizer identity")
 	errTeamsRequesterMissing      = errcode.Unauthenticated("requester account missing")
 
 	// Sentinels for rename and restricted operations.
