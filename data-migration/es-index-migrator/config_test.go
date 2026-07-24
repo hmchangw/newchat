@@ -11,16 +11,16 @@ import (
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	env := map[string]string{
-		"SITE_ID":             "site-a",
-		"SEARCH_URL":          "http://localhost:9200",
-		"MSG_INDEX_PREFIX":    "messages-a-v1",
-		"SPOTLIGHT_INDEX":     "spotlight-a-v1",
-		"USER_ROOM_INDEX":     "user-room-a",
-		"MIGRATION_START_AT":  "2025-07-01T00:00:00Z",
-		"MIGRATION_END_AT":    "2026-07-01T00:00:00Z",
+		"SITE_ID":              "site-a",
+		"SEARCH_URL":           "http://localhost:9200",
+		"MSG_INDEX_PREFIX":     "messages-a-v1",
+		"SPOTLIGHT_INDEX":      "spotlight-a-v1",
+		"USER_ROOM_INDEX":      "user-room-a",
+		"MIGRATION_START_AT":   "2025-07-01T00:00:00Z",
+		"MIGRATION_END_AT":     "2026-07-01T00:00:00Z",
 		"MESSAGE_BUCKET_HOURS": "72",
-		"MONGO_URI":           "mongodb://localhost:27017",
-		"CASSANDRA_HOSTS":     "localhost",
+		"MONGO_URI":            "mongodb://localhost:27017",
+		"CASSANDRA_HOSTS":      "localhost",
 	}
 	for k, v := range env {
 		t.Setenv(k, v)
