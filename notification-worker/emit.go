@@ -24,15 +24,15 @@ type Emitter interface {
 }
 
 type mobileEmitter struct {
-	pub                 publisher
-	outputSubjectPrefix string
-	maxPayloadBytes     int
+	pub             publisher
+	sendSubject     string
+	maxPayloadBytes int
 }
 
-// newMobileEmitter builds an Emitter. outputSubjectPrefix is env-driven so the same binary
-// can publish onto either the user or bot push-notification subject; ".send" is appended per publish.
-func newMobileEmitter(pub publisher, outputSubjectPrefix string, maxPayloadBytes int) *mobileEmitter {
-	return &mobileEmitter{pub: pub, outputSubjectPrefix: outputSubjectPrefix, maxPayloadBytes: maxPayloadBytes}
+// newMobileEmitter builds an Emitter. sendSubject is the full .send subject the pipeline
+// publishes on (user vs bot chosen at boot via MODE/pkg/stream.Resolve).
+func newMobileEmitter(pub publisher, sendSubject string, maxPayloadBytes int) *mobileEmitter {
+	return &mobileEmitter{pub: pub, sendSubject: sendSubject, maxPayloadBytes: maxPayloadBytes}
 }
 
 func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEvent) error { //nolint:gocritic // hugeParam: spec requires value semantics for Emitter interface
@@ -44,7 +44,7 @@ func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEven
 		return fmt.Errorf("push batch %s exceeds NATS max_payload: wire=%d, cap=%d", evt.ID, len(data), e.maxPayloadBytes)
 	}
 	msg := &nats.Msg{
-		Subject: e.outputSubjectPrefix + ".send",
+		Subject: e.sendSubject,
 		Header:  nats.Header{},
 		Data:    data,
 	}

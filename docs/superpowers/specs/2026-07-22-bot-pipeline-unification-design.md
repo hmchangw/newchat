@@ -24,8 +24,8 @@ PR #109 introduced a parallel bot messaging pipeline. Three of its fan-out servi
 
 ## Non-goals
 
-- Merging `bot-msg-handler` with `message-gatekeeper` (different ingress semantics — bots use req/reply with header validation; users publish direct to `MESSAGES` stream).
-- Merging `bot-msg-worker` with `message-worker` (already at parity for at-rest encryption; deferrable).
+- Merging `bot-message-handler` with `message-gatekeeper` (different ingress semantics — bots use req/reply with header validation; users publish direct to `MESSAGES` stream).
+- Merging `bot-message-worker` with `message-worker` (already at parity for at-rest encryption; deferrable).
 - Merging `bot-room-service` with `room-service`/`room-worker` (bot ingress is HTTP-terminated through BP and has distinct auth/routing; also deferrable).
 - Reworking `search-sync-worker` (already handled correctly).
 
@@ -120,7 +120,7 @@ Introducing a durable retry queue for key-delivery events is deliberately out of
 ## Data flow (after unification)
 
 ```text
-BP (HTTP) ──req/reply──> bot-msg-handler ──publish──> BOT_MESSAGES_CANONICAL
+BP (HTTP) ──req/reply──> bot-message-handler ──publish──> BOT_MESSAGES_CANONICAL
                                                            │
                                                            ├──> broadcast-worker[bot deployment]
                                                            │       ├─ encrypt via room key → WS fan-out
@@ -129,7 +129,7 @@ BP (HTTP) ──req/reply──> bot-msg-handler ──publish──> BOT_MESSAG
                                                            │       ├─ mute / presence / hook / mention / large-room gates
                                                            │       ├─ EligibleForPush (filters bot recipients)
                                                            │       └─ emit PushNotificationEvent → BOT_PUSH_NOTIF
-                                                           ├──> bot-msg-worker
+                                                           ├──> bot-message-worker
                                                            └──> search-sync-worker (existing)
 
                        BOT_PUSH_NOTIF ──> push-notification-service[bot deployment] ──> Dispatcher (APNs/FCM)

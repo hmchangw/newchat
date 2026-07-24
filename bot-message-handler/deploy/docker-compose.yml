@@ -1,0 +1,27 @@
+name: bot-message-handler
+
+services:
+  bot-message-handler:
+    build:
+      context: ../..
+      dockerfile: bot-message-handler/deploy/Dockerfile
+    environment:
+      - OTEL_SERVICE_NAME=bot-message-handler
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - MAX_CONCURRENCY=200
+      # Owns BOT_MESSAGES_CANONICAL_{siteID}; provisions on boot in dev.
+      - BOOTSTRAP_STREAMS=true
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

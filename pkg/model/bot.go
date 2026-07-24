@@ -15,7 +15,7 @@ const (
 	HeaderBotCreatedAt = "X-Bot-Created-At"
 )
 
-// BotContentMaxBytes caps content payload size; enforced at BP ingress and in bot-msg-handler.
+// BotContentMaxBytes caps content payload size; enforced at BP ingress and in bot-message-handler.
 const BotContentMaxBytes = 20 * 1024
 
 // BotIdentity is the JSON-encoded caller identity stamped into X-Bot-Identity.

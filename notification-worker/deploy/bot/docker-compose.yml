@@ -11,13 +11,7 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
-      # Bot-canonical pipeline (Task 8): same notification-worker binary as the
-      # user deployment, bound to the bot streams/subjects instead via env.
-      - INPUT_STREAM=BOT_MESSAGES_CANONICAL_site-local
-      - INPUT_SUBJECT_FILTER=chat.bot.canonical.site-local.>
-      - OUTPUT_STREAM=BOT_PUSH_NOTIF_site-local
-      - OUTPUT_SUBJECT_PREFIX=chat.bot.notification.push.site-local
-      - CONSUMER_NAME=bot-notification-worker
+      - MODE=bot
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
@@ -26,7 +20,7 @@ services:
       - VALKEY_ADDRS=valkey:6379
       - ROOMSUBCACHE_TTL=5m
       - LARGE_ROOM_THRESHOLD=500
-      # Recipients per BOT_PUSH_NOTIF event. Default 100; well under FCM's 500-token
+      # Recipients per BOT_PUSH_NOTIFICATION event. Default 100; well under FCM's 500-token
       # multicast cap and APNs HTTP/2 connection-frame ceiling.
       - PUSH_RECIPIENT_BATCH_SIZE=100
       - ROOM_META_CACHE_SIZE=10000
@@ -36,10 +30,7 @@ services:
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.
       - NATS_MAX_PAYLOAD_BYTES=262144
-      # bot-msg-handler already bootstraps BOT_MESSAGES_CANONICAL; this
-      # deployment's bootstrap.go still hardcodes MESSAGES_CANONICAL/PUSH_NOTIFICATION,
-      # so bootstrap MUST stay off here to avoid creating/verifying the wrong streams.
-      # NOTE: no service currently bootstraps BOT_PUSH_NOTIF (see task-8 report).
+      # BOT_MESSAGES_CANONICAL owned by bot-message-handler; BOT_PUSH_NOTIFICATION is ops/IaC-owned.
       - BOOTSTRAP_STREAMS=false
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro

@@ -3,7 +3,7 @@
 **Status:** approved
 **Author:** claude (bot-implementation-8d2ctl)
 **Date:** 2026-07-22
-**Scope:** 5 bot HTTP endpoints in `botplatform-service` (BP) and their NATS routing to `bot-msg-handler` / `bot-room-service`.
+**Scope:** 5 bot HTTP endpoints in `botplatform-service` (BP) and their NATS routing to `bot-message-handler` / `bot-room-service`.
 
 ## 1. The rule
 
@@ -16,7 +16,7 @@ This mirrors the user pipeline exactly: user subscriptions live at the subscribe
 | Component | Owns |
 |---|---|
 | **botplatform-service (BP)** | session auth, rate limit, idempotency, **subscription lookup**, cross-site routing decision, cross-site room-details fetch for reply enrichment |
-| **bot-msg-handler** | content validation, canonical publish. Never does DM-ensure; never does cross-site room fetch |
+| **bot-message-handler** | content validation, canonical publish. Never does DM-ensure; never does cross-site room fetch |
 | **bot-room-service** | room CRUD, DM ensure (deterministic ID), OUTBOX for cross-site subscription fanout |
 
 ## 3. Endpoint routing (all 5)
@@ -42,8 +42,8 @@ Rate-limit and idempotency stay BP-local (they gate ingress). Idempotency sentin
 1. `POST /rooms/{roomID}/messages` → BP@site1.
 2. BP@site1 subscription lookup `(bot, roomID)` → `sub.SiteID = site2`.
 3. BP@site1 NATS req/reply to `chat.server.bot.request.room.**site2**.{roomID}.msg.send` (crosses the supercluster).
-4. bot-msg-handler@**site2** validates, publishes to `BOT_MESSAGES_CANONICAL_**site2**`.
-5. bot-msg-worker@**site2** writes Cassandra@**site2**.
+4. bot-message-handler@**site2** validates, publishes to `BOT_MESSAGES_CANONICAL_**site2**`.
+5. bot-message-worker@**site2** writes Cassandra@**site2**.
 6. `broadcast-worker` (bot deployment)@**site2** fans out to site2 members. Cross-site members (site1, site3 …) receive via the existing bot-canonical → federation lane.
 
 ### Scenario 2 — First-time DM to cross-site user
@@ -55,7 +55,7 @@ Rate-limit and idempotency stay BP-local (they gate ingress). Idempotency sentin
 3. BP@site1 → bot-room-service@**site1** on `chat.server.bot.request.room.**site1**.dm.ensure` — DM room created at site1 with deterministic ID `idgen.BuildDMRoomID(bot, userA)`.
 4. bot-room-service@site1 upserts bot's subscription in site1 Mongo; publishes `member_added` on the OUTBOX (destination=site2) → inbox-worker@site2 upserts userA's subscription in site2 Mongo pointing to the site1 room.
 5. BP@site1 forwards the send to `chat.server.bot.request.dm.**site1**.{userA}.msg.send`.
-6. bot-msg-handler@site1 publishes canonical@site1, Cassandra@site1.
+6. bot-message-handler@site1 publishes canonical@site1, Cassandra@site1.
 
 ### Scenario 3 — Subsequent DM (cross-site room already exists)
 
@@ -65,7 +65,7 @@ Rate-limit and idempotency stay BP-local (they gate ingress). Idempotency sentin
 2. BP@site1 subscription lookup `(bot, userA)` → `sub.SiteID = site2`.
 3. BP@site1 optionally calls `chat.server.bot.request.room.**site2**.get` for reply-payload enrichment.
 4. BP@site1 NATS req/reply to `chat.server.bot.request.dm.**site2**.{userA}.msg.send`.
-5. bot-msg-handler@**site2** publishes canonical@**site2**, Cassandra@**site2**.
+5. bot-message-handler@**site2** publishes canonical@**site2**, Cassandra@**site2**.
 
 ### Scenario 4 — Create channel room
 
@@ -170,8 +170,8 @@ Cross-site NATS routing between sites is an ops/IaC concern (supercluster gatewa
 
 | # | Change | Files |
 |---|---|---|
-| 1 | Delete cross-site room fetcher (superseded — handler always runs at room's site) | `bot-msg-handler/room_fetcher.go`, `bot-msg-handler/handler.go` (drop `verifyRoomExists` remote branch), `bot-msg-handler/main.go` (drop wiring), `bot-msg-handler/handler_test.go` |
-| 2 | Move DM-ensure trigger from `bot-msg-handler` to BP; drop `DMEnsurer` from the handler | `bot-msg-handler/dm_ensurer.go` (delete), `bot-msg-handler/handler.go` (remove ensure fallback), `bot-msg-handler/main.go`; add `botplatform-service/dm_ensurer.go` |
+| 1 | Delete cross-site room fetcher (superseded — handler always runs at room's site) | `bot-message-handler/room_fetcher.go`, `bot-message-handler/handler.go` (drop `verifyRoomExists` remote branch), `bot-message-handler/main.go` (drop wiring), `bot-message-handler/handler_test.go` |
+| 2 | Move DM-ensure trigger from `bot-message-handler` to BP; drop `DMEnsurer` from the handler | `bot-message-handler/dm_ensurer.go` (delete), `bot-message-handler/handler.go` (remove ensure fallback), `bot-message-handler/main.go`; add `botplatform-service/dm_ensurer.go` |
 | 3 | Add `subscriptionStore` (Mongo) to BP | `botplatform-service/subscription_store.go`, `subscription_store_test.go`, integration test |
 | 4 | Route the 4 non-create endpoints by `sub.SiteID` | `botplatform-service/bot_handlers.go`, `bot_forwarder.go`, `bot_handlers_test.go`, `bot_forwarder_test.go` |
 | 5 | Deterministic DM room ID in `bot-room-service.dm.ensure` | `bot-room-service/handler.go` (Ensure path), `handler_test.go` (concurrent-race test) |
@@ -186,4 +186,4 @@ Unit / handler tests only for the routing change; existing integration tests cov
 1. `botplatform-service/bot_handlers_test.go` — table-driven `(endpoint, sub_present, sub_siteID, cfg_siteID) → expected_outbound_subject`.
 2. `botplatform-service/subscription_store_test.go` — Mongo integration test alongside the bot-platform integration suite.
 3. `bot-room-service/handler_test.go` — DM ensure concurrent race: two Ensure calls converge on one `_id`.
-4. `bot-msg-handler/handler_test.go` — delete `room_fetcher` tests; the handler no longer decides cross-site.
+4. `bot-message-handler/handler_test.go` — delete `room_fetcher` tests; the handler no longer decides cross-site.

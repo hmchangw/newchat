@@ -53,7 +53,7 @@ type config struct {
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("bot-msg-worker exited", "error", err)
+		slog.Error("bot-message-worker exited", "error", err)
 		os.Exit(1)
 	}
 }
@@ -121,7 +121,7 @@ func run() error {
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
 	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, jetstream.ConsumerConfig{
-		Durable:       "bot-msg-worker",
+		Durable:       "bot-message-worker",
 		FilterSubject: subject.BotCanonicalCreated(cfg.SiteID),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       30 * time.Second,
@@ -161,7 +161,7 @@ func run() error {
 		return fmt.Errorf("health server: %w", err)
 	}
 
-	slog.Info("bot-msg-worker running", "site", cfg.SiteID)
+	slog.Info("bot-message-worker running", "site", cfg.SiteID)
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error { iter.Stop(); return nil },
 		func(dctx context.Context) error {

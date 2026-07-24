@@ -11,17 +11,10 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
-      # Bot push pipeline: same push-notification-service binary as the user deployment,
-      # bound to the bot streams/subjects instead via env.
-      - INPUT_STREAM=BOT_PUSH_NOTIF_site-local
-      - INPUT_SUBJECT_FILTER=chat.bot.notification.push.site-local.>
-      - CONSUMER_NAME=bot-push-notification-service
+      - MODE=bot
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      # push-notification-service has no bootstrap.go (never creates streams); set for parity
-      # with other bot deployments and to document that BOT_PUSH_NOTIF is
-      # ops/IaC-owned, not push-notification-service-owned (see task-8 report).
       - BOOTSTRAP_STREAMS=false
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro

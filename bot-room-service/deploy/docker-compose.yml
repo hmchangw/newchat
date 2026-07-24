@@ -1,0 +1,27 @@
+name: bot-room-service
+
+services:
+  bot-room-service:
+    build:
+      context: ../..
+      dockerfile: bot-room-service/deploy/Dockerfile
+    environment:
+      - OTEL_SERVICE_NAME=bot-room-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      - ALL_SITE_IDS=site-local
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - ROOM_KEY_GRACE_PERIOD=24h
+      - MAX_CONCURRENCY=200
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

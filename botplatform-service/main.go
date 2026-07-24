@@ -68,15 +68,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
-	js, err := nc.JetStream()
-	if err != nil {
-		return fmt.Errorf("init jetstream: %w", err)
-	}
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
-		return fmt.Errorf("bootstrap bot streams: %w", err)
-	}
 
-	// 3s msg-flow timeout; bot-msg-handler receives req/reply on the shared NATS conn.
+	// 3s msg-flow timeout; bot-message-handler receives req/reply on the shared NATS conn.
 	h.forwarder = newBotForwarder(nc.NatsConn(), 3*time.Second)
 	// 15s DM-ensure timeout (room-mgmt budget) — first-DM creates room + federates member_added.
 	h.dmEnsurer = newNATSDMEnsurer(nc.NatsConn(), cfg.SiteID, 15*time.Second)

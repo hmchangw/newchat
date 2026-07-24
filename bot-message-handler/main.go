@@ -36,7 +36,7 @@ type config struct {
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("bot-msg-handler exited", "error", err)
+		slog.Error("bot-message-handler exited", "error", err)
 		os.Exit(1)
 	}
 }
@@ -74,7 +74,7 @@ func run() error {
 	pub := JetStreamPublisher{JS: js}
 	h := newHandler(store, pub, cfg.SiteID)
 
-	router := natsrouter.New(nc, "bot-msg-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	router := natsrouter.New(nc, "bot-message-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	h.Register(router)
 
@@ -85,7 +85,7 @@ func run() error {
 		return fmt.Errorf("health server: %w", err)
 	}
 
-	slog.Info("bot-msg-handler running", "site", cfg.SiteID)
+	slog.Info("bot-message-handler running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },

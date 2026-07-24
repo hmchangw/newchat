@@ -23,7 +23,7 @@ type natsRequester interface {
 	RequestMsgWithContext(ctx context.Context, msg *nats.Msg) (*nats.Msg, error)
 }
 
-// botForwarder issues req/reply from BP to bot-msg-handler and generates the messageID + createdAt headers bot-msg-handler uses verbatim.
+// botForwarder issues req/reply from BP to bot-message-handler and generates the messageID + createdAt headers bot-message-handler uses verbatim.
 type botForwarder struct {
 	nc           natsRequester
 	timeout      time.Duration
@@ -145,7 +145,7 @@ func (f *botForwarder) forward(ctx context.Context, sess *session.Session, subj 
 	if ee, ok := errcode.Parse(reply.Data); ok {
 		return nil, errcode.New(ee.Code, ee.Message,
 			errcode.WithReason(ee.Reason),
-			errcode.WithCause(fmt.Errorf("bot-msg-handler reply: %s", ee.Message)))
+			errcode.WithCause(fmt.Errorf("bot-message-handler reply: %s", ee.Message)))
 	}
 
 	var resp model.BotSendResponse

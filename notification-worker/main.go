@@ -53,11 +53,7 @@ type config struct {
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
 	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
-	InputStream            string                  `env:"INPUT_STREAM,required"`
-	InputSubjectFilter     string                  `env:"INPUT_SUBJECT_FILTER,required"`
-	ConsumerName           string                  `env:"CONSUMER_NAME"             envDefault:"notification-worker"`
-	OutputStream           string                  `env:"OUTPUT_STREAM,required"`
-	OutputSubjectPrefix    string                  `env:"OUTPUT_SUBJECT_PREFIX,required"` // e.g. chat.server.notification.push.<site>; ".send" is appended at publish
+	Mode                   stream.Pipeline         `env:"MODE,required"`                                 // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
@@ -184,18 +180,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, otelJS, cfg.InputStream, cfg.InputSubjectFilter, cfg.OutputStream, cfg.OutputSubjectPrefix, cfg.Bootstrap.Enabled); err != nil {
+	// Both modes filter on .created — notifications fire on new messages only,
+	// not on edits/deletes/pins/reactions.
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+
+	if err := bootstrapStreams(ctx, otelJS, wiring.CanonicalStream.Name, wiring.CanonicalCreated, wiring.PushStream.Name, wiring.PushInputWildcard, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, cfg.InputStream, buildConsumerConfig(cfg.Consumer, cfg.ConsumerName, cfg.InputSubjectFilter))
+	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
 
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, cfg.OutputSubjectPrefix, cfg.NatsMaxPayloadBytes)
+	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, wiring.PushSendSubject, cfg.NatsMaxPayloadBytes)
 
 	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
 	if cfg.PresenceEnabled {
@@ -235,7 +235,7 @@ func main() {
 	// DeliverNewPolicy: skip history on restart; roomsubcache TTL reconciles any boundary staleness.
 	roomsCfg := stream.Rooms(cfg.SiteID)
 	invalCons, err := otelJS.CreateOrUpdateConsumer(ctx, roomsCfg.Name, jetstream.ConsumerConfig{
-		Durable:       "notification-worker-room-event-invalidate",
+		Durable:       cfg.Mode.ConsumerName("notification-worker-room-event-invalidate"),
 		FilterSubject: subject.RoomCanonicalMemberEvent(cfg.SiteID, model.CanonicalMemberEventMuted),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverNewPolicy,
