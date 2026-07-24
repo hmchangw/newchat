@@ -530,6 +530,29 @@ const (
 )
 
 const (
+	// MessageTypeImportant is the sole client-settable message type (重要訊息).
+	// Unlike the system MessageType* values above it is set by the client, and it
+	// previews + notifies like a normal message — IsSystemMessageType returns false
+	// for it, so the "Type != \"\" ⇒ system" convention doesn't suppress it.
+	MessageTypeImportant = "important"
+)
+
+// IsSystemMessageType reports whether t is one of the server-set system message
+// types. Client-set types (MessageTypeImportant) and the empty regular type return
+// false — the preview filter and notification gate branch on this, not on
+// Type != "", so a client type is never mistaken for a system event.
+func IsSystemMessageType(t string) bool {
+	switch t {
+	case MessageTypeRoomCreated, MessageTypeMembersAdded, MessageTypeMemberRemoved,
+		MessageTypeMemberLeft, MessageTypeRoomRenamed, MessageTypeRoomRestricted,
+		MessageTypeTeamsMeetStarted:
+		return true
+	default:
+		return false
+	}
+}
+
+const (
 	// AsyncJobStatusOK indicates a successful async job result.
 	AsyncJobStatusOK = "ok"
 	// AsyncJobStatusError indicates a failed async job result.

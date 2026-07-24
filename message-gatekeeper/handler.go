@@ -277,6 +277,12 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("attachments exceed maximum size of %d bytes", h.maxAttachmentBytes))
 	}
 
+	// A client may set Type only to the client-settable value(s); a system type or
+	// unknown value is rejected so a client can't forge a system event.
+	if req.Type != "" && req.Type != model.MessageTypeImportant {
+		return nil, errcode.BadRequest(fmt.Sprintf("invalid message type %q", req.Type))
+	}
+
 	// Verify subscription
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil {
@@ -372,6 +378,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		TShow:                        tshow,
 		QuotedParentMessage:          quotedSnapshot,
 		Attachments:                  req.Attachments,
+		Type:                         req.Type,
 	}
 
 	// Publish MessageEvent to MESSAGES_CANONICAL. QuotedParentUnverified rides the

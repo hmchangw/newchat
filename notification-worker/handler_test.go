@@ -135,6 +135,34 @@ func msgEvent(m *model.Message) []byte { //nolint:gocritic // hugeParam: test he
 	return data
 }
 
+func TestHandle_ImportantMessageNotifies(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Type: model.MessageTypeImportant, CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"bob"}, emit.accounts(), "important message notifies like a normal message")
+}
+
+func TestHandle_SystemMessageDoesNotNotify(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Type: model.MessageTypeRoomRenamed, CreatedAt: time.Now(),
+	})))
+	assert.Empty(t, emit.accounts(), "system message must not notify")
+}
+
 func TestHandle_SkipsSender(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
@@ -981,13 +1009,14 @@ func TestIsNotifiable(t *testing.T) {
 		want    bool
 	}{
 		{"regular message", "", true},
+		{"important client type", model.MessageTypeImportant, true},
 		{"room created", model.MessageTypeRoomCreated, false},
 		{"members added", model.MessageTypeMembersAdded, false},
 		{"member removed", model.MessageTypeMemberRemoved, false},
 		{"member left", model.MessageTypeMemberLeft, false},
 		{"room renamed", model.MessageTypeRoomRenamed, false},
 		{"room restricted", model.MessageTypeRoomRestricted, false},
-		{"unknown future system type", "some_future_sys_type", false},
+		{"teams meet started", model.MessageTypeTeamsMeetStarted, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
