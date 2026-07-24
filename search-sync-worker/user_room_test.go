@@ -9,6 +9,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 func TestUserRoomCollection_TemplateName_DerivesFromEnv(t *testing.T) {
@@ -111,7 +112,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 	require.True(t, ok)
 	// Stored-script reference: the action carries only the script id, never
 	// the inlined source — that's the whole point of moving to stored scripts.
-	assert.Equal(t, addRoomScriptID, script["id"])
+	assert.Equal(t, searchindex.AddRoomScriptID, script["id"])
 	assert.NotContains(t, script, "source")
 
 	params := script["params"].(map[string]any)
@@ -196,7 +197,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 
 	script, ok := body["script"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, removeRoomScriptID, script["id"])
+	assert.Equal(t, searchindex.RemoveRoomScriptID, script["id"])
 	assert.NotContains(t, script, "source")
 
 	params := script["params"].(map[string]any)
@@ -250,8 +251,8 @@ func TestUserRoomCollection_StoredScripts(t *testing.T) {
 	scripts := coll.StoredScripts()
 	require.Len(t, scripts, 2)
 
-	add, ok := scripts[addRoomScriptID]
-	require.True(t, ok, "add script must be registered under addRoomScriptID")
+	add, ok := scripts[searchindex.AddRoomScriptID]
+	require.True(t, ok, "add script must be registered under searchindex.AddRoomScriptID")
 	var addBody map[string]any
 	require.NoError(t, json.Unmarshal(add, &addBody))
 	addScript := addBody["script"].(map[string]any)
@@ -264,8 +265,8 @@ func TestUserRoomCollection_StoredScripts(t *testing.T) {
 	assert.Contains(t, addSrc, "params.ts")
 	assert.Contains(t, addSrc, "params.hss")
 
-	remove, ok := scripts[removeRoomScriptID]
-	require.True(t, ok, "remove script must be registered under removeRoomScriptID")
+	remove, ok := scripts[searchindex.RemoveRoomScriptID]
+	require.True(t, ok, "remove script must be registered under searchindex.RemoveRoomScriptID")
 	var removeBody map[string]any
 	require.NoError(t, json.Unmarshal(remove, &removeBody))
 	removeScript := removeBody["script"].(map[string]any)

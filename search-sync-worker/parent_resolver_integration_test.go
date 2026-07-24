@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 // TestNewESRead_Integration exercises the ES self-lookup against a real index:
@@ -26,14 +27,14 @@ func TestNewESRead_Integration(t *testing.T) {
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
 	coll := newMessageCollection(prefix, time.Time{}, true)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(messageTemplateBody(prefix, true))))
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.MessageTemplateBody(prefix, true))))
 	index := prefix + "-2026-03"
 	preCreateIndex(t, esURL, index)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
 	// Index a parent message doc carrying its own (authoritative) createdAt.
 	parentCreatedAt := time.Date(2026, 3, 9, 7, 0, 0, 0, time.UTC)
-	doc, _ := json.Marshal(MessageSearchIndex{
+	doc, _ := json.Marshal(searchindex.MessageDoc{
 		MessageID: "parent-es-1",
 		RoomID:    "r1",
 		SiteID:    "site-a",

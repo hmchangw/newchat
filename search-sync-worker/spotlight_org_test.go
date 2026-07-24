@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 func TestSpotlightOrgCollection_Metadata(t *testing.T) {
@@ -64,7 +65,7 @@ func TestSpotlightOrgTemplateBody(t *testing.T) {
 }
 
 func TestSpotlightOrgTemplateProperties_MatchesStruct(t *testing.T) {
-	props := esPropertiesFromStruct[SpotlightOrgIndex]()
+	props := searchindex.EsPropertiesFromStruct[SpotlightOrgIndex]()
 
 	typ := reflect.TypeOf(SpotlightOrgIndex{})
 	esFieldCount := 0

@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -323,7 +324,7 @@ func TestUserRoomSync_Integration(t *testing.T) {
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
 	coll := newUserRoomCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(userRoomTemplateBody(indexName))))
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.UserRoomTemplateBody(indexName))))
 	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
@@ -446,7 +447,7 @@ func TestUserRoomSync_BulkInvite(t *testing.T) {
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
 	coll := newUserRoomCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(userRoomTemplateBody(indexName))))
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.UserRoomTemplateBody(indexName))))
 	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
@@ -562,7 +563,7 @@ func TestUserRoomSync_LWWGuard(t *testing.T) {
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
 	coll := newUserRoomCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(userRoomTemplateBody(indexName))))
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.UserRoomTemplateBody(indexName))))
 	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
