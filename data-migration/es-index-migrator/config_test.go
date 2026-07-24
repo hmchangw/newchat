@@ -43,12 +43,23 @@ func TestLoadConfig_Valid(t *testing.T) {
 }
 
 func TestLoadConfig_MissingRequiredField(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("SITE_ID", "")
+	for _, field := range []struct {
+		name string
+		key  string
+	}{
+		{"SITE_ID", "SITE_ID"},
+		{"MONGO_URI", "MONGO_URI"},
+		{"SEARCH_URL", "SEARCH_URL"},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(field.key, "")
 
-	_, err := loadConfig()
+			_, err := loadConfig()
 
-	require.Error(t, err)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestLoadConfig_EndNotAfterStart(t *testing.T) {

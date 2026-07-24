@@ -8,16 +8,16 @@ import (
 )
 
 type config struct {
-	SiteID string `env:"SITE_ID,required"`
+	SiteID string `env:"SITE_ID,required,notEmpty"`
 
-	SearchURL           string `env:"SEARCH_URL,required"`
+	SearchURL           string `env:"SEARCH_URL,required,notEmpty"`
 	SearchUsername      string `env:"SEARCH_USERNAME"      envDefault:""`
 	SearchPassword      string `env:"SEARCH_PASSWORD"      envDefault:""`
 	SearchTLSSkipVerify bool   `env:"SEARCH_TLS_SKIP_VERIFY" envDefault:"false"`
 
-	MsgIndexPrefix string `env:"MSG_INDEX_PREFIX,required"`
-	SpotlightIndex string `env:"SPOTLIGHT_INDEX,required"`
-	UserRoomIndex  string `env:"USER_ROOM_INDEX,required"`
+	MsgIndexPrefix string `env:"MSG_INDEX_PREFIX,required,notEmpty"`
+	SpotlightIndex string `env:"SPOTLIGHT_INDEX,required,notEmpty"`
+	UserRoomIndex  string `env:"USER_ROOM_INDEX,required,notEmpty"`
 
 	// MigrationStartAt/MigrationEndAt bound the messages backfill window
 	// ([start, end)). Spotlight and user-room backfill the site's full
@@ -28,12 +28,12 @@ type config struct {
 
 	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS,required"`
 
-	MongoURI      string `env:"MONGO_URI,required"`
+	MongoURI      string `env:"MONGO_URI,required,notEmpty"`
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
 
-	CassandraHosts    string `env:"CASSANDRA_HOSTS,required"`
+	CassandraHosts    string `env:"CASSANDRA_HOSTS,required,notEmpty"`
 	CassandraKeyspace string `env:"CASSANDRA_KEYSPACE" envDefault:"chat"`
 	CassandraUsername string `env:"CASSANDRA_USERNAME" envDefault:""`
 	CassandraPassword string `env:"CASSANDRA_PASSWORD" envDefault:""`
@@ -49,9 +49,6 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("parse config: %w", err)
 	}
 
-	if cfg.SiteID == "" {
-		return config{}, fmt.Errorf("SITE_ID cannot be empty")
-	}
 	if !cfg.MigrationEndAt.After(cfg.MigrationStartAt) {
 		return config{}, fmt.Errorf("MIGRATION_END_AT (%s) must be after MIGRATION_START_AT (%s)",
 			cfg.MigrationEndAt, cfg.MigrationStartAt)
