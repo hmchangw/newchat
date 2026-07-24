@@ -1,13 +1,41 @@
 package main
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 )
+
+// TestPlatformAdminRegex pins the mentionable/autocomplete exclusion regex to
+// the model taxonomy: it hides the platform-admin pseudo-account by its prefix
+// but keeps ordinary "p_" QA accounts mentionable.
+func TestPlatformAdminRegex(t *testing.T) {
+	assert.Equal(t, `^p_tchatadmin_`, platformAdminRegex())
+	rx := regexp.MustCompile(platformAdminRegex())
+	assert.True(t, rx.MatchString("p_tchatadmin_siteA"))
+	assert.False(t, rx.MatchString("p_qa1"))
+	assert.False(t, rx.MatchString("alice"))
+}
+
+// TestPlatformAdminRegex_HonorsOverriddenPrefix verifies the filter derives from
+// the configured prefix (ADMIN_ACCT_PREFIX) and QuoteMeta-escapes any regex
+// metacharacter so it stays the mirror of model.IsPlatformAdminAccount. Restores
+// the default via t.Cleanup; not parallel (mutates process-global model state).
+func TestPlatformAdminRegex_HonorsOverriddenPrefix(t *testing.T) {
+	orig := model.PlatformAdminAccountPrefix()
+	t.Cleanup(func() { require.NoError(t, model.SetPlatformAdminAccountPrefix(orig)) })
+
+	require.NoError(t, model.SetPlatformAdminAccountPrefix("p.admin["))
+	assert.Equal(t, `^p\.admin\[`, platformAdminRegex())
+	rx := regexp.MustCompile(platformAdminRegex())
+	assert.True(t, rx.MatchString("p.admin[siteA"), "literal metachar prefix must match")
+	assert.False(t, rx.MatchString("pXadmin[siteA"), "'.' must not be treated as a wildcard")
+}
 
 func TestHasRole(t *testing.T) {
 	tests := []struct {
@@ -34,13 +62,15 @@ func TestHasRole(t *testing.T) {
 }
 
 func TestFilterBots(t *testing.T) {
-	input := []string{"alice", "helper.bot", "bob", "p_scheduler"}
+	// Real bots and the platform-admin pseudo-account are filtered; QA p_
+	// accounts are ordinary users and are retained.
+	input := []string{"alice", "helper.bot", "bob", "p_scheduler", "p_tchatadmin_siteA"}
 	got := filterBots(input)
-	assert.Equal(t, []string{"alice", "bob"}, got)
+	assert.Equal(t, []string{"alice", "bob", "p_scheduler"}, got)
 }
 
 func TestFilterBots_AllBots(t *testing.T) {
-	input := []string{"helper.bot", "p_scheduler"}
+	input := []string{"helper.bot", "p_tchatadmin_siteA"}
 	got := filterBots(input)
 	assert.Nil(t, got)
 }
@@ -82,6 +112,8 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 		{"empty create request", errEmptyCreateRequest, errcode.CodeBadRequest, ""},
 		{"bot in channel", errBotInChannel, errcode.CodeBadRequest, errcode.RoomBotInChannel},
 		{"bot not available", errBotNotAvailable, errcode.CodeNotFound, errcode.RoomBotNotAvailable},
+		{"bot cross-site", errBotCrossSite, errcode.CodeBadRequest, errcode.RoomBotCrossSite},
+		{"bot cannot be owner", errBotCannotBeOwner, errcode.CodeBadRequest, errcode.RoomBotCannotBeOwner},
 		{"invalid user data", errInvalidUserData, errcode.CodeBadRequest, ""},
 		{"channel name required", errChannelNameRequired, errcode.CodeBadRequest, ""},
 		{"channel name too long", errChannelNameTooLong, errcode.CodeBadRequest, ""},
@@ -183,6 +215,16 @@ func TestDetermineRoomType(t *testing.T) {
 			name: "single bot user no name → botDM",
 			req:  model.CreateRoomRequest{Users: []string{"helper.bot"}},
 			want: model.RoomTypeBotDM,
+		},
+		{
+			name: "single platform-admin pseudo-account no name → botDM",
+			req:  model.CreateRoomRequest{Users: []string{"p_tchatadmin_siteA"}},
+			want: model.RoomTypeBotDM,
+		},
+		{
+			name: "single QA p_ user no name → regular DM",
+			req:  model.CreateRoomRequest{Users: []string{"p_qa1"}},
+			want: model.RoomTypeDM,
 		},
 		{
 			name: "single user with name → channel",

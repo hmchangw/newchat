@@ -124,7 +124,15 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	replyData, err := h.processMessage(ctx, account, roomID, siteID, &req)
+	// account is the raw {account} subject token — the encoded transport form (a
+	// ".bot" bot's client connects/publishes as weather_bot). It stays encoded
+	// for the reply subject (chat.user.{account}.response.{requestId}), which
+	// genuinely needs the transport form: the bot's client is scoped to the
+	// encoded token. processMessage needs the requester's real account for
+	// data-key lookups (subscription, history), keyed on the original dotted
+	// account — so decode here. No-op for every non-bot account.
+	requester := subject.DecodeAccount(account)
+	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
 		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.
 		// Bare error (raw fmt.Errorf) → transient infra failure: Nak for redelivery.
@@ -537,7 +545,8 @@ func checkQuoteThreadContext(snap *cassandra.QuotedParentMessage, quotedParentMe
 // canBypassLargeRoomCap reports whether the subscriber is exempt from the
 // large-room post restriction. Owners, admins, and bots bypass.
 //
-// "Bot" is detected by account-name pattern (\.bot$|^p_) — see helper.go.
+// "Bot" is detected via the model taxonomy (".bot" bots + the "p_tchatadmin_"
+// pseudo-account; QA "p_" accounts are ordinary users) — see helper.go.
 // This single function is the edit point if/when the bypass policy changes
 // (e.g. promoting isBot to a shared package, adding new roles, etc.).
 func canBypassLargeRoomCap(sub *model.Subscription) bool {

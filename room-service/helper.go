@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -43,9 +44,13 @@ var (
 	errPromoteRequiresIndividual = errcode.BadRequest("only individual members can be promoted to owner", errcode.WithReason(errcode.RoomPromoteRequiresIndividual))
 
 	// Sentinels for create-room validation.
-	errEmptyCreateRequest  = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
-	errBotInChannel        = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
-	errBotNotAvailable     = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
+	errEmptyCreateRequest = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
+	errBotInChannel       = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
+	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
+	// member.add admits only same-site bots — bot membership isn't federated cross-site.
+	errBotCrossSite = errcode.BadRequest("cross-site bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotCrossSite))
+	// Bots hold plain member roles only.
+	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
 	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")
@@ -102,10 +107,18 @@ var (
 	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size")
 )
 
-// platformAdminRegex matches platform-admin / webhook accounts by their `p_`
-// prefix. Mentionable autocomplete hides these accounts entirely so they do
-// not appear as `@`-mention targets.
-const platformAdminRegex = `^p_`
+// platformAdminRegex matches the platform-admin pseudo-account by its configured
+// prefix (QuoteMeta-escaped) to hide it from mentions; plain `p_` QA accounts are NOT matched.
+func platformAdminRegex() string {
+	return `^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix())
+}
+
+// botOrPlatformAdminRegex matches bot (".bot") and platform-admin (configured
+// prefix, QuoteMeta-escaped) accounts, excluding them from thread read state
+// (thread_subscriptions carry no isBot flag); plain `p_` QA accounts are NOT matched.
+func botOrPlatformAdminRegex() string {
+	return `(\.bot$|^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix()) + `)`
+}
 
 // sameFloor reports whether two read-floor pointers represent the same instant.
 // Two nil pointers are equal (both "no floor"); a nil and a non-nil differ; two
@@ -157,8 +170,9 @@ func dedup(items []string) []string {
 }
 
 // determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM with a bot (".bot") or platform-admin ("p_") counterpart is a botDM —
-// the same union enforced by the channel-membership guards (filterBots, errBotInChannel).
+// A single-user DM whose counterpart is a bot (".bot") or the "p_tchatadmin_" platform-admin
+// pseudo-account is a botDM — the same union enforced by the channel-membership guards
+// (filterBots, errBotInChannel). A QA "p_" counterpart is an ordinary user, so it is a regular DM.
 func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
 		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {

@@ -1625,9 +1625,10 @@ func TestIsBot(t *testing.T) {
 		want    bool
 	}{
 		{name: ".bot suffix", account: "helper.bot", want: true},
-		{name: "p_ prefix", account: "p_scheduler", want: true},
+		{name: "platform-admin pseudo-account", account: "p_tchatadmin_siteA", want: true},
 		{name: "another bot suffix", account: "scheduler.bot", want: true},
-		{name: "another p_ prefix", account: "p_webhook", want: true},
+		{name: "QA p_ account is an ordinary user", account: "p_webhook", want: false},
+		{name: "QA p_ scheduler is an ordinary user", account: "p_scheduler", want: false},
 		{name: "plain account", account: "alice", want: false},
 		{name: "contains bot but not suffix", account: "botmaster", want: false},
 		{name: "empty string", account: "", want: false},
@@ -1670,8 +1671,9 @@ func TestCanBypassLargeRoomCap(t *testing.T) {
 		{name: "admin + member bypasses", roles: []model.Role{model.RoleMember, model.RoleAdmin}, account: "alice", want: true},
 		{name: "empty roles, plain account", roles: nil, account: "alice", want: false},
 		{name: "bot account .bot suffix bypasses regardless of roles", roles: []model.Role{model.RoleMember}, account: "helper.bot", want: true},
-		{name: "bot account p_ prefix bypasses regardless of roles", roles: []model.Role{model.RoleMember}, account: "p_scheduler", want: true},
-		{name: "bot account with empty roles bypasses", roles: nil, account: "p_webhook", want: true},
+		{name: "platform-admin pseudo-account bypasses regardless of roles", roles: []model.Role{model.RoleMember}, account: "p_tchatadmin_siteA", want: true},
+		{name: "QA p_ member does not bypass (ordinary user)", roles: []model.Role{model.RoleMember}, account: "p_scheduler", want: false},
+		{name: "QA p_ with empty roles does not bypass", roles: nil, account: "p_webhook", want: false},
 		{name: "unknown role string with plain account", roles: []model.Role{"superuser"}, account: "alice", want: false},
 	}
 	for _, tc := range cases {
@@ -1834,6 +1836,47 @@ func TestHandleJetStreamMsg_InvalidSubject_Acks(t *testing.T) {
 	h.HandleJetStreamMsg(context.Background(), msg)
 	assert.True(t, msg.acked, "invalid subject must Ack — not retryable")
 	assert.False(t, msg.naked)
+}
+
+// TestHandleJetStreamMsg_BotSubject_DecodesAccount proves the bot read-path
+// decode on msg.send: a bot's client publishes on the encoded subject
+// (chat.user.weather_bot.room…), so the account token is the transport form.
+// The gatekeeper must (a) look up the subscription under the DECODED account
+// (weather.bot — how the data is keyed) and (b) address the reply on the
+// ENCODED token (chat.user.weather_bot.response.… — how the bot's client is
+// scoped), since the reply subject genuinely needs the transport form.
+func TestHandleJetStreamMsg_BotSubject_DecodesAccount(t *testing.T) {
+	const reqUUID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	// GetSubscription is keyed on the DECODED account. A ".bot" subscription
+	// bypasses the large-room cap, so GetRoomMeta is never called.
+	store.EXPECT().
+		GetSubscription(gomock.Any(), "weather.bot", "room-1").
+		Return(&model.Subscription{
+			User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
+			Roles: []model.Role{model.RoleMember},
+		}, nil)
+
+	var captured []*nats.Msg
+	reply := func(_ context.Context, m *nats.Msg) error {
+		captured = append(captured, m)
+		return nil
+	}
+	var published []publishedMsg
+	h := NewHandler(store, nil, makePublishFunc(&published, nil), reply, "site-A", nil, 500, 1, 8192, "")
+
+	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: reqUUID}
+	data, _ := json.Marshal(req)
+	msg := &fakeJSMsg{subject: "chat.user.weather_bot.room.room-1.site-A.msg.send", data: data}
+
+	h.HandleJetStreamMsg(context.Background(), msg)
+
+	assert.True(t, msg.acked, "successful send must Ack")
+	require.Len(t, published, 1, "must publish to MESSAGES_CANONICAL")
+	require.Len(t, captured, 1, "must send exactly one reply")
+	assert.Equal(t, "chat.user.weather_bot.response."+reqUUID, captured[0].Subject,
+		"reply must be addressed on the ENCODED account token")
 }
 
 // TestHandler_processMessage_RequestTShowMapsToTShow verifies the

@@ -669,15 +669,22 @@ func (h *Handler) removeMember(c *natsrouter.Context, req model.RemoveMemberRequ
 				return nil, errOnlyOwnersCanRemove
 			}
 		}
-		counts, err := h.store.CountMembersAndOwners(ctx, roomID)
-		if err != nil {
-			return nil, fmt.Errorf("count members: %w", err)
-		}
-		if counts.MemberCount <= 1 {
-			return nil, errCannotRemoveLastMember
-		}
-		if hasRole(target.Subscription.Roles, model.RoleOwner) && counts.OwnerCount <= 1 {
-			return nil, errLastOwnerCannotLeave
+		// Bot targets skip the last-member guard (can't orphan humans); the guard
+		// counts humans only. The last-owner guard stays generic — a legacy
+		// bot-owner must still not strand the room ownerless.
+		targetIsBot := model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)
+		targetIsOwner := hasRole(target.Subscription.Roles, model.RoleOwner)
+		if !targetIsBot || targetIsOwner {
+			counts, err := h.store.CountMembersAndOwners(ctx, roomID)
+			if err != nil {
+				return nil, fmt.Errorf("count members: %w", err)
+			}
+			if !targetIsBot && counts.HumanCount <= 1 {
+				return nil, errCannotRemoveLastMember
+			}
+			if targetIsOwner && counts.OwnerCount <= 1 {
+				return nil, errLastOwnerCannotLeave
+			}
 		}
 	} else {
 		// Owner-removes-org: only the requester's owner role matters here; org members resolved downstream.
@@ -715,6 +722,11 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 	req.RoomID = roomID
 	if req.NewRole != model.RoleOwner && req.NewRole != model.RoleMember {
 		return nil, errInvalidRole
+	}
+	// Promote-only guard: demoting a legacy bot-owner back to member stays
+	// allowed so operators can repair such rooms.
+	if req.NewRole == model.RoleOwner && (model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)) {
+		return nil, errBotCannotBeOwner
 	}
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
@@ -860,12 +872,41 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, errRoomIDMismatch
 	}
 
-	// Reject direct bots up front — mirrors classifyAndValidate in
-	// create-channel: a client that explicitly lists a bot must see a hard
-	// error rather than a silent drop.
-	for _, a := range req.Users {
-		if model.IsBot(a) || model.IsPlatformAdminAccount(a) {
-			return nil, errBotInChannel
+	// Explicitly listed ".bot" bots are admitted (create-channel still rejects
+	// them). Each must resolve to an enabled app assistant and be same-site (bot
+	// membership isn't federated cross-site). Deduped so a repeated bot costs one
+	// validation. The
+	// "p_tchatadmin_" platform-admin pseudo-account has NO app/assistant, so it
+	// is NOT validated here — it flows through as an ordinary candidate (its
+	// existence is enforced by validateMembershipRefs). QA "p_" accounts are
+	// plain users and likewise skip this loop.
+	for _, a := range dedup(req.Users) {
+		if !model.IsBot(a) {
+			continue
+		}
+		app, err := h.store.GetApp(ctx, a)
+		if err != nil {
+			if errors.Is(err, ErrAppNotFound) {
+				return nil, errBotNotAvailable
+			}
+			return nil, fmt.Errorf("get app for bot %s: %w", a, err)
+		}
+		if app.Assistant == nil || !app.Assistant.Enabled {
+			return nil, errBotNotAvailable
+		}
+		botSiteID, err := h.store.GetUserSiteID(ctx, a)
+		if err != nil {
+			return nil, fmt.Errorf("get bot siteId: %w", err)
+		}
+		// An empty siteId is impossible per the domain owner (no such bot docs
+		// exist), so if we see one it's a data anomaly. We fail open — treat it as
+		// local and let the add proceed — while logging an alarm rather than
+		// blocking; a phantom account is still rejected later by validateMembershipRefs.
+		if botSiteID == "" {
+			slog.ErrorContext(ctx, "bot has empty siteId", "account", a, "roomId", roomID)
+		}
+		if botSiteID != "" && botSiteID != h.siteID {
+			return nil, errBotCrossSite
 		}
 	}
 

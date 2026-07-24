@@ -28,10 +28,12 @@ type SubscriptionWithMembership struct {
 	HasOrgMembership        bool
 }
 
-// RoomCounts is the result of CountMembersAndOwners — member and owner counts
-// for a single room, computed in one aggregation.
+// RoomCounts is the result of CountMembersAndOwners. HumanCount excludes bot
+// subs (u.isBot) so the last-member guard blocks removing the last human even
+// when bots remain; docs missing the flag count as human.
 type RoomCounts struct {
 	MemberCount int
+	HumanCount  int
 	OwnerCount  int
 }
 

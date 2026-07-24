@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // UserRole is a platform-level role flag on the User record.
@@ -89,10 +90,43 @@ func IsPlatformAdmin(u *User) bool {
 	return false
 }
 
-// IsPlatformAdminAccount reports whether account is a platform-admin account
-// (a "p_" prefix).
+// platformAdminAccountPrefixDefault is the built-in default, overridden at
+// startup via SetPlatformAdminAccountPrefix (from ADMIN_ACCT_PREFIX).
+const platformAdminAccountPrefixDefault = "p_tchatadmin_"
+
+// platformAdminAccountPrefix holds the active prefix — atomic so concurrent
+// reads don't race the single startup write.
+var platformAdminAccountPrefix = func() *atomic.Pointer[string] {
+	p := &atomic.Pointer[string]{}
+	def := platformAdminAccountPrefixDefault
+	p.Store(&def)
+	return p
+}()
+
+// SetPlatformAdminAccountPrefix overrides the platform-admin prefix at startup.
+// An empty prefix is rejected: it would match every account.
+func SetPlatformAdminAccountPrefix(prefix string) error {
+	if prefix == "" {
+		return fmt.Errorf("platform-admin account prefix must not be empty")
+	}
+	platformAdminAccountPrefix.Store(&prefix)
+	return nil
+}
+
+// PlatformAdminAccountPrefix returns the active platform-admin pseudo-account
+// prefix (the default unless overridden via SetPlatformAdminAccountPrefix).
+func PlatformAdminAccountPrefix() string {
+	return *platformAdminAccountPrefix.Load()
+}
+
+// IsPlatformAdminAccount reports whether account is the platform-admin
+// pseudo-account (the PlatformAdminAccountPrefix() prefix, default
+// "p_tchatadmin_"). That pseudo-account has a user record but no app: it counts
+// into a room's appCount, is excluded from read-receipt floors and search, cannot
+// own a room, and a DM with it is a botDM. Other "p_" names are ordinary QA/test
+// users — this returns false for them.
 func IsPlatformAdminAccount(account string) bool {
-	return strings.HasPrefix(account, "p_")
+	return strings.HasPrefix(account, PlatformAdminAccountPrefix())
 }
 
 // HasLoginRole reports whether the role slice contains a role that may

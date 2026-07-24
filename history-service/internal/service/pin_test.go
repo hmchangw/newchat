@@ -584,8 +584,49 @@ func TestListPinnedMessages_StoreError(t *testing.T) {
 	assertInternalErr(t, err, "list pinned messages")
 }
 
+func TestPinMessage_PlatformAdminBypassesLargeRoom(t *testing.T) {
+	// The platform-admin pseudo-account stays bot-like: it bypasses the
+	// large-room check (no GetRoomUserCount call); pin-limit still runs.
+	svc, msgs, subs, _, pub, _ := newPinTestService(t)
+	adminSub := &model.Subscription{
+		RoomID: "r1",
+		User:   model.SubscriptionUser{ID: "u1", Account: "p_tchatadmin_siteA"},
+		Roles:  []model.Role{model.RoleMember},
+	}
+	subs.EXPECT().GetSubscription(gomock.Any(), "u1", "r1").Return(adminSub, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m1").Return(pinnableMsg(), nil)
+	msgs.EXPECT().GetAllPinnedMessages(gomock.Any(), "r1").Return(pinnedList(0), nil)
+	msgs.EXPECT().PinMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+	_, err := svc.PinMessage(testContext(), "site-a", models.PinMessageRequest{MessageID: "m1"})
+
+	require.NoError(t, err)
+}
+
+func TestPinMessage_QAAccountDoesNotBypassLargeRoom(t *testing.T) {
+	// A QA p_ account is an ordinary user: it does NOT bypass, so the large-room
+	// gate runs GetRoomUserCount. A small room lets the pin proceed.
+	svc, msgs, subs, rooms, pub, _ := newPinTestService(t)
+	qaSub := &model.Subscription{
+		RoomID: "r1",
+		User:   model.SubscriptionUser{ID: "u1", Account: "p_webhook"},
+		Roles:  []model.Role{model.RoleMember},
+	}
+	subs.EXPECT().GetSubscription(gomock.Any(), "u1", "r1").Return(qaSub, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m1").Return(pinnableMsg(), nil)
+	rooms.EXPECT().GetRoomUserCount(gomock.Any(), "r1").Return(1, nil)
+	msgs.EXPECT().GetAllPinnedMessages(gomock.Any(), "r1").Return(pinnedList(0), nil)
+	msgs.EXPECT().PinMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+	_, err := svc.PinMessage(testContext(), "site-a", models.PinMessageRequest{MessageID: "m1"})
+
+	require.NoError(t, err)
+}
+
 func TestPinMessage_BotAccountBypassesLargeRoom(t *testing.T) {
-	// Bot account (matches \.bot$|^p_) bypasses large-room check; pin-limit still runs.
+	// Bot account (".bot" suffix) bypasses large-room check; pin-limit still runs.
 	svc, msgs, subs, _, pub, _ := newPinTestService(t)
 	botSub := &model.Subscription{
 		RoomID: "r1",

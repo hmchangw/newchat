@@ -275,13 +275,19 @@ func TestMongoStore_CountMembersAndOwners_Integration(t *testing.T) {
 		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleOwner, model.RoleMember}},
 		model.Subscription{ID: "s3", User: model.SubscriptionUser{ID: "u3", Account: "carol"}, RoomID: "r1", Roles: []model.Role{model.RoleMember}},
 		model.Subscription{ID: "s4", User: model.SubscriptionUser{ID: "u4", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleOwner}},
+		model.Subscription{ID: "s5", User: model.SubscriptionUser{ID: "u5", Account: "weather.bot", IsBot: true}, RoomID: "r1", Roles: []model.Role{model.RoleMember}},
+		// r3: one human plus a platform-admin pseudo-account whose sub carries the
+		// legacy isBot:false — it must NOT be counted as human by account prefix.
+		model.Subscription{ID: "s6", User: model.SubscriptionUser{ID: "u6", Account: "erin"}, RoomID: "r3", Roles: []model.Role{model.RoleMember}},
+		model.Subscription{ID: "s7", User: model.SubscriptionUser{ID: "u7", Account: "p_tchatadmin_ops", IsBot: false}, RoomID: "r3", Roles: []model.Role{model.RoleMember}},
 	})
 	require.NoError(t, err)
 
-	t.Run("counts members and owners", func(t *testing.T) {
+	t.Run("counts members, humans and owners — bots excluded from humans", func(t *testing.T) {
 		counts, err := store.CountMembersAndOwners(ctx, "r1")
 		require.NoError(t, err)
-		assert.Equal(t, 3, counts.MemberCount)
+		assert.Equal(t, 4, counts.MemberCount)
+		assert.Equal(t, 3, counts.HumanCount, "bot sub must not count as human")
 		assert.Equal(t, 2, counts.OwnerCount)
 	})
 
@@ -289,7 +295,15 @@ func TestMongoStore_CountMembersAndOwners_Integration(t *testing.T) {
 		counts, err := store.CountMembersAndOwners(ctx, "r2")
 		require.NoError(t, err)
 		assert.Equal(t, 1, counts.MemberCount)
+		assert.Equal(t, 1, counts.HumanCount, "legacy sub without isBot counts as human")
 		assert.Equal(t, 1, counts.OwnerCount)
+	})
+
+	t.Run("platform-admin pseudo-account with isBot:false is not a human", func(t *testing.T) {
+		counts, err := store.CountMembersAndOwners(ctx, "r3")
+		require.NoError(t, err)
+		assert.Equal(t, 2, counts.MemberCount)
+		assert.Equal(t, 1, counts.HumanCount, "p_tchatadmin_ sub must not count as human even with isBot:false")
 	})
 
 	t.Run("empty room returns zeros", func(t *testing.T) {
@@ -353,6 +367,7 @@ func TestMongoStore_CountNewMembers_Integration(t *testing.T) {
 		model.User{ID: "u5", Account: "p_webhook", SiteID: "site-a", SectID: "org1"},
 		model.User{ID: "u6", Account: "dave", SiteID: "site-a", SectID: "org2"},
 		model.User{ID: "u7", Account: "eve", SiteID: "site-a", SectID: "org3"},
+		model.User{ID: "u8", Account: "p_tchatadmin_ops", SiteID: "site-a", SectID: "org1"},
 	}
 	if _, err := store.users.InsertMany(ctx, users); err != nil {
 		t.Fatalf("seed users: %v", err)
@@ -369,8 +384,8 @@ func TestMongoStore_CountNewMembers_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountNewMembers org1: %v", err)
 	}
-	if count != 2 {
-		t.Errorf("expected 2 (bob, charlie; alice already subscribed; bots excluded), got %d", count)
+	if count != 3 {
+		t.Errorf("expected 3 (bob, charlie, p_webhook; alice already subscribed; helper.bot + p_tchatadmin_ops excluded), got %d", count)
 	}
 
 	count, err = store.CountNewMembers(ctx, nil, []string{"eve"}, "r1", "")
@@ -405,12 +420,12 @@ func TestMongoStore_CountNewMembers_Integration(t *testing.T) {
 		t.Errorf("expected 0 when all accounts already members, got %d", count)
 	}
 
-	count, err = store.CountNewMembers(ctx, nil, []string{"helper.bot", "p_webhook"}, "r1", "")
+	count, err = store.CountNewMembers(ctx, nil, []string{"helper.bot", "p_webhook", "p_tchatadmin_ops"}, "r1", "")
 	if err != nil {
 		t.Fatalf("CountNewMembers bots: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("expected 0 for bot accounts, got %d", count)
+	if count != 1 {
+		t.Errorf("expected 1 (p_webhook counts as a QA user; helper.bot + p_tchatadmin_ops excluded), got %d", count)
 	}
 }
 
@@ -2133,23 +2148,40 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 
-	// Room "padmin": a human who has read plus a p_ platform/admin account
-	// (isBot=false) who has never read. The p_ account is excluded by account
-	// prefix, so the floor is the human's lastSeenAt — this exercises the
-	// u.account $not ^p_ predicate, since the isBot predicate alone would count
-	// the p_ account and resolve nil.
+	// Room "padmin": a human who has read plus the platform-admin pseudo-account
+	// (p_tchatadmin_ prefix, isBot=false) who has never read. The admin account is
+	// excluded by its account prefix, so the floor is the human's lastSeenAt —
+	// this exercises the u.account $not platformAdminRegex() predicate, since the
+	// isBot predicate alone would count the admin account and resolve nil.
 	mustInsertSub(t, db, &model.Subscription{
 		ID: "s17", User: model.SubscriptionUser{ID: "u17", Account: "mona"},
 		RoomID: "padmin", JoinedAt: earliest, LastSeenAt: &mid,
 	})
 	mustInsertSub(t, db, &model.Subscription{
-		ID: "s18", User: model.SubscriptionUser{ID: "u18", Account: "p_admin"},
+		ID: "s18", User: model.SubscriptionUser{ID: "u18", Account: "p_tchatadmin_siteA"},
 		RoomID: "padmin", JoinedAt: earliest,
 	})
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "padmin")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// Room "qa-unread": a human who has read plus a QA test account (plain "p_"
+	// prefix, isBot=false) who has never read. Under the split taxonomy QA "p_"
+	// accounts are ORDINARY users — they are NOT excluded from the floor, so this
+	// unread QA member holds the strict floor → nil ("not everyone has read").
+	// Guards against a regression to the old blanket ^p_ exclusion.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s19", User: model.SubscriptionUser{ID: "u19", Account: "nate"},
+		RoomID: "qa-unread", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s20", User: model.SubscriptionUser{ID: "u20", Account: "p_qa1"},
+		RoomID: "qa-unread", JoinedAt: earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "qa-unread")
+	require.NoError(t, err)
+	assert.Nil(t, got)
 
 	// Room with no subscriptions at all → nil.
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "empty")
@@ -2236,6 +2268,28 @@ func TestMongoStore_MinThreadSubscriptionLastSeenByThreadRoomID_Integration(t *t
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// "admin-parent": a human who has read plus the platform-admin pseudo-account
+	// (p_tchatadmin_ prefix) parent-author who has never read. The admin account
+	// matches botOrPlatformAdminRegex() and is excluded, so it must not freeze the
+	// thread floor → floor is the human's lastSeenAt.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts8", ThreadRoomID: "admin-parent", UserAccount: "gina", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts9", ThreadRoomID: "admin-parent", UserAccount: "p_tchatadmin_siteA"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "admin-parent")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// "qa-parent": a human who has read plus a QA test account (plain "p_" prefix)
+	// who has never read. QA "p_" accounts are ordinary users under the split
+	// taxonomy — NOT matched by botOrPlatformAdminRegex() — so this unread QA
+	// subscriber holds the thread floor → nil. Guards against the old blanket ^p_
+	// exclusion.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts10", ThreadRoomID: "qa-parent", UserAccount: "hana", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts11", ThreadRoomID: "qa-parent", UserAccount: "p_qa1"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "qa-parent")
+	require.NoError(t, err)
+	assert.Nil(t, got)
 }
 
 func TestMongoStore_UpdateThreadRoomMinUserLastSeenAt_Integration(t *testing.T) {
@@ -2310,7 +2364,8 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
 		bson.M{"_id": "uD", "account": "dave.bot", "chineseName": "戴夫", "engName": "Dave"},
-		bson.M{"_id": "uE", "account": "p_ops", "chineseName": "運維", "engName": "Ops"},
+		bson.M{"_id": "uE", "account": "p_tchatadmin_siteA", "chineseName": "管理員", "engName": "Admin"},
+		bson.M{"_id": "uF", "account": "p_qa1", "chineseName": "測試", "engName": "QA One"},
 	})
 	require.NoError(t, err)
 
@@ -2321,23 +2376,35 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "sC", "roomId": "r1", "u": bson.M{"_id": "uC", "account": "carol"}, "lastSeenAt": msgTime.Add(-time.Minute)},
 		// A bot that has read well past the message must never appear as a reader.
 		bson.M{"_id": "sD", "roomId": "r1", "u": bson.M{"_id": "uD", "account": "dave.bot", "isBot": true}, "lastSeenAt": msgTime.Add(30 * time.Minute)},
-		// A p_ platform/admin account (isBot=false) must also be excluded — this
-		// exercises the u.account $not ^p_ predicate, since isBot alone would
-		// surface p_ops.
-		bson.M{"_id": "sE", "roomId": "r1", "u": bson.M{"_id": "uE", "account": "p_ops"}, "lastSeenAt": msgTime.Add(20 * time.Minute)},
+		// The platform-admin pseudo-account (p_tchatadmin_ prefix, isBot=false) must
+		// also be excluded — this exercises the u.account $not platformAdminRegex()
+		// predicate, since isBot alone would surface it.
+		bson.M{"_id": "sE", "roomId": "r1", "u": bson.M{"_id": "uE", "account": "p_tchatadmin_siteA"}, "lastSeenAt": msgTime.Add(20 * time.Minute)},
+		// A QA test account (plain "p_" prefix, isBot=false) is an ordinary user
+		// under the split taxonomy — it MUST surface as a reader when it has read
+		// past the message. Guards against the old blanket ^p_ exclusion.
+		bson.M{"_id": "sF", "roomId": "r1", "u": bson.M{"_id": "uF", "account": "p_qa1"}, "lastSeenAt": msgTime.Add(10 * time.Minute)},
 	})
 	require.NoError(t, err)
 
-	// Only bob qualifies: alice is the sender, carol read before the message,
-	// dave.bot is a bot, and p_ops is a p_ platform/admin account (both excluded
-	// despite having read after the message).
+	// bob and p_qa1 qualify: alice is the sender, carol read before the message,
+	// dave.bot is a bot and p_tchatadmin_siteA is the platform-admin pseudo-account
+	// (both excluded despite reading after the message), while the QA "p_" account
+	// p_qa1 counts as an ordinary reader.
 	rows, err := store.ListReadReceipts(ctx, "r1", msgTime, "alice", 100)
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, "uB", rows[0].UserID)
-	require.Equal(t, "bob", rows[0].Account)
-	require.Equal(t, "鮑勃", rows[0].ChineseName)
-	require.Equal(t, "Bob", rows[0].EngName)
+	require.Len(t, rows, 2)
+	byAcct := make(map[string]ReadReceiptRow, len(rows))
+	for _, r := range rows {
+		byAcct[r.Account] = r
+	}
+	require.NotContains(t, byAcct, "dave.bot", "bots must not appear as readers")
+	require.NotContains(t, byAcct, "p_tchatadmin_siteA", "platform-admin pseudo-account must not appear as a reader")
+	require.Contains(t, byAcct, "p_qa1", "QA p_ accounts are ordinary readers")
+	require.Contains(t, byAcct, "bob")
+	assert.Equal(t, "uB", byAcct["bob"].UserID)
+	assert.Equal(t, "鮑勃", byAcct["bob"].ChineseName)
+	assert.Equal(t, "Bob", byAcct["bob"].EngName)
 
 	rows, err = store.ListReadReceipts(ctx, "r1", msgTime.Add(2*time.Hour), "alice", 100)
 	require.NoError(t, err)
@@ -2355,11 +2422,14 @@ func TestMongoStore_ListThreadReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
 		bson.M{"_id": "uD", "account": "helper.bot", "chineseName": "機器", "engName": "Helper"},
+		bson.M{"_id": "uE", "account": "p_tchatadmin_siteA", "chineseName": "管理員", "engName": "Admin"},
+		bson.M{"_id": "uF", "account": "p_qa1", "chineseName": "測試", "engName": "QA One"},
 	})
 	require.NoError(t, err)
 
-	// thread_subscriptions store userAccount/userId flat (no embedded "u"). Only
-	// bob's thread lastSeenAt is at/after the reply; carol's is before; alice is the sender.
+	// thread_subscriptions store userAccount/userId flat (no embedded "u"). bob's
+	// and p_qa1's thread lastSeenAt are at/after the reply; carol's is before;
+	// alice is the sender.
 	msgTime := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []any{
 		bson.M{"_id": "tsA", "threadRoomId": "tr1", "userId": "uA", "userAccount": "alice", "lastSeenAt": msgTime.Add(time.Hour)},
@@ -2368,16 +2438,33 @@ func TestMongoStore_ListThreadReadReceipts_Integration(t *testing.T) {
 		// A bot (".bot") thread subscriber that read past the reply must not appear
 		// as a reader (excluded by account).
 		bson.M{"_id": "tsD", "threadRoomId": "tr1", "userId": "uD", "userAccount": "helper.bot", "lastSeenAt": msgTime.Add(30 * time.Minute)},
+		// The platform-admin pseudo-account (p_tchatadmin_ prefix) is likewise
+		// excluded by account via botOrPlatformAdminRegex().
+		bson.M{"_id": "tsE", "threadRoomId": "tr1", "userId": "uE", "userAccount": "p_tchatadmin_siteA", "lastSeenAt": msgTime.Add(20 * time.Minute)},
+		// A QA test account (plain "p_" prefix) is an ordinary user — NOT matched
+		// by botOrPlatformAdminRegex() — so it MUST surface as a reader when it has
+		// read past the reply. Guards against the old blanket ^p_ exclusion.
+		bson.M{"_id": "tsF", "threadRoomId": "tr1", "userId": "uF", "userAccount": "p_qa1", "lastSeenAt": msgTime.Add(10 * time.Minute)},
 	})
 	require.NoError(t, err)
 
+	// bob and p_qa1 qualify; alice is the sender, carol read before, helper.bot is
+	// a bot and p_tchatadmin_siteA is the platform-admin pseudo-account (both
+	// excluded), while the QA "p_" account p_qa1 counts as an ordinary reader.
 	rows, err := store.ListThreadReadReceipts(ctx, "tr1", msgTime, "alice", 100)
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, "uB", rows[0].UserID)
-	require.Equal(t, "bob", rows[0].Account)
-	require.Equal(t, "鮑勃", rows[0].ChineseName)
-	require.Equal(t, "Bob", rows[0].EngName)
+	require.Len(t, rows, 2)
+	byAcct := make(map[string]ReadReceiptRow, len(rows))
+	for _, r := range rows {
+		byAcct[r.Account] = r
+	}
+	require.NotContains(t, byAcct, "helper.bot", "bots must not appear as readers")
+	require.NotContains(t, byAcct, "p_tchatadmin_siteA", "platform-admin pseudo-account must not appear as a reader")
+	require.Contains(t, byAcct, "p_qa1", "QA p_ accounts are ordinary readers")
+	require.Contains(t, byAcct, "bob")
+	assert.Equal(t, "uB", byAcct["bob"].UserID)
+	assert.Equal(t, "鮑勃", byAcct["bob"].ChineseName)
+	assert.Equal(t, "Bob", byAcct["bob"].EngName)
 
 	rows, err = store.ListThreadReadReceipts(ctx, "tr1", msgTime.Add(2*time.Hour), "alice", 100)
 	require.NoError(t, err)
@@ -3770,13 +3857,19 @@ func TestMongoStore_ListMentionableSubscriptions_Integration(t *testing.T) {
 		assert.Equal(t, "helper.bot", got[0].Account)
 	})
 
-	t.Run("p_ prefix is hidden from mentionable results", func(t *testing.T) {
+	t.Run("platform-admin pseudo-account is hidden but QA p_ users are mentionable", func(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
-		mustInsertUser(t, db, &model.User{ID: "u-pa", Account: "p_admin", EngName: "Platform Admin"})
+		// p_tchatadmin_ is the platform-admin pseudo-account: hidden. p_qa1 is a QA
+		// test account — an ordinary user — so it must appear in mentionable results.
+		mustInsertUser(t, db, &model.User{ID: "u-pa", Account: "p_tchatadmin_siteA", EngName: "Platform Admin"})
+		mustInsertUser(t, db, &model.User{ID: "u-qa", Account: "p_qa1", EngName: "QA One"})
 		mustInsertUser(t, db, &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"})
 		mustInsertSub(t, db, &model.Subscription{ID: "sub-pa",
-			User:   model.SubscriptionUser{ID: "u-pa", Account: "p_admin"},
+			User:   model.SubscriptionUser{ID: "u-pa", Account: "p_tchatadmin_siteA"},
+			RoomID: "r1", SiteID: "site-a"})
+		mustInsertSub(t, db, &model.Subscription{ID: "sub-qa",
+			User:   model.SubscriptionUser{ID: "u-qa", Account: "p_qa1"},
 			RoomID: "r1", SiteID: "site-a"})
 		mustInsertSub(t, db, &model.Subscription{ID: "sub-alice",
 			User:   model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -3784,9 +3877,14 @@ func TestMongoStore_ListMentionableSubscriptions_Integration(t *testing.T) {
 
 		got, err := store.ListMentionableSubscriptions(ctx, "r1", "", "", 10)
 		require.NoError(t, err)
-		require.Len(t, got, 1, "p_ accounts must be excluded from mentionable results")
-		assert.Equal(t, "alice", got[0].Account)
-		assert.Equal(t, "user", got[0].OptionType)
+		accts := map[string]string{}
+		for _, s := range got {
+			accts[s.Account] = s.OptionType
+		}
+		assert.NotContains(t, accts, "p_tchatadmin_siteA", "platform-admin pseudo-account must be hidden")
+		assert.Equal(t, "user", accts["alice"])
+		assert.Equal(t, "user", accts["p_qa1"], "QA p_ accounts are ordinary mentionable users")
+		assert.Len(t, got, 2)
 	})
 
 	t.Run("limit caps the result count", func(t *testing.T) {
@@ -3835,12 +3933,13 @@ func TestBotAndAdminPredicate_GoAndMongoAgree_Integration(t *testing.T) {
 	probes := []string{
 		"alice",
 		"bob.bot",
-		"p_assistant",
+		"p_tchatadmin_ops",   // platform-admin pseudo-account: hidden
+		"p_assistant",        // QA "p_" account: an ordinary user, NOT hidden
 		"botanist",           // contains "bot" but not at end
 		"p",                  // single char, no underscore
 		"weird.botanist",     // ends in 'ist', not '.bot'
 		"helper.bot.archive", // ".bot" not anchored at end
-		"p_",                 // edge: p_ with nothing after
+		"p_",                 // edge: p_ with nothing after — a QA user, not hidden
 		"P_admin",            // case-sensitive — uppercase P should NOT match
 	}
 
@@ -3867,16 +3966,16 @@ func TestBotAndAdminPredicate_GoAndMongoAgree_Integration(t *testing.T) {
 	}
 
 	// Locks Go and Mongo in agreement on bot vs platform-admin vs human:
-	//   `.bot` suffix => present + optionType "app"   (Mongo: botAccountRegex)
-	//   `p_` prefix   => absent                       (Mongo: $not platformAdminRegex)
-	//   otherwise     => present + optionType "user"
+	//   `.bot` suffix          => present + optionType "app"  (Mongo: botAccountRegex)
+	//   `p_tchatadmin_` prefix  => absent                     (Mongo: $not platformAdminRegex)
+	//   otherwise (incl. other `p_` QA accounts) => present + optionType "user"
 	for _, acct := range probes {
 		switch {
 		case strings.HasSuffix(acct, ".bot"):
 			assert.True(t, mongo[acct].present, "%q: bot should appear", acct)
 			assert.True(t, mongo[acct].isApp, "%q: bot should be optionType=app", acct)
-		case strings.HasPrefix(acct, "p_"):
-			assert.False(t, mongo[acct].present, "%q: platform admin must be hidden", acct)
+		case strings.HasPrefix(acct, "p_tchatadmin_"):
+			assert.False(t, mongo[acct].present, "%q: platform-admin pseudo-account must be hidden", acct)
 		default:
 			assert.True(t, mongo[acct].present, "%q: human should appear", acct)
 			assert.False(t, mongo[acct].isApp, "%q: human should be optionType=user", acct)

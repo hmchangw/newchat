@@ -397,9 +397,8 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Rotate after delete + reconcile; GetSubscriptionAccounts returns the
-	// post-deletion survivor accounts (projected — fan-out only needs accounts,
-	// not full subscription docs).
+	// Rotate after delete + reconcile; survivors are the post-deletion accounts.
+	// Bots hold keys too, so a bot removal rotates like any other member.
 	survivorAccounts, listErr := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 	if listErr != nil {
 		return fmt.Errorf("list survivors for key fan-out (room %s): %w", req.RoomID, listErr)
@@ -410,8 +409,11 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 
 	now := time.Now().UTC()
 
-	// Subscription update event. RoomType is fixed to channel: room-service
-	// rejects member.remove for any other room kind.
+	// Subscription update event (channel-only handler). Published for every
+	// removed member, bots included: a bot can log into the chat frontend, so it
+	// needs its sidebar cache updated. publishSubscriptionUpdate encodes the
+	// per-user subject so a dotted ".bot" account lands on the token its NATS JWT
+	// is scoped to.
 	subEvt := model.SubscriptionRemovedEvent{
 		UserID: user.ID,
 		Subscription: model.RemovedSubscriptionRef{
@@ -621,7 +623,10 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 
 	now := time.Now().UTC()
 
-	// Publish per-account subscription update and collect cross-site accounts
+	// Every removed member gets a per-account subscription.update, bots included:
+	// a bot can log into the chat frontend, so it needs its sidebar cache updated.
+	// publishSubscriptionUpdate encodes the per-user subject to match the token
+	// the recipient's NATS JWT is scoped to.
 	for _, m := range toRemove {
 		subEvt := model.SubscriptionRemovedEvent{
 			Subscription: model.RemovedSubscriptionRef{
@@ -1064,8 +1069,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Publish subscription.update BEFORE room.key so clients have a sub entry to store the key under.
-	// Channel-only handler: roomName is the already-fetched channel name.
+	// Publish subscription.update BEFORE room.key so clients have a sub entry to
+	// store the key under. Applies to bots too: a bot can log into the chat
+	// frontend, so it needs the sub entry as well before the key arrives.
+	// publishSubscriptionUpdate encodes the per-user subject so a dotted ".bot"
+	// account lands on the token its NATS JWT is scoped to.
 	for _, sub := range subs {
 		subEvt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
@@ -1557,7 +1565,9 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 }
 
 // determineRoomTypeFromPayload mirrors room-service's determineRoomType: a single
-// ".bot"/"p_" counterpart is a botDM (consistent with room-service + pkg/pipelines).
+// counterpart that is a ".bot" bot or the "p_tchatadmin_" platform-admin
+// pseudo-account is a botDM (consistent with room-service + pkg/pipelines); a QA
+// "p_" counterpart is an ordinary user, so it yields a regular DM.
 func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
 		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
@@ -2020,7 +2030,9 @@ func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subsc
 	switch sub.RoomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		cp := sub.Name
-		// Platform-admin (p_) accounts are users, not bots, for naming — only .bot takes the app path.
+		// For naming, only ".bot" accounts take the app path; every "p_" account
+		// (the p_tchatadmin_ pseudo-account and QA users) has a user record and
+		// resolves via the user map.
 		if model.IsBot(cp) {
 			app, err := h.store.GetApp(ctx, cp)
 			if err == nil && app.Name != "" {
@@ -2295,6 +2307,10 @@ func (h *Handler) buildAndFanOutRoomKey(ctx context.Context, roomID string, pair
 // evt is taken by pointer so the 80-byte struct isn't copied per fan-out call;
 // callers must not mutate it after passing it in.
 func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []string, evt *model.RoomKeyEvent) {
+	// Bots receive room keys like any member: the key subject is built via
+	// subject.RoomKeyUpdate, which encodes the account (dots→underscores) so a
+	// dotted ".bot" account maps to the single subject token its NATS JWT is
+	// scoped to (chat.user.weather_bot.>) — no raw-subject spill, no disclosure.
 	if len(accounts) == 0 {
 		return
 	}

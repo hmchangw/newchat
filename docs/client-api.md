@@ -772,6 +772,11 @@ The handler has no error path (both values are validated at portal startup). The
 Reusable payload types referenced by name throughout §3–§5. Each RPC links
 here instead of repeating the table.
 
+> **Platform-admin pseudo-account prefix.** The `p_tchatadmin_` prefix used
+> throughout (e.g. `p_tchatadmin_{siteID}`) is configurable per deployment via
+> the `ADMIN_ACCT_PREFIX` env var (default `p_tchatadmin_`) and MUST be set to
+> the same value in every service.
+
 #### Participant
 
 Actor / sender identity embedded in room and message events.
@@ -904,8 +909,8 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 |---|---|---|
 | `siteId` | string | The room's home site. |
 | `name` | string | The room's canonical name (may differ from the subscription `name`). |
-| `userCount` | number | Member count. |
-| `appCount` | number | App (bot) count. |
+| `userCount` | number | Member count — human members, including QA `p_` test accounts (ordinary users). |
+| `appCount` | number | App count — `.bot` bots plus the `p_tchatadmin_` platform-admin pseudo-account. |
 | `lastMsgAt` | RFC3339 timestamp | The room's last-message time. |
 | `lastMsgId` | string | Last message ID. |
 | `lastMentionAllAt` | RFC3339 timestamp | The last room-wide mention time. |
@@ -1044,7 +1049,7 @@ This is an **async-job RPC**: the synchronous reply only confirms acceptance. Th
 The room **type is inferred server-side** from the payload shape — the client does not send it:
 
 - `name` set → `channel`
-- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a bot)
+- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a `.bot` bot or the `p_tchatadmin_` platform-admin pseudo-account; a QA `p_` account is an ordinary user, so it yields a regular `dm`)
 - `name` empty + `users` is just the caller (e.g. `[caller]` or empty) → **self-DM** (note-to-self): a single-member `dm` room, created through the same async path as any other room. The subscription is **favorited**, and it is **one-per-user** — a repeat create returns the existing room with `status: "exists"`.
 
 The creator's account and the site come from the subject (`chat.user.{account}.request.room.{siteID}.create`); the client does not pass them in the body.
@@ -1140,7 +1145,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional; the server derives the room ID from the subject and ignores any non-matching value. |
-| `users` | string[] | no | Internal user IDs (or accounts) to add directly. |
+| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant** and live on the **local site**, else the request is rejected (see Error response). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive both the `subscription.update` and the `room.key` event on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_tchatadmin_` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant/site validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
@@ -1170,7 +1175,7 @@ The fields `requesterId`, `requesterAccount`, and `timestamp` on the Go `AddMemb
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, or a `users` entry is a bot — rejected with `"bots cannot be added to a channel"`). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added.
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled, and with `"cross-site bots cannot be added to a channel"` (`bot_cross_site`) when the bot's home site differs from the room's site. Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -1194,7 +1199,7 @@ Error example (e.g. requester not in room):
 }
 ```
 
-**2. `chat.user.{newMember}.event.subscription.update`** — one event per **newly subscribed** member (not the requester, not existing members, not org→individual upgrades).
+**2. `chat.user.{newMember}.event.subscription.update`** — one event per **newly subscribed** member (not the requester, not existing members, not org→individual upgrades). Bot members receive it too, delivered on their **encoded** per-user subject (`chat.user.{encodedAccount}.event.subscription.update`, dots→underscores — the same transform as their NATS JWT scope and `room.key` delivery), since a bot can log into the chat frontend.
 
 ###### `subscription.update` event
 
@@ -1228,7 +1233,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `
 }
 ```
 
-**3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed account (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
+**3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed member (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
@@ -1293,7 +1298,7 @@ Exactly one of `account` or `orgId` must be set. The fields `requester`, `roomTy
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually).
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually). The last-member guard counts **human** members only: removing the last human is rejected even when bot members remain, while removing a bot never trips the guard.
 
 ```json
 { "code": "bad_request", "error": "exactly one of account or orgId must be set" }
@@ -1303,7 +1308,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 **1. `chat.user.{requesterAccount}.response.{requestID}`** — an [`AsyncJobResult`](#asyncjobresult) to the requester when the removal finishes (requires `X-Request-ID`). `operation` is `"room.member.remove"` for single-account removal, `"room.member.remove_org"` for org removal.
 
-**2. `chat.user.{removedAccount}.event.subscription.update`** — one per removed account, `action: "removed"`. The payload is a dedicated `SubscriptionRemovedEvent` (not the full `SubscriptionUpdateEvent`): its `subscription` carries **only** `roomId`, `roomType`, and `u` so no zero-valued `Subscription` fields are sent. On the **org-removal** path `userId` is omitted (only `subscription.u.account` is set).
+**2. `chat.user.{removedAccount}.event.subscription.update`** — one per removed account, `action: "removed"`. Bot members receive it too, on their **encoded** per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores), since a bot can log into the chat frontend. The payload is a dedicated `SubscriptionRemovedEvent` (not the full `SubscriptionUpdateEvent`): its `subscription` carries **only** `roomId`, `roomType`, and `u` so no zero-valued `Subscription` fields are sent. On the **org-removal** path `userId` is omitted (only `subscription.u.account` is set).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1402,6 +1407,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 - Promote attempt when the target is already an owner.
 - Demote attempt when the target is not an owner.
 - Last-owner guard: an owner cannot demote themselves if they are the only owner.
+- Promote attempt on a bot account — rejected with `"bots cannot be room owners"` (demoting a bot stays allowed).
 - Promote attempt on an org-only member (individual subscription required).
 
 ```json
@@ -1731,7 +1737,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `{siteID}` must be the room's **origin `siteID`**.
 
-Used by the message composer's `@…` mention autocomplete. Returns subscriptions discriminated as `user` or `app`. The caller is always excluded from the result set. Platform-admin / webhook accounts (those whose `account` is prefixed `p_`) are also excluded — they are not `@`-mentionable.
+Used by the message composer's `@…` mention autocomplete. Returns subscriptions discriminated as `user` or `app`. The caller is always excluded from the result set. The `p_tchatadmin_` platform-admin pseudo-account is also excluded — it is not `@`-mentionable. Plain `p_` QA test accounts are ordinary users and remain mentionable.
 
 ##### Request body
 
@@ -1844,7 +1850,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - **Alert recomputation:** new `alert = oldSub.alert && len(oldSub.threadUnread) > 0`. Reading the room clears the alert when there are no unread thread mentions; it stays set when thread-level unreads remain.
 - **No `JoinedAt` fallback for the early-return:** if `subscription.lastSeenAt` is null (the user was invited but has never opened the room), the handler does **not** treat `joinedAt` as a synthetic read position — being invited isn't reading. The room-floor recompute runs in this case so a member who has just read for the first time is reflected in the floor.
-- **Room-floor recompute (`Room.MinUserLastSeenAt`):** the room's read floor (surfaced as `minUserLastSeenAt` in history responses) is a **strict "everyone has read" marker**: `MIN(lastSeenAt)` across **all** of the room's subscriptions, set **only when every subscription has a usable `lastSeenAt`**. If **any** member has never read the room (no/zero `lastSeenAt` — e.g. invited but never opened), the floor is `$unset` (null). Bots are counted like any other member, so a **botDM room — where the bot never reads — always has a null floor**. Reading a room can advance the floor (or, if this was the last unread member, raise it from null to a value).
+- **Room-floor recompute (`Room.MinUserLastSeenAt`):** the room's read floor (surfaced as `minUserLastSeenAt` in history responses) is a **strict "everyone has read" marker**: `MIN(lastSeenAt)` across the room's **human** subscriptions — bots (`u.isBot`) and the `p_tchatadmin_` platform-admin pseudo-account are excluded — set **only when every counted subscription has a usable `lastSeenAt`**. If **any** counted member has never read the room (no/zero `lastSeenAt` — e.g. invited but never opened), the floor is `$unset` (null). Because bots and the admin pseudo-account are excluded, a **botDM room resolves to the human's `lastSeenAt`** rather than being forced null by a never-reading bot; plain `p_` QA accounts are ordinary members and do count. Reading a room can advance the floor (or, if this was the last unread member, raise it from null to a value).
 - **Recompute trigger & a known gap:** the floor is recomputed only on this Mark Read path, and only when the caller was not already past `room.lastMsgAt` (the early-return above). Adding a member does not itself recompute the floor, so a newly-invited, never-read member will not flip an existing non-null floor to null until the next recompute is triggered (e.g. that member reads, or another member reads while the room has content).
 - **Read-floor fan-out:** when (and only when) the recompute above changes `Room.MinUserLastSeenAt`, the server publishes a `message_read` room event carrying the new floor, so peers can advance read-receipt / unread UI live. Fan-out is best-effort (a publish failure does not fail the RPC) and never fires on the early-return paths or when the floor is unchanged. No system message is written.
 
@@ -4726,13 +4732,13 @@ Same paginated shape as `subscription.list` — `{ "subscriptions": [...], "hasM
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.getDM`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Returns the calling user's DM subscription with the named counterpart. The reply is **room-info-enriched** (same behavior as `subscription.list`). Bots and platform-prefixed accounts are rejected.
+Returns the calling user's DM subscription with the named counterpart. The reply is **room-info-enriched** (same behavior as `subscription.list`). Bots and the `p_tchatadmin_` platform-admin pseudo-account are rejected (plain `p_` QA accounts are ordinary users and are valid DM targets).
 
 ##### Request body
 
 | Field         | Type   | Required | Notes |
 |---------------|--------|----------|-------|
-| `accountName` | string | yes      | The counterpart's account. Must not be a bot account (`.bot` suffix) or platform account (`p_` prefix). |
+| `accountName` | string | yes      | The counterpart's account. Must not be a bot account (`.bot` suffix) or the `p_tchatadmin_` platform-admin pseudo-account. A QA `p_` account is an ordinary user and is a valid DM target. |
 
 ```json
 { "accountName": "bob" }
@@ -4781,7 +4787,7 @@ Returns the calling user's DM subscription with the named counterpart. The reply
 | Condition | `code` | `reason` | Notes |
 |-----------|--------|----------|-------|
 | `accountName` empty | `bad_request` | — | `"accountName required"` |
-| Bot or platform account | `bad_request` | `invalid_dm_target` | `"invalid DM target"` |
+| Bot or `p_tchatadmin_` pseudo-account | `bad_request` | `invalid_dm_target` | `"invalid DM target"` |
 | DM subscription not found | `not_found` | `subscription_not_found` | `"dm not found"` |
 | Internal failure | `internal` | — | — |
 
@@ -5840,8 +5846,9 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 #### When clients receive `RoomKeyEvent`s
 
 - **Room creation (channels only):** sent to every initial member. DM/botDM rooms carry no key, so creation fires no `RoomKeyEvent`.
-- **Add member (channels only):** sent to each newly-added account; existing members do not receive a duplicate event.
+- **Add member (channels only):** sent to each newly-added member; existing members do not receive a duplicate event.
 - **Remove member (channels only):** the server rotates the room key. Surviving members receive a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving events for the room.
+- **Bot members** are key-holders: they receive the `RoomKeyEvent` like any member, addressed to the bot's **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend), delivered **before** the `room.key` so the client has a sub entry to store the key under.
 
 Removed members keep prior keys for decrypting historical messages but cannot decrypt anything published after the rotation.
 
@@ -5961,12 +5968,14 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `not_room_member` | forbidden | room-service / room-worker (actor not a member) |
 | `not_room_owner` | forbidden | room-service role/admin paths |
 | `last_owner_cannot_leave` | conflict | room-service leave |
-| `bot_in_channel` | bad_request | room-service member-add (bot in a channel room) |
-| `bot_not_available` | not_found | room-service member-add (unknown bot) |
+| `bot_in_channel` | bad_request | room-service create-channel (bot listed in a channel create request) |
+| `bot_not_available` | not_found | room-service member-add (bot with no app record or disabled assistant) and create-botDM (assistant disabled) |
+| `bot_cross_site` | bad_request | room-service member-add (bot's home site differs from the room's site) |
+| `bot_cannot_be_owner` | bad_request | room-service role-update (promote a bot to owner) |
 | `user_not_found` | not_found | room-service / room-worker (account does not resolve to a user) |
 | `invalid_org` | bad_request | room-service create/add (orgId does not resolve to any users) |
 | `self_dm` | bad_request | room-service create (DM to yourself) |
-| `last_member_cannot_remove` | conflict | room-service remove-member (would empty the room) |
+| `last_member_cannot_remove` | conflict | room-service remove-member (would remove the last human member; bots don't count) |
 | `target_not_member` | bad_request | room-service role-update (target is not a room member) |
 | `already_owner` | conflict | room-service role-update (promote a current owner) |
 | `cannot_demote_last_owner` | conflict | room-service role-update (demote the last owner) |
@@ -5987,7 +5996,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `bot_login_disabled` | forbidden | portal-service `POST /api/v1/login` (§2.5) — portal is configured (`BOT_LOGIN_ENABLED=false`) to reject bot-account logins. Direct the user to the bot developer console. |
 | `app_not_found` | not_found | user-service `subscription.setAppSubscription` (appId does not resolve to any app) |
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
-| `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or platform account) |
+| `invalid_dm_target` | bad_request | user-service `subscription.getDM` (target is a bot or the `p_tchatadmin_` platform-admin pseudo-account) |
 | `subscription_not_found` | not_found | user-service `subscription.getDM` (no DM subscription exists for the account pair) |
 | `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the caller) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
@@ -6014,7 +6023,7 @@ Compute the trigger as `reason ?? code` and branch on that. Use `code` for gener
 
 Public HTTP endpoints served by `media-service`. GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
 
-**Bot detection:** an account is a bot if it ends in `.bot` **or** begins with `p_`. Everything else is a user.
+**Bot detection:** an account takes the bot avatar path if it ends in `.bot` **or** is the `p_tchatadmin_` platform-admin pseudo-account. Everything else — including plain `p_` QA test accounts — is a user.
 
 **Default image:** when no custom image exists (and for users with no `employeeId`), the service returns a deterministic SVG "initials" avatar (`Content-Type: image/svg+xml`) generated on the fly — never stored. The SVG is cacheable: it carries a stable `ETag` and `Cache-Control: public, max-age=<cfg>`.
 
@@ -6051,7 +6060,7 @@ Resolves a user or bot avatar. The frontend also routes DM/botDM room avatars he
 ```
 GET /api/v1/avatar/alice          → 307 to employee-photo host
 GET /api/v1/avatar/helper.bot     → 200 (custom image) or 200 (default SVG)
-GET /api/v1/avatar/p_webhook      → 200 (custom image) or 200 (default SVG)
+GET /api/v1/avatar/p_tchatadmin_hk → 200 (custom image) or 200 (default SVG)
 ```
 
 ---
@@ -6105,7 +6114,7 @@ Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; 
 
 | | Notes |
 |---|---|
-| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or begins with `p_`). |
+| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or is the `p_tchatadmin_` platform-admin pseudo-account). |
 | Body | Raw image bytes (PNG or JPEG). SVG and non-image payloads are rejected. |
 | `Content-Type` header | Advisory. Validation is by decoding the body — a valid PNG or JPEG is accepted regardless of the declared header; non-images are rejected. |
 | Max size | `MAX_UPLOAD_BYTES` (default 1 MiB). |

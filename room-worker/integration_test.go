@@ -732,17 +732,36 @@ func TestMongoStore_ListAddMemberCandidates_Integration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := store.ListAddMemberCandidates(ctx, []string{"org-eng"}, nil, roomID)
-	require.NoError(t, err)
-
-	byAccount := map[string]AddMemberCandidate{}
-	for _, c := range got {
-		byAccount[c.Account] = c
+	collect := func(t *testing.T, orgIDs, direct []string) map[string]AddMemberCandidate {
+		t.Helper()
+		got, err := store.ListAddMemberCandidates(ctx, orgIDs, direct, roomID)
+		require.NoError(t, err)
+		byAccount := map[string]AddMemberCandidate{}
+		for _, c := range got {
+			byAccount[c.Account] = c
+		}
+		return byAccount
 	}
-	require.Len(t, byAccount, 3, "bot dave.bot must be excluded")
-	assert.Equal(t, AddMemberCandidate{Account: "alice", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["alice"])
-	assert.Equal(t, AddMemberCandidate{Account: "bob", HasSubscription: true, HasIndividualRoomMember: false}, byAccount["bob"], "bug scenario: sub exists, IRM does not")
-	assert.Equal(t, AddMemberCandidate{Account: "carol", HasSubscription: true, HasIndividualRoomMember: true}, byAccount["carol"])
+
+	t.Run("org expansion excludes bots", func(t *testing.T) {
+		byAccount := collect(t, []string{"org-eng"}, nil)
+		require.Len(t, byAccount, 3, "org-covered bot dave.bot must be excluded")
+		assert.Equal(t, AddMemberCandidate{Account: "alice", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["alice"])
+		assert.Equal(t, AddMemberCandidate{Account: "bob", HasSubscription: true, HasIndividualRoomMember: false}, byAccount["bob"], "bug scenario: sub exists, IRM does not")
+		assert.Equal(t, AddMemberCandidate{Account: "carol", HasSubscription: true, HasIndividualRoomMember: true}, byAccount["carol"])
+	})
+
+	t.Run("explicitly listed bot resolves via the direct-only path", func(t *testing.T) {
+		byAccount := collect(t, nil, []string{"dave.bot"})
+		require.Len(t, byAccount, 1)
+		assert.Equal(t, AddMemberCandidate{Account: "dave.bot", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["dave.bot"])
+	})
+
+	t.Run("explicitly listed bot resolves alongside org expansion", func(t *testing.T) {
+		byAccount := collect(t, []string{"org-eng"}, []string{"dave.bot"})
+		require.Len(t, byAccount, 4, "direct bot admitted, org arms still bot-free")
+		assert.Contains(t, byAccount, "dave.bot")
+	})
 }
 
 // newIntegrationHandler creates a Handler wired to the given store and siteID with a no-op publish function.

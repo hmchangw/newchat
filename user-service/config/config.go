@@ -40,8 +40,10 @@ type Config struct {
 	TLSSkipVerify    bool          `env:"OIDC_TLS_SKIP_VERIFY" envDefault:"false"`
 	OIDCClientID     string        `env:"OIDC_CLIENT_ID"     envDefault:""`
 	SSORefreshWindow time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
-	Mongo            MongoConfig   `envPrefix:"MONGO_"`
-	NATS             NATSConfig    `envPrefix:"NATS_"`
+	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
+	AdminAcctPrefix string      `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_tchatadmin_"`
+	Mongo           MongoConfig `envPrefix:"MONGO_"`
+	NATS            NATSConfig  `envPrefix:"NATS_"`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.

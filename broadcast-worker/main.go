@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -64,6 +65,8 @@ type config struct {
 	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
 	DebugLog             logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
 }
 
 func main() {
@@ -76,6 +79,11 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+
+	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
+		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
+		os.Exit(1)
+	}
 
 	ctx := context.Background()
 

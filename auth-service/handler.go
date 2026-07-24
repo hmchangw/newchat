@@ -241,7 +241,7 @@ func (h *AuthHandler) handleSession(ctx context.Context, c *gin.Context, req aut
 	}
 	// NATS subject slots are single-token, so dotted bot accounts
 	// (`botname.shortsiteid.bot`) collapse to underscores; others pass through.
-	natsAccount := strings.ReplaceAll(p.Account, ".", "_")
+	natsAccount := subject.EncodeAccount(p.Account)
 	if !subject.IsValidAccountToken(natsAccount) {
 		errhttp.Write(ctx, c, errcode.BadRequest("account contains invalid characters"))
 		return

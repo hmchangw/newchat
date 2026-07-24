@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -409,10 +408,11 @@ func subscriptionName(roomType model.RoomType, roomName, requesterAccount string
 	return ""
 }
 
-// isBot mirrors the bot predicate used by room-service/helper.go and pkg/pipelines:
-// accounts ending in ".bot" or starting with "p_" (webhook-style bots).
+// isBot reports whether account is bot-like — a real ".bot" bot or the
+// "p_tchatadmin_" platform-admin pseudo-account — via the model taxonomy. Plain
+// "p_" QA test accounts are ordinary users and return false.
 func isBot(account string) bool {
-	return strings.HasSuffix(account, ".bot") || strings.HasPrefix(account, "p_")
+	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
 }
 
 func subscriptionIsSubscribed(roomType model.RoomType, u *model.User) bool {

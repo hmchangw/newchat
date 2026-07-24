@@ -6,6 +6,28 @@ import (
 	"unicode"
 )
 
+// EncodeAccount maps an account to its NATS subject-token form by replacing the
+// dot separators a dotted account (e.g. a ".bot" account) would otherwise spill
+// across subject tokens. This is the SAME transform auth-service applies when
+// minting a principal's NATS JWT, so a per-user subject built from the encoded
+// form matches the {account} token the principal's JWT is scoped to. A no-op for
+// accounts without dots (all plain human accounts).
+func EncodeAccount(account string) string {
+	return strings.ReplaceAll(account, ".", "_")
+}
+
+// DecodeAccount decodes the NATS subject-token form of an account back to the
+// real account. Only ".bot" bots are ever encoded (the system forbids dots in
+// any other account), so exactly a trailing "_bot" is reversed to ".bot" and
+// every non-bot account passes through unchanged. Idempotent, and a no-op for
+// any account that was never encoded. Inverse of EncodeAccount for ".bot" bots.
+func DecodeAccount(account string) string {
+	if s, ok := strings.CutSuffix(account, "_bot"); ok {
+		return s + ".bot"
+	}
+	return account
+}
+
 // IsValidAccountToken reports whether s can serve as the {account} token of a
 // NATS subject: non-empty, no '.'/'*'/'>' runes, no whitespace or control runes.
 func IsValidAccountToken(s string) bool {
@@ -22,7 +44,10 @@ func IsValidAccountToken(s string) bool {
 
 // ParseUserRoomSubject extracts the user account and roomID from subjects
 // matching the pattern "chat.user.{account}.*.room.{roomID}.…".
-// Returns the user account, roomID, and ok=true on success.
+// Returns the user account, roomID, and ok=true on success. The account is
+// validated as a raw NATS token (the encoded transport form) and then decoded
+// via DecodeAccount, so callers get the requester's real identity (a ".bot"
+// bot's weather_bot token becomes weather.bot) for data-key lookups.
 func ParseUserRoomSubject(subj string) (account, roomID string, ok bool) {
 	parts := strings.Split(subj, ".")
 	if len(parts) < 5 || parts[0] != "chat" || parts[1] != "user" {
@@ -39,7 +64,7 @@ func ParseUserRoomSubject(subj string) (account, roomID string, ok bool) {
 			if !isValidAccountToken(roomID) {
 				return "", "", false
 			}
-			return account, roomID, true
+			return DecodeAccount(account), roomID, true
 		}
 	}
 	return "", "", false
@@ -180,7 +205,9 @@ func ParseOutbox(subj string) (originSiteID, destSiteID, eventType string, ok bo
 }
 
 func SubscriptionUpdate(account string) string {
-	return fmt.Sprintf("chat.user.%s.event.subscription.update", account)
+	// Encode the account so the subject matches the {account} token the
+	// recipient's NATS JWT is scoped to (a dotted ".bot" account spans tokens).
+	return fmt.Sprintf("chat.user.%s.event.subscription.update", EncodeAccount(account))
 }
 
 // SettingsUpdate is the client-facing fanout subject published by
@@ -282,7 +309,9 @@ func UserRoomEvent(account string) string {
 }
 
 func RoomKeyUpdate(account string) string {
-	return fmt.Sprintf("chat.user.%s.event.room.key", account)
+	// Encode the account so the subject matches the {account} token the
+	// recipient's NATS JWT is scoped to (a dotted ".bot" account spans tokens).
+	return fmt.Sprintf("chat.user.%s.event.room.key", EncodeAccount(account))
 }
 
 // --- Room CRUD request builders ---

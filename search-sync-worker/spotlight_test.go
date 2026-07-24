@@ -150,6 +150,32 @@ func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
 	assert.Equal(t, "site-a", doc["siteId"])
 }
 
+func TestSpotlightCollection_BuildAction_SkipsBots(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	// Real bots and the platform-admin pseudo-account are not searchable
+	// principals; QA p_ accounts are ordinary users and ARE indexed.
+	payload.Accounts = []string{"alice", "weather.bot", "p_tchatadmin_siteA", "p_qa1"}
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2, "bots and the platform-admin pseudo-account must not be indexed")
+	docIDs := []string{actions[0].DocID, actions[1].DocID}
+	assert.ElementsMatch(t, []string{"alice_r-eng", "p_qa1_r-eng"}, docIDs)
+}
+
+func TestSpotlightCollection_BuildAction_AllBots_NoActions(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"weather.bot"}
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err, "an all-bot event is a clean no-op, not an error")
+	assert.Empty(t, actions)
+}
+
 func TestSpotlightCollection_BuildAction_MemberRemoved(t *testing.T) {
 	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 	payload := baseInboxMemberEvent()
@@ -165,6 +191,54 @@ func TestSpotlightCollection_BuildAction_MemberRemoved(t *testing.T) {
 	assert.Equal(t, "alice_r-eng", action.DocID)
 	assert.Equal(t, int64(2000), action.Version)
 	assert.Nil(t, action.Doc)
+}
+
+// TestSpotlightCollection_BuildAction_MemberRemoved_BotsCleanedUp verifies that
+// bot / platform-admin removals are NOT skipped: a delete action must still be
+// emitted so a bot doc indexed by legacy behavior (or during a rolling deploy)
+// gets cleaned up. The delete is idempotent — a 404 on a never-indexed doc is a
+// benign ack (see isBulkItemSuccess).
+func TestSpotlightCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"weather.bot", "p_tchatadmin_siteA"}
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, 3000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2, "bot and platform-admin removals must still emit cleanup deletes")
+
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		assert.Equal(t, searchengine.ActionDelete, action.Action)
+		assert.Equal(t, "spotlight-site-a-v1-chat", action.Index)
+		assert.Equal(t, int64(3000), action.Version)
+		assert.Nil(t, action.Doc)
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"weather.bot_r-eng", "p_tchatadmin_siteA_r-eng"}, docIDs)
+}
+
+// TestSpotlightCollection_BuildAction_MemberRemoved_MixedHumanAndBot verifies a
+// mixed removal fans out to a delete for BOTH the human and the bot — the human
+// because they were indexed, the bot as defensive cleanup of any stale doc.
+func TestSpotlightCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.Accounts = []string{"alice", "weather.bot"}
+	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, 4000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2)
+
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		assert.Equal(t, searchengine.ActionDelete, action.Action)
+		assert.Nil(t, action.Doc)
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"alice_r-eng", "weather.bot_r-eng"}, docIDs)
 }
 
 func TestSpotlightCollection_BuildAction_RestrictedRoomIndexedLikeAnyOther(t *testing.T) {

@@ -146,6 +146,55 @@ func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 	}
 }
 
+// TestHandler_ProcessRemoveMember_BotTarget_RotatesAndSubUpdate: removing a bot
+// rotates the room key like any member (bots hold keys) — GetSubscriptionAccounts
+// is called for the survivor fan-out — AND publishes a per-user
+// subscription.update to the bot's ENCODED subject, since a bot can log into the
+// chat frontend and needs its sidebar cache updated like any member.
+func TestHandler_ProcessRemoveMember_BotTarget_RotatesAndSubUpdate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	const (
+		roomID    = "room-1"
+		botAcct   = "weather.bot"
+		requester = "alice"
+		siteID    = "site-a"
+	)
+
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, botAcct).Return(&UserWithMembership{
+		User: model.User{ID: "u_bot", Account: botAcct, SiteID: siteID, EngName: "Weather"},
+	}, nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, botAcct).Return(int64(1), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// The departed bot must be scrubbed from thread followers + subs (#308).
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, []string{botAcct}).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, []string{botAcct}).Return(nil)
+	// Rotation now runs for a bot removal too — the survivor fan-out reads accounts.
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u1", Account: requester, SiteID: siteID, EngName: "Alice"}, nil)
+
+	var published []publishedMsg
+	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, testKeyStore, testKeySender)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: requester, Account: botAcct, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	subjSet := map[string]bool{}
+	for _, p := range published {
+		subjSet[p.subj] = true
+	}
+	assert.True(t, subjSet[subject.SubscriptionUpdate(botAcct)], "bot gets a subscription.update on removal (FE-login capable)")
+	// Pin the encoding independently of the builder: weather.bot → weather_bot.
+	assert.True(t, subjSet["chat.user.weather_bot.event.subscription.update"], "bot subscription.update lands on its encoded per-user subject")
+	assert.True(t, subjSet[subject.MemberEvent(roomID)], "member event still fires for the removal")
+}
+
 func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -663,6 +712,60 @@ func TestHandler_ProcessAddMembers_PublishesSubscriptionUpdateBeforeRoomKey(t *t
 			"account %s: subscription.update (idx %d) must precede room.key (idx %d)",
 			account, subIdx, keyIdx)
 	}
+}
+
+// TestHandler_ProcessAddMembers_BotGetsKeyAndSubUpdate locks in the delivery
+// model: a bot member receives BOTH room.key AND subscription.update — each on
+// its encoded per-user subject (subject.RoomKeyUpdate and subject.SubscriptionUpdate
+// both encode weather.bot → weather_bot, the token its NATS JWT is scoped to),
+// because a bot can log into the chat frontend and needs its sidebar cache. A
+// human added in the same batch gets both on its plain (unencoded) subject.
+func TestHandler_ProcessAddMembers_BotGetsKeyAndSubUpdate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		return pub.Publish(subj, data)
+	}
+	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub))
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob", "weather.bot"}, "r1").
+		Return([]AddMemberCandidate{
+			{Account: "bob", HasSubscription: false, HasIndividualRoomMember: false},
+			{Account: "weather.bot", HasSubscription: false, HasIndividualRoomMember: false},
+		}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "weather.bot"}).Return([]model.User{
+		{ID: "u2", Account: "bob", SiteID: "site-a", EngName: "Bob"},
+		{ID: "u3", Account: "weather.bot", SiteID: "site-a", EngName: "Weather"},
+	}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
+		ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice",
+	}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+
+	req := model.AddMembersRequest{
+		RoomID: "r1", RequesterAccount: "alice", Users: []string{"bob", "weather.bot"},
+		History:   model.HistoryConfig{Mode: model.HistoryModeNone},
+		Timestamp: 1,
+	}
+	reqData, _ := json.Marshal(req)
+	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), reqData))
+
+	published := map[string]bool{}
+	for _, s := range pub.subjects {
+		published[s] = true
+	}
+	assert.True(t, published[subject.SubscriptionUpdate("bob")], "human must get subscription.update")
+	assert.True(t, published[subject.RoomKeyUpdate("bob")], "human must get room.key")
+	// Both builders encode the account, so these land on chat.user.weather_bot.*.
+	assert.True(t, published[subject.RoomKeyUpdate("weather.bot")], "bot gets room.key on its encoded subject")
+	assert.True(t, published[subject.SubscriptionUpdate("weather.bot")], "bot gets subscription.update on its encoded subject")
+	// Pin the encoding independently of the builder: weather.bot → weather_bot.
+	assert.True(t, published["chat.user.weather_bot.event.subscription.update"], "bot subscription.update lands on its encoded per-user subject")
 }
 
 func TestHandler_ProcessAddMembers_HistoryAll(t *testing.T) {
@@ -2243,6 +2346,25 @@ func TestResolveRoomName(t *testing.T) {
 	}
 }
 
+func TestDetermineRoomTypeFromPayload(t *testing.T) {
+	tests := map[string]struct {
+		req  model.CreateRoomRequest
+		want model.RoomType
+	}{
+		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
+		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
+		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_tchatadmin_siteA"}}, model.RoomTypeBotDM},
+		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
+		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
+		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, determineRoomTypeFromPayload(&tc.req))
+		})
+	}
+}
+
 func TestNewSubSetsAllFields(t *testing.T) {
 	user := &model.User{ID: "u1", Account: "alice"}
 	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeChannel}
@@ -2716,8 +2838,11 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 	}
 	assert.Equal(t, "Helper Bot", humanEvt.RoomName)
 
-	// bot (helper.bot) subscription.update must carry the human's display name.
+	// bot (helper.bot) subscription.update must carry the human's display name,
+	// delivered on the bot's ENCODED per-user subject (helper.bot → helper_bot).
 	botSubj := subject.SubscriptionUpdate("helper.bot")
+	assert.Equal(t, "chat.user.helper_bot.event.subscription.update", botSubj,
+		"bot subscription.update subject must be encoded to match its NATS JWT scope")
 	var botEvt model.SubscriptionUpdateEvent
 	for _, p := range getPublished() {
 		if p.subj == botSubj {
@@ -6053,13 +6178,19 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 			want:    "Alice 愛麗絲",
 		},
 		{
-			name:    "botDM platform-admin (p_) counterpart resolves as a user from map",
+			name:    "botDM p_ counterpart resolves as a user from map (has a user record)",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_admin"},
 			userMap: map[string]*model.User{"p_admin": {Account: "p_admin", EngName: "Pat", ChineseName: "派特"}},
 			want:    "Pat 派特",
 		},
 		{
-			name:    "botDM platform-admin (p_) counterpart missing from map falls back to account",
+			name:    "botDM platform-admin pseudo-account resolves via user map, not GetApp",
+			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_tchatadmin_siteA"},
+			userMap: map[string]*model.User{"p_tchatadmin_siteA": {Account: "p_tchatadmin_siteA", EngName: "Admin", ChineseName: "管理"}},
+			want:    "Admin 管理",
+		},
+		{
+			name:    "botDM p_ counterpart missing from map falls back to account",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_admin"},
 			userMap: users,
 			want:    "p_admin",

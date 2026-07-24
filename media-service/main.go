@@ -15,6 +15,7 @@ import (
 	o11ygin "github.com/flywindy/o11y/gin"
 
 	"github.com/hmchangw/chat/pkg/minioutil"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -35,6 +36,9 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
+		return fmt.Errorf("set platform-admin account prefix: %w", err)
 	}
 	if cfg.EIDCacheCapacity <= 0 {
 		return fmt.Errorf("EID_CACHE_CAPACITY must be positive, got %d", cfg.EIDCacheCapacity)
