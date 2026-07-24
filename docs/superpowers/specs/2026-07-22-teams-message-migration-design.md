@@ -1,0 +1,126 @@
+# Teams Message-History Migration — Design
+
+**Goal:** ingest Teams message history into nextgen during a bounded, multi-day bulk
+sync — idempotently, reusing the persistence pipeline. Migrated messages are indexed by
+a dedicated search-sync consumer on the batch subject (no re-publish, no Mongo).
+
+## Overview
+
+A durable JetStream consumer on the canonical stream, filtered to
+`chat.msg.canonical.{siteID}.teams.batch`, served by `message-worker`. A server-side
+producer publishes batches of Teams messages onto that subject; the consumer transforms
+each into a canonical `model.Message`, resolves the sender, and writes it **directly to
+Cassandra** via `store.SaveMessage`. It does **not** re-publish to canonical, and there
+is no reply.
+
+## Direct Cassandra write — no re-publish
+
+The consumer writes the transformed `model.Message` straight through `store.SaveMessage`
+(the same Store the live consumer persists with) — no `MessageEvent` marshal, no round
+trip through `processMessage`. Thread/mention/quote side-effects are intentionally
+dropped (a history migration replays content, not live interactions). Nothing is
+re-published to the `.created` event, so no fan-out or notification happens. Search
+indexing is not driven off `.created` here; it is handled by the existing message-sync
+consumer, which also binds the batch subject (see below).
+
+**Cross-consumer isolation (the `.teams.batch` subject rides the canonical wildcard).**
+`.teams.batch` is a two-token tail under `chat.msg.canonical.{siteID}.>`, whereas every
+per-message event (`.created`/`.updated`/`.deleted`/`.pinned`/`.unpinned`/`.reacted`) is
+single-token. Consumers that handle message events therefore bind
+`chat.msg.canonical.{siteID}.*` (single-token, via `subject.MsgCanonicalMessageWildcard`)
+so the batch envelope is never delivered to them: `message-worker`'s message consumer and
+`notification-worker` were already filtered to `.created`; `broadcast-worker` (via its
+`INPUT_SUBJECT_FILTER` env, defaulted to `.*`) narrows from `.>` to `.*` for the same
+reason. The batch is received by `message-worker`'s `.teams.batch` consumer, which
+persists it; **`search-sync-worker`'s existing message-sync (user) consumer additionally
+binds `.teams.batch`** (`[.*, .teams.batch]`) so one consumer indexes both live messages
+and migrated history — no separate durable.
+
+**Delivery + retries:** the consumer Acks a batch once every message has been handled.
+A per-message transform/resolve error is logged (`Warn`) as that message's result and
+does **not** block the batch (a deterministic bad message must not poison-loop the whole
+batch). An infra failure on the Cassandra write surfaces so the batch is Nak'd — at-least-once
+redelivery re-runs it, safe because the deterministic message id makes every write
+idempotent.
+
+## `MessageTransformer` seam
+
+```go
+type MessageTransformer interface {
+    Transform(ctx context.Context, raw json.RawMessage) (model.Message, error)
+}
+```
+
+`raw` is opaque JSON so the seam is source-agnostic. `DefaultTransformer` composes:
+HTML→supported-markdown (unsupported markup degrades to raw text), message type
+(user vs system), and the reply(quote) shape via `QuotedParentMessage`. It resolves
+the sender and each mention through the same resolver.
+
+- **Forward branch: stubbed** — it depends on a `Forwarded` model field that lands with
+  the forward feature. Until then a forwarded message migrates as a plain message; no
+  forward field is set.
+- **Reactions:** the reaction→shortcode table exists and is tested, but `model.Message`
+  has no reactions field, so reactions are not attached on the created event; they
+  migrate as separate reacted events in a follow-up.
+
+## Sender resolution
+
+Resolve a Teams user (graph id + display name) to a nextgen identity via a process-wide
+`hashicorp/golang-lru/v2` cache shared across all batches (the resolver + transformer are
+built once). The store is message-worker-local (`mongoHRIdentityStore`);
+`EmployeeIDFromGraphID` is a per-service copy — the shared HR store was removed in a prior
+merge, so there is no shared `pkg/hrstore` — but both copies now delegate to
+`idgen.DeterministicID` so they produce the identical 17-char base62 id. `employeeId` is
+globally unique, so the reads/upsert key on it alone (no site term).
+
+1. Read by `employeeId = employeeIDFromGraphID(graphId)` (the same hash the HR sync
+   uses) — the authoritative key. Found → reuse (a `FindUserByEmployeeId` read).
+2. Else a unique display-name match (`FindUserByDisplayName` exactly-one across all
+   sites; ambiguous/zero falls through) — the fuzzy fallback. `employeeId` being global,
+   the name lookup is global too (no site term).
+3. Else create via `UpsertUserIdentities`, keyed on `employeeId`. Reaching this only for
+   genuinely-new users means the upsert never overwrites an existing identity — no clobber.
+
+`account = employeeId` for a created identity (no UPN at the message layer); the display
+name lands in `chineseName`, mirroring the HR mapping.
+
+## Idempotency
+
+Message id = deterministic hash of `roomId + Teams message id` (Teams ids are unique only per conversation, so the room scope prevents cross-room collisions) in
+valid `idgen` message-id format, so a re-run of the same batch (or a Nak redelivery)
+overwrites the same Cassandra row. Sender-create is an upsert on `employeeId`. Both make
+the multi-day sync safe to retry.
+
+A message with an empty `roomId` is `skipped`: there is no target room to place it, so it
+would orphan and is never persisted.
+
+## Error handling
+
+Per message, a malformed payload or transform/resolve failure is logged as that
+message's `status: error` and the batch continues (Ack) — a deterministic bad message
+must not poison-loop the whole batch. A message with no id, or no roomId, is `skipped`.
+An infra failure in the persist pipeline Naks the batch for redelivery.
+
+## Search indexing (reuse the message-sync consumer, no Mongo)
+
+Because the migration emits no `.created` event, the existing message-sync (user)
+collection **also binds `.teams.batch`** (`FilterSubjects` returns `[.*, .teams.batch]`;
+the bot collection does not) so one consumer indexes both live and migrated messages —
+no separate durable. `BuildAction` detects the payload by shape (a `TeamsBatchRequest`
+carries a non-empty `messages` array; a `MessageEvent` does not) and, for a batch, fans
+it out. It derives every field from the raw payload — crucially the author key
+`UserID = EmployeeIDFromGraphID(from.id)`, the same hash the migration writes as the
+user's `_id` — so it needs no Mongo lookup. It applies the same skips as the persist
+consumer (no id / no roomId; system messages) so the index matches what was persisted,
+and reuses the deterministic message id + `createdAt` as the ES external version, making
+a batch replay idempotent.
+
+## Testing
+
+- Unit: `DefaultTransformer` shapes (reply/system, HTML→md incl. unsupported fallback,
+  mention resolution, quoted-parent scoped by the outer room), reaction-shortcode table,
+  deterministic-id stability, sender-resolution matrix (display-name reuse /
+  ambiguous→create / create / cache), per-message status + Nak-on-infra.
+- Unit: merged `message-sync` `BuildAction` — teams batch fan-out + skips, and a normal
+  `MessageEvent` still routed to the live path.
+- Integration: batch → direct Cassandra write + idempotent re-run (single row).

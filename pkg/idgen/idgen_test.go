@@ -43,6 +43,14 @@ func TestGenerateID_Unique(t *testing.T) {
 	}
 }
 
+func TestDeterministicID(t *testing.T) {
+	a := idgen.DeterministicID([]byte("graph-1"))
+	assert.Len(t, a, 17)
+	assert.True(t, isBase62(a), "id %q contains non-base62 characters", a)
+	assert.Equal(t, a, idgen.DeterministicID([]byte("graph-1")), "same seed → same id")
+	assert.NotEqual(t, a, idgen.DeterministicID([]byte("graph-2")), "distinct seeds → distinct ids")
+}
+
 func TestGenerateMessageID_LengthAndAlphabet(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		id := idgen.GenerateMessageID()

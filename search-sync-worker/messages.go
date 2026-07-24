@@ -14,6 +14,8 @@ import (
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // parentCreatedAtResolver resolves a thread parent's authoritative createdAt; ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
@@ -24,22 +26,30 @@ type parentCreatedAtResolver interface {
 // messageCollection implements Collection for message search sync; streamCfg + consumerName are
 // parameterized so one type consumes user or bot canonical streams. syncFrom is the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
-	indexPrefix    string
-	syncFrom       time.Time
-	devMode        bool
-	streamCfg      func(siteID string) jetstream.StreamConfig
-	consumerName   string
-	parentResolver parentCreatedAtResolver
+	indexPrefix string
+	siteID      string // for .teams.batch index docs (the normal path reads evt.SiteID per message)
+	syncFrom    time.Time
+	devMode     bool
+	// includeTeamsBatch adds the .teams.batch subject so this consumer also indexes
+	// migrated Teams history (message-worker persists it with no .created event). Only
+	// the user stream carries it; the bot stream does not.
+	includeTeamsBatch bool
+	streamCfg         func(siteID string) jetstream.StreamConfig
+	consumerName      string
+	parentResolver    parentCreatedAtResolver
 }
 
-// newMessageCollection binds to the user MESSAGES_CANONICAL stream.
-func newMessageCollection(indexPrefix string, syncFrom time.Time, devMode bool) *messageCollection {
+// newMessageCollection binds to the user MESSAGES_CANONICAL stream and also indexes
+// migrated Teams history off .teams.batch (one consumer covers both).
+func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMode bool) *messageCollection {
 	return &messageCollection{
-		indexPrefix:  indexPrefix,
-		syncFrom:     syncFrom,
-		devMode:      devMode,
-		streamCfg:    userMessagesStreamCfg,
-		consumerName: "message-sync",
+		indexPrefix:       indexPrefix,
+		siteID:            siteID,
+		syncFrom:          syncFrom,
+		devMode:           devMode,
+		includeTeamsBatch: true,
+		streamCfg:         userMessagesStreamCfg,
+		consumerName:      "message-sync",
 	}
 }
 
@@ -71,9 +81,15 @@ func (c *messageCollection) ConsumerName() string {
 	return c.consumerName
 }
 
-func (c *messageCollection) FilterSubjects(_ string) []string {
-	// Stream has a single subject pattern — no extra filtering needed.
-	return nil
+func (c *messageCollection) FilterSubjects(siteID string) []string {
+	// Single-token message events (created/updated/deleted/...). The user collection
+	// also binds the two-token `.teams.batch` migration envelope so one consumer
+	// indexes both live messages and migrated Teams history.
+	subs := []string{subject.MsgCanonicalMessageWildcard(siteID)}
+	if c.includeTeamsBatch {
+		subs = append(subs, subject.MsgCanonicalTeamsBatch(siteID))
+	}
+	return subs
 }
 
 func (c *messageCollection) TemplateName() string {
@@ -98,6 +114,13 @@ func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
 }
 
 func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
+	// A .teams.batch envelope carries a non-empty `messages` array; a normal
+	// MessageEvent has none. Detect by shape (BuildAction only sees the payload).
+	var batch model.TeamsBatchRequest
+	if err := json.Unmarshal(data, &batch); err == nil && len(batch.Messages) > 0 {
+		return c.buildTeamsActions(batch), nil
+	}
+
 	var evt model.MessageEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return nil, fmt.Errorf("unmarshal message event: %w", err)
@@ -135,6 +158,49 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 	if createdAt, ok := c.parentResolver.ResolveParentCreatedAt(context.Background(), evt.Message.ThreadParentMessageID); ok {
 		evt.Message.ThreadParentMessageCreatedAt = &createdAt
 	}
+}
+
+// buildTeamsActions fans one migrated-history batch out into one index action per
+// message, mirroring the migration writer's skips (no id / no roomId can't be addressed
+// idempotently; system messages carry no indexable content) so the index matches what
+// was persisted. The author key is derived straight from the Graph id hash — the same
+// _id the migration writes — so it needs no Mongo lookup.
+func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []searchengine.BulkAction {
+	actions := make([]searchengine.BulkAction, 0, len(req.Messages))
+	for _, raw := range req.Messages {
+		var tm teamsmigrate.Message
+		if err := json.Unmarshal(raw, &tm); err != nil {
+			continue // one malformed record must not drop its valid siblings
+		}
+		if tm.ID == "" || tm.RoomID == "" || tm.CreatedDateTime.IsZero() {
+			continue // can't address idempotently / no index bucket
+		}
+		if teamsmigrate.MessageType(tm.MessageType) != "" {
+			continue // system message — not indexed content
+		}
+		// UserAccount reuses the employeeId hash best-effort (no UPN at the message layer).
+		empID := teamsmigrate.EmployeeIDFromGraphID(tm.From.ID)
+		doc := MessageSearchIndex{
+			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
+			RoomID:      tm.RoomID,
+			SiteID:      c.siteID,
+			UserID:      empID,
+			UserAccount: empID,
+			Content:     teamsmigrate.BodyToContent(tm.Body),
+			CreatedAt:   tm.CreatedDateTime,
+		}
+		body, _ := json.Marshal(doc)
+		actions = append(actions, searchengine.BulkAction{
+			Action: searchengine.ActionIndex,
+			Index:  indexName(c.indexPrefix, tm.CreatedDateTime),
+			DocID:  doc.MessageID,
+			// Deterministic id + createdAt as the external version make a batch replay
+			// idempotent (a re-index of the same doc 409s, handled as success).
+			Version: tm.CreatedDateTime.UnixNano(),
+			Doc:     body,
+		})
+	}
+	return actions
 }
 
 // --- Message-specific internals ---

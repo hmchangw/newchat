@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
@@ -60,12 +59,10 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 
 func TestEmployeeIDFromGraphID(t *testing.T) {
 	got := EmployeeIDFromGraphID("u1")
-	// Deterministic 24-hex bson.ObjectID; same id → same key on every sync.
-	assert.Len(t, got, 24)
+	// Deterministic 17-char base62 (native-user id shape); same id → same key on every sync.
+	assert.Len(t, got, 17)
 	assert.Equal(t, got, EmployeeIDFromGraphID("u1"), "stable for the same Graph id")
 	assert.NotEqual(t, got, EmployeeIDFromGraphID("u2"), "distinct ids → distinct employeeIds")
-	_, err := bson.ObjectIDFromHex(got)
-	assert.NoError(t, err, "must be a valid bson.ObjectID")
 }
 
 func TestDefaultConverter_IdentityFieldsOnly(t *testing.T) {

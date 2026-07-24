@@ -32,7 +32,7 @@ services:
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - INPUT_STREAM=MESSAGES_CANONICAL_site1
-      - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.>
+      - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.*
     depends_on:
       - nats_site1
       - mongodb
