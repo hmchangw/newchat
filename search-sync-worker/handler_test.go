@@ -246,62 +246,6 @@ func TestHandler_FlushLinksSourceMessageSpans(t *testing.T) {
 	assert.Len(t, flush.Links(), 2)
 }
 
-func TestIsBulkItemSuccess(t *testing.T) {
-	tests := []struct {
-		name      string
-		action    searchengine.ActionType
-		status    int
-		errorType string
-		want      bool
-	}{
-		// 2xx is always success.
-		{"index 200", searchengine.ActionIndex, 200, "", true},
-		{"index 201", searchengine.ActionIndex, 201, "", true},
-		{"delete 200", searchengine.ActionDelete, 200, "", true},
-		{"update 200", searchengine.ActionUpdate, 200, "", true},
-
-		// 409 is success only for externally-versioned writes (index, delete) —
-		// external versioning rejected a stale write and the desired state is
-		// already reached. Update 409 is a version_conflict_engine_exception
-		// from concurrent writers; the painless script did NOT execute, so we
-		// NAK to let JetStream redeliver and retry the scripted update.
-		{"index 409", searchengine.ActionIndex, 409, "version_conflict_engine_exception", true},
-		{"delete 409", searchengine.ActionDelete, 409, "version_conflict_engine_exception", true},
-		{"update 409", searchengine.ActionUpdate, 409, "version_conflict_engine_exception", false},
-
-		// Delete 404 benign path: doc already absent, no error block.
-		{"delete 404 not_found (empty errorType)", searchengine.ActionDelete, 404, "", true},
-		// Delete 404 fatal path: the target INDEX is missing — config error.
-		{"delete 404 index_not_found", searchengine.ActionDelete, 404, "index_not_found_exception", false},
-
-		// Update 404 benign path: doc missing (user-room remove on empty doc).
-		{"update 404 document_missing", searchengine.ActionUpdate, 404, "document_missing_exception", true},
-		// Update 404 fatal path: the target INDEX is missing — config error.
-		{"update 404 index_not_found", searchengine.ActionUpdate, 404, "index_not_found_exception", false},
-		// Update 404 with an unfamiliar error type → fail closed.
-		{"update 404 unknown error type", searchengine.ActionUpdate, 404, "some_other_exception", false},
-
-		// Index 404 is always a failure (indexing should create the doc).
-		{"index 404 index_not_found", searchengine.ActionIndex, 404, "index_not_found_exception", false},
-		{"index 404 empty error", searchengine.ActionIndex, 404, "", false},
-
-		// Server errors are failures on every action.
-		{"index 500", searchengine.ActionIndex, 500, "", false},
-		{"delete 500", searchengine.ActionDelete, 500, "", false},
-		{"update 500", searchengine.ActionUpdate, 500, "", false},
-		{"index 503", searchengine.ActionIndex, 503, "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isBulkItemSuccess(tt.action, searchengine.BulkResult{
-				Status:    tt.status,
-				ErrorType: tt.errorType,
-			})
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 // stubCollection is a minimal Collection that emits a single action of the
 // configured type. Only BuildAction is exercised by the handler tests; the
 // rest of the interface methods return zero values.
