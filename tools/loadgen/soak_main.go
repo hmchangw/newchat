@@ -185,6 +185,9 @@ func newSoakRuntimeSelector(
 	if topology == nil || len(topology.Rooms) == 0 {
 		return nil, fmt.Errorf("soak topology has no rooms")
 	}
+	if cfg == nil {
+		return nil, fmt.Errorf("soak configuration is required")
+	}
 	picker, err := newSoakRoomPicker(seed, len(topology.Rooms))
 	if err != nil {
 		return nil, err

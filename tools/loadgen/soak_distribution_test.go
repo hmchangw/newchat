@@ -79,6 +79,43 @@ func TestNewSoakPayloadSizer_RejectsGatekeeperOverflow(t *testing.T) {
 	assert.Contains(t, err.Error(), "gatekeeper")
 }
 
+func TestNewSoakPayloadSizer_RejectsInvalidPercentileOrdering(t *testing.T) {
+	tests := []struct {
+		name   string
+		median int
+		p95    int
+		max    int
+	}{
+		{
+			name: "median does not exceed encryption overhead",
+			p95:  2048,
+			max:  4096,
+		},
+		{
+			name:   "p95 below median",
+			median: 2048,
+			p95:    1024,
+			max:    4096,
+		},
+		{
+			name:   "maximum below p95",
+			median: 1024,
+			p95:    2048,
+			max:    1500,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newSoakPayloadSizer(1, tt.median, tt.p95, tt.max)
+			require.Error(t, err)
+		})
+	}
+
+	assert.Equal(t, soakGCMTagBytes+2, modeledEncryptedPayloadBytes(0))
+	assert.Empty(t, soakContentOfSize(-1))
+}
+
 func TestSoakThreadBudgetSampler_TargetsP99AndHardCap(t *testing.T) {
 	sampler := newSoakThreadBudgetSampler(42)
 	const samples = 100000

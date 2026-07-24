@@ -1,4 +1,4 @@
-.PHONY: lint fmt test test-integration generate build validate-loadgen-k8s deps-up deps-down \
+.PHONY: lint fmt test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev \
         obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
@@ -74,6 +74,15 @@ ifdef SERVICE
 else
 	go test -race -tags integration ./...
 endif
+
+# Run only Cassandra Run A tests (unit + integration), then enforce the scoped
+# coverage contract. CLI/environment wiring and the Mongo adapter stay in the
+# Run A aggregate; the core threshold excludes those two boundary files.
+SOAK_COVERAGE_PROFILE ?= coverage-loadgen-soak.out
+coverage-loadgen-soak:
+	go test -race -tags integration -run Soak -coverprofile=$(SOAK_COVERAGE_PROFILE) ./tools/loadgen/...
+	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -min 80
+	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -exclude soak_main.go -exclude soak_store.go -min 90
 
 # Regenerate all mocks via go generate
 generate:

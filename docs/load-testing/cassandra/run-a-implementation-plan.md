@@ -973,12 +973,17 @@ make test SERVICE=pkg/subject
 make test SERVICE=tools/loadgen
 make test-integration SERVICE=tools/loadgen
 make test
-make test SERVICE=tools/loadgen GOFLAGS=-cover
+make coverage-loadgen-soak
 ```
 
-The loadgen package must report at least 80% unit-test coverage. Core soak
-selection, eligibility, retry, and state-transition logic should target 90% or
-higher meaningful coverage.
+The scoped coverage target must report at least 80% statement coverage across
+the Run A `soak_*.go` files using unit and integration tests. It must also
+report at least 90% meaningful coverage for the Run A core after excluding
+the CLI/environment boundary (`soak_main.go`) and Mongo adapter
+(`soak_store.go`). The existing loadgen modes share the same large
+`package main`; their package-wide percentage is tracked as a no-regression
+baseline rather than requiring this Cassandra-only change to repay unrelated
+legacy coverage debt.
 
 Also run the Kubernetes manifest validation Make target added in Task 16 and
 build the existing loadgen Dockerfile.

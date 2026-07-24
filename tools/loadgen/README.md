@@ -234,6 +234,26 @@ For a staging acceptance smoke, use a short duration and verify:
 3. `mutation_target_missing` remains near zero after the warm-up.
 4. Teardown deletes only the selected run's owned Mongo topology.
 
+### Run A test coverage
+
+Run the scoped coverage gate from the repository root:
+
+```text
+make coverage-loadgen-soak
+```
+
+The target runs Run A unit and integration tests with the race detector, so
+Docker must be available for the shared MongoDB, NATS, and Cassandra test
+containers. It enforces at least 80% statement coverage across all
+`soak_*.go` files and at least 90% across the Run A core after excluding the
+CLI/environment boundary (`soak_main.go`) and Mongo adapter
+(`soak_store.go`). Those boundary files are exercised by integration tests
+and remain part of the 80% aggregate.
+
+The legacy loadgen modes share the same large `package main` and predate this
+gate. Their package-wide percentage is reported by the normal test command
+but is a no-regression observation, not a Run A acceptance criterion.
+
 ## Members workload (add-member benchmark)
 
 Benchmarks the add-member pipeline:

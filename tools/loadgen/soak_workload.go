@@ -277,6 +277,9 @@ func prepareSoakRun(
 	if err != nil {
 		return soakRunWindow{}, fmt.Errorf("load soak lifecycle: %w", err)
 	}
+	if manifest == nil {
+		return soakRunWindow{}, errSoakManifestNotFound
+	}
 	if manifest.State != soakManifestSeeded &&
 		manifest.State != soakManifestRunning &&
 		manifest.State != soakManifestCompleted {
@@ -316,6 +319,9 @@ func completeSoakRun(
 	manifest, err := store.GetManifest(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("load soak manifest for completion: %w", err)
+	}
+	if manifest == nil {
+		return errSoakManifestNotFound
 	}
 	completedAt := now.UTC()
 	manifest.State = soakManifestCompleted
