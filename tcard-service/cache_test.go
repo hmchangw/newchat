@@ -16,11 +16,11 @@ import (
 var (
 	homeCard = card{
 		Path: "home", CardVersion: "v1",
-		Template: json.RawMessage(`{"cardVersion":"v1","title":"Home","widgets":["news","weather"]}`),
+		Template: json.RawMessage(`{"_tcardVersion":"v1","title":"Home","widgets":["news","weather"]}`),
 	}
 	profileCard = card{
 		Path: "profile", CardVersion: "v2",
-		Template: json.RawMessage(`{"cardVersion":"v2","title":"Profile"}`),
+		Template: json.RawMessage(`{"_tcardVersion":"v2","title":"Profile"}`),
 	}
 )
 
@@ -146,7 +146,7 @@ func TestCardCache_DuplicateKeySkippedKeepsRest(t *testing.T) {
 func TestCardCache_SamePathDifferentVersionsCoexist(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockCardStore(ctrl)
-	homeV2 := card{Path: "home", CardVersion: "v2", Template: json.RawMessage(`{"cardVersion":"v2","title":"Home v2"}`)}
+	homeV2 := card{Path: "home", CardVersion: "v2", Template: json.RawMessage(`{"_tcardVersion":"v2","title":"Home v2"}`)}
 	store.EXPECT().ListCards(gomock.Any()).Return([]card{homeCard, homeV2}, nil)
 
 	cache := newCardCache()
@@ -197,7 +197,7 @@ func TestCardCache_AddConcurrentWithLoad(t *testing.T) {
 	_, err := cache.Load(context.Background(), store)
 	require.NoError(t, err)
 
-	extra := card{Path: "extra", CardVersion: "1.0.0", Template: json.RawMessage(`{"cardVersion":"1.0.0"}`)}
+	extra := card{Path: "extra", CardVersion: "1.0.0", Template: json.RawMessage(`{"_tcardVersion":"1.0.0"}`)}
 	var wg sync.WaitGroup
 	for range 100 {
 		wg.Add(2)
@@ -359,4 +359,118 @@ func TestCardCache_RefreshLoop(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("RefreshLoop did not stop on context cancel")
 	}
+}
+
+// listSeed is a depth-3 hierarchy with multiple versions of one card.
+func listSeed() *cardCache {
+	return cacheWith(
+		card{Path: "a/b/c", CardVersion: "0.0.1", Template: json.RawMessage(`{}`)},
+		card{Path: "a/b/c", CardVersion: "0.0.2", Template: json.RawMessage(`{}`)},
+		card{Path: "a/b/c", CardVersion: "0.0.10", Template: json.RawMessage(`{}`)},
+		card{Path: "a/b/d", CardVersion: "1.0.0", Template: json.RawMessage(`{}`)},
+		card{Path: "a/x/y", CardVersion: "2.0.0", Template: json.RawMessage(`{}`)},
+		card{Path: "z/w/v", CardVersion: "1.2.3", Template: json.RawMessage(`{}`)},
+	)
+}
+
+func TestCardCache_List(t *testing.T) {
+	tests := []struct {
+		name        string
+		prefix      string
+		wantCards   []string
+		wantFolders []string
+		wantExact   bool
+		wantFound   bool
+	}{
+		{
+			name: "root lists first segments as folders", prefix: "",
+			wantCards: []string{}, wantFolders: []string{"a", "z"}, wantFound: true,
+		},
+		{
+			name: "one segment lists two-segment folders", prefix: "a",
+			wantCards: []string{}, wantFolders: []string{"a/b", "a/x"}, wantFound: true,
+		},
+		{
+			name: "two segments list cards with every version in semver order", prefix: "a/b",
+			wantCards:   []string{"a/b/c@0.0.1", "a/b/c@0.0.2", "a/b/c@0.0.10", "a/b/d@1.0.0"},
+			wantFolders: []string{}, wantFound: true,
+		},
+		{
+			name: "full card path without version is an exact hit", prefix: "a/b/c",
+			wantCards: []string{}, wantFolders: []string{}, wantExact: true,
+		},
+		{
+			name: "unknown prefix finds nothing", prefix: "nope",
+			wantCards: []string{}, wantFolders: []string{},
+		},
+		{
+			name: "prefix deeper than any card finds nothing", prefix: "a/b/c/x",
+			wantCards: []string{}, wantFolders: []string{},
+		},
+		{
+			name: "partial segment is not a prefix match", prefix: "a/b/cc",
+			wantCards: []string{}, wantFolders: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := listSeed().List(tt.prefix)
+			assert.Equal(t, tt.wantCards, res.cards)
+			assert.Equal(t, tt.wantFolders, res.folders)
+			assert.Equal(t, tt.wantExact, res.exactPath)
+			assert.Equal(t, tt.wantFound, res.found)
+		})
+	}
+}
+
+func TestCardCache_List_EmptyAndUnloaded(t *testing.T) {
+	t.Run("never-loaded cache lists nothing", func(t *testing.T) {
+		res := newCardCache().List("")
+		assert.Equal(t, []string{}, res.cards)
+		assert.Equal(t, []string{}, res.folders)
+		assert.False(t, res.found)
+		assert.False(t, res.exactPath)
+	})
+
+	t.Run("loaded-but-empty cache lists nothing at root", func(t *testing.T) {
+		res := cacheWith().List("")
+		assert.Equal(t, []string{}, res.cards)
+		assert.Equal(t, []string{}, res.folders)
+		assert.False(t, res.found)
+	})
+}
+
+// Non-semver versions fall back to lexicographic order within a path.
+func TestCardCache_List_NonSemverVersionOrder(t *testing.T) {
+	c := cacheWith(
+		card{Path: "a/b/c", CardVersion: "v2", Template: json.RawMessage(`{}`)},
+		card{Path: "a/b/c", CardVersion: "v1", Template: json.RawMessage(`{}`)},
+	)
+	res := c.List("a/b")
+	assert.Equal(t, []string{"a/b/c@v1", "a/b/c@v2"}, res.cards)
+}
+
+// Pins the depth-generic scan (spec §4) on mixed-depth data — reachable only
+// via out-of-band writes: cards+folders together, and exactPath with children.
+func TestCardCache_List_MixedDepth(t *testing.T) {
+	c := cacheWith(
+		card{Path: "a/b", CardVersion: "1.0.0", Template: json.RawMessage(`{}`)},
+		card{Path: "a/b/c", CardVersion: "0.0.1", Template: json.RawMessage(`{}`)},
+		card{Path: "a/x/y", CardVersion: "2.0.0", Template: json.RawMessage(`{}`)},
+	)
+
+	t.Run("one prefix yields cards and folders together", func(t *testing.T) {
+		res := c.List("a")
+		assert.Equal(t, []string{"a/b@1.0.0"}, res.cards)
+		assert.Equal(t, []string{"a/b", "a/x"}, res.folders)
+		assert.False(t, res.exactPath)
+		assert.True(t, res.found)
+	})
+
+	t.Run("exact card path with deeper children reports both", func(t *testing.T) {
+		res := c.List("a/b")
+		assert.True(t, res.exactPath, "a/b is itself a cached card path")
+		assert.Equal(t, []string{"a/b/c@0.0.1"}, res.cards, "children are still scanned")
+		assert.True(t, res.found)
+	})
 }
