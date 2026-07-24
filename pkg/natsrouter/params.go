@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // Params holds named tokens extracted from a NATS subject at request time.
@@ -88,17 +89,28 @@ func parsePattern(pattern string) route {
 // extractParams scans the subject by "." positions and pulls values
 // from the positions recorded in the route's params map.
 // Uses index scanning instead of strings.Split to avoid a []string allocation.
-func (r route) extractParams(subject string) Params {
+//
+// The "account" param arrives in NATS transport form — a ".bot" bot's account
+// is minted into its JWT with dots replaced by underscores (weather.bot →
+// weather_bot), so the subject token is the encoded form. It is decoded back to
+// the requester's real account (subject.DecodeAccount) so every router-registered
+// handler gets the true identity / data key. A no-op for every non-bot account;
+// this one choke point covers all router RPCs. Other params are never decoded.
+func (r route) extractParams(subj string) Params {
 	if len(r.params) == 0 {
 		return Params{}
 	}
 	values := make(map[string]string, len(r.params))
 	pos := 0
 	tokenStart := 0
-	for i := 0; i <= len(subject); i++ {
-		if i == len(subject) || subject[i] == '.' {
+	for i := 0; i <= len(subj); i++ {
+		if i == len(subj) || subj[i] == '.' {
 			if name, ok := r.params[pos]; ok {
-				values[name] = subject[tokenStart:i]
+				val := subj[tokenStart:i]
+				if name == "account" {
+					val = subject.DecodeAccount(val)
+				}
+				values[name] = val
 			}
 			pos++
 			tokenStart = i + 1
