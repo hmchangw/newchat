@@ -74,7 +74,7 @@ type GetMessagesByIDsResponse struct {
 }
 
 // RoomsGetRequest/PreviewMessage/RoomsGetResponse are shared with user-service (which
-// embeds PreviewMessage into SubscriptionRoom.LastMessage), so the wire types live in pkg/model.
+// embeds PreviewMessage into SubscriptionRoom.PreviewMessage), so the wire types live in pkg/model.
 type RoomsGetRequest = model.RoomsGetRequest
 type PreviewMessage = model.PreviewMessage
 type RoomsGetResponse = model.RoomsGetResponse

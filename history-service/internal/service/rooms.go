@@ -136,7 +136,7 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 		MessageID:   m.MessageID,
 		Sender:      sender,
 		Content:     m.Msg,
-		CreatedAt:   m.CreatedAt.UTC().UnixMilli(),
+		CreatedAt:   m.CreatedAt.UTC(),
 		Attachments: m.DecodedAttachments,
 		Mentions:    mentions,
 		VisibleTo:   m.VisibleTo,

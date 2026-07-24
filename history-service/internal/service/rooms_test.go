@@ -77,7 +77,7 @@ func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	assert.Equal(t, "m1", lm.MessageID)
 	assert.Equal(t, "hello", lm.Content)
 	assert.Equal(t, "alice", lm.Sender.Account)
-	assert.Equal(t, roomLastMsgAt.UnixMilli(), lm.CreatedAt)
+	assert.Equal(t, roomLastMsgAt.UTC(), lm.CreatedAt)
 }
 
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {

@@ -102,12 +102,12 @@ type RoomsGetRequest struct {
 // enriched for the room-list preview. Content is the full message body; the client
 // truncates for display. Sender/mentions carry render-ready wire Participants (a bot
 // sender's displayName is its app name). Shared wire type: history-service's rooms.get
-// RPC produces it, user-service's subscription.list embeds it (SubscriptionRoom.LastMessage).
+// RPC produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
 type PreviewMessage struct {
 	MessageID   string                 `json:"messageId"`
 	Sender      Participant            `json:"sender"`
 	Content     string                 `json:"content"`
-	CreatedAt   int64                  `json:"createdAt"` // UTC millis
+	CreatedAt   time.Time              `json:"createdAt"`
 	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
 	Mentions    []Participant          `json:"mentions,omitempty"`
 	// VisibleTo is surfaced now; its write-path (populating the column) is a separate

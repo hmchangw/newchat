@@ -120,7 +120,7 @@ type SubscriptionRoom struct {
 	// LastMessage is resolved at read time via history-service's rooms.get RPC
 	// (A2 — no denormalized write path). Omitted when the room has no message,
 	// the enriching site RPC degraded, or the room is soft-deleted (Room==nil).
-	LastMessage *PreviewMessage `json:"lastMessage,omitempty" bson:"-"`
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // SubscriptionHRInfo carries the counterpart's HR-directory record on a DM subscription for sidebar/header rendering.

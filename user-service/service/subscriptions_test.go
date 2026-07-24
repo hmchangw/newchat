@@ -1006,14 +1006,14 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}).
-		Return(map[string]model.PreviewMessage{"r1": {MessageID: "m9", Content: "hi", CreatedAt: 123}}, nil)
+		Return(map[string]model.PreviewMessage{"r1": {MessageID: "m9", Content: "hi", CreatedAt: time.Unix(123, 0).UTC()}}, nil)
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err)
 	require.Len(t, resp.Subscriptions, 1)
 	room := resp.Subscriptions[0].Base().Room
 	require.NotNil(t, room)
-	require.NotNil(t, room.LastMessage, "last message attached from rooms.get")
-	assert.Equal(t, "m9", room.LastMessage.MessageID)
+	require.NotNil(t, room.PreviewMessage, "last message attached from rooms.get")
+	assert.Equal(t, "m9", room.PreviewMessage.MessageID)
 }
 
 // includeLastMessage:false skips the rooms.get RPC entirely.
@@ -1032,7 +1032,7 @@ func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
 	require.Len(t, resp.Subscriptions, 1)
 	room := resp.Subscriptions[0].Base().Room
 	require.NotNil(t, room)
-	assert.Nil(t, room.LastMessage, "excluded last message stays nil")
+	assert.Nil(t, room.PreviewMessage, "excluded last message stays nil")
 }
 
 func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
@@ -1050,5 +1050,5 @@ func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	require.Len(t, resp.Subscriptions, 1)
 	room := resp.Subscriptions[0].Base().Room
 	require.NotNil(t, room)
-	assert.Nil(t, room.LastMessage, "degraded site leaves LastMessage nil")
+	assert.Nil(t, room.PreviewMessage, "degraded site leaves LastMessage nil")
 }
