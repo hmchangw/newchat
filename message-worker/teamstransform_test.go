@@ -64,7 +64,7 @@ func TestDefaultTransformer_Shapes(t *testing.T) {
 		msg, err := tr.Transform(context.Background(), raw)
 		require.NoError(t, err)
 		require.NotNil(t, msg.QuotedParentMessage)
-		assert.Equal(t, teamsmigrate.DeterministicMessageID("p1"), msg.QuotedParentMessage.MessageID)
+		assert.Equal(t, teamsmigrate.DeterministicMessageID("r1", "p1"), msg.QuotedParentMessage.MessageID)
 		assert.Equal(t, "r1", msg.QuotedParentMessage.RoomID)
 		assert.Equal(t, "parent", msg.QuotedParentMessage.Msg)
 		assert.Equal(t, "u2", msg.QuotedParentMessage.Sender.Account)

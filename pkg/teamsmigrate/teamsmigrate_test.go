@@ -42,9 +42,10 @@ func TestEmployeeIDFromGraphID_Deterministic(t *testing.T) {
 }
 
 func TestDeterministicMessageID_Stable(t *testing.T) {
-	a := DeterministicMessageID("tm-1")
-	assert.Equal(t, a, DeterministicMessageID("tm-1"), "same teams id → same message id")
-	assert.NotEqual(t, a, DeterministicMessageID("tm-2"))
+	a := DeterministicMessageID("r1", "tm-1")
+	assert.Equal(t, a, DeterministicMessageID("r1", "tm-1"), "same room+teams id → same message id")
+	assert.NotEqual(t, a, DeterministicMessageID("r1", "tm-2"))
+	assert.NotEqual(t, a, DeterministicMessageID("r2", "tm-1"), "same teams id in a different room → different id (no cross-room collision)")
 	assert.True(t, isValidBase62MessageID(a), "valid message-id format: %q", a)
 }
 

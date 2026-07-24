@@ -103,8 +103,8 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, raw json.RawMessage)
 		res.Status, res.Error = model.TeamsBatchError, "transform failed"
 		return res, nil //nolint:nilerr // per-message transform error is isolated, not a batch Nak
 	}
-	// Teams message ids are globally unique → hash the id alone for a stable, idempotent row id.
-	msg.ID = teamsmigrate.DeterministicMessageID(head.ID)
+	// Teams ids are unique only per conversation → scope by roomId to avoid collisions.
+	msg.ID = teamsmigrate.DeterministicMessageID(head.RoomID, head.ID)
 
 	// Cache hit after Transform (same sender key), so it adds no store round trip.
 	sender, err := h.resolver.resolve(ctx, head.From.ID, head.From.DisplayName)
