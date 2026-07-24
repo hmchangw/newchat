@@ -27,7 +27,7 @@ func TestNewESRead_Integration(t *testing.T) {
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
 	coll := newMessageCollection(prefix, time.Time{}, true)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(messageTemplateBody(prefix, true))))
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.MessageTemplateBody(prefix, true))))
 	index := prefix + "-2026-03"
 	preCreateIndex(t, esURL, index)
 	waitForClusterGreen(t, esURL, 120*time.Second)

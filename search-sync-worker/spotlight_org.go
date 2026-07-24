@@ -172,7 +172,7 @@ func spotlightOrgTemplateBody(indexName string, devMode bool) json.RawMessage {
 			},
 			"mappings": map[string]any{
 				"dynamic":    false,
-				"properties": esPropertiesFromStruct[SpotlightOrgIndex](),
+				"properties": searchindex.EsPropertiesFromStruct[SpotlightOrgIndex](),
 			},
 		},
 	}

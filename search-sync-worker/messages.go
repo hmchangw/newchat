@@ -75,11 +75,11 @@ func (c *messageCollection) FilterSubjects(_ string) []string {
 }
 
 func (c *messageCollection) TemplateName() string {
-	return fmt.Sprintf("%s_template", searchindex.StripVersionBase(c.indexPrefix))
+	return searchindex.MessageTemplateName(c.indexPrefix)
 }
 
 func (c *messageCollection) TemplateBody() json.RawMessage {
-	return messageTemplateBody(c.indexPrefix, c.devMode)
+	return searchindex.MessageTemplateBody(c.indexPrefix, c.devMode)
 }
 
 // StoredScripts returns nil — message indexing uses plain index/delete bulk actions with no painless scripts.
@@ -91,7 +91,7 @@ func (c *messageCollection) StoredScripts() map[string]json.RawMessage {
 // monthly indices; the same pattern the template targets.
 func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
 	// Error discarded: input is a static map of literals, marshal cannot fail.
-	body, _ := json.Marshal(map[string]any{"properties": messageTemplateProperties()})
+	body, _ := json.Marshal(map[string]any{"properties": searchindex.EsPropertiesFromStruct[searchindex.MessageDoc]()})
 	return searchindex.IndexPattern(c.indexPrefix), body
 }
 
@@ -194,61 +194,5 @@ func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengin
 func buildDocument(evt *model.MessageEvent) json.RawMessage {
 	doc := newMessageSearchIndex(evt)
 	data, _ := json.Marshal(doc)
-	return data
-}
-
-// messageTemplateProperties generates ES mapping properties from MessageDoc struct tags. The `es` tag is the source of truth.
-func messageTemplateProperties() map[string]any {
-	return esPropertiesFromStruct[searchindex.MessageDoc]()
-}
-
-func messageTemplateBody(prefix string, devMode bool) json.RawMessage {
-	shards := 4
-	replicas := 2
-	if devMode {
-		shards = 1
-		replicas = 0
-	}
-	tmpl := map[string]any{
-		"index_patterns": []string{searchindex.IndexPattern(prefix)},
-		"template": map[string]any{
-			"settings": map[string]any{
-				"index": map[string]any{
-					"number_of_shards":   shards,
-					"number_of_replicas": replicas,
-					"refresh_interval":   "30s",
-				},
-				"analysis": map[string]any{
-					"analyzer": map[string]any{
-						"custom_analyzer": map[string]any{
-							"type":        "custom",
-							"tokenizer":   "underscore_preserving",
-							"filter":      []string{"underscore_subword", "cjk_bigram", "lowercase"},
-							"char_filter": []string{"html_strip"},
-						},
-					},
-					"tokenizer": map[string]any{
-						"underscore_preserving": map[string]any{
-							"type":    "pattern",
-							"pattern": `[\s,;!?()\[\]{}"'<>]+`,
-						},
-					},
-					"filter": map[string]any{
-						"underscore_subword": map[string]any{
-							"type":                 "word_delimiter_graph",
-							"split_on_case_change": false,
-							"split_on_numerics":    false,
-							"preserve_original":    true,
-						},
-					},
-				},
-			},
-			"mappings": map[string]any{
-				"dynamic":    false,
-				"properties": messageTemplateProperties(),
-			},
-		},
-	}
-	data, _ := json.Marshal(tmpl)
 	return data
 }

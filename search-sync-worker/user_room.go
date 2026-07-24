@@ -25,11 +25,11 @@ func (c *userRoomCollection) ConsumerName() string {
 }
 
 func (c *userRoomCollection) TemplateName() string {
-	return fmt.Sprintf("%s_template", c.indexName)
+	return searchindex.UserRoomTemplateName(c.indexName)
 }
 
 func (c *userRoomCollection) TemplateBody() json.RawMessage {
-	return userRoomTemplateBody(c.indexName)
+	return searchindex.UserRoomTemplateBody(c.indexName)
 }
 
 // StoredScripts registers the add/remove painless scripts as ES stored scripts; BuildAction
@@ -92,39 +92,4 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 		}
 	}
 	return actions, nil
-}
-
-// userRoomTemplateBody builds the ES index template for user-room; index_patterns is the exact
-// configured index name so a custom USER_ROOM_INDEX still maps correctly, and roomTimestamps is `flattened` to avoid per-key mapping bloat.
-func userRoomTemplateBody(indexName string) json.RawMessage {
-	tmpl := map[string]any{
-		"index_patterns": []string{indexName},
-		"template": map[string]any{
-			"settings": map[string]any{
-				"index": map[string]any{
-					"number_of_shards":   1,
-					"number_of_replicas": 1,
-				},
-			},
-			"mappings": map[string]any{
-				"dynamic": false,
-				"properties": map[string]any{
-					"userAccount": map[string]any{"type": "keyword"},
-					"rooms": map[string]any{
-						"type": "text",
-						"fields": map[string]any{
-							"keyword": map[string]any{"type": "keyword", "ignore_above": 256},
-						},
-					},
-					// restrictedRooms is a rid→historySharedSince map; `flattened` keeps the mapping stable regardless of rid count — same approach as roomTimestamps.
-					"restrictedRooms": map[string]any{"type": "flattened"},
-					"roomTimestamps":  map[string]any{"type": "flattened"},
-					"createdAt":       map[string]any{"type": "date"},
-					"updatedAt":       map[string]any{"type": "date"},
-				},
-			},
-		},
-	}
-	data, _ := json.Marshal(tmpl)
-	return data
 }

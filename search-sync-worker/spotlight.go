@@ -30,11 +30,11 @@ func (c *spotlightCollection) ConsumerName() string {
 }
 
 func (c *spotlightCollection) TemplateName() string {
-	return fmt.Sprintf("%s_template", searchindex.StripVersionBase(c.indexName))
+	return searchindex.SpotlightTemplateName(c.indexName)
 }
 
 func (c *spotlightCollection) TemplateBody() json.RawMessage {
-	return spotlightTemplateBody(c.indexName, c.devMode)
+	return searchindex.SpotlightTemplateBody(c.indexName, c.devMode)
 }
 
 // BuildAction fans a member_added / member_removed event out into one ES
@@ -121,53 +121,4 @@ func convertJoinedAt(joinedAtMs int64) time.Time {
 		return time.UnixMilli(joinedAtMs).UTC()
 	}
 	return time.Time{}
-}
-
-// spotlightTemplateBody builds the ES index template. The wildcard
-// index_patterns lets a single template cover the current versioned
-// index and any future reindex targets.
-func spotlightTemplateBody(indexName string, devMode bool) json.RawMessage {
-	shards := 3
-	replicas := 1
-	if devMode {
-		shards = 1
-		replicas = 0
-	}
-	tmpl := map[string]any{
-		"index_patterns": []string{searchindex.IndexPattern(indexName)},
-		"template": map[string]any{
-			"settings": map[string]any{
-				"index": map[string]any{
-					"number_of_shards":   shards,
-					"number_of_replicas": replicas,
-				},
-				"analysis": map[string]any{
-					"analyzer": map[string]any{
-						"custom_analyzer": map[string]any{
-							"type":      "custom",
-							"tokenizer": "custom_tokenizer",
-							"filter":    []string{"lowercase"},
-						},
-					},
-					"tokenizer": map[string]any{
-						// Whitespace tokenizer only supports max_token_length
-						// (default 255). `token_chars` is valid on ngram /
-						// edge_ngram tokenizers, not whitespace — sending it
-						// here would reject the UpsertTemplate request.
-						"custom_tokenizer": map[string]any{
-							"type": "whitespace",
-						},
-					},
-				},
-			},
-			"mappings": map[string]any{
-				"dynamic":    false,
-				"properties": esPropertiesFromStruct[searchindex.SpotlightDoc](),
-			},
-		},
-	}
-	// tmpl is built entirely from map/slice/string/int literals that are
-	// always JSON-marshalable, so the error cannot occur in practice.
-	data, _ := json.Marshal(tmpl)
-	return data
 }
