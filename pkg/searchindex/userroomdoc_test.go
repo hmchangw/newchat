@@ -39,6 +39,7 @@ func TestBuildAddRoomUpdateBody(t *testing.T) {
 	assert.Equal(t, "room1", decoded.Script.Params["rid"])
 	assert.InDelta(t, 1000, decoded.Script.Params["ts"], 0)
 	assert.InDelta(t, 0, decoded.Script.Params["hss"], 0)
+	assert.Equal(t, "alice", decoded.Upsert.UserAccount)
 }
 
 func TestBuildAddRoomUpdateBody_RestrictedRoomSeedsRestrictedRoomsMap(t *testing.T) {
@@ -50,6 +51,7 @@ func TestBuildAddRoomUpdateBody_RestrictedRoomSeedsRestrictedRoomsMap(t *testing
 	require.NoError(t, json.Unmarshal(body, &decoded))
 	assert.Empty(t, decoded.Upsert.Rooms)
 	assert.Equal(t, int64(500), decoded.Upsert.RestrictedRooms["room1"])
+	assert.Equal(t, "alice", decoded.Upsert.UserAccount)
 }
 
 func TestBuildAddRoomUpdateBody_UnrestrictedRoomSeedsRoomsArray(t *testing.T) {
@@ -61,6 +63,7 @@ func TestBuildAddRoomUpdateBody_UnrestrictedRoomSeedsRoomsArray(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &decoded))
 	assert.Equal(t, []string{"room1"}, decoded.Upsert.Rooms)
 	assert.Empty(t, decoded.Upsert.RestrictedRooms)
+	assert.Equal(t, "alice", decoded.Upsert.UserAccount)
 }
 
 func TestBuildRemoveRoomUpdateBody_NoUpsertSeed(t *testing.T) {
