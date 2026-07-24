@@ -44,9 +44,12 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 256, cc.MaxWaiting)
 	})
 
-	t.Run("filter subject restricts to .created", func(t *testing.T) {
+	t.Run("filters to .created + .teams.batch, excludes edits/deletes", func(t *testing.T) {
 		cc := buildConsumerConfig(stream.ConsumerSettings{}, "site-a")
-		assert.Equal(t, subject.MsgCanonicalCreated("site-a"), cc.FilterSubject,
-			"message-worker must only consume canonical .created subjects to avoid re-processing edits/deletes")
+		assert.Empty(t, cc.FilterSubject, "single FilterSubject unset when using FilterSubjects")
+		assert.ElementsMatch(t,
+			[]string{subject.MsgCanonicalCreated("site-a"), subject.MsgCanonicalTeamsBatch("site-a")},
+			cc.FilterSubjects,
+			"one durable serves the live .created feed + the one-time .teams.batch migration; .updated/.deleted stay excluded")
 	})
 }
