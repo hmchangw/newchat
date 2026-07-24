@@ -71,6 +71,24 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 
 	first, err := seedSoak(ctx, store, keyStore, &input, newProductionSoakIDs())
 	require.NoError(t, err)
+	firstRoomID := first.Rooms[0].ID
+	for collection, document := range map[string]any{
+		"thread_rooms": bson.D{
+			{Key: "_id", Value: "old-thread"},
+			{Key: "roomId", Value: firstRoomID},
+		},
+		"thread_subscriptions": bson.D{
+			{Key: "_id", Value: "old-thread-sub"},
+			{Key: "roomId", Value: firstRoomID},
+		},
+		"room_data_keys": bson.D{
+			{Key: "_id", Value: firstRoomID},
+			{Key: "wrappedDEK", Value: []byte("old-wrapped-dek")},
+		},
+	} {
+		_, err := db.Collection(collection).InsertOne(ctx, document)
+		require.NoError(t, err, collection)
+	}
 	second, err := seedSoak(ctx, store, keyStore, &input, newProductionSoakIDs())
 	require.NoError(t, err)
 
@@ -96,6 +114,22 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 		},
 	))
 	assert.Equal(t, len(first.Rooms), len(second.Rooms))
+	for _, collection := range []string{
+		"thread_rooms",
+		"thread_subscriptions",
+		"room_data_keys",
+	} {
+		assert.Equal(t, int64(0), countDocuments(
+			t,
+			db.Collection(collection),
+			bson.D{{Key: "roomId", Value: firstRoomID}},
+		), collection)
+	}
+	assert.Equal(t, int64(0), countDocuments(
+		t,
+		db.Collection("room_data_keys"),
+		bson.D{{Key: "_id", Value: firstRoomID}},
+	))
 
 	_, found := findIndex(ctx, t, roomsCollection, indexName)
 	assert.True(t, found)

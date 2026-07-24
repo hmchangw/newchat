@@ -95,6 +95,33 @@ func (s *mongoSoakStore) BorrowUsers(
 
 func (s *mongoSoakStore) ResetOwned(ctx context.Context, runID string) error {
 	filter := bson.D{{Key: "soakRunId", Value: runID}}
+	cursor, err := s.db.Collection("rooms").Find(
+		ctx,
+		filter,
+		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}),
+	)
+	if err != nil {
+		return fmt.Errorf("find prior rooms owned by soak run %q: %w", runID, err)
+	}
+	var priorRooms []struct {
+		ID string `bson:"_id"`
+	}
+	if err := cursor.All(ctx, &priorRooms); err != nil {
+		_ = cursor.Close(ctx)
+		return fmt.Errorf("decode prior rooms owned by soak run %q: %w", runID, err)
+	}
+	if err := cursor.Close(ctx); err != nil {
+		return fmt.Errorf("close prior soak room cursor: %w", err)
+	}
+	roomIDs := make([]string, len(priorRooms))
+	for i := range priorRooms {
+		roomIDs[i] = priorRooms[i].ID
+	}
+	for _, batch := range chunkSoakRoomIDs(roomIDs, soakOwnershipChunkSize) {
+		if err := s.DeleteOwnedRoomBatch(ctx, runID, batch); err != nil {
+			return fmt.Errorf("delete prior soak room artifacts: %w", err)
+		}
+	}
 	for _, collection := range []string{"subscriptions", "rooms", soakOwnershipCollection} {
 		if _, err := s.db.Collection(collection).DeleteMany(ctx, filter); err != nil {
 			return fmt.Errorf("delete %s owned by soak run %q: %w", collection, runID, err)
