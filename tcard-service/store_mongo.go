@@ -21,19 +21,19 @@ func newMongoCardStore(db *mongo.Database) *mongoCardStore {
 	return &mongoCardStore{cards: db.Collection("cards")}
 }
 
-// EnsureIndexes enforces (path, cardVersion) uniqueness so two docs can't claim
-// one version. The data-type `version` field is unrelated and is not indexed.
+// EnsureIndexes enforces (path, _tcardVersion) uniqueness so two docs can't
+// claim one version. The data-type `version` field is unrelated, not indexed.
 func (s *mongoCardStore) EnsureIndexes(ctx context.Context) error {
 	if _, err := s.cards.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "path", Value: 1}, {Key: "cardVersion", Value: 1}},
+		Keys:    bson.D{{Key: "path", Value: 1}, {Key: "_tcardVersion", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
-		return fmt.Errorf("ensure cards (path, cardVersion) unique index: %w", err)
+		return fmt.Errorf("ensure cards (path, _tcardVersion) unique index: %w", err)
 	}
 	return nil
 }
 
-// ListCards returns every card keyed by (path, cardVersion), each rendered to
+// ListCards returns every card keyed by (path, _tcardVersion), each rendered to
 // relaxed ext-JSON minus _id and path; docs missing either key are skipped.
 func (s *mongoCardStore) ListCards(ctx context.Context) ([]card, error) {
 	proj := options.Find().SetProjection(bson.D{{Key: "_id", Value: 0}})
@@ -54,7 +54,7 @@ func (s *mongoCardStore) ListCards(ctx context.Context) ([]card, error) {
 			return nil, err
 		}
 		if !ok {
-			slog.Warn("card document missing a string path or cardVersion, skipping")
+			slog.Warn("card document missing a string path or _tcardVersion, skipping")
 			continue
 		}
 		cards = append(cards, c)
@@ -65,10 +65,10 @@ func (s *mongoCardStore) ListCards(ctx context.Context) ([]card, error) {
 	return cards, nil
 }
 
-// GetCard fetches one card by (path, cardVersion); ok is false if none matches.
+// GetCard fetches one card by (path, _tcardVersion); ok is false if none matches.
 func (s *mongoCardStore) GetCard(ctx context.Context, path, cardVersion string) (card, bool, error) {
 	proj := options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 0}})
-	filter := bson.D{{Key: "path", Value: path}, {Key: "cardVersion", Value: cardVersion}}
+	filter := bson.D{{Key: "path", Value: path}, {Key: "_tcardVersion", Value: cardVersion}}
 	var doc bson.D
 	if err := s.cards.FindOne(ctx, filter, proj).Decode(&doc); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -88,7 +88,7 @@ func docToCard(doc bson.D) (card, bool, error) {
 		switch e.Key {
 		case "path":
 			path, _ = e.Value.(string) // routing key, not template content — drop it
-		case "cardVersion":
+		case "_tcardVersion":
 			cardVersion, _ = e.Value.(string)
 			payload = append(payload, e)
 		default:
@@ -105,9 +105,9 @@ func docToCard(doc bson.D) (card, bool, error) {
 	return card{Path: path, CardVersion: cardVersion, Template: tmpl}, true, nil
 }
 
-// ListVersions returns the cardVersion of every document for path.
+// ListVersions returns the _tcardVersion of every document for path.
 func (s *mongoCardStore) ListVersions(ctx context.Context, path string) ([]string, error) {
-	proj := options.Find().SetProjection(bson.D{{Key: "cardVersion", Value: 1}, {Key: "_id", Value: 0}})
+	proj := options.Find().SetProjection(bson.D{{Key: "_tcardVersion", Value: 1}, {Key: "_id", Value: 0}})
 	cursor, err := s.cards.Find(ctx, bson.D{{Key: "path", Value: path}}, proj)
 	if err != nil {
 		return nil, fmt.Errorf("find card versions: %w", err)
@@ -116,7 +116,7 @@ func (s *mongoCardStore) ListVersions(ctx context.Context, path string) ([]strin
 
 	var versions []string
 	for cursor.Next(ctx) {
-		if v, ok := cursor.Current.Lookup("cardVersion").StringValueOK(); ok {
+		if v, ok := cursor.Current.Lookup("_tcardVersion").StringValueOK(); ok {
 			versions = append(versions, v)
 		}
 	}
@@ -133,7 +133,7 @@ func (s *mongoCardStore) InsertCard(ctx context.Context, doc *cardDoc) error {
 		return fmt.Errorf("decode body: %w", err)
 	}
 	d := bson.M{
-		"path": doc.Path, "cardVersion": doc.CardVersion,
+		"path": doc.Path, "_tcardVersion": doc.CardVersion,
 		"type": doc.Type, "schema": doc.Schema, "version": doc.Version, "body": body,
 	}
 	if len(doc.CardUsage) > 0 {

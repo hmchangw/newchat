@@ -16,14 +16,22 @@ import (
 )
 
 // templateSuffix is the required template filename suffix:
-// GET /api/v1/cards/{path}@{cardVersion}.template.json.
+// GET /api/v1/cards/{path}@{version}.template.json.
 const templateSuffix = ".template.json"
 
 // refreshResponse is the /api/v1/cards/refresh success payload: count is the
-// number of distinct (path, cardVersion) entries now in the cache.
+// number of distinct (path, _tcardVersion) entries now in the cache.
 type refreshResponse struct {
 	Status string `json:"status"`
 	Count  int    `json:"count"`
+}
+
+// listResponse is the directory-listing payload for suffix-less GETs: the
+// direct children of the requested prefix as full paths from root.
+type listResponse struct {
+	StatusCode int      `json:"statusCode"`
+	Cards      []string `json:"cards"`
+	Folders    []string `json:"folders"`
 }
 
 // CardHandler serves card template documents from the in-memory cache and
@@ -58,29 +66,31 @@ func (h *CardHandler) HandleRefresh(c *gin.Context) {
 	c.JSON(http.StatusOK, refreshResponse{Status: "ok", Count: n})
 }
 
-// HandleGetTemplate serves the cached card for {path}@{cardVersion} (a lock-free
-// lookup, no Mongo read). The version is required: no "@" is a bad request.
+// HandleGetTemplate serves the cached card for {path}@{version}.template.json
+// (lock-free, no Mongo read); without the suffix it serves a listing instead.
 func (h *CardHandler) HandleGetTemplate(c *gin.Context) {
 	ctx := reqCtx(c)
 
-	file := c.Param("file")
-	spec := strings.TrimSuffix(file, templateSuffix)
-	if spec == file {
-		errhttp.Write(ctx, c, errcode.BadRequest("card template file must be named {path}@{cardVersion}"+templateSuffix))
+	file := strings.Trim(c.Param("file"), "/")
+	if !strings.HasSuffix(file, templateSuffix) {
+		h.handleList(ctx, c, file)
 		return
 	}
+	spec := strings.TrimSuffix(file, templateSuffix)
 	if spec == "" {
 		errhttp.Write(ctx, c, errcode.BadRequest("card template file name is empty"))
 		return
 	}
+	// Split on the last "@": registration rejects "@" in paths, so this equals
+	// Index for all registered cards, but legacy data with "@" still resolves.
 	at := strings.LastIndex(spec, "@")
 	if at < 0 {
-		errhttp.Write(ctx, c, errcode.BadRequest("card template request must include a version: {path}@{cardVersion}"+templateSuffix))
+		errhttp.Write(ctx, c, errcode.BadRequest("card template request must include a version: {path}@{version}"+templateSuffix))
 		return
 	}
 	path, cardVersion := spec[:at], spec[at+1:]
 	if path == "" || cardVersion == "" {
-		errhttp.Write(ctx, c, errcode.BadRequest("card template path and cardVersion must both be non-empty"))
+		errhttp.Write(ctx, c, errcode.BadRequest("card template path and version must both be non-empty"))
 		return
 	}
 
@@ -90,6 +100,25 @@ func (h *CardHandler) HandleGetTemplate(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "application/json; charset=utf-8", tmpl)
+}
+
+// handleList lists prefix from the cache: 404 until first load and for unknown
+// prefixes, 400 for a card path missing its version, else 200 (root included).
+func (h *CardHandler) handleList(ctx context.Context, c *gin.Context, prefix string) {
+	if !h.cache.Ready() {
+		errhttp.Write(ctx, c, errcode.NotFound("no paths or cards exist"))
+		return
+	}
+	res := h.cache.List(prefix)
+	if res.exactPath {
+		errhttp.Write(ctx, c, errcode.BadRequest(fmt.Sprintf("no version specified for card %q", prefix)))
+		return
+	}
+	if !res.found && prefix != "" {
+		errhttp.Write(ctx, c, errcode.NotFound(fmt.Sprintf("given path %q for card list not found", prefix)))
+		return
+	}
+	c.JSON(http.StatusOK, listResponse{StatusCode: http.StatusOK, Cards: res.cards, Folders: res.folders})
 }
 
 // HandleHealth is the liveness probe: the process is up and serving HTTP.
@@ -128,21 +157,21 @@ func (h *CardHandler) HandleRegister(c *gin.Context) {
 	}
 
 	// This check and the insert aren't serialized: concurrent same-path registers
-	// can both insert different versions; only an exact (path, cardVersion) dupe fails. Accepted.
+	// can both insert different versions; only an exact (path, _tcardVersion) dupe fails. Accepted.
 	versions, err := h.store.ListVersions(ctx, doc.Path)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("list card versions: %w", err))
 		return
 	}
 	if !isHighest(doc.CardVersion, versions) {
-		errhttp.Write(ctx, c, errcode.Conflict("cardVersion must be the highest for this path"))
+		errhttp.Write(ctx, c, errcode.Conflict("_tcardVersion must be the highest for this path"))
 		return
 	}
 	if err := h.store.InsertCard(ctx, &doc); err != nil {
 		// Reachable only under a concurrent same-version register; otherwise
 		// isHighest already rejects an equal version.
 		if errors.Is(err, ErrDuplicateCard) {
-			errhttp.Write(ctx, c, errcode.Conflict("card already exists for this (path, cardVersion)"))
+			errhttp.Write(ctx, c, errcode.Conflict("card already exists for this (path, _tcardVersion)"))
 			return
 		}
 		errhttp.Write(ctx, c, err)
@@ -151,23 +180,27 @@ func (h *CardHandler) HandleRegister(c *gin.Context) {
 
 	// Add to the cache so the card is servable at once; a failure here is logged,
 	// not surfaced (it is persisted and appears on the next refresh).
-	if cd, ok, err := h.store.GetCard(ctx, doc.Path, doc.CardVersion); err != nil || !ok {
+	switch cd, ok, err := h.store.GetCard(ctx, doc.Path, doc.CardVersion); {
+	case err != nil:
 		slog.Warn("card registered but not cached",
 			"path", doc.Path, "cardVersion", doc.CardVersion, "error", err)
-	} else {
+	case !ok:
+		slog.Warn("card registered but not cached",
+			"path", doc.Path, "cardVersion", doc.CardVersion)
+	default:
 		h.cache.Add(cd)
 	}
 	c.JSON(http.StatusCreated, gin.H{"success": true})
 }
 
-// validateRegister runs the field/format checks: required fields, path safety,
-// semver cardVersion, pinned type/schema/version, and a non-empty array body.
+// validateRegister runs the field/format checks: required fields, a 3-segment
+// path, semver _tcardVersion, pinned type/schema/version, and a non-empty array body.
 func validateRegister(doc *cardDoc) error {
 	switch {
 	case doc.Path == "":
 		return errcode.BadRequest("path is required")
 	case doc.CardVersion == "":
-		return errcode.BadRequest("cardVersion is required")
+		return errcode.BadRequest("_tcardVersion is required")
 	case doc.Type == "":
 		return errcode.BadRequest("type is required")
 	case doc.Schema == "":
@@ -175,11 +208,20 @@ func validateRegister(doc *cardDoc) error {
 	case doc.Version == "":
 		return errcode.BadRequest("version is required")
 	}
-	if strings.Contains(doc.Path, "/") {
-		return errcode.BadRequest("path must not contain '/'")
+	if strings.Contains(doc.Path, "@") {
+		return errcode.BadRequest("path must not contain '@'")
+	}
+	segments := strings.Split(doc.Path, "/")
+	if len(segments) != 3 {
+		return errcode.BadRequest("path must have exactly 3 segments a/b/c")
+	}
+	for _, s := range segments {
+		if s == "" {
+			return errcode.BadRequest("path segments must be non-empty")
+		}
 	}
 	if _, ok := parseSemver(doc.CardVersion); !ok {
-		return errcode.BadRequest("cardVersion must be a semantic version a.b.c")
+		return errcode.BadRequest("_tcardVersion must be a semantic version a.b.c")
 	}
 	if doc.Type != registerType {
 		return errcode.BadRequest(`type must be "AdaptiveCard"`)

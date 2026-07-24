@@ -12,7 +12,7 @@ import (
 // rendered as JSON (schemaless templates stay raw JSON, not a typed struct).
 type card struct {
 	Path        string          `json:"path" bson:"path"`
-	CardVersion string          `json:"cardVersion" bson:"cardVersion"`
+	CardVersion string          `json:"_tcardVersion" bson:"_tcardVersion"`
 	Template    json.RawMessage `json:"template" bson:"template"`
 }
 
@@ -20,7 +20,7 @@ type card struct {
 // InsertCard builds the stored document explicitly).
 type cardDoc struct {
 	Path        string          `json:"path"`
-	CardVersion string          `json:"cardVersion"`
+	CardVersion string          `json:"_tcardVersion"`
 	CardUsage   json.RawMessage `json:"cardUsage"`
 	Type        string          `json:"type"`
 	Schema      string          `json:"schema"`

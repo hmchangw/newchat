@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -144,4 +146,77 @@ func (c *cardCache) RefreshLoop(ctx context.Context, store CardStore, at time.Ti
 		case <-timer.C:
 		}
 	}
+}
+
+// listResult is the outcome of scanning the snapshot for one prefix's direct
+// children (design spec §4: generic over depth, entries are full paths).
+type listResult struct {
+	cards     []string // "path@version", one per cached version, sorted
+	folders   []string // full folder paths, deduped, sorted
+	exactPath bool     // prefix names a cached card path exactly (no version)
+	found     bool     // at least one card or folder matched under prefix
+}
+
+// List returns prefix's direct children ("" = root; pre-trimmed of slashes):
+// one lock-free O(total entries) snapshot scan — fine for a bounded catalog.
+func (c *cardCache) List(prefix string) listResult {
+	res := listResult{cards: []string{}, folders: []string{}}
+	m := c.entries.Load()
+	if m == nil {
+		return res
+	}
+
+	type cardEntry struct{ path, version string }
+	var cards []cardEntry
+	folderSet := make(map[string]struct{})
+	needle := prefix + "/"
+	for k := range *m {
+		if k.path == prefix {
+			res.exactPath = true
+			continue
+		}
+		rest := k.path
+		if prefix != "" {
+			if !strings.HasPrefix(k.path, needle) {
+				continue
+			}
+			rest = k.path[len(needle):]
+		}
+		if i := strings.Index(rest, "/"); i >= 0 {
+			folder := rest[:i]
+			if prefix != "" {
+				folder = prefix + "/" + folder
+			}
+			folderSet[folder] = struct{}{}
+		} else {
+			cards = append(cards, cardEntry{path: k.path, version: k.cardVersion})
+		}
+	}
+
+	// Sort by path, then semver; non-semver versions (out-of-band writes only)
+	// sort after semver ones, lexicographic among themselves — a total order.
+	sort.Slice(cards, func(i, j int) bool {
+		if cards[i].path != cards[j].path {
+			return cards[i].path < cards[j].path
+		}
+		vi, oki := parseSemver(cards[i].version)
+		vj, okj := parseSemver(cards[j].version)
+		if oki && okj {
+			return vj.greater(vi)
+		}
+		if oki != okj {
+			return oki
+		}
+		return cards[i].version < cards[j].version
+	})
+	res.cards = make([]string, 0, len(cards))
+	for _, e := range cards {
+		res.cards = append(res.cards, e.path+"@"+e.version)
+	}
+	for f := range folderSet {
+		res.folders = append(res.folders, f)
+	}
+	sort.Strings(res.folders)
+	res.found = len(res.cards) > 0 || len(res.folders) > 0
+	return res
 }
