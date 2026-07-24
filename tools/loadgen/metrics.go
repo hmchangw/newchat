@@ -28,6 +28,14 @@ type Metrics struct {
 	BotRoomPublishErrors *prometheus.CounterVec
 	BotRoomE2ELatency    *prometheus.HistogramVec
 	BotRoomReadLatency   *prometheus.HistogramVec
+
+	SoakOperations            *prometheus.CounterVec
+	SoakRetries               *prometheus.CounterVec
+	SoakErrors                *prometheus.CounterVec
+	SoakRPCLatency            *prometheus.HistogramVec
+	SoakVerifications         *prometheus.CounterVec
+	SoakMutationTargetMissing prometheus.Counter
+	SoakSaturation            *prometheus.CounterVec
 }
 
 // NewMetrics constructs a dedicated Prometheus registry with all loadgen
@@ -105,6 +113,55 @@ func NewMetrics() *Metrics {
 		prometheus.HistogramOpts{Name: "loadgen_botroom_read_latency_seconds", Help: "room-service read latency by room size.", Buckets: buckets},
 		[]string{"size"},
 	)
+	m.SoakOperations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_operations_total",
+			Help: "Cassandra soak operations by bounded action, outcome, and phase.",
+		},
+		[]string{"action", "outcome", "phase"},
+	)
+	m.SoakRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_retries_total",
+			Help: "Cassandra soak retries by bounded action.",
+		},
+		[]string{"action"},
+	)
+	m.SoakErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_errors_total",
+			Help: "Cassandra soak failures by bounded action and error class.",
+		},
+		[]string{"action", "class"},
+	)
+	m.SoakRPCLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_soak_rpc_latency_seconds",
+			Help:    "Cassandra soak per-RPC end-to-end latency by bounded action.",
+			Buckets: buckets,
+		},
+		[]string{"action"},
+	)
+	m.SoakVerifications = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_verifications_total",
+			Help: "Cassandra soak read-back results by bounded action and result class.",
+		},
+		[]string{"action", "class"},
+	)
+	m.SoakMutationTargetMissing = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_mutation_target_missing_total",
+			Help: "Cassandra soak mutation targets still missing after the dedicated retry policy.",
+		},
+	)
+	m.SoakSaturation = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_saturation_total",
+			Help: "Cassandra soak operations skipped because the bounded in-flight budget was full.",
+		},
+		[]string{"lane"},
+	)
 	r.MustRegister(
 		m.Published, m.PublishErrors,
 		m.E1Latency, m.E2Latency,
@@ -113,6 +170,9 @@ func NewMetrics() *Metrics {
 		m.MemberE1Latency, m.MemberE2Latency, m.MemberRoomSize,
 		m.BotRoomPublished, m.BotRoomPublishErrors,
 		m.BotRoomE2ELatency, m.BotRoomReadLatency,
+		m.SoakOperations, m.SoakRetries, m.SoakErrors,
+		m.SoakRPCLatency, m.SoakVerifications,
+		m.SoakMutationTargetMissing, m.SoakSaturation,
 	)
 	return m
 }
