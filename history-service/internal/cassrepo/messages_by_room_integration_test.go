@@ -81,7 +81,7 @@ func seedMessage(t *testing.T, session *gocql.Session, roomID, messageID string,
 
 func TestRepository_GetMessagesBefore(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	seedMessages(t, session, "r1", base, 5)
@@ -97,7 +97,7 @@ func TestRepository_GetMessagesBefore(t *testing.T) {
 
 func TestRepository_GetMessagesBetweenDesc(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	seedMessages(t, session, "r1", base, 5)
@@ -113,7 +113,7 @@ func TestRepository_GetMessagesBetweenDesc(t *testing.T) {
 
 func TestRepository_GetMessagesAfter(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	seedMessages(t, session, "r1", base, 5)
@@ -129,7 +129,7 @@ func TestRepository_GetMessagesAfter(t *testing.T) {
 
 func TestRepository_GetAllMessagesAsc(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	seedMessages(t, session, "r1", base, 5)
@@ -153,7 +153,7 @@ func TestHybridRead_LegacyAndEncrypted(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-hybrid-1"
@@ -194,7 +194,7 @@ func TestHybridRead_LegacyAndEncrypted(t *testing.T) {
 
 func TestRepository_GetMessagesBefore_ThreadRoomID(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sizer := msgbucket.New(24 * time.Hour)
@@ -219,7 +219,7 @@ func TestRepository_GetMessagesBefore_ThreadRoomID(t *testing.T) {
 
 func TestGetMessagesBefore_CrossBucketWalkDESC(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "room-walk-desc"
@@ -250,7 +250,7 @@ func TestGetMessagesBefore_CrossBucketWalkDESC(t *testing.T) {
 
 func TestGetMessagesBefore_FloorTerminates(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "room-floor"
@@ -268,7 +268,7 @@ func TestGetMessagesBefore_FloorTerminates(t *testing.T) {
 
 func TestGetMessagesBefore_MaxBucketsCap(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 2, nil) // cap at 2 buckets
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 2, 10, nil) // cap at 2 buckets
 	ctx := context.Background()
 
 	roomID := "room-cap"
@@ -296,7 +296,7 @@ func TestGetMessages_DecryptErrorHaltsWalk(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	roomID := "r-halt-1"
 
@@ -341,7 +341,7 @@ func TestGetMessages_DecryptErrorHaltsWalk(t *testing.T) {
 func TestGetMessagesBefore_SysMsgDataRoundTrips(t *testing.T) {
 	session := setupCassandra(t)
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, nil)
+	repo := NewRepository(session, sizer, 365, 10, nil)
 	ctx := context.Background()
 
 	roomID := "room-sysmsg"

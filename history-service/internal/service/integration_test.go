@@ -157,7 +157,7 @@ func (stubRoomRepo) GetRoomUserCount(_ context.Context, _ string) (int, error) {
 
 func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
-	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	pub := &recordingPublisher{}
 	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
@@ -221,7 +221,7 @@ func TestEditMessage_Integration(t *testing.T) {
 
 func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
-	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	pub := &recordingPublisher{}
 	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
@@ -283,7 +283,7 @@ func TestDeleteMessage_Integration(t *testing.T) {
 
 func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
-	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	pub := &recordingPublisher{}
 	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
@@ -352,7 +352,7 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 
 func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.T) {
 	session := setupCassandra(t)
-	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	pub := &recordingPublisher{}
 	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
@@ -422,7 +422,7 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 // and visibleTo, then asserts rooms.get surfaces them on the enriched preview.
 func TestRoomsGet_Integration_EnrichesPreview(t *testing.T) {
 	session := setupCassandra(t)
-	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,

@@ -282,8 +282,11 @@ func (r *Repository) UpdateMessageContent(ctx context.Context, msg *models.Messa
 	return nil
 }
 
-// SoftDeleteMessage uses a Cassandra LWT on messages_by_id as a one-shot gate so only
-// the winning goroutine runs mirror-table updates and tcount decrement, preventing double-decrement.
+// SoftDeleteMessage uses a Cassandra LWT on messages_by_id as a one-shot gate: only the
+// goroutine that wins the CAS returns applied=true, so the caller publishes the canonical delete
+// event exactly once. The mirror-table updates and parent-tcount work it then runs are all
+// idempotent — SET deleted=true, and tcount is a recompute-and-set (never a decrement) — so a
+// redelivery/retry or reconcile that replays them converges rather than corrupting the count.
 // `IF deleted != true` matches NULL (message-worker never writes deleted) and false, excluding true.
 // The returned newThreadLastMsgAt is the newest surviving reply's createdAt (nil when none survive),
 // so the caller can publish it on the canonical event without a second read.
@@ -308,8 +311,8 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 		return time.Time{}, false, nil, nil, fmt.Errorf("cas update messages_by_id for message %s: %w", msg.MessageID, err)
 	}
 	if !applied {
-		// Concurrent delete won. Read the existing updated_at so the caller
-		// can return an accurate response timestamp.
+		// The delete already committed (a concurrent delete won, or this is a
+		// redelivery/retry). Read the winning delete's updated_at for the response.
 		var existing time.Time
 		if err := r.session.Query(
 			`SELECT updated_at FROM messages_by_id WHERE message_id = ?`,
@@ -321,9 +324,36 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 			}
 			return time.Time{}, false, nil, nil, fmt.Errorf("read updated_at after cas miss for message %s: %w", msg.MessageID, err)
 		}
+		// Concurrent-CAS race: findMessage saw deleted=false, but another delete's CAS
+		// committed first. That winner is already running applyDeleteMirrors; replay the
+		// idempotent mirror writes here too so mirrors are still repaired under a double
+		// fault (the winner's own mirror pass also failed). Sequential retries never reach
+		// this branch — DeleteMessage/MigrationDeleteMessage short-circuit on msg.Deleted
+		// and reconcile via ReconcileDeletedMirrors instead. applied stays false: the caller
+		// suppresses the duplicate publish and ignores the returned tcount/tlm here.
+		if _, _, rerr := r.applyDeleteMirrors(ctx, msg, existing, isThreadParent); rerr != nil {
+			return existing, false, nil, nil, fmt.Errorf("reconcile mirrors after cas miss for message %s: %w", msg.MessageID, rerr)
+		}
 		return existing, false, nil, nil, nil
 	}
 
+	// Post-LWT: the delete committed. applyDeleteMirrors' writes are idempotent, so on
+	// failure we still report applied=true — a retry (now a CAS-miss) replays it and
+	// repairs the stale mirror, distinct from a concurrent-CAS miss.
+	newTcount, newTlm, err := r.applyDeleteMirrors(ctx, msg, deletedAt, isThreadParent)
+	if err != nil {
+		return deletedAt, true, nil, nil, err
+	}
+	return deletedAt, true, newTcount, newTlm, nil
+}
+
+// applyDeleteMirrors idempotently propagates a committed soft-delete to every mirror
+// table (messages_by_room, thread_messages_by_thread, the TShow channel copy, and
+// pinned_messages_by_room) and recomputes the parent tcount+tlm. Every write is
+// idempotent — SET deleted=true, and countAndSetParentTcount recomputes-and-sets — so
+// it is safe to replay on a CAS-miss to repair a prior attempt's partial failure.
+// Returns the recomputed tcount/tlm (nil for a non-thread message).
+func (r *Repository) applyDeleteMirrors(ctx context.Context, msg *models.Message, deletedAt time.Time, isThreadParent bool) (*int, *time.Time, error) {
 	msgByRoomQ := deleteMsgByRoom
 	threadMsgQ := deleteThreadMsg
 	pinnedMsgQ := deletePinnedMsg
@@ -335,39 +365,52 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 
 	if msg.ThreadParentID == "" {
 		if err := r.deleteInMessagesByRoom(ctx, msgByRoomQ, msg, deletedAt); err != nil {
-			return time.Time{}, false, nil, nil, fmt.Errorf("update messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+			return nil, nil, fmt.Errorf("update messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 		}
 	} else {
 		if err := r.session.Query(threadMsgQ, deletedAt, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID).WithContext(ctx).Exec(); err != nil {
-			return time.Time{}, false, nil, nil, fmt.Errorf("update thread_messages_by_thread for message %s thread %s: %w", msg.MessageID, msg.ThreadRoomID, err)
+			return nil, nil, fmt.Errorf("update thread_messages_by_thread for message %s thread %s: %w", msg.MessageID, msg.ThreadRoomID, err)
 		}
-		// A TShow ("also send to channel") thread reply is dual-written into
-		// messages_by_room at create time; soft-delete must also hit that copy
-		// or it stays visible in the channel timeline. Additive on top of the
-		// thread delete — same shape as the PinnedAt branch below.
+		// TShow thread reply: also dual-written into messages_by_room at create time,
+		// so soft-delete must hit that channel copy too (same shape as PinnedAt below).
 		if msg.TShow {
 			if err := r.deleteInMessagesByRoom(ctx, msgByRoomQ, msg, deletedAt); err != nil {
-				return time.Time{}, false, nil, nil, fmt.Errorf("update messages_by_room for tshow thread message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+				return nil, nil, fmt.Errorf("update messages_by_room for tshow thread message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 			}
 		}
 	}
 
 	if msg.PinnedAt != nil {
 		if err := r.deleteInPinnedMessagesByRoom(ctx, pinnedMsgQ, msg, deletedAt); err != nil {
-			return time.Time{}, false, nil, nil, fmt.Errorf("update pinned_messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
+			return nil, nil, fmt.Errorf("update pinned_messages_by_room for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 		}
 	}
 
 	if msg.ThreadParentID == "" {
-		return deletedAt, true, nil, nil, nil
+		return nil, nil, nil
 	}
 	newTcount, newTlm, err := r.countAndSetParentTcount(ctx, msg)
 	if err != nil {
-		// The LWT delete already committed — return applied=true so callers correctly
-		// identify this as a count-set failure rather than a concurrent-winner race.
-		return deletedAt, true, nil, nil, fmt.Errorf("count and set parent tcount for message %s: %w", msg.MessageID, err)
+		return nil, nil, fmt.Errorf("count and set parent tcount for message %s: %w", msg.MessageID, err)
 	}
-	return deletedAt, true, newTcount, newTlm, nil
+	return newTcount, newTlm, nil
+}
+
+// ReconcileDeletedMirrors idempotently replays the soft-delete to every mirror table for a
+// message whose messages_by_id row is already deleted, repairing any mirror a prior attempt's
+// partial failure left stale. The service-layer already-deleted short-circuit calls this on
+// retry (it returns before SoftDeleteMessage, so the CAS-miss replay would never fire there).
+// Every write is idempotent (SET deleted=true / recompute-and-set), so repeated calls are safe.
+// Uses the committed delete's updated_at (from the deleted row) as the mirror timestamp.
+func (r *Repository) ReconcileDeletedMirrors(ctx context.Context, msg *models.Message) error {
+	if msg.UpdatedAt == nil {
+		return fmt.Errorf("reconcile deleted mirrors for message %s: deleted row has no updated_at", msg.MessageID)
+	}
+	isThreadParent := msg.TCount != nil && *msg.TCount > 0
+	if _, _, err := r.applyDeleteMirrors(ctx, msg, *msg.UpdatedAt, isThreadParent); err != nil {
+		return fmt.Errorf("reconcile deleted mirrors for message %s: %w", msg.MessageID, err)
+	}
+	return nil
 }
 
 // countThreadReplies returns the bounded, soft-delete-aware reply count and the

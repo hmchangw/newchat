@@ -1400,13 +1400,39 @@ func TestHistoryService_DeleteMessage_AlreadyDeleted_ShortCircuits(t *testing.T)
 		UpdatedAt: &priorUpdatedAt,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-abc").Return(hydrated, nil)
+	// Retry lands here; mirrors are reconciled idempotently (repairs a prior partial failure),
+	// but no SoftDeleteMessage, no parent lookup, no publish. tcount stays durable in Cassandra.
+	msgs.EXPECT().ReconcileDeletedMirrors(gomock.Any(), hydrated).Return(nil)
 
-	// Already-deleted: no parent lookup, no publish. tcount was persisted by
-	// countAndSetParentTcount on the first delete and is durable in Cassandra.
 	resp, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "m-abc"})
 	require.NoError(t, err)
 	assert.Equal(t, "m-abc", resp.MessageID)
 	assert.Equal(t, priorUpdatedAt.UnixMilli(), resp.DeletedAt, "short-circuit should echo the existing updated_at")
+}
+
+func TestHistoryService_DeleteMessage_AlreadyDeleted_ReconcileFails(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	priorUpdatedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	hydrated := &models.Message{
+		MessageID: "m-abc",
+		RoomID:    "r1",
+		Sender:    models.Participant{Account: "u1"},
+		Deleted:   true,
+		UpdatedAt: &priorUpdatedAt,
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-abc").Return(hydrated, nil)
+	// A mirror-reconcile failure must surface as an error so the caller retries and repair
+	// converges, rather than silently returning success over a still-stale mirror.
+	msgs.EXPECT().ReconcileDeletedMirrors(gomock.Any(), hydrated).Return(errors.New("cassandra down"))
+
+	resp, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "m-abc"})
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "reconciling already-deleted message m-abc")
 }
 
 func TestHistoryService_DeleteMessage_AlreadyDeleted_ThreadReply_ShortCircuits(t *testing.T) {
@@ -1426,8 +1452,9 @@ func TestHistoryService_DeleteMessage_AlreadyDeleted_ThreadReply_ShortCircuits(t
 		TShow:          false,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-abc").Return(hydrated, nil)
+	// Mirrors reconciled idempotently on retry; no publish. tcount stays durable in Cassandra.
+	msgs.EXPECT().ReconcileDeletedMirrors(gomock.Any(), hydrated).Return(nil)
 
-	// No parent lookup, no publish: tcount is durable in Cassandra from the first delete.
 	resp, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "reply-abc"})
 	require.NoError(t, err)
 	assert.Equal(t, "reply-abc", resp.MessageID)
@@ -1842,6 +1869,91 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishesThreadMetadataEvent(t
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, "reply-1", resp.MessageID)
+}
+
+// Deleting a thread reply must carry the recomputed NewThreadLastMsgAt: downstream
+// reads nil as "no replies remain", so dropping it would clear the thread's lastMsgAt.
+func TestHistoryService_DeleteMessage_ThreadReply_CarriesNewThreadLastMsgAt(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	parentCreatedAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	hydrated := &models.Message{
+		MessageID:             "reply-1",
+		RoomID:                "r1",
+		Sender:                models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:             time.Date(2026, 5, 14, 13, 0, 0, 0, time.UTC),
+		Msg:                   "reply content",
+		ThreadParentID:        "parent-1",
+		ThreadParentCreatedAt: &parentCreatedAt,
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
+
+	newTcount := 2
+	survivingTlm := time.Date(2026, 5, 14, 12, 30, 0, 0, time.UTC)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, &newTcount, &survivingTlm, nil
+		})
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			require.NotNil(t, evt.NewTCount)
+			assert.Equal(t, 2, *evt.NewTCount)
+			require.NotNil(t, evt.NewThreadLastMsgAt, "delete event must carry the surviving newest reply's timestamp")
+			assert.Equal(t, survivingTlm, evt.NewThreadLastMsgAt.UTC())
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "reply-1"})
+	require.NoError(t, err)
+}
+
+// When the repo reports no surviving replies (nil tlm), the canonical event's
+// NewThreadLastMsgAt stays nil — the "no replies remain" signal downstream.
+func TestHistoryService_DeleteMessage_ThreadReply_NilThreadLastMsgAtWhenNoSurvivors(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	parentCreatedAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	hydrated := &models.Message{
+		MessageID:             "reply-1",
+		RoomID:                "r1",
+		Sender:                models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:             time.Date(2026, 5, 14, 13, 0, 0, 0, time.UTC),
+		ThreadParentID:        "parent-1",
+		ThreadParentCreatedAt: &parentCreatedAt,
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
+
+	newTcount := 0
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, &newTcount, nil, nil
+		})
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			require.NotNil(t, evt.NewTCount)
+			assert.Equal(t, 0, *evt.NewTCount)
+			assert.Nil(t, evt.NewThreadLastMsgAt, "no survivors ⇒ nil, signalling the thread has no replies left")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "reply-1"})
+	require.NoError(t, err)
 }
 
 // If the canonical deleted event fails to publish, DeleteMessage still succeeds — Cassandra is the source of truth.

@@ -11,6 +11,7 @@ package main
 
 import (
 	context "context"
+	json "encoding/json"
 	reflect "reflect"
 	time "time"
 
@@ -132,6 +133,34 @@ func (mr *MockStoreMockRecorder) ListSubscriptions(ctx, roomID any) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSubscriptions", reflect.TypeOf((*MockStore)(nil).ListSubscriptions), ctx, roomID)
 }
 
+// RewindRoomLastMessage mocks base method.
+func (m *MockStore) RewindRoomLastMessage(ctx context.Context, roomID, deletedMsgID string, pointer *model.LastMessagePointer, survivor *model.LastMessagePreview, updatedAt time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RewindRoomLastMessage", ctx, roomID, deletedMsgID, pointer, survivor, updatedAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RewindRoomLastMessage indicates an expected call of RewindRoomLastMessage.
+func (mr *MockStoreMockRecorder) RewindRoomLastMessage(ctx, roomID, deletedMsgID, pointer, survivor, updatedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RewindRoomLastMessage", reflect.TypeOf((*MockStore)(nil).RewindRoomLastMessage), ctx, roomID, deletedMsgID, pointer, survivor, updatedAt)
+}
+
+// SetRoomLastMessageEdited mocks base method.
+func (m *MockStore) SetRoomLastMessageEdited(ctx context.Context, roomID, editedMsgID, newMsg string, encMsg json.RawMessage, editedAt time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetRoomLastMessageEdited", ctx, roomID, editedMsgID, newMsg, encMsg, editedAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetRoomLastMessageEdited indicates an expected call of SetRoomLastMessageEdited.
+func (mr *MockStoreMockRecorder) SetRoomLastMessageEdited(ctx, roomID, editedMsgID, newMsg, encMsg, editedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRoomLastMessageEdited", reflect.TypeOf((*MockStore)(nil).SetRoomLastMessageEdited), ctx, roomID, editedMsgID, newMsg, encMsg, editedAt)
+}
+
 // SetSubscriptionMentions mocks base method.
 func (m *MockStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
 	m.ctrl.T.Helper()
@@ -147,15 +176,15 @@ func (mr *MockStoreMockRecorder) SetSubscriptionMentions(ctx, roomID, accounts, 
 }
 
 // UpdateRoomLastMessage mocks base method.
-func (m *MockStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
+func (m *MockStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, preview *model.LastMessagePreview) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateRoomLastMessage", ctx, roomID, msgID, msgAt, mentionAll)
+	ret := m.ctrl.Call(m, "UpdateRoomLastMessage", ctx, roomID, msgID, msgAt, mentionAll, preview)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateRoomLastMessage indicates an expected call of UpdateRoomLastMessage.
-func (mr *MockStoreMockRecorder) UpdateRoomLastMessage(ctx, roomID, msgID, msgAt, mentionAll any) *gomock.Call {
+func (mr *MockStoreMockRecorder) UpdateRoomLastMessage(ctx, roomID, msgID, msgAt, mentionAll, preview any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomLastMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomLastMessage), ctx, roomID, msgID, msgAt, mentionAll)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomLastMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomLastMessage), ctx, roomID, msgID, msgAt, mentionAll, preview)
 }
