@@ -22,16 +22,19 @@ type NATSConfig struct {
 }
 
 type Config struct {
-	SiteID      string        `env:"SITE_ID,required"`
-	Backend     string        `env:"TRANSLATION_BACKEND"      envDefault:"mock"`
-	Endpoint    string        `env:"TRANSLATION_ENDPOINT"     envDefault:""`
-	APIKey      string        `env:"TRANSLATION_API_KEY"      envDefault:""`
-	HTTPTimeout time.Duration `env:"TRANSLATION_HTTP_TIMEOUT" envDefault:"30s"`
-	NATS        NATSConfig    `envPrefix:"NATS_"`
+	SiteID         string        `env:"SITE_ID,required"`
+	Backend        string        `env:"TRANSLATION_BACKEND"          envDefault:"mock"`
+	Endpoint       string        `env:"TRANSLATION_ENDPOINT"         envDefault:""`
+	AccessTokenURL string        `env:"TRANSLATION_ACCESS_TOKEN_URL" envDefault:""`
+	J1Token        string        `env:"TRANSLATION_J1_TOKEN"         envDefault:""`
+	HTTPTimeout    time.Duration `env:"TRANSLATION_HTTP_TIMEOUT"     envDefault:"30s"`
+	TokenSkew      time.Duration `env:"TRANSLATION_TOKEN_SKEW"       envDefault:"60s"`
+	NATS           NATSConfig    `envPrefix:"NATS_"`
 }
 
-// newTranslator selects the backend. The stream backend fails fast without an
-// endpoint so a misconfigured production deploy dies at startup, not per-request.
+// newTranslator selects the backend. The stream backend fails fast when its
+// endpoint / accessToken URL / J1 token are missing, so a misconfigured
+// production deploy dies at startup, not per-request.
 func newTranslator(cfg *Config) (Translator, error) {
 	switch cfg.Backend {
 	case "mock":
@@ -40,7 +43,13 @@ func newTranslator(cfg *Config) (Translator, error) {
 		if cfg.Endpoint == "" {
 			return nil, fmt.Errorf("TRANSLATION_ENDPOINT is required when TRANSLATION_BACKEND=stream")
 		}
-		return newStreamTranslator(cfg.Endpoint, cfg.APIKey, cfg.HTTPTimeout), nil
+		if cfg.AccessTokenURL == "" {
+			return nil, fmt.Errorf("TRANSLATION_ACCESS_TOKEN_URL is required when TRANSLATION_BACKEND=stream")
+		}
+		if cfg.J1Token == "" {
+			return nil, fmt.Errorf("TRANSLATION_J1_TOKEN is required when TRANSLATION_BACKEND=stream")
+		}
+		return newStreamTranslator(cfg.Endpoint, cfg.AccessTokenURL, cfg.J1Token, cfg.HTTPTimeout, cfg.TokenSkew), nil
 	default:
 		return nil, fmt.Errorf("unknown TRANSLATION_BACKEND %q (want mock|stream)", cfg.Backend)
 	}

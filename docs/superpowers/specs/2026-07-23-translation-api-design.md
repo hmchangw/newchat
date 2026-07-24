@@ -189,6 +189,17 @@ required. Lets the whole service run end-to-end in dev/CI immediately.
 
 Speaks the third-party streaming contract:
 
+- **Authentication (J1 → J2)**: a `tokenProvider` reads the **J1** token from
+  `TRANSLATION_J1_TOKEN`, calls the accessToken API (`TRANSLATION_ACCESS_TOKEN_URL`)
+  with header `Authorization: <J1>`, and receives `{token, expiresAt, username,
+  jwtRequestId}`. The **J2** token (`token`) is cached until `expiresAt` minus a skew
+  (`TRANSLATION_TOKEN_SKEW`, default 60s) and sent on the translate call as
+  `Authorization: <J2>` (raw, no `Bearer`). The provider is mutex-guarded (safe for
+  concurrent translate calls).
+- **Reactive refresh + retry**: if the translate API replies
+  `{"message": "failed to verify jwt"}` (token rejected mid-use), the client
+  force-refreshes J2 and retries the translate call **once**; a second failure is a
+  backend error.
 - **Request** (Resty POST, timeout set): `{"text": <text>, "targetLang": <targetLang>, "applyWiki": false}`.
 - **Response**: Server-Sent Events. Each line is
   `data: {"returnCode":96200,"returnMessage":"success","returnData":{"translation":"..."}}`.
@@ -201,8 +212,8 @@ Speaks the third-party streaming contract:
   timeout / connection drop) **without** a `[DONE]`, is a backend failure (raw-wrapped
   error → `internal` at the boundary).
 
-Constructor fails fast if `TRANSLATION_ENDPOINT` (and any required credential) is
-empty when `TRANSLATION_BACKEND=stream`.
+`newTranslator` fails fast if `TRANSLATION_ENDPOINT`, `TRANSLATION_ACCESS_TOKEN_URL`,
+or `TRANSLATION_J1_TOKEN` is empty when `TRANSLATION_BACKEND=stream`.
 
 ## Configuration (`caarlos0/env`)
 
@@ -212,8 +223,10 @@ empty when `TRANSLATION_BACKEND=stream`.
 | `SITE_ID` | — | required |
 | `LOG_LEVEL` | `info` | |
 | `TRANSLATION_BACKEND` | `mock` | `mock` \| `stream` |
-| `TRANSLATION_ENDPOINT` | `` | required when backend=`stream` (checked at construction) |
-| `TRANSLATION_API_KEY` | `` | secret; required when backend=`stream`; never logged |
+| `TRANSLATION_ENDPOINT` | `` | translate API URL; required when backend=`stream` |
+| `TRANSLATION_ACCESS_TOKEN_URL` | `` | accessToken (J1→J2) API URL; required when backend=`stream` |
+| `TRANSLATION_J1_TOKEN` | `` | secret J1 token; required when backend=`stream`; never logged |
+| `TRANSLATION_TOKEN_SKEW` | `60s` | refresh J2 this long before `expiresAt` |
 | `TRANSLATION_HTTP_TIMEOUT` | `30s` | Resty client timeout |
 | `MAX_WORKERS` | `100` | in-flight handler concurrency (semaphore) |
 
