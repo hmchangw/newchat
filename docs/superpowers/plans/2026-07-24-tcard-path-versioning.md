@@ -9,7 +9,7 @@
 > 3. **No legacy-index drop** (Task 2 here is reverted): the old `(path, cardVersion)` index
 >    was removed manually from the production collection; `EnsureIndexes` only creates the
 >    `(path, _tcardVersion)` unique index.
-
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rename the card version field to `_tcardVersion` on every wire/storage surface, make `GET /api/v1/cards/...` match slash-containing card paths, and add cache-derived directory listings when the URL lacks the `.template.json` suffix.

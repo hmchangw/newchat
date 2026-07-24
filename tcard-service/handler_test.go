@@ -68,7 +68,7 @@ var deepCard = card{
 	Template: json.RawMessage(`{"_tcardVersion":"0.0.1","title":"Welcome"}`),
 }
 
-func TestHandleGetTemplate_SlashPath(t *testing.T) {
+func TestCardHandler_HandleGetTemplate_SlashPath(t *testing.T) {
 	r := setupRouter(t, NewCardHandler(cacheWith(deepCard), nil))
 
 	w := doRequest(t, r, http.MethodGet, "/api/v1/cards/greetings/en/welcome@0.0.1.template.json")
@@ -272,7 +272,7 @@ func listRouter(t *testing.T) *gin.Engine {
 	), nil))
 }
 
-func TestHandleList(t *testing.T) {
+func TestCardHandler_HandleList(t *testing.T) {
 	tests := []struct {
 		name     string
 		target   string
@@ -308,7 +308,7 @@ func TestHandleList(t *testing.T) {
 	}
 }
 
-func TestHandleList_Errors(t *testing.T) {
+func TestCardHandler_HandleList_Errors(t *testing.T) {
 	tests := []struct {
 		name     string
 		target   string
@@ -350,7 +350,7 @@ func TestHandleList_Errors(t *testing.T) {
 	}
 }
 
-func TestHandleList_CacheStates(t *testing.T) {
+func TestCardHandler_HandleList_CacheStates(t *testing.T) {
 	t.Run("loaded but empty cache lists root as empty 200", func(t *testing.T) {
 		r := setupRouter(t, NewCardHandler(cacheWith(), nil))
 		w := doRequest(t, r, http.MethodGet, "/api/v1/cards/")

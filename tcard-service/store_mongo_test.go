@@ -8,7 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-func TestDocToCard(t *testing.T) {
+func TestMongoCardStore_DocToCard(t *testing.T) {
 	tests := []struct {
 		name        string
 		doc         bson.D
