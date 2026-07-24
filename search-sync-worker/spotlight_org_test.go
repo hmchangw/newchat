@@ -222,3 +222,10 @@ func TestSpotlightOrg_BuildAction_Errors(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+// Spotlight-org writes to one fixed index — no additive mapping push at startup.
+func TestSpotlightOrg_MappingUpdate_NoOp(t *testing.T) {
+	pattern, body := newSpotlightOrgCollection("spotlight-org-v1", "site-a", "hr", false).MappingUpdate()
+	assert.Empty(t, pattern)
+	assert.Nil(t, body)
+}

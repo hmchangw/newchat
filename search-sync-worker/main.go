@@ -166,6 +166,11 @@ func main() {
 		slog.Info("index template upserted", "name", name)
 	}
 
+	if err := pushMappings(ctx, engine, collections); err != nil {
+		slog.Error("update index mapping failed", "error", err)
+		os.Exit(1)
+	}
+
 	// Register stored scripts before any consumer starts so the first scripted update already
 	// resolves the script id; idempotent across pods (PUT _scripts is last-write-wins).
 	for _, coll := range collections {
@@ -319,6 +324,22 @@ func main() {
 		// obsShutdown LAST so drain-window flush spans/logs are exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// pushMappings PUTs each collection's additive mapping onto existing indices;
+// templates cover only new ones, so new fields stay unmapped until rollover.
+func pushMappings(ctx context.Context, engine searchengine.SearchEngine, collections []Collection) error {
+	for _, coll := range collections {
+		pattern, body := coll.MappingUpdate()
+		if pattern == "" || len(body) == 0 {
+			continue
+		}
+		if err := engine.UpdateMapping(ctx, pattern, body); err != nil {
+			return fmt.Errorf("update mapping %s: %w", pattern, err)
+		}
+		slog.Info("index mapping updated", "pattern", pattern)
+	}
+	return nil
 }
 
 // runConsumer is the batch-flush consumer loop: fetchBatchSize bounds JetStream Fetch() pulls

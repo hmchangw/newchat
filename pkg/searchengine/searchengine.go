@@ -65,6 +65,10 @@ type SearchEngine interface {
 	// repeat the same script body once per action.
 	PutScript(ctx context.Context, id string, body json.RawMessage) error
 
+	// UpdateMapping PUTs an additive `{"properties":...}` onto every index
+	// matching pattern; templates apply only at creation, existing indices need this.
+	UpdateMapping(ctx context.Context, indexPattern string, body json.RawMessage) error
+
 	GetIndexMapping(ctx context.Context, index string) (json.RawMessage, error)
 
 	// Search executes a `_search` against the comma-joined list of indices

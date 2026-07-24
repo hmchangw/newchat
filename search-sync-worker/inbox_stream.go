@@ -43,6 +43,12 @@ func (b *inboxMemberCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
 
+// MappingUpdate returns none: fixed indices are already governed by their
+// template; only rolling-index collections need startup mapping pushes.
+func (b *inboxMemberCollection) MappingUpdate() (string, json.RawMessage) {
+	return "", nil
+}
+
 // parseMemberEvent decodes an INBOX message into an InboxEvent + its
 // InboxMemberEvent payload and validates the common preconditions shared by
 // all inbox-member collections.

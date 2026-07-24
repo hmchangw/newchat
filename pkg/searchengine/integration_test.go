@@ -63,6 +63,33 @@ func TestNew_WithObservability_RecordsESSemanticSpan(t *testing.T) {
 	assert.Equal(t, index, attrValue(search.Attributes, "db.elasticsearch.path_parts.index"))
 }
 
+func TestSearchEngine_UpdateMapping_AppliesToExistingIndex(t *testing.T) {
+	esURL := testutil.Elasticsearch(t)
+	index := testutil.ElasticsearchIndex(t, "searchenginemap")
+
+	ctx := context.Background()
+	engine, err := New(ctx, Config{Backend: "elasticsearch", URL: esURL})
+	require.NoError(t, err)
+
+	// Materialize the index by writing a doc, then push a new field mapping.
+	_, err = engine.Bulk(ctx, []BulkAction{{
+		Action: ActionIndex, Index: index, DocID: "d1", Version: 1,
+		Doc: json.RawMessage(`{"content":"x"}`),
+	}})
+	require.NoError(t, err)
+
+	err = engine.UpdateMapping(ctx, index, json.RawMessage(`{"properties":{"cardData":{"type":"text"}}}`))
+	require.NoError(t, err)
+
+	mapping, err := engine.GetIndexMapping(ctx, index)
+	require.NoError(t, err)
+	assert.Contains(t, string(mapping), `"cardData"`)
+
+	// A pattern matching nothing must be a no-op, not an error.
+	err = engine.UpdateMapping(ctx, "no-such-index-pattern-*", json.RawMessage(`{"properties":{"x":{"type":"keyword"}}}`))
+	assert.NoError(t, err)
+}
+
 func spanNames(spans tracetest.SpanStubs) []string {
 	names := make([]string, len(spans))
 	for i := range spans {

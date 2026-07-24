@@ -167,8 +167,10 @@ func buildTestTemplate(pattern string, properties map[string]any) json.RawMessag
 	return data
 }
 
-func messageTestTemplate() json.RawMessage {
-	return buildTestTemplate("messages-*", map[string]any{
+// messageTestTemplate mirrors the worker's prod message-index mapping; the
+// caller-supplied pattern keeps fixtures from governing each other's indices.
+func messageTestTemplate(pattern string) json.RawMessage {
+	return buildTestTemplate(pattern, map[string]any{
 		"messageId":   map[string]any{"type": "keyword"},
 		"roomId":      map[string]any{"type": "keyword"},
 		"siteId":      map[string]any{"type": "keyword"},
@@ -181,9 +183,15 @@ func messageTestTemplate() json.RawMessage {
 			},
 		},
 		"createdAt":                    map[string]any{"type": "date"},
+		"editedAt":                     map[string]any{"type": "date"},
+		"updatedAt":                    map[string]any{"type": "date"},
 		"threadParentMessageId":        map[string]any{"type": "keyword"},
 		"threadParentMessageCreatedAt": map[string]any{"type": "date"},
 		"tshow":                        map[string]any{"type": "boolean"},
+		"attachmentText":               map[string]any{"type": "text"},
+		"cardData":                     map[string]any{"type": "text"},
+		"attachments":                  map[string]any{"type": "object", "enabled": false},
+		"card":                         map[string]any{"type": "object", "enabled": false},
 	})
 }
 
@@ -254,9 +262,9 @@ func waitForRemoteConnected(t *testing.T, localURL, remoteName string, timeout t
 func (f *ccsFixture) installTemplates(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	require.NoError(t, f.localES.UpsertTemplate(ctx, "messages_template", messageTestTemplate()),
+	require.NoError(t, f.localES.UpsertTemplate(ctx, "messages_template", messageTestTemplate("messages-*")),
 		"upsert messages_template on local")
-	require.NoError(t, f.remoteES.UpsertTemplate(ctx, "messages_template", messageTestTemplate()),
+	require.NoError(t, f.remoteES.UpsertTemplate(ctx, "messages_template", messageTestTemplate("messages-*")),
 		"upsert messages_template on remote")
 	// user-room is local-only per the search-service architecture.
 	require.NoError(t, f.localES.UpsertTemplate(ctx, "user_room_template", userRoomTestTemplate()),

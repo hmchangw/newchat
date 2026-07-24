@@ -20,7 +20,8 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// migrationLocator matches a *models.Message whose MessageID/RoomID/CreatedAt equal the request's.
+// migrationLocator matches the resolved row passed to the writer by its
+// MessageID/RoomID/CreatedAt identity.
 func migrationLocator(messageID, roomID string, createdAt time.Time) gomock.Matcher {
 	return gomock.Cond(func(x any) bool {
 		m, ok := x.(*models.Message)
@@ -37,6 +38,20 @@ func TestHistoryService_MigrationEditMessage_Success(t *testing.T) {
 
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
 	editedAt := time.Date(2026, 5, 15, 9, 0, 0, 0, time.UTC)
+
+	// Row resolved first so .updated carries sender+attachments+card;
+	// a slim event would wipe those (full-doc replace in search-sync-worker).
+	attachments := [][]byte{[]byte(`{"title":"legacy.pdf","fileType":"application/pdf"}`)}
+	hydrated := &models.Message{
+		MessageID:   "msg-1",
+		RoomID:      "r1",
+		CreatedAt:   createdAt,
+		Sender:      models.Participant{Account: "bob", ID: "bob-id"},
+		Msg:         "old body",
+		Attachments: attachments,
+		Card:        &models.Card{Template: "legacy-card-v1"},
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
 
 	msgs.EXPECT().
 		UpdateMessageContent(gomock.Any(), migrationLocator("msg-1", "r1", createdAt), "new body", editedAt).
@@ -55,6 +70,11 @@ func TestHistoryService_MigrationEditMessage_Success(t *testing.T) {
 			require.NotNil(t, evt.Message.EditedAt)
 			assert.True(t, evt.Message.EditedAt.Equal(editedAt))
 			assert.Equal(t, "site-test", evt.SiteID)
+			assert.Equal(t, "bob", evt.Message.UserAccount)
+			assert.Equal(t, "bob-id", evt.Message.UserID)
+			assert.Equal(t, attachments, evt.Message.Attachments)
+			require.NotNil(t, evt.Message.Card)
+			assert.Equal(t, "legacy-card-v1", evt.Message.Card.Template)
 			// Event-level Timestamp is publish-time (now), distinct from the historical
 			// domain editedAt carried inside Message.
 			assert.Greater(t, evt.Timestamp, editedAt.UnixMilli())
@@ -74,11 +94,98 @@ func TestHistoryService_MigrationEditMessage_Success(t *testing.T) {
 	assert.True(t, ack.OK)
 }
 
+// Edit-after-delete replay must ack idempotently: an unconditional update
+// would republish .updated with a fresh version and resurrect the doc in ES.
+func TestHistoryService_MigrationEditMessage_AlreadyDeletedAcksOK(t *testing.T) {
+	svc, msgs, _, pub, _ := newService(t)
+	c := testContext()
+
+	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
+		Return(&models.Message{MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt, Deleted: true}, nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	ack, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
+		MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt,
+		Content: "new body", EditedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, ack)
+	assert.True(t, ack.OK)
+}
+
+// A transformer bug sending a mismatched RoomID must not edit whatever row
+// owns the message ID.
+func TestHistoryService_MigrationEditMessage_RoomMismatchRejected(t *testing.T) {
+	svc, msgs, _, pub, _ := newService(t)
+	c := testContext()
+
+	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
+		Return(&models.Message{MessageID: "msg-1", RoomID: "r-actual", CreatedAt: createdAt}, nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	ack, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
+		MessageID: "msg-1", RoomID: "r-other", CreatedAt: createdAt,
+		Content: "new body", EditedAt: time.Now().UTC(),
+	})
+	require.Error(t, err)
+	assert.Nil(t, ack)
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeNotFound, ec.Code)
+}
+
+func TestHistoryService_MigrationEditMessage_ReaderErrorPropagates(t *testing.T) {
+	svc, msgs, _, pub, _ := newService(t)
+	c := testContext()
+
+	readerErr := errors.New("cassandra down")
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(nil, readerErr)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	_, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
+		MessageID: "msg-1", RoomID: "r1", CreatedAt: time.Now().UTC(),
+		Content: "new body", EditedAt: time.Now().UTC(),
+	})
+	require.ErrorIs(t, err, readerErr, "reader failure must stay on the %w chain")
+}
+
+// Row vanished between the read and the keyed UPDATE (hard-missing on the
+// cipher-path read) — must map to a retryable NotFound, not a 5xx.
+func TestHistoryService_MigrationEditMessage_RowVanishesRetries(t *testing.T) {
+	svc, msgs, _, pub, _ := newService(t)
+	c := testContext()
+
+	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
+		Return(&models.Message{MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt}, nil)
+	msgs.EXPECT().
+		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(fmt.Errorf("edit message msg-1: %w", cassrepo.ErrMessageNotFound))
+	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	ack, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
+		MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt,
+		Content: "new body", EditedAt: time.Now().UTC(),
+	})
+	require.Error(t, err)
+	assert.Nil(t, ack)
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeNotFound, ec.Code)
+}
+
 func TestHistoryService_MigrationEditMessage_WriterError(t *testing.T) {
 	svc, msgs, _, pub, _ := newService(t)
 	c := testContext()
 
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
+		Return(&models.Message{MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt}, nil)
 	msgs.EXPECT().
 		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(errors.New("cassandra down"))
@@ -212,9 +319,12 @@ func TestHistoryService_MigrationEditMessage_AbsentRowRetries(t *testing.T) {
 	c := testContext()
 
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	// Insert not yet persisted: the row lookup comes back empty, so no
+	// update and no publish happen.
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-5").Return(nil, nil)
 	msgs.EXPECT().
 		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(fmt.Errorf("edit message msg-5: %w", cassrepo.ErrMessageNotFound))
+		Times(0)
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	ack, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{

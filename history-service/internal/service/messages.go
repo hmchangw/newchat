@@ -413,11 +413,8 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 
 	editedAtMs := editedAt.UnixMilli()
 
-	// Carry the fields downstream actually reads: search-sync-worker reindexes
-	// by Content/EditedAt/UpdatedAt; broadcast-worker emits a slim
-	// MessageEditedPayload of {ID, Content, EditedBy, EditedAt, UpdatedAt} and
-	// routes thread-reply edits via ThreadParentMessageID + TShow.
-	// Mentions intentionally omitted — broadcast-worker re-resolves from Content.
+	// search-sync-worker reindexes the FULL doc, so attachments/card must ride
+	// along or edits wipe them. Mentions omitted: broadcast-worker re-resolves.
 	canonicalEvt := model.MessageEvent{
 		Event: model.EventUpdated,
 		Message: model.Message{
@@ -426,6 +423,8 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 			UserID:                       msg.Sender.ID,
 			UserAccount:                  msg.Sender.Account,
 			Content:                      req.NewMsg,
+			Attachments:                  msg.Attachments,
+			Card:                         msg.Card,
 			CreatedAt:                    msg.CreatedAt,
 			EditedAt:                     &editedAt,
 			UpdatedAt:                    &editedAt,

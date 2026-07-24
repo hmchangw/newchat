@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
-	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -25,16 +24,33 @@ import (
 func (s *HistoryService) MigrationEditMessage(c *natsrouter.Context, siteID string, req model.MigrationEditRequest) (*model.MigrationAck, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
 	c.WithLogValues("room_id", req.RoomID, "message_id", req.MessageID)
 
-	locator := &models.Message{
-		MessageID: req.MessageID,
-		RoomID:    req.RoomID,
-		CreatedAt: req.CreatedAt,
+	// Resolve the row first: .updated is a full-doc replace needing sender/
+	// attachments/card, and the row is the accurate UPDATE locator.
+	msg, err := s.msgReader.GetMessageByID(c, req.MessageID)
+	if err != nil {
+		return nil, fmt.Errorf("migration edit %q: %w", req.MessageID, err)
 	}
-	if err := s.msgWriter.UpdateMessageContent(c, locator, req.Content, req.EditedAt); err != nil {
-		// Edit-before-insert race: the row isn't persisted yet, so the UPDATE matched nothing.
-		// Map to NotFound (4xx, retryable Nak) so this benign race doesn't log as internal/5xx.
+	if msg == nil {
+		// Edit-before-insert race: the row isn't persisted yet. Surface a
+		// retryable NotFound (4xx, Nak) so the benign race doesn't log as 5xx.
+		return nil, errcode.NotFound("message not yet persisted, retry")
+	}
+	// Edit-after-delete replay: ack idempotently — updating would republish
+	// .updated with a fresh version and resurrect the doc in search.
+	if msg.Deleted {
+		return &model.MigrationAck{OK: true}, nil
+	}
+	// Locator sanity: a transformer bug with a wrong RoomID must not edit
+	// whatever row happens to own the message ID.
+	if req.RoomID != "" && msg.RoomID != req.RoomID {
+		return nil, errcode.NotFound("message not found in room")
+	}
+
+	if err := s.msgWriter.UpdateMessageContent(c, msg, req.Content, req.EditedAt); err != nil {
+		// Row vanished between read and update (hard-missing on the
+		// cipher-path read) — benign, retryable.
 		if errors.Is(err, cassrepo.ErrMessageNotFound) {
-			return nil, errcode.NotFound("message not yet persisted, retry")
+			return nil, errcode.NotFound("message row missing, retry")
 		}
 		return nil, fmt.Errorf("migration edit message %s: %w", req.MessageID, err)
 	}
@@ -43,12 +59,19 @@ func (s *HistoryService) MigrationEditMessage(c *natsrouter.Context, siteID stri
 	evt := model.MessageEvent{
 		Event: model.EventUpdated,
 		Message: model.Message{
-			ID:        req.MessageID,
-			RoomID:    req.RoomID,
-			CreatedAt: req.CreatedAt,
-			Content:   req.Content,
-			EditedAt:  &editedAt,
-			UpdatedAt: &editedAt,
+			ID:                           msg.MessageID,
+			RoomID:                       msg.RoomID,
+			UserID:                       msg.Sender.ID,
+			UserAccount:                  msg.Sender.Account,
+			CreatedAt:                    msg.CreatedAt,
+			Content:                      req.Content,
+			Attachments:                  msg.Attachments,
+			Card:                         msg.Card,
+			EditedAt:                     &editedAt,
+			UpdatedAt:                    &editedAt,
+			ThreadParentMessageID:        msg.ThreadParentID,
+			ThreadParentMessageCreatedAt: msg.ThreadParentCreatedAt,
+			TShow:                        msg.TShow,
 		},
 		SiteID: siteID,
 		// Event-level Timestamp is publish-time, not the source editedAt (the domain timestamp inside Message).

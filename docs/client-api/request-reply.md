@@ -1207,7 +1207,8 @@ search-service on that site.
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
 Full-text message search. Auto-scoped to rooms the user is a member of. May include
-messages from remote sites.
+messages from remote sites. One query matches message text, attachment text (file
+names + descriptions, pooled into one searched field), and tcard data.
 
 > **Breaking change (v2):** Response changed from `{total, results}` to `{messages, total}`.
 > The `results` field no longer exists.
@@ -1228,10 +1229,17 @@ messages from remote sites.
 | `messages` | SearchMessage[] | Per-hit projection. |
 | `total` | integer | Total matching hits (may exceed `messages.length`). |
 
+All terms of the query must match within a single searched field (`multi_match`
+with `AND`) — terms split across e.g. message text and a filename match nothing.
+
 `SearchMessage` fields: `messageId`, `roomId`, `siteId`, `userAccount`, `content`,
 `createdAt`, `editedAt` (nullable), `updatedAt` (nullable), `threadParentMessageId`
-(omitted when not a reply), `threadParentMessageCreatedAt` (omitted when not a reply).
-All sourced from ES — no Mongo round-trip.
+(omitted when not a reply), `threadParentMessageCreatedAt` (omitted when not a reply),
+`attachments` (`Attachment[]`, omitted when the message has no attachments),
+`card` (`MessageCard`, omitted when the message carries no tcard).
+All sourced from ES — no Mongo round-trip. `attachments`/`card` mirror the message
+payloads as-is (same wire shape as history reads) so hits render without a follow-up
+history load.
 
 #### Errors
 

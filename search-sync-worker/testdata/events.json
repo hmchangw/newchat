@@ -40,5 +40,36 @@
     "message": {"id": "msg-002", "roomId": "room-1", "createdAt": "2026-01-15T10:31:00Z"},
     "siteId": "site-test",
     "timestamp": 1000007
+  },
+  {
+    "event": "created",
+    "message": {
+      "id": "msg-006",
+      "roomId": "room-2",
+      "userId": "u1",
+      "userAccount": "alice",
+      "content": "see the attached report",
+      "createdAt": "2026-02-11T09:00:00Z",
+      "attachments": ["eyJ0aXRsZSI6InEzLXJlcG9ydC5wZGYiLCJkZXNjcmlwdGlvbiI6IlF1YXJ0ZXJseSBudW1iZXJzIiwiZmlsZVR5cGUiOiJhcHBsaWNhdGlvbi9wZGYifQ=="],
+      "card": {
+        "template": "expense-approval-v1",
+        "data": "eyJ0eXBlIjoiQWRhcHRpdmVDYXJkIiwiYm9keSI6W3sidHlwZSI6IlRleHRCbG9jayIsInRleHQiOiJFeHBlbnNlIHJlcXVlc3QgZnJvbSBCb2IifV19"
+      },
+      "cardAction": {"verb": "approve", "displayText": "Approved by Alice"}
+    },
+    "siteId": "site-test",
+    "timestamp": 1000008
+  },
+  {
+    "event": "pinned",
+    "message": {"id": "msg-001", "roomId": "room-1", "userId": "u1", "userAccount": "alice", "createdAt": "2026-01-15T10:30:00Z"},
+    "siteId": "site-test",
+    "timestamp": 1000009
+  },
+  {
+    "event": "unpinned",
+    "message": {"id": "msg-002", "roomId": "room-1", "userId": "u2", "userAccount": "bob", "createdAt": "2026-01-15T10:31:00Z"},
+    "siteId": "site-test",
+    "timestamp": 1000010
   }
 ]

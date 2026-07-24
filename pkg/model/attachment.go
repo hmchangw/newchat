@@ -8,4 +8,5 @@ import "github.com/hmchangw/chat/pkg/model/cassandra"
 type (
 	Attachment      = cassandra.Attachment
 	ImageDimensions = cassandra.ImageDimensions
+	Card            = cassandra.Card
 )

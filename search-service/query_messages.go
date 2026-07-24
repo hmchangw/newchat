@@ -35,6 +35,9 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 		"from":             req.Offset,
 		"size":             req.Size,
 		"track_total_hits": true,
+		// Search-only fields never ship on hits: cardData is a large blob and
+		// attachmentText duplicates what the `attachments` objects carry.
+		"_source": map[string]any{"excludes": []string{"cardData", "attachmentText"}},
 		"query": map[string]any{
 			"bool": map[string]any{
 				"must": []any{
@@ -43,7 +46,9 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 							"query":    req.Query,
 							"type":     "bool_prefix",
 							"operator": "AND",
-							"fields":   []string{"content"},
+							// Message text, attachment titles+descriptions (one
+							// pooled field) and tcard data — one query box.
+							"fields": []string{"content", "attachmentText", "cardData"},
 						},
 					},
 				},

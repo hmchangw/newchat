@@ -62,6 +62,11 @@ func (c *spotlightOrgCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
 
+// MappingUpdate returns no update — spotlight-org writes to one fixed index.
+func (c *spotlightOrgCollection) MappingUpdate() (string, json.RawMessage) {
+	return "", nil
+}
+
 // BuildAction decodes the employees.upsert bare array (already decompressed by
 // the framework) straight into SpotlightOrgIndex — the shared org json tags mean
 // each employee object yields its nine org fields and ignores the rest, so this
@@ -142,7 +147,7 @@ func spotlightOrgTemplateBody(indexName string, devMode bool) json.RawMessage {
 		replicas = 0
 	}
 	tmpl := map[string]any{
-		"index_patterns": []string{fmt.Sprintf("%s-*", searchindex.StripVersionBase(indexName))},
+		"index_patterns": []string{searchindex.IndexPattern(indexName)},
 		"template": map[string]any{
 			"settings": map[string]any{
 				"index": map[string]any{

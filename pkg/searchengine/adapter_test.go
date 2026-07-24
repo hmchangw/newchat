@@ -235,6 +235,46 @@ func TestAdapter_PutScript(t *testing.T) {
 	})
 }
 
+func TestAdapter_UpdateMapping(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		var capturedBody string
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			assert.Equal(t, http.MethodPut, req.Method)
+			assert.Equal(t, "/messages-site1-*/_mapping", req.URL.Path)
+			assert.Equal(t, "true", req.URL.Query().Get("allow_no_indices"))
+			assert.Equal(t, "true", req.URL.Query().Get("ignore_unavailable"))
+			assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
+			body, _ := io.ReadAll(req.Body)
+			capturedBody = string(body)
+			return jsonResponse(200, `{"acknowledged": true}`), nil
+		}}
+		a := newAdapter(ft)
+		body := json.RawMessage(`{"properties":{"cardData":{"type":"text"}}}`)
+		err := a.UpdateMapping(context.Background(), "messages-site1-*", body)
+		require.NoError(t, err)
+		assert.JSONEq(t, string(body), capturedBody)
+	})
+
+	t.Run("error status", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(400, `{"error":"mapper_parsing_exception"}`), nil
+		}}
+		a := newAdapter(ft)
+		err := a.UpdateMapping(context.Background(), "messages-*", json.RawMessage(`{}`))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "400")
+	})
+
+	t.Run("empty pattern rejected", func(t *testing.T) {
+		a := newAdapter(&fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			t.Fatal("no request expected for empty pattern")
+			return nil, nil
+		}})
+		err := a.UpdateMapping(context.Background(), "", json.RawMessage(`{}`))
+		assert.Error(t, err)
+	})
+}
+
 func TestAdapter_Search(t *testing.T) {
 	t.Run("single index", func(t *testing.T) {
 		var capturedPath, capturedMethod, capturedBody string

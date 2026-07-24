@@ -212,6 +212,36 @@ func (a *httpAdapter) UpsertTemplate(ctx context.Context, name string, body json
 	return nil
 }
 
+// UpdateMapping PUTs an additive mapping onto every index matching pattern
+// (templates apply only at creation); a no-op on a fresh cluster.
+func (a *httpAdapter) UpdateMapping(ctx context.Context, indexPattern string, body json.RawMessage) error {
+	if indexPattern == "" {
+		return fmt.Errorf("update mapping: index pattern required")
+	}
+	path := fmt.Sprintf("/%s/_mapping?allow_no_indices=true&ignore_unavailable=true", indexPattern)
+	resp, err := a.do(ctx, "indices.put_mapping", indexPattern, func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, path, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
+	if err != nil {
+		return fmt.Errorf("update mapping: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("update mapping: status %d, read body: %w", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("update mapping: status %d, body: %s", resp.StatusCode, respBody)
+	}
+	return nil
+}
+
 func (a *httpAdapter) PutScript(ctx context.Context, id string, body json.RawMessage) error {
 	resp, err := a.do(ctx, "put_script", "", func(ctx context.Context) (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("/_scripts/%s", id), bytes.NewReader(body))

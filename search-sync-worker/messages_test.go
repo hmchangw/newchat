@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
 
@@ -71,6 +73,31 @@ func TestMessageCollection_ConsumerName(t *testing.T) {
 func TestMessageCollection_StoredScripts(t *testing.T) {
 	coll := newMessageCollection("msgs-v1", time.Time{}, false)
 	assert.Empty(t, coll.StoredScripts(), "messages collection uses no stored scripts")
+}
+
+// Templates apply only to new indices, so existing monthly indices need the
+// additive mapping update or new fields stay unmapped until rollover.
+func TestMessageCollection_MappingUpdate(t *testing.T) {
+	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
+	pattern, body := coll.MappingUpdate()
+	assert.Equal(t, "messages-site1-*", pattern, "pattern must strip the version suffix like the template's index_patterns")
+	require.NotNil(t, body)
+
+	var parsed struct {
+		Properties map[string]any `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	assert.Contains(t, parsed.Properties, "attachmentText")
+	assert.Contains(t, parsed.Properties, "cardData")
+	assert.Contains(t, parsed.Properties, "content", "full property set keeps the update idempotent")
+
+	// Render payloads are stored but never indexed: object + enabled:false.
+	for _, key := range []string{"attachments", "card"} {
+		prop, ok := parsed.Properties[key].(map[string]any)
+		require.True(t, ok, "%s must be mapped", key)
+		assert.Equal(t, "object", prop["type"], key)
+		assert.Equal(t, false, prop["enabled"], "%s must not be indexed", key)
+	}
 }
 
 func TestIndexName(t *testing.T) {
@@ -182,6 +209,12 @@ func TestMessageTemplateProperties_MatchesStruct(t *testing.T) {
 
 		esType, _, _ := strings.Cut(esTag, ",")
 		propMap := prop.(map[string]any)
+		// object_disabled expands to a stored-only object mapping.
+		if esType == "object_disabled" {
+			assert.Equal(t, "object", propMap["type"], "type mismatch for field %s", name)
+			assert.Equal(t, false, propMap["enabled"], "field %s must not be indexed", name)
+			continue
+		}
 		assert.Equal(t, esType, propMap["type"], "type mismatch for field %s", name)
 	}
 
@@ -342,6 +375,189 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 		actions, err := uncapped.BuildAction(mkEvent(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
 		require.NoError(t, err)
 		assert.Len(t, actions, 1)
+	})
+}
+
+// Slim (no-content) events must never upsert: pin/unpin would wipe indexed
+// fields, and unpin-after-delete would resurrect a stub doc.
+func TestMessageCollection_BuildAction_SlimEventsSkipped(t *testing.T) {
+	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+
+	mkEvent := func(eventType model.EventType) []byte {
+		evt := model.MessageEvent{
+			Event: eventType,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		data, err := json.Marshal(evt)
+		require.NoError(t, err)
+		return data
+	}
+
+	tests := []struct {
+		name  string
+		event model.EventType
+	}{
+		{"pinned skipped", model.EventPinned},
+		{"unpinned skipped", model.EventUnpinned},
+		{"thread_reply_added skipped", model.EventThreadReplyAdded},
+		{"unknown future type skipped", model.EventType("archived")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actions, err := coll.BuildAction(mkEvent(tt.event))
+			require.NoError(t, err)
+			assert.Empty(t, actions, "event %q must not produce an ES action", tt.event)
+		})
+	}
+}
+
+func TestBuildDocument_AttachmentFields(t *testing.T) {
+	ts := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	mkBlob := func(t *testing.T, a cassandra.Attachment) []byte {
+		b, err := json.Marshal(a)
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("searched projections and full render objects are indexed", func(t *testing.T) {
+		evt := &model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Content: "see attached", CreatedAt: ts,
+				Attachments: [][]byte{
+					mkBlob(t, cassandra.Attachment{ID: "f1", Title: "q3-report.pdf", Description: "Quarterly numbers", FileType: "application/pdf", TitleLink: "api/v1/file/rooms/r1/file/f1"}),
+					mkBlob(t, cassandra.Attachment{ID: "f2", Title: "team.png", FileType: "image/png"}),
+				},
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(buildDocument(evt), &doc))
+		// One string pools every title+description so AND queries can mix
+		// words from both (and across attachments of the same message).
+		assert.Equal(t, "q3-report.pdf Quarterly numbers team.png", doc["attachmentText"])
+
+		// The whole decoded objects ride along (render-only, never indexed)
+		// so search hits can display attachments without a history lookup.
+		atts, ok := doc["attachments"].([]any)
+		require.True(t, ok, "attachments must be an array of full objects")
+		require.Len(t, atts, 2)
+		first := atts[0].(map[string]any)
+		assert.Equal(t, "f1", first["id"])
+		assert.Equal(t, "q3-report.pdf", first["title"])
+		assert.Equal(t, "Quarterly numbers", first["description"])
+		assert.Equal(t, "application/pdf", first["fileType"])
+		assert.Equal(t, "api/v1/file/rooms/r1/file/f1", first["titleLink"])
+	})
+
+	t.Run("malformed blob is skipped, valid ones kept", func(t *testing.T) {
+		evt := &model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Content: "x", CreatedAt: ts,
+				Attachments: [][]byte{
+					[]byte("{not json"),
+					mkBlob(t, cassandra.Attachment{ID: "f1", Title: "ok.txt", FileType: "text/plain"}),
+				},
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(buildDocument(evt), &doc))
+		assert.Equal(t, "ok.txt", doc["attachmentText"])
+	})
+
+	t.Run("no attachments omits the fields", func(t *testing.T) {
+		evt := &model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Content: "x", CreatedAt: ts,
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(buildDocument(evt), &doc))
+		for _, key := range []string{"attachmentText", "attachments"} {
+			_, present := doc[key]
+			assert.False(t, present, "%s should be omitted when there are no attachments", key)
+		}
+	})
+}
+
+func TestBuildDocument_CardFields(t *testing.T) {
+	ts := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	t.Run("card template and stringified card data are indexed", func(t *testing.T) {
+		data := `{"type":"AdaptiveCard","body":[{"type":"TextBlock","text":"Expense request from Bob"},{"title":"Amount","value":"$120"}]}`
+		evt := &model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				CreatedAt: ts,
+				Card: &cassandra.Card{
+					Template: "expense-approval-v1",
+					Data:     []byte(data),
+				},
+				CardAction: &cassandra.CardAction{
+					Verb: "approve", Text: "Approve the expense", DisplayText: "Bob approved",
+				},
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(buildDocument(evt), &doc))
+		assert.Equal(t, data, doc["cardData"], "card data is indexed verbatim as text")
+
+		// The card object rides along as-is (render-only) — template + data,
+		// same wire shape as history reads ([]byte data → base64 string).
+		card, ok := doc["card"].(map[string]any)
+		require.True(t, ok, "card must be the full object")
+		assert.Equal(t, "expense-approval-v1", card["template"])
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte(data)), card["data"])
+	})
+
+	t.Run("no card omits the fields", func(t *testing.T) {
+		evt := &model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Content: "x", CreatedAt: ts,
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(buildDocument(evt), &doc))
+		for _, key := range []string{"card", "cardData"} {
+			_, present := doc[key]
+			assert.False(t, present, "%s should be omitted when there is no card", key)
+		}
+	})
+
+	t.Run("card with empty data carries the object but no cardData", func(t *testing.T) {
+		evt := &model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				CreatedAt: ts,
+				Card:      &cassandra.Card{Template: "welcome-v1"},
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(buildDocument(evt), &doc))
+		card, ok := doc["card"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "welcome-v1", card["template"])
+		_, present := doc["cardData"]
+		assert.False(t, present, "empty card data should be omitted")
 	})
 }
 
