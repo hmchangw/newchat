@@ -57,9 +57,7 @@ type config struct {
 	HealthAddr           string                  `env:"HEALTH_ADDR"              envDefault:":8081"`
 	PProfEnabled         bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr          string                  `env:"METRICS_ADDR"             envDefault:":9090"`
-	InputStream          string                  `env:"INPUT_STREAM,required"`
-	InputSubjectFilter   string                  `env:"INPUT_SUBJECT_FILTER,required"`
-	ConsumerName         string                  `env:"CONSUMER_NAME"             envDefault:"broadcast-worker"`
+	Mode                 stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
@@ -144,12 +142,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.InputStream, cfg.InputSubjectFilter, cfg.Bootstrap.Enabled); err != nil {
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+
+	if err := bootstrapStreams(ctx, js, wiring.CanonicalStream.Name, wiring.CanonicalWildcard, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, cfg.InputStream, buildConsumerConfig(cfg.Consumer, cfg.ConsumerName, cfg.InputSubjectFilter))
+	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)

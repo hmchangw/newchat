@@ -1,0 +1,32 @@
+name: bot-message-worker
+
+services:
+  bot-message-worker:
+    build:
+      context: ../..
+      dockerfile: bot-message-worker/deploy/Dockerfile
+    environment:
+      - OTEL_SERVICE_NAME=bot-message-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
+      - CASSANDRA_HOSTS=cassandra:9042
+      - CASSANDRA_KEYSPACE=chat
+      - CASSANDRA_NUM_CONNS=4
+      - MESSAGE_BUCKET_HOURS=72
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - MAX_WORKERS=100
+      - MAX_DELIVER=5
+      # BOT_MESSAGES_CANONICAL is owned by bot-message-handler; consumer only verifies.
+      - BOOTSTRAP_STREAMS=false
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

@@ -9,7 +9,7 @@ func ServerBotMsgRoomSend(siteID, roomID string) string {
 	return fmt.Sprintf("chat.server.bot.request.room.%s.%s.msg.send", siteID, roomID)
 }
 
-// ServerBotDMSend is BP's publish subject for a bot send-DM request. bot-msg-handler derives the roomID from userID via idgen.BuildDMRoomID.
+// ServerBotDMSend is BP's publish subject for a bot send-DM request. bot-message-handler derives the roomID from userID via idgen.BuildDMRoomID.
 func ServerBotDMSend(siteID, userID string) string {
 	return fmt.Sprintf("chat.server.bot.request.dm.%s.%s.msg.send", siteID, userID)
 }
@@ -64,7 +64,7 @@ func ServerBotWildcard() string {
 	return "chat.server.bot.request.>"
 }
 
-// BotCanonicalCreated is the subject bot-msg-handler publishes canonical bot messages on.
+// BotCanonicalCreated is the subject bot-message-handler publishes canonical bot messages on.
 func BotCanonicalCreated(siteID string) string {
 	return fmt.Sprintf("chat.bot.canonical.%s.created", siteID)
 }
@@ -79,7 +79,7 @@ func BotPushNotification(siteID, kind string) string {
 	return fmt.Sprintf("chat.bot.notification.push.%s.%s", siteID, kind)
 }
 
-// BotPushNotificationWildcard matches every subject on BOT_PUSH_NOTIF.
+// BotPushNotificationWildcard matches every subject on BOT_PUSH_NOTIFICATION.
 func BotPushNotificationWildcard(siteID string) string {
 	return fmt.Sprintf("chat.bot.notification.push.%s.>", siteID)
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// Store is the narrow Cassandra write surface bot-msg-worker calls.
+// Store is the narrow Cassandra write surface bot-message-worker calls.
 type Store interface {
 	// SaveMessage inserts into messages_by_room + messages_by_id; idempotent on the compound PK.
 	SaveMessage(ctx context.Context, msg *model.Message, siteID string) error

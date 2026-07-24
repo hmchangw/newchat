@@ -11,12 +11,7 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
-      # User push pipeline: consumes the batched PushNotificationEvent stream
-      # notification-worker publishes to. The bot deployment (deploy/bot/)
-      # overrides these to bind the same binary to the bot pipeline instead.
-      - INPUT_STREAM=PUSH_NOTIFICATION_site-local
-      - INPUT_SUBJECT_FILTER=chat.server.notification.push.site-local.>
-      - CONSUMER_NAME=push-notification-service
+      - MODE=user
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}

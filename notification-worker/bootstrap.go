@@ -22,7 +22,7 @@ type streamManager interface {
 
 // bootstrapStreams creates the input+output streams when enabled (dev/integration), otherwise
 // verifies the input stream exists so a misconfigured deploy fails at startup; identities are env-driven.
-func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubjectPrefix string, enabled bool) error {
+func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputSubject, outputStream, outputSubject string, enabled bool) error {
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     inputStream,
@@ -32,7 +32,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, inputStream, inputS
 		}
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     outputStream,
-			Subjects: []string{outputSubjectPrefix + ".>"},
+			Subjects: []string{outputSubject},
 			// S2 storage compression — transparent to publisher/consumer; ~2× ratio on JSON at near-zero CPU. Shrinks inter-replica wire bytes and on-disk bytes.
 			Compression: jetstream.S2Compression,
 		}); err != nil {

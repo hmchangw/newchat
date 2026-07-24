@@ -7,7 +7,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// Store is the narrow Mongo surface bot-msg-handler needs.
+// Store is the narrow Mongo surface bot-message-handler needs.
 type Store interface {
 	// FindSubscription returns (nil, ErrNotFound) when the bot is not a member.
 	FindSubscription(ctx context.Context, roomID, userID string) (*Subscription, error)

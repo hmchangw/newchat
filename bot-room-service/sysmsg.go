@@ -14,7 +14,7 @@ import (
 )
 
 // Sysmsg emission is LOCAL ONLY, never federated via OUTBOX — remote members learn membership
-// from member_added instead. Wire shape is a raw model.Message on the same subject as bot-msg-handler.
+// from member_added instead. Wire shape is a raw model.Message on the same subject as bot-message-handler.
 
 // jsPublishAdapter narrows o11ynats.JetStream to sysmsgPublisher.
 type jsPublishAdapter struct {

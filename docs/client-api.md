@@ -6975,7 +6975,7 @@ This endpoint is intended for **server-to-server use**; bot SDKs do not call it 
 ### 10.3 Bot HTTP endpoints — routing model
 
 The 5 bot endpoints below all resolve to a target site before forwarding to
-`bot-msg-handler` / `bot-room-service` over NATS. BP reads the bot's local
+`bot-message-handler` / `bot-room-service` over NATS. BP reads the bot's local
 Mongo subscription for the operation's key (`roomID` for room-scoped ops,
 `otherAccount` for DMs) and forwards to the site the subscription's
 `siteId` names. **The message canonical stream, Cassandra write, and any

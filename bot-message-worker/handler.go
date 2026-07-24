@@ -25,7 +25,7 @@ func newHandler(store Store, siteID string) *handler {
 func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	var evt model.MessageEvent
 	if err := json.Unmarshal(msg.Data(), &evt); err != nil {
-		slog.ErrorContext(ctx, "bot-msg-worker unmarshal failed — ack-drop",
+		slog.ErrorContext(ctx, "bot-message-worker unmarshal failed — ack-drop",
 			"subject", msg.Subject(), "error", err)
 		_ = msg.Ack()
 		return
@@ -34,21 +34,21 @@ func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	if err := h.write(ctx, &m); err != nil {
 		if isPermanent(err) {
 			permanentErrorTotal.Inc()
-			slog.ErrorContext(ctx, "bot-msg-worker permanent error — ack-drop",
+			slog.ErrorContext(ctx, "bot-message-worker permanent error — ack-drop",
 				"messageID", m.ID, "roomID", m.RoomID, "error", err)
 			_ = msg.Ack()
 			return
 		}
-		slog.WarnContext(ctx, "bot-msg-worker transient error — nak",
+		slog.WarnContext(ctx, "bot-message-worker transient error — nak",
 			"messageID", m.ID, "roomID", m.RoomID, "error", err)
 		// NakWithDelay(0) defers to the consumer's BackOff schedule.
 		if nakErr := msg.NakWithDelay(0); nakErr != nil {
-			slog.WarnContext(ctx, "bot-msg-worker nak failed", "error", nakErr)
+			slog.WarnContext(ctx, "bot-message-worker nak failed", "error", nakErr)
 		}
 		return
 	}
 	if err := msg.Ack(); err != nil {
-		slog.WarnContext(ctx, "bot-msg-worker ack failed",
+		slog.WarnContext(ctx, "bot-message-worker ack failed",
 			"messageID", m.ID, "roomID", m.RoomID, "error", err)
 	}
 }

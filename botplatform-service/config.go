@@ -38,8 +38,5 @@ type config struct {
 	// BotIdempotencyRoomMgmtTTL exceeds the 15s NATS timeout for room management.
 	BotIdempotencyRoomMgmtTTL time.Duration `env:"BOT_IDEMPOTENCY_ROOM_MGMT_TTL" envDefault:"60s"`
 
-	// Bootstrap gates dev-only CreateOrUpdateStream calls; ops/IaC owns provisioning in prod.
-	Bootstrap bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-
 	DevMode bool `env:"DEV_MODE" envDefault:"false"`
 }

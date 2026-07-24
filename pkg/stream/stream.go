@@ -69,8 +69,8 @@ func MigrationOplog(siteID string) Config {
 	}
 }
 
-// BotMessagesCanonical returns BOT_MESSAGES_CANONICAL_{siteID}, published by bot-msg-handler.
-// Consumed by bot-msg-worker, bot-broadcast-worker, bot-notification-worker, search-sync-worker.
+// BotMessagesCanonical returns BOT_MESSAGES_CANONICAL_{siteID}, published by bot-message-handler.
+// Consumed by bot-message-worker, bot-broadcast-worker, bot-notification-worker, search-sync-worker.
 func BotMessagesCanonical(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("BOT_MESSAGES_CANONICAL_%s", siteID),
@@ -78,10 +78,10 @@ func BotMessagesCanonical(siteID string) Config {
 	}
 }
 
-// BotPushNotif returns BOT_PUSH_NOTIF_{siteID}, isolated from user PUSH_NOTIFICATION so a bot-notification incident cannot touch user push delivery.
-func BotPushNotif(siteID string) Config {
+// BotPushNotification returns BOT_PUSH_NOTIFICATION_{siteID}, isolated from user PUSH_NOTIFICATION so a bot-notification incident cannot touch user push delivery.
+func BotPushNotification(siteID string) Config {
 	return Config{
-		Name:     fmt.Sprintf("BOT_PUSH_NOTIF_%s", siteID),
+		Name:     fmt.Sprintf("BOT_PUSH_NOTIFICATION_%s", siteID),
 		Subjects: []string{subject.BotPushNotificationWildcard(siteID)},
 	}
 }

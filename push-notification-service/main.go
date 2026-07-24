@@ -15,19 +15,19 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 type config struct {
-	NatsURL            string `env:"NATS_URL,required"`
-	NatsCredsFile      string `env:"NATS_CREDS_FILE"`
-	SiteID             string `env:"SITE_ID,required"`
-	MaxWorkers         int    `env:"MAX_WORKERS" envDefault:"100"`
-	MaxDeliver         int    `env:"MAX_DELIVER" envDefault:"5"`
-	HealthAddr         string `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled       bool   `env:"PPROF_ENABLED" envDefault:"false"`
-	InputStream        string `env:"INPUT_STREAM,required"`
-	InputSubjectFilter string `env:"INPUT_SUBJECT_FILTER,required"`
-	ConsumerName       string `env:"CONSUMER_NAME" envDefault:"push-notification-service"`
+	NatsURL       string          `env:"NATS_URL,required"`
+	NatsCredsFile string          `env:"NATS_CREDS_FILE"`
+	SiteID        string          `env:"SITE_ID,required"`
+	MaxWorkers    int             `env:"MAX_WORKERS" envDefault:"100"`
+	MaxDeliver    int             `env:"MAX_DELIVER" envDefault:"5"`
+	HealthAddr    string          `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled  bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	Mode          stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+
 }
 
 func main() {
@@ -60,9 +60,11 @@ func run() error {
 
 	h := newHandler(LogDispatcher{})
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, cfg.InputStream, jetstream.ConsumerConfig{
-		Durable:       cfg.ConsumerName,
-		FilterSubject: cfg.InputSubjectFilter,
+	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name, jetstream.ConsumerConfig{
+		Durable:       cfg.Mode.ConsumerName("push-notification-service"),
+		FilterSubject: wiring.PushInputWildcard,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       30 * time.Second,
 		MaxDeliver:    cfg.MaxDeliver,
