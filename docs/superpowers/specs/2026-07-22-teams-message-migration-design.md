@@ -86,7 +86,7 @@ name lands in `chineseName`, mirroring the HR mapping.
 
 ## Idempotency
 
-Message id = deterministic hash of the Teams message id **alone** (globally unique) in
+Message id = deterministic hash of `roomId + Teams message id` (Teams ids are unique only per conversation, so the room scope prevents cross-room collisions) in
 valid `idgen` message-id format, so a re-run of the same batch (or a Nak redelivery)
 overwrites the same Cassandra row. Sender-create is an upsert on `employeeId`. Both make
 the multi-day sync safe to retry.

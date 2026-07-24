@@ -103,9 +103,9 @@ func TestMigrateOne_PerMessageStatus(t *testing.T) {
 		})
 	}
 
-	// Only the good, roomId-bearing message was written — with the teams-id-alone deterministic id and resolved sender.
+	// Only the good, roomId-bearing message was written — with the roomId-scoped deterministic id and resolved sender.
 	require.Len(t, store.saved, 1)
-	assert.Equal(t, teamsmigrate.DeterministicMessageID("ok1"), store.saved[0].ID)
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("r1", "ok1"), store.saved[0].ID)
 	assert.Equal(t, "u1", store.senders[0].Account)
 }
 

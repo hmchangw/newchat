@@ -66,10 +66,11 @@ func EmployeeIDFromGraphID(graphID string) string {
 	return idgen.DeterministicID([]byte(graphID))
 }
 
-// DeterministicMessageID is a stable, valid message id derived from the Teams message
-// id alone (globally unique), so a batch re-run overwrites the same row (idempotent).
-func DeterministicMessageID(teamsID string) string {
-	return idgen.MessageIDFromRequestID(teamsID, "teams")
+// DeterministicMessageID is a stable, valid message id derived from the room scope +
+// the Teams message id. Teams ids are unique only per conversation, so scoping by room
+// keeps a batch re-run idempotent AND prevents cross-room id collisions.
+func DeterministicMessageID(chatScope, teamsID string) string {
+	return idgen.MessageIDFromRequestID(chatScope+":"+teamsID, "teams")
 }
 
 // MessageType returns "" for a normal user message; any other Teams type is a

@@ -69,7 +69,7 @@ func (t *DefaultTransformer) Transform(ctx context.Context, raw json.RawMessage)
 	_ = tm.Forwarded
 
 	// ponytail: Teams reactions map via reactionShortcode, but model.Message carries no
-	// reactions field — they migrate as separate reacted events in a follow-up, not here.
+	// reactions field â they migrate as separate reacted events in a follow-up, not here.
 	return msg, nil
 }
 
@@ -91,16 +91,16 @@ func (t *DefaultTransformer) resolveMentions(ctx context.Context, mentions []tea
 	return out, nil
 }
 
-// roomID is the OUTER reply's room — the conversation the quote belongs to. The
+// roomID is the OUTER reply's room â the conversation the quote belongs to. The
 // nested parent payload's own roomId may be absent, so the outer roomID is its RoomID;
-// the parent's id derives from its Teams message id alone (globally unique).
+// the parent’s id derives from the room scope + its Teams message id (unique per conversation).
 func (t *DefaultTransformer) buildQuotedParent(ctx context.Context, roomID string, parent *teamsmigrate.Message) (*cassandra.QuotedParentMessage, error) {
 	s, err := t.resolver.resolve(ctx, parent.From.ID, parent.From.DisplayName)
 	if err != nil {
 		return nil, fmt.Errorf("resolve quoted sender: %w", err)
 	}
 	return &cassandra.QuotedParentMessage{
-		MessageID: teamsmigrate.DeterministicMessageID(parent.ID),
+		MessageID: teamsmigrate.DeterministicMessageID(roomID, parent.ID),
 		RoomID:    roomID,
 		Sender:    cassandra.Participant{ID: s.UserID, Account: s.Account, EngName: s.EngName},
 		CreatedAt: parent.CreatedDateTime,

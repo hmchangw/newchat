@@ -630,7 +630,7 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 	require.Len(t, actions, 2)
 
 	wantEmp := teamsmigrate.EmployeeIDFromGraphID("graph-1")
-	assert.Equal(t, teamsmigrate.DeterministicMessageID("tm-1"), actions[0].DocID)
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
 
 	var doc MessageSearchIndex
 	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
@@ -659,5 +659,5 @@ func TestMessageCollection_BuildAction_TeamsBatch_Skips(t *testing.T) {
 	actions, err := c.BuildAction(data)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
-	assert.Equal(t, teamsmigrate.DeterministicMessageID("tm-4"), actions[0].DocID)
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-4"), actions[0].DocID)
 }

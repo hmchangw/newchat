@@ -43,7 +43,7 @@ func TestTeamsBatch_Integration(t *testing.T) {
 		CreatedDateTime: time.Now().UTC().Truncate(time.Millisecond),
 	})
 	req := model.TeamsBatchRequest{Messages: []json.RawMessage{raw}}
-	wantID := teamsmigrate.DeterministicMessageID("tm-1")
+	wantID := teamsmigrate.DeterministicMessageID("room-1", "tm-1")
 
 	// Run twice: same batch → same deterministic id → idempotent.
 	for i := 0; i < 2; i++ {

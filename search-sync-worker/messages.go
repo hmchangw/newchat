@@ -181,7 +181,7 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 		// UserAccount reuses the employeeId hash best-effort (no UPN at the message layer).
 		empID := teamsmigrate.EmployeeIDFromGraphID(tm.From.ID)
 		doc := MessageSearchIndex{
-			MessageID:   teamsmigrate.DeterministicMessageID(tm.ID),
+			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
 			RoomID:      tm.RoomID,
 			SiteID:      c.siteID,
 			UserID:      empID,
