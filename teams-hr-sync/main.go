@@ -109,7 +109,9 @@ func run() error {
 		"created", stats.Created,
 		"updated", stats.Updated,
 		"quits", stats.Quits,
-		"published", stats.Published,
+		"employeesPublished", stats.EmployeesPublished,
+		"usersPublished", stats.UsersPublished,
+		"quitsPublished", stats.QuitsPublished,
 		"durationMs", time.Since(start).Milliseconds(),
 		"succeeded", err == nil,
 	)
@@ -182,10 +184,12 @@ func jetStreamPublish(js jetstream.JetStream) publishFunc {
 // runStats summarizes one sync run for the end-of-run log line.
 type runStats struct {
 	collectStats
-	Created   int // rows absent from the store
-	Updated   int // rows whose fields changed
-	Quits     int // departed accounts across all sites
-	Published int // JetStream messages sent
+	Created            int // rows absent from the store
+	Updated            int // rows whose fields changed
+	Quits              int // departed accounts across all sites
+	EmployeesPublished int // employee records written
+	UsersPublished     int // user records written (1:1 with employees)
+	QuitsPublished     int // per-site quit batches written
 }
 
 // runSync performs one full stream-mode sync: walk the configured groups,
@@ -226,8 +230,10 @@ func runSyncCore(ctx context.Context, graph msgraph.GroupReader, mapper transfor
 	for _, accounts := range diff.Quits {
 		stats.Quits += len(accounts)
 	}
-	published, err := emit.emit(ctx, diff)
-	stats.Published = published
+	res, err := emit.emit(ctx, diff)
+	stats.EmployeesPublished = res.EmployeesWritten
+	stats.UsersPublished = res.UsersWritten
+	stats.QuitsPublished = res.QuitsWritten
 	if err != nil {
 		return stats, fmt.Errorf("emit sync batches: %w", err)
 	}
