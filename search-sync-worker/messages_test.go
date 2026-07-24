@@ -79,7 +79,7 @@ func TestMessageCollection_StoredScripts(t *testing.T) {
 // Templates apply only to new indices, so existing monthly indices need the
 // additive mapping update or new fields stay unmapped until rollover.
 func TestMessageCollection_MappingUpdate(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
+	coll := newMessageCollection("messages-site1-v1", "site-a", time.Time{}, false)
 	pattern, body := coll.MappingUpdate()
 	assert.Equal(t, "messages-site1-*", pattern, "pattern must strip the version suffix like the template's index_patterns")
 	require.NotNil(t, body)
@@ -382,7 +382,7 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 // Slim (no-content) events must never upsert: pin/unpin would wipe indexed
 // fields, and unpin-after-delete would resurrect a stub doc.
 func TestMessageCollection_BuildAction_SlimEventsSkipped(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 
 	mkEvent := func(eventType model.EventType) []byte {
 		evt := model.MessageEvent{
