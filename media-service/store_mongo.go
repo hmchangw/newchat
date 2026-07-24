@@ -77,6 +77,31 @@ func (s *mongoStore) RoomSite(ctx context.Context, roomID string) (string, model
 	return sub.SiteID, sub.RoomType, sub.Name, true, nil
 }
 
+func (s *mongoStore) UserByAccount(ctx context.Context, account string) (*model.User, bool, error) {
+	var u model.User
+	err := s.users.FindOne(ctx, bson.M{"account": account},
+		options.FindOne().SetProjection(bson.M{"_id": 1, "account": 1, "engName": 1, "chineseName": 1, "deactivated": 1})).Decode(&u)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("find user by account: %w", err)
+	}
+	return &u, true, nil
+}
+
+func (s *mongoStore) RoomMember(ctx context.Context, roomID, account string) (bool, error) {
+	err := s.subscriptions.FindOne(ctx, bson.M{"roomId": roomID, "u.account": account},
+		options.FindOne().SetProjection(bson.M{"_id": 1})).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find room member: %w", err)
+	}
+	return true, nil
+}
+
 func (s *mongoStore) Avatar(ctx context.Context, subjectType model.AvatarSubjectType, subjectID string) (*model.Avatar, bool, error) {
 	id := string(subjectType) + ":" + subjectID
 	var av model.Avatar
