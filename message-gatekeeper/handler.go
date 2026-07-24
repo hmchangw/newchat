@@ -124,7 +124,15 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	replyData, err := h.processMessage(ctx, account, roomID, siteID, &req)
+	// account is the raw {account} subject token — the encoded transport form (a
+	// ".bot" bot's client connects/publishes as weather_bot). It stays encoded
+	// for the reply subject (chat.user.{account}.response.{requestId}), which
+	// genuinely needs the transport form: the bot's client is scoped to the
+	// encoded token. processMessage needs the requester's real account for
+	// data-key lookups (subscription, history), keyed on the original dotted
+	// account — so decode here. No-op for every non-bot account.
+	requester := subject.DecodeAccount(account)
+	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
 		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.
 		// Bare error (raw fmt.Errorf) → transient infra failure: Nak for redelivery.
