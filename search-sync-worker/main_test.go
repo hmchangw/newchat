@@ -44,7 +44,7 @@ func (f *fakeEngine) Search(context.Context, []string, json.RawMessage) (json.Ra
 func TestPushMappings_PushesOnlyCollectionsWithMappings(t *testing.T) {
 	eng := &fakeEngine{}
 	collections := []Collection{
-		newMessageCollection("messages-x-v1", time.Time{}, false),
+		newMessageCollection("messages-x-v1", "site-x", time.Time{}, false),
 		newSpotlightCollection("spotlight-x", false),
 		newSpotlightOrgCollection("spotlight-org-x", "s1", "hr", false),
 		newUserRoomCollection("user-room-x"),
@@ -72,7 +72,7 @@ func TestPushMappings_SkipsEmptyBody(t *testing.T) {
 func TestPushMappings_PropagatesEngineError(t *testing.T) {
 	engineErr := errors.New("es down")
 	eng := &fakeEngine{mappingErr: engineErr}
-	collections := []Collection{newMessageCollection("messages-x-v1", time.Time{}, false)}
+	collections := []Collection{newMessageCollection("messages-x-v1", "site-x", time.Time{}, false)}
 
 	err := pushMappings(context.Background(), eng, collections)
 	require.ErrorIs(t, err, engineErr, "engine failure must stay on the %w chain")
