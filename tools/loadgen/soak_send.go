@@ -31,9 +31,10 @@ func pickSoakSendKind(rng *rand.Rand, threadShare float64) soakSendKind {
 }
 
 type soakSendConfig struct {
-	SiteID       string
-	ThreadShare  float64
-	ReplyTimeout time.Duration
+	SiteID               string
+	ThreadShare          float64
+	ReplyTimeout         time.Duration
+	NextThreadReplyLimit func() int
 }
 
 type soakSendIDs struct {
@@ -77,9 +78,12 @@ const (
 )
 
 type soakSendReplyResult struct {
-	Status    soakSendReplyStatus
-	RequestID string
-	MessageID string
+	Status     soakSendReplyStatus
+	Kind       soakSendKind
+	RequestID  string
+	MessageID  string
+	Latency    time.Duration
+	ErrorClass soakErrorClass
 }
 
 type soakSender struct {
@@ -173,6 +177,11 @@ func (s *soakSender) Publish(
 		ID: messageID, RoomID: target.RoomID, Author: target.Account,
 		Content: content, CreatedAt: now, ThreadParentID: threadParentID,
 	}
+	if kind == soakSendTopLevel && s.cfg.NextThreadReplyLimit != nil {
+		s.rngMu.Lock()
+		candidate.ThreadReplyLimit = s.cfg.NextThreadReplyLimit()
+		s.rngMu.Unlock()
+	}
 	if err := s.catalog.TrackPublished(&candidate); err != nil {
 		return nil, fmt.Errorf("track soak send before publish: %w", err)
 	}
@@ -210,25 +219,29 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 		return soakSendReplyResult{Status: soakSendReplyUnmatched, RequestID: requestID}
 	}
 	result := soakSendReplyResult{
-		Status: soakSendReplyRejected, RequestID: requestID,
-		MessageID: pending.MessageID,
+		Status: soakSendReplyRejected, Kind: pending.Kind, RequestID: requestID,
+		MessageID: pending.MessageID, Latency: s.clock.Now().Sub(pending.PublishedAt),
 	}
 
-	if parseSoakErrorEnvelope(data) != nil {
+	if responseErr := parseSoakErrorEnvelope(data); responseErr != nil {
 		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+		result.ErrorClass = classifySoakRPCError(responseErr)
 		return result
 	}
 	var response model.Message
 	if err := json.Unmarshal(data, &response); err != nil {
 		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
 		result.Status = soakSendReplyMalformed
+		result.ErrorClass = soakErrorDecode
 		return result
 	}
 	if !matchingSoakSendReply(pending, &response) {
 		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+		result.ErrorClass = soakErrorAssertion
 		return result
 	}
 	if !s.catalog.Accept(pending.Target.RoomID, pending.MessageID) {
+		result.ErrorClass = soakErrorAssertion
 		return result
 	}
 	result.Status = soakSendReplyAccepted
@@ -352,10 +365,21 @@ func startSoakSendResponses(
 	source soakResponseSource,
 	sender *soakSender,
 ) (soakResponseSubscription, error) {
+	return startSoakSendResponsesWithObserver(source, sender, nil)
+}
+
+func startSoakSendResponsesWithObserver(
+	source soakResponseSource,
+	sender *soakSender,
+	observer func(soakSendReplyResult),
+) (soakResponseSubscription, error) {
 	subscription, err := source.Subscribe(
 		subject.UserResponseWildcard(),
 		func(message *nats.Msg) {
-			sender.HandleReply(message.Subject, message.Data)
+			result := sender.HandleReply(message.Subject, message.Data)
+			if observer != nil && result.Status != soakSendReplyUnmatched {
+				observer(result)
+			}
 		},
 	)
 	if err != nil {

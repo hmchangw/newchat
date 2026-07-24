@@ -134,6 +134,48 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 	assert.Equal(t, parentID, child.ThreadParentID)
 }
 
+func TestSoakSender_TopLevelStoresConfiguredThreadReplyLimit(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	sender := newSoakSender(
+		soakSendConfig{
+			SiteID: "site-1",
+			NextThreadReplyLimit: func() int {
+				return 37
+			},
+		},
+		catalog,
+		&soakRecordingPublisher{},
+		clock,
+		rand.New(rand.NewSource(1)),
+		&soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		},
+	)
+	_, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "parent")
+	require.NoError(t, err)
+	reply, err := json.Marshal(model.Message{
+		ID: soakTestMessageID, RoomID: "room-1", UserID: "u-1",
+		UserAccount: "alice", Content: "parent", CreatedAt: clock.Now(),
+	})
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		soakSendReplyAccepted,
+		sender.HandleReply(
+			subject.UserResponse("alice", soakTestRequestID),
+			reply,
+		).Status,
+	)
+
+	message, ok := catalog.Get("room-1", soakTestMessageID)
+	require.True(t, ok)
+	assert.Equal(t, 37, message.ThreadReplyLimit)
+}
+
 func TestSoakSendPicker_ConfiguredNinetyTenMix(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	thread := 0
@@ -196,21 +238,25 @@ func TestSoakSender_ErrorAndMalformedRepliesRejectPendingCandidate(t *testing.T)
 		name       string
 		reply      []byte
 		wantStatus soakSendReplyStatus
+		wantClass  soakErrorClass
 	}{
 		{
 			name:       "gatekeeper error",
 			reply:      []byte(`{"error":"not subscribed","code":"forbidden"}`),
 			wantStatus: soakSendReplyRejected,
+			wantClass:  soakErrorForbidden,
 		},
 		{
 			name:       "malformed success",
 			reply:      []byte(`{"id":`),
 			wantStatus: soakSendReplyMalformed,
+			wantClass:  soakErrorDecode,
 		},
 		{
 			name:       "wrong message",
 			reply:      []byte(`{"id":"wrong","roomId":"room-1","userId":"u-1","userAccount":"alice","content":"hello","createdAt":"1970-01-01T00:01:40Z"}`),
 			wantStatus: soakSendReplyRejected,
+			wantClass:  soakErrorAssertion,
 		},
 	}
 
@@ -229,11 +275,36 @@ func TestSoakSender_ErrorAndMalformedRepliesRejectPendingCandidate(t *testing.T)
 				tt.reply,
 			)
 			assert.Equal(t, tt.wantStatus, result.Status)
+			assert.Equal(t, tt.wantClass, result.ErrorClass)
 			assert.Zero(t, catalog.Size())
 			assert.Equal(t, 0, sender.Pending())
 			assert.False(t, catalog.Accept("room-1", soakTestMessageID))
 		})
 	}
+}
+
+func TestStartSoakSendResponses_ObserverIgnoresUnmatchedTraffic(t *testing.T) {
+	source := &fakeSoakResponseSource{}
+	sender := newTestSoakSender(
+		newSoakCatalog(8, 100, 0, nil),
+		&soakRecordingPublisher{},
+		newFakeSoakClock(time.Unix(100, 0)),
+		0,
+	)
+	observed := 0
+	_, err := startSoakSendResponsesWithObserver(
+		source,
+		sender,
+		func(soakSendReplyResult) { observed++ },
+	)
+	require.NoError(t, err)
+
+	source.handler(&nats.Msg{
+		Subject: subject.UserResponse("another-process", "request-id"),
+		Data:    []byte(`{"id":"unrelated"}`),
+	})
+
+	assert.Zero(t, observed)
 }
 
 func TestSoakSender_ThreadParentRequiresRoomGraceAndAvailableCap(t *testing.T) {

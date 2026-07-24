@@ -158,7 +158,7 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
 	_ = fs.Parse(args)
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseSeed)
+		return runSoakPhase(ctx, cfg, soakPhaseSeed, *seed)
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -311,7 +311,7 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	seed := fs.Int64("seed", 42, "RNG seed (must match the seed used at seed time)")
 	_ = fs.Parse(args)
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseTeardown)
+		return runSoakPhase(ctx, cfg, soakPhaseTeardown, soakDefaultSeed)
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -347,19 +347,20 @@ const (
 )
 
 func runSoak(ctx context.Context, cfg *config, args []string) int {
-	fs := flag.NewFlagSet("soak", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
+	seed, err := parseSoakArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "soak does not accept positional arguments")
-		return 2
-	}
-	return runSoakPhase(ctx, cfg, soakPhaseRun)
+	return runSoakPhase(ctx, cfg, soakPhaseRun, seed)
 }
 
-func runSoakPhase(ctx context.Context, cfg *config, phase soakPhase) int {
+func runSoakPhase(
+	ctx context.Context,
+	cfg *config,
+	phase soakPhase,
+	seed int64,
+) int {
 	if err := validateSoakConfig(&cfg.Soak, cfg.CassandraKeyspace); err != nil {
 		slog.Error("invalid Cassandra soak configuration", "phase", phase, "error", err)
 		return 2
@@ -368,8 +369,10 @@ func runSoakPhase(ctx context.Context, cfg *config, phase soakPhase) int {
 	if phase == soakPhaseTeardown {
 		return runSoakTeardown(ctx, cfg)
 	}
-	slog.Error("Cassandra soak phase is not implemented yet", "phase", phase)
-	return 1
+	if phase == soakPhaseSeed {
+		return runSoakSeed(ctx, cfg, seed)
+	}
+	return runSoakWorkload(ctx, cfg, seed)
 }
 
 func runSoakTeardown(ctx context.Context, cfg *config) int {

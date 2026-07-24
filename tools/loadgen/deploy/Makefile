@@ -9,7 +9,7 @@ STEPS            ?=
 # `ENCRYPTION_ENABLED=false make up` for a plaintext comparison run.
 export ENCRYPTION_ENABLED ?= true
 
-.PHONY: up stack-up overlay-up seed teardown run run-dashboards run-max-rps run-daily down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-botroom teardown-botroom run-max-room-size
+.PHONY: up stack-up overlay-up seed teardown run run-dashboards run-max-rps run-daily down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-botroom teardown-botroom run-max-room-size soak-seed soak-run soak-teardown
 
 up: stack-up overlay-up
 
@@ -30,6 +30,29 @@ seed:
 teardown:
 	@test -n "$(PRESET)" || (echo "PRESET=<name> required" && exit 1)
 	$(COMPOSE) exec -T loadgen /loadgen teardown --preset=$(PRESET)
+
+soak-seed:
+	@test -n "$(SOAK_RUN_ID)" || (echo "SOAK_RUN_ID=<unique-run-id> required" && exit 1)
+	$(COMPOSE) exec -T -e SOAK_RUN_ID=$(SOAK_RUN_ID) loadgen \
+	    /loadgen seed --workload=soak --seed=$(or $(SEED),42)
+
+soak-run:
+	@test -n "$(SOAK_RUN_ID)" || (echo "SOAK_RUN_ID=<unique-run-id> required" && exit 1)
+	$(COMPOSE) exec -T -e SOAK_RUN_ID=$(SOAK_RUN_ID) loadgen \
+	    /loadgen soak --seed=$(or $(SEED),42)
+
+soak-teardown:
+	@test -n "$(SOAK_RUN_ID)" || (echo "SOAK_RUN_ID=<unique-run-id> required" && exit 1)
+	@if [ "$(SOAK_CASSANDRA_CLEANUP)" = "truncate" ]; then \
+	    test -n "$(CASSANDRA_KEYSPACE)" || (echo "CASSANDRA_KEYSPACE required for truncate" && exit 1); \
+	    test "$(SOAK_CONFIRM_KEYSPACE)" = "$(CASSANDRA_KEYSPACE)" || (echo "SOAK_CONFIRM_KEYSPACE must exactly match CASSANDRA_KEYSPACE" && exit 1); \
+	fi
+	$(COMPOSE) exec -T \
+	    -e SOAK_RUN_ID=$(SOAK_RUN_ID) \
+	    -e SOAK_CASSANDRA_CLEANUP=$(or $(SOAK_CASSANDRA_CLEANUP),none) \
+	    -e CASSANDRA_KEYSPACE=$(or $(CASSANDRA_KEYSPACE),chat) \
+	    -e SOAK_CONFIRM_KEYSPACE=$(SOAK_CONFIRM_KEYSPACE) \
+	    loadgen /loadgen teardown --workload=soak
 
 seed-members:
 	@test -n "$(PRESET)" || (echo "PRESET=<members-*> required" && exit 1)

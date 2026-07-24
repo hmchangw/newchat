@@ -135,6 +135,126 @@ func (s *mongoSoakStore) GetManifest(
 	return &manifest, nil
 }
 
+func (s *mongoSoakStore) LoadTopology(
+	ctx context.Context,
+	runID string,
+	siteID string,
+) (soakTopology, error) {
+	filter := bson.D{
+		{Key: "soakRunId", Value: runID},
+		{Key: "siteId", Value: siteID},
+	}
+	roomCursor, err := s.db.Collection("rooms").Find(
+		ctx,
+		filter,
+		options.Find().
+			SetProjection(bson.D{
+				{Key: "_id", Value: 1},
+				{Key: "name", Value: 1},
+				{Key: "type", Value: 1},
+				{Key: "siteId", Value: 1},
+				{Key: "userCount", Value: 1},
+				{Key: "uids", Value: 1},
+				{Key: "accounts", Value: 1},
+				{Key: "createdAt", Value: 1},
+				{Key: "updatedAt", Value: 1},
+			}).
+			SetSort(bson.D{{Key: "_id", Value: 1}}),
+	)
+	if err != nil {
+		return soakTopology{}, fmt.Errorf("find owned soak rooms: %w", err)
+	}
+	defer func() { _ = roomCursor.Close(ctx) }()
+
+	var rooms []model.Room
+	if err := roomCursor.All(ctx, &rooms); err != nil {
+		return soakTopology{}, fmt.Errorf("decode owned soak rooms: %w", err)
+	}
+	if len(rooms) == 0 {
+		return soakTopology{}, fmt.Errorf(
+			"load soak topology for run %q: no owned rooms",
+			runID,
+		)
+	}
+
+	subscriptionCursor, err := s.db.Collection("subscriptions").Find(
+		ctx,
+		filter,
+		options.Find().
+			SetProjection(bson.D{
+				{Key: "_id", Value: 1},
+				{Key: "u", Value: 1},
+				{Key: "roomId", Value: 1},
+				{Key: "siteId", Value: 1},
+				{Key: "roles", Value: 1},
+				{Key: "name", Value: 1},
+				{Key: "roomType", Value: 1},
+				{Key: "isSubscribed", Value: 1},
+				{Key: "joinedAt", Value: 1},
+			}).
+			SetSort(bson.D{{Key: "_id", Value: 1}}),
+	)
+	if err != nil {
+		return soakTopology{}, fmt.Errorf("find owned soak subscriptions: %w", err)
+	}
+	defer func() { _ = subscriptionCursor.Close(ctx) }()
+
+	var subscriptions []model.Subscription
+	if err := subscriptionCursor.All(ctx, &subscriptions); err != nil {
+		return soakTopology{}, fmt.Errorf("decode owned soak subscriptions: %w", err)
+	}
+	if len(subscriptions) == 0 {
+		return soakTopology{}, fmt.Errorf(
+			"load soak topology for run %q: no owned subscriptions",
+			runID,
+		)
+	}
+	usersByID := make(map[string]model.User)
+	for i := range subscriptions {
+		user := subscriptions[i].User
+		if user.ID == "" || user.Account == "" {
+			continue
+		}
+		usersByID[user.ID] = model.User{
+			ID: user.ID, Account: user.Account, SiteID: siteID,
+		}
+	}
+	activeUsers := make([]model.User, 0, len(usersByID))
+	for userID := range usersByID {
+		activeUsers = append(activeUsers, usersByID[userID])
+	}
+	return soakTopology{
+		ActiveUsers: activeUsers, Rooms: rooms, Subscriptions: subscriptions,
+	}, nil
+}
+
+func (s *mongoSoakStore) HasWrappedDEK(
+	ctx context.Context,
+	roomID string,
+) (bool, error) {
+	var record struct {
+		WrappedDEK []byte `bson:"wrappedDEK"`
+	}
+	err := s.db.Collection(atrest.CollectionName).FindOne(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: roomID},
+			{Key: "wrappedDEK", Value: bson.D{{Key: "$exists", Value: true}}},
+		},
+		options.FindOne().SetProjection(bson.D{
+			{Key: "_id", Value: 0},
+			{Key: "wrappedDEK", Value: 1},
+		}),
+	).Decode(&record)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find wrapped DEK for room %q: %w", roomID, err)
+	}
+	return len(record.WrappedDEK) > 0, nil
+}
+
 func soakManifestProjection() bson.D {
 	return bson.D{
 		{Key: "_id", Value: 1},

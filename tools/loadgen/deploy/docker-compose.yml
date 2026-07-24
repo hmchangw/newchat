@@ -19,6 +19,12 @@ services:
       - SITE_ID=site-local
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # Normal Run A traffic reaches Cassandra only through message-worker and
+      # history-service. These values are used directly only by an explicitly
+      # guarded teardown with SOAK_CASSANDRA_CLEANUP=truncate.
+      - CASSANDRA_HOSTS=cassandra
+      - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
+      - MESSAGE_BUCKET_HOURS=${MESSAGE_BUCKET_HOURS:-72}
       - METRICS_ADDR=:9099
       # Worker-pool cap for concurrent publishes. Set to 0 to publish
       # serially on the ticker goroutine (legacy behavior).
@@ -28,6 +34,41 @@ services:
       # profiling.
       # - PPROF_ADDR=:6060
       - BOTTLENECK_PROM_URL=http://prometheus:9090
+      # Cassandra Run A. SOAK_RUN_ID must be supplied when bringing up the
+      # overlay; all remaining values use the conservative binary defaults
+      # unless overridden here.
+      - SOAK_RUN_ID=${SOAK_RUN_ID:-}
+      - SOAK_RUN_DURATION=${SOAK_RUN_DURATION:-72h}
+      - SOAK_WARMUP=${SOAK_WARMUP:-30s}
+      - SOAK_SEND_RATE=${SOAK_SEND_RATE:-100}
+      - SOAK_READ_RATE=${SOAK_READ_RATE:-700}
+      - SOAK_THREAD_SHARE=${SOAK_THREAD_SHARE:-0.10}
+      - SOAK_MUTATION_RATE=${SOAK_MUTATION_RATE:-5}
+      - SOAK_SOFT_DELETE_RATIO=${SOAK_SOFT_DELETE_RATIO:-0.001}
+      - SOAK_REACTION_RATE=${SOAK_REACTION_RATE:-100}
+      - SOAK_REACTIONS_PER_HOT_MESSAGE=${SOAK_REACTIONS_PER_HOT_MESSAGE:-30}
+      - SOAK_REACTION_MESSAGE_SCOPE=${SOAK_REACTION_MESSAGE_SCOPE:-hot_only}
+      - SOAK_REACTION_REMOVE_SHARE=${SOAK_REACTION_REMOVE_SHARE:-0.20}
+      - SOAK_PINNED_LIST_RATE=${SOAK_PINNED_LIST_RATE:-1}
+      - SOAK_VERIFY_RATE=${SOAK_VERIFY_RATE:-1}
+      - SOAK_MAX_USERS=${SOAK_MAX_USERS:-20000}
+      - SOAK_ACTIVE_USERS=${SOAK_ACTIVE_USERS:-2000}
+      - SOAK_ROOM_COUNT=${SOAK_ROOM_COUNT:-10000}
+      - SOAK_CHANNEL_RATIO=${SOAK_CHANNEL_RATIO:-0.30}
+      - SOAK_CHANNEL_MEMBERS=${SOAK_CHANNEL_MEMBERS:-100}
+      - SOAK_RATE_SCOPE=${SOAK_RATE_SCOPE:-site}
+      - SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY=${SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY:-0}
+      - SOAK_PAYLOAD_MEDIAN_BYTES=${SOAK_PAYLOAD_MEDIAN_BYTES:-1024}
+      - SOAK_PAYLOAD_P95_BYTES=${SOAK_PAYLOAD_P95_BYTES:-2048}
+      - SOAK_PAYLOAD_MAX_BYTES=${SOAK_PAYLOAD_MAX_BYTES:-10240}
+      - SOAK_PERSIST_GRACE=${SOAK_PERSIST_GRACE:-10s}
+      - SOAK_MUTATION_RETRIES=${SOAK_MUTATION_RETRIES:-3}
+      - SOAK_RETRY_MIN_BACKOFF=${SOAK_RETRY_MIN_BACKOFF:-100ms}
+      - SOAK_RETRY_MAX_BACKOFF=${SOAK_RETRY_MAX_BACKOFF:-5s}
+      - SOAK_RECENT_PER_ROOM=${SOAK_RECENT_PER_ROOM:-128}
+      - SOAK_RECENT_TOTAL=${SOAK_RECENT_TOTAL:-200000}
+      - SOAK_CASSANDRA_CLEANUP=${SOAK_CASSANDRA_CLEANUP:-none}
+      - SOAK_CONFIRM_KEYSPACE=${SOAK_CONFIRM_KEYSPACE:-}
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     ports:
