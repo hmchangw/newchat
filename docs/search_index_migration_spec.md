@@ -58,9 +58,9 @@ To guarantee this job can never drift from what `search-sync-worker` actually in
 
 `search-sync-worker` becomes a thin caller of both packages; this job is the second, independent caller — see the implementation plan (`docs/superpowers/plans/2026-07-24-es-index-migrator.md`) for the exact extraction steps.
 
-## At-rest encryption
+## No at-rest decryption dependency
 
-Message content (`msg`, `attachments`, `card`, `cardAction`) may be stored encrypted in Cassandra's `enc_payload`/`enc_meta` columns when a site has `ATREST_ENABLED=true` (envelope encryption via `pkg/atrest`, DEKs wrapped by Vault's transit engine). This job decrypts exactly as `history-service` does: for any row with a non-empty `enc_payload`, it calls `atrest.Cipher.Decrypt` (constructed the same way `message-worker`/`history-service` construct it, from `ATREST_*`/`VAULT_*` config) and applies the result via `atrest.ApplyDecryptedFields` before building the search document. A decrypt failure for a room aborts that room's read as an error — it is never silently skipped, since silently indexing nothing for an encrypted room would look identical to "room has no messages."
+`message-worker`'s live write path can store message content encrypted in Cassandra's `enc_payload`/`enc_meta` columns when a site has `ATREST_ENABLED=true` (envelope encryption via `pkg/atrest`, DEKs wrapped by Vault's transit engine), and `history-service` decrypts those columns on its live read path. This job is different: the `messages_by_room` rows it reads were themselves written directly into the plaintext `msg`/`attachments`/`card` columns by the process that populated the table for this migration — never through the live at-rest-encryption write path. So this job reads those columns as-is, never touches `enc_payload`/`enc_meta`, and has no dependency on `pkg/atrest` or Vault at all — no Vault connectivity, no `room_data_keys` read access, no `ATREST_*`/`VAULT_*` config.
 
 ## Collection 1 — Messages
 
@@ -71,7 +71,6 @@ Message content (`msg`, `attachments`, `card`, `cardAction`) may be stored encry
 2. Per room, walk every bucket touching `[MIGRATION_START_AT, MIGRATION_END_AT)` via `pkg/msgbucket.Sizer` (bucket window = `MESSAGE_BUCKET_HOURS`, must match the value configured on `message-worker`/`history-service` for this site).
 3. Stream rows per bucket (never materializing a whole room's history in memory) via `SELECT ... FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at >= ? AND created_at < ?`.
 4. Skip rows where `deleted = true`.
-5. Decrypt `enc_payload` rows in place when `ATREST_ENABLED=true` (see above).
 
 **Field mapping** (Cassandra `Message` → `searchindex.MessageDoc`, via `searchindex.MessageFields`):
 
@@ -145,15 +144,13 @@ Index: `USER_ROOM_INDEX` (flat).
 | `CASSANDRA_NUM_CONNS` | no | `8` | |
 | `BULK_BATCH_SIZE` | no | `500` | Soft cap on buffered ES actions per `_bulk` call. |
 | `WORKER_CONCURRENCY` | no | `4` | Parallel room/subscription workers. |
-| `ATREST_ENABLED` / `ATREST_DEK_CACHE_SIZE` / `ATREST_DEK_CACHE_TTL` | no | see `pkg/atrest.Config` | At-rest decryption, must match the site's live services. |
-| `VAULT_ADDR` / Vault auth vars | conditional | — | Required only when `ATREST_ENABLED=true`; see `pkg/atrest.VaultConfig`. |
 
-Only `MIGRATION_START_AT`/`MIGRATION_END_AT` bound anything — spotlight and user-room always backfill the site's full current subscription set.
+Only `MIGRATION_START_AT`/`MIGRATION_END_AT` bound anything — spotlight and user-room always backfill the site's full current subscription set. There are no `ATREST_*`/`VAULT_*` vars — see "No at-rest decryption dependency" above.
 
 ## Execution shape
 
 1. Parse config, fail fast on missing required vars.
-2. Connect to Cassandra, MongoDB, Elasticsearch (and Vault, if `ATREST_ENABLED`).
+2. Connect to Cassandra, MongoDB, Elasticsearch.
 3. Idempotently **ensure** (not just verify) the three ES index templates and two user-room stored scripts exist, using the exact same builders `search-sync-worker` uses at its own startup — so this job can run standalone against a fresh site that has never run `search-sync-worker`.
 4. Run the three collections concurrently (independent indexes/sources); each internally parallelizes across rooms/subscriptions with a bounded worker pool (`WORKER_CONCURRENCY`).
 5. Buffer ES bulk actions per collection, flushing at `BULK_BATCH_SIZE`. A flush always runs at the end of each collection's pass, even if a worker in that collection failed — partial progress is never silently discarded.

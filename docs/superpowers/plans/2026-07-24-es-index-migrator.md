@@ -4,7 +4,7 @@
 
 **Goal:** Add `data-migration/es-index-migrator`, a standalone one-time/rebuild job that backfills the `messages` (monthly), `spotlight`, and `user-room` Elasticsearch indexes directly from a site's own current-stack Cassandra and MongoDB — for use when a site's ES indexes need to be rebuilt (cluster loss, mapping change, enabling search for an existing site) — while extracting the ES document shapes, Painless scripts, and bulk-result classification that `search-sync-worker` already uses live into shared packages so both consumers can never drift.
 
-**Architecture:** Two phases. Phase A extracts `search-sync-worker`'s currently-private document builders (`MessageSearchIndex`, `SpotlightSearchIndex`, `userRoomUpsertDoc`, the two Painless scripts, `esPropertiesFromStruct`, `isBulkItemSuccess`) into importable packages (`pkg/searchindex`, `pkg/searchengine`), with `search-sync-worker` becoming a thin caller of the same shared code — no behavior change, verified by the existing test suite passing unchanged. Phase B builds the new service: it reads room membership straight from the `subscriptions` collection (each row already carries `roomId`/`roomType`/`name`/`joinedAt`/`historySharedSince` — no legacy room classifier or extra `rooms` lookup needed, unlike the design this repo's now-obsolete sibling once used) and reads message history from Cassandra's `messages_by_room` bucketed table (streaming per-bucket, never materializing a whole room's history in memory), decrypting at-rest-encrypted rows via `pkg/atrest` exactly as `history-service` does. It writes to ES using the same versioned/idempotent scheme `search-sync-worker` uses in production (external versioning for messages/spotlight, the same scripted delta update for user-room), so a re-run or overlap with live traffic converges instead of racing.
+**Architecture:** Two phases. Phase A extracts `search-sync-worker`'s currently-private document builders (`MessageSearchIndex`, `SpotlightSearchIndex`, `userRoomUpsertDoc`, the two Painless scripts, `esPropertiesFromStruct`, `isBulkItemSuccess`) into importable packages (`pkg/searchindex`, `pkg/searchengine`), with `search-sync-worker` becoming a thin caller of the same shared code — no behavior change, verified by the existing test suite passing unchanged. Phase B builds the new service: it reads room membership straight from the `subscriptions` collection (each row already carries `roomId`/`roomType`/`name`/`joinedAt`/`historySharedSince` — no legacy room classifier or extra `rooms` lookup needed, unlike the design this repo's now-obsolete sibling once used) and reads message history from Cassandra's `messages_by_room` bucketed table (streaming per-bucket, never materializing a whole room's history in memory). The rows this job reads were themselves written directly into the plaintext `msg`/`attachments`/`card` columns by the migration process that populated `messages_by_room` — never through the live at-rest-encryption write path — so this job reads those columns as-is and has no dependency on `pkg/atrest`/Vault. It writes to ES using the same versioned/idempotent scheme `search-sync-worker` uses in production (external versioning for messages/spotlight, the same scripted delta update for user-room), so a re-run or overlap with live traffic converges instead of racing.
 
 **Tech Stack:** Go 1.25, `go.mongodb.org/mongo-driver/v2`, `github.com/gocql/gocql`, `golang.org/x/sync/errgroup`, `github.com/caarlos0/env/v11`, `go.uber.org/mock` (mockgen), `stretchr/testify`, `testcontainers-go`.
 
@@ -951,7 +951,7 @@ git commit -m "refactor(searchindex): move ES template/mapping builders into pkg
 - Create: `data-migration/es-index-migrator/config_test.go`
 
 **Interfaces:**
-- Consumes: `atrest.Config`, `atrest.VaultConfig` (`pkg/atrest`).
+- Consumes: nothing beyond `caarlos0/env`.
 - Produces: `type config struct{...}`, `func loadConfig() (config, error)` — consumed by `main.go` (Task 14).
 
 - [ ] **Step 1: Write the failing test**
@@ -1077,8 +1077,6 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-
-	"github.com/hmchangw/chat/pkg/atrest"
 )
 
 type config struct {
@@ -1115,9 +1113,6 @@ type config struct {
 
 	BulkBatchSize     int `env:"BULK_BATCH_SIZE"     envDefault:"500"`
 	WorkerConcurrency int `env:"WORKER_CONCURRENCY"  envDefault:"4"`
-
-	Atrest atrest.Config
-	Vault  atrest.VaultConfig
 }
 
 func loadConfig() (config, error) {
@@ -1242,12 +1237,14 @@ git commit -m "feat(es-index-migrator): define store interfaces"
 - Create: `data-migration/es-index-migrator/messagesource_integration_test.go` (`//go:build integration`)
 
 **Interfaces:**
-- Consumes: `pkg/cassutil.Connect`, `pkg/msgbucket.Sizer`, `pkg/atrest.Cipher`/`EncMeta`/`ApplyDecryptedFields`, `pkg/model/cassandra.Message`.
-- Produces: `type cassandraMessageSource struct{...}`, `func newCassandraMessageSource(session *gocql.Session, sizer msgbucket.Sizer, cipher atrest.Cipher) *cassandraMessageSource` implementing `MessageSource` (Task 7) — consumed by `main.go` (Task 14) and `runner.go` (Task 14).
+- Consumes: `pkg/cassutil.Connect`, `pkg/msgbucket.Sizer`, `pkg/model/cassandra.Message`.
+- Produces: `type cassandraMessageSource struct{...}`, `func newCassandraMessageSource(session *gocql.Session, sizer msgbucket.Sizer) *cassandraMessageSource` implementing `MessageSource` (Task 7) — consumed by `main.go` (Task 14) and `runner.go` (Task 14).
+
+This job reads `messages_by_room` rows that were themselves written directly into the plaintext `msg`/`attachments`/`card` columns by whatever process populated the table — never through the live at-rest-encryption write path — so it reads those columns as-is. It does not read or decrypt `enc_payload`/`enc_meta` and has no dependency on `pkg/atrest` or Vault. (Contrast with `history-service`, which reads the same table on the *live* serving path and does decrypt — that asymmetry is intentional and specific to how this job's source data was populated, not an oversight.)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `data-migration/es-index-migrator/messagesource_cassandra_test.go` — this task's core logic (bucket iteration bounds, deleted-row skip, decrypt-if-needed dispatch) is unit-testable only around the bucket-range computation and the decrypt gate, since the actual row scan needs a real `*gocql.Session`. Write the two pure-logic unit tests here, and defer full read-path coverage to the integration test in Step 6:
+Create `data-migration/es-index-migrator/messagesource_cassandra_test.go` — this task's core logic (bucket iteration bounds, deleted-row skip) is unit-testable only around the bucket-range computation, since the actual row scan needs a real `*gocql.Session`. Write the pure-logic unit tests here, and defer full read-path coverage to the integration test in Step 6:
 
 ```go
 package main
@@ -1314,19 +1311,19 @@ import (
 
 	"github.com/gocql/gocql"
 
-	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 
 // messageColumns is the explicit set of messages_by_room columns this
-// service needs — a superset that covers both the plaintext path and the
-// at-rest-encrypted path (enc_payload/enc_meta), but excludes columns no
-// search doc ever uses (mentions, quoted_parent_message, card_action,
-// sys_msg_data, pinned_at/pinned_by, visible_to, reactions, type).
+// service needs, excluding columns no search doc ever uses (mentions,
+// quoted_parent_message, card_action, sys_msg_data, pinned_at/pinned_by,
+// visible_to, reactions, type) and excluding enc_payload/enc_meta — this
+// job's source rows were written directly into the plaintext msg/
+// attachments/card columns, never through the live at-rest-encryption
+// write path, so there is nothing to decrypt here.
 const messageColumns = "room_id, created_at, message_id, sender, msg, attachments, card, " +
-	"tshow, thread_parent_id, thread_parent_created_at, deleted, site_id, edited_at, updated_at, " +
-	"enc_payload, enc_meta"
+	"tshow, thread_parent_id, thread_parent_created_at, deleted, site_id, edited_at, updated_at"
 
 const messagesByRoomQuery = "SELECT " + messageColumns + " FROM messages_by_room " +
 	"WHERE room_id = ? AND bucket = ? AND created_at >= ? AND created_at < ?"
@@ -1334,13 +1331,10 @@ const messagesByRoomQuery = "SELECT " + messageColumns + " FROM messages_by_room
 type cassandraMessageSource struct {
 	session *gocql.Session
 	sizer   msgbucket.Sizer
-	// cipher is nil when ATREST_ENABLED=false; StreamMessages then never
-	// attempts to decrypt (every row's enc_payload is empty in that mode).
-	cipher atrest.Cipher
 }
 
-func newCassandraMessageSource(session *gocql.Session, sizer msgbucket.Sizer, cipher atrest.Cipher) *cassandraMessageSource {
-	return &cassandraMessageSource{session: session, sizer: sizer, cipher: cipher}
+func newCassandraMessageSource(session *gocql.Session, sizer msgbucket.Sizer) *cassandraMessageSource {
+	return &cassandraMessageSource{session: session, sizer: sizer}
 }
 
 // bucketRange returns every bucket value that can contain a row with
@@ -1360,14 +1354,10 @@ func (s *cassandraMessageSource) StreamMessages(
 	for _, bucket := range bucketRange(s.sizer, from, to) {
 		iter := s.session.Query(messagesByRoomQuery, roomID, bucket, from, to).WithContext(ctx).Iter()
 
-		var (
-			row        cassandra.Message
-			encPayload []byte
-			encMeta    *cassandra.EncMeta
-		)
+		var row cassandra.Message
 		for iter.Scan(&row.RoomID, &row.CreatedAt, &row.MessageID, &row.Sender, &row.Msg, &row.Attachments,
 			&row.Card, &row.TShow, &row.ThreadParentID, &row.ThreadParentCreatedAt, &row.Deleted, &row.SiteID,
-			&row.EditedAt, &row.UpdatedAt, &encPayload, &encMeta) {
+			&row.EditedAt, &row.UpdatedAt) {
 
 			if row.Deleted {
 				row = cassandra.Message{}
@@ -1377,27 +1367,12 @@ func (s *cassandraMessageSource) StreamMessages(
 				row.SiteID = siteID
 			}
 
-			if len(encPayload) > 0 && s.cipher != nil {
-				meta := atrest.EncMeta{}
-				if encMeta != nil {
-					meta.Nonce = encMeta.Nonce
-				}
-				fields, err := s.cipher.Decrypt(ctx, row.RoomID, encPayload, meta)
-				if err != nil {
-					_ = iter.Close()
-					return fmt.Errorf("decrypt message %s in room %s: %w", row.MessageID, roomID, err)
-				}
-				atrest.ApplyDecryptedFields(&row, &fields)
-			}
-
 			if err := fn(row); err != nil {
 				_ = iter.Close()
 				return fmt.Errorf("handle message %s in room %s: %w", row.MessageID, roomID, err)
 			}
 
 			row = cassandra.Message{}
-			encPayload = nil
-			encMeta = nil
 		}
 		if err := iter.Close(); err != nil {
 			return fmt.Errorf("read messages_by_room for room %s bucket %d: %w", roomID, bucket, err)
@@ -1454,7 +1429,7 @@ func insertTestMessage(t *testing.T, session *gocql.Session, roomID string, buck
 func TestCassandraMessageSource_StreamMessages_MultiBucketWindow(t *testing.T) {
 	_, session, _ := testutil.CassandraKeyspace(t, "esmig")
 	sizer := msgbucket.New(72 * time.Hour)
-	source := newCassandraMessageSource(session, sizer, nil)
+	source := newCassandraMessageSource(session, sizer)
 
 	from := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	to := from.Add(200 * time.Hour)
@@ -1482,7 +1457,7 @@ func TestCassandraMessageSource_StreamMessages_MultiBucketWindow(t *testing.T) {
 func TestCassandraMessageSource_StreamMessages_CallbackErrorAborts(t *testing.T) {
 	_, session, _ := testutil.CassandraKeyspace(t, "esmig")
 	sizer := msgbucket.New(72 * time.Hour)
-	source := newCassandraMessageSource(session, sizer, nil)
+	source := newCassandraMessageSource(session, sizer)
 
 	from := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	to := from.Add(time.Hour)
@@ -1512,7 +1487,7 @@ Expected: PASS
 
 ```bash
 git add data-migration/es-index-migrator/messagesource_cassandra.go data-migration/es-index-migrator/messagesource_cassandra_test.go data-migration/es-index-migrator/messagesource_integration_test.go
-git commit -m "feat(es-index-migrator): add streaming Cassandra message source with at-rest decryption"
+git commit -m "feat(es-index-migrator): add streaming Cassandra message source"
 ```
 
 ---
@@ -2767,7 +2742,7 @@ git commit -m "feat(es-index-migrator): add concurrent per-collection runner wit
 - Create: `data-migration/es-index-migrator/integration_test.go` (`//go:build integration`)
 
 **Interfaces:**
-- Consumes: everything from Tasks 6-14, plus `pkg/cassutil.Connect`, `pkg/mongoutil.Connect`, `pkg/searchengine.New`, `pkg/msgbucket.New`, `pkg/atrest.NewVaultKeyWrapper`/`NewCipher`/`NewMongoDEKStore`/`CollectionName`.
+- Consumes: everything from Tasks 6-14, plus `pkg/cassutil.Connect`, `pkg/mongoutil.Connect`, `pkg/searchengine.New`, `pkg/msgbucket.New`.
 - Produces: `func main()`, `func run(ctx context.Context, cfg config) error` (the testable body of `main`, mirroring the split every other service in this repo uses between `main()`'s os.Exit-on-error wiring and a plain-error-returning `run`).
 
 - [ ] **Step 1: Write the failing test**
@@ -2828,7 +2803,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -2871,23 +2845,13 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("elasticsearch connect: %w", err)
 	}
 
-	var cipher atrest.Cipher
-	if cfg.Atrest.Enabled {
-		wrapper, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
-		if err != nil {
-			return fmt.Errorf("construct vault key wrapper: %w", err)
-		}
-		dekColl := db.Collection(atrest.CollectionName)
-		cipher = atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
-	}
-
 	if err := bootstrapPrerequisites(ctx, engine, cfg); err != nil {
 		return fmt.Errorf("bootstrap prerequisites: %w", err)
 	}
 
 	bucketSizer := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
 	subs := newMongoSubscriptionSource(db)
-	messages := newCassandraMessageSource(cassSession, bucketSizer, cipher)
+	messages := newCassandraMessageSource(cassSession, bucketSizer)
 
 	msgFlusher := newFlusher(engine, cfg.BulkBatchSize)
 	spotlightFlusher := newFlusher(engine, cfg.BulkBatchSize)
@@ -3080,10 +3044,6 @@ services:
       - MONGO_DB=chat
       - CASSANDRA_HOSTS=cassandra
       - CASSANDRA_KEYSPACE=chat
-      - ATREST_ENABLED=true
-      - VAULT_ADDR=http://vault:8200
-      - VAULT_TOKEN=dev-only-token
-      - ATREST_VAULT_TRANSIT_KEY=chat-kek
     networks:
       - chat-local
 
@@ -3092,7 +3052,7 @@ networks:
     external: true
 ```
 
-Cross-reference the `search-sync-worker`/`message-worker` compose files' exact index-name and Vault-related env values (`MSG_INDEX_PREFIX`, `ATREST_VAULT_TRANSIT_KEY`, etc.) to keep them consistent with the rest of the local stack — copy those values verbatim rather than inventing new ones, so a local run of this migrator targets the same indexes/DEKs `search-sync-worker` would.
+This service has no Vault/`ATREST_*` env vars — unlike `message-worker`/`search-sync-worker`, it never decrypts (see Task 8's note: its source rows were written directly into the plaintext `msg`/`attachments`/`card` columns, never through the live at-rest-encryption path). Cross-reference the `search-sync-worker`/`message-worker` compose files' exact index-name values (`MSG_INDEX_PREFIX`, etc.) to keep them consistent with the rest of the local stack — copy those values verbatim rather than inventing new ones, so a local run of this migrator targets the same indexes `search-sync-worker` would.
 
 - [ ] **Step 3: Create `azure-pipelines.yml`**
 
@@ -3108,7 +3068,7 @@ This replaces the now-obsolete `chat` repo's spec of the same name with one that
 - **Additive-only limitation**: because subscriptions are hard-deleted on leave (no soft-delete row to read), this job can only reconstruct current membership state — it cannot detect or evict a stale ES entry for a membership that ended and was never re-added before an earlier ES data loss. State this plainly as an accepted limitation, not a bug.
 - **Write model**: messages/spotlight external-versioned (`CreatedAt`/`JoinedAt` in millis); user-room scripted update via the same stored Painless scripts `search-sync-worker` registers, no external version — every write is idempotent/LWW-safe so a re-run or overlap with live traffic converges.
 - **Collections 1-3**: source query, field mapping table (Cassandra `Message` column → `MessageDoc` field; `model.Subscription` field → `SpotlightDoc`/user-room script params), index name, doc ID, bulk action — mirror the level of detail in Tasks 8-12 above.
-- **At-rest encryption**: this job decrypts `enc_payload`/`enc_meta` via `pkg/atrest` exactly as `history-service` does, when `ATREST_ENABLED=true`; a room with content encrypted under a DEK this job's Vault credentials can't unwrap fails that room's read (surfaced as a `run` error, not silently skipped).
+- **No at-rest decryption dependency**: unlike `history-service`, this job never reads `enc_payload`/`enc_meta` or depends on `pkg/atrest`/Vault — its source `messages_by_room` rows were written directly into the plaintext `msg`/`attachments`/`card` columns by the process that populated that table, not through the live at-rest-encryption write path.
 - **Configuration table**: every env var from Task 6's `config.go`, required/default noted.
 - **Execution shape**: mirrors Task 14/15 — connect, bootstrap prerequisites (idempotent), run three collections concurrently, `slog` progress, exit 0 only if `runAllCollections` succeeded and zero bulk items failed across all three flushers.
 
