@@ -306,3 +306,10 @@ func TestSpotlightCollection_BuildAction_BulkRemove(t *testing.T) {
 		assert.Nil(t, action.Doc)
 	}
 }
+
+// Spotlight writes to one fixed index — no additive mapping push at startup.
+func TestSpotlightCollection_MappingUpdate_NoOp(t *testing.T) {
+	pattern, body := newSpotlightCollection("spotlight-site-a-v1-chat", false).MappingUpdate()
+	assert.Empty(t, pattern)
+	assert.Nil(t, body)
+}

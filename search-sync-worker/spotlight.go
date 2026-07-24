@@ -136,7 +136,7 @@ func spotlightTemplateBody(indexName string, devMode bool) json.RawMessage {
 		replicas = 0
 	}
 	tmpl := map[string]any{
-		"index_patterns": []string{fmt.Sprintf("%s-*", searchindex.StripVersionBase(indexName))},
+		"index_patterns": []string{searchindex.IndexPattern(indexName)},
 		"template": map[string]any{
 			"settings": map[string]any{
 				"index": map[string]any{

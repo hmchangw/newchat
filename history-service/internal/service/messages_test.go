@@ -1280,6 +1280,52 @@ func TestHistoryService_EditMessage_PublishesCanonicalUpdatedEvent(t *testing.T)
 	require.NotNil(t, resp)
 }
 
+// .updated is a full-doc replace: it must carry attachments and card,
+// or the re-index wipes those fields from the search document.
+func TestHistoryService_EditMessage_CarriesAttachmentsAndCard(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	attachments := [][]byte{[]byte(`{"title":"q3.pdf","description":"numbers","fileType":"application/pdf"}`)}
+	card := &models.Card{Template: "expense-v1", Data: []byte(`{"text":"hi"}`)}
+	cardAction := &models.CardAction{Verb: "approve", DisplayText: "Approved by Ann"}
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID:   "msg-1",
+		RoomID:      "r1",
+		Sender:      models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:   time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:         "original content",
+		Attachments: attachments,
+		Card:        card,
+		CardAction:  cardAction,
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any()).Return(nil)
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Equal(t, attachments, evt.Message.Attachments)
+			require.NotNil(t, evt.Message.Card)
+			assert.Equal(t, card.Template, evt.Message.Card.Template)
+			assert.Equal(t, card.Data, evt.Message.Card.Data)
+			// CardAction stays off the wire: no .updated consumer reads it,
+			// and its Data blob would inflate every edit event.
+			assert.Nil(t, evt.Message.CardAction)
+			return nil
+		})
+
+	_, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{
+		MessageID: "msg-1",
+		NewMsg:    "updated content",
+	})
+	require.NoError(t, err)
+}
+
 // Canonical publish is best-effort — a failure must not roll back the edit (Cassandra is the source of truth).
 func TestHistoryService_EditMessage_PublishFailureDoesNotFailRPC(t *testing.T) {
 	svc, msgs, subs, pub, _ := newService(t)

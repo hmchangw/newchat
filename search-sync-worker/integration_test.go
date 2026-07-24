@@ -291,6 +291,10 @@ func TestSearchSyncIntegration(t *testing.T) {
 			subj = subject.MsgCanonicalUpdated(siteID)
 		case model.EventDeleted:
 			subj = subject.MsgCanonicalDeleted(siteID)
+		case model.EventPinned:
+			subj = subject.MsgCanonicalPinned(siteID)
+		case model.EventUnpinned:
+			subj = subject.MsgCanonicalUnpinned(siteID)
 		default:
 			t.Fatalf("unsupported event type in fixture: %q", evt.Event)
 		}
@@ -321,10 +325,10 @@ func TestSearchSyncIntegration(t *testing.T) {
 	// --- Verify results in Elasticsearch ---
 	refreshIndex(t, esURL, prefix+"-*")
 
-	// Total doc count: 5 created - 1 deleted = 4
+	// Total doc count: 6 created - 1 deleted = 5 (pinned/unpinned produce no actions)
 	t.Run("total doc count", func(t *testing.T) {
 		total := countDocs(t, esURL, prefix+"-*")
-		assert.Equal(t, 4, total, "expected 4 docs total (5 created, 1 update replacing, 1 delete)")
+		assert.Equal(t, 5, total, "expected 5 docs total (6 created, 1 update replacing, 1 delete, pin/unpin skipped)")
 	})
 
 	// January index: msg-001 (updated), msg-003 → 2 docs
@@ -333,14 +337,15 @@ func TestSearchSyncIntegration(t *testing.T) {
 		assert.Equal(t, 2, janCount, "expected 2 docs in 2026-01 index")
 	})
 
-	// February index: msg-004, msg-005 → 2 docs
+	// February index: msg-004, msg-005, msg-006 → 3 docs
 	t.Run("february index count", func(t *testing.T) {
 		febCount := countDocs(t, esURL, prefix+"-2026-02")
-		assert.Equal(t, 2, febCount, "expected 2 docs in 2026-02 index")
+		assert.Equal(t, 3, febCount, "expected 3 docs in 2026-02 index")
 	})
 
-	// Verify msg-001 was updated (content should be edited version)
-	t.Run("msg-001 updated content", func(t *testing.T) {
+	// Verify msg-001 was updated (content should be edited version) and that
+	// the later pinned event did NOT wipe the document (slim events are skipped).
+	t.Run("msg-001 updated content survives pin", func(t *testing.T) {
 		doc := getDoc(t, esURL, prefix+"-2026-01", "msg-001")
 		require.NotNil(t, doc, "msg-001 should exist")
 		assert.Equal(t, "hello world (edited)", doc["content"])
@@ -348,10 +353,38 @@ func TestSearchSyncIntegration(t *testing.T) {
 		assert.Equal(t, "room-1", doc["roomId"])
 	})
 
-	// Verify msg-002 was deleted
-	t.Run("msg-002 deleted", func(t *testing.T) {
+	// Verify msg-002 was deleted and that the later unpinned event did NOT
+	// resurrect a stub document.
+	t.Run("msg-002 deleted and not resurrected by unpin", func(t *testing.T) {
 		doc := getDoc(t, esURL, prefix+"-2026-01", "msg-002")
-		assert.Nil(t, doc, "msg-002 should be deleted")
+		assert.Nil(t, doc, "msg-002 should stay deleted")
+	})
+
+	// Verify msg-006 carries the searched projections AND the render payloads.
+	t.Run("msg-006 attachment and card fields", func(t *testing.T) {
+		doc := getDoc(t, esURL, prefix+"-2026-02", "msg-006")
+		require.NotNil(t, doc, "msg-006 should exist")
+		assert.Equal(t, "q3-report.pdf Quarterly numbers", doc["attachmentText"])
+		cardData, _ := doc["cardData"].(string)
+		assert.Contains(t, cardData, "Expense request from Bob")
+
+		atts, ok := doc["attachments"].([]any)
+		require.True(t, ok, "full attachment objects must be stored")
+		require.Len(t, atts, 1)
+		att := atts[0].(map[string]any)
+		assert.Equal(t, "q3-report.pdf", att["title"])
+		assert.Equal(t, "application/pdf", att["fileType"])
+		card, ok := doc["card"].(map[string]any)
+		require.True(t, ok, "full card object must be stored")
+		assert.Equal(t, "expense-approval-v1", card["template"])
+		assert.NotEmpty(t, card["data"], "card data must be stored for rendering")
+	})
+
+	// Full-text search must now match attachment titles, descriptions and card text.
+	t.Run("search matches attachment and card fields", func(t *testing.T) {
+		assert.Equal(t, 1, searchHitsMultiField(t, esURL, prefix+"-*", "q3-report.pdf"), "filename should match")
+		assert.Equal(t, 1, searchHitsMultiField(t, esURL, prefix+"-*", "Quarterly"), "attachment description should match")
+		assert.Equal(t, 1, searchHitsMultiField(t, esURL, prefix+"-*", "Expense request"), "card text should match")
 	})
 
 	// Verify msg-003 exists with correct content
@@ -369,6 +402,35 @@ func TestSearchSyncIntegration(t *testing.T) {
 		assert.Equal(t, "february message", doc["content"])
 		assert.Equal(t, "charlie", doc["userAccount"])
 	})
+}
+
+// searchHitsMultiField mirrors the search-service message query: a multi_match
+// bool_prefix over content + attachment + card text fields.
+func searchHitsMultiField(t *testing.T, esURL, indexPattern, query string) int {
+	t.Helper()
+	body := fmt.Sprintf(`{"query":{"multi_match":{"query":%q,"type":"bool_prefix","operator":"AND","fields":["content","attachmentText","cardData"]}}}`, query)
+	u := esURLFor(t, esURL, indexPattern, "_search")
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewBufferString(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var result struct {
+		Hits struct {
+			Total struct {
+				Value int `json:"value"`
+			} `json:"total"`
+		} `json:"hits"`
+	}
+	require.NoError(t, json.Unmarshal(respBody, &result))
+	return result.Hits.Total.Value
 }
 
 // searchHits queries ES for docs where the content field matches the given query string.

@@ -128,6 +128,44 @@ func TestToSearchMessage_ThreadParentBothFieldsCopied(t *testing.T) {
 	assert.True(t, got.ThreadParentMessageCreatedAt.Equal(tp))
 }
 
+// Full attachment objects and the card ride the hit so the client can render
+// the result (file row, tcard) without a history-service lookup.
+func TestToSearchMessage_AttachmentAndCardFieldsCopied(t *testing.T) {
+	hit := messageSearchHit{
+		MessageID:   "m1",
+		RoomID:      "r1",
+		UserAccount: "alice",
+		Attachments: []model.Attachment{
+			{ID: "f1", Title: "q3-report.pdf", Description: "Quarterly numbers", FileType: "application/pdf", TitleLink: "api/v1/file/rooms/r1/file/f1", TitleLinkDownload: true},
+			{ID: "f2", Title: "team.png", FileType: "image/png"},
+		},
+		Card: &model.Card{Template: "expense-approval-v1", Data: []byte(`{"amount":42}`)},
+	}
+	got := toSearchMessage(&hit)
+	require.Len(t, got.Attachments, 2)
+	assert.Equal(t, "q3-report.pdf", got.Attachments[0].Title)
+	assert.Equal(t, "Quarterly numbers", got.Attachments[0].Description)
+	assert.Equal(t, "api/v1/file/rooms/r1/file/f1", got.Attachments[0].TitleLink)
+	require.NotNil(t, got.Card)
+	assert.Equal(t, "expense-approval-v1", got.Card.Template)
+	assert.Equal(t, []byte(`{"amount":42}`), got.Card.Data)
+}
+
+// A text-only hit must not grow attachment/card keys on the wire.
+func TestToSearchMessage_AttachmentAndCardOmittedWhenAbsent(t *testing.T) {
+	hit := messageSearchHit{MessageID: "m1", RoomID: "r1", UserAccount: "alice", Content: "hello"}
+	got := toSearchMessage(&hit)
+
+	data, err := json.Marshal(got)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	for _, key := range []string{"attachments", "card"} {
+		_, present := raw[key]
+		assert.False(t, present, "%s should be omitted when empty", key)
+	}
+}
+
 func TestParseRooms_HappyPath(t *testing.T) {
 	body := json.RawMessage(`{
 		"hits": {

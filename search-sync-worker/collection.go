@@ -26,6 +26,9 @@ type Collection interface {
 	TemplateName() string
 	// TemplateBody returns the ES index template JSON. nil means no template.
 	TemplateBody() json.RawMessage
+	// MappingUpdate returns a pattern + additive `{"properties":...}` PUT onto
+	// existing indices at startup (rolling indices only). Empty/nil = no update.
+	MappingUpdate() (indexPattern string, body json.RawMessage)
 	// StoredScripts returns the ES stored scripts this collection depends on,
 	// keyed by script id. Each value is the full `PUT /_scripts/{id}` body.
 	// nil/empty means the collection inlines no scripts (or uses none). The

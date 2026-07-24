@@ -27,3 +27,9 @@ func StripVersionBase(name string) string {
 	base, _, _ := StripVersion(name)
 	return base
 }
+
+// IndexPattern returns the wildcard covering every index of prefix's base, e.g.
+// "messages-a-v2" → "messages-a-*"; template and mapping push share it to avoid drift.
+func IndexPattern(prefix string) string {
+	return StripVersionBase(prefix) + "-*"
+}

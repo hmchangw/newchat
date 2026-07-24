@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -87,6 +89,14 @@ func (c *messageCollection) StoredScripts() map[string]json.RawMessage {
 	return nil
 }
 
+// MappingUpdate pushes the full (idempotent) property set onto existing
+// monthly indices; the same pattern the template targets.
+func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
+	// Error discarded: input is a static map of literals, marshal cannot fail.
+	body, _ := json.Marshal(map[string]any{"properties": messageTemplateProperties()})
+	return searchindex.IndexPattern(c.indexPrefix), body
+}
+
 func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
 	var evt model.MessageEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
@@ -104,8 +114,9 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if !c.syncFrom.IsZero() && evt.Message.CreatedAt.Before(c.syncFrom) {
 		return nil, nil
 	}
-	// Reactions don't change indexed content; skip rather than re-upserting the same document with a bumped updatedAt.
-	if evt.Event == model.EventReacted {
+	// Slim events (reacted/pinned/unpinned/…) carry no content: upserting them
+	// would wipe indexed fields or resurrect deleted docs. "" = legacy created.
+	if !actionableEvent(evt.Event) {
 		return nil, nil
 	}
 	c.resolveThreadParentCreatedAt(&evt)
@@ -128,8 +139,19 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 
 // --- Message-specific internals ---
 
+// actionableEvent reports whether an event type produces a bulk action at
+// all — index/replace (created, updated, legacy "") or delete (deleted).
+func actionableEvent(e model.EventType) bool {
+	switch e {
+	case model.EventCreated, model.EventUpdated, model.EventDeleted, "":
+		return true
+	default:
+		return false
+	}
+}
+
 // MessageSearchIndex is the Elasticsearch document for messages, mirroring pkg/model.Message; the
-// `es` struct tag (keyword/text/date/boolean, or text,custom_analyzer) drives the template — add new Message fields here with an `es` tag and populate them in newMessageSearchIndex().
+// `es` tag (keyword/text/date/boolean, text,custom_analyzer, or object_disabled) drives the template — add new Message fields here and populate them in newMessageSearchIndex().
 type MessageSearchIndex struct {
 	MessageID   string `json:"messageId"                              es:"keyword"`
 	RoomID      string `json:"roomId"                                 es:"keyword"`
@@ -145,11 +167,22 @@ type MessageSearchIndex struct {
 	ThreadParentID        string     `json:"threadParentMessageId,omitempty"        es:"keyword"`
 	ThreadParentCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty" es:"date"`
 	TShow                 bool       `json:"tshow,omitempty"                        es:"boolean"`
+
+	// Searched attachment/tcard projections. AttachmentText is one string —
+	// every attachment title+description joined — so an AND query can mix
+	// words from both. CardData duplicates card.data — accepted.
+	AttachmentText string `json:"attachmentText,omitempty" es:"text,custom_analyzer"`
+	CardData       string `json:"cardData,omitempty"       es:"text,custom_analyzer"`
+
+	// Render payloads stored as-is (never indexed) so search hits can be
+	// rendered on the frontend without a history-service lookup.
+	Attachments []cassandra.Attachment `json:"attachments,omitempty" es:"object_disabled"`
+	Card        *cassandra.Card        `json:"card,omitempty"        es:"object_disabled"`
 }
 
 // newMessageSearchIndex maps a MessageEvent to a search index document.
 func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
-	return MessageSearchIndex{
+	doc := MessageSearchIndex{
 		MessageID:             evt.Message.ID,
 		RoomID:                evt.Message.RoomID,
 		SiteID:                evt.SiteID,
@@ -164,6 +197,29 @@ func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
 		ThreadParentCreatedAt: evt.Message.ThreadParentMessageCreatedAt,
 		TShow:                 evt.Message.TShow,
 	}
+
+	// Lenient decode: a malformed blob is skipped by DecodeAttachments; one
+	// bad attachment must not block indexing the rest of the message.
+	attachments, _ := cassandra.DecodeAttachments(evt.Message.Attachments)
+	doc.Attachments = attachments
+	var attachmentText []string
+	for i := range attachments {
+		a := &attachments[i]
+		if a.Title != "" {
+			attachmentText = append(attachmentText, a.Title)
+		}
+		if a.Description != "" {
+			attachmentText = append(attachmentText, a.Description)
+		}
+	}
+	doc.AttachmentText = strings.Join(attachmentText, " ")
+
+	if evt.Message.Card != nil {
+		doc.Card = evt.Message.Card
+		doc.CardData = string(evt.Message.Card.Data)
+	}
+
+	return doc
 }
 
 func indexName(prefix string, createdAt time.Time) string {
@@ -212,7 +268,7 @@ func messageTemplateBody(prefix string, devMode bool) json.RawMessage {
 		replicas = 0
 	}
 	tmpl := map[string]any{
-		"index_patterns": []string{fmt.Sprintf("%s-*", searchindex.StripVersionBase(prefix))},
+		"index_patterns": []string{searchindex.IndexPattern(prefix)},
 		"template": map[string]any{
 			"settings": map[string]any{
 				"index": map[string]any{

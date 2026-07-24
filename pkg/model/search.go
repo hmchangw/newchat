@@ -39,6 +39,11 @@ type SearchMessage struct {
 	UpdatedAt                    *time.Time `json:"updatedAt,omitempty"`
 	ThreadParentMessageID        string     `json:"threadParentMessageId,omitempty"`
 	ThreadParentMessageCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty"`
+
+	// Render payloads mirrored as-is from the message (same wire shape as
+	// history reads) so the client can render hits without a second lookup.
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Card        *Card        `json:"card,omitempty"`
 }
 
 // SearchRoomsRequest is the NATS payload for

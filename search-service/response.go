@@ -27,17 +27,19 @@ type rawResponse[T any] struct {
 // Fields mirror the ES messages-* index; the public reply type
 // (model.SearchMessage) is a projection of this struct with `UserID` dropped.
 type messageSearchHit struct {
-	MessageID             string     `json:"messageId"`
-	RoomID                string     `json:"roomId"`
-	SiteID                string     `json:"siteId"`
-	UserID                string     `json:"userId"`
-	UserAccount           string     `json:"userAccount"`
-	Content               string     `json:"content"`
-	CreatedAt             time.Time  `json:"createdAt"`
-	EditedAt              *time.Time `json:"editedAt,omitempty"`
-	UpdatedAt             *time.Time `json:"updatedAt,omitempty"`
-	ThreadParentID        string     `json:"threadParentMessageId,omitempty"`
-	ThreadParentCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty"`
+	MessageID             string             `json:"messageId"`
+	RoomID                string             `json:"roomId"`
+	SiteID                string             `json:"siteId"`
+	UserID                string             `json:"userId"`
+	UserAccount           string             `json:"userAccount"`
+	Content               string             `json:"content"`
+	CreatedAt             time.Time          `json:"createdAt"`
+	EditedAt              *time.Time         `json:"editedAt,omitempty"`
+	UpdatedAt             *time.Time         `json:"updatedAt,omitempty"`
+	ThreadParentID        string             `json:"threadParentMessageId,omitempty"`
+	ThreadParentCreatedAt *time.Time         `json:"threadParentMessageCreatedAt,omitempty"`
+	Attachments           []model.Attachment `json:"attachments,omitempty"`
+	Card                  *model.Card        `json:"card,omitempty"`
 }
 
 // roomSearchHit is the spotlight ES `_source` shape for a room
@@ -88,6 +90,8 @@ func toSearchMessage(hit *messageSearchHit) model.SearchMessage {
 		UpdatedAt:                    hit.UpdatedAt,
 		ThreadParentMessageID:        hit.ThreadParentID,
 		ThreadParentMessageCreatedAt: hit.ThreadParentCreatedAt,
+		Attachments:                  hit.Attachments,
+		Card:                         hit.Card,
 	}
 }
 

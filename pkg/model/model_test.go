@@ -2116,8 +2116,23 @@ func TestSearchMessageJSON(t *testing.T) {
 			EditedAt:              &edited,
 			UpdatedAt:             &updated,
 			ThreadParentMessageID: "p1",
+			Attachments: []model.Attachment{{
+				ID: "f1", Title: "q3.pdf", Description: "numbers",
+				Type: "file", FileType: "application/pdf",
+				TitleLink: "api/v1/file/rooms/r1/file/f1", TitleLinkDownload: true,
+			}},
+			Card: &model.Card{Template: "expense-v1", Data: []byte(`{"amount":42}`)},
 		}
 		roundTrip(t, &msg, &model.SearchMessage{})
+	})
+
+	t.Run("attachment and card fields omitted when empty", func(t *testing.T) {
+		msg := model.SearchMessage{MessageID: "m1", RoomID: "r1", Content: "hi"}
+		data, err := json.Marshal(&msg)
+		require.NoError(t, err)
+		for _, key := range []string{"attachments", "card"} {
+			assert.NotContains(t, string(data), `"`+key+`"`)
+		}
 	})
 
 	t.Run("optional fields omitted when zero", func(t *testing.T) {

@@ -52,6 +52,30 @@ func TestBuildMessageQuery_GlobalUnrestricted(t *testing.T) {
 	assert.Equal(t, "rooms", lookup["path"])
 }
 
+// One query box searches message text, file names/descriptions and tcard
+// text together.
+func TestBuildMessageQuery_SearchesAttachmentAndCardFields(t *testing.T) {
+	req := model.SearchMessagesRequest{Query: "report", Size: 25}
+	raw, err := buildMessageQuery(req, "alice", nil, 365*24*time.Hour, "user-room")
+	require.NoError(t, err)
+
+	q := parseQuery(t, raw)
+	musts := q["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
+	require.Len(t, musts, 1)
+	mm := musts[0].(map[string]any)["multi_match"].(map[string]any)
+	assert.Equal(t, "report", mm["query"])
+	assert.Equal(t, "bool_prefix", mm["type"])
+	assert.Equal(t, "AND", mm["operator"])
+	assert.Equal(t,
+		[]any{"content", "attachmentText", "cardData"},
+		mm["fields"])
+
+	// Search-only fields never ship on hits: cardData is a (possibly large)
+	// blob and the attachment projections are already inside `attachments`.
+	src := q["_source"].(map[string]any)
+	assert.Equal(t, []any{"cardData", "attachmentText"}, src["excludes"])
+}
+
 func TestBuildMessageQuery_GlobalWithRestricted(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "hi", Size: 10, Offset: 5}
 	restricted := map[string]int64{

@@ -33,6 +33,11 @@ func esPropertiesFromStruct[T any]() map[string]any {
 		}
 
 		esType, analyzer, _ := strings.Cut(esTag, ",")
+		// object_disabled → stored in _source for rendering, never indexed.
+		if esType == "object_disabled" {
+			props[name] = map[string]any{"type": "object", "enabled": false}
+			continue
+		}
 		prop := map[string]any{"type": esType}
 		if analyzer != "" {
 			prop["analyzer"] = analyzer

@@ -3751,6 +3751,8 @@ See [Error envelope](#6-error-envelope-reference).
 
 **Cross-site results:** results may include messages from rooms hosted on remote sites (the index is searched across the local and remote clusters). The `siteId` on each `SearchMessage` identifies the originating site; there is no client opt-in/opt-out.
 
+**Searched fields:** one query matches message text (`content`), attachment text (`attachmentText` — every attachment's file name and description pooled into one field), and tcard data (`cardData`, the card's data document indexed verbatim as text). All terms of the query must match within a single one of these fields (`multi_match` with `AND`) — a query mixing a word from the message text with a word from a filename matches neither field and returns no hit; a query mixing a filename word with a description word DOES match, since both live in `attachmentText`.
+
 ##### Request body
 
 ```json
@@ -3784,7 +3786,22 @@ See [Error envelope](#6-error-envelope-reference).
       "editedAt": "2026-04-01T12:05:00Z",
       "updatedAt": "2026-04-01T12:06:00Z",
       "threadParentMessageId": "p0",
-      "threadParentMessageCreatedAt": "2026-04-01T11:58:00Z"
+      "threadParentMessageCreatedAt": "2026-04-01T11:58:00Z",
+      "attachments": [
+        {
+          "id": "file-abc",
+          "title": "q3-report.pdf",
+          "type": "file",
+          "description": "Quarterly numbers",
+          "titleLink": "api/v1/file/rooms/r1/file/file-abc?drive_host=https://drive.example.com",
+          "titleLinkDownload": true,
+          "fileType": "application/pdf"
+        }
+      ],
+      "card": {
+        "template": "expense-approval-v1",
+        "data": "eyJhbW91bnQiOjQyfQ=="
+      }
     }
   ],
   "total": 42
@@ -3810,6 +3827,10 @@ See [Error envelope](#6-error-envelope-reference).
 | `updatedAt` | RFC3339 timestamp (nullable) | omitted when the message has never been mutated server-side (edit, soft-delete, etc.) |
 | `threadParentMessageId` | string | omitted when not a thread reply |
 | `threadParentMessageCreatedAt` | RFC3339 timestamp (nullable) | omitted when not a thread reply |
+| `attachments` | [Attachment](#attachment)[] | omitted when the message has no attachments |
+| `card` | [MessageCard](#messagecard) | omitted when the message carries no tcard |
+
+`attachments` and `card` are the message's payloads mirrored as-is from the index (same wire shape as history reads — decoded `Attachment` objects; `card.data` is base64-encoded bytes), so the client can render a hit (file row, tcard) without a follow-up history-service load.
 
 Display fields (user name, room name) are intentionally NOT carried in the response. Clients resolve them via their own subscription cache, subscription enrichment (HRInfo), or [profile.getByName](#profilegetbyname) (§3.4).
 
@@ -7013,7 +7034,7 @@ Attachments are rejected as `unknown_field` — bots send text and cards only.
 | 403 | `forbidden` | `not_a_room_member` | Bot has no subscription to `roomID`. |
 | 404 | `not_found` | `room_not_found` | Room disappeared between subscription lookup and forward. |
 | 409 | `conflict` | `in_flight` | Duplicate op detected inside the idempotency window. |
-| 429 | `resource_exhausted` | `rate_limited_caller` \| `rate_limited_global` | Per-caller or global RPM cap exceeded. |
+| 429 | `too_many_requests` | `rate_limited_caller` \| `rate_limited_global` | Per-caller or global RPM cap exceeded. |
 | 503 | `unavailable` | `handler_timeout` | Downstream NATS request timed out (3 s budget). |
 
 ---

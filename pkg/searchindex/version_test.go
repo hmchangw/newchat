@@ -81,3 +81,16 @@ func TestStripVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestIndexPattern(t *testing.T) {
+	tests := []struct{ prefix, want string }{
+		{"messages-site1-v1", "messages-site1-*"},
+		{"messages-site1", "messages-site1-*"},
+		{"msgs-v12", "msgs-*"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.prefix, func(t *testing.T) {
+			assert.Equal(t, tt.want, IndexPattern(tt.prefix))
+		})
+	}
+}
