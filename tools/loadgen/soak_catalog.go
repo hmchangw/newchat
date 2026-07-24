@@ -231,6 +231,85 @@ func (c *soakCatalog) PickEligible(
 	return soakCatalogMessage{}, false
 }
 
+func (c *soakCatalog) PickAnyEligible(
+	roomID string,
+	action soakCatalogAction,
+) (soakCatalogMessage, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return soakCatalogMessage{}, false
+	}
+	now := c.clock.Now()
+	for i := len(room.order) - 1; i >= 0; i-- {
+		entry := room.order[i]
+		if c.eligible(entry, entry.Author, action, now) {
+			return snapshotSoakCatalogEntry(entry), true
+		}
+	}
+	return soakCatalogMessage{}, false
+}
+
+func (c *soakCatalog) GetEligible(
+	roomID string,
+	messageID string,
+	action soakCatalogAction,
+) (soakCatalogMessage, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return soakCatalogMessage{}, false
+	}
+	entry := room.messages[messageID]
+	if entry == nil || !c.eligible(entry, entry.Author, action, c.clock.Now()) {
+		return soakCatalogMessage{}, false
+	}
+	return snapshotSoakCatalogEntry(entry), true
+}
+
+func (c *soakCatalog) PickPinCandidate(
+	roomID string,
+	pinned bool,
+) (soakCatalogMessage, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return soakCatalogMessage{}, false
+	}
+	now := c.clock.Now()
+	for i := len(room.order) - 1; i >= 0; i-- {
+		entry := room.order[i]
+		if entry.pinned == pinned &&
+			c.eligible(entry, entry.Author, soakCatalogPin, now) {
+			return snapshotSoakCatalogEntry(entry), true
+		}
+	}
+	return soakCatalogMessage{}, false
+}
+
+func (c *soakCatalog) PinnedCount(roomID string) int {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range room.order {
+		if entry.pinned {
+			count++
+		}
+	}
+	return count
+}
+
 func (c *soakCatalog) Get(roomID, messageID string) (soakCatalogMessage, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
