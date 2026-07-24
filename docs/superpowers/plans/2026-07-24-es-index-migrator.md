@@ -2241,8 +2241,11 @@ func newFlusher(store ESStore, batchSize int) *flusher {
 // A zero-value action (searchengine.BulkAction{}) is silently ignored —
 // callers like buildUserRoomAction return one to signal "skip this row"
 // (e.g. a bot subscription) without needing a separate sentinel type.
+// searchengine.BulkAction is not comparable with == (it embeds a
+// json.RawMessage slice field), so the zero-value check is field-level
+// on Action rather than a whole-struct comparison.
 func (f *flusher) Add(ctx context.Context, action searchengine.BulkAction) error {
-	if action == (searchengine.BulkAction{}) {
+	if action.Action == "" {
 		return nil
 	}
 	f.buffered = append(f.buffered, action)
