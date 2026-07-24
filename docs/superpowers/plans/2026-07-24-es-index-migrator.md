@@ -2317,7 +2317,7 @@ git commit -m "feat(es-index-migrator): add buffered bulk flusher"
 
 **Interfaces:**
 - Consumes: `searchindex.MessageTemplateName`/`MessageTemplateBody`, `SpotlightTemplateName`/`SpotlightTemplateBody`, `UserRoomTemplateName`/`UserRoomTemplateBody`, `AddRoomScriptID`/`AddRoomScript`, `RemoveRoomScriptID`/`RemoveRoomScript`, `StoredScriptBody` (all Task 5/4).
-- Produces: `type templateStore interface{...}`, `func bootstrapPrerequisites(ctx context.Context, engine templateStore, cfg config) error` — consumed by `main.go` (Task 14).
+- Produces: `type TemplateStore interface{...}`, `func bootstrapPrerequisites(ctx context.Context, engine TemplateStore, cfg *config) error` (interface exported to match sibling interfaces in `store.go`; `cfg` taken by pointer since `config` is large enough to trip gocritic's `hugeParam` check) — consumed by `main.go` (Task 15).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2408,10 +2408,12 @@ import (
 	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
-// templateStore is the narrow slice of searchengine.SearchEngine this file
+// TemplateStore is the narrow slice of searchengine.SearchEngine this file
 // needs — defined here (the consumer), satisfied directly by
-// searchengine.SearchEngine.
-type templateStore interface {
+// searchengine.SearchEngine. Exported to match the sibling interfaces in
+// store.go (MessageSource, SubscriptionSource, ESStore), which are all
+// exported despite this being package main.
+type TemplateStore interface {
 	UpsertTemplate(ctx context.Context, name string, body json.RawMessage) error
 	PutScript(ctx context.Context, id string, body json.RawMessage) error
 }
@@ -2422,8 +2424,9 @@ type templateStore interface {
 // (pkg/searchindex) — so a fresh site can run this migrator standalone
 // without first having ever run search-sync-worker. UpsertTemplate/
 // PutScript are both create-or-update and safe to call repeatedly with
-// unchanged content.
-func bootstrapPrerequisites(ctx context.Context, engine templateStore, cfg config) error {
+// unchanged content. cfg is taken by pointer since config has enough
+// fields to trip gocritic's hugeParam check.
+func bootstrapPrerequisites(ctx context.Context, engine TemplateStore, cfg *config) error {
 	templates := []struct {
 		name string
 		body json.RawMessage
@@ -2851,7 +2854,7 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("elasticsearch connect: %w", err)
 	}
 
-	if err := bootstrapPrerequisites(ctx, engine, cfg); err != nil {
+	if err := bootstrapPrerequisites(ctx, engine, &cfg); err != nil {
 		return fmt.Errorf("bootstrap prerequisites: %w", err)
 	}
 
