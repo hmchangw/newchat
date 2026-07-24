@@ -21,8 +21,26 @@ func TestNewTranslator_StreamRequiresEndpoint(t *testing.T) {
 	assert.Contains(t, err.Error(), "TRANSLATION_ENDPOINT")
 }
 
+func TestNewTranslator_StreamRequiresAccessTokenURL(t *testing.T) {
+	_, err := newTranslator(&Config{Backend: "stream", Endpoint: "http://x", J1Token: "j1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TRANSLATION_ACCESS_TOKEN_URL")
+}
+
+func TestNewTranslator_StreamRequiresJ1Token(t *testing.T) {
+	_, err := newTranslator(&Config{Backend: "stream", Endpoint: "http://x", AccessTokenURL: "http://a"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TRANSLATION_J1_TOKEN")
+}
+
 func TestNewTranslator_Stream(t *testing.T) {
-	tr, err := newTranslator(&Config{Backend: "stream", Endpoint: "http://x", HTTPTimeout: time.Second})
+	tr, err := newTranslator(&Config{
+		Backend:        "stream",
+		Endpoint:       "http://x",
+		AccessTokenURL: "http://a",
+		J1Token:        "j1",
+		HTTPTimeout:    time.Second,
+	})
 	require.NoError(t, err)
 	_, ok := tr.(*streamTranslator)
 	assert.True(t, ok)

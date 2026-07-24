@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"io"
 	"strings"
 	"time"
 
@@ -16,6 +16,10 @@ import (
 
 // successReturnCode is the third-party "success" sentinel for a stream chunk.
 const successReturnCode = 96200
+
+// jwtFailureMessage is the message the translate API returns when the J2 token is
+// rejected. On this response the client refreshes J2 and retries once.
+const jwtFailureMessage = "failed to verify jwt"
 
 type backendRequest struct {
 	Text       string `json:"text"`
@@ -32,64 +36,124 @@ type streamChunk struct {
 }
 
 // streamTranslator calls the third-party streaming translation API and merges the
-// SSE chunks into one string.
+// SSE chunks into one string. It authenticates with a J2 token obtained from
+// tokens (J1 → accessToken API → J2).
 type streamTranslator struct {
 	client   *resty.Client
 	endpoint string
+	tokens   *tokenProvider
 }
 
-func newStreamTranslator(endpoint, apiKey string, timeout time.Duration) *streamTranslator {
-	opts := []restyutil.Option{restyutil.WithTimeout(timeout)}
-	if apiKey != "" {
-		opts = append(opts, restyutil.WithBearerToken(apiKey))
+func newStreamTranslator(endpoint, accessTokenURL, j1Token string, timeout, skew time.Duration) *streamTranslator {
+	return &streamTranslator{
+		client:   restyutil.New(endpoint, restyutil.WithTimeout(timeout)),
+		endpoint: endpoint,
+		tokens:   newTokenProvider(accessTokenURL, j1Token, timeout, skew),
 	}
-	return &streamTranslator{client: restyutil.New(endpoint, opts...), endpoint: endpoint}
 }
 
+// Translate fetches a J2 token and calls the translate API. If the token is
+// rejected ("failed to verify jwt"), it force-refreshes J2 and retries once.
 func (t *streamTranslator) Translate(ctx context.Context, text, targetLang string) (string, error) {
+	token, err := t.tokens.Token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+
+	result, jwtFailed, err := t.translateOnce(ctx, text, targetLang, token)
+	if err != nil {
+		return "", err
+	}
+	if jwtFailed {
+		token, err = t.tokens.Refresh(ctx, token)
+		if err != nil {
+			return "", fmt.Errorf("refresh access token after jwt failure: %w", err)
+		}
+		result, jwtFailed, err = t.translateOnce(ctx, text, targetLang, token)
+		if err != nil {
+			return "", err
+		}
+		if jwtFailed {
+			return "", fmt.Errorf("translate rejected: %s (after token refresh)", jwtFailureMessage)
+		}
+	}
+	return result, nil
+}
+
+// translateOnce performs a single translate call. It returns jwtFailed=true (with
+// nil error) when the response is a "failed to verify jwt" auth rejection, so the
+// caller can refresh and retry.
+func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, token string) (result string, jwtFailed bool, err error) {
 	resp, err := t.client.R().
 		SetContext(ctx).
 		SetHeader("Accept", "text/event-stream").
+		SetHeader("Authorization", token).
 		SetBody(backendRequest{Text: text, TargetLang: targetLang, ApplyWiki: false}).
 		SetDoNotParseResponse(true).
 		Post("")
 	if err != nil {
-		return "", fmt.Errorf("translate request: %w", err)
+		return "", false, fmt.Errorf("translate request: %w", err)
 	}
 	body := resp.RawBody()
 	defer body.Close()
-	if resp.StatusCode() != http.StatusOK {
-		return "", fmt.Errorf("translate backend status %d", resp.StatusCode())
+
+	reader := bufio.NewReader(body)
+	var merged strings.Builder
+	var nonSSE strings.Builder // accumulates a non-SSE body (potential error JSON)
+	sawData := false
+	sawDone := false
+	for {
+		line, readErr := reader.ReadString('\n')
+		trimmed := strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(trimmed, "data:"):
+			sawData = true
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if payload == "[DONE]" {
+				sawDone = true
+				readErr = io.EOF // stop scanning after the terminator
+				break
+			}
+			var chunk streamChunk
+			if uerr := json.Unmarshal([]byte(payload), &chunk); uerr != nil {
+				return "", false, fmt.Errorf("decode stream chunk: %w", uerr)
+			}
+			if chunk.ReturnCode != successReturnCode {
+				return "", false, fmt.Errorf("translate backend returnCode %d: %s", chunk.ReturnCode, chunk.ReturnMessage)
+			}
+			merged.WriteString(chunk.ReturnData.Translation) // verbatim, whitespace preserved
+		case trimmed != "":
+			nonSSE.WriteString(trimmed)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return "", false, fmt.Errorf("read stream: %w", readErr)
+		}
 	}
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var merged strings.Builder
-	sawDone := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue // skip blank lines / other SSE fields
+	if !sawData {
+		// No SSE payload — the response is an error body, possibly a JWT rejection.
+		if isJWTFailure(nonSSE.String()) {
+			return "", true, nil
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			sawDone = true
-			break
-		}
-		var chunk streamChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return "", fmt.Errorf("decode stream chunk: %w", err)
-		}
-		if chunk.ReturnCode != successReturnCode {
-			return "", fmt.Errorf("translate backend returnCode %d: %s", chunk.ReturnCode, chunk.ReturnMessage)
-		}
-		merged.WriteString(chunk.ReturnData.Translation) // verbatim, whitespace preserved
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("read stream: %w", err)
+		return "", false, fmt.Errorf("translate backend error (status %d)", resp.StatusCode())
 	}
 	if !sawDone {
-		return "", fmt.Errorf("stream ended without [DONE]")
+		return "", false, fmt.Errorf("stream ended without [DONE]")
 	}
-	return merged.String(), nil
+	return merged.String(), false, nil
+}
+
+// isJWTFailure reports whether body is a `{"message": "...failed to verify jwt..."}`
+// auth-rejection response from the translate API.
+func isJWTFailure(body string) bool {
+	var e struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(e.Message), jwtFailureMessage)
 }
