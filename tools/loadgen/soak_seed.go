@@ -37,6 +37,7 @@ type soakManifest struct {
 	StartedAt         time.Time         `bson:"startedAt"`
 	UpdatedAt         time.Time         `bson:"updatedAt"`
 	SeededAt          *time.Time        `bson:"seededAt,omitempty"`
+	CleanedAt         *time.Time        `bson:"cleanedAt,omitempty"`
 }
 
 type soakSeedInput struct {

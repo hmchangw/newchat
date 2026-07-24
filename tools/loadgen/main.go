@@ -27,6 +27,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -358,14 +359,58 @@ func runSoak(ctx context.Context, cfg *config, args []string) int {
 	return runSoakPhase(ctx, cfg, soakPhaseRun)
 }
 
-func runSoakPhase(_ context.Context, cfg *config, phase soakPhase) int {
+func runSoakPhase(ctx context.Context, cfg *config, phase soakPhase) int {
 	if err := validateSoakConfig(&cfg.Soak, cfg.CassandraKeyspace); err != nil {
 		slog.Error("invalid Cassandra soak configuration", "phase", phase, "error", err)
 		return 2
 	}
 	logSoakAssumptions(&cfg.Soak)
+	if phase == soakPhaseTeardown {
+		return runSoakTeardown(ctx, cfg)
+	}
 	slog.Error("Cassandra soak phase is not implemented yet", "phase", phase)
 	return 1
+}
+
+func runSoakTeardown(ctx context.Context, cfg *config) int {
+	db, _, cleanup, err := connectStores(ctx, cfg)
+	if err != nil {
+		return 1
+	}
+	defer cleanup()
+
+	var cleaner soakCassandraCleaner
+	if cfg.Soak.CassandraCleanup == "truncate" {
+		if cfg.CassandraHosts == "" {
+			slog.Error("CASSANDRA_HOSTS is required when SOAK_CASSANDRA_CLEANUP=truncate")
+			return 2
+		}
+		session, err := connectCassandra(cfg)
+		if err != nil {
+			slog.Error("connect Cassandra for soak teardown", "error", err)
+			return 1
+		}
+		defer cassutil.Close(session)
+		cleaner = &gocqlSoakCleaner{session: session, keyspace: cfg.CassandraKeyspace}
+	}
+
+	found, err := teardownSoak(
+		ctx,
+		&mongoSoakStore{db: db},
+		cleaner,
+		&cfg.Soak,
+		cfg.CassandraKeyspace,
+	)
+	if err != nil {
+		slog.Error("teardown Cassandra soak run", "runId", cfg.Soak.RunID, "error", err)
+		return 1
+	}
+	if !found {
+		slog.Info("Cassandra soak run not found; nothing to clean", "runId", cfg.Soak.RunID)
+		return 0
+	}
+	slog.Info("Cassandra soak teardown complete", "runId", cfg.Soak.RunID)
+	return 0
 }
 
 func runTeardownMessages(ctx context.Context, cfg *config, preset string, seed int64) int {
