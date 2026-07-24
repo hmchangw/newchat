@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -52,7 +53,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 		quoted_parent_message FROZEN<"QuotedParentMessage">, visible_to TEXT,
 		reactions MAP<FROZEN<reaction_key>, FROZEN<reactor_info>>,
 		deleted BOOLEAN,
-		type TEXT, sys_msg_data BLOB, site_id TEXT, edited_at TIMESTAMP, updated_at TIMESTAMP,
+		type TEXT, sys_msg_data BLOB, site_id TEXT, edited_at TIMESTAMP, updated_at TIMESTAMP, pinned_at TIMESTAMP,
 		enc_payload BLOB, enc_meta FROZEN<"EncMeta">,
 		PRIMARY KEY ((room_id, bucket), created_at, message_id)
 	) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`)).Exec())
@@ -415,4 +416,44 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 	assert.Equal(t, parentID, canonicalEvt.Message.ThreadParentMessageID)
 	require.NotNil(t, canonicalEvt.NewTCount, "canonical delete for a thread reply must carry NewTCount")
 	assert.Equal(t, 0, *canonicalEvt.NewTCount, "tcount seeded at 1 minus one decrement must equal 0")
+}
+
+// TestRoomsGet_Integration_EnrichesPreview seeds a message with attachments, mentions,
+// and visibleTo, then asserts rooms.get surfaces them on the enriched preview.
+func TestRoomsGet_Integration_EnrichesPreview(t *testing.T) {
+	session := setupCassandra(t)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil, &config.Config{
+		MessageHistoryFloorDays: 730,
+		LargeRoomThreshold:      500,
+		MaxPinnedPerRoom:        10,
+		PinEnabled:              true,
+	})
+
+	sender := models.Participant{ID: "u1", Account: "alice", EngName: "Alice", CompanyName: "愛麗絲"}
+	mentions := []models.Participant{{ID: "u2", Account: "bob", CompanyName: "小明"}}
+	atts := cassandra.EncodeAttachments([]cassandra.Attachment{{ID: "f1", Title: "a.png", Type: "file"}})
+	roomID := "r-preview"
+	msgID := "m-preview"
+	createdAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, mentions, attachments, visible_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "hello", mentions, atts, "u1",
+	).Exec())
+
+	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+	resp, err := svc.RoomsGet(c, models.RoomsGetRequest{RoomIDs: []string{roomID}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, roomID)
+	pm := resp.Rooms[roomID]
+	assert.Equal(t, msgID, pm.MessageID)
+	assert.Equal(t, "hello", pm.Content)
+	assert.Equal(t, "愛麗絲", pm.Sender.ChineseName)
+	require.Len(t, pm.Attachments, 1)
+	assert.Equal(t, "a.png", pm.Attachments[0].Title)
+	require.Len(t, pm.Mentions, 1)
+	assert.Equal(t, "bob", pm.Mentions[0].Account)
+	assert.Equal(t, "u1", pm.VisibleTo)
 }

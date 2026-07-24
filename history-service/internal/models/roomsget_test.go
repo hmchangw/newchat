@@ -3,9 +3,12 @@ package models
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 func TestRoomsGetRequest_JSON(t *testing.T) {
@@ -24,9 +27,9 @@ func TestRoomsGetResponse_JSONRoundTrip(t *testing.T) {
 		name string
 		in   RoomsGetResponse
 	}{
-		{name: "empty", in: RoomsGetResponse{Rooms: map[string]LastMessage{}}},
-		{name: "one room", in: RoomsGetResponse{Rooms: map[string]LastMessage{
-			"r1": {MessageID: "m1", Sender: Participant{ID: "u1", Account: "alice"}, Content: "hi", CreatedAt: 1_714_000_000_000},
+		{name: "empty", in: RoomsGetResponse{Rooms: map[string]PreviewMessage{}}},
+		{name: "one room", in: RoomsGetResponse{Rooms: map[string]PreviewMessage{
+			"r1": {MessageID: "m1", Sender: model.Participant{UserID: "u1", Account: "alice"}, Content: "hi", CreatedAt: time.Unix(1_714_000_000, 0).UTC()},
 		}}},
 	}
 	for _, tc := range cases {

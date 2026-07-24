@@ -98,19 +98,27 @@ type RoomsGetRequest struct {
 	RoomIDs []string `json:"roomIds"`
 }
 
-// LastMessage is a room's most-recent NON-deleted message, resolved at read time.
-// Content is preview-trimmed. Shared wire type: history-service's rooms.get RPC
-// produces it, user-service's subscription.list embeds it (SubscriptionRoom.LastMessage).
-type LastMessage struct {
-	MessageID string                `json:"messageId"`
-	Sender    cassandra.Participant `json:"sender"`
-	Content   string                `json:"content"`
-	CreatedAt int64                 `json:"createdAt"` // UTC millis
+// PreviewMessage is a room's most-recent eligible message, resolved at read time and
+// enriched for the room-list preview. Content is the full message body; the client
+// truncates for display. Sender/mentions carry render-ready wire Participants (a bot
+// sender's displayName is its app name). Shared wire type: history-service's rooms.get
+// RPC produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
+type PreviewMessage struct {
+	MessageID   string                 `json:"messageId"`
+	Sender      Participant            `json:"sender"`
+	Content     string                 `json:"content"`
+	CreatedAt   time.Time              `json:"createdAt"`
+	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
+	Mentions    []Participant          `json:"mentions,omitempty"`
+	// VisibleTo is surfaced now; its write-path (populating the column) is a separate
+	// follow-up, so it's empty until that lands.
+	VisibleTo string `json:"visibleTo,omitempty"`
+	// TODO(#106): forwardSource — wired after the Forwarded snapshot merges.
 }
 
 // RoomsGetResponse maps each requested roomId that has a resolvable last message to
-// it. Rooms with no non-deleted message, or that degraded, are omitted (best-effort)
+// it. Rooms with no eligible message, or that degraded, are omitted (best-effort)
 // rather than failing the whole batch.
 type RoomsGetResponse struct {
-	Rooms map[string]LastMessage `json:"rooms"`
+	Rooms map[string]PreviewMessage `json:"rooms"`
 }

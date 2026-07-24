@@ -469,10 +469,10 @@ func (mr *MockHistoryClientMockRecorder) GetThreadList(ctx, siteID, req any) *go
 }
 
 // RoomsGet mocks base method.
-func (m *MockHistoryClient) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.LastMessage, error) {
+func (m *MockHistoryClient) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.PreviewMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RoomsGet", ctx, siteID, roomIDs)
-	ret0, _ := ret[0].(map[string]model.LastMessage)
+	ret0, _ := ret[0].(map[string]model.PreviewMessage)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

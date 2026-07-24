@@ -325,18 +325,18 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 	return dropped
 }
 
-// enrichLastMessage populates sub.Room.LastMessage (read-time resolve, no denormalized
+// enrichLastMessage populates sub.Room.PreviewMessage (read-time resolve, no denormalized
 // write path) via one rooms.get RPC per site — LOCAL subs need it too (last-message
 // isn't part of the $lookup baseline). One call per site: a subscription page is
 // bounded well under history-service's 100-roomId batch cap, so no chunk-split is
 // needed. Reuses the caller's per-site grouping. A degraded/absent site, or a room the
-// RPC omits, just leaves LastMessage nil; it never fails the list.
+// RPC omits, just leaves PreviewMessage nil; it never fails the list.
 func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
-	lastMsgBySite := make([]map[string]model.LastMessage, len(sites)) // nil ⇒ site degraded
+	lastMsgBySite := make([]map[string]model.PreviewMessage, len(sites)) // nil ⇒ site degraded
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {
@@ -374,7 +374,7 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 			if !ok {
 				continue
 			}
-			subs[j].Room.LastMessage = &lm
+			subs[j].Room.PreviewMessage = &lm
 		}
 	}
 }

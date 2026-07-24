@@ -73,10 +73,10 @@ type GetMessagesByIDsResponse struct {
 	Messages []Message `json:"messages"`
 }
 
-// RoomsGetRequest/LastMessage/RoomsGetResponse are shared with user-service (which
-// embeds LastMessage into SubscriptionRoom), so the wire types live in pkg/model.
+// RoomsGetRequest/PreviewMessage/RoomsGetResponse are shared with user-service (which
+// embeds PreviewMessage into SubscriptionRoom.PreviewMessage), so the wire types live in pkg/model.
 type RoomsGetRequest = model.RoomsGetRequest
-type LastMessage = model.LastMessage
+type PreviewMessage = model.PreviewMessage
 type RoomsGetResponse = model.RoomsGetResponse
 
 type EditMessageRequest struct {

@@ -8,16 +8,16 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 const (
-	maxRoomsGetBatch        = 100 // mirrors maxGetByIDsBatchSize
-	maxRoomsGetConcurrency  = 16  // mirrors cassrepo.maxConcurrentIDReads
-	lastMessagePreviewRunes = 256 // room-list snippet cap
-	lastMsgWalkPageSize     = 50  // messages scanned per walk-back page
-	lastMsgWalkMaxPages     = 5   // ponytail: cap the deleted-tail walk; a room with >250 trailing deletes just shows no last message
+	maxRoomsGetBatch       = 100 // mirrors maxGetByIDsBatchSize
+	maxRoomsGetConcurrency = 16  // mirrors cassrepo.maxConcurrentIDReads
+	lastMsgWalkPageSize    = 50  // messages scanned per walk-back page
+	lastMsgWalkMaxPages    = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -34,7 +34,7 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	ids := dedupRoomIDs(req.RoomIDs)
 	now := time.Now().UTC()
 
-	out := make(map[string]models.LastMessage, len(ids))
+	out := make(map[string]models.PreviewMessage, len(ids))
 	var mu sync.Mutex
 	// WaitGroup+sem (not errgroup): per-room failures must degrade, never cancel
 	// siblings. Acquire sem before spawning so live goroutine count stays bounded.
@@ -65,20 +65,20 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	return &models.RoomsGetResponse{Rooms: out}, nil
 }
 
-// roomLastMessage resolves one room's latest NON-deleted message at read time.
-// ok=false means drop the room (empty, all-deleted within the walk cap, or a read
-// failure). Walks backward from lastMsgAt in pages, skipping soft-deleted messages.
-func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now time.Time) (models.LastMessage, bool) {
+// roomLastMessage resolves one room's latest eligible message at read time.
+// ok=false means drop the room (empty, all-ineligible within the walk cap, or a read
+// failure). Walks backward from lastMsgAt in pages, skipping ineligible messages.
+func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now time.Time) (models.PreviewMessage, bool) {
 	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, nil, now)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-		return models.LastMessage{}, false
+		return models.PreviewMessage{}, false
 	}
 
 	pageReq, err := parsePageRequest("", lastMsgWalkPageSize)
 	if err != nil {
-		return models.LastMessage{}, false
+		return models.PreviewMessage{}, false
 	}
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
 	before := ceiling.Add(time.Millisecond)
@@ -88,43 +88,59 @@ func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-			return models.LastMessage{}, false
+			return models.PreviewMessage{}, false
 		}
 		if len(page.Data) == 0 {
-			return models.LastMessage{}, false // room empty or floor reached
+			return models.PreviewMessage{}, false // room empty or floor reached
 		}
 		for i := range page.Data {
 			m := page.Data[i]
-			if m.Deleted {
+			// System messages and quoted replies aren't representative room content —
+			// skip to the previous eligible message, same as a deleted one.
+			if m.Deleted || m.Type != "" || m.QuotedParentMessage != nil {
 				continue
 			}
-			return models.LastMessage{
-				MessageID: m.MessageID,
-				Sender:    m.Sender,
-				Content:   previewContent(m.Msg),
-				CreatedAt: m.CreatedAt.UTC().UnixMilli(),
-			}, true
+			return s.toPreviewMessage(ctx, &m), true
 		}
-		// Whole page deleted. A short page means the walk is exhausted (no older
-		// messages) — stop. Otherwise page again strictly before the oldest one seen.
+		// Whole page ineligible (deleted/system/quoted). A short page means the walk
+		// is exhausted (no older messages) — stop. Otherwise page again strictly
+		// before the oldest one seen.
 		if len(page.Data) < lastMsgWalkPageSize {
-			return models.LastMessage{}, false
+			return models.PreviewMessage{}, false
 		}
 		before = page.Data[len(page.Data)-1].CreatedAt
 	}
-	return models.LastMessage{}, false // deleted tail longer than the walk cap
+	return models.PreviewMessage{}, false // ineligible tail longer than the walk cap
 }
 
-// previewContent trims a message body to a rune-bounded room-list snippet.
-func previewContent(msg string) string {
-	if len(msg) <= lastMessagePreviewRunes {
-		return msg // bytes ≤ cap ⇒ runes ≤ cap; no alloc on the common short case
+// toPreviewMessage enriches an eligible message into the room-list preview: sender and
+// mentions become wire Participants (chineseName from the Cassandra company_name), a bot
+// sender's displayName is its app name, and attachments/visibleTo pass through the
+// projection the walk already read.
+func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message) models.PreviewMessage {
+	// The walk reads raw attachment blobs; other read paths decode via
+	// setDecodedAttachments, so decode this one message before mapping.
+	decodeMessageAttachments(ctx, m)
+	sender := toWireParticipant(&m.Sender)
+	sender.DisplayName = s.botAwareDisplayName(ctx, m.Sender.EngName, m.Sender.CompanyName, m.Sender.Account)
+
+	var mentions []pkgmodel.Participant
+	if len(m.Mentions) > 0 {
+		mentions = make([]pkgmodel.Participant, len(m.Mentions))
+		for i := range m.Mentions {
+			mentions[i] = toWireParticipant(&m.Mentions[i])
+		}
 	}
-	r := []rune(msg)
-	if len(r) <= lastMessagePreviewRunes {
-		return msg
+
+	return models.PreviewMessage{
+		MessageID:   m.MessageID,
+		Sender:      sender,
+		Content:     m.Msg,
+		CreatedAt:   m.CreatedAt.UTC(),
+		Attachments: m.DecodedAttachments,
+		Mentions:    mentions,
+		VisibleTo:   m.VisibleTo,
 	}
-	return string(r[:lastMessagePreviewRunes])
 }
 
 // dedupRoomIDs removes duplicate roomIds, preserving first-seen order.
