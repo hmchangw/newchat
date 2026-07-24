@@ -100,10 +100,14 @@ type CreateOnlineMeetingRequest struct {
 	ExternalID string
 	// Subject is the meeting title shown in Teams.
 	Subject string
-	// OrganizerEmail is the user the meeting is created for (the organizer).
-	// When empty the application-context default mailbox is used.
-	OrganizerEmail string
-	// AttendeeEmails are the invited attendees (excluding the organizer).
+	// OrganizerID is the organizer's Azure AD user object id (a GUID). The
+	// app-only onlineMeetings/createOrGet endpoint requires the object id — NOT
+	// the userPrincipalName/email — as the /users/{id} path segment; Graph
+	// rejects a UPN with "The userId in request URL is not a valid GUID". When
+	// empty the delegated /me path is used.
+	OrganizerID string
+	// AttendeeEmails are the invited attendees (excluding the organizer). These
+	// ride the request body as participant upns, which DO accept UPNs.
 	AttendeeEmails []string
 }
 
@@ -532,12 +536,14 @@ func (g *graphClient) CreateOnlineMeeting(ctx context.Context, req CreateOnlineM
 
 	// createOrGet pushes idempotency to Graph: it returns the existing meeting
 	// for an (organizer, externalId) pair if one exists, otherwise creates one.
-	// App-only context requires targeting a specific organizer mailbox via the
-	// /users/{id}/onlineMeetings/createOrGet path; delegated context uses /me.
-	// We use the organizer-scoped path when an organizer email is supplied.
+	// App-only context requires targeting a specific organizer via the
+	// /users/{objectId}/onlineMeetings/createOrGet path — the object id (GUID),
+	// not the UPN, or Graph returns 400 "userId in request URL is not a valid
+	// GUID"; delegated context uses /me. We use the organizer-scoped path when an
+	// organizer object id is supplied.
 	var endpoint string
-	if req.OrganizerEmail != "" {
-		endpoint = fmt.Sprintf("%s/users/%s/onlineMeetings/createOrGet", g.baseURL, url.PathEscape(req.OrganizerEmail))
+	if req.OrganizerID != "" {
+		endpoint = fmt.Sprintf("%s/users/%s/onlineMeetings/createOrGet", g.baseURL, url.PathEscape(req.OrganizerID))
 	} else {
 		endpoint = g.baseURL + "/me/onlineMeetings/createOrGet"
 	}

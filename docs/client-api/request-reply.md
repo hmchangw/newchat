@@ -796,6 +796,7 @@ Optional; `roomId` field optional echo.
 | — | `bad_request` | `roomId` empty. |
 | `not_room_member` | `forbidden` | Caller not a member. |
 | `max_room_size_reached` | `conflict` | More than `ROOM_MEMBERS_LIMIT` (500) members. |
+| `teams_organizer_not_provisioned` | `conflict` | Organizer has no `teams_user` mapping yet (Azure object id unknown). Retry after directory sync. |
 | — | `internal` | Teams not configured, or Graph create failed. |
 
 **Emits:** On first creation, a `teams_meet_started` system message → [events.md § new_message](events.md#new_message-roomevent). No event on idempotent repeat calls.

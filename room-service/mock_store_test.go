@@ -264,6 +264,22 @@ func (mr *MockRoomStoreMockRecorder) GetSubscriptionWithMembership(ctx, roomID, 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSubscriptionWithMembership", reflect.TypeOf((*MockRoomStore)(nil).GetSubscriptionWithMembership), ctx, roomID, account)
 }
 
+// GetTeamsUserObjectID mocks base method.
+func (m *MockRoomStore) GetTeamsUserObjectID(ctx context.Context, account string) (string, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetTeamsUserObjectID", ctx, account)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetTeamsUserObjectID indicates an expected call of GetTeamsUserObjectID.
+func (mr *MockRoomStoreMockRecorder) GetTeamsUserObjectID(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetTeamsUserObjectID", reflect.TypeOf((*MockRoomStore)(nil).GetTeamsUserObjectID), ctx, account)
+}
+
 // GetThreadRoomByID mocks base method.
 func (m *MockRoomStore) GetThreadRoomByID(ctx context.Context, threadRoomID string) (*model.ThreadRoom, error) {
 	m.ctrl.T.Helper()

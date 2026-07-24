@@ -28,4 +28,10 @@ const (
 	// receipts temporarily unavailable" and allow a retry rather than surfacing a
 	// hard failure.
 	RoomReadReceiptsUnavailable Reason = "read_receipts_unavailable"
+	// TeamsOrganizerNotProvisioned marks a teams.meeting request whose organizer
+	// (the requester) has no teams_user mapping yet, so their Azure AD object id
+	// is unknown and the Graph onlineMeeting cannot be created on their behalf.
+	// The frontend should show "your Teams account isn't ready yet" and allow a
+	// retry once directory sync has provisioned the user.
+	TeamsOrganizerNotProvisioned Reason = "teams_organizer_not_provisioned"
 )

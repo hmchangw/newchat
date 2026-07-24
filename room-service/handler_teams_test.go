@@ -275,6 +275,7 @@ func TestTeamsMeeting_CreatesAndPublishes(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
 		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, nil)
+	store.EXPECT().GetTeamsUserObjectID(gomock.Any(), "alice").Return("alice-obj-id", true, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://teams.example/join/1"}}
@@ -305,7 +306,7 @@ func TestTeamsMeeting_CreatesAndPublishes(t *testing.T) {
 	// externalId is the stable siteID:roomID key.
 	assert.Equal(t, 1, graph.callCount)
 	assert.Equal(t, "site-a:r1", graph.lastReq.ExternalID)
-	assert.Equal(t, "alice@corp.com", graph.lastReq.OrganizerEmail)
+	assert.Equal(t, "alice-obj-id", graph.lastReq.OrganizerID, "organizer is the Azure object id, not the UPN")
 	assert.ElementsMatch(t, []string{"alice@corp.com", "bob@corp.com"}, graph.lastReq.AttendeeEmails)
 
 	// The meeting was persisted as a first-class record keyed (roomId, siteId).
@@ -378,6 +379,7 @@ func TestTeamsMeeting_DuplicateKey_ReturnsExisting(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
 		Return([]model.RoomMember{indMember("alice")}, nil)
+	store.EXPECT().GetTeamsUserObjectID(gomock.Any(), "alice").Return("alice-obj-id", true, nil)
 
 	// createOrGet returns the SAME meeting the concurrent winner got (Graph is
 	// the source of truth on a true race).
@@ -433,6 +435,7 @@ func TestTeamsMeeting_Concurrent_SingleCreateSingleMessage(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil).AnyTimes()
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
 		Return([]model.RoomMember{indMember("alice")}, nil).AnyTimes()
+	store.EXPECT().GetTeamsUserObjectID(gomock.Any(), "alice").Return("alice-obj-id", true, nil).AnyTimes()
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil).AnyTimes()
 
 	graph := newCreateOrGetGraphStub()
@@ -535,6 +538,29 @@ func TestTeamsMeeting_TooManyMembers(t *testing.T) {
 	assert.Equal(t, 0, graph.callCount, "limit gate must short-circuit before Graph")
 }
 
+func TestTeamsMeeting_OrganizerNotSynced(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
+		Return([]model.RoomMember{indMember("alice")}, nil)
+	// No teams_user mapping for the organizer yet.
+	store.EXPECT().GetTeamsUserObjectID(gomock.Any(), "alice").Return("", false, nil)
+
+	graph := &fakeGraphClient{}
+	var published bool
+	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
+		graphClient: graph, teamsMeetingStore: newStubTeamsMeetingStore(),
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { published = true; return nil },
+	}
+	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.ErrorIs(t, err, errTeamsOrganizerNotSynced)
+	assert.Equal(t, errcode.TeamsOrganizerNotProvisioned, errcode.ReasonOf(err))
+	assert.Equal(t, 0, graph.callCount, "must not call Graph when the organizer is unresolved")
+	assert.False(t, published)
+}
+
 func TestTeamsMeeting_GraphCreateFails(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
@@ -542,6 +568,7 @@ func TestTeamsMeeting_GraphCreateFails(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
 		Return([]model.RoomMember{indMember("alice")}, nil)
+	store.EXPECT().GetTeamsUserObjectID(gomock.Any(), "alice").Return("alice-obj-id", true, nil)
 
 	graph := &fakeGraphClient{err: errors.New("graph 500")}
 	var published bool

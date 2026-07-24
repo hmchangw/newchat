@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,10 +47,10 @@ func TestCreateOnlineMeeting_Success(t *testing.T) {
 	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		meetingCalls++
 		assert.Equal(t, "Bearer tok-123", r.Header.Get("Authorization"))
-		// Idempotent endpoint: the organizer-scoped createOrGet path.
-		assert.True(t, strings.Contains(r.URL.Path, "/users/alice%40corp.com/onlineMeetings/createOrGet") ||
-			strings.Contains(r.URL.Path, "/users/alice@corp.com/onlineMeetings/createOrGet"),
-			"organizer-scoped createOrGet path expected, got %s", r.URL.Path)
+		// Idempotent endpoint: the organizer-scoped createOrGet path, keyed by the
+		// organizer's Azure AD object id (GUID), not the UPN.
+		assert.Contains(t, r.URL.Path, "/users/11111111-1111-1111-1111-111111111111/onlineMeetings/createOrGet",
+			"organizer-scoped createOrGet path (by object id) expected, got %s", r.URL.Path)
 		// externalId is the per-room idempotency key and must be sent.
 		var body onlineMeetingPayload
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
@@ -63,14 +62,14 @@ func TestCreateOnlineMeeting_Success(t *testing.T) {
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
 	m, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "room-key-1", Subject: "Standup", OrganizerEmail: "alice@corp.com", AttendeeEmails: []string{"bob@corp.com"},
+		ExternalID: "room-key-1", Subject: "Standup", OrganizerID: "11111111-1111-1111-1111-111111111111", AttendeeEmails: []string{"bob@corp.com"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", m.ID)
 	assert.Equal(t, "https://join/1", m.JoinURL)
 
 	// Second call reuses the cached token (no second token fetch).
-	_, err = c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "room-key-1", OrganizerEmail: "alice@corp.com"})
+	_, err = c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "room-key-1", OrganizerID: "11111111-1111-1111-1111-111111111111"})
 	require.NoError(t, err)
 	assert.Equal(t, 1, tokenCalls, "token should be cached across calls")
 	assert.Equal(t, 2, meetingCalls)
@@ -108,11 +107,11 @@ func TestCreateOnlineMeeting_Idempotent_SameExternalID(t *testing.T) {
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
 	first, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "k", OrganizerEmail: "a@b.com",
+		ExternalID: "k", OrganizerID: "22222222-2222-2222-2222-222222222222",
 	})
 	require.NoError(t, err)
 	second, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "k", OrganizerEmail: "a@b.com",
+		ExternalID: "k", OrganizerID: "22222222-2222-2222-2222-222222222222",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, second.ID, "same externalId returns the same meeting")
@@ -124,7 +123,7 @@ func TestCreateOnlineMeeting_Idempotent_SameExternalID(t *testing.T) {
 // an empty externalId is rejected before any network call.
 func TestCreateOnlineMeeting_RequiresExternalID(t *testing.T) {
 	c := newTestClient("http://unused", "http://unused")
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{OrganizerEmail: "a@b.com"}) // no ExternalID
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{OrganizerID: "22222222-2222-2222-2222-222222222222"}) // no ExternalID
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "externalId")
 }
@@ -140,7 +139,7 @@ func TestCreateOnlineMeeting_TokenError(t *testing.T) {
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "super-secret-value"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL("http://unused"),
 	)
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "22222222-2222-2222-2222-222222222222"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid_client")
 	// Never leak the secret in the error.
@@ -160,7 +159,7 @@ func TestCreateOnlineMeeting_GraphError(t *testing.T) {
 	defer graphSrv.Close()
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "22222222-2222-2222-2222-222222222222"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "403")
 	assert.Contains(t, err.Error(), "Forbidden", "sanitized error code should be surfaced")
@@ -179,7 +178,7 @@ func TestCreateOnlineMeeting_MissingJoinURL(t *testing.T) {
 	defer graphSrv.Close()
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "22222222-2222-2222-2222-222222222222"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "joinWebUrl")
 }
@@ -529,9 +528,9 @@ func TestCreateOnlineMeeting_SendsDefaultUserAgent(t *testing.T) {
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
 	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID:     "room-key-1",
-		Subject:        "Standup",
-		OrganizerEmail: "alice@corp.com",
+		ExternalID:  "room-key-1",
+		Subject:     "Standup",
+		OrganizerID: "11111111-1111-1111-1111-111111111111",
 	})
 	require.NoError(t, err)
 }
@@ -555,7 +554,7 @@ func TestCreateOnlineMeeting_UserAgentOverride(t *testing.T) {
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
 	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "room-key-1", OrganizerEmail: "alice@corp.com",
+		ExternalID: "room-key-1", OrganizerID: "11111111-1111-1111-1111-111111111111",
 	})
 	require.NoError(t, err)
 }

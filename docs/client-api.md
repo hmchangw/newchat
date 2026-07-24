@@ -2491,6 +2491,7 @@ See [Error envelope](#6-error-envelope-reference).
 | — | `bad_request` | `roomId` empty (subject malformed). |
 | `not_room_member` | `forbidden` | Caller is not a member of the room. |
 | `max_room_size_reached` | `conflict` | Room has more than `ROOM_MEMBERS_LIMIT` (500) members. |
+| `teams_organizer_not_provisioned` | `conflict` | The organizer (requester) has no `teams_user` mapping yet, so their Azure AD object id is unknown and the meeting cannot be created on their behalf. Retry once directory sync has provisioned the user. |
 | — | `internal` | Teams meetings not configured, or the Graph create failed. |
 
 ##### Triggered events — success path

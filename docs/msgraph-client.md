@@ -42,8 +42,15 @@ error until the credentials are set.
 The client calls Graph's **`createOrGet`** endpoint with a required
 `externalId`:
 
-- App-only: `POST {base}/users/{organizerEmail}/onlineMeetings/createOrGet`
+- App-only: `POST {base}/users/{organizerObjectId}/onlineMeetings/createOrGet`
 - Delegated fallback: `POST {base}/me/onlineMeetings/createOrGet`
+
+The app-only path segment **must be the organizer's Azure AD object id (a GUID)**,
+not their userPrincipalName/email — the `onlineMeetings` endpoints reject a UPN
+with `400` *"The userId in request URL is not a valid GUID"*. `room-service`
+resolves the requester's object id from the `teams_user` mapping (populated by
+`teams-user-sync`) and passes it as `CreateOnlineMeetingRequest.OrganizerID`;
+attendee UPNs still ride the request body, which does accept UPNs.
 
 `createOrGet` is idempotent at the source of truth: for a given
 `(organizer, externalId)` it returns the **existing** meeting if one exists,

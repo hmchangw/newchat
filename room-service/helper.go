@@ -83,6 +83,7 @@ var (
 	errTeamsMeetingTooManyMembers = errcode.Conflict("room has too many members to start a meeting", errcode.WithReason(errcode.RoomMaxSizeReached))
 	errTeamsNotConfigured         = errcode.Internal("teams meetings are not configured")
 	errTeamsRequesterMissing      = errcode.Unauthenticated("requester account missing")
+	errTeamsOrganizerNotSynced    = errcode.Conflict("meeting organizer is not provisioned for Teams yet", errcode.WithReason(errcode.TeamsOrganizerNotProvisioned))
 
 	// Sentinels for rename and restricted operations.
 	errOnlyOwnersOrAdmins       = errcode.Forbidden("only owners or platform admins can rename a channel")

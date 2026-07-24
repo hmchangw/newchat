@@ -133,13 +133,24 @@ func (h *Handler) teamsMeeting(c *natsrouter.Context, _ model.TeamsMeetingReques
 	}
 
 	attendeeEmails := membersToAttendeeEmails(members, h.teamsEmailDomain)
-	organizerEmail := teamsEmail(requesterAccount, h.teamsEmailDomain)
+
+	// The app-only onlineMeetings/createOrGet path requires the organizer's Azure
+	// AD object id (a GUID), not their UPN. Resolve it from the teams_user mapping
+	// (populated by teams-user-sync); a missing mapping means the organizer isn't
+	// provisioned for Teams yet.
+	organizerID, found, err := h.store.GetTeamsUserObjectID(ctx, requesterAccount)
+	if err != nil {
+		return nil, fmt.Errorf("resolve organizer teams object id: %w", err)
+	}
+	if !found {
+		return nil, errTeamsOrganizerNotSynced
+	}
 
 	// Graph createOrGet: concurrent callers get the same meeting back.
 	meeting, err := h.graphClient.CreateOnlineMeeting(ctx, msgraph.CreateOnlineMeetingRequest{
 		ExternalID:     teamsMeetingExternalID(h.siteID, roomID),
 		Subject:        meetingSubject(room),
-		OrganizerEmail: organizerEmail,
+		OrganizerID:    organizerID,
 		AttendeeEmails: attendeeEmails,
 	})
 	if err != nil {

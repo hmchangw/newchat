@@ -34,6 +34,7 @@ type MongoStore struct {
 	apps                *mongo.Collection
 	botCmdMenus         *mongo.Collection
 	teamsMeetings       *mongo.Collection
+	teamsUsers          *mongo.Collection
 }
 
 func NewMongoStore(db *mongo.Database) *MongoStore {
@@ -47,6 +48,7 @@ func NewMongoStore(db *mongo.Database) *MongoStore {
 		apps:                db.Collection("apps"),
 		botCmdMenus:         db.Collection("bot_cmd_menu"),
 		teamsMeetings:       db.Collection("teams_meetings"),
+		teamsUsers:          db.Collection("teams_user"),
 	}
 }
 
@@ -1123,6 +1125,24 @@ const (
 	pseudoAccountRegex      = `^p_`
 	botOrPseudoAccountRegex = `(\.bot$|^p_)`
 )
+
+// GetTeamsUserObjectID looks up teams_user._id (the Azure AD user object id) by
+// account. Returns ("", false, nil) when no teams_user document exists — the
+// account has not been synced by teams-user-sync yet.
+func (s *MongoStore) GetTeamsUserObjectID(ctx context.Context, account string) (string, bool, error) {
+	var doc struct {
+		ID string `bson:"_id"`
+	}
+	err := s.teamsUsers.FindOne(ctx, bson.M{"account": account},
+		options.FindOne().SetProjection(bson.M{"_id": 1})).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get teams user object id for %q: %w", account, err)
+	}
+	return doc.ID, doc.ID != "", nil
+}
 
 // MinSubscriptionLastSeenByRoomID returns the room's strict read floor: the
 // minimum lastSeenAt across the room's ordinary-member subscriptions, but only

@@ -162,6 +162,12 @@ type RoomStore interface {
 
 	// GetUser returns the user by account, or ErrUserNotFound.
 	GetUser(ctx context.Context, account string) (*model.User, error)
+	// GetTeamsUserObjectID returns the account's Azure AD user object id (GUID)
+	// from the teams_user mapping (populated by teams-user-sync). The object id
+	// is required as the /users/{id} path segment for the app-only
+	// onlineMeetings/createOrGet call. Returns ("", false, nil) when the account
+	// has no teams_user document (not yet synced).
+	GetTeamsUserObjectID(ctx context.Context, account string) (string, bool, error)
 	// GetApp returns the app whose Assistant.Name == botAccount, or ErrAppNotFound.
 	GetApp(ctx context.Context, botAccount string) (*model.App, error)
 	// ListDefaultChannelTabApps returns apps whose channelTab.enabled AND

@@ -4015,3 +4015,31 @@ func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testi
 	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
 	assert.True(t, bobRaw.Alert)
 }
+
+// TestMongoStore_GetTeamsUserObjectID_Integration verifies the teams_user
+// object-id lookup: the GUID when a mapping exists, ("", false, nil) when the
+// account has not been synced.
+func TestMongoStore_GetTeamsUserObjectID_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	_, err := db.Collection("teams_user").InsertOne(ctx, model.TeamsUser{
+		ID:      "00000000-0000-0000-0000-0000000000aa",
+		UPN:     "alice@corp.com",
+		Account: "alice",
+		SiteID:  "site-a",
+	})
+	require.NoError(t, err)
+
+	id, found, err := store.GetTeamsUserObjectID(ctx, "alice")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "00000000-0000-0000-0000-0000000000aa", id)
+
+	// Unsynced account → not found, no error.
+	id, found, err = store.GetTeamsUserObjectID(ctx, "ghost")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, id)
+}
