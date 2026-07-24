@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 func makeInboxMemberEvent(t *testing.T, typ string, payload *model.InboxMemberEvent, ts int64) []byte {
@@ -104,9 +105,9 @@ func TestSpotlightCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 }
 
 func TestSpotlightTemplateProperties_MatchesStruct(t *testing.T) {
-	props := esPropertiesFromStruct[SpotlightSearchIndex]()
+	props := esPropertiesFromStruct[searchindex.SpotlightDoc]()
 
-	typ := reflect.TypeOf(SpotlightSearchIndex{})
+	typ := reflect.TypeOf(searchindex.SpotlightDoc{})
 	esFieldCount := 0
 	for i := range typ.NumField() {
 		field := typ.Field(i)

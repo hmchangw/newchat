@@ -99,30 +99,28 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 	return actions, nil
 }
 
-// SpotlightSearchIndex defines the Elasticsearch document structure for the
-// spotlight index. One doc per (user, room) pair.
-type SpotlightSearchIndex struct {
-	UserAccount string    `json:"userAccount" es:"keyword"`
-	RoomID      string    `json:"roomId"      es:"keyword"`
-	RoomName    string    `json:"roomName"    es:"search_as_you_type,custom_analyzer"`
-	RoomType    string    `json:"roomType"    es:"keyword"`
-	SiteID      string    `json:"siteId"      es:"keyword"`
-	JoinedAt    time.Time `json:"joinedAt"    es:"date"`
-}
-
-func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) SpotlightSearchIndex {
-	var joinedAt time.Time
+func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) searchindex.SpotlightDoc {
+	var joinedAt int64
 	if evt.JoinedAt > 0 {
-		joinedAt = time.UnixMilli(evt.JoinedAt).UTC()
+		joinedAt = evt.JoinedAt
 	}
-	return SpotlightSearchIndex{
+	return searchindex.NewSpotlightDoc(searchindex.SpotlightFields{
 		UserAccount: account,
 		RoomID:      evt.RoomID,
 		RoomName:    evt.RoomName,
 		RoomType:    string(evt.RoomType),
 		SiteID:      evt.SiteID,
-		JoinedAt:    joinedAt,
+		JoinedAt:    convertJoinedAt(joinedAt),
+	})
+}
+
+// convertJoinedAt converts a Unix millisecond timestamp to a UTC time.Time,
+// or returns a zero time.Time if the timestamp is 0.
+func convertJoinedAt(joinedAtMs int64) time.Time {
+	if joinedAtMs > 0 {
+		return time.UnixMilli(joinedAtMs).UTC()
 	}
+	return time.Time{}
 }
 
 // spotlightTemplateBody builds the ES index template. The wildcard
@@ -164,7 +162,7 @@ func spotlightTemplateBody(indexName string, devMode bool) json.RawMessage {
 			},
 			"mappings": map[string]any{
 				"dynamic":    false,
-				"properties": esPropertiesFromStruct[SpotlightSearchIndex](),
+				"properties": esPropertiesFromStruct[searchindex.SpotlightDoc](),
 			},
 		},
 	}
