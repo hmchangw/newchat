@@ -41,6 +41,10 @@ type config struct {
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	// ADMIN_ACCT_PREFIX scopes which accounts are treated as admins and excluded
+	// from read floors / receipts. Empty disables the admin exclusion (bots still
+	// excluded). See store_mongo.go adminAccountPatterns.
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_chatadmin_"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
 	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
 	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
@@ -133,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := NewMongoStore(db)
+	store := NewMongoStore(db, WithAdminAcctPrefix(cfg.AdminAcctPrefix))
 	// Bounded timeout so a hung createIndexes surfaces at startup.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := store.EnsureIndexes(ensureCtx); err != nil {

@@ -20,6 +20,10 @@ services:
       - MONGO_DB=chat
       - MAX_ROOM_SIZE=1000
       - MAX_BATCH_SIZE=500
+      # Accounts matching this prefix are treated as admins and excluded from
+      # read floors / receipts. Empty disables the admin exclusion (bots still
+      # excluded). Default p_chatadmin_.
+      - ADMIN_ACCT_PREFIX=p_chatadmin_
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=24h

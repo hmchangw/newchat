@@ -2143,13 +2143,29 @@ func TestMongoStore_MinSubscriptionLastSeenByRoomID_Integration(t *testing.T) {
 		RoomID: "padmin", JoinedAt: earliest, LastSeenAt: &mid,
 	})
 	mustInsertSub(t, db, &model.Subscription{
-		ID: "s18", User: model.SubscriptionUser{ID: "u18", Account: "p_admin"},
+		ID: "s18", User: model.SubscriptionUser{ID: "u18", Account: "p_chatadmin_admin"},
 		RoomID: "padmin", JoinedAt: earliest,
 	})
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "padmin")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// Room "pwebhook-counted": a non-admin p_ account (does NOT match the default
+	// ADMIN_ACCT_PREFIX p_chatadmin_) is a real participant now. It has never read,
+	// so the strict floor is nil — proving the narrowed prefix no longer excludes
+	// every p_ account the way the old ^p_ guard did.
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s19", User: model.SubscriptionUser{ID: "u19", Account: "nina"},
+		RoomID: "pwebhook-counted", JoinedAt: earliest, LastSeenAt: &mid,
+	})
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s20", User: model.SubscriptionUser{ID: "u20", Account: "p_webhook"},
+		RoomID: "pwebhook-counted", JoinedAt: earliest,
+	})
+	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "pwebhook-counted")
+	require.NoError(t, err)
+	assert.Nil(t, got)
 
 	// Room with no subscriptions at all → nil.
 	got, err = store.MinSubscriptionLastSeenByRoomID(ctx, "empty")
@@ -2236,6 +2252,22 @@ func TestMongoStore_MinThreadSubscriptionLastSeenByThreadRoomID_Integration(t *t
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// "admin-parent": a p_chatadmin_ admin thread subscriber that never read is
+	// excluded by account, so the floor is the human's lastSeenAt.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts8", ThreadRoomID: "admin-parent", UserAccount: "grace", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts9", ThreadRoomID: "admin-parent", UserAccount: "p_chatadmin_ops"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "admin-parent")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.WithinDuration(t, mid, *got, time.Second)
+
+	// "pwebhook-thread": a non-admin p_ subscriber is counted now; never-read ⇒ nil.
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts10", ThreadRoomID: "pwebhook-thread", UserAccount: "harry", LastSeenAt: &mid})
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{ID: "ts11", ThreadRoomID: "pwebhook-thread", UserAccount: "p_webhook"})
+	got, err = store.MinThreadSubscriptionLastSeenByThreadRoomID(ctx, "pwebhook-thread")
+	require.NoError(t, err)
+	assert.Nil(t, got)
 }
 
 func TestMongoStore_UpdateThreadRoomMinUserLastSeenAt_Integration(t *testing.T) {
@@ -2310,7 +2342,7 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
 		bson.M{"_id": "uC", "account": "carol", "chineseName": "卡羅", "engName": "Carol"},
 		bson.M{"_id": "uD", "account": "dave.bot", "chineseName": "戴夫", "engName": "Dave"},
-		bson.M{"_id": "uE", "account": "p_ops", "chineseName": "運維", "engName": "Ops"},
+		bson.M{"_id": "uE", "account": "p_chatadmin_ops", "chineseName": "運維", "engName": "Ops"},
 	})
 	require.NoError(t, err)
 
@@ -2321,15 +2353,15 @@ func TestMongoStore_ListReadReceipts_Integration(t *testing.T) {
 		bson.M{"_id": "sC", "roomId": "r1", "u": bson.M{"_id": "uC", "account": "carol"}, "lastSeenAt": msgTime.Add(-time.Minute)},
 		// A bot that has read well past the message must never appear as a reader.
 		bson.M{"_id": "sD", "roomId": "r1", "u": bson.M{"_id": "uD", "account": "dave.bot", "isBot": true}, "lastSeenAt": msgTime.Add(30 * time.Minute)},
-		// A p_ platform/admin account (isBot=false) must also be excluded — this
-		// exercises the u.account $not ^p_ predicate, since isBot alone would
-		// surface p_ops.
-		bson.M{"_id": "sE", "roomId": "r1", "u": bson.M{"_id": "uE", "account": "p_ops"}, "lastSeenAt": msgTime.Add(20 * time.Minute)},
+		// An admin account (ADMIN_ACCT_PREFIX, isBot=false) must also be excluded —
+		// this exercises the u.account $not /^p_chatadmin_/ predicate, since isBot
+		// alone would surface p_chatadmin_ops.
+		bson.M{"_id": "sE", "roomId": "r1", "u": bson.M{"_id": "uE", "account": "p_chatadmin_ops"}, "lastSeenAt": msgTime.Add(20 * time.Minute)},
 	})
 	require.NoError(t, err)
 
 	// Only bob qualifies: alice is the sender, carol read before the message,
-	// dave.bot is a bot, and p_ops is a p_ platform/admin account (both excluded
+	// dave.bot is a bot, and p_chatadmin_ops is an admin account (both excluded
 	// despite having read after the message).
 	rows, err := store.ListReadReceipts(ctx, "r1", msgTime, "alice", 100)
 	require.NoError(t, err)
@@ -4014,4 +4046,44 @@ func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testi
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&bobRaw))
 	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
 	assert.True(t, bobRaw.Alert)
+}
+
+func TestMongoStore_ListReadReceipts_AdminPrefixConfig_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	require.NoError(t, NewMongoStore(db).EnsureIndexes(ctx))
+
+	_, err := db.Collection("users").InsertMany(ctx, []any{
+		bson.M{"_id": "uB", "account": "bob", "chineseName": "鮑勃", "engName": "Bob"},
+		bson.M{"_id": "uAdm", "account": "p_chatadmin_ops", "chineseName": "運維", "engName": "Ops"},
+		bson.M{"_id": "uHook", "account": "p_webhook", "chineseName": "掛鉤", "engName": "Hook"},
+	})
+	require.NoError(t, err)
+
+	msgTime := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	_, err = db.Collection("subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "sB", "roomId": "r1", "u": bson.M{"_id": "uB", "account": "bob"}, "lastSeenAt": msgTime.Add(time.Hour)},
+		bson.M{"_id": "sAdm", "roomId": "r1", "u": bson.M{"_id": "uAdm", "account": "p_chatadmin_ops"}, "lastSeenAt": msgTime.Add(time.Hour)},
+		bson.M{"_id": "sHook", "roomId": "r1", "u": bson.M{"_id": "uHook", "account": "p_webhook"}, "lastSeenAt": msgTime.Add(time.Hour)},
+	})
+	require.NoError(t, err)
+
+	accountsOf := func(store *MongoStore) []string {
+		rows, err := store.ListReadReceipts(ctx, "r1", msgTime, "someone-else", 100)
+		require.NoError(t, err)
+		got := make([]string, 0, len(rows))
+		for _, r := range rows {
+			got = append(got, r.Account)
+		}
+		return got
+	}
+
+	// Default prefix (p_chatadmin_): admin excluded, non-admin p_webhook counted.
+	assert.ElementsMatch(t, []string{"bob", "p_webhook"}, accountsOf(NewMongoStore(db)))
+
+	// Broad legacy prefix p_: both p_ accounts excluded.
+	assert.ElementsMatch(t, []string{"bob"}, accountsOf(NewMongoStore(db, WithAdminAcctPrefix("p_"))))
+
+	// Empty prefix: admin exclusion disabled, all three surface.
+	assert.ElementsMatch(t, []string{"bob", "p_chatadmin_ops", "p_webhook"}, accountsOf(NewMongoStore(db, WithAdminAcctPrefix(""))))
 }

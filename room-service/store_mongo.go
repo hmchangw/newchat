@@ -24,6 +24,24 @@ const botAccountRegex = `\.bot$`
 
 var botAccountPattern = regexp.MustCompile(botAccountRegex)
 
+// defaultAdminAcctPrefix is the built-in ADMIN_ACCT_PREFIX default: admin
+// accounts are named p_chatadmin_*. Overridden per-store via WithAdminAcctPrefix.
+const defaultAdminAcctPrefix = "p_chatadmin_"
+
+// adminAccountPatterns builds the query-side account-exclusion regexes from a
+// configured admin-account prefix. It returns the admin-only regex (anchored,
+// for the main-room u.account guard) and the combined bot+admin regex (for the
+// flat thread_subscriptions queries). An empty prefix disables the admin-account
+// exclusion (adminRegex == ""), leaving only the bot filter. The prefix is
+// regex-escaped: a configured value must never be trusted to be a regex literal.
+func adminAccountPatterns(prefix string) (adminRegex, botOrAdminRegex string) {
+	if prefix == "" {
+		return "", botAccountRegex
+	}
+	q := regexp.QuoteMeta(prefix)
+	return "^" + q, `(\.bot$|^` + q + `)`
+}
+
 type MongoStore struct {
 	rooms               *mongo.Collection
 	subscriptions       *mongo.Collection
@@ -34,10 +52,28 @@ type MongoStore struct {
 	apps                *mongo.Collection
 	botCmdMenus         *mongo.Collection
 	teamsMeetings       *mongo.Collection
+	// adminAcctRegex excludes admin accounts (accounts matching ADMIN_ACCT_PREFIX)
+	// from read floors / receipts; "" disables the admin exclusion. botOrAdminRegex
+	// is the combined bot+admin exclusion for the flat thread_subscriptions queries.
+	adminAcctRegex  string
+	botOrAdminRegex string
 }
 
-func NewMongoStore(db *mongo.Database) *MongoStore {
-	return &MongoStore{
+// Option configures a MongoStore at construction.
+type Option func(*MongoStore)
+
+// WithAdminAcctPrefix overrides the account prefix used to exclude admin
+// accounts from read-floor and read-receipt queries. An empty prefix disables
+// the admin-account exclusion (bot filtering still applies).
+func WithAdminAcctPrefix(prefix string) Option {
+	return func(s *MongoStore) {
+		s.adminAcctRegex, s.botOrAdminRegex = adminAccountPatterns(prefix)
+	}
+}
+
+func NewMongoStore(db *mongo.Database, opts ...Option) *MongoStore {
+	adminRegex, botOrAdminRegex := adminAccountPatterns(defaultAdminAcctPrefix)
+	s := &MongoStore{
 		rooms:               db.Collection("rooms"),
 		subscriptions:       db.Collection("subscriptions"),
 		threadSubscriptions: db.Collection("thread_subscriptions"),
@@ -47,7 +83,13 @@ func NewMongoStore(db *mongo.Database) *MongoStore {
 		apps:                db.Collection("apps"),
 		botCmdMenus:         db.Collection("bot_cmd_menu"),
 		teamsMeetings:       db.Collection("teams_meetings"),
+		adminAcctRegex:      adminRegex,
+		botOrAdminRegex:     botOrAdminRegex,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // EnsureIndexes creates the indexes that back the read paths in this service
@@ -1115,28 +1157,19 @@ func (s *MongoStore) GetUserSiteID(ctx context.Context, account string) (string,
 	return doc.SiteID, nil
 }
 
-// pseudoAccountRegex matches p_ accounts, which represent both platform and
-// admin accounts. botOrPseudoAccountRegex additionally matches ".bot" accounts.
-// They are the query-side equivalents of model.IsPlatformAdminAccount / IsBot,
-// used to exclude non-human participants from read state directly by account.
-const (
-	pseudoAccountRegex      = `^p_`
-	botOrPseudoAccountRegex = `(\.bot$|^p_)`
-)
-
 // MinSubscriptionLastSeenByRoomID returns the room's strict read floor: the
 // minimum lastSeenAt across the room's ordinary-member subscriptions, but only
 // when EVERY such subscription has a usable lastSeenAt (> zero). If any has no
 // usable lastSeenAt — missing, null, or the BSON zero date, i.e. a member who
 // was invited but has never opened the room — it returns nil, meaning "not
 // everyone has read yet". It also returns nil for a room with no subscriptions.
-// Bots (u.isBot) and p_ platform/admin accounts (u.account prefix) are excluded,
-// so a passive bot/admin never freezes the floor and a botDM resolves to the
+// Bots (u.isBot) and admin accounts (ADMIN_ACCT_PREFIX) are excluded, so a
+// passive bot/admin never freezes the floor and a botDM resolves to the
 // human's lastSeenAt. A room with only such subscriptions resolves to nil. The
 // caller $unsets rooms.minUserLastSeenAt on a nil result.
 func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID string) (*time.Time, error) {
 	// The whole result is determined by a single document: the room's ordinary
-	// (non-bot, non-p_) subscription with the smallest lastSeenAt. The
+	// (non-bot, non-admin) subscription with the smallest lastSeenAt. The
 	// (roomId, lastSeenAt) index
 	// (non-sparse, so missing fields are indexed as null) returns the room's
 	// subscriptions in ascending lastSeenAt order, and BSON sorts missing/null
@@ -1147,17 +1180,22 @@ func (s *MongoStore) MinSubscriptionLastSeenByRoomID(ctx context.Context, roomID
 	//   - smallest value is a real post-zero date → every member has read and
 	//     that value IS the minimum → the floor.
 	// The (roomId, lastSeenAt) index still serves the sort; the u.isBot and
-	// u.account predicates are applied as residual filters (bots/p_ are few per
+	// u.account predicates are applied as residual filters (bots/admins are few per
 	// room), so this stays a bounded index seek on the message-read hot path
 	// rather than the prior full-room $group scan.
 	var doc struct {
 		LastSeenAt time.Time `bson:"lastSeenAt"`
 	}
+	// u.isBot excludes bots (and admin subs stamped locally); the u.account $not
+	// /^<prefix>/ predicate additionally excludes admin accounts (ADMIN_ACCT_PREFIX)
+	// whose isBot may be unset (e.g. cross-site mirror subs), no stored flag needed.
+	// An empty configured prefix disables the admin-account predicate.
+	filter := bson.M{"roomId": roomID, "u.isBot": bson.M{"$ne": true}}
+	if s.adminAcctRegex != "" {
+		filter["u.account"] = bson.M{"$not": bson.Regex{Pattern: s.adminAcctRegex}}
+	}
 	err := s.subscriptions.FindOne(ctx,
-		// u.isBot excludes bots (and p_ subs stamped locally); the u.account $not
-		// ^p_ predicate additionally excludes p_ platform/admin accounts whose
-		// isBot may be unset (e.g. cross-site mirror subs), no stored flag needed.
-		bson.M{"roomId": roomID, "u.isBot": bson.M{"$ne": true}, "u.account": bson.M{"$not": bson.Regex{Pattern: pseudoAccountRegex}}},
+		filter,
 		options.FindOne().
 			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
 			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),
@@ -1198,14 +1236,19 @@ func (s *MongoStore) ListReadReceipts(
 	excludeAccount string,
 	limit int,
 ) ([]ReadReceiptRow, error) {
+	// Bots (u.isBot) and admin accounts (ADMIN_ACCT_PREFIX) are never surfaced as
+	// readers, in addition to excluding the sender. An empty configured prefix
+	// disables the admin-account predicate (sender exclusion still applies).
+	account := bson.M{"$ne": excludeAccount}
+	if s.adminAcctRegex != "" {
+		account["$not"] = bson.Regex{Pattern: s.adminAcctRegex}
+	}
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{
 			"roomId":     roomID,
 			"lastSeenAt": bson.M{"$gte": since},
-			// Bots (u.isBot) and p_ platform/admin accounts (u.account prefix) are
-			// never surfaced as readers, in addition to excluding the sender.
-			"u.account": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: pseudoAccountRegex}},
-			"u.isBot":   bson.M{"$ne": true},
+			"u.account":  account,
+			"u.isBot":    bson.M{"$ne": true},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
@@ -1258,9 +1301,9 @@ func (s *MongoStore) ListThreadReadReceipts(
 		{{Key: "$match", Value: bson.M{
 			"threadRoomId": threadRoomID,
 			"lastSeenAt":   bson.M{"$gte": since},
-			// Bot (".bot") and p_ platform/admin subscribers are never surfaced as
-			// readers, in addition to excluding the sender.
-			"userAccount": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: botOrPseudoAccountRegex}},
+			// Bot (".bot") and admin (ADMIN_ACCT_PREFIX) subscribers are never
+			// surfaced as readers, in addition to excluding the sender.
+			"userAccount": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: s.botOrAdminRegex}},
 		}}},
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
@@ -1771,9 +1814,9 @@ func (s *MongoStore) GetThreadRoomByID(ctx context.Context, threadRoomID string)
 // MinThreadSubscriptionLastSeenByThreadRoomID returns the thread room's strict
 // read floor: the minimum lastSeenAt across the thread's ordinary-member
 // thread_subscriptions for threadRoomID, but only when every such subscriber has
-// a usable lastSeenAt (> zero). Bot (".bot") and p_ platform/admin subscribers
-// are excluded by account, so a bot that authored a threaded message cannot
-// freeze the floor via its never-read parent-author subscription.
+// a usable lastSeenAt (> zero). Bot (".bot") and admin (ADMIN_ACCT_PREFIX)
+// subscribers are excluded by account, so a bot that authored a threaded message
+// cannot freeze the floor via its never-read parent-author subscription.
 // Returns nil when any subscriber has never read, or when there are no subscribers.
 // The (threadRoomId, lastSeenAt) index (non-sparse) returns the smallest value
 // first — a missing/null/zero lastSeenAt sorts before real dates, so the first
@@ -1783,10 +1826,10 @@ func (s *MongoStore) MinThreadSubscriptionLastSeenByThreadRoomID(ctx context.Con
 		LastSeenAt time.Time `bson:"lastSeenAt"`
 	}
 	err := s.threadSubscriptions.FindOne(ctx,
-		// Bot/p_ thread subs don't hold the floor: excluded by account so a bot
+		// Bot/admin thread subs don't hold the floor: excluded by account so a bot
 		// that authored a threaded message can't freeze it via its never-read
 		// parent-author subscription.
-		bson.M{"threadRoomId": threadRoomID, "userAccount": bson.M{"$not": bson.Regex{Pattern: botOrPseudoAccountRegex}}},
+		bson.M{"threadRoomId": threadRoomID, "userAccount": bson.M{"$not": bson.Regex{Pattern: s.botOrAdminRegex}}},
 		options.FindOne().
 			SetSort(bson.D{{Key: "lastSeenAt", Value: 1}}).
 			SetProjection(bson.M{"lastSeenAt": 1, "_id": 0}),
