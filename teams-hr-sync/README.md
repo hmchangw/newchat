@@ -39,10 +39,9 @@ calls the interfaces:
 
 - **`transform.Mapper`** ([`transform`](transform/transform.go)) — owns name
   mapping and org placement (a group maps to the section level).
-  `OrgFromGroup` shapes the org node from the group profile;
   `EmployeeFromMember` derives the Employee (account from the UPN, names,
-  site, `Source`). Returning an Employee with an empty `Account` marks the
-  member unmappable — the service skips it.
+  site, org node from the group profile). Returning `nil` marks the member
+  unmappable (no usable UPN or Graph id) — the service skips it.
 - **`transform.EmployeeUserConverter`** — derives the `users.upsert` row from
   an Employee. `DefaultConverter` copies identity fields only.
 - **`hrstore.Store`** ([`pkg/hrstore`](../pkg/hrstore)) — the write surface
@@ -58,8 +57,11 @@ Example — different English-name convention:
 ```go
 type surnameFirstMapper struct{ transform.DefaultMapper }
 
-func (m surnameFirstMapper) EmployeeFromMember(u *msgraph.GraphUser, org *model.Org, siteID string) model.Employee {
-	e := m.DefaultMapper.EmployeeFromMember(u, org, siteID)
+func (m surnameFirstMapper) EmployeeFromMember(u *msgraph.GraphUser, g msgraph.GroupProfile, siteID string) *model.IEmployee {
+	e := m.DefaultMapper.EmployeeFromMember(u, g, siteID)
+	if e == nil {
+		return nil
+	}
 	e.EngName = strings.TrimSpace(u.Surname + " " + u.GivenName)
 	return e
 }

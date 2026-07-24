@@ -12,17 +12,13 @@ import (
 
 var testGroup = msgraph.GroupProfile{ID: "g1", DisplayName: "Engineering", Description: "eng dept"}
 
-func TestDefaultMapper_OrgFromGroup(t *testing.T) {
-	got := DefaultMapper{}.OrgFromGroup(testGroup)
-	assert.Equal(t, model.IOrg{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}, got, "group maps to section level")
-}
-
 func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
+	// testGroup maps to this org node, derived inside EmployeeFromMember.
 	org := model.IOrg{SectID: "g1", SectName: "Engineering", SectDescription: "eng dept"}
 	tests := []struct {
 		name string
 		user msgraph.GraphUser
-		want model.IEmployee
+		want *model.IEmployee
 	}{
 		{
 			name: "full identity mapping",
@@ -33,7 +29,7 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 			},
 			// EmployeeID derived from the Graph id (u1), not the AAD EMP1 attribute;
 			// mail/userType/accountEnabled carried through.
-			want: model.IEmployee{
+			want: &model.IEmployee{
 				ID: EmployeeIDFromGraphID("u1"), EmployeeID: EmployeeIDFromGraphID("u1"),
 				Account: "alice.wu", EngName: "Alice Wu",
 				ChineseName: "愛麗絲", Mail: "alice.wu@corp.com", MailNickname: "alice.wu",
@@ -44,16 +40,16 @@ func TestDefaultMapper_EmployeeFromMember(t *testing.T) {
 		{
 			name: "surname only trims the joiner space",
 			user: msgraph.GraphUser{ID: "u2", UserPrincipalName: "bob@corp.com", Surname: "Lin"},
-			want: model.IEmployee{ID: EmployeeIDFromGraphID("u2"), EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", IOrg: org},
+			want: &model.IEmployee{ID: EmployeeIDFromGraphID("u2"), EmployeeID: EmployeeIDFromGraphID("u2"), Account: "bob", EngName: "Lin", SiteID: "site-a", IOrg: org},
 		},
-		// empty Account or missing Graph id signals unmappable — the caller skips
-		{name: "no at sign", user: msgraph.GraphUser{ID: "u3", UserPrincipalName: "not-a-upn"}, want: model.IEmployee{}},
-		{name: "empty local part", user: msgraph.GraphUser{ID: "u4", UserPrincipalName: "@corp.com"}, want: model.IEmployee{}},
-		{name: "no graph id", user: msgraph.GraphUser{UserPrincipalName: "carol@corp.com"}, want: model.IEmployee{}},
+		// no usable UPN or Graph id signals unmappable → nil, the caller skips
+		{name: "no at sign", user: msgraph.GraphUser{ID: "u3", UserPrincipalName: "not-a-upn"}, want: nil},
+		{name: "empty local part", user: msgraph.GraphUser{ID: "u4", UserPrincipalName: "@corp.com"}, want: nil},
+		{name: "no graph id", user: msgraph.GraphUser{UserPrincipalName: "carol@corp.com"}, want: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, DefaultMapper{}.EmployeeFromMember(&tt.user, &org, "site-a"))
+			assert.Equal(t, tt.want, DefaultMapper{}.EmployeeFromMember(&tt.user, testGroup, "site-a"))
 		})
 	}
 }
