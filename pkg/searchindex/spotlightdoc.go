@@ -25,13 +25,8 @@ type SpotlightFields struct {
 }
 
 // NewSpotlightDoc builds the ES document for the spotlight index from f.
+//
+//nolint:gocritic // hugeParam: f is passed by value to satisfy the builder interface; struct copy is negligible for 100 bytes
 func NewSpotlightDoc(f SpotlightFields) SpotlightDoc {
-	return SpotlightDoc{
-		UserAccount: f.UserAccount,
-		RoomID:      f.RoomID,
-		RoomName:    f.RoomName,
-		RoomType:    f.RoomType,
-		SiteID:      f.SiteID,
-		JoinedAt:    f.JoinedAt,
-	}
+	return SpotlightDoc(f)
 }

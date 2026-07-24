@@ -69,6 +69,8 @@ func isBotAccount(account string) bool {
 }
 
 // NewMessageDoc builds the ES document for the messages index from f.
+//
+//nolint:gocritic // hugeParam: f is passed by value to satisfy the builder interface; struct copy is negligible for 200 bytes
 func NewMessageDoc(f MessageFields) MessageDoc {
 	doc := MessageDoc{
 		MessageID:             f.MessageID,
