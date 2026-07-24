@@ -32,12 +32,11 @@ func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper tra
 		if err != nil {
 			return nil, stats, fmt.Errorf("get group %s: %w", sg.GroupID, err)
 		}
-		org := mapper.OrgFromGroup(*profile)
 		skipped, err := graph.ListGroupMembers(ctx, sg.GroupID, pageSize, func(users []msgraph.GraphUser) error {
 			stats.Members += len(users)
 			for i := range users {
-				e := mapper.EmployeeFromMember(&users[i], &org, sg.SiteID)
-				if e.Account == "" {
+				e := mapper.EmployeeFromMember(&users[i], *profile, sg.SiteID)
+				if e == nil {
 					stats.InvalidUPN++
 					continue
 				}
@@ -51,7 +50,7 @@ func collectEmployees(ctx context.Context, graph msgraph.GroupReader, mapper tra
 					continue
 				}
 				seen[e.Account] = struct{}{}
-				out = append(out, e)
+				out = append(out, *e)
 			}
 			return nil
 		})

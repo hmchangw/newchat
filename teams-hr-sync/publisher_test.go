@@ -49,9 +49,11 @@ func TestPublishSync_AllThreeBatches(t *testing.T) {
 		}},
 		Quits: map[string][]string{"site-b": {"bob"}, "site-a": {"eve"}},
 	}
-	n, err := p.publishSync(context.Background(), d)
+	res, err := p.publishSync(context.Background(), d)
 	require.NoError(t, err)
-	assert.Equal(t, 4, n)
+	assert.Equal(t, 1, res.EmployeesWritten)
+	assert.Equal(t, 1, res.UsersWritten)
+	assert.Equal(t, 2, res.QuitsWritten) // two per-site quit batches
 	require.Len(t, got, 4)
 
 	// employees.upsert — bare array, no wrapper
@@ -85,9 +87,9 @@ func TestPublishSync_SkipsEmptyBatches(t *testing.T) {
 	var got []captured
 	p := newCapturingPublisher(t, &got)
 
-	n, err := p.publishSync(context.Background(), diffResult{})
+	res, err := p.publishSync(context.Background(), diffResult{})
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Equal(t, emitResult{}, res)
 	assert.Empty(t, got, "nothing to publish on an empty diff")
 }
 
@@ -95,9 +97,9 @@ func TestPublishSync_QuitsOnlySkipsUpserts(t *testing.T) {
 	var got []captured
 	p := newCapturingPublisher(t, &got)
 
-	n, err := p.publishSync(context.Background(), diffResult{Quits: map[string][]string{"site-a": {"eve"}}})
+	res, err := p.publishSync(context.Background(), diffResult{Quits: map[string][]string{"site-a": {"eve"}}})
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, res.QuitsWritten)
 	require.Len(t, got, 1)
 	assert.Equal(t, "chat.hr.site-a.employees.quit", got[0].subj)
 }

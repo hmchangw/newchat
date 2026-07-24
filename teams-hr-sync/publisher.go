@@ -45,15 +45,15 @@ func newPublisher(publish publishFunc, central string, converter transform.Emplo
 	return &publisher{publish: publish, central: central, converter: converter}
 }
 
-// publishSync publishes the diff and returns the number of messages sent.
-func (p *publisher) publishSync(ctx context.Context, d diffResult) (int, error) {
-	published := 0
+// publishSync publishes the diff, returning per-kind written counts.
+func (p *publisher) publishSync(ctx context.Context, d diffResult) (emitResult, error) {
+	var res emitResult
 
 	if len(d.Upserts) > 0 {
 		if err := p.publishZstd(ctx, subject.OrgSyncEmployeesUpsert(p.central), d.Upserts); err != nil {
-			return published, fmt.Errorf("publish employees.upsert: %w", err)
+			return res, fmt.Errorf("publish employees.upsert: %w", err)
 		}
-		published++
+		res.EmployeesWritten = len(d.Upserts)
 
 		users := make([]model.IUserWithChange, 0, len(d.Upserts))
 		for i := range d.Upserts {
@@ -63,9 +63,9 @@ func (p *publisher) publishSync(ctx context.Context, d diffResult) (int, error) 
 			})
 		}
 		if err := p.publishZstd(ctx, subject.OrgSyncUsersUpsert(p.central), users); err != nil {
-			return published, fmt.Errorf("publish users.upsert: %w", err)
+			return res, fmt.Errorf("publish users.upsert: %w", err)
 		}
-		published++
+		res.UsersWritten = len(users)
 	}
 
 	// deterministic site order so a partial failure is reproducible
@@ -77,11 +77,11 @@ func (p *publisher) publishSync(ctx context.Context, d diffResult) (int, error) 
 	for _, siteID := range siteIDs {
 		if err := p.publishZstd(ctx, subject.EmployeesQuit(siteID),
 			model.IHRSyncEmployeeQuitBatch{Timestamp: time.Now().UTC().UnixMilli(), SiteID: siteID, Accounts: d.Quits[siteID]}); err != nil {
-			return published, fmt.Errorf("publish employees.quit for site %s: %w", siteID, err)
+			return res, fmt.Errorf("publish employees.quit for site %s: %w", siteID, err)
 		}
-		published++
+		res.QuitsWritten++
 	}
-	return published, nil
+	return res, nil
 }
 
 func (p *publisher) publishZstd(ctx context.Context, subj string, payload any) error {

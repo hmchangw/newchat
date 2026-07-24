@@ -16,12 +16,10 @@ import (
 )
 
 // Mapper maps Graph objects into the domain; owns the name-mapping, org
-// placement, and the employeeId derivation. An EmployeeFromMember result with
-// an empty Account is unmappable (no usable UPN or Graph id) and must be
-// skipped by the caller.
+// placement, and the employeeId derivation. A nil EmployeeFromMember result is
+// unmappable (no usable UPN or Graph id) and must be skipped by the caller.
 type Mapper interface {
-	OrgFromGroup(g msgraph.GroupProfile) model.IOrg
-	EmployeeFromMember(m *msgraph.GraphUser, org *model.IOrg, siteID string) model.IEmployee
+	EmployeeFromMember(m *msgraph.GraphUser, g msgraph.GroupProfile, siteID string) *model.IEmployee
 }
 
 // EmployeeUserConverter maps Employee -> User for the users.upsert feed.
@@ -36,18 +34,14 @@ type EmployeeUserConverter interface {
 // stub. ponytail: no OrgType — the new Org has no type field.
 type DefaultMapper struct{}
 
-func (DefaultMapper) OrgFromGroup(g msgraph.GroupProfile) model.IOrg {
-	return model.IOrg{SectID: g.ID, SectName: g.DisplayName, SectDescription: g.Description}
-}
-
-func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.IOrg, siteID string) model.IEmployee {
+func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, g msgraph.GroupProfile, siteID string) *model.IEmployee {
 	account, ok := splitUPN(m.UserPrincipalName)
 	// No stable Graph id → no deterministic employeeId key → unmappable.
 	if !ok || m.ID == "" {
-		return model.IEmployee{}
+		return nil
 	}
 	empID := EmployeeIDFromGraphID(m.ID)
-	return model.IEmployee{
+	return &model.IEmployee{
 		ID:             empID, // hr_employee _id = the stable derived id
 		EmployeeID:     empID,
 		Account:        account,
@@ -58,7 +52,7 @@ func (DefaultMapper) EmployeeFromMember(m *msgraph.GraphUser, org *model.IOrg, s
 		UserType:       m.UserType,
 		AccountEnabled: m.AccountEnabled,
 		SiteID:         siteID,
-		IOrg:           *org,
+		IOrg:           model.IOrg{SectID: g.ID, SectName: g.DisplayName, SectDescription: g.Description},
 	}
 }
 
