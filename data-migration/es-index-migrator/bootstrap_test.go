@@ -14,6 +14,7 @@ import (
 func testConfig() config {
 	return config{
 		SiteID: "site-a", MsgIndexPrefix: "messages-a-v1", SpotlightIndex: "spotlight-a-v1", UserRoomIndex: "user-room-a",
+		WorkerConcurrency: 4,
 	}
 }
 
