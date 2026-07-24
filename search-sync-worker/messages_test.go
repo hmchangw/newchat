@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 func TestMessageCollection_TemplateName_StripsVersion(t *testing.T) {
@@ -113,7 +114,7 @@ func TestIndexName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := indexName(tt.prefix, tt.createdAt)
+			got := searchindex.MessageIndexName(tt.prefix, tt.createdAt)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -193,8 +194,8 @@ func TestBuildMessageAction(t *testing.T) {
 func TestMessageTemplateProperties_MatchesStruct(t *testing.T) {
 	props := messageTemplateProperties()
 
-	// Every MessageSearchIndex field with an es tag must have a corresponding template property.
-	typ := reflect.TypeOf(MessageSearchIndex{})
+	// Every MessageDoc field with an es tag must have a corresponding template property.
+	typ := reflect.TypeOf(searchindex.MessageDoc{})
 	for i := range typ.NumField() {
 		field := typ.Field(i)
 		esTag := field.Tag.Get("es")

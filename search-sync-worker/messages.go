@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -150,45 +148,14 @@ func actionableEvent(e model.EventType) bool {
 	}
 }
 
-// MessageSearchIndex is the Elasticsearch document for messages, mirroring pkg/model.Message; the
-// `es` tag (keyword/text/date/boolean, text,custom_analyzer, or object_disabled) drives the template — add new Message fields here and populate them in newMessageSearchIndex().
-type MessageSearchIndex struct {
-	MessageID   string `json:"messageId"                              es:"keyword"`
-	RoomID      string `json:"roomId"                                 es:"keyword"`
-	SiteID      string `json:"siteId"                                 es:"keyword"`
-	UserID      string `json:"userId"                                 es:"keyword"`
-	UserAccount string `json:"userAccount"                            es:"keyword"`
-	// IsBot flags bot-authored messages so search-service can filter/facet by source.
-	IsBot                 bool       `json:"isBot,omitempty"                        es:"boolean"`
-	Content               string     `json:"content,omitempty"                      es:"text,custom_analyzer"`
-	CreatedAt             time.Time  `json:"createdAt"                              es:"date"`
-	EditedAt              *time.Time `json:"editedAt,omitempty"                     es:"date"`
-	UpdatedAt             *time.Time `json:"updatedAt,omitempty"                    es:"date"`
-	ThreadParentID        string     `json:"threadParentMessageId,omitempty"        es:"keyword"`
-	ThreadParentCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty" es:"date"`
-	TShow                 bool       `json:"tshow,omitempty"                        es:"boolean"`
-
-	// Searched attachment/tcard projections. AttachmentText is one string —
-	// every attachment title+description joined — so an AND query can mix
-	// words from both. CardData duplicates card.data — accepted.
-	AttachmentText string `json:"attachmentText,omitempty" es:"text,custom_analyzer"`
-	CardData       string `json:"cardData,omitempty"       es:"text,custom_analyzer"`
-
-	// Render payloads stored as-is (never indexed) so search hits can be
-	// rendered on the frontend without a history-service lookup.
-	Attachments []cassandra.Attachment `json:"attachments,omitempty" es:"object_disabled"`
-	Card        *cassandra.Card        `json:"card,omitempty"        es:"object_disabled"`
-}
-
 // newMessageSearchIndex maps a MessageEvent to a search index document.
-func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
-	doc := MessageSearchIndex{
+func newMessageSearchIndex(evt *model.MessageEvent) searchindex.MessageDoc {
+	return searchindex.NewMessageDoc(searchindex.MessageFields{
 		MessageID:             evt.Message.ID,
 		RoomID:                evt.Message.RoomID,
 		SiteID:                evt.SiteID,
 		UserID:                evt.Message.UserID,
 		UserAccount:           evt.Message.UserAccount,
-		IsBot:                 model.IsBot(evt.Message.UserAccount),
 		Content:               evt.Message.Content,
 		CreatedAt:             evt.Message.CreatedAt,
 		EditedAt:              evt.Message.EditedAt,
@@ -196,38 +163,13 @@ func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
 		ThreadParentID:        evt.Message.ThreadParentMessageID,
 		ThreadParentCreatedAt: evt.Message.ThreadParentMessageCreatedAt,
 		TShow:                 evt.Message.TShow,
-	}
-
-	// Lenient decode: a malformed blob is skipped by DecodeAttachments; one
-	// bad attachment must not block indexing the rest of the message.
-	attachments, _ := cassandra.DecodeAttachments(evt.Message.Attachments)
-	doc.Attachments = attachments
-	var attachmentText []string
-	for i := range attachments {
-		a := &attachments[i]
-		if a.Title != "" {
-			attachmentText = append(attachmentText, a.Title)
-		}
-		if a.Description != "" {
-			attachmentText = append(attachmentText, a.Description)
-		}
-	}
-	doc.AttachmentText = strings.Join(attachmentText, " ")
-
-	if evt.Message.Card != nil {
-		doc.Card = evt.Message.Card
-		doc.CardData = string(evt.Message.Card.Data)
-	}
-
-	return doc
-}
-
-func indexName(prefix string, createdAt time.Time) string {
-	return fmt.Sprintf("%s-%s", prefix, createdAt.UTC().Format("2006-01"))
+		Attachments:           evt.Message.Attachments,
+		Card:                  evt.Message.Card,
+	})
 }
 
 func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengine.BulkAction {
-	index := indexName(indexPrefix, evt.Message.CreatedAt)
+	index := searchindex.MessageIndexName(indexPrefix, evt.Message.CreatedAt)
 
 	// Only an explicit EventDeleted removes the doc; created/updated (and any unstamped legacy/replayed event) take the index upsert path.
 	if evt.Event == model.EventDeleted {
@@ -255,9 +197,9 @@ func buildDocument(evt *model.MessageEvent) json.RawMessage {
 	return data
 }
 
-// messageTemplateProperties generates ES mapping properties from MessageSearchIndex struct tags. The `es` tag is the source of truth.
+// messageTemplateProperties generates ES mapping properties from MessageDoc struct tags. The `es` tag is the source of truth.
 func messageTemplateProperties() map[string]any {
-	return esPropertiesFromStruct[MessageSearchIndex]()
+	return esPropertiesFromStruct[searchindex.MessageDoc]()
 }
 
 func messageTemplateBody(prefix string, devMode bool) json.RawMessage {
