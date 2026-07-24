@@ -1,4 +1,4 @@
-.PHONY: lint fmt test test-integration generate build deps-up deps-down \
+.PHONY: lint fmt test test-integration generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev \
         obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
@@ -8,6 +8,8 @@ NATS_CREDS       := docker-local/backend.creds
 NATS_CONF        := docker-local/nats.conf
 NATS_CONTAINER   := chat-local-nats
 OBS_COMPOSE      := tools/observability/docker-compose.yml
+NULL_DEVICE      := $(if $(filter Windows_NT,$(OS)),NUL,/dev/null)
+KUBE_DRY_RUN     ?= false
 
 # --- SAST / dev tooling ------------------------------------------------------
 # Pinned tool versions. Keep GOLANGCI_LINT_VERSION in sync with
@@ -86,10 +88,32 @@ build:
 ifndef SERVICE
 	$(error SERVICE is required. Usage: make build SERVICE=<name>)
 endif
+ifeq ($(OS),Windows_NT)
+	@if not exist bin mkdir bin
+ifeq ($(SERVICE),history-service)
+	set CGO_ENABLED=0&& go build -o bin/$(notdir $(SERVICE)) ./$(SERVICE)/cmd/
+else
+	set CGO_ENABLED=0&& go build -o bin/$(notdir $(SERVICE)) ./$(SERVICE)/
+endif
+else
+	mkdir -p bin
 ifeq ($(SERVICE),history-service)
 	CGO_ENABLED=0 go build -o bin/$(SERVICE) ./$(SERVICE)/cmd/
 else
-	CGO_ENABLED=0 go build -o bin/$(SERVICE) ./$(SERVICE)/
+	CGO_ENABLED=0 go build -o bin/$(notdir $(SERVICE)) ./$(SERVICE)/
+endif
+endif
+
+# Always render every Cassandra Run A resource. When the current Kubernetes
+# context is reachable, also run kubectl's client dry-run with API discovery.
+# The operator's real apply performs final server-side OpenAPI validation.
+validate-loadgen-k8s:
+	kubectl kustomize tools/loadgen/deploy/k8s > $(NULL_DEVICE)
+	kubectl kustomize --load-restrictor LoadRestrictionsNone tools/loadgen/deploy/k8s/validation > $(NULL_DEVICE)
+ifeq ($(KUBE_DRY_RUN),true)
+	kubectl kustomize --load-restrictor LoadRestrictionsNone tools/loadgen/deploy/k8s/validation | kubectl apply --dry-run=client -f -
+else
+	@echo "Render validation passed. Re-run with KUBE_DRY_RUN=true against a reachable Kubernetes context for client dry-run discovery."
 endif
 
 # --- Local dev docker targets -------------------------------------------------

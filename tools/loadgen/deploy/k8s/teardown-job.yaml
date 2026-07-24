@@ -1,0 +1,105 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cassandra-soak-teardown
+  labels:
+    app.kubernetes.io/name: loadgen
+    app.kubernetes.io/component: cassandra-soak
+    loadgen.newchat/phase: teardown
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loadgen
+        app.kubernetes.io/component: cassandra-soak
+        loadgen.newchat/phase: teardown
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loadgen
+          image: loadgen:latest
+          imagePullPolicy: IfNotPresent
+          args: ["teardown", "--workload=soak"]
+          envFrom:
+            - configMapRef:
+                name: cassandra-soak-loadgen-config
+            - configMapRef:
+                name: cassandra-soak-run
+          env:
+            - name: NATS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: nats-url
+            - name: NATS_CREDS_FILE
+              value: /var/run/secrets/loadgen/backend.creds
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: mongo-uri
+            - name: MONGO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: mongo-username
+                  optional: true
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: mongo-password
+                  optional: true
+            - name: CASSANDRA_HOSTS
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: cassandra-hosts
+                  optional: true
+            - name: CASSANDRA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: cassandra-username
+                  optional: true
+            - name: CASSANDRA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-soak-loadgen-secrets
+                  key: cassandra-password
+                  optional: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: nats-creds
+              mountPath: /var/run/secrets/loadgen
+              readOnly: true
+      volumes:
+        - name: nats-creds
+          secret:
+            secretName: cassandra-soak-loadgen-secrets
+            items:
+              - key: backend.creds
+                path: backend.creds
