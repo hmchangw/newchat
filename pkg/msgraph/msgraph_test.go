@@ -63,14 +63,14 @@ func TestCreateOnlineMeeting_Success(t *testing.T) {
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
 	m, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "room-key-1", Subject: "Standup", OrganizerEmail: "alice@corp.com", AttendeeEmails: []string{"bob@corp.com"},
+		ExternalID: "room-key-1", Subject: "Standup", OrganizerID: "alice@corp.com", AttendeeIDs: []string{"bob@corp.com"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", m.ID)
 	assert.Equal(t, "https://join/1", m.JoinURL)
 
 	// Second call reuses the cached token (no second token fetch).
-	_, err = c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "room-key-1", OrganizerEmail: "alice@corp.com"})
+	_, err = c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "room-key-1", OrganizerID: "alice@corp.com"})
 	require.NoError(t, err)
 	assert.Equal(t, 1, tokenCalls, "token should be cached across calls")
 	assert.Equal(t, 2, meetingCalls)
@@ -108,11 +108,11 @@ func TestCreateOnlineMeeting_Idempotent_SameExternalID(t *testing.T) {
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
 	first, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "k", OrganizerEmail: "a@b.com",
+		ExternalID: "k", OrganizerID: "a@b.com",
 	})
 	require.NoError(t, err)
 	second, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "k", OrganizerEmail: "a@b.com",
+		ExternalID: "k", OrganizerID: "a@b.com",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, second.ID, "same externalId returns the same meeting")
@@ -124,7 +124,7 @@ func TestCreateOnlineMeeting_Idempotent_SameExternalID(t *testing.T) {
 // an empty externalId is rejected before any network call.
 func TestCreateOnlineMeeting_RequiresExternalID(t *testing.T) {
 	c := newTestClient("http://unused", "http://unused")
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{OrganizerEmail: "a@b.com"}) // no ExternalID
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{OrganizerID: "a@b.com"}) // no ExternalID
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "externalId")
 }
@@ -140,7 +140,7 @@ func TestCreateOnlineMeeting_TokenError(t *testing.T) {
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "super-secret-value"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL("http://unused"),
 	)
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "a@b.com"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid_client")
 	// Never leak the secret in the error.
@@ -160,7 +160,7 @@ func TestCreateOnlineMeeting_GraphError(t *testing.T) {
 	defer graphSrv.Close()
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "a@b.com"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "403")
 	assert.Contains(t, err.Error(), "Forbidden", "sanitized error code should be surfaced")
@@ -179,7 +179,7 @@ func TestCreateOnlineMeeting_MissingJoinURL(t *testing.T) {
 	defer graphSrv.Close()
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
-	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerEmail: "a@b.com"})
+	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "a@b.com"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "joinWebUrl")
 }
@@ -529,9 +529,9 @@ func TestCreateOnlineMeeting_SendsDefaultUserAgent(t *testing.T) {
 
 	c := newTestClient(tokenSrv.URL, graphSrv.URL)
 	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID:     "room-key-1",
-		Subject:        "Standup",
-		OrganizerEmail: "alice@corp.com",
+		ExternalID:  "room-key-1",
+		Subject:     "Standup",
+		OrganizerID: "alice@corp.com",
 	})
 	require.NoError(t, err)
 }
@@ -555,7 +555,7 @@ func TestCreateOnlineMeeting_UserAgentOverride(t *testing.T) {
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
 	_, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
-		ExternalID: "room-key-1", OrganizerEmail: "alice@corp.com",
+		ExternalID: "room-key-1", OrganizerID: "alice@corp.com",
 	})
 	require.NoError(t, err)
 }
@@ -699,4 +699,100 @@ func TestNewChatsClient_ProxyRejectsCustomRoundTripper(t *testing.T) {
 		WithHTTPClient(&http.Client{Transport: stubRoundTripper{}}),
 	)
 	require.Error(t, err)
+}
+
+func TestNewDirectoryROPCClient_ResolvesWithPasswordGrant(t *testing.T) {
+	var grant, user, pass string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		grant = r.Form.Get("grant_type")
+		user = r.Form.Get("username")
+		pass = r.Form.Get("password")
+		assert.Equal(t, graphScope, r.Form.Get("scope"))
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "dtok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer dtok", r.Header.Get("Authorization"))
+		assert.Equal(t, "eventual", r.Header.Get("ConsistencyLevel"))
+		filter := r.URL.Query().Get("$filter")
+		assert.Contains(t, filter, "startsWith(userPrincipalName,'alice@')")
+		_ = json.NewEncoder(w).Encode(map[string]any{"value": []GraphUser{
+			{ID: "ida", UserPrincipalName: "alice@corp.com"},
+		}})
+	}))
+	defer graphSrv.Close()
+
+	d, err := NewDirectoryROPCClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
+		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
+	)
+	require.NoError(t, err)
+
+	got, err := d.ResolveAccountIDs(context.Background(), []string{"alice"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"alice": "ida"}, got)
+	assert.Equal(t, "password", grant)
+	assert.Equal(t, "svc@corp.com", user)
+	assert.Equal(t, "pw", pass)
+}
+
+func TestNewDirectoryROPCClient_TokenErrorDoesNotLeakPassword(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(tokenResponse{Error: "invalid_grant"}) // #nosec G117 -- test mock OAuth error response; no token value
+	}))
+	defer tokenSrv.Close()
+
+	d, err := NewDirectoryROPCClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		ROPCCredentials{Username: "svc@corp.com", Password: "supersecret"},
+		WithTokenURL(tokenSrv.URL), WithBaseURL("http://unused"),
+	)
+	require.NoError(t, err)
+
+	_, err = d.ResolveAccountIDs(context.Background(), []string{"alice"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "supersecret")
+	assert.Contains(t, err.Error(), "invalid_grant")
+}
+
+func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// organizer object ID in the createOrGet path
+		assert.Contains(t, r.URL.Path, "/users/00000000-org/onlineMeetings/createOrGet")
+		var body struct {
+			ExternalID   string `json:"externalId"`
+			Participants struct {
+				Attendees []struct {
+					Identity struct {
+						User struct {
+							ID string `json:"id"`
+						} `json:"user"`
+					} `json:"identity"`
+				} `json:"attendees"`
+			} `json:"participants"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, "k", body.ExternalID)
+		require.Len(t, body.Participants.Attendees, 1)
+		assert.Equal(t, "11111111-bob", body.Participants.Attendees[0].Identity.User.ID)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
+	}))
+	defer graphSrv.Close()
+
+	c := newTestClient(tokenSrv.URL, graphSrv.URL)
+	m, err := c.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{
+		ExternalID: "k", Subject: "Standup", OrganizerID: "00000000-org", AttendeeIDs: []string{"11111111-bob"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "m1", m.ID)
 }

@@ -100,11 +100,12 @@ type CreateOnlineMeetingRequest struct {
 	ExternalID string
 	// Subject is the meeting title shown in Teams.
 	Subject string
-	// OrganizerEmail is the user the meeting is created for (the organizer).
-	// When empty the application-context default mailbox is used.
-	OrganizerEmail string
-	// AttendeeEmails are the invited attendees (excluding the organizer).
-	AttendeeEmails []string
+	// OrganizerID is the Azure AD object ID of the meeting organizer, used as
+	// the /users/{id} path segment. When empty the application-context default
+	// mailbox is used.
+	OrganizerID string
+	// AttendeeIDs are the Azure AD object IDs of the invited attendees.
+	AttendeeIDs []string
 }
 
 // OnlineMeeting is the subset of the Graph onlineMeeting resource we return.
@@ -397,13 +398,24 @@ const maxAccountsPerQuery = maxUserFilterClauses / 2
 // account (the returned UPN's local-part, lowercased). Batched into chunked
 // $filter queries; first match wins on a duplicate local-part.
 func (g *graphClient) ResolveAccountIDs(ctx context.Context, accounts []string) (map[string]string, error) {
-	out := make(map[string]string, len(accounts))
 	if len(accounts) == 0 {
-		return out, nil
+		return map[string]string{}, nil
 	}
 	token, err := g.accessToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire graph token: %w", err)
+	}
+	return resolveAccountIDs(ctx, g.httpClient, g.baseURL, g.userAgent, token, accounts)
+}
+
+// resolveAccountIDs is the token-agnostic directory lookup shared by the
+// app-only graphClient and the ROPC directoryClient. Semantics match the
+// original graphClient.ResolveAccountIDs: chunked startsWith filter, result
+// keyed by lowercased UPN local-part, first match wins.
+func resolveAccountIDs(ctx context.Context, hc *http.Client, baseURL, userAgent, token string, accounts []string) (map[string]string, error) {
+	out := make(map[string]string, len(accounts))
+	if len(accounts) == 0 {
+		return out, nil
 	}
 	want := make(map[string]struct{}, len(accounts))
 	for _, a := range accounts {
@@ -411,7 +423,7 @@ func (g *graphClient) ResolveAccountIDs(ctx context.Context, accounts []string) 
 	}
 	for start := 0; start < len(accounts); start += maxAccountsPerQuery {
 		end := min(start+maxAccountsPerQuery, len(accounts))
-		if err := g.resolveChunk(ctx, token, accounts[start:end], want, out); err != nil {
+		if err := resolveChunk(ctx, hc, baseURL, userAgent, token, accounts[start:end], want, out); err != nil {
 			return nil, err
 		}
 	}
@@ -440,7 +452,7 @@ func localPart(email string) (string, bool) {
 
 // resolveChunk queries one chunk of accounts and records the account->id matches
 // (keyed by the lowercased UPN local-part) into out.
-func (g *graphClient) resolveChunk(ctx context.Context, token string, chunk []string, want map[string]struct{}, out map[string]string) error {
+func resolveChunk(ctx context.Context, hc *http.Client, baseURL, userAgent, token string, chunk []string, want map[string]struct{}, out map[string]string) error {
 	clauses := make([]string, 0, len(chunk)*2)
 	for _, a := range chunk {
 		for _, variant := range casedVariants(a) {
@@ -455,7 +467,7 @@ func (g *graphClient) resolveChunk(ctx context.Context, token string, chunk []st
 	// $count pairs with ConsistencyLevel: eventual to satisfy Graph's advanced-
 	// query contract for startsWith on userPrincipalName.
 	q.Set("$count", "true")
-	endpoint := g.baseURL + "/users?" + q.Encode()
+	endpoint := baseURL + "/users?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -465,8 +477,8 @@ func (g *graphClient) resolveChunk(ctx context.Context, token string, chunk []st
 	// startsWith on userPrincipalName is served as an advanced query — request
 	// eventual consistency so Graph accepts it regardless of tenant defaults.
 	req.Header.Set("ConsistencyLevel", "eventual")
-	req.Header.Set("User-Agent", g.userAgent)
-	resp, err := g.httpClient.Do(req)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("get users: %w", err)
 	}
@@ -518,7 +530,15 @@ type meetingParticipants struct {
 }
 
 type meetingAttendee struct {
-	Upn string `json:"upn"`
+	Identity meetingIdentitySet `json:"identity"`
+}
+
+type meetingIdentitySet struct {
+	User meetingIdentity `json:"user"`
+}
+
+type meetingIdentity struct {
+	ID string `json:"id"`
 }
 
 func (g *graphClient) CreateOnlineMeeting(ctx context.Context, req CreateOnlineMeetingRequest) (*OnlineMeeting, error) {
@@ -534,19 +554,19 @@ func (g *graphClient) CreateOnlineMeeting(ctx context.Context, req CreateOnlineM
 	// for an (organizer, externalId) pair if one exists, otherwise creates one.
 	// App-only context requires targeting a specific organizer mailbox via the
 	// /users/{id}/onlineMeetings/createOrGet path; delegated context uses /me.
-	// We use the organizer-scoped path when an organizer email is supplied.
+	// We use the organizer-scoped path when an organizer object ID is supplied.
 	var endpoint string
-	if req.OrganizerEmail != "" {
-		endpoint = fmt.Sprintf("%s/users/%s/onlineMeetings/createOrGet", g.baseURL, url.PathEscape(req.OrganizerEmail))
+	if req.OrganizerID != "" {
+		endpoint = fmt.Sprintf("%s/users/%s/onlineMeetings/createOrGet", g.baseURL, url.PathEscape(req.OrganizerID))
 	} else {
 		endpoint = g.baseURL + "/me/onlineMeetings/createOrGet"
 	}
 
 	payload := onlineMeetingPayload{ExternalID: req.ExternalID, Subject: req.Subject}
-	if len(req.AttendeeEmails) > 0 {
-		attendees := make([]meetingAttendee, 0, len(req.AttendeeEmails))
-		for _, email := range req.AttendeeEmails {
-			attendees = append(attendees, meetingAttendee{Upn: email})
+	if len(req.AttendeeIDs) > 0 {
+		attendees := make([]meetingAttendee, 0, len(req.AttendeeIDs))
+		for _, id := range req.AttendeeIDs {
+			attendees = append(attendees, meetingAttendee{Identity: meetingIdentitySet{User: meetingIdentity{ID: id}}})
 		}
 		payload.Participants = &meetingParticipants{Attendees: attendees}
 	}

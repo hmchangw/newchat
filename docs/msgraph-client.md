@@ -23,7 +23,9 @@ derive organizer/attendee addresses):
 | `TEAMS_TENANT_ID` | Azure AD tenant id (path segment of the token URL) |
 | `TEAMS_CLIENT_ID` | App registration (client) id |
 | `TEAMS_CLIENT_SECRET` | App registration client secret |
-| `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev |
+| `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev. Used only by the deep-link call RPCs — meetings resolve real object IDs (below). |
+| `TEAMS_ROPC_USERNAME` | Service-account UPN for the ROPC directory lookup (`User.Read.All`) that resolves meeting organizer/attendee Azure object IDs. Reuses `TEAMS_CLIENT_ID`/`TEAMS_CLIENT_SECRET` as the confidential client. Meetings RPC is not-configured until set. |
+| `TEAMS_ROPC_PASSWORD` | Service-account password for the ROPC directory lookup. |
 | `GRAPH_PROXY_URL` | Optional. Routes the meetings Graph client through this proxy (scheme+host, e.g. `http://proxy.corp:8080`), overriding `HTTPS_PROXY`/`HTTP_PROXY`. Empty falls back to the standard proxy env vars. |
 
 When the Teams credentials are unset, the deep-link call RPCs still work (they
@@ -39,10 +41,15 @@ error until the credentials are set.
 
 ## Creating a meeting (idempotent)
 
+The request carries Azure AD **object IDs**, not emails:
+`CreateOnlineMeetingRequest{ExternalID, Subject, OrganizerID, AttendeeIDs}`. The
+organizer object ID is the path segment; attendees are added as
+`participants.attendees[].identity.user.id`.
+
 The client calls Graph's **`createOrGet`** endpoint with a required
 `externalId`:
 
-- App-only: `POST {base}/users/{organizerEmail}/onlineMeetings/createOrGet`
+- App-only: `POST {base}/users/{organizerId}/onlineMeetings/createOrGet`
 - Delegated fallback: `POST {base}/me/onlineMeetings/createOrGet`
 
 `createOrGet` is idempotent at the source of truth: for a given
@@ -55,6 +62,20 @@ empty value.
 room-service constructs this client via `NewMeetingsClient(cfg)`, which honors
 `Config.ProxyURL` (from `GRAPH_PROXY_URL`) and fails fast on a malformed proxy
 value at startup.
+
+## Resolving object IDs (ROPC directory reader)
+
+Because the organizer path and attendee identities are object IDs — not the
+guessed `account@TEAMS_EMAIL_DOMAIN` email — `room-service` first resolves them
+through a **ROPC** (`grant_type=password`) directory reader that holds the
+**`User.Read.All`** permission delegated to a service account. Construct via
+`NewDirectoryROPCClient(cfg, ROPCCredentials{Username, Password})`; it reuses
+`TEAMS_CLIENT_ID`/`TEAMS_CLIENT_SECRET` as the confidential client plus
+`TEAMS_ROPC_USERNAME`/`TEAMS_ROPC_PASSWORD`, and satisfies the `DirectoryReader`
+interface (`ResolveAccountIDs(ctx, accounts) → map[account]objectID`, matching
+`startsWith(userPrincipalName,'account@')` so any domain resolves). The organizer
+must resolve or the `teams.meeting` request fails; an attendee that does not
+resolve is dropped from the invite.
 
 ## Listing users (paginated)
 

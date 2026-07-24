@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func (h *Handler) teamsMeeting(c *natsrouter.Context, _ model.TeamsMeetingReques
 	if roomID == "" {
 		return nil, errTeamsRoomIDRequired
 	}
-	if h.graphClient == nil || h.teamsMeetingStore == nil {
+	if h.graphClient == nil || h.teamsMeetingStore == nil || h.directoryClient == nil {
 		return nil, errTeamsNotConfigured
 	}
 
@@ -132,15 +133,47 @@ func (h *Handler) teamsMeeting(c *natsrouter.Context, _ model.TeamsMeetingReques
 		return nil, errTeamsMeetingTooManyMembers
 	}
 
-	attendeeEmails := membersToAttendeeEmails(members, h.teamsEmailDomain)
-	organizerEmail := teamsEmail(requesterAccount, h.teamsEmailDomain)
+	// Resolve organizer + attendee Azure AD object IDs via the ROPC directory
+	// (User.Read.All). account@domain is only a guess; Graph createOrGet needs
+	// the real organizer identity in the path, so a failed organizer resolution
+	// is fatal. Attendees are best-effort — an unresolved attendee is dropped.
+	accounts := membersToIndividualAccounts(members)
+	organizerKey := strings.ToLower(requesterAccount)
+	accounts = appendUnique(accounts, organizerKey)
+
+	idByAccount, err := h.directoryClient.ResolveAccountIDs(ctx, accounts)
+	if err != nil {
+		return nil, fmt.Errorf("resolve member object ids: %w", err)
+	}
+	organizerID, ok := idByAccount[organizerKey]
+	if !ok || organizerID == "" {
+		return nil, errTeamsOrganizerUnresolved
+	}
+
+	attendeeIDs := make([]string, 0, len(members))
+	dropped := 0
+	for i := range members {
+		entry := members[i].Member
+		if entry.Type != model.RoomMemberIndividual || entry.Account == "" {
+			continue
+		}
+		id, ok := idByAccount[strings.ToLower(entry.Account)]
+		if !ok || id == "" {
+			dropped++
+			continue
+		}
+		attendeeIDs = append(attendeeIDs, id)
+	}
+	if dropped > 0 {
+		slog.WarnContext(ctx, "dropped unresolved teams meeting attendees", "roomId", roomID, "count", dropped)
+	}
 
 	// Graph createOrGet: concurrent callers get the same meeting back.
 	meeting, err := h.graphClient.CreateOnlineMeeting(ctx, msgraph.CreateOnlineMeetingRequest{
-		ExternalID:     teamsMeetingExternalID(h.siteID, roomID),
-		Subject:        meetingSubject(room),
-		OrganizerEmail: organizerEmail,
-		AttendeeEmails: attendeeEmails,
+		ExternalID:  teamsMeetingExternalID(h.siteID, roomID),
+		Subject:     meetingSubject(room),
+		OrganizerID: organizerID,
+		AttendeeIDs: attendeeIDs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create online meeting: %w", err)
@@ -256,18 +289,28 @@ func membersToCallEmails(members []model.RoomMember, self, domain string) []stri
 	return out
 }
 
-// membersToAttendeeEmails returns attendee emails for every individual member
-// (organizer included is harmless; Graph dedups the organizer).
-func membersToAttendeeEmails(members []model.RoomMember, domain string) []string {
+// membersToIndividualAccounts returns the lowercased account of every
+// individual member (for directory object-ID resolution).
+func membersToIndividualAccounts(members []model.RoomMember) []string {
 	out := make([]string, 0, len(members))
 	for i := range members {
 		entry := members[i].Member
 		if entry.Type != model.RoomMemberIndividual || entry.Account == "" {
 			continue
 		}
-		out = append(out, teamsEmail(entry.Account, domain))
+		out = append(out, strings.ToLower(entry.Account))
 	}
 	return out
+}
+
+// appendUnique appends s to accounts only if not already present.
+func appendUnique(accounts []string, s string) []string {
+	for _, a := range accounts {
+		if a == s {
+			return accounts
+		}
+	}
+	return append(accounts, s)
 }
 
 // countIndividualMembers counts individual (human) members for the limit gate.

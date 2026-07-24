@@ -61,7 +61,11 @@ type Handler struct {
 	// per-room idempotency record (Mongo unique key on roomId+siteId).
 	// roomMembersLimit / roomMembersCallLimit cap the member set for meetings and
 	// calls respectively.
-	graphClient          msgraph.Client
+	graphClient msgraph.Client
+	// directoryClient resolves account local-parts to Azure AD object IDs via a
+	// ROPC User.Read.All service account. Required by the meetings RPC (nil ->
+	// errTeamsNotConfigured); the deep-link call RPCs do not use it.
+	directoryClient      msgraph.DirectoryReader
 	teamsMeetingStore    TeamsMeetingStore
 	teamsEmailDomain     string
 	roomMembersLimit     int
