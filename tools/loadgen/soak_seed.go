@@ -24,20 +24,25 @@ const (
 )
 
 type soakManifest struct {
-	ID                string            `bson:"_id"`
-	State             soakManifestState `bson:"state"`
-	SiteID            string            `bson:"siteId"`
-	MongoDatabase     string            `bson:"mongoDatabase"`
-	CassandraKeyspace string            `bson:"cassandraKeyspace"`
-	ConfigDigest      string            `bson:"configDigest"`
-	BorrowedUserCount int               `bson:"borrowedUserCount"`
-	ActiveUserCount   int               `bson:"activeUserCount"`
-	RoomCount         int               `bson:"roomCount"`
-	SubscriptionCount int               `bson:"subscriptionCount"`
-	StartedAt         time.Time         `bson:"startedAt"`
-	UpdatedAt         time.Time         `bson:"updatedAt"`
-	SeededAt          *time.Time        `bson:"seededAt,omitempty"`
-	CleanedAt         *time.Time        `bson:"cleanedAt,omitempty"`
+	ID                 string            `bson:"_id"`
+	State              soakManifestState `bson:"state"`
+	SiteID             string            `bson:"siteId"`
+	MongoDatabase      string            `bson:"mongoDatabase"`
+	CassandraKeyspace  string            `bson:"cassandraKeyspace"`
+	ConfigDigest       string            `bson:"configDigest"`
+	BorrowedUserCount  int               `bson:"borrowedUserCount"`
+	ActiveUserCount    int               `bson:"activeUserCount"`
+	RoomCount          int               `bson:"roomCount"`
+	SubscriptionCount  int               `bson:"subscriptionCount"`
+	StartedAt          time.Time         `bson:"startedAt"`
+	UpdatedAt          time.Time         `bson:"updatedAt"`
+	SeededAt           *time.Time        `bson:"seededAt,omitempty"`
+	CleanedAt          *time.Time        `bson:"cleanedAt,omitempty"`
+	FirstStartedAt     *time.Time        `bson:"firstStartedAt,omitempty"`
+	Deadline           *time.Time        `bson:"deadline,omitempty"`
+	CompletedAt        *time.Time        `bson:"completedAt,omitempty"`
+	ConfiguredDuration time.Duration     `bson:"configuredDuration,omitempty"`
+	RestartCount       int               `bson:"restartCount,omitempty"`
 }
 
 type soakSeedInput struct {

@@ -21,7 +21,7 @@ const (
 	soakOwnershipChunkSize  = 2000
 )
 
-//go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakSeedStore
+//go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakSeedStore,soakLifecycleStore
 
 type soakSeedStore interface {
 	BorrowUsers(ctx context.Context, siteID string, limit int) ([]model.User, error)
@@ -37,8 +37,9 @@ type mongoSoakStore struct {
 }
 
 var (
-	_ soakSeedStore     = (*mongoSoakStore)(nil)
-	_ soakTeardownStore = (*mongoSoakStore)(nil)
+	_ soakSeedStore      = (*mongoSoakStore)(nil)
+	_ soakTeardownStore  = (*mongoSoakStore)(nil)
+	_ soakLifecycleStore = (*mongoSoakStore)(nil)
 )
 
 func soakUserFilter(siteID string) bson.D {
@@ -113,6 +114,49 @@ func (s *mongoSoakStore) PutManifest(ctx context.Context, manifest *soakManifest
 		return fmt.Errorf("put soak manifest %q: %w", manifest.ID, err)
 	}
 	return nil
+}
+
+func (s *mongoSoakStore) GetManifest(
+	ctx context.Context,
+	runID string,
+) (*soakManifest, error) {
+	var manifest soakManifest
+	err := s.db.Collection(soakManifestCollection).FindOne(
+		ctx,
+		bson.D{{Key: "_id", Value: runID}},
+		options.FindOne().SetProjection(soakManifestProjection()),
+	).Decode(&manifest)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, errSoakManifestNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get soak manifest %q: %w", runID, err)
+	}
+	return &manifest, nil
+}
+
+func soakManifestProjection() bson.D {
+	return bson.D{
+		{Key: "_id", Value: 1},
+		{Key: "state", Value: 1},
+		{Key: "siteId", Value: 1},
+		{Key: "mongoDatabase", Value: 1},
+		{Key: "cassandraKeyspace", Value: 1},
+		{Key: "configDigest", Value: 1},
+		{Key: "borrowedUserCount", Value: 1},
+		{Key: "activeUserCount", Value: 1},
+		{Key: "roomCount", Value: 1},
+		{Key: "subscriptionCount", Value: 1},
+		{Key: "startedAt", Value: 1},
+		{Key: "updatedAt", Value: 1},
+		{Key: "seededAt", Value: 1},
+		{Key: "cleanedAt", Value: 1},
+		{Key: "firstStartedAt", Value: 1},
+		{Key: "deadline", Value: 1},
+		{Key: "completedAt", Value: 1},
+		{Key: "configuredDuration", Value: 1},
+		{Key: "restartCount", Value: 1},
+	}
 }
 
 func (s *mongoSoakStore) InsertOwnedRooms(
