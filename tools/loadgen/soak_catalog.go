@@ -310,6 +310,56 @@ func (c *soakCatalog) PinnedCount(roomID string) int {
 	return count
 }
 
+func (c *soakCatalog) PickVerificationCandidate(
+	roomID string,
+	preferMutated bool,
+) (soakCatalogMessage, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return soakCatalogMessage{}, false
+	}
+	now := c.clock.Now()
+	var fallback *soakCatalogEntry
+	for i := len(room.order) - 1; i >= 0; i-- {
+		entry := room.order[i]
+		if !c.persistenceEligible(entry, now) {
+			continue
+		}
+		if fallback == nil {
+			fallback = entry
+		}
+		mutated := entry.edited || entry.deleted
+		if mutated == preferMutated {
+			return snapshotSoakCatalogEntry(entry), true
+		}
+	}
+	if fallback != nil {
+		return snapshotSoakCatalogEntry(fallback), true
+	}
+	return soakCatalogMessage{}, false
+}
+
+func (c *soakCatalog) GetVerificationCandidate(
+	roomID string,
+	messageID string,
+) (soakCatalogMessage, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return soakCatalogMessage{}, false
+	}
+	entry := room.messages[messageID]
+	if entry == nil || !c.persistenceEligible(entry, c.clock.Now()) {
+		return soakCatalogMessage{}, false
+	}
+	return snapshotSoakCatalogEntry(entry), true
+}
+
 func (c *soakCatalog) Get(roomID, messageID string) (soakCatalogMessage, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
@@ -439,6 +489,14 @@ func (c *soakCatalog) eligible(
 	default:
 		return false
 	}
+}
+
+func (c *soakCatalog) persistenceEligible(
+	entry *soakCatalogEntry,
+	now time.Time,
+) bool {
+	return !now.Before(entry.acceptedAt) &&
+		now.Sub(entry.acceptedAt) >= c.persistGrace
 }
 
 func (c *soakCatalog) removeRoomIndexLocked(room *soakCatalogRoom, index int) {
