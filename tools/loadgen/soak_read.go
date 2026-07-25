@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -144,10 +143,13 @@ func (r *soakReader) LoadHistory(
 	}
 
 	var before *int64
+	lastMsgAt := r.now().UTC().UnixMilli()
+	meta := &soakRoomMeta{LastMsgAt: &lastMsgAt}
 	for range r.cfg.MaxPages {
 		request := soakLoadHistoryRequest{
 			Before: before,
 			Limit:  r.cfg.PageLimit,
+			Meta:   meta,
 		}
 		var response soakLoadHistoryResponse
 		result, latency, err := r.call(ctx, soakRPCRequest{
@@ -282,7 +284,7 @@ func (r *soakReader) GetMessageByID(
 		return r.skip(outcome), nil
 	}
 
-	var response cassandra.Message
+	var response soakWireMessage
 	result, latency, err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCGetMessage,
 		Subject: subject.MsgGet(account, roomID, r.cfg.SiteID),
@@ -346,6 +348,11 @@ func (r *soakReader) ListPinnedMessages(
 		}
 		outcome.Pages++
 		outcome.Messages += len(response.Messages)
+		if r.catalog != nil {
+			for i := range response.Messages {
+				r.catalog.ObservePinned(&response.Messages[i])
+			}
+		}
 		sample := soakReadSample{
 			Action: soakRPCPinnedList, Latency: latency,
 			Messages: len(response.Messages), Retries: result.Retries,
@@ -401,7 +408,7 @@ func (r *soakReader) pickAccount(roomID string) (string, bool) {
 	return member.Account, true
 }
 
-func oldestSoakMessageMillis(messages []cassandra.Message) int64 {
+func oldestSoakMessageMillis(messages []soakWireMessage) int64 {
 	oldest := messages[0].CreatedAt.UTC().UnixMilli()
 	for i := 1; i < len(messages); i++ {
 		createdAt := messages[i].CreatedAt.UTC().UnixMilli()

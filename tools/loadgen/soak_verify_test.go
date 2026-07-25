@@ -122,9 +122,13 @@ func TestSoakVerifier_LoadHistoryFindsMessageAcrossBeforePages(t *testing.T) {
 	other.CreatedAt = time.UnixMilli(300)
 	target := verifiedCassandraMessage("room-1", "message-1", "alice", "original")
 	target.CreatedAt = time.UnixMilli(100)
-	first, err := json.Marshal(soakLoadHistoryResponse{Messages: []cassandra.Message{other}})
+	first, err := json.Marshal(soakLoadHistoryResponse{Messages: []soakWireMessage{
+		soakVerifyToWireMessage(&other),
+	}})
 	require.NoError(t, err)
-	second, err := json.Marshal(soakLoadHistoryResponse{Messages: []cassandra.Message{target}})
+	second, err := json.Marshal(soakLoadHistoryResponse{Messages: []soakWireMessage{
+		soakVerifyToWireMessage(&target),
+	}})
 	require.NoError(t, err)
 	transport := &soakReadTransport{replies: []soakRPCFakeReply{
 		{data: first},
@@ -139,9 +143,15 @@ func TestSoakVerifier_LoadHistoryFindsMessageAcrossBeforePages(t *testing.T) {
 	calls := transport.snapshot()
 	require.Len(t, calls, 2)
 	var request soakLoadHistoryRequest
+	require.NoError(t, json.Unmarshal(calls[0].data, &request))
+	require.NotNil(t, request.Before)
+	assert.Equal(t, int64(100001), *request.Before)
+	require.NotNil(t, request.Meta)
+	require.NotNil(t, request.Meta.LastMsgAt)
 	require.NoError(t, json.Unmarshal(calls[1].data, &request))
 	require.NotNil(t, request.Before)
 	assert.Equal(t, int64(299), *request.Before)
+	require.NotNil(t, request.Meta)
 }
 
 func TestSoakVerifier_ResultClassesRemainDistinct(t *testing.T) {
@@ -358,4 +368,13 @@ func mustVerifiedMessageJSON(
 		panic(err)
 	}
 	return data
+}
+
+func soakVerifyToWireMessage(message *cassandra.Message) soakWireMessage {
+	return soakWireMessage{
+		RoomID: message.RoomID, CreatedAt: message.CreatedAt,
+		MessageID: message.MessageID, Sender: message.Sender, Msg: message.Msg,
+		ThreadParentID: message.ThreadParentID, Deleted: message.Deleted,
+		EditedAt: message.EditedAt, PinnedAt: message.PinnedAt,
+	}
 }

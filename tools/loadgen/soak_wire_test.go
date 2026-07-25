@@ -103,9 +103,9 @@ func TestSoakWireResponses_DecodeHistoryServiceJSON(t *testing.T) {
 		{
 			name:    "get message is a direct message object",
 			payload: string(messageJSON),
-			target:  &cassandra.Message{},
+			target:  &soakWireMessage{},
 			assert: func(t *testing.T, target any) {
-				got := target.(*cassandra.Message)
+				got := target.(*soakWireMessage)
 				assert.Equal(t, "message-1", got.MessageID)
 			},
 		},
@@ -193,6 +193,46 @@ func TestSoakWireResponses_DecodeHistoryServiceJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(tt.payload), tt.target))
 			tt.assert(t, tt.target)
+		})
+	}
+}
+
+func TestSoakWireResponses_DecodeMessagesWithWireReactions(t *testing.T) {
+	payload := `{
+		"roomId":"room-1",
+		"createdAt":"2026-07-24T10:00:00Z",
+		"messageId":"message-1",
+		"sender":{"id":"user-1","account":"a@example.com"},
+		"msg":"hello",
+		"reactions":{"thumbsup":[{"account":"b@example.com","displayName":"Bob"}]}
+	}`
+
+	tests := []struct {
+		name   string
+		target any
+	}{
+		{name: "get message", target: &soakWireMessage{}},
+		{
+			name:   "load history",
+			target: &soakLoadHistoryResponse{},
+		},
+		{
+			name:   "thread messages",
+			target: &soakGetThreadMessagesResponse{},
+		},
+		{
+			name:   "pinned messages",
+			target: &soakListPinnedMessagesResponse{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := payload
+			if tt.name != "get message" {
+				body = `{"messages":[` + payload + `]}`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), tt.target))
 		})
 	}
 }

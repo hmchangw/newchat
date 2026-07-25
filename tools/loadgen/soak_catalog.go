@@ -139,6 +139,14 @@ func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
 }
 
 func (c *soakCatalog) Accept(roomID, messageID string) bool {
+	return c.AcceptAt(roomID, messageID, time.Time{})
+}
+
+func (c *soakCatalog) AcceptAt(
+	roomID string,
+	messageID string,
+	createdAt time.Time,
+) bool {
 	key := soakCatalogKey(roomID, messageID)
 	c.globalMu.Lock()
 	element, exists := c.pending[key]
@@ -149,6 +157,9 @@ func (c *soakCatalog) Accept(roomID, messageID string) bool {
 	pending := element.Value.(*soakPendingEntry)
 	delete(c.pending, key)
 	c.pendingOrder.Remove(element)
+	if !createdAt.IsZero() {
+		pending.candidate.CreatedAt = createdAt
+	}
 
 	entry := &soakCatalogEntry{
 		soakCatalogCandidate: pending.candidate,
@@ -168,28 +179,14 @@ func (c *soakCatalog) Accept(roomID, messageID string) bool {
 	room.order = append(room.order, entry)
 	c.size++
 	if len(room.order) > c.perRoomCap {
-		c.removeRoomIndexLocked(room, 0)
+		c.removeOldestUnpinnedRoomLocked(room)
 	}
 	shard.mu.Unlock()
 
 	for c.size > c.globalCap {
-		oldest := c.globalOrder.Front()
-		if oldest == nil {
+		if !c.removeOldestUnpinnedGlobalLocked() {
 			break
 		}
-		victim := oldest.Value.(*soakCatalogEntry)
-		victimShard := c.shard(victim.RoomID)
-		victimShard.mu.Lock()
-		victimRoom := victimShard.rooms[victim.RoomID]
-		if victimRoom != nil {
-			for i := range victimRoom.order {
-				if victimRoom.order[i] == victim {
-					c.removeRoomIndexLocked(victimRoom, i)
-					break
-				}
-			}
-		}
-		victimShard.mu.Unlock()
 	}
 	c.globalMu.Unlock()
 	return true
@@ -342,6 +339,26 @@ func (c *soakCatalog) PickVerificationCandidate(
 	return soakCatalogMessage{}, false
 }
 
+func (c *soakCatalog) PickHistoryVerificationCandidate(
+	roomID string,
+) (soakCatalogMessage, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return soakCatalogMessage{}, false
+	}
+	now := c.clock.Now()
+	for i := len(room.order) - 1; i >= 0; i-- {
+		entry := room.order[i]
+		if entry.ThreadParentID == "" && c.persistenceEligible(entry, now) {
+			return snapshotSoakCatalogEntry(entry), true
+		}
+	}
+	return soakCatalogMessage{}, false
+}
+
 func (c *soakCatalog) GetVerificationCandidate(
 	roomID string,
 	messageID string,
@@ -404,6 +421,53 @@ func (c *soakCatalog) SetPinned(roomID, messageID string, pinned bool) bool {
 		entry.pinned = pinned
 		return true
 	})
+}
+
+func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
+	if message == nil || message.RoomID == "" || message.MessageID == "" ||
+		message.Sender.Account == "" {
+		return false
+	}
+
+	c.globalMu.Lock()
+	shard := c.shard(message.RoomID)
+	shard.mu.Lock()
+	room := shard.room(message.RoomID)
+	if entry := room.messages[message.MessageID]; entry != nil {
+		entry.pinned = true
+		shard.mu.Unlock()
+		c.globalMu.Unlock()
+		return true
+	}
+
+	entry := &soakCatalogEntry{
+		soakCatalogCandidate: soakCatalogCandidate{
+			ID: message.MessageID, RoomID: message.RoomID,
+			Author: message.Sender.Account, Content: message.Msg,
+			CreatedAt: message.CreatedAt, ThreadParentID: message.ThreadParentID,
+			ThreadReplyLimit: soakThreadReplyHardCap,
+		},
+		acceptedAt: c.clock.Now().Add(-c.persistGrace),
+		edited:     message.EditedAt != nil,
+		deleted:    message.Deleted,
+		pinned:     true,
+		reactions:  make(map[string]map[string]struct{}),
+	}
+	entry.globalElement = c.globalOrder.PushBack(entry)
+	room.messages[message.MessageID] = entry
+	room.order = append(room.order, entry)
+	c.size++
+	if len(room.order) > c.perRoomCap {
+		c.removeOldestUnpinnedRoomLocked(room)
+	}
+	shard.mu.Unlock()
+	for c.size > c.globalCap {
+		if !c.removeOldestUnpinnedGlobalLocked() {
+			break
+		}
+	}
+	c.globalMu.Unlock()
+	return true
 }
 
 func (c *soakCatalog) SetReaction(
@@ -506,6 +570,41 @@ func (c *soakCatalog) removeRoomIndexLocked(room *soakCatalogRoom, index int) {
 	room.order = room.order[:len(room.order)-1]
 	c.globalOrder.Remove(entry.globalElement)
 	c.size--
+}
+
+func (c *soakCatalog) removeOldestUnpinnedRoomLocked(
+	room *soakCatalogRoom,
+) bool {
+	for i, entry := range room.order {
+		if entry.pinned {
+			continue
+		}
+		c.removeRoomIndexLocked(room, i)
+		return true
+	}
+	return false
+}
+
+func (c *soakCatalog) removeOldestUnpinnedGlobalLocked() bool {
+	for element := c.globalOrder.Front(); element != nil; element = element.Next() {
+		entry := element.Value.(*soakCatalogEntry)
+		shard := c.shard(entry.RoomID)
+		shard.mu.Lock()
+		room := shard.rooms[entry.RoomID]
+		if room == nil || entry.pinned {
+			shard.mu.Unlock()
+			continue
+		}
+		for i := range room.order {
+			if room.order[i] == entry {
+				c.removeRoomIndexLocked(room, i)
+				shard.mu.Unlock()
+				return true
+			}
+		}
+		shard.mu.Unlock()
+	}
+	return false
 }
 
 func (c *soakCatalog) messageExists(roomID, messageID string) bool {

@@ -199,7 +199,10 @@ func (v *soakVerifier) VerifyHistory(
 		messageID,
 		&expected,
 	)
-	var before *int64
+	beforeMillis := expected.CreatedAt.UTC().UnixMilli() + 1
+	before := &beforeMillis
+	lastMsgAt := v.now().UTC().UnixMilli()
+	meta := &soakRoomMeta{LastMsgAt: &lastMsgAt}
 	var totalLatency time.Duration
 	for range v.cfg.MaxPages {
 		var response soakVerifyHistoryResponse
@@ -214,6 +217,7 @@ func (v *soakVerifier) VerifyHistory(
 			Body: soakLoadHistoryRequest{
 				Before: before,
 				Limit:  v.cfg.PageLimit,
+				Meta:   meta,
 			},
 			Timeout: v.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		}, &response)

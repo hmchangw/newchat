@@ -22,7 +22,7 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
-      restartPolicy: OnFailure
+      restartPolicy: Never
       terminationGracePeriodSeconds: 60
       securityContext:
         {{- include "cassandra-soak.podSecurityContext" . | nindent 8 }}

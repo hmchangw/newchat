@@ -54,8 +54,12 @@ func TestSoakReader_LoadHistoryPaginatesWithStrictOldestBoundary(t *testing.T) {
 		requests = append(requests, request)
 	}
 	assert.Nil(t, requests[0].Before)
+	require.NotNil(t, requests[0].Meta)
+	require.NotNil(t, requests[0].Meta.LastMsgAt)
 	require.NotNil(t, requests[1].Before)
 	assert.Equal(t, int64(199), *requests[1].Before)
+	require.NotNil(t, requests[1].Meta)
+	assert.Equal(t, requests[0].Meta.LastMsgAt, requests[1].Meta.LastMsgAt)
 	require.NotNil(t, requests[2].Before)
 	assert.Equal(t, int64(49), *requests[2].Before)
 
@@ -168,6 +172,32 @@ func TestSoakReader_PinnedListCursorPaginationAndRepeatGuard(t *testing.T) {
 	}
 }
 
+func TestSoakReader_PinnedListRehydratesCatalog(t *testing.T) {
+	pinnedAt := time.Unix(101, 0)
+	message := soakWireMessage{
+		RoomID: "room-1", MessageID: "pinned-1",
+		Sender: cassandra.Participant{Account: "alice"},
+		Msg:    "owned by the soak room", CreatedAt: time.Unix(100, 0),
+		PinnedAt: &pinnedAt,
+	}
+	data, err := json.Marshal(soakListPinnedMessagesResponse{
+		Messages: []soakWireMessage{message},
+	})
+	require.NoError(t, err)
+	transport := &soakReadTransport{
+		replies: []soakRPCFakeReply{{data: data}},
+	}
+	catalog := emptySoakReadCatalog()
+	reader := newTestSoakReader(transport, &soakReadRecorder{}, catalog)
+
+	_, err = reader.ListPinnedMessages(context.Background(), "room-1")
+	require.NoError(t, err)
+	got, ok := catalog.Get("room-1", "pinned-1")
+	require.True(t, ok)
+	assert.True(t, got.Pinned)
+	assert.Equal(t, "alice", got.Author)
+}
+
 func TestSoakReader_EmptyCatalogIsWarmupSkip(t *testing.T) {
 	transport := &soakReadTransport{}
 	recorder := &soakReadRecorder{}
@@ -192,7 +222,7 @@ func TestSoakReader_EmptyCatalogIsWarmupSkip(t *testing.T) {
 func TestSoakReader_GetMessageDecodesPayloadAndRecordsEndpointLatency(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	catalog := acceptedSoakReadMessage(t, clock, "room-1", "message-1", "")
-	response, err := json.Marshal(cassandra.Message{
+	response, err := json.Marshal(soakWireMessage{
 		RoomID: "room-1", MessageID: "message-1", Msg: "hello",
 		CreatedAt: time.UnixMilli(100),
 	})
@@ -368,9 +398,9 @@ func acceptedSoakReadMessage(
 
 func soakHistoryReply(t *testing.T, timestamps ...int64) []byte {
 	t.Helper()
-	messages := make([]cassandra.Message, 0, len(timestamps))
+	messages := make([]soakWireMessage, 0, len(timestamps))
 	for index, timestamp := range timestamps {
-		messages = append(messages, cassandra.Message{
+		messages = append(messages, soakWireMessage{
 			RoomID: "room-1", MessageID: soakReadMessageID(index),
 			CreatedAt: time.UnixMilli(timestamp),
 		})
@@ -410,10 +440,10 @@ func soakPinnedReply(
 	return data
 }
 
-func soakCassandraMessages(messageIDs []string) []cassandra.Message {
-	messages := make([]cassandra.Message, len(messageIDs))
+func soakCassandraMessages(messageIDs []string) []soakWireMessage {
+	messages := make([]soakWireMessage, len(messageIDs))
 	for index, messageID := range messageIDs {
-		messages[index] = cassandra.Message{
+		messages[index] = soakWireMessage{
 			RoomID: "room-1", MessageID: messageID,
 			CreatedAt: time.UnixMilli(int64(index + 1)),
 		}

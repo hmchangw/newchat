@@ -58,6 +58,35 @@ func TestParseSoakArgs(t *testing.T) {
 	}
 }
 
+func TestWarmSoakPinnedCatalog_UsesPinnedListPath(t *testing.T) {
+	data := soakPinnedReply(t, nil, "", false)
+	transport := &soakReadTransport{
+		replies: []soakRPCFakeReply{{data: data}},
+	}
+	reader := newTestSoakReader(
+		transport,
+		nil,
+		emptySoakReadCatalog(),
+	)
+
+	require.NoError(t, warmSoakPinnedCatalog(
+		context.Background(),
+		reader,
+		[]string{"room-1"},
+		2,
+	))
+	require.Len(t, transport.snapshot(), 1)
+}
+
+func TestSoakMeasuredReadConfig_OneScheduledReadEqualsOneRPC(t *testing.T) {
+	cfg := soakMeasuredReadConfig("site-1")
+
+	assert.Equal(t, "site-1", cfg.SiteID)
+	assert.Equal(t, 50, cfg.PageLimit)
+	assert.Equal(t, 1, cfg.MaxPages)
+	assert.Equal(t, soakRequestTimeout, cfg.RequestTimeout)
+}
+
 func TestWaitForSoakWrappedDEK(t *testing.T) {
 	t.Run("appears after message worker persists", func(t *testing.T) {
 		store := &fakeSoakEncryptionStore{results: []bool{false, true}}

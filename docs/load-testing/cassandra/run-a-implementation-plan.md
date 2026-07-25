@@ -193,7 +193,7 @@ loadgen settings remain unchanged.
 | `SOAK_HEARTBEAT_INTERVAL` | `30s` | Active-run Mongo lease renewal |
 | `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown active-run guard threshold |
 | `SOAK_SEND_RATE` | `100` | Total sends per second |
-| `SOAK_READ_RATE` | `700` | Main history reads per second |
+| `SOAK_READ_RATE` | `700` | Main history RPCs per second; each scheduled read fetches one page |
 | `SOAK_THREAD_SHARE` | `0.10` | Thread replies as a share of sends |
 | `SOAK_MUTATION_RATE` | `5` | Edit/delete/pin family operations per second |
 | `SOAK_SOFT_DELETE_RATIO` | `0.001` | Soft-deletes per accepted message |
@@ -973,6 +973,70 @@ make test
 **Commit**
 
 `feat(loadgen): add Kubernetes assets for Cassandra soak`
+
+---
+
+## Task 17: Validate the Hybrid Local Service Path
+
+**Files**
+
+- Add `tools/loadgen/deploy/k8s/values-local.yaml`.
+- Extend `tools/loadgen/deploy/k8s/README.md`.
+- Update Run A catalog, mutation, read, verification, and runtime wiring where
+  the real service-path smoke exposes contract drift.
+- Make `docker-local/setup.sh` accept a Windows-safe temporary output root
+  without changing its Linux/macOS default.
+
+**Red**
+
+- Lint the Chart with the local values profile.
+- Confirm kind accepts the Seed Job, Soak Deployment, stopped state, and
+  Teardown Job through Kubernetes API discovery.
+- Run the real message-gatekeeper → message-worker → Cassandra path and the
+  history-service read path at a low local rate.
+- Add failing tests for every runtime contract mismatch found by the smoke;
+  do not hide real RPC failures by lowering assertions.
+
+**Green and refactor**
+
+- Keep the local profile non-secret and explicitly allow its mutable image tag
+  only for kind.
+- Preserve pinned run-owned messages in the bounded catalog and rebuild pin
+  state through pinned-list RPCs after a Pod restart.
+- Use a reaction shortcode accepted by the history-service wire contract.
+- Reconcile reaction toggles from the successful server response after a
+  process-local catalog restart.
+- Decode history responses through a narrow wire projection instead of the
+  Cassandra storage-only reaction map.
+- Send a current `lastMsgAt` room hint so zero-history synthetic Mongo rooms do
+  not collapse the history-service bucket walk to the Unix epoch.
+- Restrict LoadHistory verification to top-level messages and begin its
+  timestamp walk at the selected message boundary.
+- Keep scheduled reads to one page so `SOAK_READ_RATE` remains an RPC rate;
+  reserve multi-page bucket walks for the independent verifier.
+- Retain failed Seed Job Pods so Argo operators can inspect application logs.
+- Document the exact local lifecycle and the boundary between what kind proves
+  and what remains staging-only.
+
+**Acceptance**
+
+- The Seed Job borrows the expected local users and creates only run-owned
+  topology.
+- The Soak Deployment passes the encryption preflight, persists ciphertext
+  with no plaintext `msg`, and exposes per-action Prometheus counters.
+- Reaction, pin/unpin, and history verification operate without systematic
+  contract errors after the corrected image is deployed.
+- The measured read RPC rate is not multiplied by pagination depth.
+- SIGTERM prints a process-local report and a replacement Pod resumes the same
+  continuous run after a fresh warm-up.
+- The stopped phase removes the Deployment; approved teardown preserves
+  borrowed users and removes only run-owned Mongo topology.
+- No result from this low-rate Docker Desktop run is presented as a Cassandra
+  capacity conclusion.
+
+**Commit**
+
+`test(loadgen): validate the local Cassandra soak lifecycle`
 
 ---
 

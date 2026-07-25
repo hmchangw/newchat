@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
@@ -20,8 +22,8 @@ type soakLoadHistoryRequest struct {
 }
 
 type soakLoadHistoryResponse struct {
-	Messages          []cassandra.Message `json:"messages"`
-	MinUserLastSeenAt *int64              `json:"minUserLastSeenAt,omitempty"`
+	Messages          []soakWireMessage `json:"messages"`
+	MinUserLastSeenAt *int64            `json:"minUserLastSeenAt,omitempty"`
 }
 
 type soakLoadNextMessagesRequest struct {
@@ -32,14 +34,30 @@ type soakLoadNextMessagesRequest struct {
 }
 
 type soakLoadNextMessagesResponse struct {
-	Messages          []cassandra.Message `json:"messages"`
-	NextCursor        string              `json:"nextCursor,omitempty"`
-	HasNext           bool                `json:"hasNext"`
-	MinUserLastSeenAt *int64              `json:"minUserLastSeenAt,omitempty"`
+	Messages          []soakWireMessage `json:"messages"`
+	NextCursor        string            `json:"nextCursor,omitempty"`
+	HasNext           bool              `json:"hasNext"`
+	MinUserLastSeenAt *int64            `json:"minUserLastSeenAt,omitempty"`
 }
 
 type soakGetMessageByIDRequest struct {
 	MessageID string `json:"messageId"`
+}
+
+// soakWireMessage is the read-side JSON projection required by Run A.
+// In particular, it intentionally omits reactions: cassandra.Reactions is a
+// storage map with struct keys, while history-service emits a grouped JSON map
+// that cannot be unmarshaled back into that storage type.
+type soakWireMessage struct {
+	RoomID         string                `json:"roomId"`
+	CreatedAt      time.Time             `json:"createdAt"`
+	MessageID      string                `json:"messageId"`
+	Sender         cassandra.Participant `json:"sender"`
+	Msg            string                `json:"msg"`
+	ThreadParentID string                `json:"threadParentId,omitempty"`
+	Deleted        bool                  `json:"deleted,omitempty"`
+	EditedAt       *time.Time            `json:"editedAt,omitempty"`
+	PinnedAt       *time.Time            `json:"pinnedAt,omitempty"`
 }
 
 type soakEditMessageRequest struct {
@@ -84,9 +102,9 @@ type soakListPinnedMessagesRequest struct {
 }
 
 type soakListPinnedMessagesResponse struct {
-	Messages   []cassandra.Message `json:"messages"`
-	NextCursor string              `json:"nextCursor,omitempty"`
-	HasNext    bool                `json:"hasNext"`
+	Messages   []soakWireMessage `json:"messages"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+	HasNext    bool              `json:"hasNext"`
 }
 
 type soakReactMessageRequest struct {
@@ -108,9 +126,9 @@ type soakGetThreadMessagesRequest struct {
 }
 
 type soakGetThreadMessagesResponse struct {
-	Messages          []cassandra.Message `json:"messages"`
-	NextCursor        string              `json:"nextCursor,omitempty"`
-	HasNext           bool                `json:"hasNext"`
-	ParentMessage     *cassandra.Message  `json:"parentMessage,omitempty"`
-	MinUserLastSeenAt *int64              `json:"minUserLastSeenAt,omitempty"`
+	Messages          []soakWireMessage `json:"messages"`
+	NextCursor        string            `json:"nextCursor,omitempty"`
+	HasNext           bool              `json:"hasNext"`
+	ParentMessage     *soakWireMessage  `json:"parentMessage,omitempty"`
+	MinUserLastSeenAt *int64            `json:"minUserLastSeenAt,omitempty"`
 }

@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
@@ -428,11 +430,29 @@ func runSoakWorkload(
 		nil,
 		nil,
 	)
-	reader := newSoakReader(
+	warmReader := newSoakReader(
 		soakReadConfig{
 			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
 			RequestTimeout: soakRequestTimeout,
 		},
+		&topology,
+		catalog,
+		rpc,
+		nil,
+		rand.New(rand.NewSource(seed+5)),
+		now,
+	)
+	if err := warmSoakPinnedCatalog(
+		ctx,
+		warmReader,
+		selector.rooms,
+		cfg.MaxInFlight,
+	); err != nil {
+		slog.Error("warm Cassandra soak pinned catalog", "error", err)
+		return 1
+	}
+	reader := newSoakReader(
+		soakMeasuredReadConfig(cfg.SiteID),
 		&topology,
 		catalog,
 		rpc,
@@ -520,7 +540,7 @@ func runSoakWorkload(
 		Verify: func(actionCtx context.Context, _ bool) error {
 			roomID := selector.nextRoom()
 			if verificationSequence.Add(1)%2 == 0 {
-				candidate, ok := catalog.PickVerificationCandidate(roomID, false)
+				candidate, ok := catalog.PickHistoryVerificationCandidate(roomID)
 				if ok {
 					verifier.VerifyHistory(actionCtx, roomID, candidate.ID)
 					return nil
@@ -562,6 +582,45 @@ func runSoakWorkload(
 		return 1
 	}
 	return 0
+}
+
+func soakMeasuredReadConfig(siteID string) soakReadConfig {
+	// Workload Model v1 defines the read rate in RPCs/second. Scheduled reads
+	// therefore fetch one page; the independent verifier owns bucket-walks.
+	return soakReadConfig{
+		SiteID: siteID, PageLimit: 50, MaxPages: 1,
+		RequestTimeout: soakRequestTimeout,
+	}
+}
+
+func warmSoakPinnedCatalog(
+	ctx context.Context,
+	reader *soakReader,
+	roomIDs []string,
+	maxInFlight int,
+) error {
+	if reader == nil {
+		return fmt.Errorf("soak pinned-catalog reader is required")
+	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(max(1, maxInFlight))
+	for _, roomID := range roomIDs {
+		roomID := roomID
+		group.Go(func() error {
+			if _, err := reader.ListPinnedMessages(groupCtx, roomID); err != nil {
+				return fmt.Errorf(
+					"list pinned messages for room %q: %w",
+					roomID,
+					err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("warm pinned catalog: %w", err)
+	}
+	return nil
 }
 
 func runSoakEncryptionPreflight(

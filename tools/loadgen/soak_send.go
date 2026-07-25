@@ -240,7 +240,11 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 		result.ErrorClass = soakErrorAssertion
 		return result
 	}
-	if !s.catalog.Accept(pending.Target.RoomID, pending.MessageID) {
+	if !s.catalog.AcceptAt(
+		pending.Target.RoomID,
+		pending.MessageID,
+		response.CreatedAt,
+	) {
 		result.ErrorClass = soakErrorAssertion
 		return result
 	}

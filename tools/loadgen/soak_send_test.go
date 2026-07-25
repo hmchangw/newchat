@@ -95,6 +95,34 @@ func TestSoakSender_TopLevelUsesFrontdoorAndAdmitsOnlyAfterSuccessReply(t *testi
 	assert.Equal(t, "hello", got.Content)
 }
 
+func TestSoakSender_UsesGatekeeperCreatedAtForAcceptedCatalogEntry(t *testing.T) {
+	publishedAt := time.Unix(100, 0).UTC()
+	persistedAt := publishedAt.Add(250 * time.Millisecond)
+	clock := newFakeSoakClock(publishedAt)
+	catalog := newSoakCatalog(8, 100, 10*time.Second, clock)
+	sender := newTestSoakSender(catalog, &soakRecordingPublisher{}, clock, 0)
+
+	_, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	reply, err := json.Marshal(model.Message{
+		ID: soakTestMessageID, RoomID: "room-1", UserID: "u-1",
+		UserAccount: "alice", Content: "hello", CreatedAt: persistedAt,
+	})
+	require.NoError(t, err)
+
+	result := sender.HandleReply(
+		subject.UserResponse("alice", soakTestRequestID),
+		reply,
+	)
+
+	require.Equal(t, soakSendReplyAccepted, result.Status)
+	got, ok := catalog.Get("room-1", soakTestMessageID)
+	require.True(t, ok)
+	assert.Equal(t, persistedAt, got.CreatedAt)
+}
+
 func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
 	catalog := newSoakCatalog(8, 100, 10*time.Second, clock)

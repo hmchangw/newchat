@@ -12,7 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-const soakReactionShortcode = "👍"
+const soakReactionShortcode = "thumbsup"
 
 type soakMutationKind string
 
@@ -468,18 +468,24 @@ func (m *soakMutator) React(
 	if !result.AmbiguityResolved &&
 		(response.MessageID != message.ID ||
 			response.Shortcode != soakReactionShortcode ||
-			response.Action != desired) {
+			(response.Action != model.ReactionActionAdded &&
+				response.Action != model.ReactionActionRemoved)) {
 		m.recordResult(outcome, latency, soakErrorAssertion, false)
 		return outcome, newSoakAssertionError(
-			"reaction response did not match requested state transition",
+			"reaction response did not identify a valid state transition",
 		)
+	}
+	actual := desired
+	if !result.AmbiguityResolved {
+		actual = response.Action
+		outcome.ReactionAction = actual
 	}
 	m.catalog.SetReaction(
 		roomID,
 		message.ID,
 		soakReactionShortcode,
 		actor.Account,
-		desired == model.ReactionActionAdded,
+		actual == model.ReactionActionAdded,
 	)
 	m.recordResult(outcome, latency, "", false)
 	return outcome, nil

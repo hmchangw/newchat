@@ -11,9 +11,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/emoji"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+func TestSoakReactionShortcode_MatchesHistoryServiceContract(t *testing.T) {
+	canonical, err := emoji.Canonicalize(soakReactionShortcode)
+	require.NoError(t, err)
+	assert.Equal(t, soakReactionShortcode, canonical)
+}
 
 func TestSoakMutator_EditAndDeleteUseOriginalSender(t *testing.T) {
 	tests := []struct {
@@ -190,13 +197,19 @@ func TestSoakMutator_ReactionActorsAreMembersUniqueAndClamped(t *testing.T) {
 
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
-	assert.Len(t, message.Reactions["👍"], 1, "third operation removes at the width cap")
+	assert.Len(t, message.Reactions[soakReactionShortcode], 1, "third operation removes at the width cap")
 }
 
 func TestSoakMutator_ReactionRemoveShareUsesExistingActor(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
-	require.True(t, catalog.SetReaction("room-1", "message-1", "👍", "bob", true))
+	require.True(t, catalog.SetReaction(
+		"room-1",
+		"message-1",
+		soakReactionShortcode,
+		"bob",
+		true,
+	))
 	transport := &soakReadTransport{replies: []soakRPCFakeReply{{
 		data: reactionSuccess("message-1", model.ReactionActionRemoved),
 	}}}
@@ -209,6 +222,30 @@ func TestSoakMutator_ReactionRemoveShareUsesExistingActor(t *testing.T) {
 	calls := transport.snapshot()
 	require.Len(t, calls, 1)
 	assert.Equal(t, subject.MsgReact("bob", "room-1", "site-1"), calls[0].subject)
+}
+
+func TestSoakMutator_ReactionReconcilesAuthoritativeToggleAfterRestart(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
+	transport := &soakReadTransport{replies: []soakRPCFakeReply{{
+		data: reactionSuccess("message-1", model.ReactionActionRemoved),
+	}}}
+	mutator := newTestSoakMutator(
+		catalog,
+		transport,
+		&soakMutationRecorder{},
+		mutationTopology(),
+		clock,
+	)
+	mutator.cfg.ReactionRemoveShare = 0
+
+	outcome, err := mutator.React(context.Background(), "room-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, model.ReactionActionRemoved, outcome.ReactionAction)
+	message, ok := catalog.Get("room-1", "message-1")
+	require.True(t, ok)
+	assert.Empty(t, message.Reactions[soakReactionShortcode])
 }
 
 func TestSoakMutator_HotOnlyScopeKeepsBuildingSameMessage(t *testing.T) {
@@ -312,7 +349,7 @@ func TestSoakMutator_ReactionTimeoutReadsStateInsteadOfBlindToggleRetry(t *testi
 	state := []byte(`{
 		"roomId":"room-1",
 		"messageId":"message-1",
-		"reactions":{"👍":[{"account":"bob","displayName":"Bob"}]}
+		"reactions":{"thumbsup":[{"account":"bob","displayName":"Bob"}]}
 	}`)
 	transport := &soakReadTransport{replies: []soakRPCFakeReply{
 		{err: context.DeadlineExceeded},
@@ -332,7 +369,7 @@ func TestSoakMutator_ReactionTimeoutReadsStateInsteadOfBlindToggleRetry(t *testi
 	assert.Equal(t, subject.MsgGet("bob", "room-1", "site-1"), calls[1].subject)
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
-	assert.Equal(t, []string{"bob"}, message.Reactions["👍"])
+	assert.Equal(t, []string{"bob"}, message.Reactions[soakReactionShortcode])
 }
 
 func TestSoakMutator_DeletedMessagesAreExcludedFromFutureActions(t *testing.T) {
@@ -458,7 +495,7 @@ func acceptMutationCatalogMessage(
 func reactionSuccess(messageID string, action model.ReactionAction) []byte {
 	data, err := json.Marshal(soakReactMessageResponse{
 		MessageID: messageID,
-		Shortcode: "👍",
+		Shortcode: soakReactionShortcode,
 		Action:    action,
 		ReactedAt: 1000,
 	})

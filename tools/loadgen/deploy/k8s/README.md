@@ -228,3 +228,98 @@ make validate-loadgen-k8s KUBE_DRY_RUN=true
 The optional command adds kubectl API discovery. A real release remains the
 final validation of company admission policies, Argo CD configuration,
 ExternalSecret integration, quotas, and network policy.
+
+## Local kind service-path smoke
+
+`values-local.yaml` is a non-secret, low-rate profile for validating the same
+Chart lifecycle against a local kind cluster. It is not a capacity benchmark
+and must not be promoted to staging. On Windows, run the POSIX Make recipes
+from Git Bash.
+
+For a first-time Windows setup, keep the temporary NATS credential output on a
+Docker-bindable workspace path:
+
+```bash
+export NATS_SETUP_TMP_ROOT="$PWD/tmp"
+```
+
+Start the local dependencies, seed the existing development users, and start
+the three services that define Run A:
+
+```bash
+make deps-up
+make seed
+make up-detached SERVICE=message-gatekeeper
+make up-detached SERVICE=message-worker
+make up-detached SERVICE=history-service
+```
+
+The local Valkey cluster announces the Docker-network hostname `valkey`. If a
+Windows host cannot resolve that redirect while running `make seed`, run the
+same Make target in an ephemeral container attached to `chat-local`; do not
+change production Valkey discovery:
+
+```bash
+docker run --rm --network chat-local \
+  -v "$PWD:/src" -w /src \
+  -e MONGO_URI=mongodb://mongodb:27017 \
+  -e VALKEY_ADDRS=valkey:6379 \
+  golang:1.25.12 make seed
+```
+
+Create the cluster, build the exact loadgen image, and load it into kind:
+
+```bash
+kind create cluster --name newchat-loadgen
+make -C tools/loadgen/deploy image IMAGE=newchat-loadgen:local
+kind load docker-image newchat-loadgen:local --name newchat-loadgen
+make validate-loadgen-k8s KUBE_DRY_RUN=true
+```
+
+Create only local credentials. These commands are for the disposable kind
+cluster; production Secret delivery remains part of the release platform:
+
+```bash
+kubectl create namespace loadgen-smoke
+kubectl -n loadgen-smoke create secret generic cassandra-soak-credentials \
+  --from-literal=nats-url=nats://host.docker.internal:4222 \
+  --from-literal=mongo-uri=mongodb://host.docker.internal:27017 \
+  --from-file=backend.creds=docker-local/backend.creds
+```
+
+Exercise the same desired-state transitions that Argo CD will reconcile:
+
+```bash
+helm upgrade --install cassandra-soak tools/loadgen/deploy/k8s \
+  -n loadgen-smoke -f tools/loadgen/deploy/k8s/values-local.yaml \
+  --set phase=seed --wait --wait-for-jobs --timeout 10m
+
+helm upgrade cassandra-soak tools/loadgen/deploy/k8s \
+  -n loadgen-smoke -f tools/loadgen/deploy/k8s/values-local.yaml \
+  --set phase=soak --wait --timeout 5m
+
+helm upgrade cassandra-soak tools/loadgen/deploy/k8s \
+  -n loadgen-smoke -f tools/loadgen/deploy/k8s/values-local.yaml \
+  --set phase=stopped --wait --timeout 5m
+
+helm upgrade cassandra-soak tools/loadgen/deploy/k8s \
+  -n loadgen-smoke -f tools/loadgen/deploy/k8s/values-local.yaml \
+  --set phase=teardown --set teardown.approved=true \
+  --wait --wait-for-jobs --timeout 10m
+```
+
+During soak, confirm the encryption preflight log, Prometheus operation/error
+counters, increasing Cassandra row counts, and ciphertext in `enc_payload`
+with a null plaintext `msg`. Delete the soak Pod once and confirm that its
+replacement reloads the manifest, rebuilds pinned state through the real
+pinned-list RPC, performs a fresh warm-up, and resumes the continuous run.
+After `phase=stopped`, confirm no loadgen Pod remains and its heartbeat is no
+longer advancing. After teardown, confirm borrowed `users` remain and only
+run-owned Mongo topology was removed.
+
+This smoke proves container startup, Kubernetes API acceptance, lifecycle
+replacement, host-to-kind connectivity, the real NATS service path,
+Cassandra encrypted persistence, history read-back, graceful termination,
+and restart recovery. It does not reproduce staging topology, admission
+controllers, network policies, Argo CD pruning, ExternalSecret behavior,
+multi-node Cassandra, or production performance.

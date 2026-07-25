@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 func TestSoakCatalog_PublishDoesNotAdmitUntilGatekeeperAccepts(t *testing.T) {
@@ -45,6 +47,21 @@ func TestSoakCatalog_RejectRemovesPendingPublish(t *testing.T) {
 	assert.True(t, catalog.Reject("r-1", "m-1"))
 	assert.False(t, catalog.Accept("r-1", "m-1"))
 	assert.Zero(t, catalog.Size())
+}
+
+func TestSoakCatalog_PendingPublishesStayWithinGlobalMemoryCap(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(8, 1, 0, clock)
+	for _, messageID := range []string{"oldest", "newest"} {
+		require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+			ID: messageID, RoomID: "r-1", Author: "alice",
+			CreatedAt: clock.Now(),
+		}))
+	}
+
+	assert.False(t, catalog.Accept("r-1", "oldest"))
+	assert.True(t, catalog.Accept("r-1", "newest"))
+	assert.Equal(t, 1, catalog.Size())
 }
 
 func TestSoakCatalog_EditAndDeleteAreAuthorOnly(t *testing.T) {
@@ -121,6 +138,63 @@ func TestSoakCatalog_PerRoomAndGlobalEviction(t *testing.T) {
 	assert.Equal(t, 3, global.Size())
 	_, ok = global.Get("r-1", "m-1")
 	assert.False(t, ok)
+}
+
+func TestSoakCatalog_EvictionRetainsPinnedMessages(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(2, 2, 0, clock)
+	acceptCatalogIDs(t, catalog, clock, "r-1", "m-1", "m-2")
+	require.True(t, catalog.SetPinned("r-1", "m-1", true))
+
+	acceptCatalogIDs(t, catalog, clock, "r-1", "m-3")
+
+	pinned, ok := catalog.Get("r-1", "m-1")
+	require.True(t, ok)
+	assert.True(t, pinned.Pinned)
+	assert.Equal(t, 1, catalog.PinnedCount("r-1"))
+	assert.LessOrEqual(t, catalog.Size(), 2)
+}
+
+func TestSoakCatalog_HistoryVerificationExcludesThreadReplies(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "top-level", RoomID: "r-1", Author: "alice",
+		CreatedAt: clock.Now(),
+	}))
+	require.True(t, catalog.Accept("r-1", "top-level"))
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "thread-reply", RoomID: "r-1", Author: "alice",
+		CreatedAt: clock.Now(), ThreadParentID: "top-level",
+	}))
+	require.True(t, catalog.Accept("r-1", "thread-reply"))
+
+	candidate, ok := catalog.PickHistoryVerificationCandidate("r-1")
+	require.True(t, ok)
+	assert.Equal(t, "top-level", candidate.ID)
+}
+
+func TestSoakCatalog_ObservePinnedValidatesAndReconcilesExistingMessage(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := acceptedCatalogMessage(t, clock, 0)
+
+	assert.False(t, catalog.ObservePinned(nil))
+	assert.False(t, catalog.ObservePinned(&soakWireMessage{
+		RoomID: "r-1", MessageID: "invalid",
+	}))
+	before, ok := catalog.Get("r-1", "m-1")
+	require.True(t, ok)
+	assert.False(t, before.Pinned)
+
+	assert.True(t, catalog.ObservePinned(&soakWireMessage{
+		RoomID: "r-1", MessageID: "m-1",
+		Sender: cassandra.Participant{Account: "alice"},
+	}))
+
+	message, ok := catalog.Get("r-1", "m-1")
+	require.True(t, ok)
+	assert.True(t, message.Pinned)
+	assert.Equal(t, 1, catalog.Size(), "warmup updates instead of duplicating")
 }
 
 func TestSoakCatalog_ConcurrentAccessStaysBounded(t *testing.T) {

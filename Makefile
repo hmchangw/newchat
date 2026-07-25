@@ -12,6 +12,7 @@ NULL_DEVICE      := $(if $(filter Windows_NT,$(OS)),NUL,/dev/null)
 KUBE_DRY_RUN     ?= false
 LOADGEN_CHART    := tools/loadgen/deploy/k8s
 LOADGEN_VALUES   := $(LOADGEN_CHART)/values-validation.yaml
+LOADGEN_LOCAL_VALUES := $(LOADGEN_CHART)/values-local.yaml
 
 # --- SAST / dev tooling ------------------------------------------------------
 # Pinned tool versions. Keep GOLANGCI_LINT_VERSION in sync with
@@ -119,6 +120,7 @@ endif
 # endpoints and an immutable image digest; no Secret value is committed.
 validate-loadgen-k8s:
 	helm lint --strict $(LOADGEN_CHART) -f $(LOADGEN_VALUES)
+	helm lint --strict $(LOADGEN_CHART) -f $(LOADGEN_LOCAL_VALUES)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=seed --show-only templates/seed-job.yaml > $(NULL_DEVICE)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=soak --show-only templates/soak-deployment.yaml > $(NULL_DEVICE)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=stopped > $(NULL_DEVICE)
