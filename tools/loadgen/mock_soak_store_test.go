@@ -12,6 +12,7 @@ package main
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
 	gomock "go.uber.org/mock/gomock"
@@ -177,4 +178,18 @@ func (m *MocksoakLifecycleStore) PutManifest(arg0 context.Context, arg1 *soakMan
 func (mr *MocksoakLifecycleStoreMockRecorder) PutManifest(arg0, arg1 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PutManifest", reflect.TypeOf((*MocksoakLifecycleStore)(nil).PutManifest), arg0, arg1)
+}
+
+// TouchHeartbeat mocks base method.
+func (m *MocksoakLifecycleStore) TouchHeartbeat(arg0 context.Context, arg1 string, arg2 time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TouchHeartbeat", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// TouchHeartbeat indicates an expected call of TouchHeartbeat.
+func (mr *MocksoakLifecycleStoreMockRecorder) TouchHeartbeat(arg0, arg1, arg2 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TouchHeartbeat", reflect.TypeOf((*MocksoakLifecycleStore)(nil).TouchHeartbeat), arg0, arg1, arg2)
 }

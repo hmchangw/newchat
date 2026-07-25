@@ -290,10 +290,11 @@ func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T
 		"subscriptionCount", "startedAt", "updatedAt", "seededAt",
 		"cleanedAt", "firstStartedAt", "deadline", "completedAt",
 		"configuredDuration", "restartCount", "runMode", "lastStoppedAt",
+		"lastHeartbeatAt",
 	} {
 		assert.Equal(t, 1, fields[field], field)
 	}
-	assert.Len(t, fields, 21)
+	assert.Len(t, fields, 22)
 }
 
 func TestSoakWorkload_AlreadyElapsedDeadlineCompletesWithoutDispatch(t *testing.T) {
@@ -349,6 +350,62 @@ func TestSoakWorkload_RestartBeginsWithEmptyCatalog(t *testing.T) {
 	assert.Zero(t, restartedCatalog.Size())
 	_, ok := restartedCatalog.Get("room-1", "message-1")
 	assert.False(t, ok, "manifest lifecycle never checkpoints recent messages")
+}
+
+func TestRunSoakHeartbeat_UpdatesEveryTick(t *testing.T) {
+	store := seededLifecycleStore("run-1")
+	store.manifest.State = soakManifestRunning
+	ticks := make(chan time.Time, 2)
+	first := time.Unix(100, 0).UTC()
+	second := first.Add(30 * time.Second)
+	ticks <- first
+	ticks <- second
+	close(ticks)
+
+	require.NoError(t, runSoakHeartbeat(
+		context.Background(),
+		store,
+		"run-1",
+		ticks,
+	))
+
+	assert.Equal(t, []time.Time{first, second}, store.heartbeats)
+	assert.Equal(t, second, *store.snapshot().LastHeartbeatAt)
+}
+
+func TestRunSoakHeartbeat_StopsOnCancellationAndStoreFailure(t *testing.T) {
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := runSoakHeartbeat(
+			ctx,
+			seededLifecycleStore("run-1"),
+			"run-1",
+			make(chan time.Time),
+		)
+
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("store failure", func(t *testing.T) {
+		wantErr := errors.New("mongo unavailable")
+		store := seededLifecycleStore("run-1")
+		store.manifest.State = soakManifestRunning
+		store.heartbeatErr = wantErr
+		ticks := make(chan time.Time, 1)
+		ticks <- time.Now()
+
+		err := runSoakHeartbeat(
+			context.Background(),
+			store,
+			"run-1",
+			ticks,
+		)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, wantErr)
+	})
 }
 
 type recordingSoakDispatcher struct {
@@ -435,8 +492,30 @@ func (d *singleSoakDispatcher) Dispatch(
 }
 
 type fakeSoakLifecycleStore struct {
-	mu       sync.Mutex
-	manifest soakManifest
+	mu           sync.Mutex
+	manifest     soakManifest
+	heartbeats   []time.Time
+	heartbeatErr error
+}
+
+func (s *fakeSoakLifecycleStore) TouchHeartbeat(
+	_ context.Context,
+	runID string,
+	at time.Time,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.heartbeatErr != nil {
+		return s.heartbeatErr
+	}
+	if s.manifest.ID != runID || s.manifest.State != soakManifestRunning {
+		return errors.New("manifest is not running")
+	}
+	heartbeat := at.UTC()
+	s.manifest.LastHeartbeatAt = &heartbeat
+	s.manifest.UpdatedAt = heartbeat
+	s.heartbeats = append(s.heartbeats, heartbeat)
+	return nil
 }
 
 func (s *fakeSoakLifecycleStore) GetManifest(

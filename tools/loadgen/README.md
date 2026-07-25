@@ -145,10 +145,12 @@ partial topology owned by the same run ID. `duration` mode stores the run
 deadline in the manifest, so a replacement process resumes the remaining
 wall-clock duration. `continuous` mode has no deadline and stops gracefully
 only when the process receives SIGINT or SIGTERM; a replacement process
-resumes the same run. Every process start has a fresh warm-up. The
-recent-message catalog is intentionally in-memory, so mutations, threads, and
-verification skip until new accepted messages age past
-`SOAK_PERSIST_GRACE`.
+resumes the same run. While running, loadgen renews a Mongo-backed heartbeat
+lease. Teardown refuses to change data while that lease is fresh; this guard
+does not require loadgen to access the Kubernetes API. Every process start has
+a fresh warm-up. The recent-message catalog is intentionally in-memory, so
+mutations, threads, and verification skip until new accepted messages age
+past `SOAK_PERSIST_GRACE`.
 
 Run must have access to MongoDB, NATS, message-gatekeeper, message-worker, and
 history-service. Cassandra credentials are not used by normal Run A traffic.
@@ -182,6 +184,8 @@ Run A environment variables:
 | `SOAK_RUN_MODE` | `duration` | `duration` for a bounded smoke/run, or `continuous` until SIGTERM. |
 | `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |
+| `SOAK_HEARTBEAT_INTERVAL` | `30s` | Mongo lifecycle lease renewal interval while load is active. |
+| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown blocks a running manifest until its heartbeat is older than this threshold. |
 | `SOAK_SEND_RATE` | `100` | Top-level plus thread sends per second. |
 | `SOAK_READ_RATE` | `700` | Mixed history reads per second. |
 | `SOAK_THREAD_SHARE` | `0.10` | Fraction of sends attempted as thread replies. |

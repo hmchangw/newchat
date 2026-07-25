@@ -25,6 +25,7 @@ type soakWorkloadConfig struct {
 	Duration          time.Duration
 	Continuous        bool
 	Warmup            time.Duration
+	HeartbeatInterval time.Duration
 	SendRate          float64
 	ReadRate          float64
 	MutationRate      float64
@@ -57,6 +58,7 @@ type soakRunWindow struct {
 type soakLifecycleStore interface {
 	GetManifest(context.Context, string) (*soakManifest, error)
 	PutManifest(context.Context, *soakManifest) error
+	TouchHeartbeat(context.Context, string, time.Time) error
 }
 
 var errSoakManifestNotFound = errors.New("soak run manifest not found")
@@ -93,6 +95,9 @@ func newSoakWorkload(
 	}
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = 256
+	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = 30 * time.Second
 	}
 	if dispatch == nil {
 		dispatch = dispatchSoakLane
@@ -177,6 +182,28 @@ func (w *soakWorkload) Run(
 		}
 		fatalMu.Unlock()
 	}
+	heartbeatDone := make(chan error, 1)
+	heartbeatTicker := time.NewTicker(w.cfg.HeartbeatInterval)
+	go func() {
+		defer heartbeatTicker.Stop()
+		heartbeatErr := runSoakHeartbeat(
+			runCtx,
+			w.store,
+			w.cfg.RunID,
+			heartbeatTicker.C,
+		)
+		if heartbeatErr != nil &&
+			!errors.Is(heartbeatErr, context.Canceled) &&
+			!errors.Is(heartbeatErr, context.DeadlineExceeded) {
+			fatalMu.Lock()
+			if fatalErr == nil {
+				fatalErr = heartbeatErr
+				cancel()
+			}
+			fatalMu.Unlock()
+		}
+		heartbeatDone <- heartbeatErr
+	}()
 	lanes := w.lanes()
 	for _, lane := range lanes {
 		if lane.action == nil || lane.rate <= 0 {
@@ -210,6 +237,7 @@ func (w *soakWorkload) Run(
 
 	<-runCtx.Done()
 	laneWG.Wait()
+	<-heartbeatDone
 	fatalMu.Lock()
 	dependencyErr := fatalErr
 	fatalMu.Unlock()
@@ -338,7 +366,9 @@ func prepareSoakRun(
 		manifest.RestartCount++
 	}
 	manifest.State = soakManifestRunning
-	manifest.UpdatedAt = now.UTC()
+	heartbeat := now.UTC()
+	manifest.LastHeartbeatAt = &heartbeat
+	manifest.UpdatedAt = heartbeat
 	if err := store.PutManifest(ctx, manifest); err != nil {
 		return soakRunWindow{}, fmt.Errorf("mark soak run running: %w", err)
 	}
@@ -393,6 +423,7 @@ func prepareContinuousSoakRun(
 	manifest.Deadline = nil
 	manifest.ConfiguredDuration = 0
 	manifest.LastStoppedAt = nil
+	manifest.LastHeartbeatAt = &startedAt
 	manifest.UpdatedAt = startedAt
 	if err := store.PutManifest(ctx, manifest); err != nil {
 		return soakRunWindow{}, fmt.Errorf(
@@ -436,6 +467,27 @@ func stopSoakRun(
 		return fmt.Errorf("mark soak run stopped: %w", err)
 	}
 	return nil
+}
+
+func runSoakHeartbeat(
+	ctx context.Context,
+	store soakLifecycleStore,
+	runID string,
+	ticks <-chan time.Time,
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case at, ok := <-ticks:
+			if !ok {
+				return nil
+			}
+			if err := store.TouchHeartbeat(ctx, runID, at.UTC()); err != nil {
+				return fmt.Errorf("update soak heartbeat: %w", err)
+			}
+		}
+	}
 }
 
 func completeSoakRun(

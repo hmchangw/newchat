@@ -18,6 +18,8 @@ func TestSoakConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "duration", cfg.RunMode)
 	assert.Equal(t, 72*time.Hour, cfg.RunDuration)
 	assert.Equal(t, 30*time.Second, cfg.Warmup)
+	assert.Equal(t, 30*time.Second, cfg.HeartbeatInterval)
+	assert.Equal(t, 2*time.Minute, cfg.HeartbeatStaleAfter)
 	assert.Equal(t, 100.0, cfg.SendRate)
 	assert.Equal(t, 700.0, cfg.ReadRate)
 	assert.Equal(t, 0.10, cfg.ThreadShare)
@@ -57,6 +59,8 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 			"SOAK_RUN_ID":                           "run-20260724",
 			"SOAK_RUN_MODE":                         "continuous",
 			"SOAK_RUN_DURATION":                     "4h",
+			"SOAK_HEARTBEAT_INTERVAL":               "15s",
+			"SOAK_HEARTBEAT_STALE_AFTER":            "45s",
 			"SOAK_SEND_RATE":                        "125.5",
 			"SOAK_REACTION_MESSAGE_SCOPE":           "all_messages",
 			"SOAK_RATE_SCOPE":                       "global",
@@ -71,6 +75,8 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 	assert.Equal(t, "run-20260724", cfg.Soak.RunID)
 	assert.Equal(t, "continuous", cfg.Soak.RunMode)
 	assert.Equal(t, 4*time.Hour, cfg.Soak.RunDuration)
+	assert.Equal(t, 15*time.Second, cfg.Soak.HeartbeatInterval)
+	assert.Equal(t, 45*time.Second, cfg.Soak.HeartbeatStaleAfter)
 	assert.Equal(t, 125.5, cfg.Soak.SendRate)
 	assert.Equal(t, "all_messages", cfg.Soak.ReactionMessageScope)
 	assert.Equal(t, "global", cfg.Soak.RateScope)
@@ -120,6 +126,10 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"zero run duration", func(c *soakConfig) { c.RunDuration = 0 }, "SOAK_RUN_DURATION"},
 		{"negative warmup", func(c *soakConfig) { c.Warmup = -time.Second }, "SOAK_WARMUP"},
 		{"warmup equals duration", func(c *soakConfig) { c.Warmup = c.RunDuration }, "SOAK_WARMUP"},
+		{"zero heartbeat interval", func(c *soakConfig) { c.HeartbeatInterval = 0 }, "SOAK_HEARTBEAT_INTERVAL"},
+		{"stale threshold equals interval", func(c *soakConfig) {
+			c.HeartbeatStaleAfter = c.HeartbeatInterval
+		}, "SOAK_HEARTBEAT_STALE_AFTER"},
 		{"negative persist grace", func(c *soakConfig) { c.PersistGrace = -time.Second }, "SOAK_PERSIST_GRACE"},
 		{"negative mutation retries", func(c *soakConfig) { c.MutationRetries = -1 }, "SOAK_MUTATION_RETRIES"},
 		{"zero retry minimum", func(c *soakConfig) { c.RetryMinBackoff = 0 }, "SOAK_RETRY_MIN_BACKOFF"},

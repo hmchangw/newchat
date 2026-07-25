@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,6 +155,71 @@ func TestTeardownSoak_RepeatIsIdempotent(t *testing.T) {
 	assert.True(t, found)
 	assert.Empty(t, store.deletedBatches)
 	assert.False(t, store.cleaned)
+}
+
+func TestTeardownSoak_RejectsActiveContinuousRun(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := validSoakConfig(t)
+	cfg.RunID = "run-a"
+	tests := []struct {
+		name      string
+		heartbeat *time.Time
+	}{
+		{name: "fresh heartbeat", heartbeat: &now},
+		{name: "missing heartbeat"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingSoakTeardownStore{
+				manifest: &soakManifest{
+					ID: "run-a", State: soakManifestRunning,
+					RunMode:         soakRunModeContinuous,
+					LastHeartbeatAt: tt.heartbeat,
+				},
+			}
+
+			_, err := teardownSoak(
+				context.Background(),
+				store,
+				nil,
+				&cfg,
+				"chat",
+			)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "active")
+			assert.Empty(t, store.deletedBatches)
+			assert.False(t, store.ownershipDeleted)
+			assert.False(t, store.cleaned)
+		})
+	}
+}
+
+func TestTeardownSoak_AllowsExpiredHeartbeatLease(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.RunID = "run-a"
+	expired := time.Now().UTC().Add(-cfg.HeartbeatStaleAfter - time.Minute)
+	store := &recordingSoakTeardownStore{
+		manifest: &soakManifest{
+			ID: "run-a", State: soakManifestRunning,
+			RunMode:         soakRunModeContinuous,
+			LastHeartbeatAt: &expired,
+		},
+	}
+
+	found, err := teardownSoak(
+		context.Background(),
+		store,
+		nil,
+		&cfg,
+		"chat",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.True(t, store.ownershipDeleted)
+	assert.True(t, store.cleaned)
 }
 
 type recordingSoakTeardownStore struct {

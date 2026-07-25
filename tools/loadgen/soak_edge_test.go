@@ -49,6 +49,14 @@ func (s *configurableSoakLifecycleStore) PutManifest(
 	return nil
 }
 
+func (s *configurableSoakLifecycleStore) TouchHeartbeat(
+	_ context.Context,
+	_ string,
+	_ time.Time,
+) error {
+	return nil
+}
+
 type failingSoakSleeper struct {
 	err error
 }

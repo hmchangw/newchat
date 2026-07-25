@@ -44,6 +44,7 @@ type soakManifest struct {
 	Deadline           *time.Time        `bson:"deadline,omitempty"`
 	CompletedAt        *time.Time        `bson:"completedAt,omitempty"`
 	LastStoppedAt      *time.Time        `bson:"lastStoppedAt,omitempty"`
+	LastHeartbeatAt    *time.Time        `bson:"lastHeartbeatAt,omitempty"`
 	ConfiguredDuration time.Duration     `bson:"configuredDuration,omitempty"`
 	RestartCount       int               `bson:"restartCount,omitempty"`
 }

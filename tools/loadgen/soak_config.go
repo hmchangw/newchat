@@ -22,6 +22,8 @@ type soakConfig struct {
 	RunMode                     string        `env:"RUN_MODE"                        envDefault:"duration"`
 	RunDuration                 time.Duration `env:"RUN_DURATION"                    envDefault:"72h"`
 	Warmup                      time.Duration `env:"WARMUP"                          envDefault:"30s"`
+	HeartbeatInterval           time.Duration `env:"HEARTBEAT_INTERVAL"               envDefault:"30s"`
+	HeartbeatStaleAfter         time.Duration `env:"HEARTBEAT_STALE_AFTER"            envDefault:"2m"`
 	SendRate                    float64       `env:"SEND_RATE"                       envDefault:"100"`
 	ReadRate                    float64       `env:"READ_RATE"                       envDefault:"700"`
 	ThreadShare                 float64       `env:"THREAD_SHARE"                    envDefault:"0.10"`
@@ -71,6 +73,14 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		}
 	default:
 		return fmt.Errorf("SOAK_RUN_MODE must be duration or continuous")
+	}
+	if cfg.HeartbeatInterval <= 0 {
+		return fmt.Errorf("SOAK_HEARTBEAT_INTERVAL must be greater than zero")
+	}
+	if cfg.HeartbeatStaleAfter <= cfg.HeartbeatInterval {
+		return fmt.Errorf(
+			"SOAK_HEARTBEAT_STALE_AFTER must be greater than SOAK_HEARTBEAT_INTERVAL",
+		)
 	}
 
 	if err := validatePositiveRate("SOAK_SEND_RATE", cfg.SendRate); err != nil {

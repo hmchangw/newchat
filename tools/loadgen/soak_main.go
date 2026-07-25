@@ -533,8 +533,9 @@ func runSoakWorkload(
 	workload := newSoakWorkload(
 		&soakWorkloadConfig{
 			RunID: cfg.Soak.RunID, Duration: cfg.Soak.RunDuration,
-			Continuous: cfg.Soak.RunMode == soakRunModeContinuous,
-			Warmup:     cfg.Soak.Warmup, SendRate: cfg.Soak.SendRate,
+			Continuous:        cfg.Soak.RunMode == soakRunModeContinuous,
+			HeartbeatInterval: cfg.Soak.HeartbeatInterval,
+			Warmup:            cfg.Soak.Warmup, SendRate: cfg.Soak.SendRate,
 			ReadRate: cfg.Soak.ReadRate, MutationRate: cfg.Soak.MutationRate,
 			ReactionRate:   cfg.Soak.ReactionRate,
 			PinnedListRate: cfg.Soak.PinnedListRate,

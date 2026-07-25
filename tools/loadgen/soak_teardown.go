@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gocql/gocql"
 )
@@ -79,6 +80,15 @@ func teardownSoak(
 	}
 	if manifest.State == soakManifestCleaned {
 		return true, nil
+	}
+	if manifest.State == soakManifestRunning {
+		if manifest.LastHeartbeatAt == nil ||
+			time.Since(*manifest.LastHeartbeatAt) <= cfg.HeartbeatStaleAfter {
+			return true, fmt.Errorf(
+				"refuse teardown for active soak run %q",
+				cfg.RunID,
+			)
+		}
 	}
 
 	after := ""

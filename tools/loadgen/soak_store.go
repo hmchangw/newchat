@@ -162,6 +162,32 @@ func (s *mongoSoakStore) GetManifest(
 	return &manifest, nil
 }
 
+func (s *mongoSoakStore) TouchHeartbeat(
+	ctx context.Context,
+	runID string,
+	at time.Time,
+) error {
+	heartbeat := at.UTC()
+	result, err := s.db.Collection(soakManifestCollection).UpdateOne(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: runID},
+			{Key: "state", Value: soakManifestRunning},
+		},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "lastHeartbeatAt", Value: heartbeat},
+			{Key: "updatedAt", Value: heartbeat},
+		}}},
+	)
+	if err != nil {
+		return fmt.Errorf("touch soak manifest %q heartbeat: %w", runID, err)
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("touch soak manifest %q heartbeat: run is not active", runID)
+	}
+	return nil
+}
+
 func (s *mongoSoakStore) LoadTopology(
 	ctx context.Context,
 	runID string,
@@ -303,6 +329,7 @@ func soakManifestProjection() bson.D {
 		{Key: "deadline", Value: 1},
 		{Key: "completedAt", Value: 1},
 		{Key: "lastStoppedAt", Value: 1},
+		{Key: "lastHeartbeatAt", Value: 1},
 		{Key: "configuredDuration", Value: 1},
 		{Key: "restartCount", Value: 1},
 	}
