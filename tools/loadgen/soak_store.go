@@ -286,6 +286,7 @@ func soakManifestProjection() bson.D {
 	return bson.D{
 		{Key: "_id", Value: 1},
 		{Key: "state", Value: 1},
+		{Key: "runMode", Value: 1},
 		{Key: "siteId", Value: 1},
 		{Key: "mongoDatabase", Value: 1},
 		{Key: "cassandraKeyspace", Value: 1},
@@ -301,6 +302,7 @@ func soakManifestProjection() bson.D {
 		{Key: "firstStartedAt", Value: 1},
 		{Key: "deadline", Value: 1},
 		{Key: "completedAt", Value: 1},
+		{Key: "lastStoppedAt", Value: 1},
 		{Key: "configuredDuration", Value: 1},
 		{Key: "restartCount", Value: 1},
 	}

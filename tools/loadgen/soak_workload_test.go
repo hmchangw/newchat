@@ -202,6 +202,82 @@ func TestPrepareSoakRun_ReusesManifestDeadlineAfterRestart(t *testing.T) {
 	assert.Equal(t, soakManifestRunning, manifest.State)
 }
 
+func TestSoakWorkload_ContinuousModeRunsUntilCancellationAndMarksStopped(
+	t *testing.T,
+) {
+	store := seededLifecycleStore("run-1")
+	store.manifest.RunMode = "continuous"
+	dispatcher := &singleSoakDispatcher{}
+	workload := newSoakWorkload(&soakWorkloadConfig{
+		RunID: "run-1", Continuous: true, Warmup: 0,
+		SendRate: 1, MaxInFlight: 1,
+	}, store, soakWorkloadActions{
+		Send: func(context.Context, bool) error { return nil },
+	}, dispatcher.Dispatch, time.Now, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var result soakWorkloadResult
+	var runErr error
+	go func() {
+		result, runErr = workload.Run(ctx)
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		return dispatcher.started.Load() == 1
+	}, time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	assert.ErrorIs(t, runErr, context.Canceled)
+	assert.Equal(t, soakCompletionCanceled, result.Completion)
+	assert.True(t, result.Deadline.IsZero())
+	manifest := store.snapshot()
+	assert.Equal(t, soakManifestStopped, manifest.State)
+	assert.Nil(t, manifest.Deadline)
+	require.NotNil(t, manifest.LastStoppedAt)
+}
+
+func TestPrepareContinuousSoakRun_ResumesStoppedManifestWithoutDeadline(
+	t *testing.T,
+) {
+	firstStart := time.Unix(100, 0).UTC()
+	store := seededLifecycleStoreAt("run-1", firstStart.Add(-time.Minute))
+	store.manifest.RunMode = "continuous"
+
+	first, err := prepareContinuousSoakRun(
+		context.Background(),
+		store,
+		"run-1",
+		firstStart,
+	)
+	require.NoError(t, err)
+	assert.True(t, first.Deadline.IsZero())
+	assert.Equal(t, 0, first.RestartCount)
+
+	require.NoError(t, stopSoakRun(
+		context.Background(),
+		store,
+		"run-1",
+		firstStart.Add(time.Minute),
+	))
+	second, err := prepareContinuousSoakRun(
+		context.Background(),
+		store,
+		"run-1",
+		firstStart.Add(2*time.Minute),
+	)
+	require.NoError(t, err)
+	assert.True(t, second.Deadline.IsZero())
+	assert.Equal(t, 1, second.RestartCount)
+
+	manifest := store.snapshot()
+	assert.Equal(t, soakManifestRunning, manifest.State)
+	assert.Nil(t, manifest.Deadline)
+	assert.Zero(t, manifest.ConfiguredDuration)
+	assert.Equal(t, 1, manifest.RestartCount)
+}
+
 func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T) {
 	projection := soakManifestProjection()
 	fields := make(map[string]any, len(projection))
@@ -213,11 +289,11 @@ func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T
 		"configDigest", "borrowedUserCount", "activeUserCount", "roomCount",
 		"subscriptionCount", "startedAt", "updatedAt", "seededAt",
 		"cleanedAt", "firstStartedAt", "deadline", "completedAt",
-		"configuredDuration", "restartCount",
+		"configuredDuration", "restartCount", "runMode", "lastStoppedAt",
 	} {
 		assert.Equal(t, 1, fields[field], field)
 	}
-	assert.Len(t, fields, 19)
+	assert.Len(t, fields, 21)
 }
 
 func TestSoakWorkload_AlreadyElapsedDeadlineCompletesWithoutDispatch(t *testing.T) {

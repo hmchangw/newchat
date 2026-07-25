@@ -19,6 +19,7 @@ const (
 	soakManifestSeeding   soakManifestState = "seeding"
 	soakManifestSeeded    soakManifestState = "seeded"
 	soakManifestRunning   soakManifestState = "running"
+	soakManifestStopped   soakManifestState = "stopped"
 	soakManifestCompleted soakManifestState = "completed"
 	soakManifestCleaned   soakManifestState = "cleaned"
 )
@@ -26,6 +27,7 @@ const (
 type soakManifest struct {
 	ID                 string            `bson:"_id"`
 	State              soakManifestState `bson:"state"`
+	RunMode            string            `bson:"runMode"`
 	SiteID             string            `bson:"siteId"`
 	MongoDatabase      string            `bson:"mongoDatabase"`
 	CassandraKeyspace  string            `bson:"cassandraKeyspace"`
@@ -41,6 +43,7 @@ type soakManifest struct {
 	FirstStartedAt     *time.Time        `bson:"firstStartedAt,omitempty"`
 	Deadline           *time.Time        `bson:"deadline,omitempty"`
 	CompletedAt        *time.Time        `bson:"completedAt,omitempty"`
+	LastStoppedAt      *time.Time        `bson:"lastStoppedAt,omitempty"`
 	ConfiguredDuration time.Duration     `bson:"configuredDuration,omitempty"`
 	RestartCount       int               `bson:"restartCount,omitempty"`
 }
@@ -81,6 +84,7 @@ func seedSoak(
 	manifest := soakManifest{
 		ID:                input.RunID,
 		State:             soakManifestSeeding,
+		RunMode:           input.Config.RunMode,
 		SiteID:            input.SiteID,
 		MongoDatabase:     input.MongoDatabase,
 		CassandraKeyspace: input.CassandraKeyspace,

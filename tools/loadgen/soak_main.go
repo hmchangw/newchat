@@ -337,7 +337,16 @@ func runSoakWorkload(
 	}()
 
 	now := time.Now
-	collector := NewSoakCollector(metrics, now(), cfg.Soak.Warmup, cfg.Soak.RunDuration)
+	collectorDuration := cfg.Soak.RunDuration
+	if cfg.Soak.RunMode == soakRunModeContinuous {
+		collectorDuration = 0
+	}
+	collector := NewSoakCollector(
+		metrics,
+		now(),
+		cfg.Soak.Warmup,
+		collectorDuration,
+	)
 	recorders := newSoakCollectorRecorders(collector, now)
 	catalog := newSoakCatalog(
 		cfg.Soak.RecentPerRoom,
@@ -524,7 +533,8 @@ func runSoakWorkload(
 	workload := newSoakWorkload(
 		&soakWorkloadConfig{
 			RunID: cfg.Soak.RunID, Duration: cfg.Soak.RunDuration,
-			Warmup: cfg.Soak.Warmup, SendRate: cfg.Soak.SendRate,
+			Continuous: cfg.Soak.RunMode == soakRunModeContinuous,
+			Warmup:     cfg.Soak.Warmup, SendRate: cfg.Soak.SendRate,
 			ReadRate: cfg.Soak.ReadRate, MutationRate: cfg.Soak.MutationRate,
 			ReactionRate:   cfg.Soak.ReactionRate,
 			PinnedListRate: cfg.Soak.PinnedListRate,

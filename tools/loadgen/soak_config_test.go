@@ -15,6 +15,7 @@ func TestSoakConfig_Defaults(t *testing.T) {
 	cfg := mustDefaultSoakConfig(t)
 
 	assert.Equal(t, "", cfg.RunID)
+	assert.Equal(t, "duration", cfg.RunMode)
 	assert.Equal(t, 72*time.Hour, cfg.RunDuration)
 	assert.Equal(t, 30*time.Second, cfg.Warmup)
 	assert.Equal(t, 100.0, cfg.SendRate)
@@ -54,6 +55,7 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 			"NATS_URL":                              "nats://example.invalid",
 			"MONGO_URI":                             "mongodb://example.invalid",
 			"SOAK_RUN_ID":                           "run-20260724",
+			"SOAK_RUN_MODE":                         "continuous",
 			"SOAK_RUN_DURATION":                     "4h",
 			"SOAK_SEND_RATE":                        "125.5",
 			"SOAK_REACTION_MESSAGE_SCOPE":           "all_messages",
@@ -67,6 +69,7 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "run-20260724", cfg.Soak.RunID)
+	assert.Equal(t, "continuous", cfg.Soak.RunMode)
 	assert.Equal(t, 4*time.Hour, cfg.Soak.RunDuration)
 	assert.Equal(t, 125.5, cfg.Soak.SendRate)
 	assert.Equal(t, "all_messages", cfg.Soak.ReactionMessageScope)
@@ -113,6 +116,7 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"soft delete ratio below zero", func(c *soakConfig) { c.SoftDeleteRatio = -0.01 }, "SOAK_SOFT_DELETE_RATIO"},
 		{"reaction remove share above one", func(c *soakConfig) { c.ReactionRemoveShare = 1.01 }, "SOAK_REACTION_REMOVE_SHARE"},
 		{"channel ratio above one", func(c *soakConfig) { c.ChannelRatio = 1.01 }, "SOAK_CHANNEL_RATIO"},
+		{"unknown run mode", func(c *soakConfig) { c.RunMode = "forever-ish" }, "SOAK_RUN_MODE"},
 		{"zero run duration", func(c *soakConfig) { c.RunDuration = 0 }, "SOAK_RUN_DURATION"},
 		{"negative warmup", func(c *soakConfig) { c.Warmup = -time.Second }, "SOAK_WARMUP"},
 		{"warmup equals duration", func(c *soakConfig) { c.Warmup = c.RunDuration }, "SOAK_WARMUP"},
@@ -156,6 +160,15 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestValidateSoakConfig_ContinuousModeDoesNotRequireDuration(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.RunMode = "continuous"
+	cfg.RunDuration = 0
+	cfg.Warmup = time.Minute
+
+	require.NoError(t, validateSoakConfig(&cfg, "chat"))
 }
 
 func TestValidateSoakConfig_AcceptsGuardedTruncate(t *testing.T) {

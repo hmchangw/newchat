@@ -124,6 +124,7 @@ type SoakCollector struct {
 	warmupDeadline time.Time
 	end            time.Time
 	midpoint       time.Time
+	bounded        bool
 
 	warmupAttempted       uint64
 	actions               map[soakRPCAction]*soakActionAccumulator
@@ -144,6 +145,7 @@ func NewSoakCollector(
 	return &SoakCollector{
 		metrics: metrics, start: start, warmupDeadline: warmupDeadline, end: end,
 		midpoint:      warmupDeadline.Add(measuredDuration / 2),
+		bounded:       duration > 0,
 		actions:       make(map[soakRPCAction]*soakActionAccumulator),
 		errors:        make(map[soakRPCAction]map[soakErrorClass]uint64),
 		verifications: make(map[soakRPCAction]map[soakVerifyClass]uint64),
@@ -191,10 +193,12 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 		}
 		if sample.Latency > 0 {
 			accumulator.latency.Observe(sample.Latency)
-			if sample.At.Before(c.midpoint) {
-				accumulator.early.Observe(sample.Latency)
-			} else {
-				accumulator.late.Observe(sample.Latency)
+			if c.bounded {
+				if sample.At.Before(c.midpoint) {
+					accumulator.early.Observe(sample.Latency)
+				} else {
+					accumulator.late.Observe(sample.Latency)
+				}
 			}
 		}
 		if sample.ErrorClass != "" {
@@ -312,7 +316,7 @@ func (c *SoakCollector) Snapshot(now time.Time) soakCollectorSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	measuredEnd := now
-	if measuredEnd.After(c.end) {
+	if c.bounded && measuredEnd.After(c.end) {
 		measuredEnd = c.end
 	}
 	measuredDuration := max(time.Duration(0), measuredEnd.Sub(c.warmupDeadline))

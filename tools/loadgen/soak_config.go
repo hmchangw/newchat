@@ -10,10 +10,16 @@ import (
 
 const maxBorrowedSoakUsers = 20000
 
+const (
+	soakRunModeDuration   = "duration"
+	soakRunModeContinuous = "continuous"
+)
+
 // soakConfig is the Run A configuration contract. I8, I10, and I12 remain
 // explicit inputs because their production interpretation is not yet confirmed.
 type soakConfig struct {
 	RunID                       string        `env:"RUN_ID"                          envDefault:""`
+	RunMode                     string        `env:"RUN_MODE"                        envDefault:"duration"`
 	RunDuration                 time.Duration `env:"RUN_DURATION"                    envDefault:"72h"`
 	Warmup                      time.Duration `env:"WARMUP"                          envDefault:"30s"`
 	SendRate                    float64       `env:"SEND_RATE"                       envDefault:"100"`
@@ -51,11 +57,20 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if strings.TrimSpace(cfg.RunID) == "" {
 		return fmt.Errorf("SOAK_RUN_ID is required")
 	}
-	if cfg.RunDuration <= 0 {
-		return fmt.Errorf("SOAK_RUN_DURATION must be greater than zero")
-	}
-	if cfg.Warmup < 0 || cfg.Warmup >= cfg.RunDuration {
-		return fmt.Errorf("SOAK_WARMUP must be non-negative and less than SOAK_RUN_DURATION")
+	switch cfg.RunMode {
+	case soakRunModeDuration:
+		if cfg.RunDuration <= 0 {
+			return fmt.Errorf("SOAK_RUN_DURATION must be greater than zero")
+		}
+		if cfg.Warmup < 0 || cfg.Warmup >= cfg.RunDuration {
+			return fmt.Errorf("SOAK_WARMUP must be non-negative and less than SOAK_RUN_DURATION")
+		}
+	case soakRunModeContinuous:
+		if cfg.Warmup < 0 {
+			return fmt.Errorf("SOAK_WARMUP must be non-negative")
+		}
+	default:
+		return fmt.Errorf("SOAK_RUN_MODE must be duration or continuous")
 	}
 
 	if err := validatePositiveRate("SOAK_SEND_RATE", cfg.SendRate); err != nil {

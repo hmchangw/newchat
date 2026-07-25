@@ -23,6 +23,7 @@ type soakWorkloadActions struct {
 type soakWorkloadConfig struct {
 	RunID             string
 	Duration          time.Duration
+	Continuous        bool
 	Warmup            time.Duration
 	SendRate          float64
 	ReadRate          float64
@@ -111,13 +112,26 @@ func newSoakWorkload(
 func (w *soakWorkload) Run(
 	ctx context.Context,
 ) (soakWorkloadResult, error) {
-	window, err := prepareSoakRun(
-		ctx,
-		w.store,
-		w.cfg.RunID,
-		w.cfg.Duration,
-		w.now().UTC(),
+	var (
+		window soakRunWindow
+		err    error
 	)
+	if w.cfg.Continuous {
+		window, err = prepareContinuousSoakRun(
+			ctx,
+			w.store,
+			w.cfg.RunID,
+			w.now().UTC(),
+		)
+	} else {
+		window, err = prepareSoakRun(
+			ctx,
+			w.store,
+			w.cfg.RunID,
+			w.cfg.Duration,
+			w.now().UTC(),
+		)
+	}
 	if err != nil {
 		return soakWorkloadResult{}, err
 	}
@@ -125,7 +139,7 @@ func (w *soakWorkload) Run(
 		Deadline:     window.Deadline,
 		RestartCount: window.RestartCount,
 	}
-	if !w.now().Before(window.Deadline) {
+	if !w.cfg.Continuous && !w.now().Before(window.Deadline) {
 		if err := completeSoakRun(
 			ctx,
 			w.store,
@@ -138,7 +152,10 @@ func (w *soakWorkload) Run(
 		return result, nil
 	}
 
-	runCtx, cancel := context.WithDeadline(ctx, window.Deadline)
+	runCtx, cancel := context.WithCancel(ctx)
+	if !w.cfg.Continuous {
+		runCtx, cancel = context.WithDeadline(ctx, window.Deadline)
+	}
 	defer cancel()
 	processStartedAt := w.now()
 	warmupDeadline := processStartedAt.Add(w.cfg.Warmup)
@@ -202,6 +219,21 @@ func (w *soakWorkload) Run(
 		return result, dependencyErr
 	case ctx.Err() != nil:
 		result.Completion = soakCompletionCanceled
+		if w.cfg.Continuous {
+			stopCtx, cancelStop := context.WithTimeout(
+				context.Background(),
+				5*time.Second,
+			)
+			defer cancelStop()
+			if err := stopSoakRun(
+				stopCtx,
+				w.store,
+				w.cfg.RunID,
+				w.now().UTC(),
+			); err != nil {
+				return result, err
+			}
+		}
 		return result, ctx.Err()
 	default:
 		if err := completeSoakRun(
@@ -288,6 +320,12 @@ func prepareSoakRun(
 			manifest.State,
 		)
 	}
+	if manifest.RunMode == soakRunModeContinuous {
+		return soakRunWindow{}, fmt.Errorf(
+			"soak manifest run mode %q cannot use a duration deadline",
+			manifest.RunMode,
+		)
+	}
 
 	if manifest.Deadline == nil {
 		firstStartedAt := now.UTC()
@@ -308,6 +346,96 @@ func prepareSoakRun(
 		Deadline:     *manifest.Deadline,
 		RestartCount: manifest.RestartCount,
 	}, nil
+}
+
+func prepareContinuousSoakRun(
+	ctx context.Context,
+	store soakLifecycleStore,
+	runID string,
+	now time.Time,
+) (soakRunWindow, error) {
+	if store == nil {
+		return soakRunWindow{}, fmt.Errorf("soak lifecycle store is required")
+	}
+	if runID == "" {
+		return soakRunWindow{}, fmt.Errorf("soak run ID is required")
+	}
+	manifest, err := store.GetManifest(ctx, runID)
+	if err != nil {
+		return soakRunWindow{}, fmt.Errorf("load continuous soak lifecycle: %w", err)
+	}
+	if manifest == nil {
+		return soakRunWindow{}, errSoakManifestNotFound
+	}
+	if manifest.RunMode != soakRunModeContinuous {
+		return soakRunWindow{}, fmt.Errorf(
+			"soak manifest run mode %q is not continuous",
+			manifest.RunMode,
+		)
+	}
+	if manifest.State != soakManifestSeeded &&
+		manifest.State != soakManifestRunning &&
+		manifest.State != soakManifestStopped {
+		return soakRunWindow{}, fmt.Errorf(
+			"continuous soak manifest state %q cannot run",
+			manifest.State,
+		)
+	}
+
+	startedAt := now.UTC()
+	if manifest.FirstStartedAt == nil {
+		manifest.FirstStartedAt = &startedAt
+		manifest.RestartCount = 0
+	} else {
+		manifest.RestartCount++
+	}
+	manifest.State = soakManifestRunning
+	manifest.Deadline = nil
+	manifest.ConfiguredDuration = 0
+	manifest.LastStoppedAt = nil
+	manifest.UpdatedAt = startedAt
+	if err := store.PutManifest(ctx, manifest); err != nil {
+		return soakRunWindow{}, fmt.Errorf(
+			"mark continuous soak run running: %w",
+			err,
+		)
+	}
+	return soakRunWindow{RestartCount: manifest.RestartCount}, nil
+}
+
+func stopSoakRun(
+	ctx context.Context,
+	store soakLifecycleStore,
+	runID string,
+	now time.Time,
+) error {
+	if store == nil {
+		return fmt.Errorf("soak lifecycle store is required")
+	}
+	if runID == "" {
+		return fmt.Errorf("soak run ID is required")
+	}
+	manifest, err := store.GetManifest(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("load soak manifest for stop: %w", err)
+	}
+	if manifest == nil {
+		return errSoakManifestNotFound
+	}
+	if manifest.State == soakManifestStopped {
+		return nil
+	}
+	if manifest.State != soakManifestRunning {
+		return fmt.Errorf("soak manifest state %q cannot stop", manifest.State)
+	}
+	stoppedAt := now.UTC()
+	manifest.State = soakManifestStopped
+	manifest.LastStoppedAt = &stoppedAt
+	manifest.UpdatedAt = stoppedAt
+	if err := store.PutManifest(ctx, manifest); err != nil {
+		return fmt.Errorf("mark soak run stopped: %w", err)
+	}
+	return nil
 }
 
 func completeSoakRun(

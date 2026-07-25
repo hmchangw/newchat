@@ -131,6 +131,7 @@ only for an isolated, disposable keyspace and requires
 ```bash
 # Small smoke-test values; use the approved staging values for the real soak.
 export SOAK_RUN_ID=cassandra-run-a-20260724
+export SOAK_RUN_MODE=duration
 export SOAK_RUN_DURATION=10m
 export SOAK_WARMUP=30s
 
@@ -140,11 +141,14 @@ export SOAK_WARMUP=30s
 ```
 
 Seed and run are restart-safe at the process level. Seed replaces only
-partial topology owned by the same run ID. The run deadline is stored in the
-manifest; a replacement pod resumes the remaining wall-clock duration and
-starts a fresh warm-up. The recent-message catalog is intentionally
-in-memory, so mutations, threads, and verification skip until new accepted
-messages age past `SOAK_PERSIST_GRACE`.
+partial topology owned by the same run ID. `duration` mode stores the run
+deadline in the manifest, so a replacement process resumes the remaining
+wall-clock duration. `continuous` mode has no deadline and stops gracefully
+only when the process receives SIGINT or SIGTERM; a replacement process
+resumes the same run. Every process start has a fresh warm-up. The
+recent-message catalog is intentionally in-memory, so mutations, threads, and
+verification skip until new accepted messages age past
+`SOAK_PERSIST_GRACE`.
 
 Run must have access to MongoDB, NATS, message-gatekeeper, message-worker, and
 history-service. Cassandra credentials are not used by normal Run A traffic.
@@ -175,7 +179,8 @@ Run A environment variables:
 | Variable | Default | Purpose |
 |---|---:|---|
 | `SOAK_RUN_ID` | required | Unique ownership and lifecycle ID. |
-| `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration across pod restarts. |
+| `SOAK_RUN_MODE` | `duration` | `duration` for a bounded smoke/run, or `continuous` until SIGTERM. |
+| `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |
 | `SOAK_SEND_RATE` | `100` | Top-level plus thread sends per second. |
 | `SOAK_READ_RATE` | `700` | Mixed history reads per second. |

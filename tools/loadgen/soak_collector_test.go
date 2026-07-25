@@ -151,6 +151,25 @@ func TestSoakCollector_MemoryShapeDoesNotGrowWithEventCount(t *testing.T) {
 	assert.LessOrEqual(t, after.ErrorCells, len(soakAllErrorClasses))
 }
 
+func TestSoakCollector_UnboundedDurationUsesAllElapsedTime(t *testing.T) {
+	start := time.Unix(100, 0)
+	collector := NewSoakCollector(NewMetrics(), start, time.Minute, 0)
+	require.NoError(t, collector.Record(&soakOperationSample{
+		Action: soakRPCSend, Outcome: soakOutcomeSucceeded,
+		At: start.Add(3 * time.Hour), Latency: time.Millisecond,
+	}))
+
+	snapshot := collector.Snapshot(start.Add(4 * time.Hour))
+
+	assert.Equal(t, 3*time.Hour+59*time.Minute, snapshot.MeasuredDuration)
+	assert.InDelta(
+		t,
+		1/(3*time.Hour+59*time.Minute).Seconds(),
+		snapshot.Actions[soakRPCSend].AchievedRate,
+		0.0000001,
+	)
+}
+
 func TestSoakPrometheusMetrics_StableNamesAndBoundedLabels(t *testing.T) {
 	metrics := NewMetrics()
 	collector := NewSoakCollector(metrics, time.Unix(100, 0), 0, time.Minute)
