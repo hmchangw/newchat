@@ -176,6 +176,14 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	// Teams migration shares this one durable consumer (both .created and
+	// .teams.batch on the canonical stream — reused rather than a second durable
+	// for a one-shot job). Its batches are transformed + written straight to
+	// Cassandra — never re-published, so broadcast/notification stay silent;
+	// search-sync indexes off the same .teams.batch subject.
+	teamsMigration := newTeamsBatchHandler(store, newMongoHRIdentityStore(db), cfg.SiteID)
+	teamsBatchSubj := subject.MsgCanonicalTeamsBatch(cfg.SiteID)
+
 	go func() {
 		for {
 			msgCtx, msg, err := iter.Next()
@@ -195,6 +203,13 @@ func main() {
 				jobguard.Run(msg, func() {
 					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 					handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+					// Dispatch by subject: the one-time .teams.batch migration
+					// writes straight to Cassandra; the live .created feed runs the
+					// normal pipeline.
+					if msg.Subject() == teamsBatchSubj {
+						teamsMigration.consume(handlerCtx, msg)
+						return
+					}
 					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 					handler.HandleJetStreamMsg(handlerCtx, msg)
 				})
@@ -241,13 +256,17 @@ func main() {
 	)
 }
 
-// buildConsumerConfig restricts the consumer to canonical .created subjects:
-// history-service publishes .updated and .deleted to the same stream and
-// already wrote Cassandra synchronously for those, so re-processing them here
-// would duplicate writes.
+// buildConsumerConfig binds the single message-worker durable to the two subjects
+// it processes on the canonical stream: the live .created feed and the one-time
+// Teams migration .teams.batch feed (handler dispatches by subject). .updated and
+// .deleted are excluded — history-service already wrote Cassandra synchronously for
+// those, so re-processing would duplicate writes.
 func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "message-worker"
-	cc.FilterSubject = subject.MsgCanonicalCreated(siteID)
+	cc.FilterSubjects = []string{
+		subject.MsgCanonicalCreated(siteID),
+		subject.MsgCanonicalTeamsBatch(siteID),
+	}
 	return cc
 }

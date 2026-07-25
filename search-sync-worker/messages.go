@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // parentCreatedAtResolver resolves a thread parent's authoritative createdAt; ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
@@ -21,25 +24,50 @@ type parentCreatedAtResolver interface {
 	ResolveParentCreatedAt(ctx context.Context, messageID string) (time.Time, bool)
 }
 
+// teamsIdentity is a migrated sender's nextgen identity for the search index: the
+// account (from teams_user) and the user _id (from the account's users row, empty
+// until message-worker has created it).
+type teamsIdentity struct {
+	Account string
+	UserID  string
+}
+
+// teamsUserResolver batch-maps AAD user ids → teamsIdentity for indexing migrated Teams
+// history. Ids with no teams_user record are omitted. Satisfied by *mongoTeamsUserResolver.
+type teamsUserResolver interface {
+	ResolveIdentities(ctx context.Context, teamsUserIDs []string) (map[string]teamsIdentity, error)
+}
+
 // messageCollection implements Collection for message search sync; streamCfg + consumerName are
 // parameterized so one type consumes user or bot canonical streams. syncFrom is the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
-	indexPrefix    string
-	syncFrom       time.Time
-	devMode        bool
-	streamCfg      func(siteID string) jetstream.StreamConfig
-	consumerName   string
-	parentResolver parentCreatedAtResolver
+	indexPrefix string
+	siteID      string // for .teams.batch index docs (the normal path reads evt.SiteID per message)
+	syncFrom    time.Time
+	devMode     bool
+	// includeTeamsBatch adds the .teams.batch subject so this consumer also indexes
+	// migrated Teams history (message-worker persists it with no .created event). Only
+	// the user stream carries it; the bot stream does not.
+	includeTeamsBatch bool
+	streamCfg         func(siteID string) jetstream.StreamConfig
+	consumerName      string
+	parentResolver    parentCreatedAtResolver
+	// teamsUsers resolves migrated senders' account + user _id; nil on the bot collection
+	// (no .teams.batch) and in tests that don't exercise the teams path.
+	teamsUsers teamsUserResolver
 }
 
-// newMessageCollection binds to the user MESSAGES_CANONICAL stream.
-func newMessageCollection(indexPrefix string, syncFrom time.Time, devMode bool) *messageCollection {
+// newMessageCollection binds to the user MESSAGES_CANONICAL stream and also indexes
+// migrated Teams history off .teams.batch (one consumer covers both).
+func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMode bool) *messageCollection {
 	return &messageCollection{
-		indexPrefix:  indexPrefix,
-		syncFrom:     syncFrom,
-		devMode:      devMode,
-		streamCfg:    userMessagesStreamCfg,
-		consumerName: "message-sync",
+		indexPrefix:       indexPrefix,
+		siteID:            siteID,
+		syncFrom:          syncFrom,
+		devMode:           devMode,
+		includeTeamsBatch: true,
+		streamCfg:         userMessagesStreamCfg,
+		consumerName:      "message-sync",
 	}
 }
 
@@ -71,9 +99,15 @@ func (c *messageCollection) ConsumerName() string {
 	return c.consumerName
 }
 
-func (c *messageCollection) FilterSubjects(_ string) []string {
-	// Stream has a single subject pattern — no extra filtering needed.
-	return nil
+func (c *messageCollection) FilterSubjects(siteID string) []string {
+	// Single-token message events (created/updated/deleted/...). The user collection
+	// also binds the two-token `.teams.batch` migration envelope so one consumer
+	// indexes both live messages and migrated Teams history.
+	subs := []string{subject.MsgCanonicalMessageWildcard(siteID)}
+	if c.includeTeamsBatch {
+		subs = append(subs, subject.MsgCanonicalTeamsBatch(siteID))
+	}
+	return subs
 }
 
 func (c *messageCollection) TemplateName() string {
@@ -98,6 +132,13 @@ func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
 }
 
 func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
+	// A .teams.batch envelope carries a non-empty `messages` array; a normal
+	// MessageEvent has none. Detect by shape (BuildAction only sees the payload).
+	var batch model.TeamsBatchRequest
+	if err := json.Unmarshal(data, &batch); err == nil && len(batch.Messages) > 0 {
+		return c.buildTeamsActions(batch), nil
+	}
+
 	var evt model.MessageEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return nil, fmt.Errorf("unmarshal message event: %w", err)
@@ -135,6 +176,79 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 	if createdAt, ok := c.parentResolver.ResolveParentCreatedAt(context.Background(), evt.Message.ThreadParentMessageID); ok {
 		evt.Message.ThreadParentMessageCreatedAt = &createdAt
 	}
+}
+
+// buildTeamsActions fans one migrated-history batch out into one index action per
+// message, mirroring the migration writer's skips (no id / no roomId can't be addressed
+// idempotently; system messages carry no indexable content) so the index matches what
+// was persisted. Sender account + user _id are batch-resolved via teams_user + users to
+// match the same account-keyed identity message-worker persists.
+func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []searchengine.BulkAction {
+	keeps := make([]teamsmigrate.Message, 0, len(req.Messages))
+	idSet := make(map[string]struct{})
+	for _, raw := range req.Messages {
+		var tm teamsmigrate.Message
+		if err := json.Unmarshal(raw, &tm); err != nil {
+			continue // one malformed record must not drop its valid siblings
+		}
+		if tm.ID == "" || tm.RoomID == "" || tm.CreatedDateTime.IsZero() {
+			continue // can't address idempotently / no index bucket
+		}
+		if teamsmigrate.MessageType(tm.MessageType) != "" {
+			continue // system message — not indexed content
+		}
+		keeps = append(keeps, tm)
+		if tm.From.ID != "" {
+			idSet[tm.From.ID] = struct{}{}
+		}
+	}
+
+	identities := c.resolveTeamsIdentities(idSet)
+
+	actions := make([]searchengine.BulkAction, 0, len(keeps))
+	for i := range keeps {
+		tm := &keeps[i]
+		id := identities[tm.From.ID] // zero value (empty account/userID) when unresolved
+		doc := MessageSearchIndex{
+			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
+			RoomID:      tm.RoomID,
+			SiteID:      c.siteID,
+			UserID:      id.UserID,
+			UserAccount: id.Account,
+			Content:     teamsmigrate.BodyToContent(tm.Body),
+			CreatedAt:   tm.CreatedDateTime,
+		}
+		body, _ := json.Marshal(doc)
+		actions = append(actions, searchengine.BulkAction{
+			Action: searchengine.ActionIndex,
+			Index:  indexName(c.indexPrefix, tm.CreatedDateTime),
+			DocID:  doc.MessageID,
+			// Deterministic id + createdAt as the external version make a batch replay
+			// idempotent (a re-index of the same doc 409s, handled as success).
+			Version: tm.CreatedDateTime.UnixNano(),
+			Doc:     body,
+		})
+	}
+	return actions
+}
+
+// resolveTeamsIdentities batch-maps sender ids → account + user _id via the injected
+// resolver. A nil resolver or a lookup error yields empty identities (best-effort: a
+// migrated doc still indexes its content, just without an author key).
+func (c *messageCollection) resolveTeamsIdentities(idSet map[string]struct{}) map[string]teamsIdentity {
+	if c.teamsUsers == nil || len(idSet) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	identities, err := c.teamsUsers.ResolveIdentities(context.Background(), ids)
+	if err != nil {
+		slog.Error("resolve teams sender identities", "error", err)
+		return nil
+	}
+	return identities
 }
 
 // --- Message-specific internals ---

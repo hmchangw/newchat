@@ -8,7 +8,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
-	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
@@ -78,7 +77,10 @@ func (s *mongoWriteStore) UpsertUserIdentities(ctx context.Context, users []mode
 					"engName": u.EngName, "chineseName": u.ChineseName,
 					"employeeId": u.EmployeeID,
 				},
-				"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
+				// _id = employeeId (the stable per-employee id, matching the employees
+				// upsert + message-worker's migration) so a user's id is derivable from
+				// the Teams id — search-sync indexes migrated messages without a Mongo lookup.
+				"$setOnInsert": bson.M{"_id": u.EmployeeID},
 			}).
 			SetUpsert(true))
 	}

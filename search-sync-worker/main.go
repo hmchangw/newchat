@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/searchengine"
@@ -32,6 +33,10 @@ type config struct {
 	NatsURL             string `env:"NATS_URL,required"`
 	NatsCredsFile       string `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID              string `env:"SITE_ID,required"`
+	MongoURI            string `env:"MONGO_URI,required"`
+	MongoDB             string `env:"MONGO_DB"      envDefault:"chat"`
+	MongoUsername       string `env:"MONGO_USERNAME" envDefault:""`
+	MongoPassword       string `env:"MONGO_PASSWORD" envDefault:""`
 	SearchURL           string `env:"SEARCH_URL,required"`
 	SearchBackend       string `env:"SEARCH_BACKEND"         envDefault:"elasticsearch"`
 	SearchUsername      string `env:"SEARCH_USERNAME"        envDefault:""`
@@ -137,15 +142,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	msgColl := newMessageCollection(cfg.MsgIndexPrefix, syncMessagesFrom, cfg.DevMode)
+	// Mongo backs the migrated-Teams-history author lookup (teams_user → account → user _id).
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	if err != nil {
+		slog.Error("mongodb connect failed", "error", err)
+		os.Exit(1)
+	}
+	db := mongoClient.Database(cfg.MongoDB)
+
+	msgColl := newMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, syncMessagesFrom, cfg.DevMode)
 	// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
 	msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+	msgColl.teamsUsers = newMongoTeamsUserResolver(db)
 
 	// Second consumer over messageCollection, bound to BOT_MESSAGES_CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
 	botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
 	botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
 	collections := []Collection{
+		// msgColl also indexes migrated Teams history off .teams.batch (message-worker
+		// persists it with no .created event) — one consumer covers both.
 		msgColl,
 		botMsgColl,
 		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
@@ -320,6 +336,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// obsShutdown LAST so drain-window flush spans/logs are exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },

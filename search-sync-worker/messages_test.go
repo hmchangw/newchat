@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
@@ -14,20 +15,21 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 func TestMessageCollection_TemplateName_StripsVersion(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
+	coll := newMessageCollection("messages-site1-v1", "site-a", time.Time{}, false)
 	assert.Equal(t, "messages-site1_template", coll.TemplateName())
 }
 
 func TestMessageCollection_TemplateName_BareBaseFallback(t *testing.T) {
-	coll := newMessageCollection("messages-site1", time.Time{}, false)
+	coll := newMessageCollection("messages-site1", "site-a", time.Time{}, false)
 	assert.Equal(t, "messages-site1_template", coll.TemplateName())
 }
 
 func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
+	coll := newMessageCollection("messages-site1-v1", "site-a", time.Time{}, false)
 	body := coll.TemplateBody()
 	require.NotNil(t, body)
 
@@ -60,25 +62,25 @@ func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 }
 
 func TestMessageCollection_StreamConfig(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	cfg := coll.StreamConfig("site-a")
 	assert.Equal(t, "MESSAGES_CANONICAL_site-a", cfg.Name)
 }
 
 func TestMessageCollection_ConsumerName(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	assert.Equal(t, "message-sync", coll.ConsumerName())
 }
 
 func TestMessageCollection_StoredScripts(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	assert.Empty(t, coll.StoredScripts(), "messages collection uses no stored scripts")
 }
 
 // Templates apply only to new indices, so existing monthly indices need the
 // additive mapping update or new fields stay unmapped until rollover.
 func TestMessageCollection_MappingUpdate(t *testing.T) {
-	coll := newMessageCollection("messages-site1-v1", time.Time{}, false)
+	coll := newMessageCollection("messages-site1-v1", "site-a", time.Time{}, false)
 	pattern, body := coll.MappingUpdate()
 	assert.Equal(t, "messages-site1-*", pattern, "pattern must strip the version suffix like the template's index_patterns")
 	require.NotNil(t, body)
@@ -311,7 +313,7 @@ func TestNewMessageSearchIndex_TShowOmittedWhenFalse(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	evt := model.MessageEvent{
 		Event: model.EventCreated,
 		Message: model.Message{
@@ -337,7 +339,7 @@ func TestMessageCollection_BuildAction(t *testing.T) {
 
 func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	coll := newMessageCollection("msgs-v1", cutoff, false)
+	coll := newMessageCollection("msgs-v1", "site-a", cutoff, false)
 
 	mkEvent := func(createdAt time.Time) []byte {
 		evt := model.MessageEvent{
@@ -371,7 +373,7 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 	})
 
 	t.Run("zero cutoff disables filter — old data still indexed", func(t *testing.T) {
-		uncapped := newMessageCollection("msgs-v1", time.Time{}, false)
+		uncapped := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		actions, err := uncapped.BuildAction(mkEvent(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
 		require.NoError(t, err)
 		assert.Len(t, actions, 1)
@@ -381,7 +383,7 @@ func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 // Slim (no-content) events must never upsert: pin/unpin would wipe indexed
 // fields, and unpin-after-delete would resurrect a stub doc.
 func TestMessageCollection_BuildAction_SlimEventsSkipped(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 
 	mkEvent := func(eventType model.EventType) []byte {
 		evt := model.MessageEvent{
@@ -562,7 +564,7 @@ func TestBuildDocument_CardFields(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction_ReactedSkipped(t *testing.T) {
-	coll := newMessageCollection("msgs-v1", time.Time{}, false)
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	evt := model.MessageEvent{
 		Event: model.EventReacted,
 		Message: model.Message{
@@ -579,4 +581,100 @@ func TestMessageCollection_BuildAction_ReactedSkipped(t *testing.T) {
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
 	assert.Empty(t, actions, "reactions must not produce an ES action — content is unchanged")
+}
+
+// --- Teams-batch indexing (folded from the retired teamsMigrationCollection) ---
+
+func teamsBatch(t *testing.T, msgs ...teamsmigrate.Message) []byte {
+	t.Helper()
+	raws := make([]json.RawMessage, 0, len(msgs))
+	for i := range msgs {
+		b, err := json.Marshal(msgs[i])
+		require.NoError(t, err)
+		raws = append(raws, b)
+	}
+	data, err := json.Marshal(model.TeamsBatchRequest{Messages: raws})
+	require.NoError(t, err)
+	return data
+}
+
+func TestMessageCollection_FilterSubjects_UserIncludesTeamsBatch(t *testing.T) {
+	user := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
+	assert.Equal(t, []string{
+		"chat.msg.canonical.site-a.*",
+		"chat.msg.canonical.site-a.teams.batch",
+	}, user.FilterSubjects("site-a"))
+
+	// The bot stream carries no .teams.batch, so its collection must not bind it.
+	bot := newBotMessageCollection("msgs-v1", false)
+	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, bot.FilterSubjects("site-a"))
+}
+
+// fakeTeamsUserResolver returns a fixed id→identity map (nil error).
+type fakeTeamsUserResolver map[string]teamsIdentity
+
+func (f fakeTeamsUserResolver) ResolveIdentities(_ context.Context, ids []string) (map[string]teamsIdentity, error) {
+	out := make(map[string]teamsIdentity, len(ids))
+	for _, id := range ids {
+		if v, ok := f[id]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+
+func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
+	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	c.teamsUsers = fakeTeamsUserResolver{
+		"graph-1": {Account: "alice", UserID: "uid-alice"},
+		"graph-2": {Account: "bob", UserID: "uid-bob"},
+	}
+	ts := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+
+	data := teamsBatch(t,
+		teamsmigrate.Message{
+			ID: "tm-1", RoomID: "room-1", MessageType: "message",
+			From: teamsmigrate.User{ID: "graph-1"},
+			Body: teamsmigrate.Body{ContentType: "text", Content: "one"}, CreatedDateTime: ts,
+		},
+		teamsmigrate.Message{
+			ID: "tm-2", RoomID: "room-1", MessageType: "message",
+			From: teamsmigrate.User{ID: "graph-2"},
+			Body: teamsmigrate.Body{ContentType: "html", Content: "<b>two</b>"}, CreatedDateTime: ts,
+		},
+	)
+	actions, err := c.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 2)
+
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
+
+	var doc MessageSearchIndex
+	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
+	assert.Equal(t, "uid-alice", doc.UserID)  // account-resolved user _id
+	assert.Equal(t, "alice", doc.UserAccount) // account from teams_user
+	assert.Equal(t, "room-1", doc.RoomID)
+	assert.Equal(t, "site-a", doc.SiteID)
+	assert.Equal(t, "one", doc.Content)
+	assert.Equal(t, ts, doc.CreatedAt)
+
+	var doc2 MessageSearchIndex
+	require.NoError(t, json.Unmarshal(actions[1].Doc, &doc2))
+	assert.Equal(t, "**two**", doc2.Content) // html body renders to markdown
+}
+
+func TestMessageCollection_BuildAction_TeamsBatch_Skips(t *testing.T) {
+	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	ts := time.Now().UTC()
+
+	data := teamsBatch(t,
+		teamsmigrate.Message{ID: "", RoomID: "room-1", MessageType: "message", CreatedDateTime: ts},                                       // no id
+		teamsmigrate.Message{ID: "tm-2", RoomID: "", MessageType: "message", CreatedDateTime: ts},                                         // no roomId
+		teamsmigrate.Message{ID: "tm-3", RoomID: "room-1", MessageType: "systemEventMessage", CreatedDateTime: ts},                        // system
+		teamsmigrate.Message{ID: "tm-4", RoomID: "room-1", MessageType: "message", From: teamsmigrate.User{ID: "g"}, CreatedDateTime: ts}, // kept
+	)
+	actions, err := c.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-4"), actions[0].DocID)
 }

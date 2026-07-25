@@ -58,7 +58,7 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 
 	t.Run("event-carried value is trusted — resolver not called", func(t *testing.T) {
 		resolver := &fakeParentResolver{val: resolved, ok: true}
-		coll := newMessageCollection("msgs-v1", time.Time{}, false)
+		coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		coll.parentResolver = resolver
 
 		actions, err := coll.BuildAction(threadReplyData(t, model.EventCreated, &eventVal))
@@ -72,7 +72,7 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 
 	t.Run("absent value re-resolved from ES (fallback)", func(t *testing.T) {
 		resolver := &fakeParentResolver{val: resolved, ok: true}
-		coll := newMessageCollection("msgs-v1", time.Time{}, false)
+		coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		coll.parentResolver = resolver
 
 		actions, err := coll.BuildAction(threadReplyData(t, model.EventCreated, nil))
@@ -86,7 +86,7 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 
 	t.Run("absent value stays unset when resolver returns ok=false", func(t *testing.T) {
 		resolver := &fakeParentResolver{ok: false}
-		coll := newMessageCollection("msgs-v1", time.Time{}, false)
+		coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		coll.parentResolver = resolver
 
 		actions, err := coll.BuildAction(threadReplyData(t, model.EventCreated, nil))
@@ -97,7 +97,7 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 
 	t.Run("does not resolve a non-thread message", func(t *testing.T) {
 		resolver := &fakeParentResolver{val: resolved, ok: true}
-		coll := newMessageCollection("msgs-v1", time.Time{}, false)
+		coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		coll.parentResolver = resolver
 
 		evt := model.MessageEvent{
@@ -114,7 +114,7 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 
 	t.Run("does not resolve a delete", func(t *testing.T) {
 		resolver := &fakeParentResolver{val: resolved, ok: true}
-		coll := newMessageCollection("msgs-v1", time.Time{}, false)
+		coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		coll.parentResolver = resolver
 
 		_, err := coll.BuildAction(threadReplyData(t, model.EventDeleted, nil))
@@ -123,7 +123,7 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 	})
 
 	t.Run("nil resolver keeps event value (feature off)", func(t *testing.T) {
-		coll := newMessageCollection("msgs-v1", time.Time{}, false)
+		coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 		actions, err := coll.BuildAction(threadReplyData(t, model.EventCreated, &eventVal))
 		require.NoError(t, err)
 		got := indexedThreadParentCreatedAt(t, actions[0].Doc)

@@ -20,6 +20,7 @@ func setRequiredConfigEnv(t *testing.T) {
 	t.Setenv("SPOTLIGHT_ORG_INDEX", "spotlightorg-site-test-v1")
 	t.Setenv("HR_CENTRAL_SITE_ID", "site-central")
 	t.Setenv("USER_ROOM_INDEX", "user-room-mv-site-test")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 }
 
 func TestConfig_HRJetStreamDomain(t *testing.T) {
