@@ -60,15 +60,30 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure teams_chat pending-work indexes: %w", err)
 	}
+	// teams_user watermark: ListUsers sorts the full collection by from
+	// ascending so deadline-bounded runs dispatch the stalest users first.
+	// teams-chat-sync owns the from field (teams-user-sync creates no indexes
+	// here), so it owns this index.
+	if _, err := s.users.Raw().Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "from", Value: 1}},
+		Options: options.Index().SetName("from_watermark"),
+	}); err != nil {
+		return fmt.Errorf("ensure teams_user watermark index: %w", err)
+	}
 	return nil
 }
 
 // ListUsers returns every teams_user projected to the sync fields
-// (_id, siteId, account, from). Served by the primary.
+// (_id, siteId, account, from), ordered by watermark ascending — BSON sorts a
+// missing from before any date, so never-synced users come first, then oldest
+// watermark first. Served by the primary; the sort rides the from_watermark
+// index.
 func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
-	users, err := s.users.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
-		"_id": 1, "siteId": 1, "account": 1, "from": 1,
-	}))
+	users, err := s.users.FindMany(ctx, bson.M{},
+		mongoutil.WithProjection(bson.M{
+			"_id": 1, "siteId": 1, "account": 1, "from": 1,
+		}),
+		mongoutil.WithSort(bson.D{{Key: "from", Value: 1}}))
 	if err != nil {
 		return nil, fmt.Errorf("list teams users: %w", err)
 	}

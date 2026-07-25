@@ -50,6 +50,29 @@ func TestMongoStore_ListUsers(t *testing.T) {
 	assert.Nil(t, byID["u2"].From, "user without watermark loads with nil From")
 }
 
+// TestMongoStore_ListUsers_OrderedByWatermark guards the dispatch-priority
+// contract: never-synced users (no from) come first, then ascending from, so
+// a deadline-bounded run spends its budget on the stalest users.
+func TestMongoStore_ListUsers_OrderedByWatermark(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsstore")
+	store := newMongoStore(db)
+	early := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	// Seeded deliberately out of watermark order.
+	seedUsers(t, store,
+		model.TeamsUser{ID: "u-late", SiteID: "site-a", Account: "carol", From: &late},
+		model.TeamsUser{ID: "u-never", SiteID: "site-b", Account: "bob"},
+		model.TeamsUser{ID: "u-early", SiteID: "site-a", Account: "alice", From: &early},
+	)
+
+	users, err := store.ListUsers(context.Background())
+	require.NoError(t, err)
+	require.Len(t, users, 3)
+	assert.Equal(t, "u-never", users[0].ID, "never-synced user must be dispatched first")
+	assert.Equal(t, "u-early", users[1].ID, "older watermark before newer")
+	assert.Equal(t, "u-late", users[2].ID)
+}
+
 // teamsIndex is the subset of an index spec the EnsureIndexes test asserts on.
 type teamsIndex struct {
 	Name    string `bson:"name"`
@@ -100,6 +123,12 @@ func TestMongoStore_EnsureIndexes(t *testing.T) {
 	assert.Equal(t, "needCreateRoom:1,_id:1", keySpec(createRoom.Key),
 		"compound with _id serves find(needCreateRoom:true).sort(_id) without an in-memory sort")
 	assert.Equal(t, true, createRoom.Partial["needCreateRoom"], "indexes only needCreateRoom=true docs")
+
+	userIdx := listIndexes(t, store.users.Raw())
+	watermark, ok := userIdx["from_watermark"]
+	require.True(t, ok, "teams_user must have the from watermark index")
+	assert.Equal(t, "from:1", keySpec(watermark.Key),
+		"serves ListUsers' sort({from:1}) without an in-memory sort")
 }
 
 func TestMongoStore_SetFrom(t *testing.T) {

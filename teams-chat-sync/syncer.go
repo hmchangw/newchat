@@ -134,6 +134,9 @@ type summary struct {
 // run executes one full sync: load the user cache, fan eligible users out to
 // MaxWorkers workers, wait, and report. It returns an error when any user
 // failed so main exits non-zero and the CronJob records the failure.
+// Dispatch preserves ListUsers' watermark-ascending order, so a run cut short
+// by the Job deadline has spent its budget on the stalest users and repeated
+// runs drain a multi-day backfill monotonically.
 func (s *syncer) run(ctx context.Context) error {
 	users, err := s.users.ListUsers(ctx)
 	if err != nil {
