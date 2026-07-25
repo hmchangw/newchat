@@ -15,7 +15,7 @@ import (
 const svgTemplateVersion = "v1"
 
 // isBot reports whether account uses the bot avatar path (bot subject type,
-// no employee photo): real ".bot" bots and the "p_tchatadmin_" platform-admin
+// no employee photo): real ".bot" bots and the "p_admin" platform-admin
 // pseudo-account. Routed through the model taxonomy so plain "p_" QA test
 // accounts — ordinary users — are served via the user avatar path instead.
 func isBot(account string) bool {

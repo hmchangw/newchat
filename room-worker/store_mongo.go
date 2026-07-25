@@ -101,7 +101,7 @@ func (s *MongoStore) ListByRoom(ctx context.Context, roomID string) ([]model.Sub
 // ReconcileMemberCounts recomputes the room's AppCount (bot subs) and UserCount
 // (everyone else) and writes both back in a single updateOne. AppCount is an
 // index-backed CountDocuments on {roomId, u.isBot} (the flag is stamped at
-// sub-creation for ".bot" bots and the "p_tchatadmin_" pseudo-account; QA "p_"
+// sub-creation for ".bot" bots and the "p_admin" pseudo-account; QA "p_"
 // users are stamped false) and UserCount is total minus bots — both
 // counts use the index and no per-document regex runs. Deriving UserCount by
 // subtraction also means legacy docs written before u.isBot existed (and any

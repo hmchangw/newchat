@@ -17,13 +17,18 @@ func EncodeAccount(account string) string {
 }
 
 // DecodeAccount decodes the NATS subject-token form of an account back to the
-// real account. Only ".bot" bots are ever encoded (the system forbids dots in
-// any other account), so exactly a trailing "_bot" is reversed to ".bot" and
-// every non-bot account passes through unchanged. Idempotent, and a no-op for
-// any account that was never encoded. Inverse of EncodeAccount for ".bot" bots.
+// real account. A ".bot" bot's account is multi-section dotted — name.siteID.bot
+// (e.g. "weather.site-a.bot") — and auth-service encodes EVERY dot as an
+// underscore when minting the NATS JWT ("weather_site-a_bot"). Only ".bot" bots
+// are ever encoded (the system forbids dots in any other account, and no non-bot
+// account ends in "_bot"), so a trailing "_bot" marks an encoded bot: every
+// underscore is restored to a dot ("weather_site-a_bot" → "weather.site-a.bot").
+// Every other account passes through unchanged. Idempotent (an already-dotted
+// ".bot" account has no "_bot" suffix), and the inverse of EncodeAccount for
+// ".bot" bots.
 func DecodeAccount(account string) string {
-	if s, ok := strings.CutSuffix(account, "_bot"); ok {
-		return s + ".bot"
+	if strings.HasSuffix(account, "_bot") {
+		return strings.ReplaceAll(account, "_", ".")
 	}
 	return account
 }
@@ -47,7 +52,7 @@ func IsValidAccountToken(s string) bool {
 // Returns the user account, roomID, and ok=true on success. The account is
 // validated as a raw NATS token (the encoded transport form) and then decoded
 // via DecodeAccount, so callers get the requester's real identity (a ".bot"
-// bot's weather_bot token becomes weather.bot) for data-key lookups.
+// bot's weather_site-a_bot token becomes weather.site-a.bot) for data-key lookups.
 func ParseUserRoomSubject(subj string) (account, roomID string, ok bool) {
 	parts := strings.Split(subj, ".")
 	if len(parts) < 5 || parts[0] != "chat" || parts[1] != "user" {

@@ -590,7 +590,7 @@ func TestPinMessage_PlatformAdminBypassesLargeRoom(t *testing.T) {
 	svc, msgs, subs, _, pub, _ := newPinTestService(t)
 	adminSub := &model.Subscription{
 		RoomID: "r1",
-		User:   model.SubscriptionUser{ID: "u1", Account: "p_tchatadmin_siteA"},
+		User:   model.SubscriptionUser{ID: "u1", Account: "p_adminsiteA"},
 		Roles:  []model.Role{model.RoleMember},
 	}
 	subs.EXPECT().GetSubscription(gomock.Any(), "u1", "r1").Return(adminSub, nil)

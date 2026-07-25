@@ -20,7 +20,7 @@ func mentionVisible(historySharedSince, parentCreatedAt *time.Time) bool {
 }
 
 // isBot reports whether account has no live UI client and so must be skipped for
-// event fan-out: real ".bot" bots and the "p_tchatadmin_" platform-admin
+// event fan-out: real ".bot" bots and the "p_admin" platform-admin
 // pseudo-account. It routes through the model taxonomy so plain "p_" QA test
 // accounts — ordinary users with a client — are NOT skipped.
 func isBot(account string) bool {

@@ -70,7 +70,7 @@ type config struct {
 	Vault    atrest.VaultConfig // env vars already prefixed (VAULT_*, ATREST_VAULT_*)
 	DebugLog logctx.Config      `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
 
 func main() {

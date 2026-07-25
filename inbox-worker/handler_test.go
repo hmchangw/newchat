@@ -1367,7 +1367,7 @@ func TestSubscriptionIsSubscribed(t *testing.T) {
 	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "weather.bot"}))
 	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "alice"}))
 	// Platform-admin pseudo-account stays bot-like (no client): not subscribed.
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_tchatadmin_siteA"}))
+	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_adminsiteA"}))
 	// QA p_ account is an ordinary user: it holds a real subscription.
 	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_webhook"}))
 }

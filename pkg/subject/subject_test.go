@@ -224,18 +224,22 @@ func TestEncodeAccount(t *testing.T) {
 }
 
 func TestDecodeAccount(t *testing.T) {
-	// Only ".bot" bots are ever encoded, so a trailing "_bot" transport token is
-	// restored to ".bot"; every other account passes through untouched.
+	// A real bot account is multi-section dotted (name.siteID.bot); auth-service
+	// encodes every dot to an underscore, so a trailing "_bot" transport token has
+	// ALL underscores restored to dots. Every other account passes through
+	// untouched (non-bot accounts never end in "_bot").
 	tests := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{"bot_encoded_decodes", "weather_bot", "weather.bot"},
+		{"bot_two_section_decodes", "weather_bot", "weather.bot"},
+		{"bot_three_section_decodes", "weather_site-a_bot", "weather.site-a.bot"},
 		{"human_unchanged", "alice", "alice"},
-		{"platform_admin_unchanged", "p_tchatadmin_siteA", "p_tchatadmin_siteA"},
+		{"platform_admin_unchanged", "p_adminsiteA", "p_adminsiteA"},
 		{"p_webhook_unchanged", "p_webhook", "p_webhook"},
-		{"already_dotted_idempotent", "weather.bot", "weather.bot"},
+		{"qa_underscore_account_unchanged", "p_qa_1", "p_qa_1"},
+		{"already_dotted_idempotent", "weather.site-a.bot", "weather.site-a.bot"},
 		{"empty", "", ""},
 	}
 	for _, tt := range tests {
@@ -243,8 +247,9 @@ func TestDecodeAccount(t *testing.T) {
 			assert.Equal(t, tt.want, subject.DecodeAccount(tt.in))
 		})
 	}
-	// Round-trips with EncodeAccount for a ".bot" account.
+	// Round-trips with EncodeAccount for two- and three-section ".bot" accounts.
 	assert.Equal(t, "weather.bot", subject.DecodeAccount(subject.EncodeAccount("weather.bot")))
+	assert.Equal(t, "weather.site-a.bot", subject.DecodeAccount(subject.EncodeAccount("weather.site-a.bot")))
 }
 
 func TestParseUserRoomSubject(t *testing.T) {
@@ -260,6 +265,7 @@ func TestParseUserRoomSubject(t *testing.T) {
 		{"role_update", "chat.user.alice.request.room.r1.site-a.member.role-update", "alice", "r1", true},
 		{"msg_send", "chat.user.alice.room.r1.site-a.msg.send", "alice", "r1", true},
 		{"bot_encoded_decodes", "chat.user.weather_bot.room.r1.site-a.msg.send", "weather.bot", "r1", true},
+		{"bot_3section_encoded_decodes", "chat.user.weather_site-a_bot.room.r1.site-a.msg.send", "weather.site-a.bot", "r1", true},
 		{"too_short", "chat.user.alice", "", "", false},
 		{"no_room", "chat.user.alice.request.foo.bar", "", "", false},
 		{"bad_prefix", "foo.user.alice.room.r1", "", "", false},

@@ -545,7 +545,7 @@ func checkQuoteThreadContext(snap *cassandra.QuotedParentMessage, quotedParentMe
 // canBypassLargeRoomCap reports whether the subscriber is exempt from the
 // large-room post restriction. Owners, admins, and bots bypass.
 //
-// "Bot" is detected via the model taxonomy (".bot" bots + the "p_tchatadmin_"
+// "Bot" is detected via the model taxonomy (".bot" bots + the "p_admin"
 // pseudo-account; QA "p_" accounts are ordinary users) — see helper.go.
 // This single function is the edit point if/when the bypass policy changes
 // (e.g. promoting isBot to a shared package, adding new roles, etc.).

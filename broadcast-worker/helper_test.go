@@ -37,8 +37,8 @@ func TestIsBot(t *testing.T) {
 		want    bool
 	}{
 		{"weather.bot", true},
-		{"p_tchatadmin_siteA", true}, // platform-admin pseudo-account: no client
-		{"p_webhook", false},         // QA test account: an ordinary user with a client
+		{"p_adminsiteA", true}, // platform-admin pseudo-account: no client
+		{"p_webhook", false},   // QA test account: an ordinary user with a client
 		{"p_qa1", false},
 		{"alice", false},
 	}

@@ -489,12 +489,9 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	if req.AccountName == "" {
 		return nil, errcode.BadRequest("accountName required")
 	}
-	// Real bots (".bot") and the platform-admin pseudo-account ("p_tchatadmin_")
-	// are botDM targets, not human DM counterparts. Plain "p_" QA test accounts
-	// are ordinary users and remain valid DM targets.
-	if model.IsBot(req.AccountName) || model.IsPlatformAdminAccount(req.AccountName) {
-		return nil, errcode.BadRequest("invalid DM target", errcode.WithReason(errcode.UserInvalidDMTarget))
-	}
+	// A DM counterpart may be any account — an ordinary user, a bot, or the
+	// platform-admin pseudo-account — since all of them can log into the chat
+	// frontend and hold a DM subscription.
 	dm, err := s.subs.GetDMSubscription(c, account, req.AccountName)
 	if err != nil {
 		return nil, fmt.Errorf("get dm: %w", err)

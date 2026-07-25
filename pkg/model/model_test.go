@@ -77,15 +77,15 @@ func TestIsPlatformAdminAccount(t *testing.T) {
 		account string
 		want    bool
 	}{
-		{"platform-admin pseudo-account", "p_tchatadmin_siteA", true},
-		{"bare p_tchatadmin_ prefix", "p_tchatadmin_", true},
+		{"platform-admin pseudo-account", "p_adminsiteA", true},
+		{"bare p_admin prefix", "p_admin", true},
 		{"QA webhook is an ordinary user", "p_webhook", false},
 		{"QA test account is an ordinary user", "p_qa1", false},
 		{"bare p_ is not the admin pseudo-account", "p_", false},
 		{"case-sensitive prefix (P_tchatadmin_)", "P_tchatadmin_x", false},
 		{"plain human account", "alice", false},
 		{"bot account", "weather.bot", false},
-		{"tchatadmin prefix not at start", "x_p_tchatadmin_siteA", false},
+		{"tchatadmin prefix not at start", "x_p_adminsiteA", false},
 		{"empty", "", false},
 	}
 	for _, tt := range tests {
@@ -98,7 +98,7 @@ func TestIsPlatformAdminAccount(t *testing.T) {
 // TestPlatformAdminAccountPrefix_Default pins the built-in default that holds
 // when no deployment override is applied.
 func TestPlatformAdminAccountPrefix_Default(t *testing.T) {
-	assert.Equal(t, "p_tchatadmin_", model.PlatformAdminAccountPrefix())
+	assert.Equal(t, "p_admin", model.PlatformAdminAccountPrefix())
 }
 
 // TestSetPlatformAdminAccountPrefix_RejectsEmpty verifies an empty prefix is
@@ -107,7 +107,7 @@ func TestPlatformAdminAccountPrefix_Default(t *testing.T) {
 func TestSetPlatformAdminAccountPrefix_RejectsEmpty(t *testing.T) {
 	err := model.SetPlatformAdminAccountPrefix("")
 	require.Error(t, err)
-	assert.Equal(t, "p_tchatadmin_", model.PlatformAdminAccountPrefix(),
+	assert.Equal(t, "p_admin", model.PlatformAdminAccountPrefix(),
 		"a rejected set must not mutate the active prefix")
 }
 
@@ -127,7 +127,7 @@ func TestSetPlatformAdminAccountPrefix_Override(t *testing.T) {
 	assert.Equal(t, "admin_", model.PlatformAdminAccountPrefix())
 	assert.True(t, model.IsPlatformAdminAccount("admin_siteA"),
 		"account under the overridden prefix must be a platform admin")
-	assert.False(t, model.IsPlatformAdminAccount("p_tchatadmin_siteA"),
+	assert.False(t, model.IsPlatformAdminAccount("p_adminsiteA"),
 		"the old default prefix must no longer match after override")
 }
 

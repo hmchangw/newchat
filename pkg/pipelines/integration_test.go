@@ -104,7 +104,7 @@ func TestMatchCandidatesFilterWithDirectBots_Mongo(t *testing.T) {
 		bson.M{"_id": "u3", "account": "weather.bot"},
 		bson.M{"_id": "u4", "account": "p_hook"},
 		bson.M{"_id": "u5", "account": "bob"},
-		bson.M{"_id": "u6", "account": "p_tchatadmin_siteA", "sectId": "org1"},
+		bson.M{"_id": "u6", "account": "p_adminsiteA", "sectId": "org1"},
 		bson.M{"_id": "u7", "account": "p_qa1", "sectId": "org1"},
 	})
 	require.NoError(t, err)
@@ -144,14 +144,14 @@ func TestMatchCandidatesFilterWithDirectBots_Mongo(t *testing.T) {
 		assert.ElementsMatch(t, []string{"alice", "bob", "p_qa1"}, got)
 	})
 
-	t.Run("org expansion excludes bots + p_tchatadmin_ but admits QA p_ users", func(t *testing.T) {
-		// org1 members: alice, orgbound.bot, p_tchatadmin_siteA, p_qa1. The bot and
+	t.Run("org expansion excludes bots + p_admin but admits QA p_ users", func(t *testing.T) {
+		// org1 members: alice, orgbound.bot, p_adminsiteA, p_qa1. The bot and
 		// the platform-admin pseudo-account drop out; the QA p_ user is admitted.
 		got := fetch(t, MatchCandidatesFilter([]string{"org1"}, nil, ""))
 		assert.ElementsMatch(t, []string{"alice", "p_qa1"}, got)
 	})
 
-	t.Run("direct-bots org arm also excludes p_tchatadmin_ but admits QA p_ users", func(t *testing.T) {
+	t.Run("direct-bots org arm also excludes p_admin but admits QA p_ users", func(t *testing.T) {
 		got := fetch(t, MatchCandidatesFilterWithDirectBots([]string{"org1"}, nil, ""))
 		assert.ElementsMatch(t, []string{"alice", "p_qa1"}, got)
 	})

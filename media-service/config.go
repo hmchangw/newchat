@@ -85,7 +85,7 @@ type config struct {
 	EIDCacheCapacity int           `env:"EID_CACHE_CAPACITY" envDefault:"120000"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
 
 // clusterBaseURL returns the configured base URL for a site, or "" if unknown.

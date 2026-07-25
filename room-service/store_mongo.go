@@ -397,7 +397,7 @@ func (s *MongoStore) CountMembersAndOwners(ctx context.Context, roomID string) (
 		{{Key: "$facet", Value: bson.M{
 			"members": bson.A{bson.M{"$count": "count"}},
 			// Humans = not a bot AND not the platform-admin pseudo-account, so the
-			// last-human guard is correct even for a legacy p_tchatadmin_ sub with isBot unset.
+			// last-human guard is correct even for a legacy p_admin sub with isBot unset.
 			"humans": bson.A{
 				bson.M{"$match": bson.M{
 					"u.isBot":   bson.M{"$ne": true},
@@ -1781,7 +1781,7 @@ func (s *MongoStore) GetThreadRoomByID(ctx context.Context, threadRoomID string)
 // MinThreadSubscriptionLastSeenByThreadRoomID returns the thread room's strict
 // read floor: the minimum lastSeenAt across the thread's ordinary-member
 // thread_subscriptions for threadRoomID, but only when every such subscriber has
-// a usable lastSeenAt (> zero). Bot (".bot") and platform-admin (p_tchatadmin_
+// a usable lastSeenAt (> zero). Bot (".bot") and platform-admin (p_admin
 // prefix) subscribers are excluded by account, so a bot that authored a threaded
 // message cannot freeze the floor via its never-read parent-author subscription.
 // QA p_ accounts are ordinary users and DO hold the floor.

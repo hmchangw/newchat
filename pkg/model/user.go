@@ -92,7 +92,7 @@ func IsPlatformAdmin(u *User) bool {
 
 // platformAdminAccountPrefixDefault is the built-in default, overridden at
 // startup via SetPlatformAdminAccountPrefix (from ADMIN_ACCT_PREFIX).
-const platformAdminAccountPrefixDefault = "p_tchatadmin_"
+const platformAdminAccountPrefixDefault = "p_admin"
 
 // platformAdminAccountPrefix holds the active prefix — atomic so concurrent
 // reads don't race the single startup write.
@@ -121,8 +121,8 @@ func PlatformAdminAccountPrefix() string {
 
 // IsPlatformAdminAccount reports whether account is the platform-admin
 // pseudo-account (the PlatformAdminAccountPrefix() prefix, default
-// "p_tchatadmin_"). That pseudo-account has a user record but no app: it counts
-// into a room's appCount, is excluded from read-receipt floors and search, cannot
+// "p_admin"). That pseudo-account has a user record but no app: it counts
+// into a room's appCount, is excluded from read-receipt floors, cannot
 // own a room, and a DM with it is a botDM. Other "p_" names are ordinary QA/test
 // users — this returns false for them.
 func IsPlatformAdminAccount(account string) bool {

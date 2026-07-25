@@ -2353,7 +2353,7 @@ func TestDetermineRoomTypeFromPayload(t *testing.T) {
 	}{
 		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
 		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
-		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_tchatadmin_siteA"}}, model.RoomTypeBotDM},
+		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeBotDM},
 		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
 		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
 		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
@@ -6185,8 +6185,8 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 		},
 		{
 			name:    "botDM platform-admin pseudo-account resolves via user map, not GetApp",
-			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_tchatadmin_siteA"},
-			userMap: map[string]*model.User{"p_tchatadmin_siteA": {Account: "p_tchatadmin_siteA", EngName: "Admin", ChineseName: "管理"}},
+			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_adminsiteA"},
+			userMap: map[string]*model.User{"p_adminsiteA": {Account: "p_adminsiteA", EngName: "Admin", ChineseName: "管理"}},
 			want:    "Admin 管理",
 		},
 		{

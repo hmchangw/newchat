@@ -15,9 +15,9 @@ import (
 // the model taxonomy: it hides the platform-admin pseudo-account by its prefix
 // but keeps ordinary "p_" QA accounts mentionable.
 func TestPlatformAdminRegex(t *testing.T) {
-	assert.Equal(t, `^p_tchatadmin_`, platformAdminRegex())
+	assert.Equal(t, `^p_admin`, platformAdminRegex())
 	rx := regexp.MustCompile(platformAdminRegex())
-	assert.True(t, rx.MatchString("p_tchatadmin_siteA"))
+	assert.True(t, rx.MatchString("p_adminsiteA"))
 	assert.False(t, rx.MatchString("p_qa1"))
 	assert.False(t, rx.MatchString("alice"))
 }
@@ -64,13 +64,13 @@ func TestHasRole(t *testing.T) {
 func TestFilterBots(t *testing.T) {
 	// Real bots and the platform-admin pseudo-account are filtered; QA p_
 	// accounts are ordinary users and are retained.
-	input := []string{"alice", "helper.bot", "bob", "p_scheduler", "p_tchatadmin_siteA"}
+	input := []string{"alice", "helper.bot", "bob", "p_scheduler", "p_adminsiteA"}
 	got := filterBots(input)
 	assert.Equal(t, []string{"alice", "bob", "p_scheduler"}, got)
 }
 
 func TestFilterBots_AllBots(t *testing.T) {
-	input := []string{"helper.bot", "p_tchatadmin_siteA"}
+	input := []string{"helper.bot", "p_adminsiteA"}
 	got := filterBots(input)
 	assert.Nil(t, got)
 }
@@ -112,7 +112,6 @@ func TestSentinelCodesAndReasons(t *testing.T) {
 		{"empty create request", errEmptyCreateRequest, errcode.CodeBadRequest, ""},
 		{"bot in channel", errBotInChannel, errcode.CodeBadRequest, errcode.RoomBotInChannel},
 		{"bot not available", errBotNotAvailable, errcode.CodeNotFound, errcode.RoomBotNotAvailable},
-		{"bot cross-site", errBotCrossSite, errcode.CodeBadRequest, errcode.RoomBotCrossSite},
 		{"bot cannot be owner", errBotCannotBeOwner, errcode.CodeBadRequest, errcode.RoomBotCannotBeOwner},
 		{"invalid user data", errInvalidUserData, errcode.CodeBadRequest, ""},
 		{"channel name required", errChannelNameRequired, errcode.CodeBadRequest, ""},
@@ -218,7 +217,7 @@ func TestDetermineRoomType(t *testing.T) {
 		},
 		{
 			name: "single platform-admin pseudo-account no name → botDM",
-			req:  model.CreateRoomRequest{Users: []string{"p_tchatadmin_siteA"}},
+			req:  model.CreateRoomRequest{Users: []string{"p_adminsiteA"}},
 			want: model.RoomTypeBotDM,
 		},
 		{

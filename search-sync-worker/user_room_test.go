@@ -138,30 +138,34 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 	assert.NotEmpty(t, upsert["createdAt"])
 }
 
-func TestUserRoomCollection_BuildAction_SkipsBots(t *testing.T) {
+func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
-	// Real bots and the platform-admin pseudo-account are skipped; QA p_
-	// accounts are ordinary users and DO enter the user-room index.
-	payload.Accounts = []string{"alice", "weather.bot", "p_tchatadmin_siteA", "p_qa1"}
+	// Bots and the platform-admin pseudo-account can log into the chat frontend
+	// and use search like any user, so they enter the user-room index too.
+	payload.Accounts = []string{"alice", "weather.bot", "p_adminsiteA", "p_qa1"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
 
 	actions, err := coll.BuildAction(data)
 	require.NoError(t, err)
-	require.Len(t, actions, 2, "bots and the platform-admin pseudo-account must not enter the user-room index")
-	docIDs := []string{actions[0].DocID, actions[1].DocID}
-	assert.ElementsMatch(t, []string{"alice", "p_qa1"}, docIDs)
+	require.Len(t, actions, 4, "bots and the platform-admin pseudo-account enter the user-room index like any member")
+	docIDs := make([]string, len(actions))
+	for i, action := range actions {
+		docIDs[i] = action.DocID
+	}
+	assert.ElementsMatch(t, []string{"alice", "weather.bot", "p_adminsiteA", "p_qa1"}, docIDs)
 }
 
-func TestUserRoomCollection_BuildAction_AllBots_NoActions(t *testing.T) {
+func TestUserRoomCollection_BuildAction_Bot_Indexed(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"weather.bot"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
 
 	actions, err := coll.BuildAction(data)
-	require.NoError(t, err, "an all-bot event is a clean no-op, not an error")
-	assert.Empty(t, actions)
+	require.NoError(t, err)
+	require.Len(t, actions, 1, "a bot is a searchable principal and enters the user-room index")
+	assert.Equal(t, "weather.bot", actions[0].DocID)
 }
 
 func TestUserRoomCollection_BuildAction_MemberAdded_Restricted(t *testing.T) {
@@ -244,7 +248,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T) {
 	coll := newUserRoomCollection("user-room-site-a")
 	payload := baseInboxMemberEvent()
-	payload.Accounts = []string{"weather.bot", "p_tchatadmin_siteA"}
+	payload.Accounts = []string{"weather.bot", "p_adminsiteA"}
 	const ts int64 = 1735689800000
 	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, ts)
 
@@ -266,7 +270,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T
 		assert.False(t, hasUpsert, "remove update must not contain an upsert")
 		docIDs[i] = action.DocID
 	}
-	assert.ElementsMatch(t, []string{"weather.bot", "p_tchatadmin_siteA"}, docIDs)
+	assert.ElementsMatch(t, []string{"weather.bot", "p_adminsiteA"}, docIDs)
 }
 
 // TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot verifies a
