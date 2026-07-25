@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
@@ -609,8 +610,25 @@ func TestMessageCollection_FilterSubjects_UserIncludesTeamsBatch(t *testing.T) {
 	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, bot.FilterSubjects("site-a"))
 }
 
+// fakeTeamsUserResolver returns a fixed id→identity map (nil error).
+type fakeTeamsUserResolver map[string]teamsIdentity
+
+func (f fakeTeamsUserResolver) ResolveIdentities(_ context.Context, ids []string) (map[string]teamsIdentity, error) {
+	out := make(map[string]teamsIdentity, len(ids))
+	for _, id := range ids {
+		if v, ok := f[id]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+
 func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	c.teamsUsers = fakeTeamsUserResolver{
+		"graph-1": {Account: "alice", UserID: "uid-alice"},
+		"graph-2": {Account: "bob", UserID: "uid-bob"},
+	}
 	ts := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
 
 	data := teamsBatch(t,
@@ -629,13 +647,12 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, actions, 2)
 
-	wantEmp := teamsmigrate.EmployeeIDFromGraphID("graph-1")
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
 
 	var doc MessageSearchIndex
 	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
-	assert.Equal(t, wantEmp, doc.UserID)      // author key = employeeId hash, no Mongo read
-	assert.Equal(t, wantEmp, doc.UserAccount) // best-effort reuse
+	assert.Equal(t, "uid-alice", doc.UserID)  // account-resolved user _id
+	assert.Equal(t, "alice", doc.UserAccount) // account from teams_user
 	assert.Equal(t, "room-1", doc.RoomID)
 	assert.Equal(t, "site-a", doc.SiteID)
 	assert.Equal(t, "one", doc.Content)

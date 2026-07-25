@@ -10,7 +10,6 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 func testSenderCache(t *testing.T) *lru.Cache[string, resolvedSender] {
@@ -20,13 +19,15 @@ func testSenderCache(t *testing.T) *lru.Cache[string, resolvedSender] {
 	return c
 }
 
-func TestSenderResolver_EmployeeIdHit(t *testing.T) {
+func TestSenderResolver_AccountHit(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	empID := teamsmigrate.EmployeeIDFromGraphID("graph-1")
 	existing := &model.User{ID: "uid1", Account: "alice", SiteID: "s1", EngName: "Alice", ChineseName: "愛麗絲"}
-	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(existing, nil)
-	// employeeId is authoritative: no display-name lookup, no upsert.
+	gomock.InOrder(
+		store.EXPECT().AccountByTeamsID(gomock.Any(), "graph-1").Return("alice", nil),
+		store.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(existing, nil),
+	)
+	// account found → no upsert.
 
 	r := newSenderResolver(store, "s1", testSenderCache(t))
 	got, err := r.resolve(context.Background(), "graph-1", "愛麗絲")
@@ -36,74 +37,52 @@ func TestSenderResolver_EmployeeIdHit(t *testing.T) {
 	assert.Equal(t, "Alice 愛麗絲", got.DisplayName) // engName and chineseName combined
 }
 
-func TestSenderResolver_DisplayNameFallback(t *testing.T) {
+func TestSenderResolver_NoUserCreates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	empID := teamsmigrate.EmployeeIDFromGraphID("graph-1")
-	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(nil, nil) // employeeId miss
-	store.EXPECT().FindUserByDisplayName(gomock.Any(), "愛麗絲").
-		Return(&model.User{Account: "alice"}, nil)
-
-	r := newSenderResolver(store, "s1", testSenderCache(t))
-	got, err := r.resolve(context.Background(), "graph-1", "愛麗絲")
-	require.NoError(t, err)
-	assert.Equal(t, "alice", got.Account)
-}
-
-func TestSenderResolver_NoMatchCreates(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockHRIdentityStore(ctrl)
-	wantEmp := teamsmigrate.EmployeeIDFromGraphID("graph-2")
-	created := &model.User{ID: "new-uid", Account: wantEmp, SiteID: "s1", ChineseName: "Bob"}
-	// Order: employeeId miss → displayName miss → upsert → read back the created row.
+	created := &model.User{ID: "new-uid", Account: "bob", SiteID: "s1", ChineseName: "Bob"}
+	// Order: account resolved → users miss → upsert (no employeeId) → read back the created row.
 	gomock.InOrder(
-		store.EXPECT().FindUserByEmployeeId(gomock.Any(), wantEmp).Return(nil, nil),
-		store.EXPECT().FindUserByDisplayName(gomock.Any(), "Bob").Return(nil, nil),
+		store.EXPECT().AccountByTeamsID(gomock.Any(), "graph-2").Return("bob", nil),
+		store.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(nil, nil),
 		store.EXPECT().UpsertUserIdentities(gomock.Any(), gomock.Any()).
 			DoAndReturn(func(_ context.Context, users []model.IUserWithChange) error {
 				require.Len(t, users, 1)
-				assert.Equal(t, wantEmp, users[0].EmployeeID)
-				assert.Equal(t, wantEmp, users[0].Account) // account = employeeId (no UPN at the message layer)
+				assert.Equal(t, "bob", users[0].Account)
+				assert.Empty(t, users[0].EmployeeID, "migrated users carry no employeeId")
 				assert.Equal(t, "Bob", users[0].ChineseName)
 				assert.Equal(t, "s1", users[0].SiteID)
 				return nil
 			}),
-		store.EXPECT().FindUserByEmployeeId(gomock.Any(), wantEmp).Return(created, nil),
+		store.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(created, nil),
 	)
 
 	r := newSenderResolver(store, "s1", testSenderCache(t))
 	got, err := r.resolve(context.Background(), "graph-2", "Bob")
 	require.NoError(t, err)
-	assert.Equal(t, wantEmp, got.Account)
-	assert.Equal(t, "new-uid", got.UserID, "created sender carries the generated UserID")
+	assert.Equal(t, "bob", got.Account)
+	assert.Equal(t, "new-uid", got.UserID, "created sender carries the minted UserID")
 	assert.Equal(t, "Bob", got.DisplayName)
 }
 
-func TestSenderResolver_EmptyDisplayNameSkipsNameLookup(t *testing.T) {
+func TestSenderResolver_NoTeamsUserErrors(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	wantEmp := teamsmigrate.EmployeeIDFromGraphID("graph-3")
-	created := &model.User{ID: "nu", Account: wantEmp, SiteID: "s1"}
-	// No FindUserByDisplayName call when displayName is empty; upsert then read back.
-	gomock.InOrder(
-		store.EXPECT().FindUserByEmployeeId(gomock.Any(), wantEmp).Return(nil, nil),
-		store.EXPECT().UpsertUserIdentities(gomock.Any(), gomock.Any()).Return(nil),
-		store.EXPECT().FindUserByEmployeeId(gomock.Any(), wantEmp).Return(created, nil),
-	)
+	store.EXPECT().AccountByTeamsID(gomock.Any(), "graph-x").Return("", nil) // no teams_user record
 
 	r := newSenderResolver(store, "s1", testSenderCache(t))
-	got, err := r.resolve(context.Background(), "graph-3", "")
-	require.NoError(t, err)
-	assert.Equal(t, wantEmp, got.Account)
-	assert.Equal(t, "nu", got.UserID)
+	_, err := r.resolve(context.Background(), "graph-x", "Nobody")
+	require.Error(t, err)
 }
 
 func TestSenderResolver_CacheHitSkipsStore(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockHRIdentityStore(ctrl)
-	empID := teamsmigrate.EmployeeIDFromGraphID("graph-1")
 	// Exactly one round of lookups for two resolves.
-	store.EXPECT().FindUserByEmployeeId(gomock.Any(), empID).Return(&model.User{Account: "al"}, nil).Times(1)
+	gomock.InOrder(
+		store.EXPECT().AccountByTeamsID(gomock.Any(), "graph-1").Return("al", nil).Times(1),
+		store.EXPECT().FindUserByAccount(gomock.Any(), "al").Return(&model.User{Account: "al"}, nil).Times(1),
+	)
 
 	r := newSenderResolver(store, "s1", testSenderCache(t))
 	for i := 0; i < 2; i++ {

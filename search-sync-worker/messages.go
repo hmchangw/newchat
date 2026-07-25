@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -23,6 +24,20 @@ type parentCreatedAtResolver interface {
 	ResolveParentCreatedAt(ctx context.Context, messageID string) (time.Time, bool)
 }
 
+// teamsIdentity is a migrated sender's nextgen identity for the search index: the
+// account (from teams_user) and the user _id (from the account's users row, empty
+// until message-worker has created it).
+type teamsIdentity struct {
+	Account string
+	UserID  string
+}
+
+// teamsUserResolver batch-maps AAD user ids → teamsIdentity for indexing migrated Teams
+// history. Ids with no teams_user record are omitted. Satisfied by *mongoTeamsUserResolver.
+type teamsUserResolver interface {
+	ResolveIdentities(ctx context.Context, teamsUserIDs []string) (map[string]teamsIdentity, error)
+}
+
 // messageCollection implements Collection for message search sync; streamCfg + consumerName are
 // parameterized so one type consumes user or bot canonical streams. syncFrom is the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
@@ -37,6 +52,9 @@ type messageCollection struct {
 	streamCfg         func(siteID string) jetstream.StreamConfig
 	consumerName      string
 	parentResolver    parentCreatedAtResolver
+	// teamsUsers resolves migrated senders' account + user _id; nil on the bot collection
+	// (no .teams.batch) and in tests that don't exercise the teams path.
+	teamsUsers teamsUserResolver
 }
 
 // newMessageCollection binds to the user MESSAGES_CANONICAL stream and also indexes
@@ -163,10 +181,11 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 // buildTeamsActions fans one migrated-history batch out into one index action per
 // message, mirroring the migration writer's skips (no id / no roomId can't be addressed
 // idempotently; system messages carry no indexable content) so the index matches what
-// was persisted. The author key is derived straight from the Graph id hash — the same
-// _id the migration writes — so it needs no Mongo lookup.
+// was persisted. Sender account + user _id are batch-resolved via teams_user + users to
+// match the same account-keyed identity message-worker persists.
 func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []searchengine.BulkAction {
-	actions := make([]searchengine.BulkAction, 0, len(req.Messages))
+	keeps := make([]teamsmigrate.Message, 0, len(req.Messages))
+	idSet := make(map[string]struct{})
 	for _, raw := range req.Messages {
 		var tm teamsmigrate.Message
 		if err := json.Unmarshal(raw, &tm); err != nil {
@@ -178,14 +197,24 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 		if teamsmigrate.MessageType(tm.MessageType) != "" {
 			continue // system message — not indexed content
 		}
-		// UserAccount reuses the employeeId hash best-effort (no UPN at the message layer).
-		empID := teamsmigrate.EmployeeIDFromGraphID(tm.From.ID)
+		keeps = append(keeps, tm)
+		if tm.From.ID != "" {
+			idSet[tm.From.ID] = struct{}{}
+		}
+	}
+
+	identities := c.resolveTeamsIdentities(idSet)
+
+	actions := make([]searchengine.BulkAction, 0, len(keeps))
+	for i := range keeps {
+		tm := &keeps[i]
+		id := identities[tm.From.ID] // zero value (empty account/userID) when unresolved
 		doc := MessageSearchIndex{
 			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
 			RoomID:      tm.RoomID,
 			SiteID:      c.siteID,
-			UserID:      empID,
-			UserAccount: empID,
+			UserID:      id.UserID,
+			UserAccount: id.Account,
 			Content:     teamsmigrate.BodyToContent(tm.Body),
 			CreatedAt:   tm.CreatedDateTime,
 		}
@@ -201,6 +230,25 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 		})
 	}
 	return actions
+}
+
+// resolveTeamsIdentities batch-maps sender ids → account + user _id via the injected
+// resolver. A nil resolver or a lookup error yields empty identities (best-effort: a
+// migrated doc still indexes its content, just without an author key).
+func (c *messageCollection) resolveTeamsIdentities(idSet map[string]struct{}) map[string]teamsIdentity {
+	if c.teamsUsers == nil || len(idSet) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	identities, err := c.teamsUsers.ResolveIdentities(context.Background(), ids)
+	if err != nil {
+		slog.Error("resolve teams sender identities", "error", err)
+		return nil
+	}
+	return identities
 }
 
 // --- Message-specific internals ---

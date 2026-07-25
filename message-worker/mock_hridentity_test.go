@@ -17,6 +17,45 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
+// MockidentityResolver is a mock of identityResolver interface.
+type MockidentityResolver struct {
+	ctrl     *gomock.Controller
+	recorder *MockidentityResolverMockRecorder
+	isgomock struct{}
+}
+
+// MockidentityResolverMockRecorder is the mock recorder for MockidentityResolver.
+type MockidentityResolverMockRecorder struct {
+	mock *MockidentityResolver
+}
+
+// NewMockidentityResolver creates a new mock instance.
+func NewMockidentityResolver(ctrl *gomock.Controller) *MockidentityResolver {
+	mock := &MockidentityResolver{ctrl: ctrl}
+	mock.recorder = &MockidentityResolverMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockidentityResolver) EXPECT() *MockidentityResolverMockRecorder {
+	return m.recorder
+}
+
+// resolve mocks base method.
+func (m *MockidentityResolver) resolve(ctx context.Context, teamsUserID, displayName string) (resolvedSender, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "resolve", ctx, teamsUserID, displayName)
+	ret0, _ := ret[0].(resolvedSender)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// resolve indicates an expected call of resolve.
+func (mr *MockidentityResolverMockRecorder) resolve(ctx, teamsUserID, displayName any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "resolve", reflect.TypeOf((*MockidentityResolver)(nil).resolve), ctx, teamsUserID, displayName)
+}
+
 // MockHRIdentityStore is a mock of HRIdentityStore interface.
 type MockHRIdentityStore struct {
 	ctrl     *gomock.Controller
@@ -41,34 +80,34 @@ func (m *MockHRIdentityStore) EXPECT() *MockHRIdentityStoreMockRecorder {
 	return m.recorder
 }
 
-// FindUserByDisplayName mocks base method.
-func (m *MockHRIdentityStore) FindUserByDisplayName(ctx context.Context, name string) (*model.User, error) {
+// AccountByTeamsID mocks base method.
+func (m *MockHRIdentityStore) AccountByTeamsID(ctx context.Context, teamsUserID string) (string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FindUserByDisplayName", ctx, name)
+	ret := m.ctrl.Call(m, "AccountByTeamsID", ctx, teamsUserID)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AccountByTeamsID indicates an expected call of AccountByTeamsID.
+func (mr *MockHRIdentityStoreMockRecorder) AccountByTeamsID(ctx, teamsUserID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AccountByTeamsID", reflect.TypeOf((*MockHRIdentityStore)(nil).AccountByTeamsID), ctx, teamsUserID)
+}
+
+// FindUserByAccount mocks base method.
+func (m *MockHRIdentityStore) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindUserByAccount", ctx, account)
 	ret0, _ := ret[0].(*model.User)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// FindUserByDisplayName indicates an expected call of FindUserByDisplayName.
-func (mr *MockHRIdentityStoreMockRecorder) FindUserByDisplayName(ctx, name any) *gomock.Call {
+// FindUserByAccount indicates an expected call of FindUserByAccount.
+func (mr *MockHRIdentityStoreMockRecorder) FindUserByAccount(ctx, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUserByDisplayName", reflect.TypeOf((*MockHRIdentityStore)(nil).FindUserByDisplayName), ctx, name)
-}
-
-// FindUserByEmployeeId mocks base method.
-func (m *MockHRIdentityStore) FindUserByEmployeeId(ctx context.Context, employeeId string) (*model.User, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FindUserByEmployeeId", ctx, employeeId)
-	ret0, _ := ret[0].(*model.User)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// FindUserByEmployeeId indicates an expected call of FindUserByEmployeeId.
-func (mr *MockHRIdentityStoreMockRecorder) FindUserByEmployeeId(ctx, employeeId any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUserByEmployeeId", reflect.TypeOf((*MockHRIdentityStore)(nil).FindUserByEmployeeId), ctx, employeeId)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUserByAccount", reflect.TypeOf((*MockHRIdentityStore)(nil).FindUserByAccount), ctx, account)
 }
 
 // UpsertUserIdentities mocks base method.

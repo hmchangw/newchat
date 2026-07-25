@@ -25,9 +25,14 @@ func TestTeamsBatch_Integration(t *testing.T) {
 	cass := setupCassandra(t)
 	mongoDB := setupMongo(t)
 
-	// Seed a user whose display name the resolver reuses (no create needed).
+	// Seed teams_user (AAD id → account) + the account's user row so the resolver
+	// reuses it (no create needed).
+	_, err := mongoDB.Collection("teams_user").InsertOne(ctx, bson.M{
+		"_id": "graph-1", "account": "alice", "siteId": "site-a",
+	})
+	require.NoError(t, err)
 	userCol := mongoDB.Collection("users")
-	_, err := userCol.InsertOne(ctx, bson.M{
+	_, err = userCol.InsertOne(ctx, bson.M{
 		"_id": "u-1", "account": "alice", "siteId": "site-a",
 		"engName": "Alice", "chineseName": "Alice", "employeeId": "EMP001",
 	})

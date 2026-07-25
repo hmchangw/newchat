@@ -8,44 +8,49 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-// mongoHRIdentityStore is this service's own identity read/write store for the Teams
-// migration sender resolver. Per-service store — there is no shared store package.
+// mongoHRIdentityStore is this service's own identity store for the Teams migration
+// sender resolver, over two collections: teams_user (AAD id → account) and users
+// (account → nextgen identity). Per-service store — there is no shared store package.
 // The consumer-owned interface it satisfies lives in teamssender.go.
 type mongoHRIdentityStore struct {
-	users *mongoutil.Collection[model.User]
+	users      *mongoutil.Collection[model.User]
+	teamsUsers *mongoutil.Collection[model.TeamsUser]
 }
 
 var _ HRIdentityStore = (*mongoHRIdentityStore)(nil)
 
 func newMongoHRIdentityStore(db *mongo.Database) *mongoHRIdentityStore {
-	return &mongoHRIdentityStore{users: mongoutil.NewCollection[model.User](db.Collection("users"))}
+	return &mongoHRIdentityStore{
+		users:      mongoutil.NewCollection[model.User](db.Collection("users")),
+		teamsUsers: mongoutil.NewCollection[model.TeamsUser](db.Collection("teams_user")),
+	}
 }
 
-func (s *mongoHRIdentityStore) FindUserByEmployeeId(ctx context.Context, employeeId string) (*model.User, error) {
-	u, err := s.users.FindOne(ctx, bson.M{"employeeId": employeeId})
+// AccountByTeamsID resolves an AAD user object id to its account via teams_user (the
+// same _id→account mapping teams-chat-member-sync reads); "" when no record exists.
+func (s *mongoHRIdentityStore) AccountByTeamsID(ctx context.Context, teamsUserID string) (string, error) {
+	u, err := s.teamsUsers.FindByID(ctx, teamsUserID, mongoutil.WithProjection(bson.M{"_id": 1, "account": 1}))
 	if err != nil {
-		return nil, fmt.Errorf("find user by employeeId: %w", err)
+		return "", fmt.Errorf("find teams_user by id: %w", err)
+	}
+	if u == nil {
+		return "", nil
+	}
+	return u.Account, nil
+}
+
+// FindUserByAccount returns the single user with account (globally unique), or (nil,nil).
+func (s *mongoHRIdentityStore) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
+	u, err := s.users.FindOne(ctx, bson.M{"account": account})
+	if err != nil {
+		return nil, fmt.Errorf("find user by account: %w", err)
 	}
 	return u, nil // FindOne yields (nil,nil) on no match
-}
-
-// FindUserByDisplayName matches on chineseName — the field the HR sync writes the
-// Graph displayName into. Reads 2 rows so a non-unique name is ambiguous (nil,nil).
-func (s *mongoHRIdentityStore) FindUserByDisplayName(ctx context.Context, name string) (*model.User, error) {
-	users, err := s.users.FindMany(ctx,
-		bson.M{"chineseName": name},
-		mongoutil.WithLimit(2))
-	if err != nil {
-		return nil, fmt.Errorf("find user by display name: %w", err)
-	}
-	if len(users) != 1 {
-		return nil, nil
-	}
-	return &users[0], nil
 }
 
 // UpsertUserIdentities builds the $set doc by hand (never a full-doc replace) so a
@@ -54,26 +59,21 @@ func (s *mongoHRIdentityStore) UpsertUserIdentities(ctx context.Context, users [
 	models := make([]mongo.WriteModel, 0, len(users))
 	for i := range users {
 		u := &users[i].User
-		if u.EmployeeID == "" {
-			// employeeId is the identity key; an empty one would clobber every keyless row.
-			// account omitted — it may be an employee identifier (privacy).
-			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId")
+		if u.Account == "" {
+			// account is the identity key; an empty one would clobber every keyless row.
+			slog.WarnContext(ctx, "skip user identity upsert: empty account")
 			continue
 		}
 		models = append(models, mongo.NewUpdateOneModel().
-			// employeeId is globally unique, so it alone keys the identity — a person
-			// resolves to one row regardless of site.
-			SetFilter(bson.M{"employeeId": u.EmployeeID}).
+			// account is globally unique (users has a unique index on it), so it alone keys
+			// the identity. Migrated Teams users carry no employeeId — it is left unset.
+			SetFilter(bson.M{"account": u.Account}).
 			SetUpdate(bson.M{
 				"$set": bson.M{
-					"account": u.Account, "siteId": u.SiteID,
-					"engName": u.EngName, "chineseName": u.ChineseName,
-					"employeeId": u.EmployeeID,
+					"siteId": u.SiteID, "engName": u.EngName, "chineseName": u.ChineseName,
 				},
-				// _id = employeeId (the identity key) so a migrated user's persisted
-				// UserID equals the hash search-sync derives from the Teams id — matching
-				// the HR-sync employee design and letting the indexer skip a Mongo read.
-				"$setOnInsert": bson.M{"_id": u.EmployeeID},
+				// Fresh UUIDv7 _id on insert — the persisted UserID search-sync reads back by account.
+				"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
 			}).
 			SetUpsert(true))
 	}
