@@ -46,9 +46,14 @@ type LoadNextMessagesResponse struct {
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
 }
 
+// LoadSurroundingMessagesRequest centers a window on exactly one of MessageID
+// (a central message, spliced into the middle of the result) or Timestamp (a
+// UTC-millis pivot with no central message; before-read is inclusive of a
+// message sitting exactly on the pivot).
 type LoadSurroundingMessagesRequest struct {
-	MessageID string    `json:"messageId"` // central message ID
-	Limit     int       `json:"limit"`     // total messages including central
+	MessageID string    `json:"messageId,omitempty"` // central message ID; exactly one of messageId/timestamp
+	Timestamp *int64    `json:"timestamp,omitempty"` // UTC millis pivot; exactly one of messageId/timestamp
+	Limit     int       `json:"limit"`               // total messages (including central in messageId mode)
 	Meta      *RoomMeta `json:"meta,omitempty"`
 }
 

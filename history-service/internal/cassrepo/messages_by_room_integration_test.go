@@ -95,6 +95,70 @@ func TestRepository_GetMessagesBefore(t *testing.T) {
 	assert.True(t, page.Data[0].CreatedAt.After(page.Data[1].CreatedAt))
 }
 
+func TestRepository_GetMessagesAtOrBefore(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessages(t, session, "r1", base, 5) // m0..m4 at base+0..+4min
+
+	q, err := ParsePageRequest("", 10)
+	require.NoError(t, err)
+
+	// Pivot exactly on m2's created_at: inclusive upper must include m2 and exclude m3/m4.
+	page, err := repo.GetMessagesAtOrBefore(ctx, "r1", base.Add(2*time.Minute), time.Time{}, q)
+	require.NoError(t, err)
+	require.Len(t, page.Data, 3) // m0, m1, m2
+	assert.Equal(t, "m2", page.Data[0].MessageID, "newest at-or-before is the pivot row itself")
+	assert.Equal(t, "m1", page.Data[1].MessageID)
+	assert.Equal(t, "m0", page.Data[2].MessageID)
+}
+
+func TestRepository_GetMessagesAtOrBefore_SameMillisecondSiblings(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	// Two messages share the exact same created_at millisecond; both must be
+	// included by the inclusive upper bound.
+	at := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	seedMessage(t, session, "r-ties", "tie-a", at)
+	seedMessage(t, session, "r-ties", "tie-b", at)
+	seedMessage(t, session, "r-ties", "after", at.Add(time.Minute))
+
+	q, err := ParsePageRequest("", 10)
+	require.NoError(t, err)
+
+	page, err := repo.GetMessagesAtOrBefore(ctx, "r-ties", at, time.Time{}, q)
+	require.NoError(t, err)
+	ids := []string{}
+	for _, m := range page.Data {
+		ids = append(ids, m.MessageID)
+	}
+	assert.Contains(t, ids, "tie-a")
+	assert.Contains(t, ids, "tie-b")
+	assert.NotContains(t, ids, "after")
+}
+
+func TestRepository_GetMessagesBetweenDescInclusive(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessages(t, session, "r1", base, 5) // m0..m4
+
+	q, err := ParsePageRequest("", 10)
+	require.NoError(t, err)
+
+	// (since, at] with since=1min, at=3min → m2, m3 (excludes m1 at the strict
+	// lower bound, includes m3 at the inclusive upper bound).
+	page, err := repo.GetMessagesBetweenDescInclusive(ctx, "r1", base.Add(1*time.Minute), base.Add(3*time.Minute), q)
+	require.NoError(t, err)
+	require.Len(t, page.Data, 2)
+	assert.Equal(t, "m3", page.Data[0].MessageID) // DESC: inclusive upper first
+	assert.Equal(t, "m2", page.Data[1].MessageID)
+}
+
 func TestRepository_GetMessagesBetweenDesc(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)

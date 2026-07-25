@@ -74,19 +74,42 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 	}
 }
 
+// Two pre-defined first-bucket query strings differing only in the upper-bound
+// comparator; the inclusiveUpper flag selects between them so no query string is
+// built dynamically (keeps SAST/gosec off the query path).
+const (
+	messagesBeforeStrictFirstBucket    = messageByRoomQuery + ` WHERE room_id = ? AND bucket = ? AND created_at < ? ORDER BY created_at DESC`
+	messagesBeforeInclusiveFirstBucket = messageByRoomQuery + ` WHERE room_id = ? AND bucket = ? AND created_at <= ? ORDER BY created_at DESC`
+)
+
+// GetMessagesBefore returns messages strictly before `before` (created_at < before), DESC.
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	return r.getMessagesBefore(ctx, roomID, before, floor, pageReq, false)
+}
+
+// GetMessagesAtOrBefore returns messages at or before `at` (created_at <= at), DESC.
+// The inclusive upper bound anchors a message whose created_at equals the pivot
+// (e.g. a subscription lastSeenAt) in the result — used by the timestamp-pivot
+// surrounding read, where there is no separately-spliced central message.
+func (r *Repository) GetMessagesAtOrBefore(ctx context.Context, roomID string, at time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	return r.getMessagesBefore(ctx, roomID, at, floor, pageReq, true)
+}
+
+func (r *Repository) getMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest, inclusiveUpper bool) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(floor)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages before: %w", err)
 	}
 
+	firstBucketQuery := messagesBeforeStrictFirstBucket
+	if inclusiveUpper {
+		firstBucketQuery = messagesBeforeInclusiveFirstBucket
+	}
+
 	queryFn := func(bucket int64, firstBucket bool) *gocql.Query {
 		if firstBucket {
-			return r.session.Query(
-				messageByRoomQuery+` WHERE room_id = ? AND bucket = ? AND created_at < ? ORDER BY created_at DESC`,
-				roomID, bucket, before,
-			)
+			return r.session.Query(firstBucketQuery, roomID, bucket, before)
 		}
 		return r.session.Query(
 			messageByRoomQuery+` WHERE room_id = ? AND bucket = ? ORDER BY created_at DESC`,
@@ -104,11 +127,42 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 	return res.toPage(), nil
 }
 
+// First-bucket query strings for the between-DESC walk. Only the upper-bound
+// comparator varies (strict `<` vs inclusive `<=`); the lower bound (`> since`)
+// is identical, so it is not duplicated below.
+const (
+	messagesBetweenStrictFirstAtFloor    = messageByRoomQuery + ` WHERE room_id = ? AND bucket = ? AND created_at > ? AND created_at < ? ORDER BY created_at DESC`
+	messagesBetweenInclusiveFirstAtFloor = messageByRoomQuery + ` WHERE room_id = ? AND bucket = ? AND created_at > ? AND created_at <= ? ORDER BY created_at DESC`
+	messagesBetweenStrictFirst           = messageByRoomQuery + ` WHERE room_id = ? AND bucket = ? AND created_at < ? ORDER BY created_at DESC`
+	messagesBetweenInclusiveFirst        = messageByRoomQuery + ` WHERE room_id = ? AND bucket = ? AND created_at <= ? ORDER BY created_at DESC`
+)
+
+// GetMessagesBetweenDesc returns messages in (since, before) — lower bound strict
+// (created_at > since), upper bound strict (created_at < before) — DESC.
 func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	return r.getMessagesBetweenDesc(ctx, roomID, since, before, pageReq, false)
+}
+
+// GetMessagesBetweenDescInclusive returns messages in (since, at] — lower bound
+// strict (created_at > since, so pre-access messages still cannot leak), upper
+// bound inclusive (created_at <= at) — DESC. The access-window counterpart of
+// GetMessagesAtOrBefore for the timestamp-pivot surrounding read.
+func (r *Repository) GetMessagesBetweenDescInclusive(ctx context.Context, roomID string, since, at time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	return r.getMessagesBetweenDesc(ctx, roomID, since, at, pageReq, true)
+}
+
+func (r *Repository) getMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest, inclusiveUpper bool) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(since)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages between desc: %w", err)
+	}
+
+	firstAtFloorQuery := messagesBetweenStrictFirstAtFloor
+	firstQuery := messagesBetweenStrictFirst
+	if inclusiveUpper {
+		firstAtFloorQuery = messagesBetweenInclusiveFirstAtFloor
+		firstQuery = messagesBetweenInclusiveFirst
 	}
 
 	queryFn := func(bucket int64, firstBucket bool) *gocql.Query {
@@ -116,16 +170,10 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 		switch {
 		case firstBucket && atFloor:
 			// Single-bucket walk: both upper (before) and lower (since) bounds apply.
-			return r.session.Query(
-				messageByRoomQuery+` WHERE room_id = ? AND bucket = ? AND created_at > ? AND created_at < ? ORDER BY created_at DESC`,
-				roomID, bucket, since, before,
-			)
+			return r.session.Query(firstAtFloorQuery, roomID, bucket, since, before)
 		case firstBucket:
 			// Top of walk: upper bound only.
-			return r.session.Query(
-				messageByRoomQuery+` WHERE room_id = ? AND bucket = ? AND created_at < ? ORDER BY created_at DESC`,
-				roomID, bucket, before,
-			)
+			return r.session.Query(firstQuery, roomID, bucket, before)
 		case atFloor:
 			// Bottom of walk: lower bound only — without this, rows with
 			// created_at <= since in the floor bucket would leak through.

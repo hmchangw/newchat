@@ -160,11 +160,42 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 	}, nil
 }
 
+// LoadSurroundingMessages centers a window on exactly one of req.MessageID (a
+// central message spliced into the middle) or req.Timestamp (a UTC-millis pivot,
+// no central message). It validates the exactly-one-of contract, clamps the
+// limit, and dispatches to the mode-specific handler.
 func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req models.LoadSurroundingMessagesRequest) (*models.LoadSurroundingMessagesResponse, error) {
 	account := c.Param("account")
 	roomID := c.Param("roomID")
 	c.WithLogValues("account", account, "room_id", roomID)
 
+	hasID := req.MessageID != ""
+	hasTS := req.Timestamp != nil
+	switch {
+	case hasID && hasTS:
+		return nil, errcode.BadRequest("provide either messageId or timestamp, not both")
+	case !hasID && !hasTS:
+		return nil, errcode.BadRequest("messageId or timestamp is required")
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = surroundingPageSize
+	}
+	if limit > maxPageSize {
+		limit = maxPageSize
+	}
+
+	if hasTS {
+		return s.loadSurroundingByTimestamp(c, account, roomID, req, limit)
+	}
+	return s.loadSurroundingByMessageID(c, account, roomID, req, limit)
+}
+
+// loadSurroundingByMessageID centers the window on req.MessageID: the central
+// message is looked up, spliced into the middle of the result, and the before /
+// after reads use strict bounds around its created_at.
+func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, account, roomID string, req models.LoadSurroundingMessagesRequest, limit int) (*models.LoadSurroundingMessagesResponse, error) {
 	accessSince, err := s.getAccessSince(c, account, roomID)
 	if err != nil {
 		return nil, err
@@ -186,13 +217,6 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
 
-	limit := req.Limit
-	if limit <= 0 {
-		limit = surroundingPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
 	remaining := limit - 1 // before gets the larger half on odd splits
 	if remaining <= 0 {
 		only := *centralMsg
@@ -216,6 +240,85 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 		return nil, err
 	}
 
+	beforeFn := func(ctx context.Context) (cassrepo.Page[models.Message], error) {
+		if accessSince == nil {
+			return s.msgReader.GetMessagesBefore(ctx, roomID, centralMsg.CreatedAt, floor, beforePageReq)
+		}
+		return s.msgReader.GetMessagesBetweenDesc(ctx, roomID, *accessSince, centralMsg.CreatedAt, beforePageReq)
+	}
+	afterFn := func(ctx context.Context) (cassrepo.Page[models.Message], error) {
+		return s.msgReader.GetMessagesAfter(ctx, roomID, centralMsg.CreatedAt, ceiling, afterPageReq)
+	}
+
+	return s.assembleSurrounding(c, roomID, accessSince, centralMsg, beforeFn, afterFn)
+}
+
+// loadSurroundingByTimestamp centers the window on a UTC-millis pivot. There is
+// no central message, so limit splits cleanly (before gets the larger half) and
+// the before read is inclusive of a message sitting exactly on the pivot
+// (created_at <= pivot); the after read stays strict (created_at > pivot), so an
+// exact-match message anchors the read group without being duplicated below.
+func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, account, roomID string, req models.LoadSurroundingMessagesRequest, limit int) (*models.LoadSurroundingMessagesResponse, error) {
+	if *req.Timestamp <= 0 {
+		return nil, errcode.BadRequest("timestamp must be positive")
+	}
+	pivot := time.UnixMilli(*req.Timestamp).UTC()
+
+	now := time.Now().UTC()
+	// No findMessage dependency, so the access check and room-times resolve run concurrently.
+	accessSince, lastMsgAt, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	if err != nil {
+		return nil, err
+	}
+	if accessSince != nil && pivot.Before(*accessSince) {
+		return nil, errcode.Forbidden("timestamp is outside access window", errcode.WithReason(errcode.MessageOutsideAccessWindow))
+	}
+
+	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+
+	beforeCount := (limit + 1) / 2
+	afterCount := limit / 2
+
+	beforePageReq, err := parsePageRequest("", beforeCount)
+	if err != nil {
+		return nil, err
+	}
+	// afterCount == 0 only when limit == 1; skip the read rather than let
+	// parsePageRequest(0) balloon the page size to defaultCassPageSize.
+	var afterPageReq cassrepo.PageRequest
+	if afterCount > 0 {
+		afterPageReq, err = parsePageRequest("", afterCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	beforeFn := func(ctx context.Context) (cassrepo.Page[models.Message], error) {
+		if accessSince == nil {
+			return s.msgReader.GetMessagesAtOrBefore(ctx, roomID, pivot, floor, beforePageReq)
+		}
+		return s.msgReader.GetMessagesBetweenDescInclusive(ctx, roomID, *accessSince, pivot, beforePageReq)
+	}
+	afterFn := func(ctx context.Context) (cassrepo.Page[models.Message], error) {
+		if afterCount == 0 {
+			return cassrepo.Page[models.Message]{}, nil
+		}
+		return s.msgReader.GetMessagesAfter(ctx, roomID, pivot, ceiling, afterPageReq)
+	}
+
+	return s.assembleSurrounding(c, roomID, accessSince, nil, beforeFn, afterFn)
+}
+
+// assembleSurrounding runs the before/after page reads plus the read-floor read
+// in parallel, then assembles them ASC: the reversed DESC before-page, the
+// optional central message (nil in timestamp-pivot mode), then the after-page.
+func (s *HistoryService) assembleSurrounding(
+	c *natsrouter.Context,
+	roomID string,
+	accessSince *time.Time,
+	central *models.Message,
+	beforeFn, afterFn func(ctx context.Context) (cassrepo.Page[models.Message], error),
+) (*models.LoadSurroundingMessagesResponse, error) {
 	var (
 		beforePage    cassrepo.Page[models.Message]
 		afterPage     cassrepo.Page[models.Message]
@@ -224,11 +327,7 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 	g, gctx := errgroup.WithContext(c)
 	g.Go(func() error {
 		var berr error
-		if accessSince == nil {
-			beforePage, berr = s.msgReader.GetMessagesBefore(gctx, roomID, centralMsg.CreatedAt, floor, beforePageReq)
-		} else {
-			beforePage, berr = s.msgReader.GetMessagesBetweenDesc(gctx, roomID, *accessSince, centralMsg.CreatedAt, beforePageReq)
-		}
+		beforePage, berr = beforeFn(gctx)
 		if berr != nil {
 			return fmt.Errorf("loading surrounding messages (before): %w", berr)
 		}
@@ -236,7 +335,7 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 	})
 	g.Go(func() error {
 		var aerr error
-		afterPage, aerr = s.msgReader.GetMessagesAfter(gctx, roomID, centralMsg.CreatedAt, ceiling, afterPageReq)
+		afterPage, aerr = afterFn(gctx)
 		if aerr != nil {
 			return fmt.Errorf("loading surrounding messages (after): %w", aerr)
 		}
@@ -250,12 +349,18 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 
 	minMs := millisPtr(lastSeenFloor)
 
-	// Assemble in ASC order: reverse the DESC before-page, append central, then after-page.
-	messages := make([]models.Message, 0, len(beforePage.Data)+1+len(afterPage.Data))
+	// Assemble in ASC order: reverse the DESC before-page, append the optional central, then after-page.
+	capacity := len(beforePage.Data) + len(afterPage.Data)
+	if central != nil {
+		capacity++
+	}
+	messages := make([]models.Message, 0, capacity)
 	for i := len(beforePage.Data) - 1; i >= 0; i-- {
 		messages = append(messages, beforePage.Data[i])
 	}
-	messages = append(messages, *centralMsg)
+	if central != nil {
+		messages = append(messages, *central)
+	}
 	messages = append(messages, afterPage.Data...)
 
 	redactUnavailableQuotes(messages, accessSince)
