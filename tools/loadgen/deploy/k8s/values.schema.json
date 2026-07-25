@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "phase",
+    "runId",
+    "siteId",
+    "image",
+    "existingSecret",
+    "mongo",
+    "cassandra",
+    "metrics",
+    "seed",
+    "soak",
+    "teardown"
+  ],
+  "properties": {
+    "phase": {
+      "type": "string",
+      "enum": ["seed", "soak", "stopped", "teardown"]
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]+$"
+    },
+    "siteId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "tag", "pullPolicy", "allowMutableTag"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[a-fA-F0-9]{64})$"
+        },
+        "tag": {"type": "string"},
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "allowMutableTag": {"type": "boolean"}
+      }
+    },
+    "existingSecret": {"type": "string", "minLength": 1},
+    "mongo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database"],
+      "properties": {
+        "database": {"type": "string", "minLength": 1}
+      }
+    },
+    "cassandra": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keyspace",
+        "cleanup",
+        "confirmKeyspace",
+        "messageBucketHours"
+      ],
+      "properties": {
+        "keyspace": {"type": "string", "minLength": 1},
+        "cleanup": {"type": "string", "enum": ["none", "truncate"]},
+        "confirmKeyspace": {"type": "string"},
+        "messageBucketHours": {"type": "integer", "minimum": 1}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "serviceAnnotations"],
+      "properties": {
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "serviceAnnotations": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "seed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "randomSeed",
+        "activeDeadlineSeconds",
+        "backoffLimit",
+        "resources"
+      ],
+      "properties": {
+        "randomSeed": {"type": "integer"},
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "backoffLimit": {"type": "integer", "minimum": 0},
+        "resources": {"type": "object"}
+      }
+    },
+    "soak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runMode",
+        "randomSeed",
+        "warmup",
+        "heartbeatInterval",
+        "heartbeatStaleAfter",
+        "terminationGracePeriodSeconds",
+        "maxInFlight",
+        "sendRate",
+        "readRate",
+        "threadShare",
+        "mutationRate",
+        "softDeleteRatio",
+        "reactionRate",
+        "reactionsPerHotMessage",
+        "reactionMessageScope",
+        "reactionRemoveShare",
+        "pinnedListRate",
+        "verifyRate",
+        "maxUsers",
+        "activeUsers",
+        "roomCount",
+        "channelRatio",
+        "channelMembers",
+        "rateScope",
+        "messagesPerActiveUserPerDay",
+        "payloadMedianBytes",
+        "payloadP95Bytes",
+        "payloadMaxBytes",
+        "persistGrace",
+        "mutationRetries",
+        "retryMinBackoff",
+        "retryMaxBackoff",
+        "recentPerRoom",
+        "recentTotal",
+        "resources"
+      ],
+      "properties": {
+        "runMode": {"type": "string", "enum": ["continuous"]},
+        "randomSeed": {"type": "integer"},
+        "warmup": {"type": "string", "minLength": 1},
+        "heartbeatInterval": {"type": "string", "minLength": 1},
+        "heartbeatStaleAfter": {"type": "string", "minLength": 1},
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxInFlight": {"type": "integer", "minimum": 1},
+        "sendRate": {"type": "string", "minLength": 1},
+        "readRate": {"type": "string", "minLength": 1},
+        "threadShare": {"type": "string", "minLength": 1},
+        "mutationRate": {"type": "string", "minLength": 1},
+        "softDeleteRatio": {"type": "string", "minLength": 1},
+        "reactionRate": {"type": "string", "minLength": 1},
+        "reactionsPerHotMessage": {"type": "string", "minLength": 1},
+        "reactionMessageScope": {
+          "type": "string",
+          "enum": ["hot_only", "all_messages"]
+        },
+        "reactionRemoveShare": {"type": "string", "minLength": 1},
+        "pinnedListRate": {"type": "string", "minLength": 1},
+        "verifyRate": {"type": "string", "minLength": 1},
+        "maxUsers": {"type": "string", "minLength": 1},
+        "activeUsers": {"type": "string", "minLength": 1},
+        "roomCount": {"type": "string", "minLength": 1},
+        "channelRatio": {"type": "string", "minLength": 1},
+        "channelMembers": {"type": "string", "minLength": 1},
+        "rateScope": {"type": "string", "enum": ["site", "global"]},
+        "messagesPerActiveUserPerDay": {"type": "string", "minLength": 1},
+        "payloadMedianBytes": {"type": "string", "minLength": 1},
+        "payloadP95Bytes": {"type": "string", "minLength": 1},
+        "payloadMaxBytes": {"type": "string", "minLength": 1},
+        "persistGrace": {"type": "string", "minLength": 1},
+        "mutationRetries": {"type": "string", "minLength": 1},
+        "retryMinBackoff": {"type": "string", "minLength": 1},
+        "retryMaxBackoff": {"type": "string", "minLength": 1},
+        "recentPerRoom": {"type": "string", "minLength": 1},
+        "recentTotal": {"type": "string", "minLength": 1},
+        "resources": {"type": "object"}
+      }
+    },
+    "teardown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approved",
+        "activeDeadlineSeconds",
+        "backoffLimit",
+        "resources"
+      ],
+      "properties": {
+        "approved": {"type": "boolean"},
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "backoffLimit": {"type": "integer", "minimum": 0},
+        "resources": {"type": "object"}
+      }
+    }
+  }
+}

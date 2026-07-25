@@ -1,0 +1,12 @@
+phase: stopped
+runId: validation-run-a
+siteId: site-validation
+
+image:
+  repository: registry.invalid/newchat-loadgen
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+cassandra:
+  keyspace: chat_soak_validation
+  cleanup: none
+  confirmKeyspace: chat_soak_validation

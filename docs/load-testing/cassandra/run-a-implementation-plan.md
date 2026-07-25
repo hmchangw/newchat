@@ -1,14 +1,15 @@
 # Cassandra Run A Soak Harness Implementation Plan
 
-**Status:** Proposed; implementation must not begin until this plan and its
-operational assumptions are approved.
+**Status:** Approved and implemented. The Kubernetes execution model was
+amended after confirming that company Jobs are limited to one day and
+production releases are reconciled by Argo CD.
 
 **Authoritative specification:**
 [`soak-test-plan.md`](soak-test-plan.md)
 
 **Goal:** Extend the existing `tools/loadgen` binary with a Kubernetes-ready
 Run A harness that drives the real message and history service paths for a
-72-hour, non-destructive Cassandra soak. The harness must build an isolated,
+continuous, operator-stopped Cassandra soak. The harness must build an isolated,
 owned room topology from real staging users, sustain the workload model from
 the specification, verify a sample of persisted data, survive transient
 dependency failures and pod restarts, and report bounded per-RPC metrics.
@@ -28,7 +29,7 @@ loadgen
 ```
 
 **Technology:** Go 1.25, NATS and JetStream, MongoDB, Cassandra, Prometheus,
-Kubernetes Jobs, Kustomize-compatible YAML, `go.uber.org/mock`,
+Kubernetes Jobs and Deployment, Helm, Argo CD, `go.uber.org/mock`,
 `stretchr/testify`, and the existing repository Make targets.
 
 ---
@@ -58,7 +59,7 @@ Kubernetes Jobs, Kustomize-compatible YAML, `go.uber.org/mock`,
 - Transient retry, NATS reconnect, and post-restart warm-up.
 - Correctness sampling against data produced by the current run.
 - Bounded in-process metrics and Prometheus export.
-- Kubernetes seed, soak, and teardown Jobs.
+- Kubernetes Seed Job, single-replica Soak Deployment, and Teardown Job.
 
 ### Explicitly out of scope
 
@@ -118,18 +119,20 @@ loadgen teardown --workload=soak
 run ID, soak loads the topology from the run manifest, and teardown removes
 only data owned by that run.
 
-The soak command records lifecycle metadata such as first start, configured
-duration, deadline, and restart count in the manifest. This is not a
-recent-message checkpoint: after a pod restart the message catalog is empty
-and must be rebuilt from fresh successful sends.
+The soak command supports a bounded `duration` mode for local/CI use and a
+`continuous` mode for the Kubernetes Deployment. It records lifecycle metadata
+such as first start, optional deadline, restart count, stop time, and heartbeat
+lease in the manifest. This is not a recent-message checkpoint: after a pod
+restart the message catalog is empty and must be rebuilt from fresh successful
+sends.
 
 ---
 
 ## Kubernetes Execution Model
 
-Run A is a finite experiment, so Kubernetes `Job` is the correct controller.
-A `Deployment` would restart a successfully completed 72-hour process
-indefinitely.
+The company platform limits Jobs to one day, while the soak must run until an
+operator publishes a stop release. Seed and teardown are bounded batch work;
+the load phase is a continuous single-replica Deployment.
 
 ```text
 seed Job (manual)
@@ -137,10 +140,11 @@ seed Job (manual)
   -> borrows real users
   -> writes owned Mongo topology and room keys
 
-soak Job (one completion, one pod)
+soak Deployment (one replica, Recreate strategy)
   -> loads the run manifest
   -> exposes Prometheus metrics
-  -> runs until the manifest deadline
+  -> renews a Mongo heartbeat lease
+  -> runs until Argo CD removes it
   -> re-warms after a pod restart
 
 teardown Job (manual, after evidence retention)
@@ -150,11 +154,12 @@ teardown Job (manual, after evidence retention)
 
 Kubernetes requirements:
 
-- `parallelism: 1` and `completions: 1`; two soak pods would double the target
-  rate and invalidate the run.
-- `restartPolicy: OnFailure`.
-- A Job-level deadline slightly longer than the configured run duration as a
-  fail-safe, while the process uses the manifest deadline for normal success.
+- `parallelism: 1` and `completions: 1` for both Jobs.
+- Exactly one Soak Deployment replica with `strategy.type=Recreate`; two soak
+  pods would double the target rate and invalidate the run.
+- Job-level deadlines below the platform's one-day limit.
+- Continuous mode has no process or Kubernetes deadline. Argo CD removal sends
+  SIGTERM and the process drains before exit.
 - NATS credentials mounted read-only from a Secret.
 - MongoDB and Cassandra credentials sourced from Secret keys, never committed.
 - Non-secret workload settings sourced from a ConfigMap.
@@ -165,7 +170,7 @@ Kubernetes requirements:
 - A ClusterIP Service and Prometheus scrape annotations for port 9099.
 - `automountServiceAccountToken: false`, non-root execution, and a read-only
   root filesystem.
-- No automatic teardown chained to Job completion. Evidence must remain for
+- No automatic teardown chained to Deployment removal. Evidence must remain for
   the agreed 24-72 hour review window.
 
 Prometheus is the cross-pod source of record if Kubernetes restarts the soak
@@ -182,8 +187,11 @@ loadgen settings remain unchanged.
 | Variable | Proposed default | Purpose |
 |---|---:|---|
 | `SOAK_RUN_ID` | required | Stable ownership and correlation ID |
-| `SOAK_RUN_DURATION` | `72h` | Total run duration |
+| `SOAK_RUN_MODE` | `duration` | `duration` for bounded runs or `continuous` until SIGTERM |
+| `SOAK_RUN_DURATION` | `72h` | Total run duration in `duration` mode |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from steady-state reporting |
+| `SOAK_HEARTBEAT_INTERVAL` | `30s` | Active-run Mongo lease renewal |
+| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown active-run guard threshold |
 | `SOAK_SEND_RATE` | `100` | Total sends per second |
 | `SOAK_READ_RATE` | `700` | Main history reads per second |
 | `SOAK_THREAD_SHARE` | `0.10` | Thread replies as a share of sends |
@@ -796,20 +804,23 @@ make test
 - Test warm-up exclusion and catalog-not-ready skips.
 - Test bounded in-flight work, cancellation, graceful drain, and no goroutine
   leaks.
-- Test manifest deadline reuse after a simulated pod restart.
+- Test manifest deadline reuse for bounded mode and deadline-free continuous
+  restart/stop behavior.
 
 **Green and refactor**
 
 - Reuse `pacedDispatch` rather than writing another ticker.
 - Share a global in-flight budget.
 - Continue sends and safe history reads while stateful actions re-warm.
-- Distinguish configured-duration completion from SIGTERM or dependency
-  failure so the Kubernetes Job can restart when appropriate.
+- Distinguish configured-duration completion, graceful SIGTERM stop, and
+  dependency failure so the Deployment can resume appropriately.
+- Renew a Mongo-backed heartbeat lease and make teardown reject a fresh lease.
 
 **Acceptance**
 
 - Configured rates remain independent.
-- A pod restart does not double the total run window.
+- A bounded pod restart does not double the total run window; a continuous
+  restart has no deadline.
 - The recent-message catalog is rebuilt only from fresh gatekeeper successes.
 - Graceful shutdown stops new work before draining in-flight work.
 
@@ -911,49 +922,52 @@ make test
 
 ---
 
-## Task 16: Add Kubernetes Deployment Assets
+## Task 16: Add GitOps Kubernetes Deployment Assets
 
 **Files**
 
 - Create `tools/loadgen/deploy/k8s/README.md`.
-- Create `tools/loadgen/deploy/k8s/kustomization.yaml`.
-- Create `tools/loadgen/deploy/k8s/configmap.yaml`.
-- Create `tools/loadgen/deploy/k8s/service.yaml`.
-- Create `tools/loadgen/deploy/k8s/seed-job.yaml`.
-- Create `tools/loadgen/deploy/k8s/soak-job.yaml`.
-- Create `tools/loadgen/deploy/k8s/teardown-job.yaml`.
+- Create a Helm Chart rooted at `tools/loadgen/deploy/k8s`.
+- Add templates for the ConfigMap, metrics Service, Seed Job, Soak
+  Deployment, and Teardown Job.
+- Add values schema and non-secret validation values.
 - Modify the root `Makefile` with a manifest validation target if no suitable
   target exists.
 
 **Red**
 
-- Add a validation check that renders the Kustomize directory and performs a
-  client-side Kubernetes dry run through a Make target.
-- Confirm the check fails while manifests are absent.
+- Add a validation check that lints the Chart and renders every lifecycle
+  phase through a Make target.
+- Confirm the check fails while the Chart is absent.
 
 **Green and refactor**
 
-- Add separate, manually applied Jobs for seed, soak, and teardown.
+- Render exactly one workload phase for `seed`, `soak`, `stopped`, or
+  `teardown`.
+- Use bounded Jobs for seed/teardown and a single-replica, `Recreate`
+  Deployment for continuous load.
 - Reference an operator-created Secret; do not add credentials or encoded
   credentials to the repository.
 - Add the non-secret ConfigMap, metrics Service, scrape annotations, resource
   settings, security context, read-only credential mount, and termination
   grace period.
-- Enforce one soak pod with one completion.
-- Keep teardown out of the soak Job dependency graph.
-- Document image override, Secret creation, apply order, status inspection,
-  log collection, Prometheus verification, evidence retention, and manual
+- Enforce an immutable image digest for non-local releases.
+- Require an explicit teardown approval value and exact keyspace confirmation.
+- Keep teardown out of Argo hooks and out of the soak Deployment lifecycle.
+- Document values promotion, Argo health gates, status inspection, log
+  collection, Prometheus verification, evidence retention, and manual
   cleanup.
 
 **Acceptance**
 
 - The Docker image starts directly with the expected subcommand.
-- Manifests pass the repository's Kubernetes validation Make target.
-- A successful soak Job is not restarted.
-- A failed/evicted pod can restart and resumes the manifest deadline with an
-  empty catalog.
+- The Chart passes the repository's Kubernetes validation Make target.
+- Seed and Teardown Jobs stay below the one-day platform limit.
+- The Soak Deployment runs until its phase changes to `stopped`.
+- A failed/evicted pod restarts with an empty catalog and resumes the same
+  continuous run.
 - Teardown requires both the run ID and exact keyspace confirmation.
-- No Kubernetes manifest contains a staging hostname, credential, or
+- No Chart template contains a staging hostname, credential, or
   environment-specific namespace.
 
 **Commit**
@@ -985,7 +999,7 @@ the CLI/environment boundary (`soak_main.go`) and Mongo adapter
 baseline rather than requiring this Cassandra-only change to repay unrelated
 legacy coverage debt.
 
-Also run the Kubernetes manifest validation Make target added in Task 16 and
+Also run the Helm/Kubernetes validation Make target added in Task 16 and
 build the existing loadgen Dockerfile.
 
 ---
@@ -1002,8 +1016,8 @@ creating the seed Job, the operator must confirm:
   `message-worker` and `history-service`;
 - `MESSAGE_BUCKET_HOURS` consistency;
 - `ATREST_ENABLED=true` and working Vault/KMS dependencies;
-- enough free Cassandra disk for the projected 72-hour growth plus safety
-  margin;
+- enough free Cassandra disk for the approved maximum observation window plus
+  safety margin;
 - Prometheus scraping of loadgen and access to L2/L3 dashboards;
 - the evidence-retention and teardown time;
 - awareness that NATS, Elasticsearch, and Valkey may receive test side

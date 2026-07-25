@@ -10,6 +10,8 @@ NATS_CONTAINER   := chat-local-nats
 OBS_COMPOSE      := tools/observability/docker-compose.yml
 NULL_DEVICE      := $(if $(filter Windows_NT,$(OS)),NUL,/dev/null)
 KUBE_DRY_RUN     ?= false
+LOADGEN_CHART    := tools/loadgen/deploy/k8s
+LOADGEN_VALUES   := $(LOADGEN_CHART)/values-validation.yaml
 
 # --- SAST / dev tooling ------------------------------------------------------
 # Pinned tool versions. Keep GOLANGCI_LINT_VERSION in sync with
@@ -113,16 +115,18 @@ else
 endif
 endif
 
-# Always render every Cassandra Run A resource. When the current Kubernetes
-# context is reachable, also run kubectl's client dry-run with API discovery.
-# The operator's real apply performs final server-side OpenAPI validation.
+# Lint and render every GitOps phase. The validation values use inert example
+# endpoints and an immutable image digest; no Secret value is committed.
 validate-loadgen-k8s:
-	kubectl kustomize tools/loadgen/deploy/k8s > $(NULL_DEVICE)
-	kubectl kustomize --load-restrictor LoadRestrictionsNone tools/loadgen/deploy/k8s/validation > $(NULL_DEVICE)
+	helm lint --strict $(LOADGEN_CHART) -f $(LOADGEN_VALUES)
+	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=seed --show-only templates/seed-job.yaml > $(NULL_DEVICE)
+	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=soak --show-only templates/soak-deployment.yaml > $(NULL_DEVICE)
+	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=stopped > $(NULL_DEVICE)
+	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=teardown --set teardown.approved=true --show-only templates/teardown-job.yaml > $(NULL_DEVICE)
 ifeq ($(KUBE_DRY_RUN),true)
-	kubectl kustomize --load-restrictor LoadRestrictionsNone tools/loadgen/deploy/k8s/validation | kubectl apply --dry-run=client -f -
+	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=soak | kubectl apply --dry-run=client -f -
 else
-	@echo "Render validation passed. Re-run with KUBE_DRY_RUN=true against a reachable Kubernetes context for client dry-run discovery."
+	@echo "Chart validation passed. Re-run with KUBE_DRY_RUN=true against a reachable Kubernetes context for client dry-run discovery."
 endif
 
 # --- Local dev docker targets -------------------------------------------------

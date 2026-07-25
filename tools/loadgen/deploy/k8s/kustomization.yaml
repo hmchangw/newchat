@@ -1,9 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - configmap.yaml
-  - service.yaml
-
-# Jobs are deliberately excluded. Applying this directory creates only shared
-# configuration and metrics discovery; operators apply exactly one phase Job
-# at a time after patching its image.

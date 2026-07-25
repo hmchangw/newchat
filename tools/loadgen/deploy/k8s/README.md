@@ -1,242 +1,230 @@
-# Cassandra Run A on Kubernetes
+# Cassandra Run A Helm release
 
-These manifests run the Cassandra-focused Run A harness in three explicit
-phases. They contain no namespace, staging endpoint, or credential.
+This Chart packages the Cassandra-focused Run A harness for an Argo CD
+release pipeline. Production operation is fully declarative: operators change
+the run values, publish a release, and let Argo CD reconcile the selected
+phase. Direct production `kubectl apply`, image patching, and Helm hooks are
+not part of the workflow.
 
-- `kustomization.yaml` installs only the shared non-secret ConfigMap and
-  metrics Service.
-- `seed-job.yaml` borrows real users read-only and creates run-owned Mongo
-  topology.
-- `soak-job.yaml` drives the real gatekeeper, message-worker, and
-  history-service paths.
-- `teardown-job.yaml` is manual and is never created by the shared
-  Kustomization.
+The Chart deploys only loadgen. NATS, MongoDB, Cassandra,
+message-gatekeeper, message-worker, and history-service must already exist.
 
-Never apply all YAML files as a directory. Doing so would start teardown at
-the same time as the soak.
+## Resource model
 
-## Prerequisites and operational gate
-
-Implementation completion does not authorize a staging run. Before seed,
-record approval for:
-
-1. The namespace, site ID, NATS account, Mongo database, and unique run ID.
-2. The borrowed-user filter/count, room count, and MongoDB write budget.
-3. A Cassandra keyspace dedicated to the test if Cassandra cleanup will use
-   `truncate`.
-4. Matching `MESSAGE_BUCKET_HOURS` on loadgen, message-worker, and
-   history-service.
-5. `ATREST_ENABLED=true` and working Vault/KMS dependencies on
-   message-worker and history-service.
-6. Cassandra free disk for projected growth plus safety margin.
-7. Prometheus discovery of this Job and access to the Cassandra/service
-   dashboards.
-8. The evidence-retention window and named operator responsible for manual
-   teardown.
-9. Acceptance that NATS, Elasticsearch, and Valkey side effects are not
-   automatically removed by this harness.
-
-Build and publish the existing `tools/loadgen/deploy/Dockerfile`. Record the
-immutable image digest:
-
-```bash
-export NAMESPACE='<approved-namespace>'
-export LOADGEN_IMAGE='<registry>/newchat-loadgen@sha256:<digest>'
-```
-
-Do not use a mutable tag for a 72-hour result.
-
-## Create operator-owned configuration
-
-The committed ConfigMap holds only portable workload defaults. Create a
-run-specific ConfigMap separately. `SOAK_CONFIRM_KEYSPACE` is required even
-when cleanup is `none`, so the evidence bundle records the intended target.
-Use `truncate` only for a disposable, dedicated keyspace.
-
-```bash
-kubectl -n "$NAMESPACE" create configmap cassandra-soak-run \
-  --from-literal=SOAK_RUN_ID='<unique-run-id>' \
-  --from-literal=SITE_ID='<site-id>' \
-  --from-literal=CASSANDRA_KEYSPACE='<dedicated-keyspace>' \
-  --from-literal=SOAK_CASSANDRA_CLEANUP='none' \
-  --from-literal=SOAK_CONFIRM_KEYSPACE='<dedicated-keyspace>' \
-  --dry-run=client -o yaml |
-  kubectl -n "$NAMESPACE" apply -f -
-```
-
-Create the connection Secret. The NATS credential is mounted read-only; URIs
-and credentials are injected as individual environment variables. Optional
-Mongo authentication keys may be omitted. Cassandra connection keys are
-needed only when `SOAK_CASSANDRA_CLEANUP=truncate`.
-
-```bash
-kubectl -n "$NAMESPACE" create secret generic cassandra-soak-loadgen-secrets \
-  --from-literal=nats-url='<nats-url>' \
-  --from-file=backend.creds='<path-to-backend.creds>' \
-  --from-literal=mongo-uri='<mongo-uri>' \
-  --from-literal=mongo-username='<mongo-user>' \
-  --from-literal=mongo-password='<mongo-password>' \
-  --dry-run=client -o yaml |
-  kubectl -n "$NAMESPACE" apply -f -
-```
-
-For guarded Cassandra truncation, recreate/apply the Secret with these
-additional keys:
+A run advances through four desired states:
 
 ```text
-cassandra-hosts
-cassandra-username
-cassandra-password
+seed Job -> soak Deployment -> stopped -> teardown Job
 ```
 
-Do not commit either generated object or its rendered YAML.
+- `phase=seed` renders one bounded Job. It borrows existing Mongo users
+  read-only, creates run-owned room/subscription topology, seeds room
+  transport keys, and writes the ownership manifest.
+- `phase=soak` renders one single-replica Deployment. It runs continuously
+  through the real service path until the release changes phase.
+- `phase=stopped` renders no workload controller. Argo CD removes the
+  Deployment and Kubernetes sends SIGTERM, allowing loadgen to drain
+  in-flight work and mark the run stopped.
+- `phase=teardown` renders one bounded Job. It deletes only run-owned Mongo
+  topology and performs Cassandra cleanup only under the guarded,
+  dedicated-keyspace option.
 
-Apply shared configuration and verify that the intended workload values are
-present:
+The Seed and Teardown Jobs default to a two-hour
+`activeDeadlineSeconds`, below the platform's one-day Job limit. The Soak
+Deployment has no duration or Kubernetes deadline.
 
-```bash
-kubectl -n "$NAMESPACE" apply -k tools/loadgen/deploy/k8s
-kubectl -n "$NAMESPACE" get configmap cassandra-soak-loadgen-config -o yaml
-kubectl -n "$NAMESPACE" get configmap cassandra-soak-run -o yaml
+The phase resources are ordinary Argo CD managed resources, not
+`PreSync`/`Sync`/`PostSync` hooks. In particular, teardown can never run
+automatically after soak completion.
+
+## Required release inputs
+
+Create one values file per run in the deployment configuration repository.
+Do not commit credentials.
+
+```yaml
+phase: seed
+runId: cassandra-run-a-20260725-01
+siteId: site-staging
+
+image:
+  repository: registry.example/newchat-loadgen
+  digest: sha256:<immutable-digest>
+
+existingSecret: cassandra-soak-loadgen-secrets
+
+mongo:
+  database: chat
+
+cassandra:
+  keyspace: chat_soak_20260725
+  cleanup: none
+  confirmKeyspace: chat_soak_20260725
+  messageBucketHours: 72
 ```
 
-Override any provisional rate or population value by editing the
-`cassandra-soak-loadgen-config` object in the cluster before seed. Keep the
-rendered, non-secret ConfigMaps in the evidence bundle.
+Staging releases must use an immutable digest. A mutable tag is accepted only
+when `image.allowMutableTag=true`, which is reserved for local kind
+validation.
 
-## Phase 1: seed
+The referenced Secret is operator-owned and must provide:
 
-Patch the immutable image locally before creating the Job. This avoids a race
-where the placeholder image could start before `kubectl set image`.
+| Key | Required by | Purpose |
+|---|---|---|
+| `nats-url` | all phases | NATS endpoint |
+| `backend.creds` | all phases | Mounted NATS credentials |
+| `mongo-uri` | all phases | MongoDB endpoint |
+| `mongo-username` | optional | MongoDB authentication |
+| `mongo-password` | optional | MongoDB authentication |
+| `cassandra-hosts` | truncate teardown only | Direct cleanup connection |
+| `cassandra-username` | optional truncate auth | Cassandra authentication |
+| `cassandra-password` | optional truncate auth | Cassandra authentication |
 
-```bash
-kubectl -n "$NAMESPACE" delete job cassandra-soak-seed --ignore-not-found
-kubectl set image --local \
-  -f tools/loadgen/deploy/k8s/seed-job.yaml \
-  loadgen="$LOADGEN_IMAGE" -o yaml |
-  kubectl -n "$NAMESPACE" apply -f -
+## Operational gates
 
-kubectl -n "$NAMESPACE" wait \
-  --for=condition=complete job/cassandra-soak-seed --timeout=30m
-kubectl -n "$NAMESPACE" logs job/cassandra-soak-seed
+Implementation completion does not authorize a staging run. Before releasing
+the seed phase, record approval for:
+
+1. Namespace, site ID, NATS account, Mongo database, and unique run ID.
+2. Borrowed-user filter/count, room count, and MongoDB write budget.
+3. A dedicated Cassandra keyspace if cleanup will use `truncate`.
+4. Matching `MESSAGE_BUCKET_HOURS` on loadgen, message-worker, and
+   history-service.
+5. At-rest encryption enabled with working Vault/KMS dependencies.
+6. Cassandra free disk for projected growth plus safety margin.
+7. Prometheus discovery and access to Cassandra/service dashboards.
+8. Evidence-retention window and the named teardown approver.
+9. Acceptance that NATS, Elasticsearch, and Valkey side effects are not
+   automatically removed.
+
+## Release sequence
+
+### 1. Seed
+
+Publish the run values with:
+
+```yaml
+phase: seed
+teardown:
+  approved: false
 ```
 
-Before proceeding, inspect the `loadgen_soak_runs` manifest, owned room and
-subscription counts, borrowed-user count, and the absence of changes to
-borrowed user documents.
+Wait for the Argo CD Job health to become complete. Before promotion, inspect
+the `loadgen_soak_runs` manifest, owned room/subscription counts, borrowed-user
+count, room keys, and the absence of changes to borrowed user documents.
+Capture Job status and logs before changing phase if the Argo application
+prunes resources that disappear from the next render.
 
-## Phase 2: soak
+### 2. Start and sustain load
 
-The soak Job has exactly one completion and one pod in parallel. A successful
-Job is not restarted. A failed container or evicted pod can retry under the
-Job's bounded backoff. The process reloads its Mongo manifest and resumes the
-original wall-clock deadline; its recent-message catalog intentionally starts
-empty and warms again.
+Promote the same run values to:
 
-```bash
-kubectl -n "$NAMESPACE" delete job cassandra-soak-run --ignore-not-found
-kubectl set image --local \
-  -f tools/loadgen/deploy/k8s/soak-job.yaml \
-  loadgen="$LOADGEN_IMAGE" -o yaml |
-  kubectl -n "$NAMESPACE" apply -f -
-
-kubectl -n "$NAMESPACE" get job cassandra-soak-run --watch
-kubectl -n "$NAMESPACE" get pods \
-  -l app.kubernetes.io/component=cassandra-soak,loadgen.newchat/phase=soak
-kubectl -n "$NAMESPACE" logs -f job/cassandra-soak-run
+```yaml
+phase: soak
 ```
 
-The first front-door probe must log
-`Cassandra soak encryption preflight passed`. This means the gatekeeper
-accepted the message and message-worker created a non-empty
-`room_data_keys.wrappedDEK`. A room's seeded `rooms.encKey` is not equivalent
-evidence.
+Argo CD replaces the Seed Job with a single-replica Deployment. The
+Deployment uses `strategy.type=Recreate`, so a configuration or image rollout
+cannot briefly double the generated rate.
 
-Verify Prometheus discovery:
+The first front-door probe must log:
 
-```bash
-kubectl -n "$NAMESPACE" get service,endpoints cassandra-soak-loadgen
-kubectl -n "$NAMESPACE" port-forward service/cassandra-soak-loadgen 9099:9099
+```text
+Cassandra soak encryption preflight passed
 ```
 
-Confirm `/metrics` exposes `loadgen_soak_operations_total`,
-`loadgen_soak_rpc_latency_seconds`, `loadgen_soak_errors_total`,
-`loadgen_soak_retries_total`, `loadgen_soak_verifications_total`, and
-`loadgen_soak_mutation_target_missing_total`. The port-forward is for
-inspection only; the Service and pod annotations are the scrape discovery
-contract.
+The Deployment then runs until another release changes its phase. Pod
+replacement reloads the Mongo manifest, increments the restart count, starts
+a fresh warm-up, and rebuilds the in-memory recent-message catalog. Prometheus
+counters are the authoritative cross-restart evidence.
 
-## Evidence retention
+Freeze the image and workload configuration while collecting a comparable
+run. A values change restarts the Deployment because the Pod template carries
+a ConfigMap checksum.
 
-Before teardown, retain at minimum:
+### 3. Stop load
 
-- the immutable loadgen image digest and Git commit;
-- both non-secret ConfigMaps and the Job/Pod specs;
-- complete seed and soak logs, including the final per-RPC report;
-- Job status, pod restart count, events, node identity, and start/end times;
-- Prometheus snapshots or exported query results for achieved rate, errors,
-  retries, latency drift, saturation, and correctness classes;
-- Cassandra capacity, compaction, tombstone, latency, and error dashboards;
-- the Mongo run manifest and ownership counts;
-- the accepted preflight message ID and wrapped-DEK existence check;
-- the approved environment assumptions and any deviations during the run.
+Promote to:
 
-Do not export Secret values, NATS credentials, message bodies, or plaintext
-DEKs.
-
-## Phase 3: manual teardown
-
-Teardown is intentionally absent from the soak Job and Kustomization. Run it
-only after evidence retention and explicit approval. Check the run-specific
-ConfigMap immediately beforehand:
-
-```bash
-kubectl -n "$NAMESPACE" get configmap cassandra-soak-run -o yaml
+```yaml
+phase: stopped
 ```
 
-For Mongo-only ownership cleanup, keep
-`SOAK_CASSANDRA_CLEANUP=none`. For a dedicated disposable keyspace, set
-`SOAK_CASSANDRA_CLEANUP=truncate` and ensure
-`SOAK_CONFIRM_KEYSPACE` exactly equals `CASSANDRA_KEYSPACE`; the binary
-rejects any mismatch.
+Argo CD removes the Deployment. SIGTERM causes loadgen to stop dispatching,
+drain in-flight operations and NATS, print its process-local report, and mark
+the run stopped. Confirm that no loadgen Pod remains and that the Mongo
+heartbeat no longer advances.
 
-```bash
-kubectl -n "$NAMESPACE" delete job cassandra-soak-teardown --ignore-not-found
-kubectl set image --local \
-  -f tools/loadgen/deploy/k8s/teardown-job.yaml \
-  loadgen="$LOADGEN_IMAGE" -o yaml |
-  kubectl -n "$NAMESPACE" apply -f -
+Do not move directly from `soak` to `teardown`.
 
-kubectl -n "$NAMESPACE" wait \
-  --for=condition=complete job/cassandra-soak-teardown --timeout=2h
-kubectl -n "$NAMESPACE" logs job/cassandra-soak-teardown
+### 4. Preserve evidence
+
+Before teardown, retain:
+
+- immutable image digest and complete non-secret values;
+- manifest state, restart count, first-start/stop times, and heartbeat;
+- Deployment/Pod status, events, node identity, and restart history;
+- logs and process-local reports;
+- Prometheus rate, error, retry, latency, saturation, and verification data;
+- Cassandra service metrics, disk usage, compaction, timeout, and latency
+  evidence;
+- Mongo owned-object counts before and after cleanup.
+
+Never export Secret values, NATS credentials, plaintext message bodies, or
+wrapped key material into the evidence bundle.
+
+### 5. Teardown
+
+After explicit approval, promote to:
+
+```yaml
+phase: teardown
+
+teardown:
+  approved: true
 ```
 
-Verify that borrowed users and unrelated runs remain, then remove the
-operational objects when the retention window ends:
+The Chart refuses to render `phase=teardown` without the approval flag.
+Loadgen additionally refuses teardown while the manifest has a fresh active
+heartbeat.
 
-```bash
-kubectl -n "$NAMESPACE" delete job \
-  cassandra-soak-seed cassandra-soak-run cassandra-soak-teardown \
-  --ignore-not-found
-kubectl -n "$NAMESPACE" delete service cassandra-soak-loadgen
-kubectl -n "$NAMESPACE" delete configmap \
-  cassandra-soak-loadgen-config cassandra-soak-run
-kubectl -n "$NAMESPACE" delete secret cassandra-soak-loadgen-secrets
+The safe Cassandra default is:
+
+```yaml
+cassandra:
+  cleanup: none
 ```
 
-If Cassandra cleanup remains `none`, its test rows remain by design and need a
-separately approved retention/deletion procedure.
+Only a disposable dedicated keyspace may use:
 
-## Local validation
+```yaml
+cassandra:
+  keyspace: chat_soak_20260725
+  cleanup: truncate
+  confirmKeyspace: chat_soak_20260725
+```
 
-This requires only `kubectl`. It renders the safe shared Kustomization and a
-validation-only aggregate containing all three phase Jobs. When the current
-Kubernetes context is reachable, opt in to a client-side dry run using that
-cluster's API discovery. Offline runs report that final server schema
-validation is deferred to the real apply:
+The Chart and binary both require exact keyspace confirmation. A shared
+staging keyspace must never use `truncate`.
+
+After the Teardown Job completes and cleanup evidence is retained, remove the
+run release from desired state.
+
+## Validation
+
+Run the portable Chart checks locally:
 
 ```bash
 make validate-loadgen-k8s
+```
+
+This lints the Chart and renders the Seed Job, Soak Deployment, stopped state,
+and approved Teardown Job. When a reachable Kubernetes context exists:
+
+```bash
 make validate-loadgen-k8s KUBE_DRY_RUN=true
 ```
+
+The optional command adds kubectl API discovery. A real release remains the
+final validation of company admission policies, Argo CD configuration,
+ExternalSecret integration, quotas, and network policy.
