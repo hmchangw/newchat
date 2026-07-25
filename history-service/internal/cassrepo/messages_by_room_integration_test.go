@@ -95,68 +95,65 @@ func TestRepository_GetMessagesBefore(t *testing.T) {
 	assert.True(t, page.Data[0].CreatedAt.After(page.Data[1].CreatedAt))
 }
 
-func TestRepository_GetMessagesAtOrBefore(t *testing.T) {
-	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
-	ctx := context.Background()
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	seedMessages(t, session, "r1", base, 5) // m0..m4 at base+0..+4min
-
-	q, err := ParsePageRequest("", 10)
-	require.NoError(t, err)
-
-	// Pivot exactly on m2's created_at: inclusive upper must include m2 and exclude m3/m4.
-	page, err := repo.GetMessagesAtOrBefore(ctx, "r1", base.Add(2*time.Minute), time.Time{}, q)
-	require.NoError(t, err)
-	require.Len(t, page.Data, 3) // m0, m1, m2
-	assert.Equal(t, "m2", page.Data[0].MessageID, "newest at-or-before is the pivot row itself")
-	assert.Equal(t, "m1", page.Data[1].MessageID)
-	assert.Equal(t, "m0", page.Data[2].MessageID)
-}
-
-func TestRepository_GetMessagesAtOrBefore_SameMillisecondSiblings(t *testing.T) {
+// TestRepository_GetMessagesBefore_PlusOneMsInclusive verifies the timestamp-pivot
+// surrounding read's inclusivity trick: calling the strict GetMessagesBefore with
+// pivot+1ms includes a message whose created_at equals the pivot exactly (and its
+// same-millisecond siblings) while excluding anything strictly after it.
+func TestRepository_GetMessagesBefore_PlusOneMsInclusive(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	ctx := context.Background()
 
-	// Two messages share the exact same created_at millisecond; both must be
-	// included by the inclusive upper bound.
-	at := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
-	seedMessage(t, session, "r-ties", "tie-a", at)
-	seedMessage(t, session, "r-ties", "tie-b", at)
-	seedMessage(t, session, "r-ties", "after", at.Add(time.Minute))
+	pivot := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	seedMessage(t, session, "r-incl", "at-a", pivot) // exactly on the pivot
+	seedMessage(t, session, "r-incl", "at-b", pivot) // same-millisecond sibling
+	seedMessage(t, session, "r-incl", "before", pivot.Add(-time.Minute))
+	seedMessage(t, session, "r-incl", "after", pivot.Add(time.Minute))
 
 	q, err := ParsePageRequest("", 10)
 	require.NoError(t, err)
 
-	page, err := repo.GetMessagesAtOrBefore(ctx, "r-ties", at, time.Time{}, q)
+	page, err := repo.GetMessagesBefore(ctx, "r-incl", pivot.Add(time.Millisecond), time.Time{}, q)
 	require.NoError(t, err)
 	ids := []string{}
 	for _, m := range page.Data {
 		ids = append(ids, m.MessageID)
 	}
-	assert.Contains(t, ids, "tie-a")
-	assert.Contains(t, ids, "tie-b")
+	assert.Contains(t, ids, "at-a")
+	assert.Contains(t, ids, "at-b")
+	assert.Contains(t, ids, "before")
 	assert.NotContains(t, ids, "after")
 }
 
-func TestRepository_GetMessagesBetweenDescInclusive(t *testing.T) {
+// TestRepository_GetMessagesBefore_PlusOneMsAtBucketBoundary covers the only case
+// where pivot+1ms crosses into the next bucket: pivot is the last millisecond of
+// its bucket window. Because pivot is then that bucket's maximum time, "all of the
+// bucket" still equals "created_at <= pivot", so the shift stays exact.
+func TestRepository_GetMessagesBefore_PlusOneMsAtBucketBoundary(t *testing.T) {
 	session := setupCassandra(t)
+	windowMs := int64(24 * time.Hour / time.Millisecond)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	ctx := context.Background()
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	seedMessages(t, session, "r1", base, 5) // m0..m4
+
+	// pivot = last ms of a bucket window → pivot+1ms starts the next bucket.
+	boundary := (time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC).UnixMilli() / windowMs) * windowMs
+	pivot := time.UnixMilli(boundary - 1).UTC()
+	seedMessage(t, session, "r-bnd", "at-pivot", pivot)
+	seedMessage(t, session, "r-bnd", "before", pivot.Add(-time.Hour))
+	seedMessage(t, session, "r-bnd", "after", pivot.Add(time.Millisecond)) // first ms of the next bucket
 
 	q, err := ParsePageRequest("", 10)
 	require.NoError(t, err)
 
-	// (since, at] with since=1min, at=3min → m2, m3 (excludes m1 at the strict
-	// lower bound, includes m3 at the inclusive upper bound).
-	page, err := repo.GetMessagesBetweenDescInclusive(ctx, "r1", base.Add(1*time.Minute), base.Add(3*time.Minute), q)
+	page, err := repo.GetMessagesBefore(ctx, "r-bnd", pivot.Add(time.Millisecond), time.Time{}, q)
 	require.NoError(t, err)
-	require.Len(t, page.Data, 2)
-	assert.Equal(t, "m3", page.Data[0].MessageID) // DESC: inclusive upper first
-	assert.Equal(t, "m2", page.Data[1].MessageID)
+	ids := []string{}
+	for _, m := range page.Data {
+		ids = append(ids, m.MessageID)
+	}
+	assert.Contains(t, ids, "at-pivot")
+	assert.Contains(t, ids, "before")
+	assert.NotContains(t, ids, "after", "message in the next bucket must not leak into <= pivot")
 }
 
 func TestRepository_GetMessagesBetweenDesc(t *testing.T) {

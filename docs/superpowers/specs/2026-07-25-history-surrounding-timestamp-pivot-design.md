@@ -59,20 +59,20 @@ land in the read group (correct: all are "at or before" the watermark).
 strict `<`** and its manual central splice unchanged — making its before-read inclusive would return
 the central message in the before group *and* splice it, duplicating it.
 
-### 4. Repository — explicit inclusive reads (`internal/cassrepo/messages_by_room.go`)
+### 4. Repository — reuse the strict reads via a `+1ms` pivot shift
 
-Option (b) chosen: explicit named methods, not a `+1ms` pivot shift. Add to the `MessageReader`
-interface and `*cassrepo.Repository`:
+Option (a) chosen: no new repository methods. The timestamp before-read calls the existing strict
+`GetMessagesBefore` / `GetMessagesBetweenDesc` with the pivot shifted up one millisecond
+(`beforeUpper = pivot + 1ms`). At millisecond precision, `created_at < pivot+1ms` selects exactly
+the same rows as `created_at <= pivot`, so the shift is an exact inclusive upper bound.
 
-- `GetMessagesAtOrBefore(ctx, roomID, at, floor, pageReq)` — mirrors `GetMessagesBefore` with
-  `created_at <= at`. Used when `accessSince == nil`.
-- `GetMessagesBetweenDescInclusive(ctx, roomID, since, at, pageReq)` — mirrors
-  `GetMessagesBetweenDesc` with upper bound `created_at <= at` (lower bound `created_at > since`
-  unchanged, so pre-access messages still cannot leak). Used when `accessSince != nil`.
+**Bucket-boundary correctness.** `pivot+1ms` crosses into the next bucket only when `pivot` is the
+last millisecond of its bucket window (`pivot ≡ windowMs-1`). In that single case `pivot` is also
+the bucket's maximum representable time, so "all of that bucket" still equals "`created_at <=
+pivot`" — the strict walk (first-bucket `< pivot+1ms` on the empty next bucket, then the pivot
+bucket read unbounded) returns exactly the right rows. No leak, no new method needed.
 
-Each existing strict method and its inclusive sibling delegate to a shared internal walk helper
-parameterised by an `inclusiveUpper bool`; the bool selects between two pre-defined constant query
-strings (`created_at < ?` vs `created_at <= ?`) so no query string is built dynamically (SAST-clean).
+The `MessageReader` interface is unchanged.
 
 ### 5. Handler (`internal/service/messages.go`)
 
@@ -86,7 +86,8 @@ Refactor `LoadSurroundingMessages` into:
   check `pivot.Before(*accessSince)` → `Forbidden(..., WithReason(MessageOutsideAccessWindow))`
   (same reason as messageId mode for consistent frontend branching); split `limit` into
   `beforeCount = (limit+1)/2` / `afterCount = limit/2` (before gets the larger half, no slot
-  reserved for a central); inclusive before-read + strict after-read; `central = nil`.
+  reserved for a central); before-read uses the strict method with `pivot+1ms` (inclusive of the
+  at-pivot message), after-read strict at `pivot`; `central = nil`.
 - **`assembleSurrounding`** (shared) — runs the errgroup (before, after, read-floor), assembles
   `reverse(before) + [central?] + after`, redacts inaccessible quotes, decodes attachments, and
   builds the response with `MoreBefore`/`MoreAfter`/`MinUserLastSeenAt`.
@@ -112,17 +113,17 @@ to `defaultCassPageSize (50)`.
 ## Testing (TDD)
 
 - **Unit** (`internal/service/messages_test.go`, mocked reader):
-  - timestamp happy path (no HSS): `GetMessagesAtOrBefore` + `GetMessagesAfter` called with pivot;
-    result has no central; oldest-first assembly.
-  - timestamp with HSS: `GetMessagesBetweenDescInclusive` used for before.
+  - timestamp happy path (no HSS): `GetMessagesBefore` called with `pivot+1ms` + `GetMessagesAfter`
+    with `pivot`; result has no central; oldest-first assembly.
+  - timestamp with HSS: `GetMessagesBetweenDesc` used for before with upper bound `pivot+1ms`.
   - `pivot.Before(accessSince)` → 403 `MessageOutsideAccessWindow`.
   - validation: both set / neither set / non-positive timestamp → `BadRequest`.
   - `limit == 1` → 1 before, after read skipped.
   - `moreBefore`/`moreAfter` propagation; before/after store errors wrapped.
   - regression: all existing messageId-mode tests still pass unchanged.
 - **Integration** (`internal/cassrepo/messages_by_room_integration_test.go`):
-  - `GetMessagesAtOrBefore` includes the exact-`at` row and same-ms siblings; excludes `> at`.
-  - `GetMessagesBetweenDescInclusive` includes `<= at`, excludes `<= since`.
+  - `GetMessagesBefore(pivot+1ms)` includes the exact-pivot row and same-ms siblings; excludes `> pivot`.
+  - bucket-boundary case (`pivot` = last ms of its window): the next-bucket message must not leak.
 
 ## Docs (mandatory — `chat.user.` handler + client-facing request struct)
 

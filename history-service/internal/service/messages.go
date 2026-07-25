@@ -254,15 +254,24 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 }
 
 // loadSurroundingByTimestamp centers the window on a UTC-millis pivot. There is
-// no central message, so limit splits cleanly (before gets the larger half) and
-// the before read is inclusive of a message sitting exactly on the pivot
-// (created_at <= pivot); the after read stays strict (created_at > pivot), so an
-// exact-match message anchors the read group without being duplicated below.
+// no central message, so limit splits cleanly (before gets the larger half). The
+// before read must be inclusive of a message sitting exactly on the pivot
+// (created_at <= pivot); since created_at and the pivot are both millisecond-
+// precision, `created_at < pivot+1ms` is exactly `created_at <= pivot`, so the
+// existing strict reads are reused with the pivot shifted up one millisecond.
+// The after read stays strict (created_at > pivot), so an exact-match message
+// anchors the read group without being duplicated below.
 func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, account, roomID string, req models.LoadSurroundingMessagesRequest, limit int) (*models.LoadSurroundingMessagesResponse, error) {
 	if *req.Timestamp <= 0 {
 		return nil, errcode.BadRequest("timestamp must be positive")
 	}
 	pivot := time.UnixMilli(*req.Timestamp).UTC()
+	// Inclusive upper bound via +1ms — equivalent to created_at <= pivot at
+	// millisecond precision. When pivot is the last ms of its bucket window
+	// (the only case where pivot+1ms crosses into the next bucket), pivot is
+	// also that bucket's maximum time, so "all of the bucket" still equals
+	// "created_at <= pivot": the shift stays exact at bucket boundaries.
+	beforeUpper := pivot.Add(time.Millisecond)
 
 	now := time.Now().UTC()
 	// No findMessage dependency, so the access check and room-times resolve run concurrently.
@@ -295,9 +304,9 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 
 	beforeFn := func(ctx context.Context) (cassrepo.Page[models.Message], error) {
 		if accessSince == nil {
-			return s.msgReader.GetMessagesAtOrBefore(ctx, roomID, pivot, floor, beforePageReq)
+			return s.msgReader.GetMessagesBefore(ctx, roomID, beforeUpper, floor, beforePageReq)
 		}
-		return s.msgReader.GetMessagesBetweenDescInclusive(ctx, roomID, *accessSince, pivot, beforePageReq)
+		return s.msgReader.GetMessagesBetweenDesc(ctx, roomID, *accessSince, beforeUpper, beforePageReq)
 	}
 	afterFn := func(ctx context.Context) (cassrepo.Page[models.Message], error) {
 		if afterCount == 0 {

@@ -18,11 +18,7 @@ import (
 
 type MessageReader interface {
 	GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
-	// GetMessagesAtOrBefore is the inclusive-upper counterpart of GetMessagesBefore (created_at <= at).
-	GetMessagesAtOrBefore(ctx context.Context, roomID string, at time.Time, floor time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
-	// GetMessagesBetweenDescInclusive is the inclusive-upper counterpart of GetMessagesBetweenDesc (created_at <= at).
-	GetMessagesBetweenDescInclusive(ctx context.Context, roomID string, since, at time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessagesAfter(ctx context.Context, roomID string, after time.Time, ceiling time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetAllMessagesAsc(ctx context.Context, roomID string, floor, ceiling time.Time, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetMessageByID(ctx context.Context, messageID string) (*models.Message, error)

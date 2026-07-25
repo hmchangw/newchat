@@ -4,24 +4,19 @@ Spec: `docs/superpowers/specs/2026-07-25-history-surrounding-timestamp-pivot-des
 
 TDD throughout: write the failing test (Red), implement to green (Green), tidy (Refactor).
 
-## Step 1 — Repo inclusive reads (Red → Green)
+## Step 1 — Repo inclusivity via `+1ms` (Red → Green)
+
+No new repository methods. The timestamp before-read reuses the strict
+`GetMessagesBefore` / `GetMessagesBetweenDesc` with `beforeUpper = pivot + 1ms`.
 
 1. **Red:** add integration tests in `internal/cassrepo/messages_by_room_integration_test.go`:
-   - `GetMessagesAtOrBefore` includes the row whose `created_at == at` and same-ms siblings;
-     excludes `created_at > at`; respects `floor`.
-   - `GetMessagesBetweenDescInclusive` includes `<= at`, excludes `<= since`.
-2. **Green:** in `messages_by_room.go`, extract the shared before/between walk into internal helpers
-   taking `inclusiveUpper bool`; select between constant `< ?` / `<= ?` query strings. Expose:
-   - `GetMessagesBefore` (strict) / `GetMessagesAtOrBefore` (inclusive).
-   - `GetMessagesBetweenDesc` (strict) / `GetMessagesBetweenDescInclusive` (inclusive).
-   Keep the strict methods' behavior byte-identical.
+   - `GetMessagesBefore(pivot+1ms)` includes the exact-pivot row and same-ms siblings; excludes `> pivot`.
+   - bucket-boundary case (`pivot` = last ms of its window): next-bucket message must not leak.
+2. **Green:** no repo code change — the existing strict methods already provide this.
 
-## Step 2 — Reader interface + mocks
+## Step 2 — (removed) no interface/mocks change
 
-1. Add `GetMessagesAtOrBefore` and `GetMessagesBetweenDescInclusive` to `MessageReader`
-   (`internal/service/service.go`).
-2. `make generate SERVICE=history-service` to regenerate `internal/service/mocks/mock_repository.go`.
-3. Confirm `var _ MessageRepository = (*cassrepo.Repository)(nil)` still compiles.
+The `MessageReader` interface is unchanged, so no `make generate` is required for the reads.
 
 ## Step 3 — Models
 
