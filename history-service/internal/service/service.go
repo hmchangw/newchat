@@ -26,19 +26,20 @@ type MessageReader interface {
 	GetMessagesByIDs(ctx context.Context, messageIDs []string) ([]models.Message, error)
 	GetPinnedMessages(ctx context.Context, roomID string, pageReq cassrepo.PageRequest) (cassrepo.Page[models.Message], error)
 	GetAllPinnedMessages(ctx context.Context, roomID string) ([]models.Message, error)
+	// GetLastRoomMessage resolves the pointer (newest survivor, any type) and preview
+	// (newest non-system) in [floor, before). Pointer nil ⇒ empty; pointer with nil msg ⇒ only system survives.
+	GetLastRoomMessage(ctx context.Context, roomID string, before, floor time.Time) (*pkgmodel.LastMessagePointer, *models.Message, error)
 }
 
 type MessageWriter interface {
 	UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error
-	// SoftDeleteMessage performs a Cassandra LWT on messages_by_id and only
-	// runs the mirror-table and parent-tcount work when the LWT applies.
-	// Returns the updated_at value now persisted (the deletedAt argument when
-	// applied; the existing value when a concurrent delete won the race).
-	// newTcount is non-nil when the parent's tcount was recomputed via CAS;
-	// nil means the CAS was skipped (e.g. parent row not found, or msg is not a thread reply).
-	// newThreadLastMsgAt is the newest surviving reply's createdAt (nil when none survive or the
-	// CAS was skipped), letting the caller carry it on the canonical event without a second read.
+	// SoftDeleteMessage LWT-gates messages_by_id, running mirror-table + parent-tcount work only when it
+	// applies. Returns persisted updated_at plus recomputed tcount/tlm (both nil if not a thread reply or CAS skipped).
 	SoftDeleteMessage(ctx context.Context, msg *models.Message, deletedAt time.Time) (actualDeletedAt time.Time, applied bool, newTcount *int, newThreadLastMsgAt *time.Time, err error)
+	// ReconcileDeletedMirrors idempotently replays the soft-delete of an already-deleted message to
+	// every mirror table, repairing any left stale by a prior attempt's partial failure. Called on the
+	// already-deleted retry short-circuit (which returns before SoftDeleteMessage's CAS-miss replay).
+	ReconcileDeletedMirrors(ctx context.Context, msg *models.Message) error
 	PinMessage(ctx context.Context, msg *models.Message, pinnedAt time.Time, pinnedBy models.Participant) error
 	UnpinMessage(ctx context.Context, msg *models.Message) error
 	// AddReaction writes one (emoji, user_account) map-cell to every mirror; idempotent.
@@ -58,9 +59,8 @@ type SubscriptionRepository interface {
 	GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error)
 }
 
-// RoomRepository reads room metadata required by history handlers:
-// MinUserLastSeenAt as a per-user read-receipt floor surfaced to clients, and
-// GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds.
+// RoomRepository reads room metadata: MinUserLastSeenAt (per-user read-receipt floor
+// surfaced to clients) and GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds.
 type RoomRepository interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
@@ -78,9 +78,8 @@ type ThreadRoomRepository interface {
 	GetThreadRooms(ctx context.Context, roomID string, accessSince *time.Time, req mongoutil.OffsetPageRequest) (mongoutil.OffsetPage[pkgmodel.ThreadRoom], error)
 	GetFollowingThreadRooms(ctx context.Context, roomID, account string, accessSince *time.Time, req mongoutil.OffsetPageRequest) (mongoutil.OffsetPage[pkgmodel.ThreadRoom], error)
 	GetUnreadThreadRooms(ctx context.Context, roomID, account string, accessSince *time.Time, req mongoutil.OffsetPageRequest) (mongoutil.OffsetPage[pkgmodel.ThreadRoom], error)
-	// GetMinThreadUserLastSeenAt returns thread_rooms.minUserLastSeenAt for
-	// threadRoomID. Returns (nil, nil) when the field is unset or the document
-	// is missing — both mean "not everyone has read yet".
+	// GetMinThreadUserLastSeenAt returns thread_rooms.minUserLastSeenAt. (nil, nil) when
+	// unset or the doc is missing — both mean "not everyone has read yet".
 	GetMinThreadUserLastSeenAt(ctx context.Context, threadRoomID string) (*time.Time, error)
 }
 
@@ -179,6 +178,7 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 		return s.MigrationDeleteMessage(c, siteID, req)
 	})
 	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), s.ListThreadSubscriptions)
+	natsrouter.Register(r, subject.MsgRoomLast(siteID), s.GetLastRoomMessage)
 }
 
 // Compile-time checks.

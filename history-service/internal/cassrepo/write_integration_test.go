@@ -21,7 +21,7 @@ import (
 
 func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -74,7 +74,7 @@ func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
 
 func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -134,7 +134,7 @@ func TestRepository_UpdateMessageContent_ThreadReply(t *testing.T) {
 
 func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -196,7 +196,7 @@ func TestRepository_UpdateMessageContent_Pinned(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -252,9 +252,152 @@ func TestRepository_SoftDeleteMessage_TopLevel(t *testing.T) {
 	// the write is impossible at the driver layer.
 }
 
+// A prior delete that committed the messages_by_id CAS but failed a mirror write
+// leaves that mirror stale; the CAS gate would otherwise skip it forever on retry.
+// The CAS-miss path must replay the idempotent mirror writes to repair every mirror.
+func TestRepository_SoftDeleteMessage_CasMissRepairsStaleMirrors(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-del-repair"
+	msgID := "m-del-repair"
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+	pinnedAt := createdAt.Add(30 * time.Second)
+	bucket := msgbucket.New(24 * time.Hour).Of(createdAt)
+
+	// Seed a pinned top-level message across all three tables, not deleted.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msgID, roomID, createdAt, sender, "original", "", false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, bucket, createdAt, msgID, sender, "original", "", false,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO pinned_messages_by_room (room_id, pinned_at, message_id, sender, msg, created_at, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		roomID, pinnedAt, msgID, sender, "original", createdAt, false,
+	).Exec())
+
+	// Simulate a partial failure: the messages_by_id CAS committed but BOTH mirror
+	// writes never ran, so both mirrors are stale.
+	deletedAt := createdAt.Add(time.Minute)
+	require.NoError(t, session.Query(
+		`UPDATE messages_by_id SET deleted = true, updated_at = ? WHERE message_id = ?`,
+		deletedAt, msgID,
+	).Exec())
+
+	readMirrorDeleted := func() (roomDel, pinnedDel bool) {
+		require.NoError(t, session.Query(
+			`SELECT deleted FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			roomID, bucket, createdAt, msgID,
+		).Scan(&roomDel))
+		require.NoError(t, session.Query(
+			`SELECT deleted FROM pinned_messages_by_room WHERE room_id = ? AND pinned_at = ? AND message_id = ?`,
+			roomID, pinnedAt, msgID,
+		).Scan(&pinnedDel))
+		return roomDel, pinnedDel
+	}
+	roomDel, pinnedDel := readMirrorDeleted()
+	require.False(t, roomDel, "precondition: messages_by_room left stale")
+	require.False(t, pinnedDel, "precondition: pinned_messages_by_room left stale")
+
+	// Retry the delete: it CAS-misses (already deleted) and must repair both mirrors.
+	msg := &models.Message{
+		MessageID: msgID, RoomID: roomID, CreatedAt: createdAt, Sender: sender,
+		ThreadParentID: "", PinnedAt: &pinnedAt,
+	}
+	_, applied, _, _, err := repo.SoftDeleteMessage(ctx, msg, deletedAt.Add(time.Second))
+	require.NoError(t, err)
+	require.False(t, applied, "retry after a committed delete is a CAS-miss")
+
+	roomDel, pinnedDel = readMirrorDeleted()
+	assert.True(t, roomDel, "CAS-miss replay must repair the stale messages_by_room mirror")
+	assert.True(t, pinnedDel, "CAS-miss replay must repair the stale pinned_messages_by_room mirror")
+}
+
+// ReconcileDeletedMirrors is the service-layer already-deleted retry path. This covers the
+// thread-reply branch: a prior attempt committed the messages_by_id delete but left
+// thread_messages_by_thread stale and the parent tcount un-recomputed; the reconcile must
+// repair the mirror and recompute the parent tcount from the survivors.
+func TestRepository_ReconcileDeletedMirrors_ThreadReplyRepairsStaleMirrors(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	roomID := "room-reconcile-thread"
+	threadRoomID := "thread-reconcile-1"
+	parentID := "m-reconcile-parent"
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	replyID := "m-reconcile-reply"
+	replyCreatedAt := parentCreatedAt.Add(10 * time.Second)
+	deletedAt := replyCreatedAt.Add(time.Minute)
+
+	// Parent seeded with a stale tcount=1 in both tables (the reply's delete never recomputed it).
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		parentID, roomID, parentCreatedAt, sender, "parent", "", false, 1,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id, deleted, tcount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID, sender, "parent", "", false, 1,
+	).Exec())
+
+	// Reply: messages_by_id already deleted (CAS committed), but the thread mirror is stale.
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, thread_parent_id, thread_parent_created_at, thread_room_id, deleted, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replyID, roomID, replyCreatedAt, sender, "reply", parentID, parentCreatedAt, threadRoomID, true, deletedAt,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, room_id, sender, msg, thread_parent_id, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		threadRoomID, replyCreatedAt, replyID, roomID, sender, "reply", parentID, false,
+	).Exec())
+
+	// Precondition: thread mirror stale, parent tcount still 1.
+	var threadDel bool
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM thread_messages_by_thread WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		threadRoomID, replyCreatedAt, replyID,
+	).Scan(&threadDel))
+	require.False(t, threadDel, "precondition: thread_messages_by_thread left stale")
+
+	parentCreatedAtPtr := parentCreatedAt
+	msg := &models.Message{
+		MessageID:             replyID,
+		RoomID:                roomID,
+		CreatedAt:             replyCreatedAt,
+		Sender:                sender,
+		ThreadParentID:        parentID,
+		ThreadParentCreatedAt: &parentCreatedAtPtr,
+		ThreadRoomID:          threadRoomID,
+		// TCount nil: a reply is not itself a thread parent (isThreadParent=false).
+		Deleted:   true,
+		UpdatedAt: &deletedAt,
+	}
+	require.NoError(t, repo.ReconcileDeletedMirrors(ctx, msg))
+
+	// Thread mirror repaired.
+	require.NoError(t, session.Query(
+		`SELECT deleted FROM thread_messages_by_thread WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`,
+		threadRoomID, replyCreatedAt, replyID,
+	).Scan(&threadDel))
+	assert.True(t, threadDel, "reconcile must repair the stale thread_messages_by_thread mirror")
+
+	// Parent tcount recomputed from survivors (the only reply is deleted ⇒ 0).
+	var gotTcount int
+	require.NoError(t, session.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		roomID, msgbucket.New(24*time.Hour).Of(parentCreatedAt), parentCreatedAt, parentID,
+	).Scan(&gotTcount))
+	assert.Equal(t, 0, gotTcount, "reconcile must recompute the parent tcount from surviving replies")
+}
+
 func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -337,7 +480,7 @@ func TestRepository_SoftDeleteMessage_ThreadReply(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -397,7 +540,7 @@ func TestRepository_SoftDeleteMessage_Pinned(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -477,7 +620,7 @@ func TestRepository_SoftDeleteMessage_DecrementsParentTcount(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -525,6 +668,8 @@ func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {
 	_, applied, _, newTlm, err := repo.SoftDeleteMessage(ctx, msg, replyAt.Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, applied)
+	require.NotNil(t, newTlm, "SoftDeleteMessage must return the recomputed tlm so DeleteMessage can stamp the canonical event")
+	assert.True(t, newTlm.Equal(survivorAt), "returned tlm must equal the newest surviving reply's createdAt")
 
 	// Returned tlm must match the persisted survivor max.
 	require.NotNil(t, newTlm, "returned newTlm must be non-nil while a survivor remains")
@@ -550,7 +695,7 @@ func TestRepository_SoftDeleteMessage_UpdatesParentTlm(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_ClearsTlmOnLastReplyDelete(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -615,7 +760,7 @@ func TestRepository_SoftDeleteMessage_ClearsTlmOnLastReplyDelete(t *testing.T) {
 
 func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -655,7 +800,7 @@ func TestRepository_SoftDeleteMessage_TopLevelDoesNotTouchTcount(t *testing.T) {
 
 func TestRepository_UpdateMessageContent_MissingThreadRoomID_ReturnsError(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -689,7 +834,7 @@ func TestRepository_UpdateMessageContent_MissingThreadRoomID_ReturnsError(t *tes
 
 func TestRepository_SoftDeleteMessage_MissingThreadRoomID_ReturnsError(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -727,7 +872,7 @@ func TestRepository_SoftDeleteMessage_MissingThreadRoomID_ReturnsError(t *testin
 // This is the load-bearing test for the IF deleted != true CAS gate.
 func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -821,7 +966,7 @@ func TestRepository_SoftDeleteMessage_LWTGatesDoubleDecrement(t *testing.T) {
 // via the struct-scan read path (Tasks 1–2).
 func TestRepository_UpdateMessageContent_RoundTrip(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -861,7 +1006,7 @@ func TestRepository_UpdateMessageContent_RoundTrip(t *testing.T) {
 // a top-level message, GetMessageByID returns deleted=true via struct scan.
 func TestRepository_SoftDeleteMessage_RoundTrip(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -904,7 +1049,7 @@ func TestRepository_SoftDeleteMessage_RoundTrip(t *testing.T) {
 // a partial phantom row; the method must handle this gracefully.
 func TestRepository_SoftDeleteMessage_RowCreatedByLWT(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	msg := &models.Message{
@@ -924,7 +1069,7 @@ func TestRepository_SoftDeleteMessage_RowCreatedByLWT(t *testing.T) {
 // atomically in messages_by_id and messages_by_room.
 func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -981,7 +1126,7 @@ func TestRepository_SoftDeleteMessage_ThreadParent_SetsTypeRemoved(t *testing.T)
 // deleting a regular message (TCount nil) does NOT set type = 'message_removed'.
 func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -1026,7 +1171,7 @@ func TestRepository_SoftDeleteMessage_NonThreadParent_NoTypeChange(t *testing.T)
 // sets type = 'message_removed' in messages_by_id and thread_messages_by_thread.
 func TestRepository_SoftDeleteMessage_ReplyThreadParent_SetsTypeRemoved(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -1093,7 +1238,7 @@ func TestEditMessage_EncryptsBody(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-edit-1"
@@ -1148,7 +1293,7 @@ func TestEditMessage_PreservesOtherEncryptedFields(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-edit-pres-1"
@@ -1202,7 +1347,7 @@ func TestEditMessage_LegacyRow_PreservesPlaintextAttachments(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-legacy-edit-1"
@@ -1258,7 +1403,7 @@ func TestDeleteMessage_NullsEncryptedColumns(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-del-1"
@@ -1312,7 +1457,7 @@ func TestUpdateMessageContent_NonExistent_CipherEnabled_ReturnsErrMessageNotFoun
 	wrapper := newTestVaultWrapper(t, ctx)
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	err := repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: "r-ghost", MessageID: "m-ghost-enc", CreatedAt: now,
@@ -1343,7 +1488,7 @@ func TestEditMessage_Encrypted_NullsLegacyPlaintextColumns(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-legacy-null-1"
@@ -1407,7 +1552,7 @@ func TestEditMessage_Encrypted_PreservesQuotedParentMetadata(t *testing.T) {
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	roomID := "r-edit-quote-1"
@@ -1489,7 +1634,7 @@ func TestEditMessage_Plaintext_NullsEncryptedColumns(t *testing.T) {
 	).Exec())
 
 	// Rollback: cipher==nil. Edit goes through the plaintext path.
-	repo := NewRepository(session, sizer, 365, nil)
+	repo := NewRepository(session, sizer, 365, 10, nil)
 	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
 		RoomID: roomID, MessageID: "m-rb", CreatedAt: now,
 	}, "v2", now.Add(time.Minute)))
@@ -1537,7 +1682,7 @@ func TestEditMessage_Encrypted_PreservesLegacyQuotedParentMetadata(t *testing.T)
 	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
 		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
 	sizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, sizer, 365, cipher)
+	repo := NewRepository(session, sizer, 365, 10, cipher)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	parentCreatedAt := now.Add(-time.Hour)
@@ -1607,7 +1752,7 @@ func TestEditMessage_Encrypted_PreservesLegacyQuotedParentMetadata(t *testing.T)
 // messages_by_id, thread_messages_by_thread, AND the messages_by_room copy.
 func TestRepository_UpdateMessageContent_TShowThreadReply(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -1676,7 +1821,7 @@ func TestRepository_UpdateMessageContent_TShowThreadReply(t *testing.T) {
 // messages_by_room copy, or the reply stays visible in the channel timeline.
 func TestRepository_SoftDeleteMessage_TShowThreadReply(t *testing.T) {
 	session := setupCassandra(t)
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, 10, nil)
 	ctx := context.Background()
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
@@ -1761,7 +1906,7 @@ func TestRepository_countThreadReplies_CapsAtThreadcountCap(t *testing.T) {
 		).WithContext(ctx).Exec())
 	}
 
-	repo := NewRepository(session, msgbucket.New(24*time.Hour), 10, nil)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 10, 10, nil)
 	n, tlm, err := repo.countThreadReplies(ctx, "thread-1")
 	require.NoError(t, err)
 	assert.Equal(t, threadcount.Cap, n)

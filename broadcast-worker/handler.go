@@ -59,25 +59,33 @@ type ParentFetcher interface {
 
 // Handler processes MESSAGES_CANONICAL messages and broadcasts room events.
 type Handler struct {
-	store         Store
-	userStore     userstore.UserStore
-	pub           Publisher
-	keyStore      RoomKeyProvider
-	parentFetcher ParentFetcher
-	encrypt       bool
-	encoder       *roomcrypto.Encoder
+	store          Store
+	userStore      userstore.UserStore
+	pub            Publisher
+	keyStore       RoomKeyProvider
+	parentFetcher  ParentFetcher
+	lastMsgFetcher LastMessageFetcher
+	encrypt        bool
+	encoder        *roomcrypto.Encoder
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool) *Handler {
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, lastMsgFetcher LastMessageFetcher, encrypt bool) *Handler {
 	return &Handler{
-		store:         store,
-		userStore:     userStore,
-		pub:           pub,
-		keyStore:      keyStore,
-		parentFetcher: parentFetcher,
-		encrypt:       encrypt,
-		encoder:       roomcrypto.NewEncoder(),
+		store:          store,
+		userStore:      userStore,
+		pub:            pub,
+		keyStore:       keyStore,
+		parentFetcher:  parentFetcher,
+		lastMsgFetcher: lastMsgFetcher,
+		encrypt:        encrypt,
+		encoder:        roomcrypto.NewEncoder(),
 	}
+}
+
+// roomEncrypted reports whether the room type is encrypted on the wire (and so
+// must never be stored or published as plaintext): channel rooms only, gated by the service flag.
+func (h *Handler) roomEncrypted(roomType model.RoomType) bool {
+	return h.encrypt && roomType == model.RoomTypeChannel
 }
 
 // HandleMessage processes a single MESSAGES_CANONICAL message payload.
@@ -168,7 +176,27 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
+	// Room meta first: the stored preview needs the content ciphertext for encrypted rooms.
+	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
+	if err != nil {
+		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
+	}
+
+	clientMsg := buildClientMessage(&msg, userByAccount)
+	// System messages bump lastMsgAt/lastMsgId (room sorting) but never become
+	// the stored preview — rooms.lastMsg previews the newest non-system message.
+	var preview *model.LastMessagePreview
+	if !model.IsSystemMessageType(msg.Type) {
+		preview = buildLastMessagePreview(clientMsg)
+		if h.roomEncrypted(meta.Type) {
+			// Naks before any store write or publish. Key fetch is LRU-cached.
+			if err := h.encryptPreview(ctx, meta.ID, preview); err != nil {
+				return fmt.Errorf("encrypt last message preview for room %s: %w", meta.ID, err)
+			}
+		}
+	}
+
+	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll, preview); err != nil {
 		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
 	}
 	// Sending implies the sender has read up to their own message: advance the
@@ -179,18 +207,12 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 			"error", err, "room_id", msg.RoomID, "account", msg.UserAccount,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 	}
-	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
-	if err != nil {
-		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
-	}
 
 	if len(resolved.Accounts) > 0 {
 		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts, msg.CreatedAt); err != nil {
 			return fmt.Errorf("set subscription mentions: %w", err)
 		}
 	}
-
-	clientMsg := buildClientMessage(&msg, userByAccount)
 
 	// debug: how this message was routed for fan-out (metadata only).
 	slog.DebugContext(ctx, "broadcast routing", "request_id", natsutil.RequestIDFromContext(ctx),
@@ -299,11 +321,38 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	edit := buildEditRoomEvent(room, evt)
-	if room.Type == model.RoomTypeChannel && h.encrypt {
-		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
+	// The event carries the FULL content (clients replace the body); the stored
+	// preview carries the trimmed snippet. Encrypted rooms seal each; empty content still gets an event envelope (attachment-only clear), the preview none.
+	newPreviewMsg := model.TrimPreview(msg.Content)
+	var encMsg, encPreviewMsg json.RawMessage
+	if h.roomEncrypted(room.Type) {
+		encMsg, err = h.encryptContent(ctx, room.ID, msg.Content)
+		if err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
 		}
+		switch newPreviewMsg {
+		case "":
+			encPreviewMsg = nil
+		case msg.Content:
+			encPreviewMsg = encMsg
+		default:
+			encPreviewMsg, err = h.encryptPreviewContent(ctx, room.ID, newPreviewMsg)
+			if err != nil {
+				return fmt.Errorf("encrypt edit preview for room %s: %w", room.ID, err)
+			}
+		}
+		newPreviewMsg = ""
+	}
+
+	// Patch lastMsg (guarded no-op if not previewed), before the publish so a failure Naks first.
+	if err := h.store.SetRoomLastMessageEdited(ctx, msg.RoomID, msg.ID, newPreviewMsg, encPreviewMsg, *msg.EditedAt); err != nil {
+		return fmt.Errorf("set room last message edited %s: %w", msg.RoomID, err)
+	}
+
+	edit := buildEditRoomEvent(room, evt)
+	if h.roomEncrypted(room.Type) {
+		edit.EncryptedNewContent = encMsg
+		edit.NewContent = ""
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
 }
@@ -496,13 +545,42 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
+	// Resolve the surviving state before any publish (an error Naks the whole event):
+	// survivor = newest non-system (preview), pointer = newest any type (sorting). Skip the RPC when the stored preview already identifies the survivor; else fetch with the delete time as ceiling.
+	var survivor *model.LastMessagePreview
+	var pointer *model.LastMessagePointer
+	if room.LastMsg != nil && room.LastMsgID != "" && room.LastMsgAt != nil &&
+		room.LastMsgID != msg.ID && room.LastMsg.MessageID != msg.ID {
+		survivor = room.LastMsg
+		// Pointer from the stored pointer fields, not room.LastMsg: in drift state the
+		// pointer tracks a newer system message while lastMsg previews an older one — the rewind must not regress to it.
+		pointer = &model.LastMessagePointer{MessageID: room.LastMsgID, CreatedAt: *room.LastMsgAt}
+	} else {
+		survivor, pointer, err = h.lastMsgFetcher.FetchLastMessage(ctx, msg.RoomID, *msg.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("fetch last message for room %s: %w", msg.RoomID, err)
+		}
+		// Encrypted rooms: seal the survivor in place (EncMsg, Msg blanked) so one
+		// ciphertext feeds both the rewind and the event. Failure Naks before any write.
+		if survivor != nil && h.roomEncrypted(room.Type) {
+			if err := h.encryptPreview(ctx, room.ID, survivor); err != nil {
+				return fmt.Errorf("encrypt last message preview for room %s: %w", room.ID, err)
+			}
+		}
+	}
+
+	// Rewind before the publishes so a Mongo failure Naks before clients saw the delete.
+	if err := h.store.RewindRoomLastMessage(ctx, msg.RoomID, msg.ID, pointer, survivor, *msg.UpdatedAt); err != nil {
+		return fmt.Errorf("rewind room last message %s: %w", msg.RoomID, err)
+	}
+
 	del := buildDeleteRoomEvent(room, evt)
+	del.LastMessage = survivor
 	if err := h.publishMutation(ctx, room, model.RoomEventMessageDeleted, msg.ID, &del); err != nil {
 		return fmt.Errorf("publish delete mutation for room %s message %s: %w", room.ID, msg.ID, err)
 	}
-	// TShow=true thread replies appear in the main room (handled by publishMutation
-	// above) but still count toward the thread's reply-count badge. Since
-	// handleThreadDeleted is bypassed for TShow=true, we publish the badge update here.
+	// TShow=true replies ride the main room but still bump the thread badge;
+	// handleThreadDeleted is bypassed for them, so publish the badge here.
 	if msg.ThreadParentMessageID != "" && evt.NewTCount != nil {
 		h.publishThreadBadge(ctx, room, *evt.NewTCount, evt.NewThreadLastMsgAt, msg.ThreadParentMessageID, msg.ID, evt.Timestamp)
 	}
@@ -729,21 +807,42 @@ func buildDeleteRoomEvent(room *model.Room, evt *model.MessageEvent) model.Delet
 	}
 }
 
-func (h *Handler) encryptEditedContent(ctx context.Context, roomID string, edited *model.EditRoomEvent) error {
+// encryptContent seals content (including empty) with the room key, returning the
+// roomcrypto envelope. Edit events always carry one so clients can tell "cleared" from "no payload".
+func (h *Handler) encryptContent(ctx context.Context, roomID, content string) (json.RawMessage, error) {
 	key, err := h.currentRoomKey(ctx, roomID)
 	if err != nil {
-		return fmt.Errorf("get encryption key for room %s: %w", roomID, err)
+		return nil, fmt.Errorf("get encryption key for room %s: %w", roomID, err)
 	}
-	encrypted, err := h.encoder.Encode(roomID, edited.NewContent, key.KeyPair.PrivateKey, key.Version)
+	encrypted, err := h.encoder.Encode(roomID, content, key.KeyPair.PrivateKey, key.Version)
 	if err != nil {
-		return fmt.Errorf("encrypt edit content for room %s: %w", roomID, err)
+		return nil, fmt.Errorf("encrypt content for room %s: %w", roomID, err)
 	}
 	encJSON, err := sonic.Marshal(encrypted)
 	if err != nil {
-		return fmt.Errorf("marshal encrypted edit content: %w", err)
+		return nil, fmt.Errorf("marshal encrypted content: %w", err)
 	}
-	edited.EncryptedNewContent = json.RawMessage(encJSON)
-	edited.NewContent = ""
+	return json.RawMessage(encJSON), nil
+}
+
+// encryptPreviewContent is encryptContent for previews: empty content returns
+// (nil, nil) — content-less previews keep Msg=="" and EncMsg==nil, no key fetch.
+func (h *Handler) encryptPreviewContent(ctx context.Context, roomID, content string) (json.RawMessage, error) {
+	if content == "" {
+		return nil, nil
+	}
+	return h.encryptContent(ctx, roomID, content)
+}
+
+// encryptPreview seals a preview in place: EncMsg gets the content ciphertext,
+// Msg is blanked; metadata stays plaintext. Content-less previews are unchanged.
+func (h *Handler) encryptPreview(ctx context.Context, roomID string, p *model.LastMessagePreview) error {
+	encMsg, err := h.encryptPreviewContent(ctx, roomID, p.Msg)
+	if err != nil {
+		return err
+	}
+	p.EncMsg = encMsg
+	p.Msg = ""
 	return nil
 }
 
@@ -919,6 +1018,35 @@ func buildClientMessage(msg *model.Message, userMap map[string]model.User) *mode
 	// gatekeeper projects its DecodedAttachments into the snapshot), so no decode
 	// is needed here — it rides along via the embedded Message: *msg copy.
 	return cm
+}
+
+// previewSenderName picks the render-ready sender name for the lastMsg preview:
+// EngName, then UserDisplayName, then account. history-service's equivalent adds a
+// bot AppName fallback, but AppName rides only on cassandra.Participant — it is not
+// carried on the canonical message (model.Participant/model.Message) this path sees,
+// so mirroring that bot case would require threading AppName through the pipeline.
+func previewSenderName(cm *model.ClientMessage) string {
+	if cm.Sender != nil && cm.Sender.EngName != "" {
+		return cm.Sender.EngName
+	}
+	if cm.UserDisplayName != "" {
+		return cm.UserDisplayName
+	}
+	return cm.UserAccount
+}
+
+// buildLastMessagePreview projects a created ClientMessage onto the lastMsg
+// preview in plaintext (encrypted rooms seal it after); body trimmed to the snippet cap.
+func buildLastMessagePreview(cm *model.ClientMessage) *model.LastMessagePreview {
+	return &model.LastMessagePreview{
+		MessageID:       cm.ID,
+		Type:            cm.Type,
+		SenderAccount:   cm.UserAccount,
+		SenderName:      previewSenderName(cm),
+		Msg:             model.TrimPreview(cm.Content),
+		CreatedAt:       cm.CreatedAt,
+		AttachmentCount: len(cm.Attachments),
+	}
 }
 
 // publishToThreadAccounts publishes payload concurrently to every account in

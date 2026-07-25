@@ -20,9 +20,8 @@ const (
 	lastMsgWalkMaxPages    = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
 )
 
-// RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
-// room, return its latest non-deleted message. Server-to-server (no per-account access
-// check). Per-room failures degrade to no entry so one bad room never fails the batch.
+// RoomsGet handles chat.server.request.history.{siteID}.rooms.get: latest non-deleted
+// message per room. Server-to-server; per-room failures degrade to no entry, never failing the batch.
 func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequest) (*models.RoomsGetResponse, error) {
 	if len(req.RoomIDs) == 0 {
 		return nil, errcode.BadRequest("roomIds must not be empty")
@@ -141,6 +140,12 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 		Mentions:    mentions,
 		VisibleTo:   m.VisibleTo,
 	}
+}
+
+// previewContent trims a message body to the shared rune-bounded room-list
+// snippet cap — the same bound broadcast-worker applies on its write paths.
+func previewContent(msg string) string {
+	return pkgmodel.TrimPreview(msg)
 }
 
 // dedupRoomIDs removes duplicate roomIds, preserving first-seen order.

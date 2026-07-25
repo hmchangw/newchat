@@ -19,7 +19,7 @@ func reactionFixture(t *testing.T) (*Repository, msgbucket.Sizer, time.Time, mod
 	t.Helper()
 	session := setupCassandra(t)
 	bucketSizer := msgbucket.New(24 * time.Hour)
-	repo := NewRepository(session, bucketSizer, 365, nil)
+	repo := NewRepository(session, bucketSizer, 365, 10, nil)
 	createdAt := time.Now().UTC().Truncate(time.Millisecond)
 	reactedAt := createdAt.Add(time.Minute).Truncate(time.Millisecond)
 	key := models.ReactionKey{Emoji: "👍", UserAccount: "alice"}

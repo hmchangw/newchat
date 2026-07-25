@@ -299,12 +299,36 @@ func TestHistoryService_MigrationDeleteMessage_AlreadyDeletedAcksOK(t *testing.T
 	msgs.EXPECT().
 		GetMessageByID(gomock.Any(), "msg-4").
 		Return(&models.Message{MessageID: "msg-4", RoomID: "r1", CreatedAt: createdAt, Deleted: true}, nil)
-	// Already deleted → no CAS, no publish.
+	// Already deleted → no CAS, no publish. Legacy row (nil updated_at) → reconcile skipped.
 	msgs.EXPECT().SoftDeleteMessage(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	msgs.EXPECT().ReconcileDeletedMirrors(gomock.Any(), gomock.Any()).Times(0)
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	ack, err := svc.MigrationDeleteMessage(c, "site-test", model.MigrationDeleteRequest{
 		MessageID: "msg-4",
+		DeletedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, ack)
+	assert.True(t, ack.OK)
+}
+
+func TestHistoryService_MigrationDeleteMessage_AlreadyDeleted_ReconcilesMirrors(t *testing.T) {
+	svc, msgs, _, pub, _ := newService(t)
+	c := testContext()
+
+	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(time.Hour)
+	deleted := &models.Message{MessageID: "msg-5", RoomID: "r1", CreatedAt: createdAt, Deleted: true, UpdatedAt: &updatedAt}
+
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-5").Return(deleted, nil)
+	// Deleted row with a committed updated_at → reconcile mirrors idempotently, still no CAS/publish.
+	msgs.EXPECT().SoftDeleteMessage(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	msgs.EXPECT().ReconcileDeletedMirrors(gomock.Any(), deleted).Return(nil)
+	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	ack, err := svc.MigrationDeleteMessage(c, "site-test", model.MigrationDeleteRequest{
+		MessageID: "msg-5",
 		DeletedAt: time.Now().UTC(),
 	})
 	require.NoError(t, err)

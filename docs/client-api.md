@@ -845,6 +845,25 @@ Room ciphertext envelope (`roomcrypto.EncryptedMessage`). See [§5 Room Encrypti
 | `nonce` | string | Base64-encoded nonce. |
 | `ciphertext` | string | Base64-encoded ciphertext. |
 
+#### LastMessagePreview
+
+Denormalized preview of a room's newest non-deleted, non-system message,
+carried on `message_deleted` events so clients can refresh the room-list
+preview without a history fetch. `createdAt`/`editedAt` are domain times of
+the previewed message, not event times.
+
+| Field | Type | Notes |
+|---|---|---|
+| `messageId` | string | The previewed message's ID. |
+| `type` | string | Optional. Message type; omitted for regular messages (system messages never appear as previews). |
+| `senderAccount` | string | The sender's account. |
+| `senderName` | string | Optional. Render-ready sender display name. |
+| `msg` | string | Optional. Plaintext message body, trimmed to 256 runes (a room-list snippet, never the full content); omitted when empty. In encrypted channel rooms it is omitted and `encMsg` carries the content instead. |
+| `encMsg` | [EncryptedMessage](#encryptedmessage) | Optional. Encrypted channel rooms only. Encrypted envelope of the content (same format as `encryptedNewContent` — decrypt with the room key); the sealed plaintext is the same 256-rune snippet as `msg`. When present, `msg` is omitted. Both absent for content-less messages (e.g. attachment-only). |
+| `createdAt` | RFC3339 timestamp | When the previewed message was created. |
+| `editedAt` | RFC3339 timestamp | Optional. Present when the previewed message was edited. |
+| `attachmentCount` | number | Optional. Number of attachments; omitted when 0. |
+
 #### Subscription
 
 A user's membership record for one room, embedded in `subscription.update`
@@ -3158,6 +3177,10 @@ A `DeleteRoomEvent` is fanned out by `broadcast-worker` (not published when the 
 - **Thread reply (TShow=true) in a channel** — `chat.room.{roomID}.event` — visible in the main channel, so the full room stream receives it.
 - **DM/botDM message — `chat.user.{recipient}.event.room`** — published once per non-bot member.
 
+On the visible-delete lanes (everything except the hidden `TShow=false` thread-reply lane) the event is enriched with the room's **surviving last-message preview** (`lastMessage`) so clients can refresh the room-list preview without a history fetch. In encrypted rooms the preview carries `encMsg` instead of `msg`.
+
+Note: in DM/botDM rooms hidden thread-reply deletes arrive on the same `chat.user.{recipient}.event.room` subject as visible deletes, and the payload carries no thread marker — distinguish them from your local cache: if the deleted `messageId` is a thread reply not shown in the room, keep the current preview; otherwise apply the visible-delete rule above.
+
 The payload is flat:
 
 | Field | Type | Notes |
@@ -3171,6 +3194,7 @@ The payload is flat:
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `lastMessage` | [LastMessagePreview](#lastmessagepreview) | Optional. The room's newest surviving non-deleted, non-system message **after** this delete; in encrypted rooms it carries `encMsg` instead of `msg`. Absent on hidden thread-reply deletes (`TShow=false` — the room preview is unchanged, keep the current one). After a **visible** delete, absent `lastMessage` means the server found no previewable message within its bounded lookback (a survivor may still exist deeper in history) — clear the preview; a later room-list resolve restores it. |
 
 ```json
 {
@@ -3181,8 +3205,27 @@ The payload is flat:
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "lastMessage": {
+    "messageId": "01970a4f8c2d7c9aMNOP",
+    "senderAccount": "bob",
+    "senderName": "Bob 鮑伯",
+    "msg": "see you at standup",
+    "createdAt": "2026-05-06T07:50:00Z"
+  }
 }
+```
+
+In an encrypted channel room the preview carries `encMsg` instead of `msg`:
+
+```json
+  "lastMessage": {
+    "messageId": "01970a4f8c2d7c9aMNOP",
+    "senderAccount": "bob",
+    "senderName": "Bob 鮑伯",
+    "encMsg": { "version": 3, "nonce": "…", "ciphertext": "…" },
+    "createdAt": "2026-05-06T07:50:00Z"
+  }
 ```
 
 **Thread-reply deletes additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. The `DeleteRoomEvent` and `ThreadMetadataUpdatedEvent` are published independently; clients must handle each on its own.
@@ -5760,7 +5803,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 | `siteId` | string | |
 | `parentMessageId` | string | The thread parent message's ID. Clients use this to locate the message in their cache and update its badge. |
 | `newTcount` | number | Authoritative reply count for the parent message, capped at 99 (99 means "99 or more"). Replaces any locally-computed count — do not delta. |
-| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0 (all replies deleted). |
+| `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply — populated on both `reply_added` and `reply_deleted` (the newest reply that remains after the operation). Absent when `newTcount` is 0 (all replies deleted). |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 | `replyMessageId` | string | The reply that was added or deleted. |
 | `timestamp` | number | Milliseconds since Unix epoch (UTC). When broadcast-worker published this event. |
@@ -5835,6 +5878,7 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
    - **The cipher is identical for both event kinds (same `roomcrypto` AES-256-GCM seal); only the plaintext payload differs**, because each event encrypts exactly what the client needs:
      - **`encryptedMessage`** (new message) decrypts to a UTF-8-encoded JSON `ClientMessage` — a brand-new message the client has never seen, so the whole object (sender, timestamps, thread/quote fields) is sealed.
      - **`encryptedNewContent`** (edit) decrypts to a plain UTF-8 content **string** — the client already has the original message rendered, and an edit only replaces its `content`, so just the new body is sealed (the surrounding message metadata is unchanged and already known).
+     - **`lastMessage.encMsg`** (last-message preview) decrypts to a plain UTF-8 content **string** trimmed to 256 runes (the room-list snippet, not the full body) — same envelope as `encryptedNewContent`; the preview's metadata (sender, timestamps, `attachmentCount`) stays plaintext, only the content is sealed.
 3. Retain past versions to support history scrolling. The server retains the previous version in its store for at least `ROOM_KEY_GRACE_PERIOD` (default 24h); after that, server-side decryption of old messages may not be possible, but clients holding old keys can still decrypt locally.
 
 #### When clients receive `RoomKeyEvent`s

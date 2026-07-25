@@ -45,20 +45,19 @@ type Config struct {
 	NATS                    NATSConfig      `envPrefix:"NATS_"`
 	MessageBucketHours      int             `env:"MESSAGE_BUCKET_HOURS"        envDefault:"72"`
 	MessageReadMaxBuckets   int             `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
+	PreviewLookbackRows     int             `env:"MESSAGE_PREVIEW_LOOKBACK_ROWS" envDefault:"10"`
 	MessageHistoryFloorDays int             `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"365"`
 	LargeRoomThreshold      int             `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
 	MaxPinnedPerRoom        int             `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
 	PinEnabled              bool            `env:"PIN_ENABLED"                 envDefault:"true"`
 
-	// Subscription access-check cache. Only positive subscriptions are cached,
-	// so the TTL bounds how long revoked access can stay readable. Set size or
-	// ttl to 0 to disable.
+	// Subscription access-check cache. Only positive subs are cached, so the TTL
+	// bounds how long revoked access stays readable. Size or ttl 0 disables.
 	SubCacheSize int           `env:"HISTORY_SUB_CACHE_SIZE" envDefault:"100000"`
 	SubCacheTTL  time.Duration `env:"HISTORY_SUB_CACHE_TTL"  envDefault:"2m"`
 
-	// Room metadata cache (room times + minUserLastSeenAt). lastMsgAt advances
-	// on every message, so the TTL is short by default; client room hints cover
-	// the freshness-sensitive path. Set size or ttl to 0 to disable.
+	// Room metadata cache (room times + minUserLastSeenAt). lastMsgAt advances often,
+	// so the TTL is short; client room hints cover freshness. Size or ttl 0 disables.
 	RoomCacheSize int           `env:"HISTORY_ROOM_CACHE_SIZE" envDefault:"50000"`
 	RoomCacheTTL  time.Duration `env:"HISTORY_ROOM_CACHE_TTL"  envDefault:"10s"`
 
@@ -82,10 +81,14 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// validate rejects negative cache sizes/TTLs that would silently disable a
-// cache (because the main wiring guards on size>0 && ttl>0). Zero is the
-// documented disable value and is accepted.
+// validate rejects negative cache sizes/TTLs that would silently disable a cache
+// (main wiring guards on size>0 && ttl>0). Zero is the documented disable value.
 func validate(cfg *Config) error {
+	// >= 1: the preview walk loops on `remaining > 0`, so a value <= 0 scans no
+	// rows and every room silently returns no preview.
+	if cfg.PreviewLookbackRows < 1 {
+		return fmt.Errorf("MESSAGE_PREVIEW_LOOKBACK_ROWS must be >= 1, got %d", cfg.PreviewLookbackRows)
+	}
 	if cfg.SubCacheSize < 0 {
 		return fmt.Errorf("HISTORY_SUB_CACHE_SIZE must be >= 0, got %d", cfg.SubCacheSize)
 	}

@@ -104,8 +104,17 @@ func (s *HistoryService) MigrationDeleteMessage(c *natsrouter.Context, siteID st
 		return nil, errcode.NotFound("message not yet persisted, retry")
 	}
 
-	// Already soft-deleted on an earlier delivery — ack without re-applying.
+	// Already soft-deleted on an earlier delivery — ack without re-applying, but reconcile
+	// the mirrors first: this path returns before SoftDeleteMessage, so an earlier attempt
+	// that committed the messages_by_id CAS then failed a mirror write would otherwise leave
+	// it stale forever on redelivery. The replay is idempotent (no-op when nothing's stale);
+	// skipped for legacy rows with no updated_at to anchor the mirror timestamp to.
 	if msg.Deleted {
+		if msg.UpdatedAt != nil {
+			if err := s.msgWriter.ReconcileDeletedMirrors(c, msg); err != nil {
+				return nil, fmt.Errorf("migration reconcile already-deleted message %s: %w", req.MessageID, err)
+			}
+		}
 		return &model.MigrationAck{OK: true}, nil
 	}
 

@@ -464,12 +464,19 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	}
 
 	// Already-deleted short-circuit: echo the current updated_at as the DeletedAt.
-	// Prevents tcount double-decrement on caller retry and avoids duplicate events.
-	// countAndSetParentTcount already wrote the correct tcount on the first delete,
-	// so no re-publish is needed — the tcount is durable in Cassandra.
+	// Avoids a duplicate canonical event; countAndSetParentTcount already wrote the
+	// correct tcount durably on the first delete, so no re-publish is needed.
 	if msg.Deleted {
 		var deletedAtMs int64
 		if msg.UpdatedAt != nil {
+			// Reconcile the mirror tables first: this path returns before SoftDeleteMessage, so
+			// if a prior attempt committed the messages_by_id CAS but a mirror write failed, the
+			// retry lands here and would otherwise leave the mirror stale forever. The replay is
+			// idempotent (SET deleted=true / recompute-and-set), so it's a no-op when nothing's
+			// stale. Skipped for legacy rows with no updated_at to anchor the mirror timestamp to.
+			if err := s.msgWriter.ReconcileDeletedMirrors(c, msg); err != nil {
+				return nil, fmt.Errorf("reconciling already-deleted message %s: %w", req.MessageID, err)
+			}
 			deletedAtMs = msg.UpdatedAt.UnixMilli()
 		}
 		return &models.DeleteMessageResponse{

@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"maps"
 	"time"
 )
 
@@ -319,16 +320,18 @@ type EditRoomEvent struct {
 }
 
 // DeleteRoomEvent is the live event published when a message is deleted. Fields are flat (no zero-valued RoomEvent base fields).
+// LastMessage is the room's newest non-deleted, non-system message after this delete (absent on hidden thread-reply deletes; carries encMsg not msg in encrypted rooms).
 type DeleteRoomEvent struct {
-	Type           RoomEventType `json:"type" bson:"type"`
-	RoomID         string        `json:"roomId" bson:"roomId"`
-	SiteID         string        `json:"siteId" bson:"siteId"`
-	Timestamp      int64         `json:"timestamp" bson:"timestamp"`
-	EventTimestamp int64         `json:"eventTimestamp,omitempty" bson:"eventTimestamp,omitempty"`
-	MessageID      string        `json:"messageId" bson:"messageId"`
-	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
-	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
-	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
+	Type           RoomEventType       `json:"type" bson:"type"`
+	RoomID         string              `json:"roomId" bson:"roomId"`
+	SiteID         string              `json:"siteId" bson:"siteId"`
+	Timestamp      int64               `json:"timestamp" bson:"timestamp"`
+	EventTimestamp int64               `json:"eventTimestamp,omitempty" bson:"eventTimestamp,omitempty"`
+	MessageID      string              `json:"messageId" bson:"messageId"`
+	DeletedBy      string              `json:"deletedBy" bson:"deletedBy"`
+	DeletedAt      time.Time           `json:"deletedAt" bson:"deletedAt"`
+	UpdatedAt      time.Time           `json:"updatedAt" bson:"updatedAt"`
+	LastMessage    *LastMessagePreview `json:"lastMessage,omitempty" bson:"lastMessage,omitempty"`
 }
 
 // PinStateRoomEvent is the live event for a pin/unpin; flat fields (mirrors EditRoomEvent/DeleteRoomEvent).
@@ -528,6 +531,30 @@ const (
 	// SysMsgData carries the meeting ID + join URL (TeamsMeetStartedSysData), read back to make the RPC idempotent.
 	MessageTypeTeamsMeetStarted = "teams_meet_started"
 )
+
+// systemMessageTypes is the canonical set of system-message Type values.
+// Unexported so importers can't mutate the shared set or race IsSystemMessageType; iterate via SystemMessageTypeSet.
+var systemMessageTypes = map[string]struct{}{
+	MessageTypeRoomCreated:      {},
+	MessageTypeMembersAdded:     {},
+	MessageTypeMemberRemoved:    {},
+	MessageTypeMemberLeft:       {},
+	MessageTypeRoomRenamed:      {},
+	MessageTypeRoomRestricted:   {},
+	MessageTypeTeamsMeetStarted: {},
+}
+
+// IsSystemMessageType reports whether typ is a system-message type.
+func IsSystemMessageType(typ string) bool {
+	_, ok := systemMessageTypes[typ]
+	return ok
+}
+
+// SystemMessageTypeSet returns a fresh clone of the canonical system-message set for callers that need to iterate it.
+// Safe to mutate; never aliases the package's internal set.
+func SystemMessageTypeSet() map[string]struct{} {
+	return maps.Clone(systemMessageTypes)
+}
 
 const (
 	// AsyncJobStatusOK indicates a successful async job result.
