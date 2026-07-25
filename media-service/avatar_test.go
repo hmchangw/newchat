@@ -12,7 +12,7 @@ import (
 func TestIsBot(t *testing.T) {
 	assert.True(t, isBot("helper.bot"))
 	// Platform-admin pseudo-account uses the bot avatar path (no employee photo).
-	assert.True(t, isBot("p_tchatadmin_siteA"))
+	assert.True(t, isBot("p_adminsiteA"))
 	// QA p_ accounts are ordinary users served via the user avatar path.
 	assert.False(t, isBot("p_payroll"))
 	assert.False(t, isBot("p_qa1"))

@@ -20,8 +20,8 @@ func TestNewSub_SetsIsBotFromAccount(t *testing.T) {
 	assert.True(t, bot.User.IsBot, "helper.bot must be flagged as a bot")
 
 	// Platform-admin pseudo-account is bot-like: stamped IsBot=true → appCount.
-	pseudo := newSub("s2", &model.User{ID: "u_p", Account: "p_tchatadmin_siteA"}, room, nil, "n", false, ts)
-	assert.True(t, pseudo.User.IsBot, "p_tchatadmin_ pseudo-account must be flagged as a bot")
+	pseudo := newSub("s2", &model.User{ID: "u_p", Account: "p_adminsiteA"}, room, nil, "n", false, ts)
+	assert.True(t, pseudo.User.IsBot, "p_admin pseudo-account must be flagged as a bot")
 
 	// QA p_ account is an ordinary user: stamped IsBot=false → userCount.
 	qa := newSub("s3", &model.User{ID: "u_qa", Account: "p_webhook"}, room, nil, "n", false, ts)

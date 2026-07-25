@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"strings"
 	"testing"
@@ -1113,7 +1112,6 @@ func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
 			botAccount: "weather.bot",
 			setupMocks: func(store *MockRoomStore) {
 				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(enabledApp, nil)
-				store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("site-a", nil)
 				expectAllAccountsExist(store)
 			},
 			wantPublish: true,
@@ -1123,7 +1121,7 @@ func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
 			// must NOT go through GetApp/site validation — it is admitted like a
 			// candidate whose existence is enforced downstream by validateMembershipRefs.
 			name:       "platform-admin pseudo account admitted without app validation",
-			botAccount: "p_tchatadmin_siteA",
+			botAccount: "p_adminsiteA",
 			setupMocks: func(store *MockRoomStore) {
 				expectAllAccountsExist(store)
 			},
@@ -1156,13 +1154,16 @@ func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
 			wantErr: errBotNotAvailable,
 		},
 		{
-			name:       "cross-site bot rejected",
+			// A bot whose home site differs from the room's is admitted:
+			// cross-site bot membership is allowed, so the bot's siteId is no
+			// longer looked up or checked.
+			name:       "cross-site bot is accepted",
 			botAccount: "weather.bot",
 			setupMocks: func(store *MockRoomStore) {
 				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(enabledApp, nil)
-				store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("site-b", nil)
+				expectAllAccountsExist(store)
 			},
-			wantErr: errBotCrossSite,
+			wantPublish: true,
 		},
 		{
 			name:       "GetApp infra error collapses to internal",
@@ -1171,15 +1172,6 @@ func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
 				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(nil, errors.New("mongo timeout"))
 			},
 			wantErrContains: "get app for bot",
-		},
-		{
-			name:       "GetUserSiteID infra error collapses to internal",
-			botAccount: "weather.bot",
-			setupMocks: func(store *MockRoomStore) {
-				store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(enabledApp, nil)
-				store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("", errors.New("mongo timeout"))
-			},
-			wantErrContains: "get bot siteId",
 		},
 	}
 	for _, tc := range tests {
@@ -1223,46 +1215,7 @@ func TestHandler_AddMembers_ExplicitBot(t *testing.T) {
 	}
 }
 
-// An empty siteId for a bot is a data anomaly (per the domain owner no empty-siteId
-// bot docs exist). We fail open: the bot is still admitted as local, and an
-// error-level line is logged as an anomaly alarm rather than rejecting the add.
-func TestHandler_AddMembers_ExplicitBot_EmptySiteID_AdmittedWithErrorLog(t *testing.T) {
-	rec := installRecorder(t)
-
-	ctrl := gomock.NewController(t)
-	store := NewMockRoomStore(ctrl)
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
-		User:  model.SubscriptionUser{ID: "u1", Account: "alice"},
-		Roles: []model.Role{model.RoleOwner},
-	}, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
-		ID: "r1", Type: model.RoomTypeChannel, UserCount: 1,
-	}, nil)
-	store.EXPECT().GetApp(gomock.Any(), "weather.bot").Return(
-		&model.App{ID: "app1", Assistant: &model.AppAssistant{Enabled: true, Name: "weather.bot"}}, nil)
-	store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Return("", nil)
-	expectAllAccountsExist(store)
-
-	var publishedPayload []byte
-	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
-		publishToStream: func(_ context.Context, _ string, data []byte, _ string) error {
-			publishedPayload = data
-			return nil
-		},
-	}
-	_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
-		model.AddMembersRequest{Users: []string{"weather.bot"}})
-	require.NoError(t, err)
-
-	var published model.AddMembersRequest
-	require.NoError(t, json.Unmarshal(publishedPayload, &published))
-	assert.Contains(t, published.Users, "weather.bot", "empty-siteId bot is admitted as local")
-
-	assert.True(t, rec.has(slog.LevelError, "bot has empty siteId"),
-		"empty-siteId bot must emit an error-level anomaly log")
-}
-
-// A bot listed twice costs one GetApp + one GetUserSiteID (dedup before validate).
+// A bot listed twice costs one GetApp (dedup before validate).
 func TestHandler_AddMembers_DuplicateBot_ValidatedOnce(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
@@ -1275,7 +1228,6 @@ func TestHandler_AddMembers_DuplicateBot_ValidatedOnce(t *testing.T) {
 	}, nil)
 	store.EXPECT().GetApp(gomock.Any(), "weather.bot").Times(1).Return(
 		&model.App{ID: "app1", Assistant: &model.AppAssistant{Enabled: true, Name: "weather.bot"}}, nil)
-	store.EXPECT().GetUserSiteID(gomock.Any(), "weather.bot").Times(1).Return("site-a", nil)
 	expectAllAccountsExist(store)
 
 	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
@@ -1378,7 +1330,7 @@ func TestHandler_UpdateRole_PlatformAdminPromotion_Rejected(t *testing.T) {
 	store := NewMockRoomStore(ctrl)
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0)
 	_, err := handler.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
-		model.UpdateRoleRequest{RoomID: "r1", Account: "p_tchatadmin_siteA", NewRole: model.RoleOwner})
+		model.UpdateRoleRequest{RoomID: "r1", Account: "p_adminsiteA", NewRole: model.RoleOwner})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errBotCannotBeOwner))
 }
@@ -2997,7 +2949,7 @@ func TestHandleCreateRoom_Channel_PlatformAdminRejected(t *testing.T) {
 	store := NewMockRoomStore(ctrl)
 	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
 
-	_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Name: "general", Users: []string{"p_tchatadmin_siteA"}})
+	_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Name: "general", Users: []string{"p_adminsiteA"}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errBotInChannel))
 }

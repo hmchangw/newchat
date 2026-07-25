@@ -12,7 +12,7 @@ import (
 )
 
 // isBot reports whether account is bot-like — a real ".bot" bot or the
-// "p_tchatadmin_" platform-admin pseudo-account — via the model taxonomy. Plain
+// "p_admin" platform-admin pseudo-account — via the model taxonomy. Plain
 // "p_" QA test accounts are ordinary users and return false.
 func isBot(account string) bool {
 	return model.IsBot(account) || model.IsPlatformAdminAccount(account)

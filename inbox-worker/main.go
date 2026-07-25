@@ -41,7 +41,7 @@ type config struct {
 	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_tchatadmin_"`
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
 
 // mongoInboxStore implements InboxStore using MongoDB.

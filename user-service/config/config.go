@@ -41,7 +41,7 @@ type Config struct {
 	OIDCClientID     string        `env:"OIDC_CLIENT_ID"     envDefault:""`
 	SSORefreshWindow time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string      `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_tchatadmin_"`
+	AdminAcctPrefix string      `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_admin"`
 	Mongo           MongoConfig `envPrefix:"MONGO_"`
 	NATS            NATSConfig  `envPrefix:"NATS_"`
 }

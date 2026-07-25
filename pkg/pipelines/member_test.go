@@ -12,18 +12,18 @@ import (
 )
 
 // TestBotOrPseudoAccountRegex pins the wire-side residual filter to the model
-// taxonomy: it must exclude ".bot" bots and the "p_tchatadmin_" platform-admin
+// taxonomy: it must exclude ".bot" bots and the "p_admin" platform-admin
 // pseudo-account, but ADMIT plain "p_" QA test accounts (ordinary users now).
 func TestBotOrPseudoAccountRegex(t *testing.T) {
-	assert.Equal(t, `(\.bot$|^p_tchatadmin_)`, botOrPseudoAccountRegex())
+	assert.Equal(t, `(\.bot$|^p_admin)`, botOrPseudoAccountRegex())
 	rx := regexp.MustCompile(botOrPseudoAccountRegex())
 	cases := []struct {
 		account string
 		match   bool
 	}{
 		{"weather.bot", true},
-		{"p_tchatadmin_siteA", true},
-		{"p_tchatadmin_", true},
+		{"p_adminsiteA", true},
+		{"p_admin", true},
 		{"p_qa1", false},
 		{"p_webhook", false},
 		{"p_", false},
@@ -47,7 +47,7 @@ func TestBotOrPseudoAccountRegex_HonorsOverriddenPrefix(t *testing.T) {
 	rx := regexp.MustCompile(botOrPseudoAccountRegex())
 	assert.True(t, rx.MatchString("admin_siteA"), "overridden-prefix admin must match")
 	assert.True(t, rx.MatchString("weather.bot"), "bots still match")
-	assert.False(t, rx.MatchString("p_tchatadmin_siteA"), "old default prefix no longer matches")
+	assert.False(t, rx.MatchString("p_adminsiteA"), "old default prefix no longer matches")
 }
 
 // TestBotOrPseudoAccountRegex_QuoteMetaEscapesPrefix verifies a prefix carrying

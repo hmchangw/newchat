@@ -13,9 +13,9 @@ This document covers all client-initiated interactions:
 For the event payloads these operations trigger, see [events.md](events.md).
 For connection, auth, shared schemas, and error reference, see [../client-api.md](../client-api.md).
 
-> **Platform-admin pseudo-account prefix.** The `p_tchatadmin_` prefix used
+> **Platform-admin pseudo-account prefix.** The `p_admin` prefix used
 > throughout is configurable per deployment via the `ADMIN_ACCT_PREFIX` env var
-> (default `p_tchatadmin_`) and MUST be set to the same value in every service.
+> (default `p_admin`) and MUST be set to the same value in every service.
 
 ---
 
@@ -327,7 +327,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional echo; server derives from subject. |
-| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get both `subscription.update` and `room.key` on their encoded per-user subject (dots→underscores). The `p_tchatadmin_` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
+| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get both `subscription.update` and `room.key` on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
@@ -339,7 +339,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 #### Errors
 
 Synchronous: requester not in room, room full, restricted + not owner, bot not
-available (no app record / disabled assistant), cross-site bot (`bot_cross_site`), user/org not found.
+available (no app record / disabled assistant), user/org not found.
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -497,7 +497,7 @@ See `MemberStatus` schema in [../client-api.md §3.1](../client-api.md#get-membe
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
 Used by the message composer's `@…` mention autocomplete. The caller and the
-`p_tchatadmin_` platform-admin pseudo-account are excluded (QA `p_` accounts are
+`p_admin` platform-admin pseudo-account are excluded (QA `p_` accounts are
 ordinary, mentionable users). Returns `user` and `app` rows.
 
 #### Request body
@@ -1603,7 +1603,7 @@ Returns the DM subscription with a named counterpart. Room-info-enriched.
 
 #### Request body
 
-`{ "accountName": "bob" }` — must not be a bot (`.bot` suffix) or the `p_tchatadmin_` platform-admin pseudo-account (QA `p_` accounts are valid DM targets).
+`{ "accountName": "bob" }` — any account is a valid DM target (an ordinary user, a bot, or the platform-admin pseudo-account).
 
 #### Success response
 
@@ -1611,8 +1611,7 @@ Returns the DM subscription with a named counterpart. Room-info-enriched.
 
 #### Errors
 
-`"accountName required"`, `"invalid DM target"` (`bad_request`, `invalid_dm_target`),
-`"dm not found"` (`not_found`, `subscription_not_found`).
+`"accountName required"`, `"dm not found"` (`not_found`, `subscription_not_found`).
 
 **Emits:** None.
 

@@ -94,7 +94,7 @@ pseudo-account only**:
 
 - **Excluded from read floors & receipts** — the platform-admin pseudo-account,
   identified by the configurable prefix `model.PlatformAdminAccountPrefix()`
-  (env `ADMIN_ACCT_PREFIX`, default `p_tchatadmin_`). Bot-like; `IsBot` / admin
+  (env `ADMIN_ACCT_PREFIX`, default `p_admin`). Bot-like; `IsBot` / admin
   prefix.
 - **Counted like ordinary users** — every other `p_…` account (QA test users,
   e.g. `p_qa1`, `p_webhook`). Their unread state **holds** the read floor and

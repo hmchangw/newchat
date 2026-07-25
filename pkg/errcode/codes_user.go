@@ -4,7 +4,6 @@ package errcode
 const (
 	UserAppNotFound          Reason = "app_not_found"
 	UserAppDisabled          Reason = "app_disabled"
-	UserInvalidDMTarget      Reason = "invalid_dm_target"
 	UserSubscriptionNotFound Reason = "subscription_not_found"
 	UserSSOTokenNotFound     Reason = "sso_token_not_found"
 )

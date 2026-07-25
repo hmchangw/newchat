@@ -47,8 +47,6 @@ var (
 	errEmptyCreateRequest = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
 	errBotInChannel       = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
-	// member.add admits only same-site bots — bot membership isn't federated cross-site.
-	errBotCrossSite = errcode.BadRequest("cross-site bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotCrossSite))
 	// Bots hold plain member roles only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
 	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
@@ -170,7 +168,7 @@ func dedup(items []string) []string {
 }
 
 // determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM whose counterpart is a bot (".bot") or the "p_tchatadmin_" platform-admin
+// A single-user DM whose counterpart is a bot (".bot") or the "p_admin" platform-admin
 // pseudo-account is a botDM — the same union enforced by the channel-membership guards
 // (filterBots, errBotInChannel). A QA "p_" counterpart is an ordinary user, so it is a regular DM.
 func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
