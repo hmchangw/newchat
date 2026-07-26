@@ -549,6 +549,8 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		SiteID:    siteID,
 		Timestamp: editedAtMs,
 	}
+
+	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, editedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
 
 	return &models.EditMessageResponse{
@@ -626,12 +628,30 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		NewTCount:          newTcount,
 		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
+
+	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
 	return &models.DeleteMessageResponse{
 		MessageID: req.MessageID,
 		DeletedAt: deletedAtMs,
 	}, nil
+}
+
+// previewAfterMutation resolves the room's current last-eligible preview (same walk as
+// subscription.list) to carry on an edit/delete fan-out. Hidden thread replies (TShow==false)
+// never appear in the room timeline, so they're skipped — clients tell those apart via the
+// event's threadParentMessageId and drive the room preview themselves. TShow==true replies do
+// appear in the room, so they still get a preview. nil for a hidden thread reply, when the room
+// has no eligible message, or on a read error.
+func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
+	if msg.ThreadParentID != "" && !msg.TShow {
+		return nil
+	}
+	if preview, ok := s.roomLastPreviewMessage(c, roomID, at); ok {
+		return &preview
+	}
+	return nil
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).

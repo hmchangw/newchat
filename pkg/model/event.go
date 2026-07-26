@@ -44,6 +44,9 @@ type MessageEvent struct {
 	// ThreadParentSenderAccount is the thread parent's author, resolved best-effort by the
 	// gatekeeper (empty on soft-fail/edit/delete); lets workers skip their own parent fetch.
 	ThreadParentSenderAccount string `json:"threadParentSenderAccount,omitempty" bson:"-"`
+	// PreviewMessage is the room's refreshed preview, computed by history-service on
+	// edit/delete for broadcast-worker to relay. nil for other events or when cleared.
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // ReactionAction is the toggle direction on ReactionDelta.Action; defined type (not alias) so constants give compile-time safety vs raw strings.
@@ -316,6 +319,15 @@ type EditRoomEvent struct {
 	EditedBy            string          `json:"editedBy" bson:"editedBy"`
 	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
+	// ThreadParentMessageID is set when the edited message is a thread reply; its presence lets
+	// clients tell a thread-reply edit from a top-level one. Omitted for top-level messages.
+	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`
+	// TShow reports whether a thread reply is also shown in the main room timeline. Only meaningful
+	// alongside threadParentMessageId; omitted when false.
+	TShow bool `json:"tshow,omitempty" bson:"tshow,omitempty"`
+	// PreviewMessage is the room's refreshed preview after this edit. Omitted for thread-reply
+	// edits (keyed by threadParentMessageId), when the room has no eligible message, or on a read error.
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // DeleteRoomEvent is the live event published when a message is deleted. Fields are flat (no zero-valued RoomEvent base fields).
@@ -329,6 +341,15 @@ type DeleteRoomEvent struct {
 	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
 	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
 	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
+	// ThreadParentMessageID is set when the deleted message is a thread reply; its presence lets
+	// clients tell a thread-reply delete from a top-level one. Omitted for top-level messages.
+	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`
+	// TShow reports whether a thread reply is also shown in the main room timeline. Only meaningful
+	// alongside threadParentMessageId; omitted when false.
+	TShow bool `json:"tshow,omitempty" bson:"tshow,omitempty"`
+	// PreviewMessage is the room's refreshed preview after this delete. Omitted for thread-reply
+	// deletes (keyed by threadParentMessageId), when the room has no eligible message, or on a read error.
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // PinStateRoomEvent is the live event for a pin/unpin; flat fields (mirrors EditRoomEvent/DeleteRoomEvent).
@@ -528,6 +549,25 @@ const (
 	// SysMsgData carries the meeting ID + join URL (TeamsMeetStartedSysData), read back to make the RPC idempotent.
 	MessageTypeTeamsMeetStarted = "teams_meet_started"
 )
+
+// systemMessageTypes is the set of system/event Message.Type values (not user content),
+// for fast membership checks. Keep in sync with the MessageType* constants above.
+var systemMessageTypes = map[string]struct{}{
+	MessageTypeRoomCreated:      {},
+	MessageTypeMembersAdded:     {},
+	MessageTypeMemberRemoved:    {},
+	MessageTypeMemberLeft:       {},
+	MessageTypeRoomRenamed:      {},
+	MessageTypeRoomRestricted:   {},
+	MessageTypeTeamsMeetStarted: {},
+}
+
+// IsSystemMessageType reports whether t is a known system-message type. A normal
+// user message has Type == "" and returns false.
+func IsSystemMessageType(t string) bool {
+	_, ok := systemMessageTypes[t]
+	return ok
+}
 
 const (
 	// AsyncJobStatusOK indicates a successful async job result.

@@ -922,9 +922,9 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 ##### PreviewMessage
 
 A room's most-recent **eligible** message, resolved at read time and enriched for
-room-list rendering. Eligible = not soft-deleted, not a system message, not a
-quoted reply — an ineligible tail is walked back to an earlier survivor; a room with only
-ineligible messages omits `previewMessage`.
+room-list rendering. Eligible = not soft-deleted and not a system message (quoted
+replies are normal content and ARE eligible) — an ineligible tail is walked back to
+an earlier survivor; a room with only ineligible messages omits `previewMessage`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -3108,6 +3108,9 @@ The payload is flat (no zero-valued room fields):
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
 
 ```json
 {
@@ -3120,7 +3123,13 @@ The payload is flat (no zero-valued room fields):
   "newContent": "morning team — updated",
   "editedBy": "alice",
   "editedAt": "2026-05-06T08:05:00Z",
-  "updatedAt": "2026-05-06T08:05:00Z"
+  "updatedAt": "2026-05-06T08:05:00Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "sender": { "account": "alice", "displayName": "Alice" },
+    "content": "morning team — updated",
+    "createdAt": "2026-05-06T08:00:00Z"
+  }
 }
 ```
 
@@ -3195,6 +3204,9 @@ The payload is flat:
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
 
 ```json
 {
@@ -3205,9 +3217,17 @@ The payload is flat:
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQPRE",
+    "sender": { "account": "bob", "displayName": "Bob" },
+    "content": "the previous message, now the newest",
+    "createdAt": "2026-05-06T07:59:00Z"
+  }
 }
 ```
+
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely.
 
 **Thread-reply deletes additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. The `DeleteRoomEvent` and `ThreadMetadataUpdatedEvent` are published independently; clients must handle each on its own.
 
