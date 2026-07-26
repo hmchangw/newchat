@@ -285,7 +285,9 @@ func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID
 }
 
 // UpdateSubscriptionOpen sets open by (roomID, account). No high-water guard —
-// set-true is idempotent and order-insensitive. Missing sub is a silent no-op.
+// set-true is idempotent and order-insensitive. A genuinely missing sub returns an
+// error (Nak) via naksIfSubscriptionMissing so the event redelivers until the
+// member_added that creates the sub lands.
 func (s *mongoInboxStore) UpdateSubscriptionOpen(ctx context.Context, roomID, account string, open bool) error {
 	res, err := s.subCol.UpdateOne(ctx,
 		bson.M{"roomId": roomID, "u.account": account},

@@ -57,7 +57,8 @@ type InboxStore interface {
 	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error
 	// UpdateSubscriptionOpen sets open by (roomID, account). No ordering guard:
-	// set-true is idempotent. Missing sub is a silent no-op.
+	// set-true is idempotent. A genuinely missing sub returns an error (Nak) so the
+	// event redelivers until the member_added that creates the sub lands.
 	UpdateSubscriptionOpen(ctx context.Context, roomID, account string, open bool) error
 	// UpdateSubscriptionNamesForRoom sets name on every subscription in the room,
 	// each guarded by its own nameUpdatedAt so an out-of-order rename cannot regress
