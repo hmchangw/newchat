@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cassandra-soak
+description: GitOps lifecycle for the Cassandra Run A load generator
+type: application
+version: 0.1.0
+appVersion: "run-a"

@@ -2,7 +2,8 @@
 
 Capacity-baseline load generator for the single-site messaging pipeline
 (`message-gatekeeper` → `MESSAGES_CANONICAL` → `message-worker` +
-`broadcast-worker`). Single Go binary with three subcommands.
+`broadcast-worker`). It also contains focused history, membership, presence,
+and Cassandra Run A workloads.
 
 ## Quick start
 
@@ -85,6 +86,196 @@ the run binary itself never touches ciphertext.
 - Not a cross-site benchmark. Single-site only.
 - Not an absolute-number tool. Numbers vary by host — compare within one
   machine across changes, don't compare across machines.
+
+## Cassandra Run A soak
+
+Run A is a Cassandra-focused storage soak through the real service path:
+
+```text
+loadgen -> message-gatekeeper -> message-worker -> Cassandra
+loadgen -> history-service -> Cassandra
+```
+
+It is not a full-newchat capacity test and it does not establish product SLOs.
+Run B/C, direct-CQL injection, historical backfill, and the optional service
+o11y domain metric are deferred.
+
+### Safety and data ownership
+
+Use a unique `SOAK_RUN_ID` for every staging run. Seed borrows existing,
+eligible users read-only and creates only run-owned rooms, subscriptions, and
+room transport keys. The manifest and chunked ownership ledger live in
+`loadgen_soak_runs` and `loadgen_soak_ownership`. Teardown selects those owned
+room IDs and never deletes or modifies borrowed `users`. The manifest also
+stores the exact active-user IDs selected at seed time, so a replacement Pod
+reuses the same active population.
+
+Topology reload and teardown do not scan shared collections on `soakRunId`.
+They page ownership room IDs, verify that each room still belongs to the run,
+and use the services' existing `_id`, `roomId`, and `threadRoomId` indexes.
+Ownership chunks themselves are paged by their run-prefixed `_id` range.
+Loadgen does not create a teardown-only index on shared service collections.
+Mongo teardown is rate-controlled with a room batch size, a cancellable delay
+between batches, and an independent timeout per batch.
+
+The two encryption artifacts have different meanings:
+
+- `rooms.encKey` is the room transport key seeded before traffic starts.
+- `room_data_keys.wrappedDEK` is the Cassandra at-rest DEK created lazily by
+  the real `message-worker`.
+
+Before starting the measured lanes, `loadgen soak` sends one message through
+the gatekeeper, waits for its correlated success response, and requires a
+non-empty wrapped DEK for that room. A missing record fails the run. This
+preflight is the runtime evidence that at-rest encryption is enabled; a seeded
+`encKey` alone is not sufficient.
+
+Mongo cleanup is ownership-scoped. Cassandra rows do not carry `SOAK_RUN_ID`,
+so the safe default is `SOAK_CASSANDRA_CLEANUP=none`. `truncate` is allowed
+only for an isolated, disposable keyspace and requires
+`SOAK_CONFIRM_KEYSPACE` to exactly equal `CASSANDRA_KEYSPACE`. Never select
+`truncate` for a shared staging keyspace.
+
+### Lifecycle
+
+```bash
+# Small smoke-test values; use the approved staging values for the real soak.
+export SOAK_RUN_ID=cassandra-run-a-20260724
+export SOAK_RUN_MODE=duration
+export SOAK_RUN_DURATION=10m
+export SOAK_WARMUP=30s
+
+/loadgen seed --workload=soak --seed=42
+/loadgen soak --seed=42
+/loadgen teardown --workload=soak
+```
+
+Seed and run are restart-safe at the process level. Seed replaces only
+partial topology owned by the same run ID. `duration` mode stores the run
+deadline in the manifest, so a replacement process resumes the remaining
+wall-clock duration. `continuous` mode has no deadline and stops gracefully
+only when the process receives SIGINT or SIGTERM; a replacement process
+resumes the same run. While running, loadgen renews a Mongo-backed heartbeat
+lease. Teardown refuses to change data while that lease is fresh; this guard
+does not require loadgen to access the Kubernetes API. Every process start has
+a fresh warm-up. The recent-message catalog is intentionally in-memory, so
+mutations, threads, and verification skip until new accepted messages age
+past `SOAK_PERSIST_GRACE`.
+
+Run must have access to MongoDB, NATS, message-gatekeeper, message-worker, and
+history-service. Cassandra credentials are not used by normal Run A traffic.
+They are required only when teardown is explicitly configured to truncate an
+isolated keyspace.
+
+### Configuration
+
+Common environment variables:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `NATS_URL` | required | NATS endpoint used for front-door sends and history RPCs. |
+| `NATS_CREDS_FILE` | empty | Backend credential file. |
+| `MONGO_URI` | required | Staging MongoDB URI. |
+| `MONGO_DB` | `chat` | Database containing users and run-owned topology. |
+| `MONGO_USERNAME`, `MONGO_PASSWORD` | empty | MongoDB authentication. |
+| `SITE_ID` | `site-local` | Site whose users and service subjects are used. |
+| `METRICS_ADDR` | `:9099` | Prometheus listener. |
+| `MAX_IN_FLIGHT` | `200` | Global loadgen concurrency guard. |
+| `CASSANDRA_HOSTS` | empty | Used only by destructive Cassandra teardown. |
+| `CASSANDRA_KEYSPACE` | `chat` | Manifest target and optional teardown keyspace. |
+| `CASSANDRA_USERNAME`, `CASSANDRA_PASSWORD` | empty | Optional teardown authentication. |
+| `MESSAGE_BUCKET_HOURS` | `72` | Must match services when Cassandra cleanup is enabled. |
+
+Run A environment variables:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `SOAK_RUN_ID` | required | Unique ownership and lifecycle ID. |
+| `SOAK_RUN_MODE` | `duration` | `duration` for a bounded smoke/run, or `continuous` until SIGTERM. |
+| `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
+| `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |
+| `SOAK_HEARTBEAT_INTERVAL` | `30s` | Mongo lifecycle lease renewal interval while load is active. |
+| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown blocks a running manifest until its heartbeat is older than this threshold. |
+| `SOAK_SEND_RATE` | `100` | Top-level plus thread sends per second. |
+| `SOAK_READ_RATE` | `700` | Mixed history reads per second. |
+| `SOAK_THREAD_SHARE` | `0.10` | Fraction of sends attempted as thread replies. |
+| `SOAK_MUTATION_RATE` | `5` | Combined edit/delete/pin-family operations per second. |
+| `SOAK_SOFT_DELETE_RATIO` | `0.001` | Accepted sends scheduled for soft-delete. |
+| `SOAK_REACTION_RATE` | `100` | Independent reaction add/remove rate per second. |
+| `SOAK_REACTIONS_PER_HOT_MESSAGE` | `30` | Maximum distinct reactors on a hot message. |
+| `SOAK_REACTION_MESSAGE_SCOPE` | `hot_only` | I8 placeholder: `hot_only` or `all_messages`. |
+| `SOAK_REACTION_REMOVE_SHARE` | `0.20` | Removal probability where possible. |
+| `SOAK_PINNED_LIST_RATE` | `1` | Pinned-list RPCs per second. |
+| `SOAK_VERIFY_RATE` | `1` | Read-back samples per second. |
+| `SOAK_MAX_USERS` | `20000` | Maximum borrowed real users. |
+| `SOAK_ACTIVE_USERS` | `2000` | Active subset; must not exceed borrowed users. |
+| `SOAK_ROOM_COUNT` | `10000` | Owned channel plus DM rooms. |
+| `SOAK_CHANNEL_RATIO` | `0.30` | Fraction of owned rooms that are channels. |
+| `SOAK_CHANNEL_MEMBERS` | `100` | Members per generated channel. |
+| `SOAK_LARGE_ROOM_THRESHOLD` | `500` | Gatekeeper large-room threshold; channel membership must not exceed it. |
+| `SOAK_RATE_SCOPE` | `site` | I10 placeholder: `site` or `global`. |
+| `SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY` | `0` | I12 placeholder; zero derives it from send rate and active users. |
+| `SOAK_PAYLOAD_MEDIAN_BYTES` | `1024` | Modeled encrypted payload median. |
+| `SOAK_PAYLOAD_P95_BYTES` | `2048` | Modeled encrypted payload p95. |
+| `SOAK_PAYLOAD_MAX_BYTES` | `10240` | Modeled encrypted payload maximum. |
+| `SOAK_PERSIST_GRACE` | `10s` | Accepted-message age before mutation/thread/read-back. |
+| `SOAK_MUTATION_RETRIES` | `3` | Not-found retries before a soft skip. |
+| `SOAK_RETRY_MIN_BACKOFF` | `100ms` | Initial transient/mutation retry delay. |
+| `SOAK_RETRY_MAX_BACKOFF` | `5s` | Maximum retry delay. |
+| `SOAK_RECENT_PER_ROOM` | `128` | Per-room recent-message ring capacity. |
+| `SOAK_RECENT_TOTAL` | `200000` | Global bounded recent-message capacity. |
+| `SOAK_CASSANDRA_CLEANUP` | `none` | `none` or guarded `truncate`. |
+| `SOAK_CONFIRM_KEYSPACE` | empty | Must exactly match the keyspace for `truncate`. |
+| `SOAK_TEARDOWN_BATCH_ROOMS` | `250` | Maximum owned room IDs per Mongo deletion batch. |
+| `SOAK_TEARDOWN_BATCH_DELAY` | `100ms` | Cancellable delay between Mongo deletion batches. |
+| `SOAK_TEARDOWN_BATCH_TIMEOUT` | `30s` | Timeout applied independently to each Mongo deletion batch. |
+
+I8, I10, and I12 are deliberately configurable assumptions, not production
+facts. Confirm and record them before interpreting a long run.
+
+### Workload and output
+
+Rooms are selected with a Zipf distribution. Reads use a 75/15/10
+LoadHistory/GetThreadMessages/GetMessageByID mix. Mutations and thread replies
+only target messages that received a matching gatekeeper success and aged past
+the persistence grace. A mutation that still returns not-found after the
+configured retries is a soft skip and increments
+`mutation_target_missing`—that value should remain approximately zero.
+
+Read-back alternates direct ID checks and bounded LoadHistory bucket walks,
+checking identity and content against the in-memory catalog. The final report
+prints achieved rate, success/failure/skip counts, retries, fixed-bucket
+p50/p95/p99, early-to-late p99 drift, error classes, and correctness results.
+The same bounded-label data is exported on `METRICS_ADDR`.
+
+For a staging acceptance smoke, use a short duration and verify:
+
+1. The encryption preflight logs success and the selected room has a non-empty
+   `room_data_keys.wrappedDEK`.
+2. GetMessageByID returns the original plaintext through history-service,
+   demonstrating successful decrypt.
+3. `mutation_target_missing` remains near zero after the warm-up.
+4. Teardown deletes only the selected run's owned Mongo topology.
+
+### Run A test coverage
+
+Run the scoped coverage gate from the repository root:
+
+```text
+make coverage-loadgen-soak
+```
+
+The target runs Run A unit and integration tests with the race detector, so
+Docker must be available for the shared MongoDB, NATS, and Cassandra test
+containers. It enforces at least 80% statement coverage across all
+`soak_*.go` files and at least 90% across the Run A core after excluding the
+CLI/environment boundary (`soak_main.go`) and Mongo adapter
+(`soak_store.go`). Those boundary files are exercised by integration tests
+and remain part of the 80% aggregate.
+
+The legacy loadgen modes share the same large `package main` and predate this
+gate. Their package-wide percentage is reported by the normal test command
+but is a no-regression observation, not a Run A acceptance criterion.
 
 ## Members workload (add-member benchmark)
 

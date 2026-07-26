@@ -1,0 +1,104 @@
+# The release pipeline advances one run through:
+# seed -> soak -> stopped -> teardown.
+phase: stopped
+runId: ""
+siteId: ""
+
+image:
+  repository: ""
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+  # Local kind validation may opt in to a tag. Staging must use a digest.
+  allowMutableTag: false
+
+existingSecret: cassandra-soak-loadgen-secrets
+
+mongo:
+  database: chat
+
+cassandra:
+  keyspace: chat
+  cleanup: none
+  confirmKeyspace: ""
+  messageBucketHours: 72
+
+metrics:
+  port: 9099
+  serviceAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "9099"
+
+seed:
+  randomSeed: 42
+  activeDeadlineSeconds: 7200
+  backoffLimit: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+soak:
+  # A Deployment must remain continuous. Use the CLI/Compose duration mode for
+  # bounded local runs.
+  runMode: continuous
+  randomSeed: 42
+  warmup: 30s
+  heartbeatInterval: 30s
+  heartbeatStaleAfter: 2m
+  terminationGracePeriodSeconds: 60
+  maxInFlight: 200
+  sendRate: "100"
+  readRate: "700"
+  threadShare: "0.10"
+  mutationRate: "5"
+  softDeleteRatio: "0.001"
+  reactionRate: "100"
+  reactionsPerHotMessage: "30"
+  reactionMessageScope: hot_only
+  reactionRemoveShare: "0.20"
+  pinnedListRate: "1"
+  verifyRate: "1"
+  maxUsers: "20000"
+  activeUsers: "2000"
+  roomCount: "10000"
+  channelRatio: "0.30"
+  channelMembers: "100"
+  largeRoomThreshold: "500"
+  rateScope: site
+  messagesPerActiveUserPerDay: "0"
+  payloadMedianBytes: "1024"
+  payloadP95Bytes: "2048"
+  payloadMaxBytes: "10240"
+  persistGrace: 10s
+  mutationRetries: "3"
+  retryMinBackoff: 100ms
+  retryMaxBackoff: 5s
+  recentPerRoom: "128"
+  recentTotal: "200000"
+  resources:
+    requests:
+      cpu: "2"
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
+teardown:
+  # The chart refuses to render teardown unless this is explicitly true.
+  approved: false
+  batchRooms: "250"
+  batchDelay: 100ms
+  batchTimeout: 30s
+  activeDeadlineSeconds: 7200
+  backoffLimit: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi

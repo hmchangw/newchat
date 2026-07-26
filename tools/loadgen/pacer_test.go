@@ -97,3 +97,16 @@ func TestPacer_AccumulatesFractionalRemainder(t *testing.T) {
 	elapsed := now.Sub(start).Seconds()
 	assert.InDelta(t, 333*elapsed, float64(total), 2)
 }
+
+func TestRatePacer_SubHertzEmitsAtConfiguredCadence(t *testing.T) {
+	start := time.Unix(0, 0)
+	p := newRatePacer(0.2, start)
+
+	assert.Equal(t, 5*time.Second, p.interval)
+	emit, underrun := p.tick(start.Add(5 * time.Second))
+	assert.Equal(t, 1, emit)
+	assert.Zero(t, underrun)
+	emit, underrun = p.tick(start.Add(10 * time.Second))
+	assert.Equal(t, 1, emit)
+	assert.Zero(t, underrun)
+}

@@ -1,0 +1,65 @@
+{{- if eq .Values.phase "soak" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cassandra-soak.fullname" . }}-soak
+  labels:
+    {{- include "cassandra-soak.labels" . | nindent 4 }}
+    loadgen.newchat/phase: soak
+  annotations:
+    loadgen.newchat/run-id: {{ .Values.runId | quote }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cassandra-soak.selectorLabels" . | nindent 6 }}
+      loadgen.newchat/phase: soak
+  template:
+    metadata:
+      labels:
+        {{- include "cassandra-soak.selectorLabels" . | nindent 8 }}
+        loadgen.newchat/phase: soak
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.soak.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- include "cassandra-soak.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: loadgen
+          image: {{ include "cassandra-soak.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - soak
+            - {{ printf "--seed=%d" (.Values.soak.randomSeed | int) | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "cassandra-soak.fullname" . }}-config
+          env:
+            {{- include "cassandra-soak.commonEnv" . | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.soak.resources | nindent 12 }}
+          securityContext:
+            {{- include "cassandra-soak.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- include "cassandra-soak.credentialsMount" . | nindent 12 }}
+      volumes:
+        {{- include "cassandra-soak.credentialsVolume" . | nindent 8 }}
+{{- end }}

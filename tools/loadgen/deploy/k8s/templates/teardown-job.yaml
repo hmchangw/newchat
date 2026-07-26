@@ -1,0 +1,67 @@
+{{- if eq .Values.phase "teardown" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cassandra-soak.fullname" . }}-teardown
+  labels:
+    {{- include "cassandra-soak.labels" . | nindent 4 }}
+    loadgen.newchat/phase: teardown
+  annotations:
+    loadgen.newchat/run-id: {{ .Values.runId | quote }}
+spec:
+  activeDeadlineSeconds: {{ .Values.teardown.activeDeadlineSeconds }}
+  completions: 1
+  parallelism: 1
+  backoffLimit: {{ .Values.teardown.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "cassandra-soak.selectorLabels" . | nindent 8 }}
+        loadgen.newchat/phase: teardown
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        {{- include "cassandra-soak.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: loadgen
+          image: {{ include "cassandra-soak.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - teardown
+            - --workload=soak
+          envFrom:
+            - configMapRef:
+                name: {{ include "cassandra-soak.fullname" . }}-config
+          env:
+            {{- include "cassandra-soak.commonEnv" . | nindent 12 }}
+            - name: CASSANDRA_HOSTS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: cassandra-hosts
+                  optional: {{ ne .Values.cassandra.cleanup "truncate" }}
+            - name: CASSANDRA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: cassandra-username
+                  optional: true
+            - name: CASSANDRA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: cassandra-password
+                  optional: true
+          resources:
+            {{- toYaml .Values.teardown.resources | nindent 12 }}
+          securityContext:
+            {{- include "cassandra-soak.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- include "cassandra-soak.credentialsMount" . | nindent 12 }}
+      volumes:
+        {{- include "cassandra-soak.credentialsVolume" . | nindent 8 }}
+{{- end }}

@@ -1,0 +1,73 @@
+# Local kind smoke values. Credentials and endpoints remain in an
+# operator-created Secret and are never committed.
+phase: stopped
+runId: kind-run-a-smoke
+siteId: site-local
+existingSecret: cassandra-soak-credentials
+
+image:
+  repository: newchat-loadgen
+  digest: ""
+  tag: local
+  pullPolicy: Never
+  allowMutableTag: true
+
+mongo:
+  database: chat
+
+cassandra:
+  keyspace: chat
+  cleanup: none
+  confirmKeyspace: chat
+  messageBucketHours: 72
+
+seed:
+  activeDeadlineSeconds: 1800
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+soak:
+  warmup: 2s
+  heartbeatInterval: 5s
+  heartbeatStaleAfter: 20s
+  maxInFlight: 32
+  sendRate: "2"
+  readRate: "5"
+  mutationRate: "1"
+  reactionRate: "1"
+  reactionsPerHotMessage: "3"
+  pinnedListRate: "1"
+  verifyRate: "1"
+  maxUsers: "9"
+  activeUsers: "6"
+  roomCount: "8"
+  channelRatio: "0.50"
+  channelMembers: "4"
+  payloadMedianBytes: "128"
+  payloadP95Bytes: "512"
+  payloadMaxBytes: "1024"
+  persistGrace: 1s
+  recentPerRoom: "16"
+  recentTotal: "128"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+teardown:
+  activeDeadlineSeconds: 1800
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi

@@ -1,0 +1,50 @@
+{{- if eq .Values.phase "seed" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cassandra-soak.fullname" . }}-seed
+  labels:
+    {{- include "cassandra-soak.labels" . | nindent 4 }}
+    loadgen.newchat/phase: seed
+  annotations:
+    loadgen.newchat/run-id: {{ .Values.runId | quote }}
+spec:
+  activeDeadlineSeconds: {{ .Values.seed.activeDeadlineSeconds }}
+  completions: 1
+  parallelism: 1
+  backoffLimit: {{ .Values.seed.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "cassandra-soak.selectorLabels" . | nindent 8 }}
+        loadgen.newchat/phase: seed
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        {{- include "cassandra-soak.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: loadgen
+          image: {{ include "cassandra-soak.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - seed
+            - --workload=soak
+            - {{ printf "--seed=%d" (.Values.seed.randomSeed | int) | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "cassandra-soak.fullname" . }}-config
+          env:
+            {{- include "cassandra-soak.commonEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.seed.resources | nindent 12 }}
+          securityContext:
+            {{- include "cassandra-soak.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- include "cassandra-soak.credentialsMount" . | nindent 12 }}
+      volumes:
+        {{- include "cassandra-soak.credentialsVolume" . | nindent 8 }}
+{{- end }}

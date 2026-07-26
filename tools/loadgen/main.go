@@ -27,6 +27,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -79,12 +80,13 @@ type config struct {
 	// or a custom monitoring port) when running against non-default infra.
 	NatsMonitoringURL string           `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
 	Bottleneck        bottleneckConfig `envPrefix:"BOTTLENECK_"`
+	Soak              soakConfig       `envPrefix:"SOAK_"`
 }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
 		os.Exit(2)
 	}
 	cfg, err := env.ParseAs[config]()
@@ -115,6 +117,8 @@ func dispatch(ctx context.Context, cfg *config) int {
 		return runRun(ctx, cfg, os.Args[2:])
 	case "teardown":
 		return runTeardown(ctx, cfg, os.Args[2:])
+	case "soak":
+		return runSoak(ctx, cfg, os.Args[2:])
 	case "members-sustained":
 		return runMembersSustained(ctx, cfg, os.Args[2:])
 	case "members-capacity":
@@ -141,7 +145,7 @@ func dispatch(ctx context.Context, cfg *config) int {
 
 func runSeed(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("seed", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|members|history|read-receipt|room-read|thread-read|botroom")
+	workload := fs.String("workload", "messages", "messages|thread|members|history|read-receipt|room-read|thread-read|botroom|soak")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	readRatio := fs.Float64("read-ratio", 0.7, "read-receipt only: fraction of each room's subscribers to mark as readers")
@@ -153,6 +157,9 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	users := fs.Int("users", 0, "override preset.Users for the messages workload (0 = use preset default; must match `loadgen daily --users` if you use both)")
 	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
 	_ = fs.Parse(args)
+	if *workload == "soak" {
+		return runSoakPhase(ctx, cfg, soakPhaseSeed, *seed)
+	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
 		return 2
@@ -299,10 +306,13 @@ func runTeardownBotRoom(ctx context.Context, cfg *config, preset string, seed in
 
 func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("teardown", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|members|history|room-read|thread-read|botroom")
+	workload := fs.String("workload", "messages", "messages|thread|members|history|room-read|thread-read|botroom|soak")
 	preset := fs.String("preset", "", "preset name (required to identify which room keys to delete)")
 	seed := fs.Int64("seed", 42, "RNG seed (must match the seed used at seed time)")
 	_ = fs.Parse(args)
+	if *workload == "soak" {
+		return runSoakPhase(ctx, cfg, soakPhaseTeardown, soakDefaultSeed)
+	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
 		return 2
@@ -326,6 +336,97 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown workload: %s\n", *workload)
 		return 2
 	}
+}
+
+type soakPhase string
+
+const (
+	soakPhaseSeed     soakPhase = "seed"
+	soakPhaseRun      soakPhase = "run"
+	soakPhaseTeardown soakPhase = "teardown"
+)
+
+func runSoak(ctx context.Context, cfg *config, args []string) int {
+	seed, err := parseSoakArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	return runSoakPhase(ctx, cfg, soakPhaseRun, seed)
+}
+
+func runSoakPhase(
+	ctx context.Context,
+	cfg *config,
+	phase soakPhase,
+	seed int64,
+) int {
+	var validationErr error
+	if phase == soakPhaseTeardown {
+		validationErr = validateSoakTeardownConfig(
+			&cfg.Soak,
+			cfg.CassandraKeyspace,
+		)
+	} else {
+		validationErr = validateSoakConfig(&cfg.Soak, cfg.CassandraKeyspace)
+	}
+	if validationErr != nil {
+		slog.Error(
+			"invalid Cassandra soak configuration",
+			"phase", phase,
+			"error", validationErr,
+		)
+		return 2
+	}
+	if phase == soakPhaseTeardown {
+		return runSoakTeardown(ctx, cfg)
+	}
+	logSoakAssumptions(&cfg.Soak)
+	if phase == soakPhaseSeed {
+		return runSoakSeed(ctx, cfg, seed)
+	}
+	return runSoakWorkload(ctx, cfg, seed)
+}
+
+func runSoakTeardown(ctx context.Context, cfg *config) int {
+	db, _, cleanup, err := connectStores(ctx, cfg)
+	if err != nil {
+		return 1
+	}
+	defer cleanup()
+
+	var cleaner soakCassandraCleaner
+	if cfg.Soak.CassandraCleanup == "truncate" {
+		if cfg.CassandraHosts == "" {
+			slog.Error("CASSANDRA_HOSTS is required when SOAK_CASSANDRA_CLEANUP=truncate")
+			return 2
+		}
+		session, err := connectCassandra(cfg)
+		if err != nil {
+			slog.Error("connect Cassandra for soak teardown", "error", err)
+			return 1
+		}
+		defer cassutil.Close(session)
+		cleaner = &gocqlSoakCleaner{session: session, keyspace: cfg.CassandraKeyspace}
+	}
+
+	found, err := teardownSoak(
+		ctx,
+		&mongoSoakStore{db: db},
+		cleaner,
+		&cfg.Soak,
+		cfg.CassandraKeyspace,
+	)
+	if err != nil {
+		slog.Error("teardown Cassandra soak run", "runId", cfg.Soak.RunID, "error", err)
+		return 1
+	}
+	if !found {
+		slog.Info("Cassandra soak run not found; nothing to clean", "runId", cfg.Soak.RunID)
+		return 0
+	}
+	slog.Info("Cassandra soak teardown complete", "runId", cfg.Soak.RunID)
+	return 0
 }
 
 func runTeardownMessages(ctx context.Context, cfg *config, preset string, seed int64) int {

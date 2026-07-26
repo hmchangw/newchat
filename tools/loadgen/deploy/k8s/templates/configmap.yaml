@@ -1,0 +1,55 @@
+{{- include "cassandra-soak.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cassandra-soak.fullname" . }}-config
+  labels:
+    {{- include "cassandra-soak.labels" . | nindent 4 }}
+  annotations:
+    loadgen.newchat/run-id: {{ .Values.runId | quote }}
+data:
+  SITE_ID: {{ .Values.siteId | quote }}
+  MONGO_DB: {{ .Values.mongo.database | quote }}
+  CASSANDRA_KEYSPACE: {{ .Values.cassandra.keyspace | quote }}
+  MESSAGE_BUCKET_HOURS: {{ .Values.cassandra.messageBucketHours | quote }}
+  METRICS_ADDR: {{ printf ":%d" (.Values.metrics.port | int) | quote }}
+  MAX_IN_FLIGHT: {{ .Values.soak.maxInFlight | quote }}
+  SOAK_RUN_ID: {{ .Values.runId | quote }}
+  SOAK_RUN_MODE: {{ .Values.soak.runMode | quote }}
+  SOAK_RUN_DURATION: "0s"
+  SOAK_WARMUP: {{ .Values.soak.warmup | quote }}
+  SOAK_HEARTBEAT_INTERVAL: {{ .Values.soak.heartbeatInterval | quote }}
+  SOAK_HEARTBEAT_STALE_AFTER: {{ .Values.soak.heartbeatStaleAfter | quote }}
+  SOAK_SEND_RATE: {{ .Values.soak.sendRate | quote }}
+  SOAK_READ_RATE: {{ .Values.soak.readRate | quote }}
+  SOAK_THREAD_SHARE: {{ .Values.soak.threadShare | quote }}
+  SOAK_MUTATION_RATE: {{ .Values.soak.mutationRate | quote }}
+  SOAK_SOFT_DELETE_RATIO: {{ .Values.soak.softDeleteRatio | quote }}
+  SOAK_REACTION_RATE: {{ .Values.soak.reactionRate | quote }}
+  SOAK_REACTIONS_PER_HOT_MESSAGE: {{ .Values.soak.reactionsPerHotMessage | quote }}
+  SOAK_REACTION_MESSAGE_SCOPE: {{ .Values.soak.reactionMessageScope | quote }}
+  SOAK_REACTION_REMOVE_SHARE: {{ .Values.soak.reactionRemoveShare | quote }}
+  SOAK_PINNED_LIST_RATE: {{ .Values.soak.pinnedListRate | quote }}
+  SOAK_VERIFY_RATE: {{ .Values.soak.verifyRate | quote }}
+  SOAK_MAX_USERS: {{ .Values.soak.maxUsers | quote }}
+  SOAK_ACTIVE_USERS: {{ .Values.soak.activeUsers | quote }}
+  SOAK_ROOM_COUNT: {{ .Values.soak.roomCount | quote }}
+  SOAK_CHANNEL_RATIO: {{ .Values.soak.channelRatio | quote }}
+  SOAK_CHANNEL_MEMBERS: {{ .Values.soak.channelMembers | quote }}
+  SOAK_LARGE_ROOM_THRESHOLD: {{ .Values.soak.largeRoomThreshold | quote }}
+  SOAK_RATE_SCOPE: {{ .Values.soak.rateScope | quote }}
+  SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY: {{ .Values.soak.messagesPerActiveUserPerDay | quote }}
+  SOAK_PAYLOAD_MEDIAN_BYTES: {{ .Values.soak.payloadMedianBytes | quote }}
+  SOAK_PAYLOAD_P95_BYTES: {{ .Values.soak.payloadP95Bytes | quote }}
+  SOAK_PAYLOAD_MAX_BYTES: {{ .Values.soak.payloadMaxBytes | quote }}
+  SOAK_PERSIST_GRACE: {{ .Values.soak.persistGrace | quote }}
+  SOAK_MUTATION_RETRIES: {{ .Values.soak.mutationRetries | quote }}
+  SOAK_RETRY_MIN_BACKOFF: {{ .Values.soak.retryMinBackoff | quote }}
+  SOAK_RETRY_MAX_BACKOFF: {{ .Values.soak.retryMaxBackoff | quote }}
+  SOAK_RECENT_PER_ROOM: {{ .Values.soak.recentPerRoom | quote }}
+  SOAK_RECENT_TOTAL: {{ .Values.soak.recentTotal | quote }}
+  SOAK_CASSANDRA_CLEANUP: {{ .Values.cassandra.cleanup | quote }}
+  SOAK_CONFIRM_KEYSPACE: {{ .Values.cassandra.confirmKeyspace | quote }}
+  SOAK_TEARDOWN_BATCH_ROOMS: {{ .Values.teardown.batchRooms | quote }}
+  SOAK_TEARDOWN_BATCH_DELAY: {{ .Values.teardown.batchDelay | quote }}
+  SOAK_TEARDOWN_BATCH_TIMEOUT: {{ .Values.teardown.batchTimeout | quote }}
