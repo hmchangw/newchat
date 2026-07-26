@@ -49,7 +49,7 @@ paths.
    - [3.1 room-service](#31-room-service)
      - [Create Room](#create-room) · [Add Members](#add-members) · [Remove Member](#remove-member) · [Update Member Role](#update-member-role) · [Rename Room](#rename-room)
      - [List Members](#list-members) · [Get Member Statuses](#get-member-statuses) · [Get Mentionable Subscriptions](#get-mentionable-subscriptions) · [List Org Members](#list-org-members)
-     - [Mark Messages Read](#mark-messages-read) · [Mark Thread as Read](#mark-thread-as-read) · [Read Message Receipts](#read-message-receipts) · [Toggle Mute](#toggle-mute) · [Toggle Favorite](#toggle-favorite)
+     - [Mark Messages Read](#mark-messages-read) · [Mark Thread as Read](#mark-thread-as-read) · [Read Message Receipts](#read-message-receipts) · [Toggle Mute](#toggle-mute) · [Toggle Favorite](#toggle-favorite) · [Open Room](#open-room)
      - [Get Room App Tabs](#get-room-app-tabs) · [Get Room App Command Menu](#get-room-app-command-menu)
    - [3.2 history-service](#32-history-service)
      - [Load History](#load-history) · [Load Next Messages](#load-next-messages) · [Load Surrounding Messages](#load-surrounding-messages) · [Get Message By ID](#get-message-by-id) · [Get Messages By IDs](#get-messages-by-ids)
@@ -853,8 +853,8 @@ Room ciphertext envelope (`roomcrypto.EncryptedMessage`). See [§5 Room Encrypti
 #### Subscription
 
 A user's membership record for one room, embedded in `subscription.update`
-events on `added` / `role_updated` / `mute_toggled` / `favorite_toggled` and
-returned (enriched) by the user-service subscription endpoints. The ID
+events on `added` / `role_updated` / `mute_toggled` / `favorite_toggled` /
+`opened` and returned (enriched) by the user-service subscription endpoints. The ID
 serializes as `id` (not `_id`) and the user under `u` (not `user`). The first
 group is always present; the rest are optional (omitted when empty/unset).
 
@@ -883,6 +883,7 @@ user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
 | `muted` | boolean | Whether the user muted the room. |
 | `favorite` | boolean | Whether the user favorited the room. |
+| `open` | boolean | Sidebar-visibility flag; false hides the room from subscription.list. |
 | `isSubscribed` | boolean | Optional. Whether the user is actively subscribed. |
 | `historySharedSince` | RFC3339 timestamp | Optional. Boundary before which prior history is shared. |
 | `lastSeenAt` | RFC3339 timestamp | Optional. The user's last-seen time in the room. |
@@ -1029,6 +1030,7 @@ and Rename Room.
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read` | [Mark Thread as Read](#mark-thread-as-read) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle` | [Toggle Mute](#toggle-mute) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.favorite.toggle` | [Toggle Favorite](#toggle-favorite) |
+| `chat.user.{account}.request.room.{roomID}.{siteID}.open` | [Open Room](#open-room) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt` | [Read Message Receipts](#read-message-receipts) |
 | `chat.user.{account}.request.orgs.{orgID}.{siteID}.members` | [List Org Members](#list-org-members) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.app.tabs` | [Get Room App Tabs](#get-room-app-tabs) |
@@ -1209,11 +1211,11 @@ Shared by Add Members, Remove Member, and Update Member Role.
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path (only `subscription.u.account` is set there). |
 | `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
-| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, or `"favorite_toggled"`. |
-| `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `read`, and absent on `removed`. |
+| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"opened"`. |
+| `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
-On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled`). `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
+On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled` / `opened`). `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
 
 ```json
 {
@@ -2065,6 +2067,56 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 ##### Cross-site behaviour
 
 When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_favorite_toggled` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_favorite_toggled`. `inbox-worker` on the user's home site mirrors the flip onto the local `Subscription` document. Missing-subscription on the home site (e.g., a federation race) is a silent no-op — no NACK, no redelivery loop.
+
+---
+
+#### Open Room
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.open`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+
+Synchronous RPC. `room-service` sets `Subscription.open` to `true` for the requester in a single atomic Mongo `FindOneAndUpdate`, replies with the resulting value, and fans out a `subscription.update` event to the user's other client sessions. Used by the client to reveal a room in the sidebar.
+
+Idempotency: this is a set, not a toggle. Every successful call sets `open` to `true`; redelivery of the same RPC is a no-op.
+
+##### Request body
+
+The subject already carries `account` and `roomID`, so no body fields are required. Clients may send `{}` or omit the body entirely; any body content is ignored.
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `open` | boolean | Always `true`. |
+
+```json
+{ "status": "ok", "open": true }
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- `"only room members can list members"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"invalid open-room subject: …"` — the subject is malformed.
+
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — emitted once for the requester so other client sessions reconcile.
+
+| Field | Type | Notes |
+|---|---|---|
+| `userId` | string | The requester's internal user ID. |
+| `subscription` | [Subscription](#subscription) | The Subscription record with the updated `open`. |
+| `action` | string | `"opened"`. |
+| `timestamp` | number | Epoch ms (UTC). |
+
+##### Cross-site behaviour
+
+When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_opened` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_opened`. `inbox-worker` on the user's home site mirrors the change onto the local `Subscription` document. Missing-subscription on the home site (e.g., a federation race) is a silent no-op — no NACK, no redelivery loop.
 
 ---
 
