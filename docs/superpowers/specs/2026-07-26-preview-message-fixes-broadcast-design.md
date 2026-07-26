@@ -129,15 +129,21 @@ Add to **both**:
 
 ```go
 // PreviewMessage is the room's refreshed preview after this edit/delete (same resolution as
-// subscription.list). Always present on edit/delete events: an object when an eligible message
-// exists, or null when the room has no eligible message left (client should clear its preview).
-PreviewMessage *PreviewMessage `json:"previewMessage"`
+// subscription.list). Present on room-level edit/delete: a serialized PreviewMessage object
+// when an eligible message exists, or the JSON literal null when the room has no eligible
+// message left (client should clear its preview). Absent on thread-reply (TShow==false) events,
+// which don't affect the room preview. json.RawMessage (not *PreviewMessage) because the room
+// and thread fan-out paths share buildEditRoomEvent/buildDeleteRoomEvent: RawMessage+omitempty
+// is the only way to distinguish "absent" (thread path) from "null" (room preview cleared) with
+// a shared struct — a plain pointer would serialize null on the thread path too.
+PreviewMessage json.RawMessage `json:"previewMessage,omitempty"`
 ```
 
-**No `omitempty`** — the field is always serialized on edit/delete fan-out: an object when a
-preview exists, `null` when cleared. This is the "always include the field" contract: `null`
-unambiguously means "clear the preview", so clients never need a separate re-fetch to learn the
-last message was removed.
+**Contract:** on the room-level edit/delete fan-out the field is always present — an object when
+a preview exists, `null` when cleared — so `null` unambiguously means "clear the preview" and
+clients never re-fetch to learn the last message was removed. It is omitted on the thread-reply
+fan-out path (those events never change the room preview). `encoding/json`/`sonic` already round-
+trip `json.RawMessage`; `EncryptedNewContent` on `EditRoomEvent` uses the same pattern.
 
 ### 2c. history-service: compute and embed (`messages.go`)
 
@@ -162,17 +168,38 @@ if msg.ThreadParentID == "" || msg.TShow {
 
 ### 2d. broadcast-worker: relay (`broadcast-worker/handler.go`)
 
-In `buildEditRoomEvent` (`handler.go:701-715`) and `buildDeleteRoomEvent` (`handler.go:717-730`),
-set the field from the incoming event:
+`buildEditRoomEvent`/`buildDeleteRoomEvent` are shared with the thread path, so they must **not**
+set the preview. Instead, set it in the room-level handlers only — `handleUpdated` (after
+`buildEditRoomEvent`, before encryption/publish) and `handleDeleted` (after `buildDeleteRoomEvent`,
+before publish) — via a small helper:
 
 ```go
-PreviewMessage: evt.PreviewMessage, // nil => serialized as null (preview cleared)
+// previewJSON marshals the refreshed room preview for a room-level edit/delete fan-out event.
+// A nil preview marshals to the JSON literal null, signalling the client to clear its room
+// preview (the last eligible message was removed). Always returns non-nil so the room-level
+// events always carry previewMessage.
+func previewJSON(p *model.PreviewMessage) json.RawMessage {
+    b, err := sonic.Marshal(p) // p == nil -> "null"
+    if err != nil {
+        return json.RawMessage("null")
+    }
+    return b
+}
 ```
 
-Only `handleUpdated`/`handleDeleted` (the room-level path) build these events, so the field is
-emitted exactly on the room-visible edit/delete fan-out. The thread-only path
-(`handleThreadUpdated`/`handleThreadDeleted`, for `TShow==false` replies) is untouched — those
-emit `ThreadMetadataUpdatedEvent` badge updates and never affect the room preview.
+```go
+// in handleUpdated, after `edit := buildEditRoomEvent(room, evt)`:
+edit.PreviewMessage = previewJSON(evt.PreviewMessage)
+```
+```go
+// in handleDeleted, after `del := buildDeleteRoomEvent(room, evt)`:
+del.PreviewMessage = previewJSON(evt.PreviewMessage)
+```
+
+Only `handleUpdated`/`handleDeleted` (the room-level path) run after the `shouldUseThreadFanOut`
+check, so the field is emitted exactly on the room-visible edit/delete fan-out. The thread-only
+path (`handleThreadUpdated`/`handleThreadDeleted`, for `TShow==false` replies) uses the same
+builders but never calls `previewJSON`, so it leaves `previewMessage` absent.
 
 ## Data flow (edit example)
 
@@ -228,19 +255,19 @@ Delete is identical via `EventDeleted` → `handleDeleted` → `DeleteRoomEvent`
   `PreviewMessage == nil` and does not invoke the walk.
 
 **`broadcast-worker/handler_test.go`:**
-- `handleUpdated` copies `evt.PreviewMessage` into `EditRoomEvent.PreviewMessage`
-  (object case and nil→null case).
-- `handleDeleted` copies into `DeleteRoomEvent.PreviewMessage`.
-- Assert the field is present (including JSON `null`) in the fanned-out payload for the
-  always-include contract.
+- `handleUpdated` sets `EditRoomEvent.PreviewMessage` from `evt.PreviewMessage`: object case
+  (non-nil → JSON object) and cleared case (nil → JSON literal `null`, field present).
+- `handleDeleted` sets `DeleteRoomEvent.PreviewMessage` the same way.
+- Thread-reply path (`TShow==false`) leaves `previewMessage` **absent** in the fanned-out payload.
+- A `previewJSON` unit test: non-nil → object bytes; nil → `null`.
 
 All packages must hold the ≥80% coverage floor.
 
 ## Documentation (same PR)
 
 - `docs/client-api.md` — `EditRoomEvent` / `DeleteRoomEvent` are server→client events; add the
-  `previewMessage` field (type `[PreviewMessage](#previewmessage)`, nullable) to both, with the
-  null-means-cleared note and an updated JSON example.
+  `previewMessage` field (type `[PreviewMessage](#previewmessage)`, nullable) to both. Document:
+  object = new preview, `null` = cleared, omitted on thread-reply edit/delete. Update JSON examples.
 - `docs/client-api/events.md` — mirror the same additions (derived view must not drift).
 - `MessageEvent` is internal (`chat.msg.canonical.*`), not client-facing → no client-api entry.
 
