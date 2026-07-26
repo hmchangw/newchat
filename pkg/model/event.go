@@ -319,9 +319,9 @@ type EditRoomEvent struct {
 	EditedBy            string          `json:"editedBy" bson:"editedBy"`
 	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
-	// PreviewMessage is the room's refreshed preview after this edit. Object when one remains,
-	// null when cleared, absent on thread-reply edits. RawMessage encodes all three states.
-	PreviewMessage json.RawMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
+	// PreviewMessage is the room's refreshed preview after this edit. Omitted when the room has
+	// no eligible message, on a read error, or on thread-reply edits (which don't affect it).
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // DeleteRoomEvent is the live event published when a message is deleted. Fields are flat (no zero-valued RoomEvent base fields).
@@ -335,9 +335,9 @@ type DeleteRoomEvent struct {
 	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
 	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
 	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
-	// PreviewMessage is the room's refreshed preview after this delete. Object when one remains,
-	// null when cleared (e.g. the last message was deleted), absent on thread-reply deletes.
-	PreviewMessage json.RawMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
+	// PreviewMessage is the room's refreshed preview after this delete. Omitted when the room has
+	// no eligible message left, on a read error, or on thread-reply deletes (which don't affect it).
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // PinStateRoomEvent is the live event for a pin/unpin; flat fields (mirrors EditRoomEvent/DeleteRoomEvent).

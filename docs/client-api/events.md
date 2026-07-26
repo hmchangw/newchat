@@ -399,7 +399,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) \| null | The room's refreshed preview after this edit (same resolution as `subscription.list`). A `PreviewMessage` object when the room still has an eligible message, or `null` when it has none left (clear the room's preview). **Omitted** on hidden thread-reply edits (`tshow=false`). |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's refreshed preview after this edit (same resolution as `subscription.list`). **Omitted** when the room has no eligible message left, on a read error, or on hidden thread-reply edits (`tshow=false`). |
 
 ```json
 {
@@ -448,7 +448,7 @@ Thread-reply deletes **additionally** emit a
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) \| null | The room's refreshed preview after this delete (same resolution as `subscription.list`). A `PreviewMessage` object when an eligible message remains, or `null` when the room has none left — e.g. the deleted message was the last one (clear the room's preview). **Omitted** on hidden thread-reply deletes (`tshow=false`). |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's refreshed preview after this delete (same resolution as `subscription.list`). **Omitted** when the room has no eligible message left — e.g. the deleted message was the last one — on a read error, or on hidden thread-reply deletes (`tshow=false`). |
 
 ```json
 {
@@ -460,9 +460,16 @@ Thread-reply deletes **additionally** emit a
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
   "updatedAt": "2026-05-06T08:06:40Z",
-  "previewMessage": null
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQPRE",
+    "sender": { "account": "bob", "displayName": "Bob" },
+    "content": "the previous message, now the newest",
+    "createdAt": "2026-05-06T07:59:00Z"
+  }
 }
 ```
+
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted**.
 
 ---
 

@@ -824,12 +824,6 @@ func TestHandleUpdated_ChannelRoomScopedPublish(t *testing.T) {
 	assert.True(t, roomEvt.UpdatedAt.Equal(edited))
 }
 
-func TestPreviewJSON(t *testing.T) {
-	assert.Equal(t, "null", string(previewJSON(nil)))
-	b := previewJSON(&model.PreviewMessage{MessageID: "m1"})
-	assert.Contains(t, string(b), `"messageId":"m1"`)
-}
-
 func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -861,14 +855,12 @@ func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
 	require.Len(t, pub.records, 1)
 	var roomEvt model.EditRoomEvent
 	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
-	require.NotEmpty(t, roomEvt.PreviewMessage, "edit fan-out must carry the refreshed preview")
-	var pm model.PreviewMessage
-	require.NoError(t, json.Unmarshal(roomEvt.PreviewMessage, &pm))
-	assert.Equal(t, "msg-1", pm.MessageID)
-	assert.Equal(t, "updated", pm.Content)
+	require.NotNil(t, roomEvt.PreviewMessage, "edit fan-out must carry the refreshed preview")
+	assert.Equal(t, "msg-1", roomEvt.PreviewMessage.MessageID)
+	assert.Equal(t, "updated", roomEvt.PreviewMessage.Content)
 }
 
-func TestHandleDeleted_RelaysNilPreviewAsNull(t *testing.T) {
+func TestHandleDeleted_OmitsPreviewWhenNil(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
@@ -888,7 +880,7 @@ func TestHandleDeleted_RelaysNilPreviewAsNull(t *testing.T) {
 			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
 			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
 		},
-		// PreviewMessage nil -> cleared
+		// PreviewMessage nil -> no eligible message / read error
 	}
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
@@ -897,8 +889,8 @@ func TestHandleDeleted_RelaysNilPreviewAsNull(t *testing.T) {
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
 	require.Len(t, pub.records, 1)
-	assert.Contains(t, string(pub.records[0].data), `"previewMessage":null`,
-		"deleting the last message must fan out previewMessage:null to clear it")
+	assert.NotContains(t, string(pub.records[0].data), "previewMessage",
+		"a nil preview must be omitted from the fan-out, not sent as null")
 }
 
 func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {

@@ -300,7 +300,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	edit := buildEditRoomEvent(room, evt)
-	edit.PreviewMessage = previewJSON(evt.PreviewMessage)
+	edit.PreviewMessage = evt.PreviewMessage // nil (no message / read error) => omitted
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
@@ -498,7 +498,7 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	del := buildDeleteRoomEvent(room, evt)
-	del.PreviewMessage = previewJSON(evt.PreviewMessage)
+	del.PreviewMessage = evt.PreviewMessage // nil (no message / read error) => omitted
 	if err := h.publishMutation(ctx, room, model.RoomEventMessageDeleted, msg.ID, &del); err != nil {
 		return fmt.Errorf("publish delete mutation for room %s message %s: %w", room.ID, msg.ID, err)
 	}
@@ -698,16 +698,6 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return nil
 	}
-}
-
-// previewJSON marshals the room preview for an edit/delete fan-out. nil → the literal null
-// (clear the preview); always non-nil, so room-level events always carry previewMessage.
-func previewJSON(p *model.PreviewMessage) json.RawMessage {
-	b, err := sonic.Marshal(p) // p == nil -> "null"
-	if err != nil {
-		return json.RawMessage("null")
-	}
-	return b
 }
 
 func buildEditRoomEvent(room *model.Room, evt *model.MessageEvent) model.EditRoomEvent {

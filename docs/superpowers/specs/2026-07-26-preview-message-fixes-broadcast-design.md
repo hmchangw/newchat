@@ -3,6 +3,12 @@
 **Date:** 2026-07-26
 **Branch:** `claude/preview-message-fixes-broadcast-4jk8qv`
 
+> **Amendment (post-review):** the client-facing `previewMessage` is now `*PreviewMessage` with
+> `omitempty` (not `json.RawMessage`). It is **omitted** when the room has no eligible message, on
+> a read error, or on thread-reply events — there is no `null` "cleared" state, and the
+> `previewJSON` helper was removed. Sections referring to the three-state `json.RawMessage`/`null`
+> design below are superseded by this simpler two-state contract.
+
 ## Overview
 
 Three related changes to the room-list "preview message" feature:
