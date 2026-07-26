@@ -44,6 +44,11 @@ type MessageEvent struct {
 	// ThreadParentSenderAccount is the thread parent's author, resolved best-effort by the
 	// gatekeeper (empty on soft-fail/edit/delete); lets workers skip their own parent fetch.
 	ThreadParentSenderAccount string `json:"threadParentSenderAccount,omitempty" bson:"-"`
+	// PreviewMessage is the room's refreshed last-eligible message, computed by history-service
+	// after an edit/delete so broadcast-worker can relay it in the fan-out event. Same resolution
+	// as subscription.list. Set only on EventUpdated/EventDeleted for room-visible messages; nil
+	// otherwise (including "no eligible message remains" — treated as cleared downstream).
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
 // ReactionAction is the toggle direction on ReactionDelta.Action; defined type (not alias) so constants give compile-time safety vs raw strings.
@@ -316,6 +321,12 @@ type EditRoomEvent struct {
 	EditedBy            string          `json:"editedBy" bson:"editedBy"`
 	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
+	// PreviewMessage is the room's refreshed preview after this edit (same resolution as
+	// subscription.list). On room-level edits: a serialized PreviewMessage object, or the JSON
+	// literal null when the room has no eligible message left (client clears its preview). Absent
+	// on thread-reply (TShow==false) edits, which don't affect the room preview. json.RawMessage
+	// (not *PreviewMessage) so the shared builder can distinguish absent (thread) from null (cleared).
+	PreviewMessage json.RawMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
 }
 
 // DeleteRoomEvent is the live event published when a message is deleted. Fields are flat (no zero-valued RoomEvent base fields).
@@ -329,6 +340,11 @@ type DeleteRoomEvent struct {
 	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
 	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
 	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
+	// PreviewMessage is the room's refreshed preview after this delete (same resolution as
+	// subscription.list). On room-level deletes: a serialized PreviewMessage object, or the JSON
+	// literal null when the room has no eligible message left (client clears its preview). Absent
+	// on thread-reply (TShow==false) deletes, which don't affect the room preview.
+	PreviewMessage json.RawMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
 }
 
 // PinStateRoomEvent is the live event for a pin/unpin; flat fields (mirrors EditRoomEvent/DeleteRoomEvent).
