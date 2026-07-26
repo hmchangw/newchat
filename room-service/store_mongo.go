@@ -243,6 +243,7 @@ func (s *MongoStore) InsertTeamsMeeting(ctx context.Context, record model.TeamsM
 // handler.go; the projection-field integration test guards drift.
 var roomReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "type", Value: 1}, {Key: "name", Value: 1},
+	{Key: "siteId", Value: 1},
 	{Key: "userCount", Value: 1}, {Key: "appCount", Value: 1},
 	{Key: "restricted", Value: 1}, {Key: "externalAccess", Value: 1},
 	{Key: "lastMsgAt", Value: 1}, {Key: "minUserLastSeenAt", Value: 1},

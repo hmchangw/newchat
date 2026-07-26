@@ -127,6 +127,7 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, "rproj", got.ID)
 	assert.Equal(t, "proj-room", got.Name)
 	assert.Equal(t, model.RoomTypeChannel, got.Type)
+	assert.Equal(t, "site-a", got.SiteID, "siteId must be in the projection (buildTabURL reads room.SiteID for ${roomOrigin})")
 	assert.Equal(t, 7, got.UserCount)
 	assert.Equal(t, 3, got.AppCount)
 	assert.True(t, got.Restricted)
