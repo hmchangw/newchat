@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -25,21 +26,27 @@ import (
 )
 
 type config struct {
-	NatsURL                  string          `env:"NATS_URL,required"`
-	NatsCredsFile            string          `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID                   string          `env:"SITE_ID"                   envDefault:"site-local"`
-	MongoURI                 string          `env:"MONGO_URI,required"`
-	MongoDB                  string          `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername            string          `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword            string          `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	NatsURL       string `env:"NATS_URL,required"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
+	// LegacyRoomOrigins maps a room's origin siteID to the legacy origin URL
+	// substituted into channel-tab ${roomOrigin} template variables. Wire
+	// format: "site-a:https://legacy.site-a.com,site-b:https://legacy.site-b.com"
+	// (comma-separated, first-colon split — URL values keep "://"). Unset ⇒
+	// every ${roomOrigin} substitutes to "".
+	LegacyRoomOrigins        map[string]string `env:"LEGACY_ROOM_ORIGINS"`
+	MongoURI                 string            `env:"MONGO_URI,required"`
+	MongoDB                  string            `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername            string            `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword            string            `env:"MONGO_PASSWORD"            envDefault:""`
+	MaxRoomSize              int               `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize             int               `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout        time.Duration     `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod       time.Duration     `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	HealthAddr               string            `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled             bool              `env:"PPROF_ENABLED" envDefault:"false"`
+	Bootstrap                bootstrapConfig   `envPrefix:"BOOTSTRAP_"`
+	RestrictedRoomMinMembers int               `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
 	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
 	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
@@ -76,6 +83,21 @@ type config struct {
 	DebugLog logctx.Config      `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+}
+
+// normalizeLegacyRoomOrigins trims whitespace around the keys and values of
+// the LEGACY_ROOM_ORIGINS map (tolerating "site-a: https://…" with a space
+// after the colon) and drops entries left empty after trimming.
+func normalizeLegacyRoomOrigins(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func main() {
@@ -227,7 +249,7 @@ func main() {
 			}
 			return nil
 		},
-		nil,
+		normalizeLegacyRoomOrigins(cfg.LegacyRoomOrigins),
 		nc.NatsConn().MaxPayload(),
 	)
 	handler.dekProvisioner = dekProvisioner
