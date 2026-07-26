@@ -3297,6 +3297,26 @@ func TestInboxSubscriptionFavoriteToggledConst(t *testing.T) {
 	assert.Equal(t, model.InboxEventType("subscription_favorite_toggled"), model.InboxSubscriptionFavoriteToggled)
 }
 
+func TestOpenRoomResponseJSON(t *testing.T) {
+	r := model.OpenRoomResponse{Status: "ok", Open: true}
+	b, err := json.Marshal(r)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(b, &raw))
+	assert.Equal(t, "ok", raw["status"])
+	assert.Equal(t, true, raw["open"])
+	roundTrip(t, &r, &model.OpenRoomResponse{})
+}
+
+func TestSubscriptionOpenedEventJSON(t *testing.T) {
+	e := model.SubscriptionOpenedEvent{Account: "alice", RoomID: "r1", Open: true, Timestamp: 123}
+	roundTrip(t, &e, &model.SubscriptionOpenedEvent{})
+}
+
+func TestInboxSubscriptionOpenedConst(t *testing.T) {
+	assert.Equal(t, "subscription_opened", model.InboxSubscriptionOpened)
+}
+
 func TestSyncCreateDMRequestJSON(t *testing.T) {
 	src := model.SyncCreateDMRequest{
 		RoomType:         model.RoomTypeDM,

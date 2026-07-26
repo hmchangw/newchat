@@ -91,3 +91,13 @@ func TestPublish_WrapsPublishError(t *testing.T) {
 	err := Publish(context.Background(), publish, "site-a", "r1", "site-b", model.InboxSubscriptionRead, []byte(`{}`), "d", 1)
 	require.ErrorIs(t, err, assert.AnError)
 }
+
+func TestOpenInConcurrentEventTypes(t *testing.T) {
+	found := false
+	for _, et := range ConcurrentEventTypes {
+		if et == model.InboxSubscriptionOpened {
+			found = true
+		}
+	}
+	assert.True(t, found, "subscription_opened must ride the concurrent lane")
+}
