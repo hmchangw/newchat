@@ -284,6 +284,22 @@ func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID
 	return nil
 }
 
+// UpdateSubscriptionOpen sets open by (roomID, account). No high-water guard —
+// set-true is idempotent and order-insensitive. Missing sub is a silent no-op.
+func (s *mongoInboxStore) UpdateSubscriptionOpen(ctx context.Context, roomID, account string, open bool) error {
+	res, err := s.subCol.UpdateOne(ctx,
+		bson.M{"roomId": roomID, "u.account": account},
+		bson.M{"$set": bson.M{"open": open}},
+	)
+	if err != nil {
+		return fmt.Errorf("update subscription open for %q in room %q: %w", account, roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return s.naksIfSubscriptionMissing(ctx, account, roomID)
+	}
+	return nil
+}
+
 func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
 	filter := bson.M{
 		"roomId":    roomID,
