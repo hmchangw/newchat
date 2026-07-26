@@ -8,6 +8,7 @@ const (
 	RoomLastOwnerCannotLeave      Reason = "last_owner_cannot_leave"
 	RoomBotInChannel              Reason = "bot_in_channel"
 	RoomBotNotAvailable           Reason = "bot_not_available"
+	RoomBotCannotBeOwner          Reason = "bot_cannot_be_owner"
 	RoomUserNotFound              Reason = "user_not_found"
 	RoomInvalidOrg                Reason = "invalid_org"
 	RoomSelfDM                    Reason = "self_dm"

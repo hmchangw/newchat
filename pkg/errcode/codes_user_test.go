@@ -6,7 +6,6 @@ func TestUserReasons(t *testing.T) {
 	cases := map[Reason]string{
 		UserAppNotFound:          "app_not_found",
 		UserAppDisabled:          "app_disabled",
-		UserInvalidDMTarget:      "invalid_dm_target",
 		UserSubscriptionNotFound: "subscription_not_found",
 		UserSSOTokenNotFound:     "sso_token_not_found",
 	}

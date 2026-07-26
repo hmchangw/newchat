@@ -453,3 +453,35 @@ func TestApplyRoomInfo_ComputesHasGroupMention_CrossSite(t *testing.T) {
 		})
 	}
 }
+
+// Bots are key-holders, so a bot/pseudo principal listing its own subscriptions
+// keeps the room-key material in the enriched bootstrap, exactly like a human.
+func TestEnrichWithRoomInfo_BotRequester_KeepsKeyMaterial(t *testing.T) {
+	secret := make([]byte, roomKeySecretLen)
+	for i := range secret {
+		secret[i] = 0x42
+	}
+	mkSubs := func() []model.EnrichedSubscription {
+		return []model.EnrichedSubscription{{
+			Subscription: model.Subscription{
+				ID: "s1", RoomID: "r1", SiteID: "site-a",
+				RoomType: model.RoomTypeChannel,
+			},
+			RoomName:    "general",
+			RoomKeyPriv: append([]byte(nil), secret...),
+			RoomKeyVer:  3,
+		}}
+	}
+	svc := &UserService{siteID: "site-a"}
+
+	for _, requester := range []string{"p_hook", "weather.bot", "alice"} {
+		t.Run(requester+" keeps the key", func(t *testing.T) {
+			got := svc.enrichWithRoomInfoAndLastMsg(ctx(requester, "site-a"), mkSubs(), false, false)
+			require.Len(t, got, 1)
+			require.NotNil(t, got[0].Room)
+			require.NotNil(t, got[0].Room.PrivateKey, "key material is no longer stripped for bots")
+			assert.NotEmpty(t, *got[0].Room.PrivateKey)
+			require.NotNil(t, got[0].Room.KeyVersion)
+		})
+	}
+}

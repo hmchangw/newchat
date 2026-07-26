@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -56,6 +57,11 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+
+	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
+		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
+		os.Exit(1)
+	}
 
 	checkConfig(&cfg)
 	slog.Info("message bucket configured",

@@ -51,6 +51,18 @@ func TestExtractParams(t *testing.T) {
 	assert.Equal(t, "site-1", params.Get("siteID"))
 }
 
+func TestExtractParams_DecodesBotAccount(t *testing.T) {
+	r := parsePattern("chat.user.{account}.request.room.{roomID}.{siteID}.msg.history")
+	params := r.extractParams("chat.user.weather_bot.request.room.room-42.site-1.msg.history")
+
+	// The {account} token is decoded from its NATS transport form back to the
+	// real ".bot" account so handlers get the requester's true identity.
+	// roomID/siteID are never decoded.
+	assert.Equal(t, "weather.bot", params.Get("account"))
+	assert.Equal(t, "room-42", params.Get("roomID"))
+	assert.Equal(t, "site-1", params.Get("siteID"))
+}
+
 func TestExtractParams_NoParams(t *testing.T) {
 	r := parsePattern("chat.static.subject")
 	params := r.extractParams("chat.static.subject")

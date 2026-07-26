@@ -36,6 +36,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.room.canonical.site-a.teams.create"},
 		{"SubscriptionUpdate", subject.SubscriptionUpdate("alice"),
 			"chat.user.alice.event.subscription.update"},
+		{"SubscriptionUpdate_dotted_bot_encoded", subject.SubscriptionUpdate("weather.bot"),
+			"chat.user.weather_bot.event.subscription.update"},
 		{"SettingsUpdate", subject.SettingsUpdate("alice"),
 			"chat.user.alice.event.settings.update"},
 		{"RoomMetadataChanged", subject.RoomMetadataChanged("alice"),
@@ -68,6 +70,8 @@ func TestSubjectBuilders(t *testing.T) {
 		{"UserRoomEvent", subject.UserRoomEvent("alice"), "chat.user.alice.event.room"},
 		{"RoomKeyUpdate", subject.RoomKeyUpdate("alice"),
 			"chat.user.alice.event.room.key"},
+		{"RoomKeyUpdate_dotted_bot_encoded", subject.RoomKeyUpdate("weather.bot"),
+			"chat.user.weather_bot.event.room.key"},
 		{"MemberRemove", subject.MemberRemove("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.member.remove"},
 		{"MemberAdd", subject.MemberAdd("alice", "r1", "site-a"),
@@ -210,6 +214,44 @@ func TestSubjectBuilders(t *testing.T) {
 	})
 }
 
+func TestEncodeAccount(t *testing.T) {
+	// Dotless accounts are untouched; dotted (".bot") accounts collapse to a
+	// single subject token, matching how auth-service mints the NATS JWT.
+	assert.Equal(t, "alice", subject.EncodeAccount("alice"))
+	assert.Equal(t, "weather_bot", subject.EncodeAccount("weather.bot"))
+	assert.Equal(t, "a_b_c_bot", subject.EncodeAccount("a.b.c.bot"))
+	assert.Equal(t, "p_hook", subject.EncodeAccount("p_hook"))
+}
+
+func TestDecodeAccount(t *testing.T) {
+	// A real bot account is multi-section dotted (name.siteID.bot); auth-service
+	// encodes every dot to an underscore, so a trailing "_bot" transport token has
+	// ALL underscores restored to dots. Every other account passes through
+	// untouched (non-bot accounts never end in "_bot").
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bot_two_section_decodes", "weather_bot", "weather.bot"},
+		{"bot_three_section_decodes", "weather_site-a_bot", "weather.site-a.bot"},
+		{"human_unchanged", "alice", "alice"},
+		{"platform_admin_unchanged", "p_adminsiteA", "p_adminsiteA"},
+		{"p_webhook_unchanged", "p_webhook", "p_webhook"},
+		{"qa_underscore_account_unchanged", "p_qa_1", "p_qa_1"},
+		{"already_dotted_idempotent", "weather.site-a.bot", "weather.site-a.bot"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, subject.DecodeAccount(tt.in))
+		})
+	}
+	// Round-trips with EncodeAccount for two- and three-section ".bot" accounts.
+	assert.Equal(t, "weather.bot", subject.DecodeAccount(subject.EncodeAccount("weather.bot")))
+	assert.Equal(t, "weather.site-a.bot", subject.DecodeAccount(subject.EncodeAccount("weather.site-a.bot")))
+}
+
 func TestParseUserRoomSubject(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -222,6 +264,8 @@ func TestParseUserRoomSubject(t *testing.T) {
 		{"history", "chat.user.alice.request.room.r1.site-a.msg.history", "alice", "r1", true},
 		{"role_update", "chat.user.alice.request.room.r1.site-a.member.role-update", "alice", "r1", true},
 		{"msg_send", "chat.user.alice.room.r1.site-a.msg.send", "alice", "r1", true},
+		{"bot_encoded_decodes", "chat.user.weather_bot.room.r1.site-a.msg.send", "weather.bot", "r1", true},
+		{"bot_3section_encoded_decodes", "chat.user.weather_site-a_bot.room.r1.site-a.msg.send", "weather.site-a.bot", "r1", true},
 		{"too_short", "chat.user.alice", "", "", false},
 		{"no_room", "chat.user.alice.request.foo.bar", "", "", false},
 		{"bad_prefix", "foo.user.alice.room.r1", "", "", false},

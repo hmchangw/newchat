@@ -91,7 +91,10 @@ Member, Update Member Role (see
 **Subject:** `chat.user.{account}.event.subscription.update`
 
 Emitted when a user's membership or subscription state changes. Clients update their
-local sidebar cache from this event.
+local sidebar cache from this event. Bot members receive it like any member; for a
+bot recipient the `{account}` token is **encoded** (dots→underscores, e.g.
+`weather.bot` → `weather_bot`), matching the token its NATS JWT is scoped to (the
+same transform as `room.key` delivery).
 
 Two shapes exist — discriminated by `action`:
 
@@ -207,7 +210,7 @@ UserSettings — every field optional, present only when explicitly set:
 
 **Subject:** `chat.user.{account}.event.room.key`
 
-Delivers the AES-256-GCM room key to channel members. Fired at create, add, and remove.
+Delivers the AES-256-GCM room key to channel members, **bots included** — bots receive it on their **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token, the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend). Fired at create, add, and remove.
 DM/botDM rooms are never encrypted and emit no key event.
 
 | Field | Type | Notes |
@@ -229,7 +232,7 @@ DM/botDM rooms are never encrypted and emit no key event.
 **When fired:**
 
 - **Create Room (channel):** one event per initial enrolled member.
-- **Add Members (channel):** one event per newly-subscribed account; existing members receive no duplicate.
+- **Add Members (channel):** one event per newly-subscribed member; existing members receive no duplicate. Bots receive the key on their encoded per-user subject (see §5 in the canonical doc).
 - **Remove Member (channel):** the key is rotated; every surviving member receives a new event with `version` incremented. The removed account stops receiving events.
 
 **Initial key bootstrap on (re)connect:** live events fire only when keys change.

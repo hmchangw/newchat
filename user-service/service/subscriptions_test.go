@@ -478,13 +478,18 @@ func TestGetDM_Empty(t *testing.T) {
 	requireCode(t, err, errcode.CodeBadRequest)
 }
 
-func TestGetDM_InvalidTarget(t *testing.T) {
-	for _, target := range []string{"p_system", "helper.bot", "p_", ".bot", "p_.bot"} {
+func TestGetDM_AnyTargetIsValid(t *testing.T) {
+	// A DM counterpart may be any account: an ordinary user, a QA p_ account, a
+	// bot (".bot"), or the platform-admin pseudo-account. All of them can log
+	// into the chat frontend and hold a DM subscription, so the lookup always
+	// falls through to GetDMSubscription rather than being rejected up front.
+	for _, target := range []string{"bob", "p_system", "p_", "p_qa1", "helper.bot", "p_adminsiteA"} {
 		t.Run(target, func(t *testing.T) {
-			svc, _, _, _, _, _, _ := newSvc(t)
+			svc, subs, _, _, _, _, _ := newSvc(t)
+			subs.EXPECT().GetDMSubscription(gomock.Any(), "alice", target).Return(nil, nil)
 			_, err := svc.GetDM(ctx("alice", "site-a"), models.GetDMRequest{AccountName: target})
-			requireCode(t, err, errcode.CodeBadRequest)
-			assert.True(t, errcode.HasReason(err, errcode.UserInvalidDMTarget))
+			requireCode(t, err, errcode.CodeNotFound)
+			assert.True(t, errcode.HasReason(err, errcode.UserSubscriptionNotFound))
 		})
 	}
 }
