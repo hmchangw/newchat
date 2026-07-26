@@ -896,16 +896,19 @@ Forward-pagination counterpart to Load History.
 
 #### Request body
 
+Pivot on **exactly one** of `messageId` or `timestamp`.
+
 | Field | Type | Notes |
 |---|---|---|
-| `messageId` | string | Required. The central message to center the window on. |
-| `limit` | number | Window size including the central message (default 50, max 100). |
+| `messageId` | string | Conditional. Central message to center the window on (included in the middle of the result). |
+| `timestamp` | number | Conditional. UTC millis pivot (`> 0`); no central message — returns messages `createdAt <= timestamp` then `createdAt > timestamp`. |
+| `limit` | number | Window size (includes the central message in `messageId` mode; default 50, max 100). |
 
 #### Success response
 
 | Field | Type | Notes |
 |---|---|---|
-| `messages` | Message[] | Window centered on `messageId`, oldest-first. |
+| `messages` | Message[] | Window oldest-first. Centered on `messageId`, or the at-or-before + after groups in `timestamp` mode. |
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
 

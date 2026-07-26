@@ -95,6 +95,67 @@ func TestRepository_GetMessagesBefore(t *testing.T) {
 	assert.True(t, page.Data[0].CreatedAt.After(page.Data[1].CreatedAt))
 }
 
+// TestRepository_GetMessagesBefore_PlusOneMsInclusive verifies the timestamp-pivot
+// surrounding read's inclusivity trick: calling the strict GetMessagesBefore with
+// pivot+1ms includes a message whose created_at equals the pivot exactly (and its
+// same-millisecond siblings) while excluding anything strictly after it.
+func TestRepository_GetMessagesBefore_PlusOneMsInclusive(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	pivot := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	seedMessage(t, session, "r-incl", "at-a", pivot) // exactly on the pivot
+	seedMessage(t, session, "r-incl", "at-b", pivot) // same-millisecond sibling
+	seedMessage(t, session, "r-incl", "before", pivot.Add(-time.Minute))
+	seedMessage(t, session, "r-incl", "after", pivot.Add(time.Minute))
+
+	q, err := ParsePageRequest("", 10)
+	require.NoError(t, err)
+
+	page, err := repo.GetMessagesBefore(ctx, "r-incl", pivot.Add(time.Millisecond), time.Time{}, q)
+	require.NoError(t, err)
+	ids := []string{}
+	for _, m := range page.Data {
+		ids = append(ids, m.MessageID)
+	}
+	assert.Contains(t, ids, "at-a")
+	assert.Contains(t, ids, "at-b")
+	assert.Contains(t, ids, "before")
+	assert.NotContains(t, ids, "after")
+}
+
+// TestRepository_GetMessagesBefore_PlusOneMsAtBucketBoundary covers the only case
+// where pivot+1ms crosses into the next bucket: pivot is the last millisecond of
+// its bucket window. Because pivot is then that bucket's maximum time, "all of the
+// bucket" still equals "created_at <= pivot", so the shift stays exact.
+func TestRepository_GetMessagesBefore_PlusOneMsAtBucketBoundary(t *testing.T) {
+	session := setupCassandra(t)
+	windowMs := int64(24 * time.Hour / time.Millisecond)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	// pivot = last ms of a bucket window → pivot+1ms starts the next bucket.
+	boundary := (time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC).UnixMilli() / windowMs) * windowMs
+	pivot := time.UnixMilli(boundary - 1).UTC()
+	seedMessage(t, session, "r-bnd", "at-pivot", pivot)
+	seedMessage(t, session, "r-bnd", "before", pivot.Add(-time.Hour))
+	seedMessage(t, session, "r-bnd", "after", pivot.Add(time.Millisecond)) // first ms of the next bucket
+
+	q, err := ParsePageRequest("", 10)
+	require.NoError(t, err)
+
+	page, err := repo.GetMessagesBefore(ctx, "r-bnd", pivot.Add(time.Millisecond), time.Time{}, q)
+	require.NoError(t, err)
+	ids := []string{}
+	for _, m := range page.Data {
+		ids = append(ids, m.MessageID)
+	}
+	assert.Contains(t, ids, "at-pivot")
+	assert.Contains(t, ids, "before")
+	assert.NotContains(t, ids, "after", "message in the next bucket must not leak into <= pivot")
+}
+
 func TestRepository_GetMessagesBetweenDesc(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)

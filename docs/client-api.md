@@ -2855,14 +2855,25 @@ See [Error envelope](#6-error-envelope-reference).
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
 
-Fetches messages around a target message — useful for "jump to this message" navigation. Returns up to `limit` messages total, centered on `messageId`.
+Fetches messages around a pivot — useful for "jump to this message" navigation and "resume at
+last-read position". The pivot is **exactly one of** `messageId` or `timestamp`. Returns up to
+`limit` messages total.
+
+- **`messageId` mode** — the window is centered on that message, which is **included** in the
+  middle of the result; `limit` covers the central message plus the context around it.
+- **`timestamp` mode** — the pivot is a UTC-millis coordinate with **no central message**. The
+  result is the messages **at or before** the pivot (`createdAt <= timestamp`) followed by the
+  messages **after** it (`createdAt > timestamp`), split evenly (before gets the larger half on an
+  odd `limit`). A message whose `createdAt` equals `timestamp` exactly is included as the newest of
+  the "at or before" group (e.g. anchoring a subscription `lastSeenAt`).
 
 ##### Request body
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `messageId` | string | yes | The central message to center the window on. |
-| `limit` | number | no | Window size including the central message — see [Common request fields](#common-request-fields-read-rpcs) (default 50, max 100). |
+| `messageId` | string | conditional | The central message to center the window on. Provide **exactly one** of `messageId` / `timestamp`. |
+| `timestamp` | number | conditional | UTC milliseconds since Unix epoch. Pivot coordinate; must be `> 0`. Provide **exactly one** of `messageId` / `timestamp`. |
+| `limit` | number | no | Window size (includes the central message in `messageId` mode) — see [Common request fields](#common-request-fields-read-rpcs) (default 50, max 100). |
 
 ```json
 {
@@ -2871,11 +2882,18 @@ Fetches messages around a target message — useful for "jump to this message" n
 }
 ```
 
+```json
+{
+  "timestamp": 1746518100000,
+  "limit": 50
+}
+```
+
 ##### Success response
 
 | Field | Type | Notes |
 |---|---|---|
-| `messages` | array<Message> | Window of messages centered on `messageId`, oldest-first. See [Message schema](#message-schema). |
+| `messages` | array<Message> | Window of messages, oldest-first. In `messageId` mode, centered on `messageId`; in `timestamp` mode, the "at or before" group followed by the "after" group with no distinct central message. See [Message schema](#message-schema). |
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |

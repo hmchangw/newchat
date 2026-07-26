@@ -976,6 +976,164 @@ func TestHistoryService_LoadSurroundingMessages_Limit1_RedactsInaccessibleQuote(
 	assert.Empty(t, q.MessageID)
 }
 
+// --- LoadSurroundingMessages: timestamp pivot ---
+
+// tsPivot reconstructs a pivot the way the handler does (time.UnixMilli(ms).UTC())
+// and returns the +1ms inclusive upper bound the before-read is called with, so
+// the expected mock args are DeepEqual to the values the handler passes.
+func tsPivot(base time.Time) (pivot, beforeUpper time.Time, ts *int64) {
+	ms := base.UnixMilli()
+	pivot = time.UnixMilli(ms).UTC()
+	return pivot, pivot.Add(time.Millisecond), &ms
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_NoHSS(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	pivot, beforeUpper, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	// No HSS → strict before-read with pivot+1ms (== created_at <= pivot) anchors an at-pivot message.
+	beforeMsgs := []models.Message{{MessageID: "m5", RoomID: "r1", CreatedAt: pivot}, {MessageID: "m4", RoomID: "r1", CreatedAt: joinTime.Add(4 * time.Minute)}}
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", beforeUpper, gomock.Any(), gomock.Any()).Return(makePage(beforeMsgs, false), nil)
+
+	afterMsgs := []models.Message{{MessageID: "m6", RoomID: "r1", CreatedAt: joinTime.Add(6 * time.Minute)}}
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", pivot, gomock.Any(), gomock.Any()).Return(makePage(afterMsgs, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 6})
+	require.NoError(t, err)
+	// Reversed before [m4, m5] + after [m6]; no central splice.
+	require.Len(t, resp.Messages, 3)
+	assert.Equal(t, "m4", resp.Messages[0].MessageID)
+	assert.Equal(t, "m5", resp.Messages[1].MessageID)
+	assert.Equal(t, "m6", resp.Messages[2].MessageID)
+	assert.False(t, resp.MoreBefore)
+	assert.False(t, resp.MoreAfter)
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_WithHSS(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	pivot, beforeUpper, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	// HSS set and pivot within window → strict between-read, lower bound = accessSince,
+	// upper bound = pivot+1ms (== created_at <= pivot).
+	beforeMsgs := []models.Message{{MessageID: "m4", RoomID: "r1", CreatedAt: joinTime.Add(4 * time.Minute)}}
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, beforeUpper, gomock.Any()).Return(makePage(beforeMsgs, false), nil)
+
+	afterMsgs := []models.Message{{MessageID: "m6", RoomID: "r1", CreatedAt: joinTime.Add(6 * time.Minute)}}
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", pivot, gomock.Any(), gomock.Any()).Return(makePage(afterMsgs, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 6})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 2)
+	assert.Equal(t, "m4", resp.Messages[0].MessageID)
+	assert.Equal(t, "m6", resp.Messages[1].MessageID)
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_MoreBeforeAndAfter(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	pivot, beforeUpper, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", beforeUpper, gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m4", RoomID: "r1", CreatedAt: joinTime.Add(4 * time.Minute)}}, true), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", pivot, gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m6", RoomID: "r1", CreatedAt: joinTime.Add(6 * time.Minute)}}, true), nil)
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 4})
+	require.NoError(t, err)
+	assert.True(t, resp.MoreBefore)
+	assert.True(t, resp.MoreAfter)
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_OutsideWindow(t *testing.T) {
+	svc, _, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	// Pivot strictly before the access floor → forbidden, no reads issued.
+	_, _, ts := tsPivot(joinTime.Add(-1 * time.Hour))
+	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 6})
+	require.Error(t, err)
+	assertForbiddenErr(t, err, "timestamp is outside access window")
+	assert.True(t, errcode.HasReason(err, errcode.MessageOutsideAccessWindow))
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_Limit1_NoAfterRead(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	pivot, beforeUpper, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	// limit=1 → beforeCount=1, afterCount=0: only the before-read runs.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", beforeUpper, gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m5", RoomID: "r1", CreatedAt: pivot}}, false), nil)
+	// No GetMessagesAfter expectation — the after-read must be skipped.
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "m5", resp.Messages[0].MessageID)
+	assert.False(t, resp.MoreAfter)
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_BeforeError(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	pivot, beforeUpper, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", beforeUpper, gomock.Any(), gomock.Any()).
+		Return(cassrepo.Page[models.Message]{}, fmt.Errorf("db error"))
+	// after-read runs in parallel; it may or may not be reached.
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", pivot, gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil).MaxTimes(1)
+
+	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 6})
+	require.Error(t, err)
+	assertInternalErr(t, err, "loading surrounding messages")
+}
+
+func TestHistoryService_LoadSurroundingMessages_BothPivots(t *testing.T) {
+	svc, _, _, _, _ := newService(t)
+	c := testContext()
+
+	_, _, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "m5", Timestamp: ts, Limit: 6})
+	require.Error(t, err)
+	assertBadRequestErr(t, err, "provide either messageId or timestamp, not both")
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_NonPositive(t *testing.T) {
+	svc, _, _, _, _ := newService(t)
+	c := testContext()
+
+	zero := int64(0)
+	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: &zero, Limit: 6})
+	require.Error(t, err)
+	assertBadRequestErr(t, err, "timestamp must be positive")
+}
+
+func TestHistoryService_LoadSurroundingMessages_ByTimestamp_NotSubscribed(t *testing.T) {
+	svc, _, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, false, nil)
+
+	_, _, ts := tsPivot(joinTime.Add(5 * time.Minute))
+	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Timestamp: ts, Limit: 6})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not subscribed to room")
+}
+
 // --- Access Control: Not Subscribed ---
 
 func TestHistoryService_LoadHistory_NotSubscribed(t *testing.T) {
@@ -1025,14 +1183,13 @@ func TestHistoryService_GetMessageByID_MissingMessageID(t *testing.T) {
 }
 
 func TestHistoryService_LoadSurroundingMessages_MissingMessageID(t *testing.T) {
-	svc, _, subs, _, _ := newService(t)
+	svc, _, _, _, _ := newService(t)
 	c := testContext()
 
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
-
+	// Exactly-one-of validation precedes the access check — no subscription read.
 	_, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{Limit: 6})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "messageId is required")
+	assertBadRequestErr(t, err, "messageId or timestamp is required")
 }
 
 func TestHistoryService_GetMessageByID_NotSubscribed(t *testing.T) {
