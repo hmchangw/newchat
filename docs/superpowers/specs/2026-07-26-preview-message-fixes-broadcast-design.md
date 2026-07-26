@@ -4,10 +4,12 @@
 **Branch:** `claude/preview-message-fixes-broadcast-4jk8qv`
 
 > **Amendment (post-review):** the client-facing `previewMessage` is now `*PreviewMessage` with
-> `omitempty` (not `json.RawMessage`). It is **omitted** when the room has no eligible message, on
-> a read error, or on thread-reply events — there is no `null` "cleared" state, and the
-> `previewJSON` helper was removed. Sections referring to the three-state `json.RawMessage`/`null`
-> design below are superseded by this simpler two-state contract.
+> `omitempty` (not `json.RawMessage`) — omitted when the room has no eligible message or on a read
+> error, with no `null` "cleared" state (the `previewJSON` helper was removed). The preview is also
+> computed **unconditionally** on every edit/delete (the hidden-thread-reply skip was dropped) and
+> carried on **every** fan-out event, including thread-reply events, so clients always learn the
+> room's current preview after any mutation. Sections below describing the three-state
+> `json.RawMessage`/`null` design and the thread-reply skip are superseded by this contract.
 
 ## Overview
 

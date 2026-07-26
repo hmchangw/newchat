@@ -1927,9 +1927,9 @@ func TestHistoryService_DeleteMessage_LastMessage_PublishesNilPreview(t *testing
 	require.NoError(t, err)
 }
 
-// A hidden thread reply (TShow=false) never appears in the room timeline, so an edit must NOT
-// recompute the room preview — no GetMessagesBefore walk, and no preview on the event.
-func TestHistoryService_EditMessage_HiddenThreadReply_SkipsPreviewWalk(t *testing.T) {
+// Even a hidden thread reply (TShow=false) edit carries the room's current preview — the walk
+// is unconditional so clients always learn the room's latest preview after any mutation.
+func TestHistoryService_EditMessage_ThreadReply_EmbedsPreview(t *testing.T) {
 	svc, msgs, subs, pub, _ := newService(t)
 	c := testContext()
 
@@ -1947,14 +1947,18 @@ func TestHistoryService_EditMessage_HiddenThreadReply_SkipsPreviewWalk(t *testin
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
-	// No GetMessagesBefore expectation: the walk must be skipped for hidden thread replies.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m-latest", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "latest", CreatedAt: hydrated.CreatedAt},
+		}, false), nil)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
-			assert.Nil(t, evt.PreviewMessage, "hidden thread reply edit carries no room preview")
+			require.NotNil(t, evt.PreviewMessage, "thread reply edit must still carry the room's current preview")
+			assert.Equal(t, "m-latest", evt.PreviewMessage.MessageID)
 			return nil
 		})
 
@@ -1982,6 +1986,7 @@ func TestHistoryService_EditMessage_ThreadReply_CarriesThreadFields(t *testing.T
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
+	expectEmptyPreviewWalk(msgs)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -2026,6 +2031,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_CarriesThreadFields(t *testing
 		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
 			return deletedAt, true, nil, nil, nil
 		})
+
+	expectEmptyPreviewWalk(msgs)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
@@ -2107,6 +2114,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishesThreadMetadataEvent(t
 			return deletedAt, true, &newTcount, &newTlm, nil
 		})
 
+	expectEmptyPreviewWalk(msgs)
+
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
@@ -2155,6 +2164,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishFailsButDeleteSucceeds(
 			return deletedAt, true, &newTcount, nil, nil
 		})
 
+	expectEmptyPreviewWalk(msgs)
+
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
 		Return(fmt.Errorf("nats disconnected"))
@@ -2185,6 +2196,8 @@ func TestHistoryService_DeleteMessage_ThreadReply_NoMetadataEventWhenTCountNil(t
 		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
 			return deletedAt, true, nil, nil, nil
 		})
+
+	expectEmptyPreviewWalk(msgs)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).

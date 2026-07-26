@@ -300,7 +300,6 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	edit := buildEditRoomEvent(room, evt)
-	edit.PreviewMessage = evt.PreviewMessage // nil (no message / read error) => omitted
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
@@ -498,7 +497,6 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	del := buildDeleteRoomEvent(room, evt)
-	del.PreviewMessage = evt.PreviewMessage // nil (no message / read error) => omitted
 	if err := h.publishMutation(ctx, room, model.RoomEventMessageDeleted, msg.ID, &del); err != nil {
 		return fmt.Errorf("publish delete mutation for room %s message %s: %w", room.ID, msg.ID, err)
 	}
@@ -713,6 +711,8 @@ func buildEditRoomEvent(room *model.Room, evt *model.MessageEvent) model.EditRoo
 		EditedBy:       msg.UserAccount,
 		EditedAt:       *msg.EditedAt,
 		UpdatedAt:      *msg.UpdatedAt,
+		// Room's current preview after the edit; nil (no eligible message / read error) => omitted.
+		PreviewMessage: evt.PreviewMessage,
 	}
 }
 
@@ -728,6 +728,8 @@ func buildDeleteRoomEvent(room *model.Room, evt *model.MessageEvent) model.Delet
 		DeletedBy:      msg.UserAccount,
 		DeletedAt:      *msg.UpdatedAt,
 		UpdatedAt:      *msg.UpdatedAt,
+		// Room's current preview after the delete; nil (no eligible message / read error) => omitted.
+		PreviewMessage: evt.PreviewMessage,
 	}
 }
 

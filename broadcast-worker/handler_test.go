@@ -2528,6 +2528,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 			ThreadParentMessageID: parentMsgID,
 			TShow:                 false,
 		},
+		PreviewMessage: &model.PreviewMessage{MessageID: "m-latest"},
 	}
 	data, _ := json.Marshal(evt)
 
@@ -2546,7 +2547,8 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 		assert.Equal(t, "updated thread reply", roomEvt.NewContent)
 		assert.Positive(t, roomEvt.Timestamp, "Timestamp must be the broadcast-worker publish time")
 		assert.Equal(t, editedAt.UnixMilli(), roomEvt.EventTimestamp)
-		assert.Empty(t, roomEvt.PreviewMessage, "thread edit must not carry a room preview")
+		require.NotNil(t, roomEvt.PreviewMessage, "thread edit carries the room's current preview")
+		assert.Equal(t, "m-latest", roomEvt.PreviewMessage.MessageID)
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])

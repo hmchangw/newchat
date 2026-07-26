@@ -399,7 +399,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's refreshed preview after this edit (same resolution as `subscription.list`). **Omitted** when the room has no eligible message left, on a read error, or on hidden thread-reply edits (`tshow=false`). |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`), carried on every edit event — including thread-reply edits. **Omitted** only when the room has no eligible message or on a read error. |
 
 ```json
 {
@@ -448,7 +448,7 @@ Thread-reply deletes **additionally** emit a
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's refreshed preview after this delete (same resolution as `subscription.list`). **Omitted** when the room has no eligible message left — e.g. the deleted message was the last one — on a read error, or on hidden thread-reply deletes (`tshow=false`). |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`), carried on every delete event — including thread-reply deletes. **Omitted** only when the room has no eligible message left (e.g. the deleted message was the last one) or on a read error. |
 
 ```json
 {
