@@ -12,9 +12,10 @@ import (
 )
 
 func TestEligibleSoakUsers_ExcludesUnsafeAccounts(t *testing.T) {
+	inactive := false
 	users := []model.User{
 		{ID: "u-1", Account: "alice", SiteID: "site-a"},
-		{ID: "u-2", Account: "disabled", SiteID: "site-a", Deactivated: true},
+		{ID: "u-2", Account: "disabled", SiteID: "site-a", Active: &inactive},
 		{ID: "u-3", Account: "", SiteID: "site-a"},
 		{ID: "u-4", Account: "bad.account", SiteID: "site-a"},
 		{ID: "u-5", Account: "load.bot", SiteID: "site-a"},

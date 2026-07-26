@@ -415,7 +415,7 @@ make test
 
 **Red**
 
-- Test exclusion of deactivated users, empty accounts, invalid NATS account
+- Test exclusion of inactive users, empty accounts, invalid NATS account
   tokens, and ineligible bot/platform accounts.
 - Test the 20,000-user ceiling and deterministic active-user selection.
 - Test the 3:7 channel/DM split, exact two-person DMs, unique DM pairs, channel

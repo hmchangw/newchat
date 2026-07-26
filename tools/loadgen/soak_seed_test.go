@@ -21,14 +21,18 @@ func TestSoakUserQuery_UsesExactFilterAndProjection(t *testing.T) {
 	filterMap := bsonDMap(filter)
 
 	assert.Equal(t, "site-a", lookupBSONValue(t, filter, "siteId"))
-	assert.Contains(t, filterMap, "deactivated")
+	assert.Equal(
+		t,
+		bson.D{{Key: "$ne", Value: false}},
+		lookupBSONValue(t, filter, "active"),
+	)
 	assert.Contains(t, filterMap, "account")
 	assert.Contains(t, filterMap, "roles")
 	assert.Equal(t, bson.M{
 		"_id":         1,
 		"account":     1,
 		"siteId":      1,
-		"deactivated": 1,
+		"active":      1,
 		"roles":       1,
 		"engName":     1,
 		"chineseName": 1,

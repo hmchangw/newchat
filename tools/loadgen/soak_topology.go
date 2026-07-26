@@ -39,7 +39,7 @@ func eligibleSoakUsers(users []model.User, siteID string) []model.User {
 		user := &users[i]
 		if user.ID == "" ||
 			user.SiteID != siteID ||
-			user.Deactivated ||
+			!user.IsActive() ||
 			!subject.IsValidAccountToken(user.Account) ||
 			model.IsBot(user.Account) ||
 			model.IsPlatformAdminAccount(user.Account) ||

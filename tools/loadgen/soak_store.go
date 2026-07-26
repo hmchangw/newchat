@@ -47,7 +47,7 @@ var (
 func soakUserFilter(siteID string) bson.D {
 	return bson.D{
 		{Key: "siteId", Value: siteID},
-		{Key: "deactivated", Value: bson.D{{Key: "$ne", Value: true}}},
+		{Key: "active", Value: bson.D{{Key: "$ne", Value: false}}},
 		{Key: "_id", Value: bson.D{
 			{Key: "$type", Value: "string"},
 			{Key: "$ne", Value: ""},
@@ -67,7 +67,7 @@ func soakUserProjection() bson.D {
 		{Key: "_id", Value: 1},
 		{Key: "account", Value: 1},
 		{Key: "siteId", Value: 1},
-		{Key: "deactivated", Value: 1},
+		{Key: "active", Value: 1},
 		{Key: "roles", Value: 1},
 		{Key: "engName", Value: 1},
 		{Key: "chineseName", Value: 1},
