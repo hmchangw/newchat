@@ -36,7 +36,7 @@ func (s *storeMongo) FindUserByAccount(ctx context.Context, account string) (*mo
 			"roles":                 1,
 			"requirePasswordChange": 1,
 			"services.password":     1,
-			"deactivated":           1,
+			"active":                1,
 		})).Decode(&u)
 	if err != nil {
 		return nil, fmt.Errorf("find user by account: %w", err)

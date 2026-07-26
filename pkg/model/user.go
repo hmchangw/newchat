@@ -63,8 +63,11 @@ type User struct {
 	StatusText            string     `json:"statusText"                      bson:"statusText"`
 	Roles                 []UserRole `json:"roles,omitempty"                 bson:"roles,omitempty"`
 	RequirePasswordChange bool       `json:"requirePasswordChange,omitempty" bson:"requirePasswordChange,omitempty"`
-	Deactivated           bool       `json:"deactivated,omitempty"           bson:"deactivated,omitempty"`
-	Services              Services   `json:"-"                               bson:"services,omitempty"`
+	// Active is the account-enabled flag: nil (field absent) or true means the
+	// account is active; only a stored active:false deactivates. `json:"-"` keeps
+	// it out of every outbound payload — read it via IsActive.
+	Active   *bool    `json:"-" bson:"active,omitempty"`
+	Services Services `json:"-" bson:"services,omitempty"`
 	// Settings is the per-user client-preferences sub-document; nil = never set.
 	Settings *UserSettings `json:"settings,omitempty" bson:"settings,omitempty"`
 }
@@ -75,6 +78,14 @@ type User struct {
 func (u User) String() string {
 	return fmt.Sprintf("User{ID:%q Account:%q SiteID:%q Roles:%v}",
 		u.ID, u.Account, u.SiteID, u.Roles)
+}
+
+// IsActive reports whether the user's account is active. A nil user, a nil
+// (missing) Active field, or an explicit true all count as active — only a
+// stored active:false deactivates. Single source of truth for the
+// missing-means-active rule.
+func (u *User) IsActive() bool {
+	return u == nil || u.Active == nil || *u.Active
 }
 
 // IsPlatformAdmin reports whether u holds the platform admin role. Nil-safe.

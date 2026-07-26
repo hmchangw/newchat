@@ -91,9 +91,9 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		return
 	}
 
-	// Deactivated check after password verify — keeps timing indistinguishable
+	// Active check after password verify — keeps timing indistinguishable
 	// from wrong-password, so bots can't probe accounts.
-	if u.Deactivated {
+	if !u.IsActive() {
 		h.loginDenied(c, ctx, req.Username)
 		return
 	}

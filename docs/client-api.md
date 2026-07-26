@@ -6469,7 +6469,7 @@ Returns a paged list of users scoped to the admin's site.
       "engName": "Alice",
       "chineseName": "愛麗絲",
       "roles": ["admin"],
-      "deactivated": false,
+      "active": true,
       "requirePasswordChange": false
     }
   ],
@@ -6518,7 +6518,7 @@ Creates a new user account. The `siteId` is always forced to the admin-service's
   "engName": "Bob",
   "chineseName": "鮑勃",
   "roles": [],
-  "deactivated": false,
+  "active": true,
   "requirePasswordChange": true
 }
 ```
@@ -6542,7 +6542,7 @@ Returns a single [UserView](#userview) by account. The account is resolved withi
   "engName": "Alice",
   "chineseName": "愛麗絲",
   "roles": ["admin"],
-  "deactivated": false,
+  "active": true,
   "requirePasswordChange": false
 }
 ```
@@ -6552,7 +6552,7 @@ Returns a single [UserView](#userview) by account. The account is resolved withi
 **Endpoint:** `PATCH /v1/admin/users/:account`
 **Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
 
-Applies partial updates to a user. All fields are optional; omitting a field leaves it unchanged. When `deactivated` is set to `true`, all active sessions for the user are revoked immediately.
+Applies partial updates to a user. All fields are optional; omitting a field leaves it unchanged. When `active` is set to `false`, all active sessions for the user are revoked immediately.
 
 #### Request body
 
@@ -6561,10 +6561,10 @@ Applies partial updates to a user. All fields are optional; omitting a field lea
 | `engName` | string | no | New English display name. |
 | `chineseName` | string | no | New Chinese display name. |
 | `roles` | string[] | no | Replaces the user's roles array. |
-| `deactivated` | boolean | no | Set to `true` to deactivate (all sessions revoked); `false` to reactivate. |
+| `active` | boolean | no | Set to `false` to deactivate (all sessions revoked); `true` to reactivate. |
 
 ```json
-{ "roles": ["admin"], "deactivated": false }
+{ "roles": ["admin"], "active": true }
 ```
 
 #### Success response
@@ -6822,7 +6822,7 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `statusText` | string | Custom status text. Omitted when empty. |
 | `roles` | string[] | Role tags, e.g. `["admin"]`. Omitted when empty. |
 | `requirePasswordChange` | boolean | First-login password-change flag. Omitted when `false`. |
-| `deactivated` | boolean | Whether the account is deactivated. Omitted when `false`. |
+| `active` | boolean | Whether the account is active. Always present; a user doc with no stored flag reads as `true`. |
 
 ### SessionView
 

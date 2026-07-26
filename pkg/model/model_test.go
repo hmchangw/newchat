@@ -163,11 +163,59 @@ func TestUserJSON_WithStatus(t *testing.T) {
 	roundTrip(t, &u, &model.User{})
 }
 
-func TestUser_DeactivatedRoundTrip(t *testing.T) {
-	u := model.User{ID: "u1", Account: "alice", SiteID: "site-local", Deactivated: true}
-	got := &model.User{}
-	roundTrip(t, &u, got)
-	assert.True(t, got.Deactivated)
+func TestUser_IsActive(t *testing.T) {
+	activeTrue := true
+	activeFalse := false
+	tests := []struct {
+		name string
+		u    *model.User
+		want bool
+	}{
+		{"nil user", nil, true},
+		{"missing field", &model.User{ID: "u1", Account: "alice"}, true},
+		{"explicit true", &model.User{ID: "u1", Account: "alice", Active: &activeTrue}, true},
+		{"explicit false", &model.User{ID: "u1", Account: "alice", Active: &activeFalse}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.u.IsActive())
+		})
+	}
+}
+
+func TestUser_ActiveBSONRoundTrip(t *testing.T) {
+	activeFalse := false
+	u := model.User{ID: "u1", Account: "alice", SiteID: "site-local", Active: &activeFalse}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+	var got model.User
+	require.NoError(t, bson.Unmarshal(data, &got))
+	require.NotNil(t, got.Active)
+	assert.False(t, *got.Active)
+	assert.False(t, got.IsActive())
+}
+
+func TestUser_ActiveOmittedFromBSONWhenNil(t *testing.T) {
+	u := model.User{ID: "u1", Account: "alice", SiteID: "site-local"}
+	data, err := bson.Marshal(&u)
+	require.NoError(t, err)
+	var raw bson.M
+	require.NoError(t, bson.Unmarshal(data, &raw))
+	_, has := raw["active"]
+	assert.False(t, has, "nil Active must be omitted from BSON")
+}
+
+func TestUser_ActiveNeverSerializedToJSON(t *testing.T) {
+	activeFalse := false
+	u := model.User{ID: "u1", Account: "alice", SiteID: "site-local", Active: &activeFalse}
+	data, err := json.Marshal(&u)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, hasActive := raw["active"]
+	assert.False(t, hasActive, "active must never reach a JSON payload")
+	_, hasDeactivated := raw["deactivated"]
+	assert.False(t, hasDeactivated, "deactivated must be gone from JSON payloads")
 }
 
 func TestRoomJSON(t *testing.T) {

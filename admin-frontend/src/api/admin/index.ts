@@ -13,7 +13,7 @@ export interface AdminUser {
   engName: string
   chineseName: string
   roles: string[]
-  deactivated: boolean
+  active: boolean
   requirePasswordChange: boolean
 }
 
@@ -58,7 +58,7 @@ export interface UpdateUserPatch {
   engName?: string
   chineseName?: string
   roles?: string[]
-  deactivated?: boolean
+  active?: boolean
 }
 
 export interface SetPasswordInput {
@@ -83,7 +83,7 @@ interface UserViewWire {
   engName?: string
   chineseName?: string
   roles?: string[]
-  deactivated?: boolean
+  active?: boolean
   requirePasswordChange?: boolean
 }
 
@@ -95,7 +95,7 @@ function normalizeUser(raw: UserViewWire): AdminUser {
     engName: raw.engName ?? '',
     chineseName: raw.chineseName ?? '',
     roles: raw.roles ?? [],
-    deactivated: raw.deactivated ?? false,
+    active: raw.active ?? true,
     requirePasswordChange: raw.requirePasswordChange ?? false,
   }
 }

@@ -8,5 +8,5 @@ const (
 	AdminAccountExists        Reason = "account_exists"         // 409: duplicate account on create
 	AdminInvalidCredentials   Reason = "invalid_credentials"    // 401: /v1/login denied (unknown / wrong password / not admin / deactivated)
 	AdminOldPasswordMismatch  Reason = "old_password_mismatch"  // 401: /v1/password/change oldPassword wrong
-	AdminMixedDeactivatePatch Reason = "mixed_deactivate_patch" // 400: PATCH mixes deactivated=true with other field updates
+	AdminMixedDeactivatePatch Reason = "mixed_deactivate_patch" // 400: PATCH mixes active=false with other field updates
 )
