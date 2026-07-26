@@ -16,7 +16,7 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
   const [engName, setEngName] = useState(user.engName)
   const [chineseName, setChineseName] = useState(user.chineseName)
   const [roles, setRoles] = useState(user.roles)
-  const [active, setActive] = useState(user.active)
+  const [deactivated, setDeactivated] = useState(!user.active)
   const [confirmingDeactivate, setConfirmingDeactivate] = useState(false)
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -34,7 +34,7 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
     if (trimmedEngName !== user.engName) patch.engName = trimmedEngName
     if (trimmedChineseName !== user.chineseName) patch.chineseName = trimmedChineseName
     if (!sameRoles(roles, user.roles)) patch.roles = roles
-    if (active !== user.active) patch.active = active
+    if (deactivated !== !user.active) patch.active = !deactivated
     return patch
   }
 
@@ -110,10 +110,10 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
         <label className="dialog-checkbox">
           <input
             type="checkbox"
-            checked={!active}
+            checked={deactivated}
             onChange={(e) => {
               setConfirmingDeactivate(false)
-              setActive(!e.target.checked)
+              setDeactivated(e.target.checked)
             }}
             disabled={submitting}
           />

@@ -100,15 +100,10 @@ targets the field, not the English word.
 ### Data note (ops)
 
 Any doc that got `deactivated: true` from the old admin-service path is currently — and
-will remain — treated as active by readers. To preserve those deactivations, ops should
-run once per site before or after deploy:
-
-```js
-db.users.updateMany({deactivated: true}, {$set: {active: false}, $unset: {deactivated: ""}})
-db.users.updateMany({deactivated: {$exists: true}}, {$unset: {deactivated: ""}})
-```
-
-No code-level migration is needed; readers never look at `deactivated` after this PR.
+will remain — treated as active by readers. To preserve those deactivations, ops must
+run the one-time backfill documented in `docs/active-field-backfill.md` (the runbook is
+the authoritative copy). No code-level migration is needed; readers never look at
+`deactivated` after this PR.
 
 ## Testing
 
