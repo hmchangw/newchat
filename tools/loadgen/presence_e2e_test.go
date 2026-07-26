@@ -77,6 +77,17 @@ func startFakePresence(t *testing.T, url, siteID string) {
 	require.NoError(t, nc.Flush())
 }
 
+type capturingPresenceFactory struct {
+	delegate presenceFactory
+	env      *presenceEnv
+}
+
+//nolint:gocritic // cfg passed by value to satisfy presenceFactory.
+func (f *capturingPresenceFactory) Build(cfg presenceConfig) *presenceEnv {
+	f.env = f.delegate.Build(cfg)
+	return f.env
+}
+
 func TestPresenceSustained_EmbeddedEndToEnd(t *testing.T) {
 	url := startCoreNATS(t)
 	startFakePresence(t, url, "site-local")
@@ -91,13 +102,24 @@ func TestPresenceSustained_EmbeddedEndToEnd(t *testing.T) {
 		P95Ms: 2000, P99Ms: 5000, ErrorRate: 0.5,
 	}
 	baseCfg := &config{NatsURL: url, SiteID: "site-local"}
-	results, err := runPresenceSustainedForTest(ctx, cfg, &prodPresenceFactory{baseCfg: baseCfg})
+	factory := &capturingPresenceFactory{
+		delegate: &prodPresenceFactory{baseCfg: baseCfg},
+	}
+	results, err := runPresenceSustainedForTest(ctx, cfg, factory)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
+	require.NotNil(t, factory.env)
 	r := results[0]
 	assert.Equal(t, verdictPass, r.Kind, "reasons: %v", r.Reasons)
 	assert.Greater(t, r.Attempted, int64(0), "expected measured transitions")
-	assert.Greater(t, r.P95Ms, 0.0, "expected at least one latency sample")
+	assert.NotEmpty(
+		t,
+		factory.env.collector.LatenciesMs(),
+		"expected at least one latency sample; attempted=%d failed=%d reasons=%v",
+		r.Attempted,
+		r.Failed,
+		r.Reasons,
+	)
 }
 
 func TestPresenceStorm_EmbeddedEndToEnd(t *testing.T) {

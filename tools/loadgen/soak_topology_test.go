@@ -18,7 +18,7 @@ func TestEligibleSoakUsers_ExcludesUnsafeAccounts(t *testing.T) {
 		{ID: "u-3", Account: "", SiteID: "site-a"},
 		{ID: "u-4", Account: "bad.account", SiteID: "site-a"},
 		{ID: "u-5", Account: "load.bot", SiteID: "site-a"},
-		{ID: "u-6", Account: "p_platform", SiteID: "site-a"},
+		{ID: "u-6", Account: "p_adminsite-a", SiteID: "site-a"},
 		{ID: "u-7", Account: "role-bot", SiteID: "site-a", Roles: []model.UserRole{model.UserRoleBot}},
 		{ID: "u-8", Account: "role-admin", SiteID: "site-a", Roles: []model.UserRole{model.UserRoleAdmin}},
 		{ID: "u-9", Account: "other-site", SiteID: "site-b"},
