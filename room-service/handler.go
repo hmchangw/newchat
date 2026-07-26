@@ -2289,6 +2289,25 @@ func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID stri
 	return nil
 }
 
+// legacyRoomTypes maps the redesigned RoomType vocabulary to the legacy
+// values pre-redesign channel-tab apps expect in their ${roomType} URL
+// template variable.
+var legacyRoomTypes = map[model.RoomType]string{
+	model.RoomTypeChannel:    "p",
+	model.RoomTypeDM:         "d",
+	model.RoomTypeBotDM:      "d",
+	model.RoomTypeDiscussion: "p",
+}
+
+// legacyRoomType returns the legacy vocabulary value for t, falling back
+// to "p" for unknown types so ${roomType} always resolves.
+func legacyRoomType(t model.RoomType) string {
+	if v, ok := legacyRoomTypes[t]; ok {
+		return v
+	}
+	return "p"
+}
+
 // buildTabURL applies the SITE_URL-based scheme/host/path-prefix
 // rewrite and the ${roomId}/${siteId} substitution to a channelTab URL
 // template. Returns (url, true) on success; (_, false) when the

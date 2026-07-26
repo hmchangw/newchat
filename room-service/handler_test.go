@@ -6296,6 +6296,26 @@ func mockTabApp(id, tabName, urlTemplate string) model.App {
 	}
 }
 
+func TestLegacyRoomType(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.RoomType
+		want string
+	}{
+		{name: "channel maps to p", in: model.RoomTypeChannel, want: "p"},
+		{name: "dm maps to d", in: model.RoomTypeDM, want: "d"},
+		{name: "botDM maps to d", in: model.RoomTypeBotDM, want: "d"},
+		{name: "discussion maps to p", in: model.RoomTypeDiscussion, want: "p"},
+		{name: "unknown type falls back to p", in: model.RoomType("livechat"), want: "p"},
+		{name: "empty type falls back to p", in: model.RoomType(""), want: "p"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, legacyRoomType(tt.in))
+		})
+	}
+}
+
 func TestHandler_buildTabURL(t *testing.T) {
 	validSiteURL, err := url.Parse("https://chat.example.com")
 	require.NoError(t, err)
