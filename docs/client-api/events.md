@@ -399,7 +399,9 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`), carried on every edit event — including thread-reply edits. **Omitted** only when the room has no eligible message or on a read error. |
+| `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for thread-reply edits (`threadParentMessageId` set), when the room has no eligible message, or on a read error. |
 
 ```json
 {
@@ -448,7 +450,9 @@ Thread-reply deletes **additionally** emit a
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`), carried on every delete event — including thread-reply deletes. **Omitted** only when the room has no eligible message left (e.g. the deleted message was the last one) or on a read error. |
+| `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for thread-reply deletes (`threadParentMessageId` set), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
 
 ```json
 {

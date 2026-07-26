@@ -1927,9 +1927,9 @@ func TestHistoryService_DeleteMessage_LastMessage_PublishesNilPreview(t *testing
 	require.NoError(t, err)
 }
 
-// Even a hidden thread reply (TShow=false) edit carries the room's current preview — the walk
-// is unconditional so clients always learn the room's latest preview after any mutation.
-func TestHistoryService_EditMessage_ThreadReply_EmbedsPreview(t *testing.T) {
+// A thread reply edit skips the room-preview walk (no GetMessagesBefore) and carries no preview;
+// clients tell it apart via the event's ThreadParentMessageID and drive the room preview themselves.
+func TestHistoryService_EditMessage_ThreadReply_SkipsPreviewWalk(t *testing.T) {
 	svc, msgs, subs, pub, _ := newService(t)
 	c := testContext()
 
@@ -1947,18 +1947,15 @@ func TestHistoryService_EditMessage_ThreadReply_EmbedsPreview(t *testing.T) {
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage([]models.Message{
-			{MessageID: "m-latest", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "latest", CreatedAt: hydrated.CreatedAt},
-		}, false), nil)
+	// No GetMessagesBefore expectation: the preview walk must be skipped for thread replies.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
-			require.NotNil(t, evt.PreviewMessage, "thread reply edit must still carry the room's current preview")
-			assert.Equal(t, "m-latest", evt.PreviewMessage.MessageID)
+			assert.Nil(t, evt.PreviewMessage, "thread reply edit carries no room preview")
+			assert.Equal(t, "parent-1", evt.Message.ThreadParentMessageID, "thread linkage must survive for the client to key on")
 			return nil
 		})
 
@@ -1986,7 +1983,7 @@ func TestHistoryService_EditMessage_ThreadReply_CarriesThreadFields(t *testing.T
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
-	expectEmptyPreviewWalk(msgs)
+	// No GetMessagesBefore expectation: thread replies skip the preview walk.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -2032,7 +2029,7 @@ func TestHistoryService_DeleteMessage_ThreadReply_CarriesThreadFields(t *testing
 			return deletedAt, true, nil, nil, nil
 		})
 
-	expectEmptyPreviewWalk(msgs)
+	// No GetMessagesBefore expectation: thread replies skip the preview walk.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
@@ -2114,7 +2111,7 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishesThreadMetadataEvent(t
 			return deletedAt, true, &newTcount, &newTlm, nil
 		})
 
-	expectEmptyPreviewWalk(msgs)
+	// No GetMessagesBefore expectation: thread replies skip the preview walk.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
@@ -2164,7 +2161,7 @@ func TestHistoryService_DeleteMessage_ThreadReply_PublishFailsButDeleteSucceeds(
 			return deletedAt, true, &newTcount, nil, nil
 		})
 
-	expectEmptyPreviewWalk(msgs)
+	// No GetMessagesBefore expectation: thread replies skip the preview walk.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
@@ -2197,7 +2194,7 @@ func TestHistoryService_DeleteMessage_ThreadReply_NoMetadataEventWhenTCountNil(t
 			return deletedAt, true, nil, nil, nil
 		})
 
-	expectEmptyPreviewWalk(msgs)
+	// No GetMessagesBefore expectation: thread replies skip the preview walk.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).

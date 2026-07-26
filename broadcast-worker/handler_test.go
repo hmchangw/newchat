@@ -858,6 +858,7 @@ func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
 	require.NotNil(t, roomEvt.PreviewMessage, "edit fan-out must carry the refreshed preview")
 	assert.Equal(t, "msg-1", roomEvt.PreviewMessage.MessageID)
 	assert.Equal(t, "updated", roomEvt.PreviewMessage.Content)
+	assert.Empty(t, roomEvt.ThreadParentMessageID, "top-level edit carries no thread parent")
 }
 
 func TestHandleDeleted_OmitsPreviewWhenNil(t *testing.T) {
@@ -2528,7 +2529,8 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 			ThreadParentMessageID: parentMsgID,
 			TShow:                 false,
 		},
-		PreviewMessage: &model.PreviewMessage{MessageID: "m-latest"},
+		// Thread replies carry no room preview (history-service skips the walk); clients
+		// tell it apart via threadParentMessageId instead.
 	}
 	data, _ := json.Marshal(evt)
 
@@ -2547,8 +2549,8 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 		assert.Equal(t, "updated thread reply", roomEvt.NewContent)
 		assert.Positive(t, roomEvt.Timestamp, "Timestamp must be the broadcast-worker publish time")
 		assert.Equal(t, editedAt.UnixMilli(), roomEvt.EventTimestamp)
-		require.NotNil(t, roomEvt.PreviewMessage, "thread edit carries the room's current preview")
-		assert.Equal(t, "m-latest", roomEvt.PreviewMessage.MessageID)
+		assert.Equal(t, parentMsgID, roomEvt.ThreadParentMessageID, "thread edit must carry threadParentMessageId so clients can tell it's a thread reply")
+		assert.Empty(t, roomEvt.PreviewMessage, "thread edit carries no room preview")
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])

@@ -319,8 +319,14 @@ type EditRoomEvent struct {
 	EditedBy            string          `json:"editedBy" bson:"editedBy"`
 	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
-	// PreviewMessage is the room's refreshed preview after this edit. Omitted when the room has
-	// no eligible message, on a read error, or on thread-reply edits (which don't affect it).
+	// ThreadParentMessageID is set when the edited message is a thread reply; its presence lets
+	// clients tell a thread-reply edit from a top-level one. Omitted for top-level messages.
+	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`
+	// TShow reports whether a thread reply is also shown in the main room timeline. Only meaningful
+	// alongside threadParentMessageId; omitted when false.
+	TShow bool `json:"tshow,omitempty" bson:"tshow,omitempty"`
+	// PreviewMessage is the room's refreshed preview after this edit. Omitted for thread-reply
+	// edits (keyed by threadParentMessageId), when the room has no eligible message, or on a read error.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
@@ -335,8 +341,14 @@ type DeleteRoomEvent struct {
 	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
 	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
 	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
-	// PreviewMessage is the room's refreshed preview after this delete. Omitted when the room has
-	// no eligible message left, on a read error, or on thread-reply deletes (which don't affect it).
+	// ThreadParentMessageID is set when the deleted message is a thread reply; its presence lets
+	// clients tell a thread-reply delete from a top-level one. Omitted for top-level messages.
+	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`
+	// TShow reports whether a thread reply is also shown in the main room timeline. Only meaningful
+	// alongside threadParentMessageId; omitted when false.
+	TShow bool `json:"tshow,omitempty" bson:"tshow,omitempty"`
+	// PreviewMessage is the room's refreshed preview after this delete. Omitted for thread-reply
+	// deletes (keyed by threadParentMessageId), when the room has no eligible message, or on a read error.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 

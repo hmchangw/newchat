@@ -51,7 +51,7 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			lm, ok := s.roomLastMessage(c, roomID, now)
+			lm, ok := s.roomLastPreviewMessage(c, roomID, now)
 			if !ok {
 				return
 			}
@@ -65,10 +65,10 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	return &models.RoomsGetResponse{Rooms: out}, nil
 }
 
-// roomLastMessage resolves one room's latest eligible message at read time.
+// roomLastPreviewMessage resolves one room's latest eligible preview message at read time.
 // ok=false means drop the room (empty, all-ineligible within the walk cap, or a read
 // failure). Walks backward from lastMsgAt in pages, skipping ineligible messages.
-func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now time.Time) (models.PreviewMessage, bool) {
+func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, now time.Time) (models.PreviewMessage, bool) {
 	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, nil, now)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,

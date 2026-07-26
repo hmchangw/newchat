@@ -5,11 +5,12 @@
 
 > **Amendment (post-review):** the client-facing `previewMessage` is now `*PreviewMessage` with
 > `omitempty` (not `json.RawMessage`) — omitted when the room has no eligible message or on a read
-> error, with no `null` "cleared" state (the `previewJSON` helper was removed). The preview is also
-> computed **unconditionally** on every edit/delete (the hidden-thread-reply skip was dropped) and
-> carried on **every** fan-out event, including thread-reply events, so clients always learn the
-> room's current preview after any mutation. Sections below describing the three-state
-> `json.RawMessage`/`null` design and the thread-reply skip are superseded by this contract.
+> error, with no `null` "cleared" state (the `previewJSON` helper was removed). history-service
+> **skips** the preview walk for thread replies (`ThreadParentID != ""`); instead
+> `EditRoomEvent`/`DeleteRoomEvent` carry `threadParentMessageId` (+ `tshow`) so clients can tell a
+> thread-reply edit/delete from a top-level one and drive the room preview themselves. The walk
+> helper `roomLastMessage` was renamed `roomLastPreviewMessage`. Sections below describing the
+> three-state `json.RawMessage`/`null` design are superseded by this contract.
 
 ## Overview
 

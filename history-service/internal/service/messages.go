@@ -550,7 +550,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		Timestamp: editedAtMs,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, roomID, editedAt)
+	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, editedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
 
 	return &models.EditMessageResponse{
@@ -629,7 +629,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, roomID, actualDeletedAt)
+	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
 	return &models.DeleteMessageResponse{
@@ -639,10 +639,14 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 }
 
 // previewAfterMutation resolves the room's current last-eligible preview (same walk as
-// subscription.list) to carry on every edit/delete fan-out, so clients always learn the room's
-// latest preview after a mutation. nil when the room has no eligible message or on a read error.
-func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, roomID string, at time.Time) *models.PreviewMessage {
-	if preview, ok := s.roomLastMessage(c, roomID, at); ok {
+// subscription.list) to carry on a top-level edit/delete fan-out. Thread replies are skipped —
+// clients tell those apart via the event's threadParentMessageId and drive the room preview
+// themselves. nil for a thread reply, when the room has no eligible message, or on a read error.
+func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
+	if msg.ThreadParentID != "" {
+		return nil
+	}
+	if preview, ok := s.roomLastPreviewMessage(c, roomID, at); ok {
 		return &preview
 	}
 	return nil
