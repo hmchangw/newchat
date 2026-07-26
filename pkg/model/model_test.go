@@ -171,7 +171,7 @@ func TestUser_IsActive(t *testing.T) {
 		u    *model.User
 		want bool
 	}{
-		{"nil user", nil, true},
+		{"nil user", nil, false},
 		{"missing field", &model.User{ID: "u1", Account: "alice"}, true},
 		{"explicit true", &model.User{ID: "u1", Account: "alice", Active: &activeTrue}, true},
 		{"explicit false", &model.User{ID: "u1", Account: "alice", Active: &activeFalse}, false},

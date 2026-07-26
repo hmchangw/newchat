@@ -80,12 +80,12 @@ func (u User) String() string {
 		u.ID, u.Account, u.SiteID, u.Roles)
 }
 
-// IsActive reports whether the user's account is active. A nil user, a nil
-// (missing) Active field, or an explicit true all count as active — only a
-// stored active:false deactivates. Single source of truth for the
-// missing-means-active rule.
+// IsActive reports whether the user's account is active. A nil user is not
+// active; on an existing user a nil (missing) Active field or an explicit true
+// counts as active — only a stored active:false deactivates. Single source of
+// truth for the missing-means-active rule.
 func (u *User) IsActive() bool {
-	return u == nil || u.Active == nil || *u.Active
+	return u != nil && (u.Active == nil || *u.Active)
 }
 
 // IsPlatformAdmin reports whether u holds the platform admin role. Nil-safe.

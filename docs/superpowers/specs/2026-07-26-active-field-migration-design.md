@@ -49,8 +49,9 @@ Active *bool `json:"-" bson:"active,omitempty"`
 - New nil-safe helper, the single source of truth for the missing-means-active rule:
 
 ```go
-// IsActive reports whether the user is active. A nil user, nil field, or
-// explicit true all count as active — only a stored active:false deactivates.
+// IsActive reports whether the user is active. A nil user is not active; a
+// nil (missing) field or explicit true counts as active — only a stored
+// active:false deactivates.
 func (u *User) IsActive() bool
 ```
 
