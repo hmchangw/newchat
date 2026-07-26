@@ -43,7 +43,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.existingSecret }}
                   key: cassandra-hosts
-                  optional: true
+                  optional: {{ ne .Values.cassandra.cleanup "truncate" }}
             - name: CASSANDRA_USERNAME
               valueFrom:
                 secretKeyRef:

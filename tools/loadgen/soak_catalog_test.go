@@ -155,6 +155,41 @@ func TestSoakCatalog_EvictionRetainsPinnedMessages(t *testing.T) {
 	assert.LessOrEqual(t, catalog.Size(), 2)
 }
 
+func TestSoakCatalog_AllPinnedEntriesStillRespectHardBounds(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(2, 2, 0, clock)
+	for _, messageID := range []string{"m-1", "m-2", "m-3"} {
+		assert.True(t, catalog.ObservePinned(&soakWireMessage{
+			RoomID: "r-1", MessageID: messageID,
+			Sender:    cassandra.Participant{Account: "alice"},
+			CreatedAt: clock.Now(),
+		}))
+		clock.Advance(time.Millisecond)
+	}
+
+	assert.Equal(t, 2, catalog.Size())
+	_, oldestExists := catalog.Get("r-1", "m-1")
+	assert.False(t, oldestExists)
+	assert.Equal(t, 2, catalog.PinnedCount("r-1"))
+}
+
+func TestSoakCatalog_AllPinnedRoomsRespectGlobalHardBound(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(4, 2, 0, clock)
+	for index, roomID := range []string{"r-1", "r-2", "r-3"} {
+		assert.True(t, catalog.ObservePinned(&soakWireMessage{
+			RoomID: roomID, MessageID: fmt.Sprintf("m-%d", index),
+			Sender:    cassandra.Participant{Account: "alice"},
+			CreatedAt: clock.Now(),
+		}))
+		clock.Advance(time.Millisecond)
+	}
+
+	assert.Equal(t, 2, catalog.Size())
+	_, oldestExists := catalog.Get("r-1", "m-0")
+	assert.False(t, oldestExists)
+}
+
 func TestSoakCatalog_HistoryVerificationExcludesThreadReplies(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	catalog := newSoakCatalog(8, 100, 0, clock)

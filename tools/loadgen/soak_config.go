@@ -40,6 +40,7 @@ type soakConfig struct {
 	RoomCount                   int           `env:"ROOM_COUNT"                       envDefault:"10000"`
 	ChannelRatio                float64       `env:"CHANNEL_RATIO"                    envDefault:"0.30"`
 	ChannelMembers              int           `env:"CHANNEL_MEMBERS"                  envDefault:"100"`
+	LargeRoomThreshold          int           `env:"LARGE_ROOM_THRESHOLD"             envDefault:"500"`
 	RateScope                   string        `env:"RATE_SCOPE"                       envDefault:"site"`
 	MessagesPerActiveUserPerDay float64       `env:"MESSAGES_PER_ACTIVE_USER_PER_DAY" envDefault:"0"`
 	PayloadMedianBytes          int           `env:"PAYLOAD_MEDIAN_BYTES"             envDefault:"1024"`
@@ -53,6 +54,9 @@ type soakConfig struct {
 	RecentTotal                 int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
 	CassandraCleanup            string        `env:"CASSANDRA_CLEANUP"                envDefault:"none"`
 	ConfirmKeyspace             string        `env:"CONFIRM_KEYSPACE"                 envDefault:""`
+	TeardownBatchRooms          int           `env:"TEARDOWN_BATCH_ROOMS"              envDefault:"250"`
+	TeardownBatchDelay          time.Duration `env:"TEARDOWN_BATCH_DELAY"              envDefault:"100ms"`
+	TeardownBatchTimeout        time.Duration `env:"TEARDOWN_BATCH_TIMEOUT"            envDefault:"30s"`
 }
 
 func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
@@ -89,24 +93,30 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if err := validatePositiveRate("SOAK_READ_RATE", cfg.ReadRate); err != nil {
 		return err
 	}
-	for name, value := range map[string]float64{
-		"SOAK_MUTATION_RATE":    cfg.MutationRate,
-		"SOAK_REACTION_RATE":    cfg.ReactionRate,
-		"SOAK_PINNED_LIST_RATE": cfg.PinnedListRate,
-		"SOAK_VERIFY_RATE":      cfg.VerifyRate,
+	for _, rate := range []struct {
+		name  string
+		value float64
+	}{
+		{"SOAK_MUTATION_RATE", cfg.MutationRate},
+		{"SOAK_REACTION_RATE", cfg.ReactionRate},
+		{"SOAK_PINNED_LIST_RATE", cfg.PinnedListRate},
+		{"SOAK_VERIFY_RATE", cfg.VerifyRate},
 	} {
-		if err := validateNonNegativeRate(name, value); err != nil {
+		if err := validateNonNegativeRate(rate.name, rate.value); err != nil {
 			return err
 		}
 	}
-	for name, value := range map[string]float64{
-		"SOAK_THREAD_SHARE":          cfg.ThreadShare,
-		"SOAK_SOFT_DELETE_RATIO":     cfg.SoftDeleteRatio,
-		"SOAK_REACTION_REMOVE_SHARE": cfg.ReactionRemoveShare,
-		"SOAK_CHANNEL_RATIO":         cfg.ChannelRatio,
+	for _, ratio := range []struct {
+		name  string
+		value float64
+	}{
+		{"SOAK_THREAD_SHARE", cfg.ThreadShare},
+		{"SOAK_SOFT_DELETE_RATIO", cfg.SoftDeleteRatio},
+		{"SOAK_REACTION_REMOVE_SHARE", cfg.ReactionRemoveShare},
+		{"SOAK_CHANNEL_RATIO", cfg.ChannelRatio},
 	} {
-		if !isFinite(value) || value < 0 || value > 1 {
-			return fmt.Errorf("%s must be between zero and one", name)
+		if !isFinite(ratio.value) || ratio.value < 0 || ratio.value > 1 {
+			return fmt.Errorf("%s must be between zero and one", ratio.name)
 		}
 	}
 
@@ -141,6 +151,14 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if cfg.ChannelMembers < 2 || cfg.ChannelMembers > cfg.MaxUsers {
 		return fmt.Errorf("SOAK_CHANNEL_MEMBERS must be between 2 and SOAK_MAX_USERS")
 	}
+	if cfg.LargeRoomThreshold <= 0 {
+		return fmt.Errorf("SOAK_LARGE_ROOM_THRESHOLD must be greater than zero")
+	}
+	if cfg.ChannelMembers > cfg.LargeRoomThreshold {
+		return fmt.Errorf(
+			"SOAK_CHANNEL_MEMBERS must not exceed SOAK_LARGE_ROOM_THRESHOLD",
+		)
+	}
 	if cfg.ReactionsPerHotMessage <= 0 || cfg.ReactionsPerHotMessage > cfg.ActiveUsers {
 		return fmt.Errorf("SOAK_REACTIONS_PER_HOT_MESSAGE must be between 1 and SOAK_ACTIVE_USERS")
 	}
@@ -168,6 +186,23 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	default:
 		return fmt.Errorf("SOAK_RATE_SCOPE must be site or global")
 	}
+	if err := validateSoakTeardownConfig(cfg, cassandraKeyspace); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateSoakTeardownConfig(
+	cfg *soakConfig,
+	cassandraKeyspace string,
+) error {
+	if cfg == nil {
+		return fmt.Errorf("soak configuration is required")
+	}
+	if strings.TrimSpace(cfg.RunID) == "" {
+		return fmt.Errorf("SOAK_RUN_ID is required")
+	}
 	switch cfg.CassandraCleanup {
 	case "none":
 	case "truncate":
@@ -177,7 +212,19 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	default:
 		return fmt.Errorf("SOAK_CASSANDRA_CLEANUP must be none or truncate")
 	}
-
+	if cfg.TeardownBatchRooms <= 0 ||
+		cfg.TeardownBatchRooms > soakOwnershipChunkSize {
+		return fmt.Errorf(
+			"SOAK_TEARDOWN_BATCH_ROOMS must be between 1 and %d",
+			soakOwnershipChunkSize,
+		)
+	}
+	if cfg.TeardownBatchDelay < 0 {
+		return fmt.Errorf("SOAK_TEARDOWN_BATCH_DELAY must be non-negative")
+	}
+	if cfg.TeardownBatchTimeout <= 0 {
+		return fmt.Errorf("SOAK_TEARDOWN_BATCH_TIMEOUT must be greater than zero")
+	}
 	return nil
 }
 

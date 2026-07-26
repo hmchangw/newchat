@@ -33,7 +33,7 @@ grows unbounded. This test validates the growth trend, not expiry/reclamation.
 | D3 | Soak duration | **3 days** (timeline-constrained). Caveat: at the 72h TWCS window this seals ~1 window and gives lower confidence on very-slow leaks; tombstone eviction is not observable regardless (gc_grace ≥ 10 days) |
 | D4 | Degraded-mode risk | **Accepted as a known limitation** — node failure/repair is out of scope (managed cluster); degraded-read availability is unvalidated |
 | D5 | Environment fidelity | Staging and production share the **same per-node spec** but **node count differs significantly** → per-node behavior/latency at equal per-node load is representative, but the **throughput ceiling and cross-node effects do not extrapolate** |
-| D6 | Data isolation & cleanup | Test creates its own topology and messages; **all test data is deleted after the run** (prefer `TRUNCATE`/keyspace drop over row-by-row `DELETE`, which would itself create tombstones) |
+| D6 | Data isolation & cleanup | Borrowed users are retained. Run-owned Mongo topology is deleted from an ownership ledger. Cassandra data is retained by default; `TRUNCATE` is allowed only for an isolated disposable keyspace after evidence retention. There is no Cassandra row-by-row `DELETE` path. |
 | D7 | Table-property permission | `gc_grace_seconds` / `compaction_window_size` **cannot be modified** — run at production values (see Config Facts) |
 | D8 | Acceptance stance | **Non-destructive** — report observed trends and any early-warning signals; do not push to a breaking point |
 
@@ -249,8 +249,11 @@ the real replica host; per-table via traces/L1, per-node only via L3.
 
 1. **Read real users** from Mongo `users` (seed the site's real users ≤ 20,000;
    ~2,000–5,000 active — see Workload Model). Real users are borrowed and read-only.
+   Persist the exact selected active-user IDs in the run manifest so pod
+   restarts do not silently change the population.
 2. **Build topology** (channel/DM rooms, subscriptions, per-room keys) directly in
-   Mongo. Topology (I11) sets partition count and heat.
+   Mongo. Topology (I11) sets partition count and heat. Every room has at least
+   one active member, and every active user has at least one writable room.
 3. **No historical backfill in v1** (timeline). Reads therefore hit only
    run-generated data (see "What Run A cannot test", item 11). If backfill is added
    later, note that *read-shape* (writing "now" with historical `created_at`) is
@@ -262,7 +265,17 @@ the real replica host; per-table via traces/L1, per-node only via L3.
 | Class | Examples | Rule |
 |---|---|---|
 | Borrowed | real `users` | Read-only; **never deleted** |
-| Test-owned | rooms, subs, keys, thread rooms, messages, pins, reactions | Tracked by `run_id` manifest; **fully deleted after the run** via `TRUNCATE`/keyspace drop (not row `DELETE`) |
+| Mongo test-owned | rooms, subscriptions, room keys, wrapped DEKs, thread rooms/subscriptions | Room IDs are recorded in a chunked ownership ledger. Teardown first verifies each room still belongs to the selected run, then deletes in paced batches. |
+| Cassandra test-owned | messages, pins, reactions | Retained by default. An isolated disposable keyspace may be truncated only with explicit exact-keyspace confirmation; shared staging keyspaces are never row-deleted. |
+| Other service side effects | NATS, Elasticsearch, Valkey | Not automatically removed; record the accepted staging blast radius before the run. |
+
+Topology reload and teardown start from the ownership room IDs instead of
+scanning shared collections by `soakRunId`. Room lookups use Mongo's `_id`
+index; subscription and thread-room operations use the services' existing
+`roomId` indexes; thread subscriptions are selected through indexed
+`threadRoomId`. Ownership chunks use a run-prefixed `_id` range on their own
+collection. Loadgen does not add a teardown-only index to shared service
+collections.
 
 Prefer a dedicated keyspace / Mongo DB / `SITE_ID`. Retain evidence 24–72h before
 cleanup. Note: driving through real services also writes NATS/ES/Valkey — know the

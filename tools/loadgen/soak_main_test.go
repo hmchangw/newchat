@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 type fakeSoakEncryptionStore struct {
@@ -85,6 +87,33 @@ func TestSoakMeasuredReadConfig_OneScheduledReadEqualsOneRPC(t *testing.T) {
 	assert.Equal(t, 50, cfg.PageLimit)
 	assert.Equal(t, 1, cfg.MaxPages)
 	assert.Equal(t, soakRequestTimeout, cfg.RequestTimeout)
+}
+
+func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {
+	cfg := validSoakConfig(t)
+	topology := soakTopology{
+		ActiveUsers: []model.User{{ID: "active-id", Account: "active"}},
+		Rooms:       []model.Room{{ID: "room-1"}},
+		Subscriptions: []model.Subscription{
+			{
+				RoomID: "room-1", IsSubscribed: true,
+				User: model.SubscriptionUser{ID: "active-id", Account: "active"},
+			},
+			{
+				RoomID: "room-1", IsSubscribed: true,
+				User: model.SubscriptionUser{ID: "inactive-id", Account: "inactive"},
+			},
+		},
+	}
+
+	selector, err := newSoakRuntimeSelector(&topology, &cfg, 42)
+	require.NoError(t, err)
+
+	for range 100 {
+		target, _ := selector.nextSend()
+		assert.Equal(t, "active-id", target.UserID)
+		assert.Equal(t, "active", target.Account)
+	}
 }
 
 func TestWaitForSoakWrappedDEK(t *testing.T) {

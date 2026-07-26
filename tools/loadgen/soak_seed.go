@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -34,6 +33,7 @@ type soakManifest struct {
 	ConfigDigest       string            `bson:"configDigest"`
 	BorrowedUserCount  int               `bson:"borrowedUserCount"`
 	ActiveUserCount    int               `bson:"activeUserCount"`
+	ActiveUserIDs      []string          `bson:"activeUserIds"`
 	RoomCount          int               `bson:"roomCount"`
 	SubscriptionCount  int               `bson:"subscriptionCount"`
 	StartedAt          time.Time         `bson:"startedAt"`
@@ -71,6 +71,16 @@ func seedSoak(
 	if input.RunID == "" || input.RunID != input.Config.RunID {
 		return soakTopology{}, fmt.Errorf("seed run ID must match SOAK_RUN_ID")
 	}
+	existing, err := store.FindManifest(ctx, input.RunID)
+	if err != nil {
+		return soakTopology{}, fmt.Errorf("check existing soak manifest: %w", err)
+	}
+	if isActiveSoakManifest(existing, input.Config.HeartbeatStaleAfter, time.Now().UTC()) {
+		return soakTopology{}, fmt.Errorf(
+			"refuse seed for active soak run %q",
+			input.RunID,
+		)
+	}
 
 	users, err := store.BorrowUsers(ctx, input.SiteID, input.Config.MaxUsers)
 	if err != nil {
@@ -79,6 +89,20 @@ func seedSoak(
 	topology, err := buildSoakTopology(users, input.Config, input.SiteID, input.Seed, ids)
 	if err != nil {
 		return soakTopology{}, fmt.Errorf("build soak topology: %w", err)
+	}
+	roomIDs := make([]string, len(topology.Rooms))
+	for i := range topology.Rooms {
+		roomIDs[i] = topology.Rooms[i].ID
+	}
+	conflicts, err := store.FindConflictingRoomIDs(ctx, input.RunID, roomIDs)
+	if err != nil {
+		return soakTopology{}, fmt.Errorf("check soak room ID conflicts: %w", err)
+	}
+	if len(conflicts) > 0 {
+		return soakTopology{}, fmt.Errorf(
+			"refuse seed: %d room ID conflicts with non-owned data",
+			len(conflicts),
+		)
 	}
 
 	now := time.Now().UTC()
@@ -92,35 +116,38 @@ func seedSoak(
 		ConfigDigest:      digestSoakConfig(input.Config),
 		BorrowedUserCount: len(topology.BorrowedUsers),
 		ActiveUserCount:   len(topology.ActiveUsers),
+		ActiveUserIDs:     make([]string, len(topology.ActiveUsers)),
 		RoomCount:         len(topology.Rooms),
 		SubscriptionCount: len(topology.Subscriptions),
 		StartedAt:         now,
 		UpdatedAt:         now,
 	}
-	if err := store.PutManifest(ctx, &manifest); err != nil {
-		return soakTopology{}, fmt.Errorf("record seeding manifest: %w", err)
+	for i := range topology.ActiveUsers {
+		manifest.ActiveUserIDs[i] = topology.ActiveUsers[i].ID
 	}
 	if err := store.ResetOwned(ctx, input.RunID); err != nil {
 		return soakTopology{}, fmt.Errorf("reset partial topology for run %q: %w", input.RunID, err)
 	}
-	if err := store.InsertOwnedRooms(ctx, input.RunID, topology.Rooms); err != nil {
-		return soakTopology{}, fmt.Errorf("insert soak rooms: %w", err)
-	}
-	if err := SeedRoomKeys(ctx, keys, buildSoakRoomKeys(topology.Rooms, input.Seed)); err != nil {
-		return soakTopology{}, fmt.Errorf("seed soak room keys: %w", err)
-	}
-	if err := store.InsertOwnedSubscriptions(ctx, input.RunID, topology.Subscriptions); err != nil {
-		return soakTopology{}, fmt.Errorf("insert soak subscriptions: %w", err)
-	}
-	roomIDs := make([]string, len(topology.Rooms))
-	for i := range topology.Rooms {
-		roomIDs[i] = topology.Rooms[i].ID
+	if err := store.PutManifest(ctx, &manifest); err != nil {
+		return soakTopology{}, fmt.Errorf("record seeding manifest: %w", err)
 	}
 	chunks := chunkSoakRoomIDs(roomIDs, soakOwnershipChunkSize)
 	if err := store.ReplaceOwnershipChunks(ctx, input.RunID, chunks); err != nil {
 		return soakTopology{}, fmt.Errorf("record soak ownership: %w", err)
 	}
-
+	if err := store.InsertOwnedRooms(ctx, input.RunID, topology.Rooms); err != nil {
+		return soakTopology{}, fmt.Errorf("insert soak rooms: %w", err)
+	}
+	roomKeys, err := buildSoakRoomKeys(topology.Rooms)
+	if err != nil {
+		return soakTopology{}, fmt.Errorf("generate soak room keys: %w", err)
+	}
+	if err := SeedRoomKeys(ctx, keys, roomKeys); err != nil {
+		return soakTopology{}, fmt.Errorf("seed soak room keys: %w", err)
+	}
+	if err := store.InsertOwnedSubscriptions(ctx, input.RunID, topology.Subscriptions); err != nil {
+		return soakTopology{}, fmt.Errorf("insert soak subscriptions: %w", err)
+	}
 	seededAt := time.Now().UTC()
 	manifest.State = soakManifestSeeded
 	manifest.UpdatedAt = seededAt
@@ -129,6 +156,20 @@ func seedSoak(
 		return soakTopology{}, fmt.Errorf("record seeded manifest: %w", err)
 	}
 	return topology, nil
+}
+
+func isActiveSoakManifest(
+	manifest *soakManifest,
+	staleAfter time.Duration,
+	now time.Time,
+) bool {
+	if manifest == nil || manifest.State != soakManifestRunning {
+		return false
+	}
+	if manifest.LastHeartbeatAt == nil {
+		return true
+	}
+	return now.Sub(manifest.LastHeartbeatAt.UTC()) <= staleAfter
 }
 
 func chunkSoakRoomIDs(roomIDs []string, size int) [][]string {
@@ -152,11 +193,16 @@ func digestSoakConfig(cfg *soakConfig) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func buildSoakRoomKeys(rooms []model.Room, seed int64) map[string]roomkeystore.RoomKeyPair {
-	rng := rand.New(rand.NewSource(seed))
+func buildSoakRoomKeys(
+	rooms []model.Room,
+) (map[string]roomkeystore.RoomKeyPair, error) {
 	keys := make(map[string]roomkeystore.RoomKeyPair, len(rooms))
 	for i := range rooms {
-		keys[rooms[i].ID] = deterministicRoomKeyPair(rng)
+		pair, err := roomkeystore.GenerateKeyPair()
+		if err != nil {
+			return nil, fmt.Errorf("generate room %q key: %w", rooms[i].ID, err)
+		}
+		keys[rooms[i].ID] = *pair
 	}
-	return keys
+	return keys, nil
 }

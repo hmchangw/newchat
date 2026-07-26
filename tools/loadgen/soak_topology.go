@@ -127,9 +127,16 @@ func buildSoakTopology(
 	for roomIndex := range channelCount {
 		members := make([]model.User, 0, channelMembers)
 		memberIDs := make(map[string]struct{}, channelMembers)
+		anchor := active[roomIndex%len(active)]
+		members = append(members, anchor)
+		memberIDs[anchor.ID] = struct{}{}
+		covered[anchor.ID] = true
 		for len(members) < channelMembers && activeCursor < len(active) {
 			user := active[activeCursor]
 			activeCursor++
+			if _, exists := memberIDs[user.ID]; exists {
+				continue
+			}
 			members = append(members, user)
 			memberIDs[user.ID] = struct{}{}
 			covered[user.ID] = true
@@ -162,9 +169,14 @@ func buildSoakTopology(
 	}
 
 	usedPairs := make(map[string]struct{}, dmCount)
-	pairI, pairJ := 0, 1
-	for range dmCount {
-		a, b, ok := nextSoakDMPair(active, borrowed, covered, usedPairs, &pairI, &pairJ)
+	for dmIndex := range dmCount {
+		a, b, ok := nextSoakDMPair(
+			active,
+			borrowed,
+			covered,
+			usedPairs,
+			dmIndex,
+		)
 		if !ok {
 			return soakTopology{}, fmt.Errorf("find unique DM pair")
 		}
@@ -202,8 +214,7 @@ func nextSoakDMPair(
 	borrowed []model.User,
 	covered map[string]bool,
 	used map[string]struct{},
-	pairI *int,
-	pairJ *int,
+	sequence int,
 ) (model.User, model.User, bool) {
 	for i := range active {
 		if covered[active[i].ID] {
@@ -217,27 +228,70 @@ func nextSoakDMPair(
 				return active[i], active[j], true
 			}
 		}
-		for offset := range borrowed {
-			candidate := borrowed[(i+offset)%len(borrowed)]
-			if reserveSoakPair(&active[i], &candidate, used) {
-				return active[i], candidate, true
-			}
+		if partner, ok := nextSoakDMPartner(
+			&active[i],
+			borrowed,
+			used,
+			sequence+i,
+		); ok {
+			return active[i], partner, true
 		}
 	}
 
-	for *pairI < len(borrowed)-1 {
-		if *pairJ >= len(borrowed) {
-			(*pairI)++
-			*pairJ = *pairI + 1
-			continue
-		}
-		a, b := borrowed[*pairI], borrowed[*pairJ]
-		(*pairJ)++
-		if reserveSoakPair(&a, &b, used) {
-			return a, b, true
+	for offset := range active {
+		index := (sequence + offset) % len(active)
+		if partner, ok := nextSoakDMPartner(
+			&active[index],
+			borrowed,
+			used,
+			sequence+offset,
+		); ok {
+			return active[index], partner, true
 		}
 	}
 	return model.User{}, model.User{}, false
+}
+
+func nextSoakDMPartner(
+	active *model.User,
+	borrowed []model.User,
+	used map[string]struct{},
+	sequence int,
+) (model.User, bool) {
+	for offset := range borrowed {
+		index := (sequence + offset) % len(borrowed)
+		if reserveSoakPair(active, &borrowed[index], used) {
+			return borrowed[index], true
+		}
+	}
+	return model.User{}, false
+}
+
+func activeSoakUserIDs(topology *soakTopology) map[string]struct{} {
+	if topology == nil {
+		return nil
+	}
+	active := make(map[string]struct{}, len(topology.ActiveUsers))
+	for i := range topology.ActiveUsers {
+		if topology.ActiveUsers[i].ID != "" {
+			active[topology.ActiveUsers[i].ID] = struct{}{}
+		}
+	}
+	return active
+}
+
+func isActiveSoakSubscription(
+	subscription *model.Subscription,
+	active map[string]struct{},
+) bool {
+	if subscription == nil || !subscription.IsSubscribed {
+		return false
+	}
+	if len(active) == 0 {
+		return true
+	}
+	_, ok := active[subscription.User.ID]
+	return ok
 }
 
 func reserveSoakPair(a, b *model.User, used map[string]struct{}) bool {

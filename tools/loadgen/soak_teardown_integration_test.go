@@ -49,8 +49,16 @@ func TestTeardownSoak_DeletesOnlySelectedMongoRun(t *testing.T) {
 			bson.D{{Key: "_id", Value: "thread-b"}, {Key: "roomId", Value: "room-b"}},
 		},
 		"thread_subscriptions": {
-			bson.D{{Key: "_id", Value: "thread-sub-a"}, {Key: "roomId", Value: "room-a"}},
-			bson.D{{Key: "_id", Value: "thread-sub-b"}, {Key: "roomId", Value: "room-b"}},
+			bson.D{
+				{Key: "_id", Value: "thread-sub-a"},
+				{Key: "roomId", Value: "stale-room-id"},
+				{Key: "threadRoomId", Value: "thread-a"},
+			},
+			bson.D{
+				{Key: "_id", Value: "thread-sub-b"},
+				{Key: "roomId", Value: "room-b"},
+				{Key: "threadRoomId", Value: "thread-b"},
+			},
 		},
 		atrest.CollectionName: {
 			bson.D{{Key: "_id", Value: "room-a"}, {Key: "wrappedDEK", Value: []byte("a")}},
@@ -104,4 +112,61 @@ func TestTeardownSoak_DeletesOnlySelectedMongoRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, int64(1), countDocuments(t, db.Collection("rooms"), bson.D{}))
+}
+
+func TestTeardownSoak_PreservesArtifactsForUnownedRoomInOwnershipChunk(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_teardown_unowned")
+	store := &mongoSoakStore{db: db}
+	now := time.Now().UTC()
+
+	require.NoError(t, store.PutManifest(ctx, &soakManifest{
+		ID: "run-a", State: soakManifestSeeded, StartedAt: now, UpdatedAt: now,
+	}))
+	require.NoError(t, store.ReplaceOwnershipChunks(
+		ctx,
+		"run-a",
+		[][]string{{"shared-room"}},
+	))
+	for collection, document := range map[string]any{
+		"rooms": bson.D{
+			{Key: "_id", Value: "shared-room"},
+			{Key: "soakRunId", Value: "another-run"},
+		},
+		"thread_rooms": bson.D{
+			{Key: "_id", Value: "shared-thread"},
+			{Key: "roomId", Value: "shared-room"},
+		},
+		"thread_subscriptions": bson.D{
+			{Key: "_id", Value: "shared-thread-sub"},
+			{Key: "roomId", Value: "shared-room"},
+		},
+		atrest.CollectionName: bson.D{
+			{Key: "_id", Value: "shared-room"},
+			{Key: "wrappedDEK", Value: []byte("keep-me")},
+		},
+	} {
+		_, err := db.Collection(collection).InsertOne(ctx, document)
+		require.NoError(t, err, collection)
+	}
+
+	cfg := validSoakConfig(t)
+	cfg.RunID = "run-a"
+	cfg.TeardownBatchDelay = 0
+	found, err := teardownSoak(ctx, store, nil, &cfg, "chat")
+
+	require.NoError(t, err)
+	assert.True(t, found)
+	for _, collection := range []string{
+		"rooms",
+		"thread_rooms",
+		"thread_subscriptions",
+		atrest.CollectionName,
+	} {
+		assert.Equal(t, int64(1), countDocuments(
+			t,
+			db.Collection(collection),
+			bson.D{},
+		), collection)
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
@@ -80,6 +81,7 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 		"thread_subscriptions": bson.D{
 			{Key: "_id", Value: "old-thread-sub"},
 			{Key: "roomId", Value: firstRoomID},
+			{Key: "threadRoomId", Value: "old-thread"},
 		},
 		"room_data_keys": bson.D{
 			{Key: "_id", Value: firstRoomID},
@@ -139,6 +141,80 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 		FindOne(ctx, bson.D{{Key: "_id", Value: cfg.RunID}}).
 		Decode(&manifest))
 	assert.Equal(t, soakManifestSeeded, manifest.State)
+}
+
+func TestSeedSoak_RejectsExistingDMRoomBeforeWritingManifest(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_seed_dm_conflict")
+	users := makeSoakUsers(10, "site-a")
+	userDocs := make([]any, len(users))
+	for i := range users {
+		userDocs[i] = users[i]
+	}
+	_, err := db.Collection("users").InsertMany(ctx, userDocs)
+	require.NoError(t, err)
+
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 10
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 5
+	cfg.ChannelRatio = 0.4
+	cfg.ChannelMembers = 3
+	cfg.ReactionsPerHotMessage = 3
+	expected, err := buildSoakTopology(
+		users,
+		&cfg,
+		"site-a",
+		42,
+		newSequenceSoakIDs(),
+	)
+	require.NoError(t, err)
+	var conflictingRoomID string
+	for i := range expected.Rooms {
+		if expected.Rooms[i].Type == model.RoomTypeDM {
+			conflictingRoomID = expected.Rooms[i].ID
+			break
+		}
+	}
+	require.NotEmpty(t, conflictingRoomID)
+	_, err = db.Collection("rooms").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: conflictingRoomID},
+		{Key: "siteId", Value: "site-a"},
+	})
+	require.NoError(t, err)
+
+	store := &mongoSoakStore{db: db}
+	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
+	t.Cleanup(func() { _ = keyStore.Close() })
+	input := soakSeedInput{
+		RunID:             cfg.RunID,
+		SiteID:            "site-a",
+		MongoDatabase:     db.Name(),
+		CassandraKeyspace: "chat",
+		Seed:              42,
+		Config:            &cfg,
+	}
+
+	_, err = seedSoak(
+		ctx,
+		store,
+		keyStore,
+		&input,
+		newSequenceSoakIDs(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflict")
+	assert.Equal(t, int64(1), countDocuments(
+		t,
+		db.Collection("rooms"),
+		bson.D{{Key: "_id", Value: conflictingRoomID}},
+	))
+	assert.Equal(t, int64(0), countDocuments(
+		t,
+		db.Collection(soakManifestCollection),
+		bson.D{},
+	))
 }
 
 func readRawDocuments(t *testing.T, collection *mongo.Collection) []bson.Raw {

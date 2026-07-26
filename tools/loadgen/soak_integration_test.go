@@ -46,7 +46,7 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	cfg.ChannelMembers = 3
 	cfg.PersistGrace = 0
 	cfg.ReactionsPerHotMessage = 3
-	_, err = seedSoak(
+	seededTopology, err := seedSoak(
 		ctx,
 		store,
 		keyStore,
@@ -62,6 +62,7 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, topology.Rooms, cfg.RoomCount)
 	require.NotEmpty(t, topology.Subscriptions)
+	assert.Equal(t, soakUserIDs(seededTopology.ActiveUsers), soakUserIDs(topology.ActiveUsers))
 
 	nc, err := nats.Connect(testutil.NATS(t))
 	require.NoError(t, err)
@@ -140,7 +141,7 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	))
 	message := <-accepted
 
-	getSubject := "chat.user.*.request.room.*." + siteID + ".msg.get"
+	getSubject := subject.MsgGetWildcard(siteID)
 	history, err := nc.Subscribe(getSubject, func(request *nats.Msg) {
 		response := soakVerifyMessage{
 			RoomID: message.RoomID, MessageID: message.ID,

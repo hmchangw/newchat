@@ -141,23 +141,24 @@ func newSoakMutator(
 	if cfg == nil {
 		cfg = &soakMutationConfig{}
 	}
-	if cfg.MutationRetries < 0 {
-		cfg.MutationRetries = 0
+	config := *cfg
+	if config.MutationRetries < 0 {
+		config.MutationRetries = 0
 	}
-	if cfg.RetryMinBackoff <= 0 {
-		cfg.RetryMinBackoff = 100 * time.Millisecond
+	if config.RetryMinBackoff <= 0 {
+		config.RetryMinBackoff = 100 * time.Millisecond
 	}
-	if cfg.RetryMaxBackoff < cfg.RetryMinBackoff {
-		cfg.RetryMaxBackoff = cfg.RetryMinBackoff
+	if config.RetryMaxBackoff < config.RetryMinBackoff {
+		config.RetryMaxBackoff = config.RetryMinBackoff
 	}
-	if cfg.MaxPinnedPerRoom <= 0 {
-		cfg.MaxPinnedPerRoom = 10
+	if config.MaxPinnedPerRoom <= 0 {
+		config.MaxPinnedPerRoom = 10
 	}
-	if cfg.ReactionsPerHotMessage <= 0 {
-		cfg.ReactionsPerHotMessage = 1
+	if config.ReactionsPerHotMessage <= 0 {
+		config.ReactionsPerHotMessage = 1
 	}
-	if cfg.RequestTimeout <= 0 {
-		cfg.RequestTimeout = 5 * time.Second
+	if config.RequestTimeout <= 0 {
+		config.RequestTimeout = 5 * time.Second
 	}
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -170,9 +171,10 @@ func newSoakMutator(
 	}
 	members := make(map[string][]model.SubscriptionUser)
 	if topology != nil {
+		active := activeSoakUserIDs(topology)
 		for i := range topology.Subscriptions {
 			subscription := &topology.Subscriptions[i]
-			if subscription.IsSubscribed &&
+			if isActiveSoakSubscription(subscription, active) &&
 				subscription.RoomID != "" &&
 				subscription.User.Account != "" {
 				members[subscription.RoomID] = append(
@@ -183,7 +185,7 @@ func newSoakMutator(
 		}
 	}
 	return &soakMutator{
-		cfg: *cfg, catalog: catalog, rpc: rpc, recorder: recorder,
+		cfg: config, catalog: catalog, rpc: rpc, recorder: recorder,
 		rng: rng, clock: clock, sleeper: sleeper, members: members,
 		hotTargets: make(map[string]string),
 	}
@@ -406,7 +408,7 @@ func (m *soakMutator) React(
 	}
 	outcome.ReactionAction = desired
 
-	startedAt := m.clock.Now()
+	var rpcLatency time.Duration
 	request := soakRPCRequest{
 		Action:  soakRPCReact,
 		Subject: subject.MsgReact(actor.Account, roomID, m.cfg.SiteID),
@@ -438,7 +440,9 @@ func (m *soakMutator) React(
 	)
 	for {
 		response = soakReactMessageResponse{}
+		attemptStartedAt := m.clock.Now()
 		result, err = m.rpc.Call(ctx, request, &response)
+		rpcLatency += m.clock.Now().Sub(attemptStartedAt)
 		if err == nil || result.ErrorClass != soakErrorNotFound {
 			break
 		}
@@ -454,7 +458,7 @@ func (m *soakMutator) React(
 		}
 		targetRetries++
 	}
-	latency := m.clock.Now().Sub(startedAt)
+	latency := rpcLatency
 	outcome.Retries = targetRetries + result.Retries
 	outcome.AmbiguityResolved = result.AmbiguityResolved
 	if err != nil && result.ErrorClass == soakErrorNotFound &&
@@ -602,29 +606,33 @@ func (m *soakMutator) callMutation(
 	request soakRPCRequest,
 	response any,
 ) (soakRPCResult, int, time.Duration, bool, error) {
-	startedAt := m.clock.Now()
 	var result soakRPCResult
+	var rpcLatency time.Duration
 	for attempt := 0; attempt <= m.cfg.MutationRetries; attempt++ {
+		attemptStartedAt := m.clock.Now()
 		var err error
 		result, err = m.rpc.Call(ctx, request, response)
+		rpcLatency += m.clock.Now().Sub(attemptStartedAt)
 		if err == nil {
-			return result, attempt, m.clock.Now().Sub(startedAt), false, nil
+			return result, attempt, rpcLatency, false, nil
 		}
 		if result.ErrorClass != soakErrorNotFound {
-			return result, attempt, m.clock.Now().Sub(startedAt), false, err
+			return result, attempt, rpcLatency, false, err
 		}
 		if attempt == m.cfg.MutationRetries {
-			return result, attempt, m.clock.Now().Sub(startedAt), true, nil
+			return result, attempt, rpcLatency, true, nil
 		}
 		if err := m.sleeper.Sleep(
 			ctx,
 			m.mutationBackoff(attempt),
 		); err != nil {
-			return result, attempt, m.clock.Now().Sub(startedAt), false,
+			return result, attempt, rpcLatency, false,
 				fmt.Errorf("wait to retry mutation target: %w", err)
 		}
 	}
-	return result, 0, m.clock.Now().Sub(startedAt), false, nil
+	return result, 0, rpcLatency, false, fmt.Errorf(
+		"mutation retry loop exited without a result",
+	)
 }
 
 func (m *soakMutator) mutationBackoff(retry int) time.Duration {

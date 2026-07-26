@@ -297,7 +297,12 @@ func (c *soakRPCClient) Call(
 			return result, fmt.Errorf("%s request failed: %w", request.Action, requestErr)
 		}
 		if attempt == c.retry.MaxAttempts {
-			return result, fmt.Errorf("%w: %s: %v", errSoakRetryExhausted, request.Action, requestErr)
+			return result, fmt.Errorf(
+				"%w: %s: %w",
+				errSoakRetryExhausted,
+				request.Action,
+				requestErr,
+			)
 		}
 
 		delay := c.backoff(result.Retries)
@@ -307,7 +312,10 @@ func (c *soakRPCClient) Call(
 		result.Retries++
 	}
 
-	return result, errSoakRetryExhausted
+	return result, fmt.Errorf(
+		"RPC retry loop exited unexpectedly: %w",
+		errSoakRetryExhausted,
+	)
 }
 
 func (c *soakRPCClient) shouldRetryAmbiguous(

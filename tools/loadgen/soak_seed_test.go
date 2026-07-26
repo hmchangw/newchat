@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,6 +72,7 @@ func TestSeedSoak_WritesOwnedTopologyAndManifestWithoutMutatingUsers(t *testing.
 	assert.Equal(t, input.CassandraKeyspace, store.lastManifest.CassandraKeyspace)
 	assert.Equal(t, len(topology.BorrowedUsers), store.lastManifest.BorrowedUserCount)
 	assert.Equal(t, len(topology.ActiveUsers), store.lastManifest.ActiveUserCount)
+	assert.Equal(t, soakUserIDs(topology.ActiveUsers), store.lastManifest.ActiveUserIDs)
 	assert.Equal(t, len(topology.Rooms), store.lastManifest.RoomCount)
 	assert.Equal(t, len(topology.Subscriptions), store.lastManifest.SubscriptionCount)
 	assert.NotEmpty(t, store.lastManifest.ConfigDigest)
@@ -112,10 +115,77 @@ func TestSeedSoak_StopsBeforeWritesWhenBorrowUsersFails(t *testing.T) {
 	assert.Empty(t, store.manifestStates)
 }
 
+func TestSeedSoak_RejectsFreshRunningManifestBeforeWrites(t *testing.T) {
+	now := time.Now().UTC()
+	store := &recordingSoakSeedStore{
+		users: makeSoakUsers(10, "site-a"),
+		manifest: &soakManifest{
+			ID:              "run-a-test",
+			State:           soakManifestRunning,
+			LastHeartbeatAt: &now,
+		},
+	}
+	input := testSoakSeedInput(t)
+
+	_, err := seedSoak(
+		context.Background(),
+		store,
+		&recordingRoomKeyStore{},
+		&input,
+		newSequenceSoakIDs(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "active")
+	assert.Zero(t, store.borrowCalls)
+	assert.Zero(t, store.resetCalls)
+	assert.Empty(t, store.manifestStates)
+}
+
+func TestSeedSoak_RejectsConflictingRoomIDsBeforeWrites(t *testing.T) {
+	store := &recordingSoakSeedStore{
+		users:       makeSoakUsers(10, "site-a"),
+		conflictIDs: []string{"existing-dm-room"},
+	}
+	input := testSoakSeedInput(t)
+
+	_, err := seedSoak(
+		context.Background(),
+		store,
+		&recordingRoomKeyStore{},
+		&input,
+		newSequenceSoakIDs(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflict")
+	assert.Zero(t, store.resetCalls)
+	assert.Empty(t, store.manifestStates)
+}
+
+func TestBuildSoakRoomKeys_UsesFreshCryptographicSecrets(t *testing.T) {
+	rooms := []model.Room{{ID: "room-1"}}
+
+	first, err := buildSoakRoomKeys(rooms)
+	require.NoError(t, err)
+	second, err := buildSoakRoomKeys(rooms)
+	require.NoError(t, err)
+
+	require.Len(t, first["room-1"].PrivateKey, 32)
+	require.Len(t, second["room-1"].PrivateKey, 32)
+	assert.False(t, bytes.Equal(
+		first["room-1"].PrivateKey,
+		second["room-1"].PrivateKey,
+	))
+}
+
 type recordingSoakSeedStore struct {
 	users             []model.User
 	borrowErr         error
 	failSubscriptions error
+	manifest          *soakManifest
+	conflictIDs       []string
+	borrowCalls       int
 	resetCalls        int
 	resetRunIDs       []string
 	rooms             []model.Room
@@ -130,7 +200,23 @@ func (s *recordingSoakSeedStore) BorrowUsers(
 	_ string,
 	_ int,
 ) ([]model.User, error) {
+	s.borrowCalls++
 	return s.users, s.borrowErr
+}
+
+func (s *recordingSoakSeedStore) FindManifest(
+	_ context.Context,
+	_ string,
+) (*soakManifest, error) {
+	return s.manifest, nil
+}
+
+func (s *recordingSoakSeedStore) FindConflictingRoomIDs(
+	_ context.Context,
+	_ string,
+	_ []string,
+) ([]string, error) {
+	return append([]string(nil), s.conflictIDs...), nil
 }
 
 func (s *recordingSoakSeedStore) ResetOwned(_ context.Context, runID string) error {
@@ -231,4 +317,12 @@ func bsonDMap(doc bson.D) bson.M {
 		result[element.Key] = element.Value
 	}
 	return result
+}
+
+func soakUserIDs(users []model.User) []string {
+	ids := make([]string, len(users))
+	for i := range users {
+		ids[i] = users[i].ID
+	}
+	return ids
 }

@@ -130,6 +130,40 @@ func TestBuildSoakTopology_EveryActiveUserHasWritableRoom(t *testing.T) {
 	}
 }
 
+func TestBuildSoakTopology_EveryRoomHasAnActiveMember(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 20
+	cfg.ActiveUsers = 3
+	cfg.RoomCount = 12
+	cfg.ChannelRatio = 0.5
+	cfg.ChannelMembers = 4
+	cfg.ReactionsPerHotMessage = 3
+
+	topology, err := buildSoakTopology(
+		makeSoakUsers(20, "site-a"),
+		&cfg,
+		"site-a",
+		42,
+		newSequenceSoakIDs(),
+	)
+	require.NoError(t, err)
+
+	active := make(map[string]struct{}, len(topology.ActiveUsers))
+	for i := range topology.ActiveUsers {
+		active[topology.ActiveUsers[i].ID] = struct{}{}
+	}
+	roomsWithActive := make(map[string]bool, len(topology.Rooms))
+	for i := range topology.Subscriptions {
+		subscription := &topology.Subscriptions[i]
+		if _, ok := active[subscription.User.ID]; ok {
+			roomsWithActive[subscription.RoomID] = true
+		}
+	}
+	for i := range topology.Rooms {
+		assert.True(t, roomsWithActive[topology.Rooms[i].ID], topology.Rooms[i].ID)
+	}
+}
+
 func TestBuildSoakTopology_IsDeterministicWithSeededIdentitySource(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.MaxUsers = 20

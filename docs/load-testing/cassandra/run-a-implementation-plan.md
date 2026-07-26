@@ -208,6 +208,7 @@ loadgen settings remain unchanged.
 | `SOAK_ROOM_COUNT` | `10000` | Safe staging default; production forecast remains configurable |
 | `SOAK_CHANNEL_RATIO` | `0.30` | Channel share of generated rooms |
 | `SOAK_CHANNEL_MEMBERS` | `100` | Target channel membership |
+| `SOAK_LARGE_ROOM_THRESHOLD` | `500` | Gatekeeper large-room threshold topology must not exceed |
 | `SOAK_RATE_SCOPE` | `site` | Provisional I10 interpretation |
 | `SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY` | `0` | `0` means derive and report the implied I12 value |
 | `SOAK_PAYLOAD_MEDIAN_BYTES` | `1024` | Post-encryption target median |
@@ -221,6 +222,9 @@ loadgen settings remain unchanged.
 | `SOAK_RECENT_TOTAL` | `200000` | Global catalog memory bound |
 | `SOAK_CASSANDRA_CLEANUP` | `none` | Must be set to `truncate` for Cassandra cleanup |
 | `SOAK_CONFIRM_KEYSPACE` | empty | Must exactly equal `CASSANDRA_KEYSPACE` before truncate |
+| `SOAK_TEARDOWN_BATCH_ROOMS` | `250` | Maximum owned room IDs per Mongo deletion batch |
+| `SOAK_TEARDOWN_BATCH_DELAY` | `100ms` | Cancellable delay between Mongo deletion batches |
+| `SOAK_TEARDOWN_BATCH_TIMEOUT` | `30s` | Per-batch Mongo cleanup timeout |
 
 The values for I8, I10, and I12 are deliberately configurable and must be
 called out as provisional in operator output and documentation.
@@ -279,13 +283,19 @@ tools/loadgen/
   README.md
 
 tools/loadgen/deploy/k8s/
+  Chart.yaml
   README.md
-  kustomization.yaml
-  configmap.yaml
-  service.yaml
-  seed-job.yaml
-  soak-job.yaml
-  teardown-job.yaml
+  values.yaml
+  values-local.yaml
+  values-validation.yaml
+  values.schema.json
+  templates/
+    _helpers.tpl
+    configmap.yaml
+    service.yaml
+    seed-job.yaml
+    soak-deployment.yaml
+    teardown-job.yaml
 ```
 
 No new third-party Go dependency is planned.
@@ -452,6 +462,8 @@ make test
 - Test bulk insertion of rooms and subscriptions with a run ownership tag.
 - Test chunked ownership records so large room sets do not approach MongoDB's
   single-document size limit.
+- Test that generated room IDs cannot overwrite an existing non-owned room.
+- Test that the exact active-user IDs are persisted and restored.
 - Test retry after a partially completed seed.
 - Integration-test preservation of borrowed users, unrelated rooms,
   subscriptions, and service-owned indexes.
@@ -462,7 +474,10 @@ make test
 - Read only the user fields required by topology, gatekeeper identity, and
   reaction display data.
 - Write test rooms/subscriptions in bounded batches.
-- Seed room `encKey` values through the existing `SeedRoomKeys` helper.
+- Generate independent cryptographically random room key pairs and persist
+  them through the existing room-key store.
+- Persist chunked ownership before room writes so a partial seed remains
+  recoverable.
 - Persist manifest state transitions: `seeding`, `seeded`, `running`,
   `completed`, and `cleaned`.
 
@@ -504,7 +519,13 @@ make test
 **Green and refactor**
 
 - Page through chunked room ownership records.
-- Delete Mongo data in dependency-safe batches.
+- Resolve each batch's rooms by `_id` and verify `soakRunId` before deleting
+  any dependent artifacts.
+- Use existing `_id`, `roomId`, and `threadRoomId` indexes rather than adding
+  a teardown-only index to shared service collections.
+- Page and delete ownership chunks through their run-prefixed `_id` range.
+- Delete Mongo data in dependency-safe, configurable paced batches with an
+  independent timeout per batch.
 - Truncate exactly:
   - `messages_by_room`;
   - `messages_by_id`;

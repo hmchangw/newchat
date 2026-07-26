@@ -194,6 +194,7 @@ func TestSoakRPCClient_ReportsRetryExhaustion(t *testing.T) {
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errSoakRetryExhausted)
+	assert.ErrorIs(t, err, nats.ErrTimeout)
 	assert.Equal(t, soakErrorTimeout, result.ErrorClass)
 	assert.Equal(t, 3, result.Attempts)
 	assert.Equal(t, 2, result.Retries)

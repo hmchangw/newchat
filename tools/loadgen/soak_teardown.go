@@ -92,6 +92,7 @@ func teardownSoak(
 	}
 
 	after := ""
+	deletedAnyBatch := false
 	for {
 		page, err := store.NextOwnershipPage(ctx, cfg.RunID, after, soakTeardownPageSize)
 		if err != nil {
@@ -103,8 +104,39 @@ func teardownSoak(
 		if page.Cursor == "" || len(page.RoomIDs) == 0 {
 			return true, fmt.Errorf("invalid empty ownership page for run %q", cfg.RunID)
 		}
-		if err := store.DeleteOwnedRoomBatch(ctx, cfg.RunID, page.RoomIDs); err != nil {
-			return true, fmt.Errorf("delete owned Mongo data for run %q: %w", cfg.RunID, err)
+		if page.Cursor <= after {
+			return true, fmt.Errorf(
+				"ownership cursor did not advance for run %q",
+				cfg.RunID,
+			)
+		}
+		for _, batch := range chunkSoakRoomIDs(
+			page.RoomIDs,
+			cfg.TeardownBatchRooms,
+		) {
+			if cfg.TeardownBatchDelay > 0 && deletedAnyBatch {
+				if err := waitOrCancel(ctx, cfg.TeardownBatchDelay); err != nil {
+					return true, fmt.Errorf("pace Mongo teardown: %w", err)
+				}
+			}
+			batchCtx, cancelBatch := context.WithTimeout(
+				ctx,
+				cfg.TeardownBatchTimeout,
+			)
+			err := store.DeleteOwnedRoomBatch(
+				batchCtx,
+				cfg.RunID,
+				batch,
+			)
+			cancelBatch()
+			if err != nil {
+				return true, fmt.Errorf(
+					"delete owned Mongo data for run %q: %w",
+					cfg.RunID,
+					err,
+				)
+			}
+			deletedAnyBatch = true
 		}
 		after = page.Cursor
 	}

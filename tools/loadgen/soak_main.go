@@ -192,7 +192,7 @@ func newSoakRuntimeSelector(
 	}
 	picker, err := newSoakRoomPicker(seed, len(topology.Rooms))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build soak room distribution: %w", err)
 	}
 	sizer, err := newSoakPayloadSizer(
 		seed+1,
@@ -211,9 +211,11 @@ func newSoakRuntimeSelector(
 	for i := range topology.Rooms {
 		selector.rooms[i] = topology.Rooms[i].ID
 	}
+	active := activeSoakUserIDs(topology)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
-		if !subscription.IsSubscribed || subscription.User.ID == "" ||
+		if !isActiveSoakSubscription(subscription, active) ||
+			subscription.User.ID == "" ||
 			subscription.User.Account == "" {
 			continue
 		}
@@ -676,7 +678,12 @@ func runSoakEncryptionPreflight(
 
 func startSoakMetricsServer(addr string, metrics *Metrics) *http.Server {
 	server := &http.Server{
-		Addr: addr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second,
+		Addr:              addr,
+		Handler:           metrics.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
 		if err := server.ListenAndServe(); err != nil &&

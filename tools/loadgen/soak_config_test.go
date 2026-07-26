@@ -36,6 +36,7 @@ func TestSoakConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 10000, cfg.RoomCount)
 	assert.Equal(t, 0.30, cfg.ChannelRatio)
 	assert.Equal(t, 100, cfg.ChannelMembers)
+	assert.Equal(t, 500, cfg.LargeRoomThreshold)
 	assert.Equal(t, "site", cfg.RateScope)
 	assert.Equal(t, 0.0, cfg.MessagesPerActiveUserPerDay)
 	assert.Equal(t, 1024, cfg.PayloadMedianBytes)
@@ -49,6 +50,9 @@ func TestSoakConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 200000, cfg.RecentTotal)
 	assert.Equal(t, "none", cfg.CassandraCleanup)
 	assert.Empty(t, cfg.ConfirmKeyspace)
+	assert.Equal(t, 250, cfg.TeardownBatchRooms)
+	assert.Equal(t, 100*time.Millisecond, cfg.TeardownBatchDelay)
+	assert.Equal(t, 30*time.Second, cfg.TeardownBatchTimeout)
 }
 
 func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
@@ -106,6 +110,17 @@ func TestValidateSoakConfig_RequiresRunID(t *testing.T) {
 	assert.Contains(t, err.Error(), "SOAK_RUN_ID")
 }
 
+func TestValidateSoakTeardownConfig_IgnoresUnrelatedWorkloadSettings(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SendRate = -1
+	cfg.ReadRate = -1
+	cfg.PayloadMedianBytes = 0
+
+	err := validateSoakTeardownConfig(&cfg, "chat")
+
+	require.NoError(t, err)
+}
+
 func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -141,6 +156,9 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"zero room count", func(c *soakConfig) { c.RoomCount = 0 }, "SOAK_ROOM_COUNT"},
 		{"channel has fewer than two members", func(c *soakConfig) { c.ChannelMembers = 1 }, "SOAK_CHANNEL_MEMBERS"},
 		{"channel members exceed users", func(c *soakConfig) { c.ChannelMembers = c.MaxUsers + 1 }, "SOAK_CHANNEL_MEMBERS"},
+		{"channel members exceed gatekeeper threshold", func(c *soakConfig) {
+			c.ChannelMembers = c.LargeRoomThreshold + 1
+		}, "SOAK_LARGE_ROOM_THRESHOLD"},
 		{"zero reactions per hot message", func(c *soakConfig) { c.ReactionsPerHotMessage = 0 }, "SOAK_REACTIONS_PER_HOT_MESSAGE"},
 		{"reactions per hot message exceed active users", func(c *soakConfig) { c.ReactionsPerHotMessage = c.ActiveUsers + 1 }, "SOAK_REACTIONS_PER_HOT_MESSAGE"},
 		{"negative messages per active user", func(c *soakConfig) { c.MessagesPerActiveUserPerDay = -1 }, "SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY"},
@@ -179,6 +197,30 @@ func TestValidateSoakConfig_ContinuousModeDoesNotRequireDuration(t *testing.T) {
 	cfg.Warmup = time.Minute
 
 	require.NoError(t, validateSoakConfig(&cfg, "chat"))
+}
+
+func TestValidateSoakConfig_ReturnsErrorsInConfigurationOrder(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MutationRate = -1
+	cfg.ReactionRate = -1
+	cfg.PinnedListRate = -1
+	cfg.VerifyRate = -1
+
+	for range 100 {
+		err := validateSoakConfig(&cfg, "chat")
+		require.EqualError(t, err, "SOAK_MUTATION_RATE must be non-negative")
+	}
+
+	cfg = validSoakConfig(t)
+	cfg.ThreadShare = -1
+	cfg.SoftDeleteRatio = -1
+	cfg.ReactionRemoveShare = -1
+	cfg.ChannelRatio = -1
+
+	for range 100 {
+		err := validateSoakConfig(&cfg, "chat")
+		require.EqualError(t, err, "SOAK_THREAD_SHARE must be between zero and one")
+	}
 }
 
 func TestValidateSoakConfig_AcceptsGuardedTruncate(t *testing.T) {
@@ -232,5 +274,6 @@ func validSoakConfig(t *testing.T) soakConfig {
 	t.Helper()
 	cfg := mustDefaultSoakConfig(t)
 	cfg.RunID = "run-a-test"
+	cfg.TeardownBatchDelay = 0
 	return cfg
 }

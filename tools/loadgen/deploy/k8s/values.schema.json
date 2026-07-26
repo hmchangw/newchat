@@ -133,6 +133,7 @@
         "roomCount",
         "channelRatio",
         "channelMembers",
+        "largeRoomThreshold",
         "rateScope",
         "messagesPerActiveUserPerDay",
         "payloadMedianBytes",
@@ -176,6 +177,7 @@
         "roomCount": {"type": "string", "minLength": 1},
         "channelRatio": {"type": "string", "minLength": 1},
         "channelMembers": {"type": "string", "minLength": 1},
+        "largeRoomThreshold": {"type": "string", "minLength": 1},
         "rateScope": {"type": "string", "enum": ["site", "global"]},
         "messagesPerActiveUserPerDay": {"type": "string", "minLength": 1},
         "payloadMedianBytes": {"type": "string", "minLength": 1},
@@ -195,12 +197,18 @@
       "additionalProperties": false,
       "required": [
         "approved",
+        "batchRooms",
+        "batchDelay",
+        "batchTimeout",
         "activeDeadlineSeconds",
         "backoffLimit",
         "resources"
       ],
       "properties": {
         "approved": {"type": "boolean"},
+        "batchRooms": {"type": "string", "minLength": 1},
+        "batchDelay": {"type": "string", "minLength": 1},
+        "batchTimeout": {"type": "string", "minLength": 1},
         "activeDeadlineSeconds": {
           "type": "integer",
           "minimum": 60,

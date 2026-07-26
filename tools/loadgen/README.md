@@ -106,7 +106,17 @@ Use a unique `SOAK_RUN_ID` for every staging run. Seed borrows existing,
 eligible users read-only and creates only run-owned rooms, subscriptions, and
 room transport keys. The manifest and chunked ownership ledger live in
 `loadgen_soak_runs` and `loadgen_soak_ownership`. Teardown selects those owned
-room IDs and never deletes or modifies borrowed `users`.
+room IDs and never deletes or modifies borrowed `users`. The manifest also
+stores the exact active-user IDs selected at seed time, so a replacement Pod
+reuses the same active population.
+
+Topology reload and teardown do not scan shared collections on `soakRunId`.
+They page ownership room IDs, verify that each room still belongs to the run,
+and use the services' existing `_id`, `roomId`, and `threadRoomId` indexes.
+Ownership chunks themselves are paged by their run-prefixed `_id` range.
+Loadgen does not create a teardown-only index on shared service collections.
+Mongo teardown is rate-controlled with a room batch size, a cancellable delay
+between batches, and an independent timeout per batch.
 
 The two encryption artifacts have different meanings:
 
@@ -202,6 +212,7 @@ Run A environment variables:
 | `SOAK_ROOM_COUNT` | `10000` | Owned channel plus DM rooms. |
 | `SOAK_CHANNEL_RATIO` | `0.30` | Fraction of owned rooms that are channels. |
 | `SOAK_CHANNEL_MEMBERS` | `100` | Members per generated channel. |
+| `SOAK_LARGE_ROOM_THRESHOLD` | `500` | Gatekeeper large-room threshold; channel membership must not exceed it. |
 | `SOAK_RATE_SCOPE` | `site` | I10 placeholder: `site` or `global`. |
 | `SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY` | `0` | I12 placeholder; zero derives it from send rate and active users. |
 | `SOAK_PAYLOAD_MEDIAN_BYTES` | `1024` | Modeled encrypted payload median. |
@@ -215,6 +226,9 @@ Run A environment variables:
 | `SOAK_RECENT_TOTAL` | `200000` | Global bounded recent-message capacity. |
 | `SOAK_CASSANDRA_CLEANUP` | `none` | `none` or guarded `truncate`. |
 | `SOAK_CONFIRM_KEYSPACE` | empty | Must exactly match the keyspace for `truncate`. |
+| `SOAK_TEARDOWN_BATCH_ROOMS` | `250` | Maximum owned room IDs per Mongo deletion batch. |
+| `SOAK_TEARDOWN_BATCH_DELAY` | `100ms` | Cancellable delay between Mongo deletion batches. |
+| `SOAK_TEARDOWN_BATCH_TIMEOUT` | `30s` | Timeout applied independently to each Mongo deletion batch. |
 
 I8, I10, and I12 are deliberately configurable assumptions, not production
 facts. Confirm and record them before interpreting a long run.

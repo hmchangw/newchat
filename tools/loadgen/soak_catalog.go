@@ -179,13 +179,15 @@ func (c *soakCatalog) AcceptAt(
 	room.order = append(room.order, entry)
 	c.size++
 	if len(room.order) > c.perRoomCap {
-		c.removeOldestUnpinnedRoomLocked(room)
+		if !c.removeOldestUnpinnedRoomLocked(room) {
+			c.removeRoomIndexLocked(room, 0)
+		}
 	}
 	shard.mu.Unlock()
 
 	for c.size > c.globalCap {
 		if !c.removeOldestUnpinnedGlobalLocked() {
-			break
+			c.removeOldestGlobalLocked()
 		}
 	}
 	c.globalMu.Unlock()
@@ -458,12 +460,14 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 	room.order = append(room.order, entry)
 	c.size++
 	if len(room.order) > c.perRoomCap {
-		c.removeOldestUnpinnedRoomLocked(room)
+		if !c.removeOldestUnpinnedRoomLocked(room) {
+			c.removeRoomIndexLocked(room, 0)
+		}
 	}
 	shard.mu.Unlock()
 	for c.size > c.globalCap {
 		if !c.removeOldestUnpinnedGlobalLocked() {
-			break
+			c.removeOldestGlobalLocked()
 		}
 	}
 	c.globalMu.Unlock()
@@ -505,6 +509,16 @@ func (c *soakCatalog) IncrementThreadReplies(roomID, messageID string) bool {
 			return false
 		}
 		entry.threadReplies++
+		return true
+	})
+}
+
+func (c *soakCatalog) DecrementThreadReplies(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+		if entry.threadReplies <= 0 {
+			return false
+		}
+		entry.threadReplies--
 		return true
 	})
 }
@@ -604,6 +618,30 @@ func (c *soakCatalog) removeOldestUnpinnedGlobalLocked() bool {
 		}
 		shard.mu.Unlock()
 	}
+	return false
+}
+
+func (c *soakCatalog) removeOldestGlobalLocked() bool {
+	element := c.globalOrder.Front()
+	if element == nil {
+		return false
+	}
+	entry := element.Value.(*soakCatalogEntry)
+	shard := c.shard(entry.RoomID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	room := shard.rooms[entry.RoomID]
+	if room == nil {
+		c.globalOrder.Remove(element)
+		return false
+	}
+	for i := range room.order {
+		if room.order[i] == entry {
+			c.removeRoomIndexLocked(room, i)
+			return true
+		}
+	}
+	c.globalOrder.Remove(element)
 	return false
 }
 

@@ -174,8 +174,36 @@ func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
 	assert.Len(t, workload.lanes(), 6)
-	assert.Equal(t, 1, soakIntegerRate(0.1))
-	assert.Equal(t, 2, soakIntegerRate(1.6))
+}
+
+func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
+	workloadConfig := soakWorkloadConfig{}
+	newSoakWorkload(
+		&workloadConfig,
+		nil,
+		soakWorkloadActions{},
+		nil,
+		nil,
+		nil,
+	)
+	assert.Equal(t, soakWorkloadConfig{}, workloadConfig)
+
+	mutationConfig := soakMutationConfig{}
+	newSoakMutator(
+		&mutationConfig,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	assert.Equal(t, soakMutationConfig{}, mutationConfig)
+
+	verifyConfig := soakVerifyConfig{}
+	newSoakVerifier(&verifyConfig, nil, nil, nil, nil)
+	assert.Equal(t, soakVerifyConfig{}, verifyConfig)
 }
 
 func TestNewSoakRuntimeSelector_ValidatesInputs(t *testing.T) {

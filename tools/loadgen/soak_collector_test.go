@@ -1,7 +1,8 @@
 package main
 
 import (
-	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -183,9 +184,7 @@ func TestSoakPrometheusMetrics_StableNamesAndBoundedLabels(t *testing.T) {
 		RoomID: "room-secret", MessageID: "message-secret",
 	}))
 
-	gathered, err := metrics.Registry.Gather()
-	require.NoError(t, err)
-	text := metricFamiliesText(gathered)
+	text := metricsExpositionText(t, metrics)
 	for _, name := range []string{
 		"loadgen_soak_operations_total",
 		"loadgen_soak_retries_total",
@@ -206,15 +205,20 @@ func TestSoakPrometheusMetrics_StableNamesAndBoundedLabels(t *testing.T) {
 	))
 }
 
-func metricFamiliesText(families any) string {
-	return fmt.Sprintf("%v", families)
+func metricsExpositionText(t *testing.T, metrics *Metrics) string {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodGet, "/metrics", nil),
+	)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	return recorder.Body.String()
 }
 
 func TestSoakMetrics_DoNotExposeRunOrEntityLabelNames(t *testing.T) {
 	metrics := NewMetrics()
-	families, err := metrics.Registry.Gather()
-	require.NoError(t, err)
-	text := strings.ToLower(metricFamiliesText(families))
+	text := strings.ToLower(metricsExpositionText(t, metrics))
 	for _, forbidden := range []string{
 		"account", "user_id", "room_id", "message_id", "run_id", "error_text",
 	} {

@@ -67,6 +67,7 @@ soak:
   roomCount: "10000"
   channelRatio: "0.30"
   channelMembers: "100"
+  largeRoomThreshold: "500"
   rateScope: site
   messagesPerActiveUserPerDay: "0"
   payloadMedianBytes: "1024"
@@ -89,6 +90,9 @@ soak:
 teardown:
   # The chart refuses to render teardown unless this is explicitly true.
   approved: false
+  batchRooms: "250"
+  batchDelay: 100ms
+  batchTimeout: 30s
   activeDeadlineSeconds: 7200
   backoffLimit: 1
   resources:

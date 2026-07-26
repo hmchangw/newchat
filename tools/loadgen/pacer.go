@@ -41,13 +41,17 @@ type pacer struct {
 // start. The ticker interval is the natural 1s/rate, clamped up to
 // minEmitInterval so the runtime can honor it.
 func newPacer(rate int, start time.Time) *pacer {
-	interval := time.Second / time.Duration(rate)
+	return newRatePacer(float64(rate), start)
+}
+
+func newRatePacer(rate float64, start time.Time) *pacer {
+	interval := time.Duration(float64(time.Second) / rate)
 	if interval < minEmitInterval {
 		interval = minEmitInterval
 	}
-	perTick := float64(rate) * interval.Seconds()
+	perTick := rate * interval.Seconds()
 	return &pacer{
-		rate:     float64(rate),
+		rate:     rate,
 		interval: interval,
 		perTick:  perTick,
 		maxBurst: perTick * pacerMaxBurstIntervals,
@@ -105,7 +109,25 @@ func pacedDispatch(
 	ctx context.Context, rate, maxInFlight int,
 	recordUnderrun func(int), recordSaturation func(), do func(context.Context),
 ) {
-	p := newPacer(rate, time.Now())
+	pacedDispatchRate(
+		ctx,
+		float64(rate),
+		maxInFlight,
+		recordUnderrun,
+		recordSaturation,
+		do,
+	)
+}
+
+func pacedDispatchRate(
+	ctx context.Context,
+	rate float64,
+	maxInFlight int,
+	recordUnderrun func(int),
+	recordSaturation func(),
+	do func(context.Context),
+) {
+	p := newRatePacer(rate, time.Now())
 	tick := time.NewTicker(p.interval)
 	defer tick.Stop()
 

@@ -164,6 +164,7 @@ func (s *soakSender) Publish(
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
+		s.releaseThreadReservation(target.RoomID, threadParentID)
 		return nil, fmt.Errorf("marshal soak send: %w", err)
 	}
 	now := s.clock.Now()
@@ -183,10 +184,11 @@ func (s *soakSender) Publish(
 		s.rngMu.Unlock()
 	}
 	if err := s.catalog.TrackPublished(&candidate); err != nil {
+		s.releaseThreadReservation(target.RoomID, threadParentID)
 		return nil, fmt.Errorf("track soak send before publish: %w", err)
 	}
 	if err := s.addPending(pending); err != nil {
-		s.catalog.Reject(target.RoomID, messageID)
+		s.rejectPending(pending)
 		return nil, err
 	}
 
@@ -224,19 +226,19 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 	}
 
 	if responseErr := parseSoakErrorEnvelope(data); responseErr != nil {
-		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+		s.rejectPending(pending)
 		result.ErrorClass = classifySoakRPCError(responseErr)
 		return result
 	}
 	var response model.Message
 	if err := json.Unmarshal(data, &response); err != nil {
-		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+		s.rejectPending(pending)
 		result.Status = soakSendReplyMalformed
 		result.ErrorClass = soakErrorDecode
 		return result
 	}
 	if !matchingSoakSendReply(pending, &response) {
-		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+		s.rejectPending(pending)
 		result.ErrorClass = soakErrorAssertion
 		return result
 	}
@@ -245,6 +247,7 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 		pending.MessageID,
 		response.CreatedAt,
 	) {
+		s.rejectPending(pending)
 		result.ErrorClass = soakErrorAssertion
 		return result
 	}
@@ -265,9 +268,26 @@ func (s *soakSender) Expire() int {
 	}
 	s.pendingMu.Unlock()
 	for _, pending := range expired {
-		s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+		s.rejectPending(pending)
 	}
 	return len(expired)
+}
+
+func (s *soakSender) rejectPending(pending *soakPendingSend) {
+	s.catalog.Reject(pending.Target.RoomID, pending.MessageID)
+	s.releaseThreadReservation(
+		pending.Target.RoomID,
+		pending.ThreadParentID,
+	)
+}
+
+func (s *soakSender) releaseThreadReservation(
+	roomID string,
+	parentID string,
+) {
+	if parentID != "" {
+		s.catalog.DecrementThreadReplies(roomID, parentID)
+	}
 }
 
 func (s *soakSender) Pending() int {

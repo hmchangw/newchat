@@ -314,6 +314,37 @@ func TestSoakMutator_NotFoundRetriesThenReportsTargetMissing(t *testing.T) {
 	assert.False(t, message.Edited, "catalog reconciles only after success")
 }
 
+func TestSoakMutator_LatencyExcludesTargetRetryBackoff(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
+	notFound := []byte(`{"error":"message not found","code":"not_found"}`)
+	transport := &soakReadTransport{replies: []soakRPCFakeReply{
+		{data: notFound},
+		{data: notFound},
+		{data: notFound},
+	}}
+	recorder := &soakMutationRecorder{}
+	mutator := newTestSoakMutator(
+		catalog,
+		transport,
+		recorder,
+		mutationTopology(),
+		clock,
+	)
+	mutator.cfg.RetryMinBackoff = 100 * time.Millisecond
+	mutator.cfg.RetryMaxBackoff = 100 * time.Millisecond
+	mutator.sleeper = &advancingSoakSleeper{clock: clock}
+	startedAt := clock.Now()
+
+	_, err := mutator.Edit(context.Background(), "room-1", "updated")
+
+	require.NoError(t, err)
+	samples := recorder.snapshot()
+	require.Len(t, samples, 1)
+	assert.Zero(t, samples[0].Latency)
+	assert.Equal(t, 200*time.Millisecond, clock.Now().Sub(startedAt))
+}
+
 func TestSoakMutator_ReactionNotFoundUsesTargetRetryPolicy(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
@@ -503,4 +534,19 @@ func reactionSuccess(messageID string, action model.ReactionAction) []byte {
 		panic(err)
 	}
 	return data
+}
+
+type advancingSoakSleeper struct {
+	clock *fakeSoakClock
+}
+
+func (s *advancingSoakSleeper) Sleep(
+	ctx context.Context,
+	delay time.Duration,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.clock.Advance(delay)
+	return nil
 }

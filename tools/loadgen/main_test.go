@@ -244,7 +244,7 @@ func TestRunSeed_RejectsUnknownWorkload(t *testing.T) {
 	assert.Equal(t, 2, code)
 }
 
-func TestDispatch_SoakRoutes(t *testing.T) {
+func TestDispatch_SoakRoutesRejectInvalidConfigBeforeExternalAccess(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
@@ -264,7 +264,8 @@ func TestDispatch_SoakRoutes(t *testing.T) {
 				CassandraKeyspace: "chat",
 				Soak:              validSoakConfig(t),
 			}
-			assert.Equal(t, 1, dispatch(context.Background(), cfg))
+			cfg.Soak.RunID = ""
+			assert.Equal(t, 2, dispatch(context.Background(), cfg))
 		})
 	}
 }

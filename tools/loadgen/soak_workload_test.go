@@ -27,7 +27,7 @@ func TestSoakWorkload_RunsIndependentConfiguredLanes(t *testing.T) {
 	workload := newSoakWorkload(&soakWorkloadConfig{
 		RunID: "run-1", Duration: time.Hour, Warmup: 0,
 		SendRate: 100, ReadRate: 700, MutationRate: 5,
-		ReactionRate: 87, PinnedListRate: 2, VerifyRate: 1,
+		ReactionRate: 87, PinnedListRate: 2, VerifyRate: 0.2,
 		MaxInFlight: 16,
 	}, store, actions, dispatcher.Dispatch, time.Now, nil)
 
@@ -37,9 +37,9 @@ func TestSoakWorkload_RunsIndependentConfiguredLanes(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, soakCompletionCanceled, result.Completion)
 
-	assert.Equal(t, map[string]int{
+	assert.Equal(t, map[string]float64{
 		"send": 100, "read": 700, "mutation": 5,
-		"reaction": 87, "pinned_list": 2, "verify": 1,
+		"reaction": 87, "pinned_list": 2, "verify": 0.2,
 	}, dispatcher.rates())
 	for _, name := range []string{
 		"send", "read", "mutation", "reaction", "pinned_list", "verify",
@@ -120,7 +120,9 @@ func TestSoakWorkload_GlobalInFlightBudgetBoundsAllLanes(t *testing.T) {
 		result, runErr = workload.Run(context.Background())
 		close(done)
 	}()
-	time.Sleep(10 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return active.Load() == int64(limit)
+	}, time.Second, time.Millisecond)
 	close(release)
 	<-done
 
@@ -286,7 +288,7 @@ func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T
 	}
 	for _, field := range []string{
 		"_id", "state", "siteId", "mongoDatabase", "cassandraKeyspace",
-		"configDigest", "borrowedUserCount", "activeUserCount", "roomCount",
+		"configDigest", "borrowedUserCount", "activeUserCount", "activeUserIds", "roomCount",
 		"subscriptionCount", "startedAt", "updatedAt", "seededAt",
 		"cleanedAt", "firstStartedAt", "deadline", "completedAt",
 		"configuredDuration", "restartCount", "runMode", "lastStoppedAt",
@@ -294,7 +296,7 @@ func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T
 	} {
 		assert.Equal(t, 1, fields[field], field)
 	}
-	assert.Len(t, fields, 22)
+	assert.Len(t, fields, 23)
 }
 
 func TestSoakWorkload_AlreadyElapsedDeadlineCompletesWithoutDispatch(t *testing.T) {
@@ -310,7 +312,7 @@ func TestSoakWorkload_AlreadyElapsedDeadlineCompletesWithoutDispatch(t *testing.
 		RunID: "run-1", Duration: time.Hour, SendRate: 1, MaxInFlight: 1,
 	}, store, soakWorkloadActions{
 		Send: func(context.Context, bool) error {
-			t.Fatal("elapsed run must not dispatch")
+			t.Error("elapsed run must not dispatch")
 			return nil
 		},
 	}, dispatcher.Dispatch, func() time.Time { return now }, nil)
@@ -410,14 +412,14 @@ func TestRunSoakHeartbeat_StopsOnCancellationAndStoreFailure(t *testing.T) {
 
 type recordingSoakDispatcher struct {
 	mu           sync.Mutex
-	seenRates    map[string]int
+	seenRates    map[string]float64
 	callsPerLane int
 }
 
 func (d *recordingSoakDispatcher) Dispatch(
 	ctx context.Context,
 	lane string,
-	rate int,
+	rate float64,
 	_ int,
 	_ func(int),
 	_ func(),
@@ -425,7 +427,7 @@ func (d *recordingSoakDispatcher) Dispatch(
 ) {
 	d.mu.Lock()
 	if d.seenRates == nil {
-		d.seenRates = make(map[string]int)
+		d.seenRates = make(map[string]float64)
 	}
 	d.seenRates[lane] = rate
 	calls := d.callsPerLane
@@ -438,10 +440,10 @@ func (d *recordingSoakDispatcher) Dispatch(
 	}
 }
 
-func (d *recordingSoakDispatcher) rates() map[string]int {
+func (d *recordingSoakDispatcher) rates() map[string]float64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	cloned := make(map[string]int, len(d.seenRates))
+	cloned := make(map[string]float64, len(d.seenRates))
 	for lane, rate := range d.seenRates {
 		cloned[lane] = rate
 	}
@@ -455,7 +457,7 @@ type burstSoakDispatcher struct {
 func (d *burstSoakDispatcher) Dispatch(
 	ctx context.Context,
 	_ string,
-	_ int,
+	_ float64,
 	_ int,
 	_ func(int),
 	_ func(),
@@ -480,7 +482,7 @@ type singleSoakDispatcher struct {
 func (d *singleSoakDispatcher) Dispatch(
 	ctx context.Context,
 	_ string,
-	_ int,
+	_ float64,
 	_ int,
 	_ func(int),
 	_ func(),

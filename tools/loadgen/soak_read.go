@@ -94,11 +94,15 @@ func newSoakReader(
 	if now == nil {
 		now = time.Now
 	}
+	if catalog == nil {
+		catalog = newSoakCatalog(1, 1, 0, nil)
+	}
 	members := make(map[string][]model.SubscriptionUser)
 	if topology != nil {
+		active := activeSoakUserIDs(topology)
 		for i := range topology.Subscriptions {
 			subscription := &topology.Subscriptions[i]
-			if !subscription.IsSubscribed ||
+			if !isActiveSoakSubscription(subscription, active) ||
 				subscription.RoomID == "" ||
 				subscription.User.Account == "" {
 				continue

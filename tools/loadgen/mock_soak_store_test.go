@@ -57,6 +57,36 @@ func (mr *MocksoakSeedStoreMockRecorder) BorrowUsers(ctx, siteID, limit any) *go
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BorrowUsers", reflect.TypeOf((*MocksoakSeedStore)(nil).BorrowUsers), ctx, siteID, limit)
 }
 
+// FindConflictingRoomIDs mocks base method.
+func (m *MocksoakSeedStore) FindConflictingRoomIDs(ctx context.Context, runID string, roomIDs []string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindConflictingRoomIDs", ctx, runID, roomIDs)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindConflictingRoomIDs indicates an expected call of FindConflictingRoomIDs.
+func (mr *MocksoakSeedStoreMockRecorder) FindConflictingRoomIDs(ctx, runID, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindConflictingRoomIDs", reflect.TypeOf((*MocksoakSeedStore)(nil).FindConflictingRoomIDs), ctx, runID, roomIDs)
+}
+
+// FindManifest mocks base method.
+func (m *MocksoakSeedStore) FindManifest(ctx context.Context, runID string) (*soakManifest, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindManifest", ctx, runID)
+	ret0, _ := ret[0].(*soakManifest)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindManifest indicates an expected call of FindManifest.
+func (mr *MocksoakSeedStoreMockRecorder) FindManifest(ctx, runID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindManifest", reflect.TypeOf((*MocksoakSeedStore)(nil).FindManifest), ctx, runID)
+}
+
 // InsertOwnedRooms mocks base method.
 func (m *MocksoakSeedStore) InsertOwnedRooms(ctx context.Context, runID string, rooms []model.Room) error {
 	m.ctrl.T.Helper()

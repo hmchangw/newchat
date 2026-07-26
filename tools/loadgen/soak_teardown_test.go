@@ -36,6 +36,8 @@ func TestTeardownSoak_DeletesOwnedChunksAndMarksCleaned(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.RunID = "run-a"
 	cfg.CassandraCleanup = "none"
+	cfg.TeardownBatchRooms = 2
+	cfg.TeardownBatchDelay = 0
 
 	found, err := teardownSoak(
 		context.Background(),
@@ -50,6 +52,46 @@ func TestTeardownSoak_DeletesOwnedChunksAndMarksCleaned(t *testing.T) {
 	assert.Equal(t, store.pages, store.deletedBatches)
 	assert.True(t, store.ownershipDeleted)
 	assert.True(t, store.cleaned)
+}
+
+func TestTeardownSoak_SplitsOwnershipPagesIntoRateLimitedBatches(t *testing.T) {
+	store := &recordingSoakTeardownStore{
+		manifest: &soakManifest{ID: "run-a", State: soakManifestSeeded},
+		pages: [][]string{
+			{"room-1", "room-2", "room-3", "room-4", "room-5"},
+		},
+	}
+	cfg := validSoakConfig(t)
+	cfg.RunID = "run-a"
+	cfg.TeardownBatchRooms = 2
+	cfg.TeardownBatchDelay = 0
+
+	_, err := teardownSoak(context.Background(), store, nil, &cfg, "chat")
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{
+		{"room-1", "room-2"},
+		{"room-3", "room-4"},
+		{"room-5"},
+	}, store.deletedBatches)
+}
+
+func TestTeardownSoak_RejectsNonAdvancingOwnershipCursor(t *testing.T) {
+	store := &recordingSoakTeardownStore{
+		manifest: &soakManifest{ID: "run-a", State: soakManifestSeeded},
+		pages:    [][]string{{"room-1"}, {"room-2"}},
+		cursors:  []string{"chunk-1", "chunk-1"},
+	}
+	cfg := validSoakConfig(t)
+	cfg.RunID = "run-a"
+	cfg.TeardownBatchDelay = 0
+
+	_, err := teardownSoak(context.Background(), store, nil, &cfg, "chat")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not advance")
+	assert.Equal(t, [][]string{{"room-1"}}, store.deletedBatches)
+	assert.False(t, store.ownershipDeleted)
 }
 
 func TestTeardownSoak_GuardsCassandraTruncate(t *testing.T) {
@@ -225,6 +267,7 @@ func TestTeardownSoak_AllowsExpiredHeartbeatLease(t *testing.T) {
 type recordingSoakTeardownStore struct {
 	manifest         *soakManifest
 	pages            [][]string
+	cursors          []string
 	nextPage         int
 	deletedBatches   [][]string
 	deleteErr        error
@@ -250,8 +293,12 @@ func (s *recordingSoakTeardownStore) NextOwnershipPage(
 	}
 	page := s.pages[s.nextPage]
 	s.nextPage++
+	cursor := fmt.Sprintf("chunk-%06d", s.nextPage)
+	if len(s.cursors) >= s.nextPage {
+		cursor = s.cursors[s.nextPage-1]
+	}
 	return &soakOwnershipPage{
-		Cursor:  fmt.Sprintf("chunk-%06d", s.nextPage),
+		Cursor:  cursor,
 		RoomIDs: page,
 	}, nil
 }

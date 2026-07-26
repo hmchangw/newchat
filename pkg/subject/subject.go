@@ -477,6 +477,10 @@ func MsgHistoryWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.msg.history", siteID)
 }
 
+func MsgGetWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.msg.get", siteID)
+}
+
 func MsgThreadWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.msg.thread", siteID)
 }

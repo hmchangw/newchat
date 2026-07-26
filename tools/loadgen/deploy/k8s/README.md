@@ -182,11 +182,22 @@ phase: teardown
 
 teardown:
   approved: true
+  batchRooms: "250"
+  batchDelay: 100ms
+  batchTimeout: 30s
 ```
 
 The Chart refuses to render `phase=teardown` without the approval flag.
 Loadgen additionally refuses teardown while the manifest has a fresh active
 heartbeat.
+
+Mongo cleanup pages the run's ownership room IDs and deletes serial batches.
+Tune `batchRooms` and `batchDelay` downward/upward to reduce or increase
+cleanup pressure; `batchTimeout` limits one batch without imposing a deadline
+on the whole cleanup. Each room is rechecked against the selected run before
+its dependent artifacts are deleted. The queries use existing service indexes,
+and the ownership ledger uses its run-prefixed `_id` range, so the Chart does
+not require a teardown-only index on shared collections.
 
 The safe Cassandra default is:
 

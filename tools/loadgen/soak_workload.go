@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 )
@@ -66,7 +65,7 @@ var errSoakManifestNotFound = errors.New("soak run manifest not found")
 type soakLaneDispatcher func(
 	ctx context.Context,
 	lane string,
-	rate int,
+	rate float64,
 	maxInFlight int,
 	recordUnderrun func(int),
 	recordSaturation func(),
@@ -93,11 +92,12 @@ func newSoakWorkload(
 	if cfg == nil {
 		cfg = &soakWorkloadConfig{}
 	}
-	if cfg.MaxInFlight <= 0 {
-		cfg.MaxInFlight = 256
+	config := *cfg
+	if config.MaxInFlight <= 0 {
+		config.MaxInFlight = 256
 	}
-	if cfg.HeartbeatInterval <= 0 {
-		cfg.HeartbeatInterval = 30 * time.Second
+	if config.HeartbeatInterval <= 0 {
+		config.HeartbeatInterval = 30 * time.Second
 	}
 	if dispatch == nil {
 		dispatch = dispatchSoakLane
@@ -109,7 +109,7 @@ func newSoakWorkload(
 		onSaturation = func() {}
 	}
 	return &soakWorkload{
-		cfg: *cfg, store: store, actions: actions, dispatch: dispatch,
+		cfg: config, store: store, actions: actions, dispatch: dispatch,
 		now: now, onSaturation: onSaturation,
 	}
 }
@@ -157,8 +157,13 @@ func (w *soakWorkload) Run(
 		return result, nil
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	if !w.cfg.Continuous {
+	var (
+		runCtx context.Context
+		cancel context.CancelFunc
+	)
+	if w.cfg.Continuous {
+		runCtx, cancel = context.WithCancel(ctx)
+	} else {
 		runCtx, cancel = context.WithDeadline(ctx, window.Deadline)
 	}
 	defer cancel()
@@ -216,7 +221,7 @@ func (w *soakWorkload) Run(
 			w.dispatch(
 				runCtx,
 				lane.name,
-				soakIntegerRate(lane.rate),
+				lane.rate,
 				w.cfg.MaxInFlight,
 				func(int) {},
 				w.onSaturation,
@@ -264,8 +269,13 @@ func (w *soakWorkload) Run(
 		}
 		return result, ctx.Err()
 	default:
-		if err := completeSoakRun(
+		completeCtx, cancelComplete := context.WithTimeout(
 			context.Background(),
+			5*time.Second,
+		)
+		defer cancelComplete()
+		if err := completeSoakRun(
+			completeCtx,
 			w.store,
 			w.cfg.RunID,
 			w.now().UTC(),
@@ -297,13 +307,13 @@ func (w *soakWorkload) lanes() []soakLane {
 func dispatchSoakLane(
 	ctx context.Context,
 	_ string,
-	rate int,
+	rate float64,
 	maxInFlight int,
 	recordUnderrun func(int),
 	recordSaturation func(),
 	action func(context.Context),
 ) {
-	pacedDispatch(
+	pacedDispatchRate(
 		ctx,
 		rate,
 		maxInFlight,
@@ -311,10 +321,6 @@ func dispatchSoakLane(
 		recordSaturation,
 		action,
 	)
-}
-
-func soakIntegerRate(rate float64) int {
-	return max(1, int(math.Round(rate)))
 }
 
 func prepareSoakRun(

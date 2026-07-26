@@ -162,6 +162,43 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 	assert.Equal(t, parentID, child.ThreadParentID)
 }
 
+func TestSoakSender_RejectedThreadReplyReleasesParentBudget(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	parentID := "AAAAAAAAAAAAAAAAAAAA"
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: parentID, RoomID: "room-1", Author: "alice",
+		Content: "parent", CreatedAt: clock.Now(), ThreadReplyLimit: 1,
+	}))
+	require.True(t, catalog.Accept("room-1", parentID))
+	sender := newTestSoakSender(
+		catalog,
+		&soakRecordingPublisher{},
+		clock,
+		1,
+	)
+
+	first, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-2", Account: "bob", RoomID: "room-1",
+	}, "reply")
+	require.NoError(t, err)
+	require.Equal(t, soakSendThreadReply, first.Kind)
+	result := sender.HandleReply(
+		subject.UserResponse("bob", first.RequestID),
+		[]byte(`{"error":"rejected","code":"forbidden"}`),
+	)
+	require.Equal(t, soakSendReplyRejected, result.Status)
+
+	parent, ok := catalog.Get("room-1", parentID)
+	require.True(t, ok)
+	assert.Zero(t, parent.ThreadReplies)
+	second, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-2", Account: "bob", RoomID: "room-1",
+	}, "retry reply")
+	require.NoError(t, err)
+	assert.Equal(t, soakSendThreadReply, second.Kind)
+}
+
 func TestSoakSender_TopLevelStoresConfiguredThreadReplyLimit(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
 	catalog := newSoakCatalog(8, 100, 0, clock)

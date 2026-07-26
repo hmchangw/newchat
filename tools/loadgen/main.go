@@ -361,14 +361,27 @@ func runSoakPhase(
 	phase soakPhase,
 	seed int64,
 ) int {
-	if err := validateSoakConfig(&cfg.Soak, cfg.CassandraKeyspace); err != nil {
-		slog.Error("invalid Cassandra soak configuration", "phase", phase, "error", err)
+	var validationErr error
+	if phase == soakPhaseTeardown {
+		validationErr = validateSoakTeardownConfig(
+			&cfg.Soak,
+			cfg.CassandraKeyspace,
+		)
+	} else {
+		validationErr = validateSoakConfig(&cfg.Soak, cfg.CassandraKeyspace)
+	}
+	if validationErr != nil {
+		slog.Error(
+			"invalid Cassandra soak configuration",
+			"phase", phase,
+			"error", validationErr,
+		)
 		return 2
 	}
-	logSoakAssumptions(&cfg.Soak)
 	if phase == soakPhaseTeardown {
 		return runSoakTeardown(ctx, cfg)
 	}
+	logSoakAssumptions(&cfg.Soak)
 	if phase == soakPhaseSeed {
 		return runSoakSeed(ctx, cfg, seed)
 	}

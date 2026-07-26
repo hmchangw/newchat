@@ -36,6 +36,7 @@ data:
   SOAK_ROOM_COUNT: {{ .Values.soak.roomCount | quote }}
   SOAK_CHANNEL_RATIO: {{ .Values.soak.channelRatio | quote }}
   SOAK_CHANNEL_MEMBERS: {{ .Values.soak.channelMembers | quote }}
+  SOAK_LARGE_ROOM_THRESHOLD: {{ .Values.soak.largeRoomThreshold | quote }}
   SOAK_RATE_SCOPE: {{ .Values.soak.rateScope | quote }}
   SOAK_MESSAGES_PER_ACTIVE_USER_PER_DAY: {{ .Values.soak.messagesPerActiveUserPerDay | quote }}
   SOAK_PAYLOAD_MEDIAN_BYTES: {{ .Values.soak.payloadMedianBytes | quote }}
@@ -49,3 +50,6 @@ data:
   SOAK_RECENT_TOTAL: {{ .Values.soak.recentTotal | quote }}
   SOAK_CASSANDRA_CLEANUP: {{ .Values.cassandra.cleanup | quote }}
   SOAK_CONFIRM_KEYSPACE: {{ .Values.cassandra.confirmKeyspace | quote }}
+  SOAK_TEARDOWN_BATCH_ROOMS: {{ .Values.teardown.batchRooms | quote }}
+  SOAK_TEARDOWN_BATCH_DELAY: {{ .Values.teardown.batchDelay | quote }}
+  SOAK_TEARDOWN_BATCH_TIMEOUT: {{ .Values.teardown.batchTimeout | quote }}

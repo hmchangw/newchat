@@ -94,20 +94,21 @@ func newSoakVerifier(
 	if cfg == nil {
 		cfg = &soakVerifyConfig{}
 	}
-	if cfg.PageLimit <= 0 {
-		cfg.PageLimit = 50
+	config := *cfg
+	if config.PageLimit <= 0 {
+		config.PageLimit = 50
 	}
-	if cfg.MaxPages <= 0 {
-		cfg.MaxPages = 20
+	if config.MaxPages <= 0 {
+		config.MaxPages = 20
 	}
-	if cfg.RequestTimeout <= 0 {
-		cfg.RequestTimeout = 5 * time.Second
+	if config.RequestTimeout <= 0 {
+		config.RequestTimeout = 5 * time.Second
 	}
 	if now == nil {
 		now = time.Now
 	}
 	return &soakVerifier{
-		cfg: *cfg, catalog: catalog, rpc: rpc, recorder: recorder, now: now,
+		cfg: config, catalog: catalog, rpc: rpc, recorder: recorder, now: now,
 	}
 }
 

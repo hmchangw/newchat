@@ -160,6 +160,8 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.msg.canonical.site-a.reacted"},
 		{"MsgGet", subject.MsgGet("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.msg.get"},
+		{"MsgGetWildcard", subject.MsgGetWildcard("site-a"),
+			"chat.user.*.request.room.*.site-a.msg.get"},
 		{"RoomKeyGet", subject.RoomKeyGet("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.key.get"},
 		{"RoomRename", subject.RoomRename("alice", "r1", "site-a"),
