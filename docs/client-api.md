@@ -2291,7 +2291,7 @@ Empty body (`{}` is tolerated). All inputs come from the subject.
 |---|---|---|
 | `id` | string | `apps._id`. |
 | `name` | string | `apps.channelTab.name`. |
-| `tabUrl` | string | Computed: `SITE_URL`'s scheme/host/path-prefix + `apps.channelTab.url.default`'s path; `${roomId}` and `${siteId}` are substituted. Apps whose template URL is empty or unparseable are silently skipped. |
+| `tabUrl` | string | Computed from `apps.channelTab.url.default`, which carries the full URL (no server-side base-URL rewrite). Substituted template variables: `${roomId}`, `${siteId}`, `${roomType}` (legacy room-type vocabulary: `channel`/`discussion` → `p`, `dm`/`botDM` → `d`, unknown → `p`), `${roomOrigin}` (legacy origin URL of the room's home site from `LEGACY_ROOM_ORIGINS`; empty string when the site is unconfigured). Apps whose template URL is empty or unparseable are silently skipped. |
 | `assistant` | [AppAssistant](#appassistant) | Optional. `apps.assistant` subdocument if set. |
 
 ```json
@@ -2300,7 +2300,7 @@ Empty body (`{}` is tolerated). All inputs come from the subject.
     {
       "id": "app-weather",
       "name": "Weather",
-      "tabUrl": "https://site-a.example.com/apps/weather?room=01970a4f8c2d7c9aQ",
+      "tabUrl": "https://template-a.com/apps/weather?room=01970a4f8c2d7c9aQ&roomType=p&roomOrigin=https://legacy.site-a.com",
       "assistant": { "enabled": true, "name": "weather.bot" }
     }
   ]
