@@ -93,11 +93,7 @@ func TestPublish_WrapsPublishError(t *testing.T) {
 }
 
 func TestOpenInConcurrentEventTypes(t *testing.T) {
-	found := false
-	for _, et := range ConcurrentEventTypes {
-		if et == model.InboxSubscriptionOpened {
-			found = true
-		}
-	}
-	assert.True(t, found, "subscription_opened must ride the concurrent lane")
+	assert.Contains(t, ConcurrentEventTypes, model.InboxSubscriptionOpened,
+		"subscription_opened must ride the concurrent lane")
+	assert.NotContains(t, OrderedEventTypes, model.InboxSubscriptionOpened)
 }
