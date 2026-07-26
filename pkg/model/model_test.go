@@ -587,6 +587,7 @@ func TestSubscriptionJSON(t *testing.T) {
 			Alert:              true,
 			Muted:              true,
 			Favorite:           true,
+			Open:               true,
 		}
 		roundTrip(t, &s, &model.Subscription{})
 	})
@@ -651,6 +652,10 @@ func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
 	favoriteVal, hasFavorite := raw["favorite"]
 	assert.True(t, hasFavorite, "favorite must be present in JSON even when false")
 	assert.Equal(t, false, favoriteVal)
+
+	openVal, hasOpen := raw["open"]
+	assert.True(t, hasOpen, "open must be present in JSON even when false")
+	assert.Equal(t, false, openVal)
 
 	var dst model.Subscription
 	require.NoError(t, json.Unmarshal(data, &dst))
