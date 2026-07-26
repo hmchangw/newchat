@@ -18,7 +18,7 @@ const USER = {
   engName: 'Alice',
   chineseName: '',
   roles: ['user'],
-  deactivated: false,
+  active: true,
   requirePasswordChange: false,
 }
 
@@ -51,22 +51,22 @@ describe('EditUserDialog', () => {
     expect(updateUser).not.toHaveBeenCalled()
     expect(screen.getByText(/confirm/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
-    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('tok', 'alice', { deactivated: true }))
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('tok', 'alice', { active: false }))
   })
 
-  it('does not require confirmation when reactivating an already-deactivated user', async () => {
+  it('does not require confirmation when reactivating an inactive user', async () => {
     updateUser.mockResolvedValue(undefined)
     render(
       <EditUserDialog
         authToken="tok"
-        user={{ ...USER, deactivated: true }}
+        user={{ ...USER, active: false }}
         onClose={vi.fn()}
         onUpdated={vi.fn()}
       />,
     )
     fireEvent.click(screen.getByRole('checkbox', { name: /^deactivated$/i }))
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
-    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('tok', 'alice', { deactivated: false }))
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('tok', 'alice', { active: true }))
   })
 
   it('logs the admin out instead of showing a banner on invalid_token', async () => {

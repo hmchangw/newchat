@@ -383,6 +383,18 @@ func TestInbox_UpdateSubscriptionFavorite_MissingSubscriptionErrors(t *testing.T
 	assert.Contains(t, err.Error(), "subscription not found")
 }
 
+func TestInbox_UpdateSubscriptionOpen_MissingSubscriptionErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newGuardStore(setupMongo(t))
+
+	// No ordering guard on open, so MatchedCount==0 can only mean a genuinely
+	// missing sub — same redeliver-until-member_added-lands contract as the
+	// other guarded subscription fields.
+	err := store.UpdateSubscriptionOpen(ctx, "missing-room", "ghost", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subscription not found")
+}
+
 func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
@@ -1376,6 +1388,23 @@ func TestInbox_UpdateSubscriptionFavorite_NewerApplies(t *testing.T) {
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
 	assert.True(t, got.Favorite)
+}
+
+func TestInbox_UpdateSubscriptionOpen(t *testing.T) {
+	ctx := context.Background()
+	store := newGuardStore(setupMongo(t))
+
+	_, err := store.subCol.InsertOne(ctx, bson.M{
+		"_id": "s1", "roomId": "r1", "u": bson.M{"account": "alice"},
+		"open": false,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.UpdateSubscriptionOpen(ctx, "r1", "alice", true))
+
+	var got model.Subscription
+	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
+	assert.True(t, got.Open)
 }
 
 func TestInbox_UpdateSubscriptionNamesForRoom_OutOfOrderSkipped(t *testing.T) {

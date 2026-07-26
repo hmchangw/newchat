@@ -49,7 +49,7 @@ paths.
    - [3.1 room-service](#31-room-service)
      - [Create Room](#create-room) · [Add Members](#add-members) · [Remove Member](#remove-member) · [Update Member Role](#update-member-role) · [Rename Room](#rename-room)
      - [List Members](#list-members) · [Get Member Statuses](#get-member-statuses) · [Get Mentionable Subscriptions](#get-mentionable-subscriptions) · [List Org Members](#list-org-members)
-     - [Mark Messages Read](#mark-messages-read) · [Mark Thread as Read](#mark-thread-as-read) · [Read Message Receipts](#read-message-receipts) · [Toggle Mute](#toggle-mute) · [Toggle Favorite](#toggle-favorite)
+     - [Mark Messages Read](#mark-messages-read) · [Mark Thread as Read](#mark-thread-as-read) · [Read Message Receipts](#read-message-receipts) · [Toggle Mute](#toggle-mute) · [Toggle Favorite](#toggle-favorite) · [Open Room](#open-room)
      - [Get Room App Tabs](#get-room-app-tabs) · [Get Room App Command Menu](#get-room-app-command-menu)
    - [3.2 history-service](#32-history-service)
      - [Load History](#load-history) · [Load Next Messages](#load-next-messages) · [Load Surrounding Messages](#load-surrounding-messages) · [Get Message By ID](#get-message-by-id) · [Get Messages By IDs](#get-messages-by-ids)
@@ -853,8 +853,8 @@ Room ciphertext envelope (`roomcrypto.EncryptedMessage`). See [§5 Room Encrypti
 #### Subscription
 
 A user's membership record for one room, embedded in `subscription.update`
-events on `added` / `role_updated` / `mute_toggled` / `favorite_toggled` and
-returned (enriched) by the user-service subscription endpoints. The ID
+events on `added` / `role_updated` / `mute_toggled` / `favorite_toggled` /
+`opened` and returned (enriched) by the user-service subscription endpoints. The ID
 serializes as `id` (not `_id`) and the user under `u` (not `user`). The first
 group is always present; the rest are optional (omitted when empty/unset).
 
@@ -883,6 +883,7 @@ user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
 | `muted` | boolean | Whether the user muted the room. |
 | `favorite` | boolean | Whether the user favorited the room. |
+| `open` | boolean | Sidebar-visibility flag; false hides the room from subscription.list. |
 | `isSubscribed` | boolean | Optional. Whether the user is actively subscribed. |
 | `historySharedSince` | RFC3339 timestamp | Optional. Boundary before which prior history is shared. |
 | `lastSeenAt` | RFC3339 timestamp | Optional. The user's last-seen time in the room. |
@@ -922,9 +923,9 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 ##### PreviewMessage
 
 A room's most-recent **eligible** message, resolved at read time and enriched for
-room-list rendering. Eligible = not soft-deleted, not a system message, not a
-quoted reply — an ineligible tail is walked back to an earlier survivor; a room with only
-ineligible messages omits `previewMessage`.
+room-list rendering. Eligible = not soft-deleted and not a system message (quoted
+replies are normal content and ARE eligible) — an ineligible tail is walked back to
+an earlier survivor; a room with only ineligible messages omits `previewMessage`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1029,6 +1030,7 @@ and Rename Room.
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read` | [Mark Thread as Read](#mark-thread-as-read) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle` | [Toggle Mute](#toggle-mute) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.favorite.toggle` | [Toggle Favorite](#toggle-favorite) |
+| `chat.user.{account}.request.room.{roomID}.{siteID}.open` | [Open Room](#open-room) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt` | [Read Message Receipts](#read-message-receipts) |
 | `chat.user.{account}.request.orgs.{orgID}.{siteID}.members` | [List Org Members](#list-org-members) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.app.tabs` | [Get Room App Tabs](#get-room-app-tabs) |
@@ -1209,11 +1211,11 @@ Shared by Add Members, Remove Member, and Update Member Role.
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path (only `subscription.u.account` is set there). |
 | `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
-| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, or `"favorite_toggled"`. |
-| `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `read`, and absent on `removed`. |
+| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"opened"`. |
+| `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
-On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled`). `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
+On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled` / `opened`). `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
 
 ```json
 {
@@ -2068,6 +2070,56 @@ When the requester's home site differs from the room's site, `room-service` emit
 
 ---
 
+#### Open Room
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.open`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+
+Synchronous RPC. `room-service` sets `Subscription.open` to `true` for the requester in a single atomic Mongo `FindOneAndUpdate`, replies with the resulting value, and fans out a `subscription.update` event to the user's other client sessions. Used by the client to reveal a room in the sidebar.
+
+Idempotency: this is a set, not a toggle. Every successful call sets `open` to `true`; redelivery of the same RPC is a no-op.
+
+##### Request body
+
+The subject already carries `account` and `roomID`, so no body fields are required. Clients may send `{}` or omit the body entirely; any body content is ignored.
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `open` | boolean | Always `true`. |
+
+```json
+{ "status": "ok", "open": true }
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- `"only room members can list members"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"invalid open-room subject: …"` — the subject is malformed.
+
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — emitted once for the requester so other client sessions reconcile.
+
+| Field | Type | Notes |
+|---|---|---|
+| `userId` | string | The requester's internal user ID. |
+| `subscription` | [Subscription](#subscription) | The Subscription record with the updated `open`. |
+| `action` | string | `"opened"`. |
+| `timestamp` | number | Epoch ms (UTC). |
+
+##### Cross-site behaviour
+
+When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_opened` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_opened`. `inbox-worker` on the user's home site mirrors the change onto the local `Subscription` document, setting `open` to `true`. This mirror is idempotent and eventually consistent: if the home-site subscription doesn't exist yet (e.g., `subscription_opened` races ahead of the originating `member_added`), the event is redelivered until the subscription exists.
+
+---
+
 #### Read Message Receipts
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt`
@@ -2456,7 +2508,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 #### Start Teams Meeting
 
-Creates a Microsoft Teams `onlineMeeting` via the Graph API and returns its join URL. **Idempotent per room, including under concurrency:** the meeting is created via Graph's `createOrGet` endpoint keyed on a stable per-room `externalId`, and a first-class `teams_meetings` record with a unique key on `(roomId, siteId)` guards local state. Repeated or concurrent calls for the same room return the same meeting and publish exactly one `teams_meet_started` system message. Attendee emails are derived as `account@TEAMS_EMAIL_DOMAIN`.
+Creates a Microsoft Teams `onlineMeeting` via the Graph API and returns its join URL. **Idempotent per room, including under concurrency:** the meeting is created via Graph's `createOrGet` endpoint keyed on a stable per-room `externalId`, and a first-class `teams_meetings` record with a unique key on `(roomId, siteId)` guards local state. Repeated or concurrent calls for the same room return the same meeting and publish exactly one `teams_meet_started` system message. The organizer and attendees are resolved to their Azure AD object IDs via a ROPC `User.Read.All` service account (`TEAMS_ROPC_USERNAME`/`TEAMS_ROPC_PASSWORD`); the organizer object ID scopes Graph's `createOrGet` and attendees are added by object ID. An attendee that cannot be resolved is omitted; an unresolvable organizer fails the request.
 
 > Graph client details (config env vars, app-only auth, the `createOrGet` idempotency key, the production application-access-policy requirement, and how to test without real credentials) are documented in [`docs/msgraph-client.md`](msgraph-client.md).
 
@@ -2497,7 +2549,7 @@ See [Error envelope](#6-error-envelope-reference).
 | — | `bad_request` | `roomId` empty (subject malformed). |
 | `not_room_member` | `forbidden` | Caller is not a member of the room. |
 | `max_room_size_reached` | `conflict` | Room has more than `ROOM_MEMBERS_LIMIT` (500) members. |
-| — | `internal` | Teams meetings not configured, or the Graph create failed. |
+| — | `internal` | Teams meetings not configured (including missing ROPC directory credentials), the organizer could not be resolved to an Azure object ID, or the Graph create failed. |
 
 ##### Triggered events — success path
 
@@ -3108,6 +3160,9 @@ The payload is flat (no zero-valued room fields):
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
 
 ```json
 {
@@ -3120,7 +3175,13 @@ The payload is flat (no zero-valued room fields):
   "newContent": "morning team — updated",
   "editedBy": "alice",
   "editedAt": "2026-05-06T08:05:00Z",
-  "updatedAt": "2026-05-06T08:05:00Z"
+  "updatedAt": "2026-05-06T08:05:00Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "sender": { "account": "alice", "displayName": "Alice" },
+    "content": "morning team — updated",
+    "createdAt": "2026-05-06T08:00:00Z"
+  }
 }
 ```
 
@@ -3195,6 +3256,9 @@ The payload is flat:
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
 
 ```json
 {
@@ -3205,9 +3269,17 @@ The payload is flat:
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQPRE",
+    "sender": { "account": "bob", "displayName": "Bob" },
+    "content": "the previous message, now the newest",
+    "createdAt": "2026-05-06T07:59:00Z"
+  }
 }
 ```
+
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely.
 
 **Thread-reply deletes additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. The `DeleteRoomEvent` and `ThreadMetadataUpdatedEvent` are published independently; clients must handle each on its own.
 
@@ -6469,7 +6541,7 @@ Returns a paged list of users scoped to the admin's site.
       "engName": "Alice",
       "chineseName": "愛麗絲",
       "roles": ["admin"],
-      "deactivated": false,
+      "active": true,
       "requirePasswordChange": false
     }
   ],
@@ -6518,7 +6590,7 @@ Creates a new user account. The `siteId` is always forced to the admin-service's
   "engName": "Bob",
   "chineseName": "鮑勃",
   "roles": [],
-  "deactivated": false,
+  "active": true,
   "requirePasswordChange": true
 }
 ```
@@ -6542,7 +6614,7 @@ Returns a single [UserView](#userview) by account. The account is resolved withi
   "engName": "Alice",
   "chineseName": "愛麗絲",
   "roles": ["admin"],
-  "deactivated": false,
+  "active": true,
   "requirePasswordChange": false
 }
 ```
@@ -6552,7 +6624,7 @@ Returns a single [UserView](#userview) by account. The account is resolved withi
 **Endpoint:** `PATCH /v1/admin/users/:account`
 **Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
 
-Applies partial updates to a user. All fields are optional; omitting a field leaves it unchanged. When `deactivated` is set to `true`, all active sessions for the user are revoked immediately.
+Applies partial updates to a user. All fields are optional; omitting a field leaves it unchanged. When `active` is set to `false`, all active sessions for the user are revoked immediately.
 
 #### Request body
 
@@ -6561,10 +6633,10 @@ Applies partial updates to a user. All fields are optional; omitting a field lea
 | `engName` | string | no | New English display name. |
 | `chineseName` | string | no | New Chinese display name. |
 | `roles` | string[] | no | Replaces the user's roles array. |
-| `deactivated` | boolean | no | Set to `true` to deactivate (all sessions revoked); `false` to reactivate. |
+| `active` | boolean | no | Set to `false` to deactivate (all sessions revoked); `true` to reactivate. |
 
 ```json
-{ "roles": ["admin"], "deactivated": false }
+{ "roles": ["admin"], "active": true }
 ```
 
 #### Success response
@@ -6822,7 +6894,7 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `statusText` | string | Custom status text. Omitted when empty. |
 | `roles` | string[] | Role tags, e.g. `["admin"]`. Omitted when empty. |
 | `requirePasswordChange` | boolean | First-login password-change flag. Omitted when `false`. |
-| `deactivated` | boolean | Whether the account is deactivated. Omitted when `false`. |
+| `active` | boolean | Whether the account is active. Always present; a user doc with no stored flag reads as `true`. |
 
 ### SessionView
 

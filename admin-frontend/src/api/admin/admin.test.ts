@@ -33,7 +33,7 @@ const USER = {
   engName: 'Alice',
   chineseName: '爱丽丝',
   roles: ['admin'],
-  deactivated: false,
+  active: true,
   requirePasswordChange: false,
 }
 
@@ -67,7 +67,7 @@ describe('listUsers', () => {
     expect(url).toBe('http://localhost:8082/v1/admin/users')
   })
 
-  it('defaults roles/deactivated/requirePasswordChange when the server omits zero-valued fields', async () => {
+  it('defaults roles/active/requirePasswordChange when the server omits zero-valued fields', async () => {
     stubFetch(200, {
       users: [{ id: 'u-2', account: 'bob', siteId: 'site-1' }],
       total: 1,
@@ -82,7 +82,7 @@ describe('listUsers', () => {
       engName: '',
       chineseName: '',
       roles: [],
-      deactivated: false,
+      active: true,
       requirePasswordChange: false,
     })
   })
@@ -171,13 +171,13 @@ describe('updateUser', () => {
   it('PATCHes /v1/admin/users/:account with the partial patch body', async () => {
     const fetchMock = stubFetch(200, { status: 'ok' })
 
-    await updateUser('tok', 'u-1', { deactivated: true })
+    await updateUser('tok', 'u-1', { active: false })
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('http://localhost:8082/v1/admin/users/u-1')
     expect(init.method).toBe('PATCH')
     expect(init.headers.Authorization).toBe('Bearer tok')
-    expect(JSON.parse(init.body)).toEqual({ deactivated: true })
+    expect(JSON.parse(init.body)).toEqual({ active: false })
   })
 })
 

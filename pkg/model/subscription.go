@@ -40,6 +40,10 @@ type Subscription struct {
 	Alert              bool             `json:"alert" bson:"alert"`
 	Muted              bool             `json:"muted" bson:"muted"`
 	Favorite           bool             `json:"favorite" bson:"favorite"`
+	// Open is the per-user sidebar-visibility flag. New subscriptions are born
+	// open (room-worker's newSub sets it); subscription.list excludes only rows
+	// explicitly closed (open == false). Set true by the room-service open RPC.
+	Open bool `json:"open" bson:"open"`
 	// Denormalized from Room.{Restricted,ExternalAccess}; the only place remote sites carry restricted state
 	// (cross-site inbox mirrors subscriptions, not Room docs). Treat missing as false.
 	Restricted     bool `json:"restricted,omitempty"     bson:"restricted,omitempty"`

@@ -49,7 +49,7 @@ func (r *UserRepo) EnsureIndexes(ctx context.Context) error {
 	return fmt.Errorf("create user index: %w", err)
 }
 
-// activeUserFilter matches non-deactivated users. Missing `active` is treated as active ({$ne:false}); only explicit false excludes.
+// activeUserFilter matches active users. Missing `active` is treated as active ({$ne:false}); only explicit false excludes.
 func activeUserFilter(account string) bson.M {
 	return bson.M{"account": account, "active": bson.M{"$ne": false}}
 }

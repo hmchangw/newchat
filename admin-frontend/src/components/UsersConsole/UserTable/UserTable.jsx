@@ -30,10 +30,10 @@ export default function UserTable({ users, loading, onEdit, onSetPassword, onSes
             <td>
               <span
                 className={`users-status-badge ${
-                  user.deactivated ? 'is-deactivated' : 'is-active'
+                  user.active ? 'is-active' : 'is-inactive'
                 }`}
               >
-                {user.deactivated ? 'Deactivated' : 'Active'}
+                {user.active ? 'Active' : 'Deactivated'}
               </span>
             </td>
             <td className="users-table-actions">

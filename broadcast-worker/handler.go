@@ -711,6 +711,11 @@ func buildEditRoomEvent(room *model.Room, evt *model.MessageEvent) model.EditRoo
 		EditedBy:       msg.UserAccount,
 		EditedAt:       *msg.EditedAt,
 		UpdatedAt:      *msg.UpdatedAt,
+		// Thread linkage so clients can tell a thread-reply edit from a top-level one.
+		ThreadParentMessageID: msg.ThreadParentMessageID,
+		TShow:                 msg.TShow,
+		// Room's current preview after the edit; nil (thread reply / no eligible message) => omitted.
+		PreviewMessage: evt.PreviewMessage,
 	}
 }
 
@@ -726,6 +731,11 @@ func buildDeleteRoomEvent(room *model.Room, evt *model.MessageEvent) model.Delet
 		DeletedBy:      msg.UserAccount,
 		DeletedAt:      *msg.UpdatedAt,
 		UpdatedAt:      *msg.UpdatedAt,
+		// Thread linkage so clients can tell a thread-reply delete from a top-level one.
+		ThreadParentMessageID: msg.ThreadParentMessageID,
+		TShow:                 msg.TShow,
+		// Room's current preview after the delete; nil (thread reply / no eligible message) => omitted.
+		PreviewMessage: evt.PreviewMessage,
 	}
 }
 

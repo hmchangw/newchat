@@ -1392,6 +1392,7 @@ func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
 		RoomType:     room.Type,
 		IsSubscribed: isSubscribed,
 		JoinedAt:     joinedAt,
+		Open:         true,
 	}
 }
 

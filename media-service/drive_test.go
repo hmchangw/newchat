@@ -130,11 +130,12 @@ func TestHandleDriveMembers_NonMember(t *testing.T) {
 	assert.Empty(t, body.Data.Members)
 }
 
-func TestHandleDriveMembers_MemberDeactivated_ActiveFalse(t *testing.T) {
+func TestHandleDriveMembers_MemberInactive_ActiveFalse(t *testing.T) {
 	r, store, _ := newTestRouter(t)
+	inactive := false
 	store.EXPECT().RoomSite(gomock.Any(), "room1").Return("s1", model.RoomTypeChannel, "General", true, nil)
 	store.EXPECT().UserByAccount(gomock.Any(), "alice").
-		Return(&model.User{ID: "u_1", Account: "alice", Deactivated: true}, true, nil)
+		Return(&model.User{ID: "u_1", Account: "alice", Active: &inactive}, true, nil)
 	store.EXPECT().RoomMember(gomock.Any(), "room1", "alice").Return(true, nil)
 
 	w := doDriveMembers(t, r, "?roomId=room1&accountName=alice")

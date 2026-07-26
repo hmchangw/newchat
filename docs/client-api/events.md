@@ -98,14 +98,14 @@ same transform as `room.key` delivery).
 
 Two shapes exist — discriminated by `action`:
 
-### `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `read` (SubscriptionUpdateEvent)
+### `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read` (SubscriptionUpdateEvent)
 
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path. |
-| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `read`. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
-| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"read"`. |
-| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `read`. |
+| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
+| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
+| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -161,7 +161,7 @@ fields are sent.
 
 **Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
-Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
+Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
 
 ---
 
@@ -399,6 +399,9 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message, or on a read error. |
 
 ```json
 {
@@ -410,7 +413,13 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
   "newContent": "morning team — updated",
   "editedBy": "alice",
   "editedAt": "2026-05-06T08:05:00Z",
-  "updatedAt": "2026-05-06T08:05:00Z"
+  "updatedAt": "2026-05-06T08:05:00Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "sender": { "account": "alice", "displayName": "Alice" },
+    "content": "morning team — updated",
+    "createdAt": "2026-05-06T08:00:00Z"
+  }
 }
 ```
 
@@ -441,6 +450,9 @@ Thread-reply deletes **additionally** emit a
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
+| `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
 
 ```json
 {
@@ -451,9 +463,17 @@ Thread-reply deletes **additionally** emit a
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQPRE",
+    "sender": { "account": "bob", "displayName": "Bob" },
+    "content": "the previous message, now the newest",
+    "createdAt": "2026-05-06T07:59:00Z"
+  }
 }
 ```
+
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted**.
 
 ---
 

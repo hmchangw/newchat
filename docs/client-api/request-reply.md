@@ -253,6 +253,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read` | [Mark Thread as Read](#mark-thread-as-read) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle` | [Toggle Mute](#toggle-mute) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.favorite.toggle` | [Toggle Favorite](#toggle-favorite) |
+| `chat.user.{account}.request.room.{roomID}.{siteID}.open` | [Open Room](#open-room) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt` | [Read Message Receipts](#read-message-receipts) |
 | `chat.user.{account}.request.orgs.{orgID}.{siteID}.members` | [List Org Members](#list-org-members) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.app.tabs` | [Get Room App Tabs](#get-room-app-tabs) |
@@ -613,6 +614,29 @@ clients must debounce. No request body required.
 `"only room members can list members"`, `"invalid favorite-toggle subject: …"`.
 
 **Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "favorite_toggled"` — to the requester for other sessions) → [events.md](events.md)
+
+---
+
+### Open Room
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.open`
+**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Synchronous RPC. Sets `Subscription.open` to `true`. Every successful call sets the
+bit — not a toggle. No request body required.
+
+#### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `open` | boolean | Always `true`. |
+
+#### Errors
+
+`"only room members can list members"`, `"invalid open-room subject: …"`.
+
+**Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "opened"` — to the requester for other sessions) → [events.md](events.md)
 
 ---
 

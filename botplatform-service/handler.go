@@ -122,8 +122,8 @@ func (h *handler) HandleLogin(c *gin.Context) {
 		return
 	}
 
-	// Deactivation check runs after password verify so timing matches wrong-password.
-	if u.Deactivated {
+	// Active check runs after password verify so timing matches wrong-password.
+	if !u.IsActive() {
 		h.denied(c, ctx, req.Username, "invalid_credentials")
 		return
 	}
@@ -166,7 +166,7 @@ func (h *handler) HandleLogin(c *gin.Context) {
 				ID:                    u.ID,
 				Username:              u.Account,
 				Name:                  u.DisplayName(),
-				Active:                !u.Deactivated,
+				Active:                u.IsActive(),
 				Roles:                 roleStrs,
 				RequirePasswordChange: u.RequirePasswordChange,
 			},

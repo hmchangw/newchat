@@ -27,7 +27,7 @@ type Store interface {
 	UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error
 	// UpsertUserIdentities upserts users by employeeId, writing IDENTITY FIELDS
 	// ONLY (account, siteId, engName, chineseName, employeeId). It must never
-	// touch roles/services/password/deactivated/status fields — users is the
+	// touch roles/services/password/active/status fields — users is the
 	// live auth store.
 	UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error
 	// QuitTeamsEmployees deletes hr_employee rows for the given accounts.

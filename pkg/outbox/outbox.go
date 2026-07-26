@@ -25,6 +25,7 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	model.InboxThreadReadAll,
 	model.InboxSubscriptionMuteToggled,
 	model.InboxSubscriptionFavoriteToggled,
+	model.InboxSubscriptionOpened,
 	model.InboxRoomRestricted,
 	// message-worker: thread-subscription federation. Order-insensitive —
 	// inbox-worker's UpsertThreadSubscription is $setOnInsert (immutable identity)

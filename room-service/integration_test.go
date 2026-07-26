@@ -2746,6 +2746,47 @@ func TestMongoStore_ToggleSubscriptionFavorite(t *testing.T) {
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
+func TestMongoStore_OpenSubscription(t *testing.T) {
+	db := testutil.MongoDB(t, "room-svc-open")
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	// Insert a sub via raw BSON with open=false explicitly set.
+	rawSub := bson.M{
+		"_id":      idgen.GenerateUUIDv7(),
+		"u":        bson.M{"_id": "u1", "account": "alice", "isBot": false},
+		"roomId":   "r1",
+		"roomType": model.RoomTypeChannel,
+		"siteId":   "site-a",
+		"roles":    []model.Role{model.RoleMember},
+		"joinedAt": time.Now().UTC(),
+		"open":     false,
+	}
+	_, err := db.Collection("subscriptions").InsertOne(ctx, rawSub)
+	require.NoError(t, err)
+
+	got, err := store.OpenSubscription(ctx, "r1", "alice")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Open)
+	assert.Equal(t, "alice", got.User.Account)
+	assert.Equal(t, "r1", got.RoomID)
+
+	// open is not projected by GetSubscription (no handler reads it from a read
+	// result), so verify persistence with a direct field read.
+	assert.True(t, subBoolField(t, db, "r1", "alice", "open"))
+
+	// Idempotent: set-true (not toggle), so applying it again stays true.
+	got, err = store.OpenSubscription(ctx, "r1", "alice")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Open)
+
+	gotNil, err := store.OpenSubscription(ctx, "missing", "alice")
+	assert.Nil(t, gotNil)
+	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
+}
+
 // TestMongoStore_ApplySubscriptionRestriction_StampsTimestamp asserts the origin
 // write stamps restrictUpdatedAt so the doc shares the federated event's
 // high-water mark (inbox-worker guards remote applies against it).

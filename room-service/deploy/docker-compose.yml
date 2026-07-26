@@ -30,6 +30,11 @@ services:
       - TEAMS_TENANT_ID=
       - TEAMS_CLIENT_ID=
       - TEAMS_CLIENT_SECRET=
+      # ROPC service account (reuses TEAMS_CLIENT_ID/SECRET as the confidential
+      # client) for the User.Read.All directory lookup that resolves meeting
+      # organizer/attendee Azure object IDs. Meetings RPC is not-configured until set.
+      - TEAMS_ROPC_USERNAME=
+      - TEAMS_ROPC_PASSWORD=
       - ROOM_MEMBERS_LIMIT=500
       - ROOM_MEMBERS_CALL_LIMIT=20
       - BOOTSTRAP_STREAMS=true

@@ -1128,3 +1128,22 @@ func TestOrgSyncUsersUpsert(t *testing.T) {
 func TestEmployeesQuit(t *testing.T) {
 	assert.Equal(t, "chat.hr.site-a.employees.quit", subject.EmployeesQuit("site-a"))
 }
+
+func TestOpenRoom(t *testing.T) {
+	assert.Equal(t, "chat.user.alice.request.room.r1.site-a.open", subject.OpenRoom("alice", "r1", "site-a"))
+}
+
+func TestOpenRoomWildcard(t *testing.T) {
+	assert.Equal(t, "chat.user.*.request.room.*.site-a.open", subject.OpenRoomWildcard("site-a"))
+}
+
+func TestOpenRoomPattern(t *testing.T) {
+	assert.Equal(t, "chat.user.{account}.request.room.{roomID}.site-a.open", subject.OpenRoomPattern("site-a"))
+}
+
+func TestOpenRoom_ParseUserRoomSubject(t *testing.T) {
+	account, roomID, ok := subject.ParseUserRoomSubject(subject.OpenRoom("alice", "r1", "site-a"))
+	require.True(t, ok)
+	assert.Equal(t, "alice", account)
+	assert.Equal(t, "r1", roomID)
+}
