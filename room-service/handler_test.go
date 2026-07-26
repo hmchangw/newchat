@@ -5901,6 +5901,225 @@ func TestHandler_FavoriteToggle_CorePublishFailureIsNonFatal(t *testing.T) {
 	assert.True(t, resp.Favorite)
 }
 
+func TestHandler_OpenRoom_Success(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(&model.Subscription{
+			User:   model.SubscriptionUser{ID: "u_alice", Account: "alice"},
+			RoomID: "r1",
+			Open:   true,
+		}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("site-a", nil)
+
+	var coreSubjects []string
+	var coreBodies [][]byte
+	h := &Handler{
+		store:  store,
+		siteID: "site-a",
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			t.Fatal("publishToStream must not be called for same-site open")
+			return nil
+		},
+		publishCore: func(_ context.Context, subj string, data []byte) error {
+			coreSubjects = append(coreSubjects, subj)
+			coreBodies = append(coreBodies, data)
+			return nil
+		},
+	}
+
+	resp, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+
+	assert.Equal(t, "ok", resp.Status)
+	assert.True(t, resp.Open)
+
+	require.Len(t, coreSubjects, 1)
+	assert.Equal(t, subject.SubscriptionUpdate("alice"), coreSubjects[0])
+
+	var evt model.SubscriptionUpdateEvent
+	require.NoError(t, json.Unmarshal(coreBodies[0], &evt))
+	assert.Equal(t, "opened", evt.Action)
+	assert.True(t, evt.Subscription.Open)
+	assert.Equal(t, "alice", evt.Subscription.User.Account)
+}
+
+func TestHandler_OpenRoom_CrossSitePublishesOutbox(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(&model.Subscription{
+			User:   model.SubscriptionUser{ID: "u_alice", Account: "alice"},
+			RoomID: "r1",
+			Open:   true,
+		}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("site-b", nil)
+
+	var streamSubj string
+	var streamData []byte
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishToStream: func(_ context.Context, s string, d []byte, _ string) error {
+			streamSubj = s
+			streamData = d
+			return nil
+		},
+		publishCore: func(_ context.Context, _ string, _ []byte) error { return nil },
+	}
+
+	_, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+
+	assert.Equal(t, subject.Outbox("site-a", "site-b", model.InboxSubscriptionOpened), streamSubj)
+	var fed model.OutboxEvent
+	require.NoError(t, json.Unmarshal(streamData, &fed))
+
+	var inboxEnv model.InboxEvent
+	require.NoError(t, json.Unmarshal(fed.Envelope, &inboxEnv))
+	assert.Equal(t, model.InboxSubscriptionOpened, inboxEnv.Type)
+	assert.Equal(t, "site-a", inboxEnv.SiteID)
+	assert.Equal(t, "site-b", inboxEnv.DestSiteID)
+
+	var payload model.SubscriptionOpenedEvent
+	require.NoError(t, json.Unmarshal(inboxEnv.Payload, &payload))
+	assert.Equal(t, "alice", payload.Account)
+	assert.Equal(t, "r1", payload.RoomID)
+	assert.True(t, payload.Open)
+	assert.NotZero(t, payload.Timestamp)
+}
+
+func TestHandler_OpenRoom_NotRoomMember(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(nil, model.ErrSubscriptionNotFound)
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		publishCore:     func(_ context.Context, _ string, _ []byte) error { return nil },
+	}
+
+	_, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	assert.ErrorIs(t, err, errNotRoomMember)
+}
+
+func TestHandler_OpenRoom_StoreError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(nil, fmt.Errorf("db down"))
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		publishCore:     func(_ context.Context, _ string, _ []byte) error { return nil },
+	}
+	_, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open subscription")
+}
+
+func TestHandler_OpenRoom_GetUserSiteIDError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(&model.Subscription{
+			User: model.SubscriptionUser{ID: "u_alice", Account: "alice"}, RoomID: "r1",
+		}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("", fmt.Errorf("mongo down"))
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			t.Fatal("publishToStream must not be called when GetUserSiteID fails")
+			return nil
+		},
+		publishCore: func(_ context.Context, _ string, _ []byte) error { return nil },
+	}
+
+	_, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "get user siteId")
+}
+
+func TestHandler_OpenRoom_CrossSiteOutboxPublishFailure(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(&model.Subscription{
+			User:   model.SubscriptionUser{ID: "u_alice", Account: "alice"},
+			RoomID: "r1",
+			Open:   true,
+		}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("site-b", nil)
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			return fmt.Errorf("nats unavailable")
+		},
+		publishCore: func(_ context.Context, _ string, _ []byte) error { return nil },
+	}
+
+	_, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "federate opened")
+}
+
+func TestHandler_OpenRoom_CorePublishFailureIsNonFatal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		OpenSubscription(gomock.Any(), "r1", "alice").
+		Return(&model.Subscription{
+			User:   model.SubscriptionUser{ID: "u_alice", Account: "alice"},
+			RoomID: "r1",
+			Open:   true,
+		}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("site-a", nil)
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishCore: func(_ context.Context, _ string, _ []byte) error {
+			return fmt.Errorf("core nats down")
+		},
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			t.Fatal("publishToStream must not be called for same-site open")
+			return nil
+		},
+	}
+
+	resp, err := h.openRoom(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err, "publishCore failure must be non-fatal — DB write is the source of truth")
+
+	assert.Equal(t, "ok", resp.Status)
+	assert.True(t, resp.Open)
+}
+
 func TestHandler_marshalBounded(t *testing.T) {
 	type sample struct {
 		Hello string `json:"hello"`
