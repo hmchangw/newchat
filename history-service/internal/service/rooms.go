@@ -95,9 +95,9 @@ func (s *HistoryService) roomLastMessage(ctx context.Context, roomID string, now
 		}
 		for i := range page.Data {
 			m := page.Data[i]
-			// System messages and quoted replies aren't representative room content —
-			// skip to the previous eligible message, same as a deleted one.
-			if m.Deleted || m.Type != "" || m.QuotedParentMessage != nil {
+			// System and deleted messages aren't representative room content — skip to the
+			// previous eligible message. Quoted replies ARE eligible (normal user content).
+			if m.Deleted || pkgmodel.IsSystemMessageType(m.Type) {
 				continue
 			}
 			return s.toPreviewMessage(ctx, &m), true
