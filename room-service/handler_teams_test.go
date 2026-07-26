@@ -283,12 +283,14 @@ func TestTeamsMeeting_CreatesAndPublishes(t *testing.T) {
 	var publishedData []byte
 	var publishedMsgID string
 	meetingStore := newStubTeamsMeetingStore()
+	dir := &fakeDirectory{ids: map[string]string{"alice": "oid-alice", "bob": "oid-bob"}}
 	h := &Handler{
 		store:             store,
 		siteID:            "site-a",
 		teamsEmailDomain:  "corp.com",
 		roomMembersLimit:  500,
 		graphClient:       graph,
+		directoryClient:   dir,
 		teamsMeetingStore: meetingStore,
 		publishToStream: func(_ context.Context, subj string, data []byte, msgID string) error {
 			publishedSubj, publishedData, publishedMsgID = subj, data, msgID
@@ -305,8 +307,8 @@ func TestTeamsMeeting_CreatesAndPublishes(t *testing.T) {
 	// externalId is the stable siteID:roomID key.
 	assert.Equal(t, 1, graph.callCount)
 	assert.Equal(t, "site-a:r1", graph.lastReq.ExternalID)
-	assert.Equal(t, "alice@corp.com", graph.lastReq.OrganizerEmail)
-	assert.ElementsMatch(t, []string{"alice@corp.com", "bob@corp.com"}, graph.lastReq.AttendeeEmails)
+	assert.Equal(t, "oid-alice", graph.lastReq.OrganizerID)
+	assert.ElementsMatch(t, []string{"oid-alice", "oid-bob"}, graph.lastReq.AttendeeIDs)
 
 	// The meeting was persisted as a first-class record keyed (roomId, siteId).
 	rec, found, _ := meetingStore.GetTeamsMeeting(context.Background(), "r1", "site-a")
@@ -351,6 +353,7 @@ func TestTeamsMeeting_Idempotent_FastPathReadHit(t *testing.T) {
 		teamsEmailDomain:  "corp.com",
 		roomMembersLimit:  500,
 		graphClient:       graph,
+		directoryClient:   &fakeDirectory{}, // non-nil to pass the not-configured gate; fast path returns before resolution
 		teamsMeetingStore: meetingStore,
 		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
 			t.Error("idempotent path must not publish a new system message")
@@ -405,6 +408,7 @@ func TestTeamsMeeting_DuplicateKey_ReturnsExisting(t *testing.T) {
 		teamsEmailDomain:  "corp.com",
 		roomMembersLimit:  500,
 		graphClient:       graph,
+		directoryClient:   &fakeDirectory{ids: map[string]string{"alice": "oid-alice"}},
 		teamsMeetingStore: meetingStore,
 		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
 			published = true
@@ -446,6 +450,7 @@ func TestTeamsMeeting_Concurrent_SingleCreateSingleMessage(t *testing.T) {
 		teamsEmailDomain:  "corp.com",
 		roomMembersLimit:  500,
 		graphClient:       graph,
+		directoryClient:   &fakeDirectory{ids: map[string]string{"alice": "oid-alice"}},
 		teamsMeetingStore: meetingStore,
 		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
 			pubMu.Lock()
@@ -512,7 +517,7 @@ func TestTeamsMeeting_NotMember(t *testing.T) {
 
 	graph := &fakeGraphClient{}
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
-		graphClient: graph, teamsMeetingStore: newStubTeamsMeetingStore()}
+		graphClient: graph, directoryClient: &fakeDirectory{}, teamsMeetingStore: newStubTeamsMeetingStore()}
 	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
 	require.ErrorIs(t, err, errNotRoomMember)
 	assert.Equal(t, 0, graph.callCount)
@@ -528,7 +533,7 @@ func TestTeamsMeeting_TooManyMembers(t *testing.T) {
 
 	graph := &fakeGraphClient{}
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 2,
-		graphClient: graph, teamsMeetingStore: newStubTeamsMeetingStore()}
+		graphClient: graph, directoryClient: &fakeDirectory{}, teamsMeetingStore: newStubTeamsMeetingStore()}
 	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
 	require.ErrorIs(t, err, errTeamsMeetingTooManyMembers)
 	assert.Equal(t, errcode.RoomMaxSizeReached, errcode.ReasonOf(err))
@@ -546,7 +551,7 @@ func TestTeamsMeeting_GraphCreateFails(t *testing.T) {
 	graph := &fakeGraphClient{err: errors.New("graph 500")}
 	var published bool
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
-		graphClient: graph, teamsMeetingStore: newStubTeamsMeetingStore(),
+		graphClient: graph, directoryClient: &fakeDirectory{ids: map[string]string{"alice": "oid-alice"}}, teamsMeetingStore: newStubTeamsMeetingStore(),
 		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { published = true; return nil },
 	}
 	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
@@ -564,7 +569,7 @@ func TestTeamsMeeting_RecordReadFails(t *testing.T) {
 	meetingStore := newStubTeamsMeetingStore()
 	meetingStore.getErr = errors.New("mongo down")
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
-		graphClient: graph, teamsMeetingStore: meetingStore}
+		graphClient: graph, directoryClient: &fakeDirectory{}, teamsMeetingStore: meetingStore}
 	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
 	require.Error(t, err)
 	assert.Equal(t, 0, graph.callCount)
@@ -581,4 +586,153 @@ func parseUsersParam(t *testing.T, link string) []string {
 		return nil
 	}
 	return strings.Split(raw, ",")
+}
+
+// fakeDirectory is a hand-rolled, race-safe msgraph.DirectoryReader double.
+type fakeDirectory struct {
+	mu        sync.Mutex
+	ids       map[string]string
+	err       error
+	callCount int
+	lastArg   []string
+}
+
+func (f *fakeDirectory) ResolveAccountIDs(_ context.Context, accounts []string) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.callCount++
+	f.lastArg = accounts
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.ids, nil
+}
+
+func TestTeamsMeeting_ResolvesObjectIDs(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
+		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
+
+	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://join/1"}}
+	dir := &fakeDirectory{ids: map[string]string{"alice": "oid-alice", "bob": "oid-bob"}}
+	h := &Handler{
+		store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
+		graphClient: graph, directoryClient: dir, teamsMeetingStore: newStubTeamsMeetingStore(),
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+	}
+
+	resp, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "mtg-1", resp.ID)
+	assert.Equal(t, "oid-alice", graph.lastReq.OrganizerID)
+	assert.ElementsMatch(t, []string{"oid-alice", "oid-bob"}, graph.lastReq.AttendeeIDs)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, dir.lastArg)
+}
+
+func TestTeamsMeeting_OrganizerUnresolvedFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
+		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, nil)
+
+	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "should-not-be-used"}}
+	dir := &fakeDirectory{ids: map[string]string{"bob": "oid-bob"}} // organizer alice missing
+	h := &Handler{
+		store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
+		graphClient: graph, directoryClient: dir, teamsMeetingStore: newStubTeamsMeetingStore(),
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+	}
+
+	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.ErrorIs(t, err, errTeamsOrganizerUnresolved)
+	assert.Equal(t, 0, graph.callCount, "no meeting when organizer unresolved")
+}
+
+func TestTeamsMeeting_AttendeeUnresolvedDropped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
+		Return([]model.RoomMember{indMember("alice"), indMember("bob"), indMember("carol")}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
+
+	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://join/1"}}
+	dir := &fakeDirectory{ids: map[string]string{"alice": "oid-alice", "bob": "oid-bob"}} // carol missing
+	h := &Handler{
+		store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
+		graphClient: graph, directoryClient: dir, teamsMeetingStore: newStubTeamsMeetingStore(),
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+	}
+
+	resp, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "mtg-1", resp.ID)
+	assert.ElementsMatch(t, []string{"oid-alice", "oid-bob"}, graph.lastReq.AttendeeIDs, "carol dropped")
+}
+
+func TestTeamsMeeting_DirectoryNotConfigured(t *testing.T) {
+	h := &Handler{
+		store: NewMockRoomStore(gomock.NewController(t)), siteID: "site-a",
+		graphClient: &fakeGraphClient{}, teamsMeetingStore: newStubTeamsMeetingStore(),
+		// directoryClient nil
+	}
+	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.ErrorIs(t, err, errTeamsNotConfigured)
+}
+
+func TestTeamsMeeting_DirectoryErrorFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
+		Return([]model.RoomMember{indMember("alice")}, nil)
+
+	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "x"}}
+	dir := &fakeDirectory{err: errors.New("graph 503")}
+	h := &Handler{
+		store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
+		graphClient: graph, directoryClient: dir, teamsMeetingStore: newStubTeamsMeetingStore(),
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+	}
+	_, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.Error(t, err)
+	assert.Equal(t, 0, graph.callCount)
+}
+
+// TestTeamsMeeting_OrganizerNotInIndividualMembers: the requester is a member
+// (membership check passes) but does not appear in the individual member list —
+// e.g. joined via an org. The organizer account is still appended to the
+// resolution set, resolved, and used as the meeting organizer.
+func TestTeamsMeeting_OrganizerNotInIndividualMembers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
+		Return([]model.RoomMember{indMember("bob")}, nil) // alice absent from individual members
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
+
+	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://join/1"}}
+	dir := &fakeDirectory{ids: map[string]string{"alice": "oid-alice", "bob": "oid-bob"}}
+	h := &Handler{
+		store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 500,
+		graphClient: graph, directoryClient: dir, teamsMeetingStore: newStubTeamsMeetingStore(),
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+	}
+
+	resp, err := h.teamsMeeting(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsMeetingRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "mtg-1", resp.ID)
+	assert.Equal(t, "oid-alice", graph.lastReq.OrganizerID)
+	assert.ElementsMatch(t, []string{"oid-bob"}, graph.lastReq.AttendeeIDs, "only individual members are attendees")
+	assert.Contains(t, dir.lastArg, "alice", "organizer appended to resolution set")
+	assert.Contains(t, dir.lastArg, "bob")
 }
