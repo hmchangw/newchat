@@ -534,6 +534,21 @@ func (mr *MockRoomStoreMockRecorder) MinThreadSubscriptionLastSeenByThreadRoomID
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MinThreadSubscriptionLastSeenByThreadRoomID", reflect.TypeOf((*MockRoomStore)(nil).MinThreadSubscriptionLastSeenByThreadRoomID), ctx, threadRoomID)
 }
 
+// OpenSubscription mocks base method.
+func (m *MockRoomStore) OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "OpenSubscription", ctx, roomID, account)
+	ret0, _ := ret[0].(*model.Subscription)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// OpenSubscription indicates an expected call of OpenSubscription.
+func (mr *MockRoomStoreMockRecorder) OpenSubscription(ctx, roomID, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OpenSubscription", reflect.TypeOf((*MockRoomStore)(nil).OpenSubscription), ctx, roomID, account)
+}
+
 // SetOwnerRole mocks base method.
 func (m *MockRoomStore) SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool, rolesUpdatedAt time.Time) (*model.Subscription, error) {
 	m.ctrl.T.Helper()

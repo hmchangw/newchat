@@ -56,6 +56,10 @@ type InboxStore interface {
 	// favoriteUpdatedAt (the source event's publish time): older/duplicate events
 	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error
+	// UpdateSubscriptionOpen sets open by (roomID, account). No ordering guard:
+	// set-true is idempotent. A genuinely missing sub returns an error (Nak) so the
+	// event redelivers until the member_added that creates the sub lands.
+	UpdateSubscriptionOpen(ctx context.Context, roomID, account string, open bool) error
 	// UpdateSubscriptionNamesForRoom sets name on every subscription in the room,
 	// each guarded by its own nameUpdatedAt so an out-of-order rename cannot regress
 	// a sub to a stale name. Used when a channel is renamed — replicated via the
@@ -110,6 +114,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleSubscriptionMuteToggled(ctx, &evt)
 	case "subscription_favorite_toggled":
 		return h.handleSubscriptionFavoriteToggled(ctx, &evt)
+	case "subscription_opened":
+		return h.handleSubscriptionOpened(ctx, &evt)
 	case "thread_subscription_upserted":
 		return h.handleThreadSubscriptionUpserted(ctx, &evt)
 	case "thread_read":
@@ -176,6 +182,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			IsSubscribed:       subscriptionIsSubscribed(roomType, &user),
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
+			Open:               true,
 		}
 		subs = append(subs, sub)
 	}
@@ -298,6 +305,18 @@ func (h *Handler) handleSubscriptionFavoriteToggled(ctx context.Context, evt *mo
 	}
 	if err := h.store.UpdateSubscriptionFavorite(ctx, e.RoomID, e.Account, e.Favorite, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription favorite for %q in room %q: %w", e.Account, e.RoomID, err)
+	}
+	return nil
+}
+
+// handleSubscriptionOpened mirrors a room-side open onto the user's home-site subscription.
+func (h *Handler) handleSubscriptionOpened(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.SubscriptionOpenedEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal subscription_opened payload: %w", err)
+	}
+	if err := h.store.UpdateSubscriptionOpen(ctx, e.RoomID, e.Account, e.Open); err != nil {
+		return fmt.Errorf("update subscription open for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
 	return nil
 }

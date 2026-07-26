@@ -135,6 +135,7 @@ const (
 	InboxSubscriptionRead            InboxEventType = "subscription_read"
 	InboxSubscriptionMuteToggled     InboxEventType = "subscription_mute_toggled"
 	InboxSubscriptionFavoriteToggled InboxEventType = "subscription_favorite_toggled"
+	InboxSubscriptionOpened          InboxEventType = "subscription_opened"
 	InboxThreadSubscriptionUpserted  InboxEventType = "thread_subscription_upserted"
 	InboxThreadRead                  InboxEventType = "thread_read"
 	InboxThreadReadAll               InboxEventType = "thread_read_all"
@@ -499,6 +500,20 @@ type SubscriptionFavoriteToggledEvent struct {
 	RoomID    string `json:"roomId"               bson:"roomId"`
 	Favorite  bool   `json:"favorite"             bson:"favorite"`
 	Timestamp int64  `json:"timestamp"            bson:"timestamp"`
+}
+
+// OpenRoomResponse is the sync reply for the open RPC. Open is always true.
+type OpenRoomResponse struct {
+	Status string `json:"status"`
+	Open   bool   `json:"open"`
+}
+
+// SubscriptionOpenedEvent is the InboxEvent.Payload for type "subscription_opened".
+type SubscriptionOpenedEvent struct {
+	Account   string `json:"account"   bson:"account"`
+	RoomID    string `json:"roomId"    bson:"roomId"`
+	Open      bool   `json:"open"      bson:"open"`
+	Timestamp int64  `json:"timestamp" bson:"timestamp"`
 }
 
 type MemberRemoveEvent struct {

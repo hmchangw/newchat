@@ -95,6 +95,7 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), h.muteToggle)
 	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), h.favoriteToggle)
+	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), h.openRoom)
 	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), h.getRoomAppTabs)
 	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), h.getRoomAppCommandMenu)
 	natsrouter.RegisterNoBody(r, subject.OrgMembersPattern(h.siteID), h.listOrgMembers)
@@ -2198,6 +2199,54 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 	}
 
 	return &model.FavoriteToggleResponse{Status: "ok", Favorite: sub.Favorite}, nil
+}
+
+func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, error) {
+	var ctx context.Context = c
+	account := c.Param("account")
+	roomID := c.Param("roomID")
+
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("site.id", h.siteID),
+		)
+	}
+
+	now := time.Now().UTC()
+	sub, err := h.store.OpenSubscription(ctx, roomID, account)
+	if err != nil {
+		if errors.Is(err, model.ErrSubscriptionNotFound) {
+			return nil, errNotRoomMember
+		}
+		return nil, fmt.Errorf("open subscription: %w", err)
+	}
+
+	if _, err := h.publishSubscriptionUpdate(ctx, account, "opened", sub, "", now); err != nil {
+		return nil, err
+	}
+
+	userSiteID, err := h.store.GetUserSiteID(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("get user siteId: %w", err)
+	}
+	if userSiteID != "" && userSiteID != h.siteID {
+		payload := model.SubscriptionOpenedEvent{
+			Account:   account,
+			RoomID:    roomID,
+			Open:      sub.Open,
+			Timestamp: now.UnixMilli(),
+		}
+		payloadData, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal opened payload: %w", err)
+		}
+		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionOpened, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("federate opened: %w", err)
+		}
+	}
+
+	return &model.OpenRoomResponse{Status: "ok", Open: sub.Open}, nil
 }
 
 // authorizeRoomAppRead allows the request iff the caller has a

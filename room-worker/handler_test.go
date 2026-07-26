@@ -2385,6 +2385,13 @@ func TestNewSubSetsAllFields(t *testing.T) {
 	assert.Equal(t, now, sub.JoinedAt)
 }
 
+func TestNewSub_OpenTrue(t *testing.T) {
+	user := &model.User{ID: "u_alice", Account: "alice"}
+	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeChannel}
+	sub := newSub("s1", user, room, nil, "general", false, time.Now())
+	assert.True(t, sub.Open, "new subscriptions must be born open")
+}
+
 // ---- processCreateRoom test helpers ----
 
 // newCreateRoomTestHandler builds a Handler with a mock store and capture-publish,

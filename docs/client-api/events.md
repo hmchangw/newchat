@@ -98,14 +98,14 @@ same transform as `room.key` delivery).
 
 Two shapes exist — discriminated by `action`:
 
-### `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `read` (SubscriptionUpdateEvent)
+### `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read` (SubscriptionUpdateEvent)
 
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path. |
-| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `read`. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
-| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"read"`. |
-| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `read`. |
+| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
+| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
+| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -161,7 +161,7 @@ fields are sent.
 
 **Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
-Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
+Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
 
 ---
 

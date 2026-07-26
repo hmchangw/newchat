@@ -41,6 +41,12 @@ type favoriteUpdate struct {
 	updatedAt time.Time
 }
 
+type openUpdate struct {
+	roomID  string
+	account string
+	open    bool
+}
+
 type nameUpdate struct {
 	roomID    string
 	newName   string
@@ -85,6 +91,7 @@ type stubInboxStore struct {
 	roleUpdates           []roleUpdate
 	muteUpdates           []muteUpdate
 	favoriteUpdates       []favoriteUpdate
+	openUpdates           []openUpdate
 	nameUpdates           []nameUpdate
 	visibilityUpdates     []visibilityUpdate
 	users                 []model.User
@@ -273,6 +280,27 @@ func (s *stubInboxStore) getFavoriteUpdates() []favoriteUpdate {
 	defer s.mu.Unlock()
 	cp := make([]favoriteUpdate, len(s.favoriteUpdates))
 	copy(cp, s.favoriteUpdates)
+	return cp
+}
+
+func (s *stubInboxStore) UpdateSubscriptionOpen(_ context.Context, roomID, account string, open bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.openUpdates = append(s.openUpdates, openUpdate{roomID: roomID, account: account, open: open})
+	for i := range s.subscriptions {
+		if s.subscriptions[i].RoomID == roomID && s.subscriptions[i].User.Account == account {
+			s.subscriptions[i].Open = open
+			return nil
+		}
+	}
+	return nil // missing-subscription → no-op
+}
+
+func (s *stubInboxStore) getOpenUpdates() []openUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]openUpdate, len(s.openUpdates))
+	copy(cp, s.openUpdates)
 	return cp
 }
 
@@ -485,6 +513,9 @@ func TestHandleEvent_MemberAdded(t *testing.T) {
 	}
 	if sub.ID == "" {
 		t.Error("subscription ID should be non-empty (generated UUID)")
+	}
+	if !sub.Open {
+		t.Error("subscription Open = false, want true: cross-site members must be born visible in the sidebar")
 	}
 
 }
@@ -1775,6 +1806,71 @@ func TestHandler_SubscriptionFavoriteToggled_MalformedPayload(t *testing.T) {
 
 	evt, err := json.Marshal(model.InboxEvent{
 		Type:    model.InboxSubscriptionFavoriteToggled,
+		Payload: []byte("not-json"),
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+}
+
+func TestHandler_SubscriptionOpened(t *testing.T) {
+	store := &stubInboxStore{
+		subscriptions: []model.Subscription{
+			{
+				ID:     "s1",
+				User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+				RoomID: "r1",
+			},
+		},
+	}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.SubscriptionOpenedEvent{
+		Account: "alice", RoomID: "r1", Open: true, Timestamp: 123,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxSubscriptionOpened, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 123,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	subs := store.getSubscriptions()
+	require.Len(t, subs, 1)
+	assert.True(t, subs[0].Open)
+
+	updates := store.getOpenUpdates()
+	require.Len(t, updates, 1)
+	assert.Equal(t, "alice", updates[0].account)
+	assert.True(t, updates[0].open)
+}
+
+func TestHandler_SubscriptionOpened_MissingSubscriptionNoOp(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.SubscriptionOpenedEvent{
+		Account: "ghost", RoomID: "missing-room", Open: true, Timestamp: 123,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxSubscriptionOpened, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 123,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getSubscriptions())
+}
+
+func TestHandler_SubscriptionOpened_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type:    model.InboxSubscriptionOpened,
 		Payload: []byte("not-json"),
 	})
 	require.NoError(t, err)
