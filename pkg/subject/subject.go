@@ -708,6 +708,16 @@ func FavoriteToggleWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.favorite.toggle", siteID)
 }
 
+// OpenRoom returns the concrete subject for the per-user open RPC.
+func OpenRoom(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.open", account, roomID, siteID)
+}
+
+// OpenRoomWildcard is the per-site subscription pattern for the open RPC.
+func OpenRoomWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.request.room.*.%s.open", siteID)
+}
+
 // RoomAppTabs returns the concrete subject for the GetRoomAppTabs RPC.
 // Pair with RoomAppTabsWildcard for room-service's QueueSubscribe.
 func RoomAppTabs(account, roomID, siteID string) string {
@@ -908,6 +918,10 @@ func MuteTogglePattern(siteID string) string {
 
 func FavoriteTogglePattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.favorite.toggle", siteID)
+}
+
+func OpenRoomPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.open", siteID)
 }
 
 func RoomRenamePattern(siteID string) string {
