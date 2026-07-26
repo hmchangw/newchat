@@ -33,7 +33,8 @@ type config struct {
 	// substituted into channel-tab ${roomOrigin} template variables. Wire
 	// format: "site-a:https://legacy.site-a.com,site-b:https://legacy.site-b.com"
 	// (comma-separated, first-colon split — URL values keep "://"). Unset ⇒
-	// every ${roomOrigin} substitutes to "".
+	// every ${roomOrigin} substitutes to "". Keyed like pkg/drive's
+	// GetBaseURLFromRoomOrigin (room-origin siteID → per-site base URL).
 	LegacyRoomOrigins        map[string]string `env:"LEGACY_ROOM_ORIGINS"`
 	MongoURI                 string            `env:"MONGO_URI,required"`
 	MongoDB                  string            `env:"MONGO_DB"                  envDefault:"chat"`

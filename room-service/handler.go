@@ -2261,32 +2261,42 @@ func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, erro
 // response (e.g. a non-empty default-tabs list, or an empty cmd-menu
 // list that looks like success). Cross-site admin authority is out of
 // scope: an admin whose users document lives on a different site is
-// denied.
-func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) error {
+// denied. Returns the room doc when the admin-bypass path fetched one
+// (nil on the member path, which never needs it).
+func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) (*model.Room, error) {
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil && !errors.Is(err, model.ErrSubscriptionNotFound) {
-		return fmt.Errorf("check room membership: %w", err)
+		return nil, fmt.Errorf("check room membership: %w", err)
 	}
 	if model.IsRoomMember(sub) {
-		return nil
+		return nil, nil
 	}
 	user, err := h.store.GetUser(ctx, account)
 	if err != nil && !errors.Is(err, ErrUserNotFound) {
-		return fmt.Errorf("check platform admin: %w", err)
+		return nil, fmt.Errorf("check platform admin: %w", err)
 	}
 	if !model.IsPlatformAdmin(user) {
-		return errAppAccessDenied
+		return nil, errAppAccessDenied
 	}
 	// Admin bypass: verify the room exists before allowing the read.
 	// Without this, admins could query app metadata for fabricated room
-	// IDs and get plausible-looking responses.
-	if _, err := h.store.GetRoom(ctx, roomID); err != nil {
+	// IDs and get plausible-looking responses. The fetched doc is returned
+	// so callers that need it (getRoomAppTabs) don't re-fetch it.
+	return h.getRoomForAppRead(ctx, roomID)
+}
+
+// getRoomForAppRead fetches roomID for the app-read RPCs, collapsing a
+// missing room to errAppAccessDenied so callers can't distinguish a
+// nonexistent room from one they're not allowed to see.
+func (h *Handler) getRoomForAppRead(ctx context.Context, roomID string) (*model.Room, error) {
+	room, err := h.store.GetRoom(ctx, roomID)
+	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return errAppAccessDenied
+			return nil, errAppAccessDenied
 		}
-		return fmt.Errorf("check room existence: %w", err)
+		return nil, fmt.Errorf("get room for app read: %w", err)
 	}
-	return nil
+	return room, nil
 }
 
 // legacyRoomTypes maps the redesigned RoomType vocabulary to the legacy
@@ -2353,16 +2363,14 @@ func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsRe
 		)
 	}
 
-	if err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
+	room, err := h.authorizeRoomAppRead(ctx, account, roomID)
+	if err != nil {
 		return nil, err
 	}
-
-	room, err := h.store.GetRoom(ctx, roomID)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, errAppAccessDenied
+	if room == nil { // member path: authorization didn't need the room doc
+		if room, err = h.getRoomForAppRead(ctx, roomID); err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("get room for app tabs: %w", err)
 	}
 
 	apps, err := h.store.ListDefaultChannelTabApps(ctx)
@@ -2411,7 +2419,7 @@ func (h *Handler) getRoomAppCommandMenu(c *natsrouter.Context) (*model.GetRoomAp
 		)
 	}
 
-	if err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
+	if _, err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
 		return nil, err
 	}
 

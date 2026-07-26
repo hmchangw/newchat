@@ -6167,6 +6167,7 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 		setupMock       func(*MockRoomStore)
 		wantErr         error
 		wantErrContains string
+		wantRoom        bool
 	}{
 		{
 			name: "member allowed",
@@ -6180,7 +6181,7 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			wantErr: nil,
 		},
 		{
-			name: "admin allowed (no sub, admin role, room exists)",
+			name: "admin allowed (no sub, admin role, room exists) returns the fetched room",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 					Return(nil, model.ErrSubscriptionNotFound)
@@ -6189,7 +6190,8 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 				s.EXPECT().GetRoom(gomock.Any(), "r1").
 					Return(&model.Room{ID: "r1"}, nil)
 			},
-			wantErr: nil,
+			wantErr:  nil,
+			wantRoom: true,
 		},
 		{
 			name: "denied: admin role but room does not exist",
@@ -6251,7 +6253,7 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 				s.EXPECT().GetRoom(gomock.Any(), "r1").
 					Return(nil, errors.New("mongo unavailable"))
 			},
-			wantErrContains: "check room existence",
+			wantErrContains: "get room for app read",
 		},
 	}
 
@@ -6261,7 +6263,7 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			store := NewMockRoomStore(ctrl)
 			tt.setupMock(store)
 			h := &Handler{store: store, siteID: "site-a"}
-			err := h.authorizeRoomAppRead(context.Background(), "alice", "r1")
+			room, err := h.authorizeRoomAppRead(context.Background(), "alice", "r1")
 			switch {
 			case tt.wantErrContains != "":
 				require.Error(t, err)
@@ -6270,6 +6272,11 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 				assert.NoError(t, err)
 			default:
 				assert.ErrorIs(t, err, tt.wantErr)
+			}
+			if tt.wantRoom {
+				assert.NotNil(t, room, "admin path must return the room it fetched")
+			} else {
+				assert.Nil(t, room)
 			}
 		})
 	}
@@ -6349,35 +6356,14 @@ func TestHandler_buildTabURL(t *testing.T) {
 			wantOK:  true,
 		},
 		{
+			// One non-channel case proves ${roomType} varies by room type
+			// end-to-end; exhaustive mapping coverage lives in
+			// TestLegacyRoomType.
 			name:    "dm maps to d",
 			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
 			tmpl:    "https://t.example.com?rt=${roomType}",
 			room:    &model.Room{ID: "r1", Type: model.RoomTypeDM, SiteID: "site-a"},
 			wantURL: "https://t.example.com?rt=d",
-			wantOK:  true,
-		},
-		{
-			name:    "botDM maps to d",
-			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
-			tmpl:    "https://t.example.com?rt=${roomType}",
-			room:    &model.Room{ID: "r1", Type: model.RoomTypeBotDM, SiteID: "site-a"},
-			wantURL: "https://t.example.com?rt=d",
-			wantOK:  true,
-		},
-		{
-			name:    "discussion maps to p",
-			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
-			tmpl:    "https://t.example.com?rt=${roomType}",
-			room:    &model.Room{ID: "r1", Type: model.RoomTypeDiscussion, SiteID: "site-a"},
-			wantURL: "https://t.example.com?rt=p",
-			wantOK:  true,
-		},
-		{
-			name:    "unknown room type falls back to p",
-			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
-			tmpl:    "https://t.example.com?rt=${roomType}",
-			room:    &model.Room{ID: "r1", Type: model.RoomType("livechat"), SiteID: "site-a"},
-			wantURL: "https://t.example.com?rt=p",
 			wantOK:  true,
 		},
 		{
@@ -6490,7 +6476,7 @@ func TestHandler_handleGetRoomAppTabs_AdminAllowed(t *testing.T) {
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil).Times(2)
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{}, nil)
 
 	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
