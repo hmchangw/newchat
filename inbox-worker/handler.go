@@ -182,6 +182,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			IsSubscribed:       subscriptionIsSubscribed(roomType, &user),
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
+			Open:               true,
 		}
 		subs = append(subs, sub)
 	}

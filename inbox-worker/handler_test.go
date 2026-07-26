@@ -514,6 +514,9 @@ func TestHandleEvent_MemberAdded(t *testing.T) {
 	if sub.ID == "" {
 		t.Error("subscription ID should be non-empty (generated UUID)")
 	}
+	if !sub.Open {
+		t.Error("subscription Open = false, want true: cross-site members must be born visible in the sidebar")
+	}
 
 }
 

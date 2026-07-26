@@ -2116,7 +2116,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 ##### Cross-site behaviour
 
-When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_opened` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_opened`. `inbox-worker` on the user's home site mirrors the change onto the local `Subscription` document. Missing-subscription on the home site (e.g., a federation race) is a silent no-op — no NACK, no redelivery loop.
+When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_opened` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_opened`. `inbox-worker` on the user's home site mirrors the change onto the local `Subscription` document, setting `open` to `true`. This mirror is idempotent and eventually consistent: if the home-site subscription doesn't exist yet (e.g., `subscription_opened` races ahead of the originating `member_added`), the event is redelivered until the subscription exists.
 
 ---
 
