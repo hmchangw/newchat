@@ -6432,6 +6432,27 @@ func TestHandler_buildTabURL(t *testing.T) {
 			room:    channelRoom,
 			wantOK:  false,
 		},
+		{
+			name:    "relative path template rejected (legacy pre-rewrite template)",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "/tab/${roomId}",
+			room:    channelRoom,
+			wantOK:  false,
+		},
+		{
+			name:    "scheme-relative template rejected",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "//upstream.example.com/tab/${roomId}",
+			room:    channelRoom,
+			wantOK:  false,
+		},
+		{
+			name:    "non-http scheme rejected",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "javascript:alert(1)",
+			room:    channelRoom,
+			wantOK:  false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

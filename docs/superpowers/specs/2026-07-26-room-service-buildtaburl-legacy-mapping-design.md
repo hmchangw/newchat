@@ -66,7 +66,8 @@ Keeps:
 - empty template ⇒ `("", false)` (tab skipped, Warn-logged by caller)
 - URL-safety check on `roomID` and `h.siteID` (`isURLSafeIDToken`) ⇒ `false`
 - substitute **before** `url.Parse` so values aren't percent-encoded
-- final `url.Parse` validity check ⇒ malformed result ⇒ `("", false)`
+- final check requires an absolute http(s) URL with a host ⇒ malformed,
+  relative, or non-http(s) result ⇒ `("", false)`
 
 Drops:
 - the `siteURL.JoinPath` scheme/host/path-prefix rewrite — the substituted

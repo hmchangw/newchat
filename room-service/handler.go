@@ -2314,7 +2314,10 @@ func legacyRoomType(t model.RoomType) string {
 // ${roomType} is the legacy room-type vocabulary (legacyRoomType);
 // ${roomOrigin} is the legacy origin URL of the room's home site, or ""
 // when unconfigured. Returns (url, true) on success; (_, false) when the
-// template is empty or unparseable, or the IDs fail the URL-safety check.
+// template is empty, unparseable, or not an absolute http(s) URL, or the
+// IDs fail the URL-safety check. Rejecting non-absolute-http(s) results
+// makes legacy path-only templates (from the pre-rewrite era) fail safe —
+// Warn-skipped by the caller — instead of shipping a broken URL to clients.
 func (h *Handler) buildTabURL(tmpl string, room *model.Room) (string, bool) {
 	if tmpl == "" {
 		return "", false
@@ -2328,7 +2331,8 @@ func (h *Handler) buildTabURL(tmpl string, room *model.Room) (string, bool) {
 	tmpl = strings.ReplaceAll(tmpl, "${siteId}", h.siteID)
 	tmpl = strings.ReplaceAll(tmpl, "${roomType}", legacyRoomType(room.Type))
 	tmpl = strings.ReplaceAll(tmpl, "${roomOrigin}", h.legacyRoomOrigins[room.SiteID])
-	if _, err := url.Parse(tmpl); err != nil {
+	u, err := url.Parse(tmpl)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return "", false
 	}
 	return tmpl, true

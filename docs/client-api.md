@@ -2291,7 +2291,7 @@ Empty body (`{}` is tolerated). All inputs come from the subject.
 |---|---|---|
 | `id` | string | `apps._id`. |
 | `name` | string | `apps.channelTab.name`. |
-| `tabUrl` | string | Computed from `apps.channelTab.url.default`, which carries the full URL (no server-side base-URL rewrite). Substituted template variables: `${roomId}`, `${siteId}`, `${roomType}` (legacy room-type vocabulary: `channel`/`discussion` → `p`, `dm`/`botDM` → `d`, unknown → `p`), `${roomOrigin}` (legacy origin URL of the room's home site from `LEGACY_ROOM_ORIGINS`; empty string when the site is unconfigured). Apps whose template URL is empty or unparseable are silently skipped. |
+| `tabUrl` | string | Computed from `apps.channelTab.url.default`, which carries the full URL (no server-side base-URL rewrite). Substituted template variables: `${roomId}`, `${siteId}`, `${roomType}` (legacy room-type vocabulary: `channel`/`discussion` → `p`, `dm`/`botDM` → `d`, unknown → `p`), `${roomOrigin}` (legacy origin URL of the room's home site from `LEGACY_ROOM_ORIGINS`; empty string when the site is unconfigured). Apps whose template URL is empty, unparseable, or not an absolute http(s) URL are silently skipped. |
 | `assistant` | [AppAssistant](#appassistant) | Optional. `apps.assistant` subdocument if set. |
 
 ```json
@@ -4091,7 +4091,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 | Field | Type | Notes |
 |---|---|---|
-| `default` | string | Canonical URL template with literal `${roomId}` / `${siteId}` placeholders. |
+| `default` | string | Canonical URL template with literal `${roomId}`, `${siteId}`, `${roomType}`, `${roomOrigin}` placeholders. See the Get Room App Tabs `tabUrl` row for substitution semantics. |
 
 ###### AppSponsor
 
@@ -4108,7 +4108,7 @@ See [Error envelope](#6-error-envelope-reference).
       "name": "Weather",
       "description": "Local forecasts",
       "assistant": { "enabled": true, "name": "weather.bot", "settingsUrl": "https://site-a.example.com/apps/weather/settings" },
-      "channelTab": { "enabled": true, "default": false, "name": "Weather", "url": { "default": "https://site-a.example.com/apps/weather?room=${roomId}&site=${siteId}" } },
+      "channelTab": { "enabled": true, "default": false, "name": "Weather", "url": { "default": "https://site-a.example.com/apps/weather?room=${roomId}&site=${siteId}&roomType=${roomType}&roomOrigin=${roomOrigin}" } },
       "sponsors": [{ "name": "Acme Corp", "phone": "+1-555-0100" }]
     }
   ]
