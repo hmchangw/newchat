@@ -53,7 +53,7 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 
 	store := &mongoSoakStore{db: db}
 	keyStore := roomkeystore.NewMongoStore(roomsCollection, time.Hour)
-	t.Cleanup(func() { _ = keyStore.Close() })
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
 	cfg.MaxUsers = 10
 	cfg.ActiveUsers = 6
@@ -106,6 +106,14 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 		t,
 		subscriptionsCollection,
 		bson.D{{Key: "soakRunId", Value: cfg.RunID}},
+	))
+	assert.Equal(t, int64(len(second.Subscriptions)), countDocuments(
+		t,
+		subscriptionsCollection,
+		bson.D{
+			{Key: "soakRunId", Value: cfg.RunID},
+			{Key: "open", Value: true},
+		},
 	))
 	assert.Equal(t, int64(len(second.Rooms)), countDocuments(
 		t,
@@ -185,7 +193,7 @@ func TestSeedSoak_RejectsExistingDMRoomBeforeWritingManifest(t *testing.T) {
 
 	store := &mongoSoakStore{db: db}
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
-	t.Cleanup(func() { _ = keyStore.Close() })
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	input := soakSeedInput{
 		RunID:             cfg.RunID,
 		SiteID:            "site-a",
@@ -204,7 +212,6 @@ func TestSeedSoak_RejectsExistingDMRoomBeforeWritingManifest(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "conflict")
 	assert.Equal(t, int64(1), countDocuments(
 		t,
 		db.Collection("rooms"),

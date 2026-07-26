@@ -27,7 +27,7 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	db := testutil.MongoDB(t, "loadgen_soak_run_a")
 	store := &mongoSoakStore{db: db}
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
-	t.Cleanup(func() { _ = keyStore.Close() })
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 
 	users := makeSoakUsers(8, siteID)
 	userDocs := make([]any, len(users))

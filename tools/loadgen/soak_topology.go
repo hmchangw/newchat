@@ -101,7 +101,9 @@ func buildSoakTopology(
 	channelCount := int(math.Round(float64(cfg.RoomCount) * cfg.ChannelRatio))
 	channelCount = max(0, min(channelCount, cfg.RoomCount))
 	dmCount := cfg.RoomCount - channelCount
-	maxDMPairs := len(borrowed) * (len(borrowed) - 1) / 2
+	inactiveBorrowed := len(borrowed) - len(active)
+	maxDMPairs := len(active)*(len(active)-1)/2 +
+		len(active)*inactiveBorrowed
 	if dmCount > maxDMPairs {
 		return soakTopology{}, fmt.Errorf("requested %d DM rooms but only %d unique DM pairs are available", dmCount, maxDMPairs)
 	}
@@ -337,6 +339,7 @@ func buildSoakSubscriptions(
 			Name:         name,
 			RoomType:     room.Type,
 			IsSubscribed: true,
+			Open:         true,
 			JoinedAt:     joinedAt,
 		}
 	}

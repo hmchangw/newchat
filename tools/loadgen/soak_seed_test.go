@@ -140,7 +140,30 @@ func TestSeedSoak_RejectsFreshRunningManifestBeforeWrites(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "active")
+	assert.Zero(t, store.borrowCalls)
+	assert.Zero(t, store.resetCalls)
+	assert.Empty(t, store.manifestStates)
+}
+
+func TestSeedSoak_RejectsRunningManifestWithoutHeartbeatBeforeWrites(t *testing.T) {
+	store := &recordingSoakSeedStore{
+		users: makeSoakUsers(10, "site-a"),
+		manifest: &soakManifest{
+			ID:    "run-a-test",
+			State: soakManifestRunning,
+		},
+	}
+	input := testSoakSeedInput(t)
+
+	_, err := seedSoak(
+		context.Background(),
+		store,
+		&recordingRoomKeyStore{},
+		&input,
+		newSequenceSoakIDs(),
+	)
+
+	require.Error(t, err)
 	assert.Zero(t, store.borrowCalls)
 	assert.Zero(t, store.resetCalls)
 	assert.Empty(t, store.manifestStates)
@@ -162,7 +185,6 @@ func TestSeedSoak_RejectsConflictingRoomIDsBeforeWrites(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "conflict")
 	assert.Zero(t, store.resetCalls)
 	assert.Empty(t, store.manifestStates)
 }

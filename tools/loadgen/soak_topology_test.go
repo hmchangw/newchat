@@ -73,6 +73,7 @@ func TestBuildSoakTopology_ChannelDMSplitMembershipAndRoles(t *testing.T) {
 	dmIDs := make(map[string]struct{})
 	subscriptionsByRoom := make(map[string][]model.Subscription)
 	for _, sub := range topology.Subscriptions {
+		assert.True(t, sub.Open, "seeded subscriptions must be visible in clients")
 		subscriptionsByRoom[sub.RoomID] = append(subscriptionsByRoom[sub.RoomID], sub)
 	}
 	for _, room := range topology.Rooms {
@@ -195,6 +196,35 @@ func TestBuildSoakTopology_RejectsImpossibleRoomShape(t *testing.T) {
 	_, err := buildSoakTopology(makeSoakUsers(3, "site-a"), &cfg, "site-a", 1, newSequenceSoakIDs())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unique DM")
+}
+
+func TestBuildSoakTopology_RejectsDMPairsWithoutActiveParticipantBeforeGeneration(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 4
+	cfg.ActiveUsers = 1
+	cfg.RoomCount = 4
+	cfg.ChannelRatio = 0
+	cfg.ChannelMembers = 2
+	cfg.ReactionsPerHotMessage = 1
+	generatedSubscriptions := 0
+	ids := &soakIDs{
+		channelRoomID: func() string { return "unused-channel" },
+		subscriptionID: func() string {
+			generatedSubscriptions++
+			return fmt.Sprintf("subscription-%d", generatedSubscriptions)
+		},
+	}
+
+	_, err := buildSoakTopology(
+		makeSoakUsers(4, "site-a"),
+		&cfg,
+		"site-a",
+		1,
+		ids,
+	)
+
+	require.Error(t, err)
+	assert.Zero(t, generatedSubscriptions, "impossible DM capacity must fail before generation")
 }
 
 func TestProductionSoakIDs_UseProjectIdentityFormats(t *testing.T) {
