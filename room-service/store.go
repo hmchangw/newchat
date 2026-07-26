@@ -132,6 +132,10 @@ type RoomStore interface {
 	// federated event publishes (inbox-worker guards remote applies against it).
 	// Returns the post-flip subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
 	ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error)
+	// OpenSubscription atomically sets open=true for (roomID, account) via a single
+	// FindOneAndUpdate and returns the post-update subscription, or
+	// model.ErrSubscriptionNotFound (wrapped) when no match.
+	OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error)
 	// SetOwnerRole atomically grants (makeOwner=true) or revokes (makeOwner=false)
 	// the owner role on the subscription keyed by (roomID, account) via a single
 	// FindOneAndUpdate. Other roles (e.g. member) are retained. Stamps rolesUpdatedAt

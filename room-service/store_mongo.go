@@ -1079,6 +1079,14 @@ func (s *MongoStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, acc
 	})
 }
 
+// OpenSubscription sets open=true. Set-not-toggle: no ordering guard is needed
+// because applying true repeatedly or out of order always converges to true.
+func (s *MongoStore) OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error) {
+	return s.findOneAndUpdateSub(ctx, roomID, account, "open subscription", bson.M{
+		"open": true,
+	})
+}
+
 // SetOwnerRole atomically grants or revokes the owner role, returning the updated
 // subscription. Promote appends "owner" only when absent; demote filters "owner"
 // out. Any other roles (e.g. "member") are preserved and array order stays stable.
