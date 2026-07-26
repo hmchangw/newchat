@@ -824,6 +824,83 @@ func TestHandleUpdated_ChannelRoomScopedPublish(t *testing.T) {
 	assert.True(t, roomEvt.UpdatedAt.Equal(edited))
 }
 
+func TestPreviewJSON(t *testing.T) {
+	assert.Equal(t, "null", string(previewJSON(nil)))
+	b := previewJSON(&model.PreviewMessage{MessageID: "m1"})
+	assert.Contains(t, string(b), `"messageId":"m1"`)
+}
+
+func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
+
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Event:     model.EventUpdated,
+		SiteID:    "site-a",
+		Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content: "updated", CreatedAt: edited.Add(-time.Hour), EditedAt: &edited, UpdatedAt: &edited,
+		},
+		PreviewMessage: &model.PreviewMessage{MessageID: "msg-1", Content: "updated"},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.NotEmpty(t, roomEvt.PreviewMessage, "edit fan-out must carry the refreshed preview")
+	var pm model.PreviewMessage
+	require.NoError(t, json.Unmarshal(roomEvt.PreviewMessage, &pm))
+	assert.Equal(t, "msg-1", pm.MessageID)
+	assert.Equal(t, "updated", pm.Content)
+}
+
+func TestHandleDeleted_RelaysNilPreviewAsNull(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
+
+	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Event:     model.EventDeleted,
+		SiteID:    "site-a",
+		Timestamp: deleted.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
+		},
+		// PreviewMessage nil -> cleared
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1)
+	assert.Contains(t, string(pub.records[0].data), `"previewMessage":null`,
+		"deleting the last message must fan out previewMessage:null to clear it")
+}
+
 func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -2477,6 +2554,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 		assert.Equal(t, "updated thread reply", roomEvt.NewContent)
 		assert.Positive(t, roomEvt.Timestamp, "Timestamp must be the broadcast-worker publish time")
 		assert.Equal(t, editedAt.UnixMilli(), roomEvt.EventTimestamp)
+		assert.Empty(t, roomEvt.PreviewMessage, "thread edit must not carry a room preview")
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
