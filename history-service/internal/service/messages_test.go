@@ -1927,9 +1927,9 @@ func TestHistoryService_DeleteMessage_LastMessage_PublishesNilPreview(t *testing
 	require.NoError(t, err)
 }
 
-// A thread reply edit skips the room-preview walk (no GetMessagesBefore) and carries no preview;
-// clients tell it apart via the event's ThreadParentMessageID and drive the room preview themselves.
-func TestHistoryService_EditMessage_ThreadReply_SkipsPreviewWalk(t *testing.T) {
+// A hidden thread reply (TShow=false) edit skips the room-preview walk (no GetMessagesBefore) and
+// carries no preview; clients tell it apart via ThreadParentMessageID and drive the preview themselves.
+func TestHistoryService_EditMessage_HiddenThreadReply_SkipsPreviewWalk(t *testing.T) {
 	svc, msgs, subs, pub, _ := newService(t)
 	c := testContext()
 
@@ -1947,15 +1947,53 @@ func TestHistoryService_EditMessage_ThreadReply_SkipsPreviewWalk(t *testing.T) {
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
 	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
-	// No GetMessagesBefore expectation: the preview walk must be skipped for thread replies.
+	// No GetMessagesBefore expectation: the walk must be skipped for hidden thread replies.
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
-			assert.Nil(t, evt.PreviewMessage, "thread reply edit carries no room preview")
+			assert.Nil(t, evt.PreviewMessage, "hidden thread reply edit carries no room preview")
 			assert.Equal(t, "parent-1", evt.Message.ThreadParentMessageID, "thread linkage must survive for the client to key on")
+			return nil
+		})
+
+	_, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "reply-1", NewMsg: "edited reply"})
+	require.NoError(t, err)
+}
+
+// A TShow=true thread reply appears in the room timeline, so its edit DOES refresh the preview.
+func TestHistoryService_EditMessage_TShowThreadReply_EmbedsPreview(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	parentCreatedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
+	hydrated := &models.Message{
+		MessageID:             "reply-1",
+		RoomID:                "r1",
+		Sender:                models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:             time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:                   "original reply",
+		ThreadParentID:        "parent-1",
+		ThreadParentCreatedAt: &parentCreatedAt,
+		TShow:                 true,
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m-latest", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "latest", CreatedAt: hydrated.CreatedAt},
+		}, false), nil)
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			require.NotNil(t, evt.PreviewMessage, "TShow thread reply edit must refresh the room preview")
+			assert.Equal(t, "m-latest", evt.PreviewMessage.MessageID)
 			return nil
 		})
 

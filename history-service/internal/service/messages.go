@@ -639,11 +639,13 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 }
 
 // previewAfterMutation resolves the room's current last-eligible preview (same walk as
-// subscription.list) to carry on a top-level edit/delete fan-out. Thread replies are skipped —
-// clients tell those apart via the event's threadParentMessageId and drive the room preview
-// themselves. nil for a thread reply, when the room has no eligible message, or on a read error.
+// subscription.list) to carry on an edit/delete fan-out. Hidden thread replies (TShow==false)
+// never appear in the room timeline, so they're skipped — clients tell those apart via the
+// event's threadParentMessageId and drive the room preview themselves. TShow==true replies do
+// appear in the room, so they still get a preview. nil for a hidden thread reply, when the room
+// has no eligible message, or on a read error.
 func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
-	if msg.ThreadParentID != "" {
+	if msg.ThreadParentID != "" && !msg.TShow {
 		return nil
 	}
 	if preview, ok := s.roomLastPreviewMessage(c, roomID, at); ok {

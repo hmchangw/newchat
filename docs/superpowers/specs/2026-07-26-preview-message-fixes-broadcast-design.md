@@ -6,7 +6,8 @@
 > **Amendment (post-review):** the client-facing `previewMessage` is now `*PreviewMessage` with
 > `omitempty` (not `json.RawMessage`) — omitted when the room has no eligible message or on a read
 > error, with no `null` "cleared" state (the `previewJSON` helper was removed). history-service
-> **skips** the preview walk for thread replies (`ThreadParentID != ""`); instead
+> **skips** the preview walk for hidden thread replies (`ThreadParentID != "" && !TShow`) —
+> `TShow==true` replies appear in the room timeline and still get a preview; instead
 > `EditRoomEvent`/`DeleteRoomEvent` carry `threadParentMessageId` (+ `tshow`) so clients can tell a
 > thread-reply edit/delete from a top-level one and drive the room preview themselves. The walk
 > helper `roomLastMessage` was renamed `roomLastPreviewMessage`. Sections below describing the
