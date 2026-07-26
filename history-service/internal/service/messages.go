@@ -549,6 +549,16 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		SiteID:    siteID,
 		Timestamp: editedAtMs,
 	}
+
+	// Refresh the room preview so broadcast-worker can relay it (same resolution as
+	// subscription.list). Skip hidden thread replies (TShow==false with a parent): they never
+	// appear in the room timeline, so the room preview can't have changed. Best-effort: a read
+	// failure leaves PreviewMessage nil (downstream treats nil as "cleared").
+	if msg.ThreadParentID == "" || msg.TShow {
+		if preview, ok := s.roomLastMessage(c, roomID, editedAt); ok {
+			canonicalEvt.PreviewMessage = &preview
+		}
+	}
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
 
 	return &models.EditMessageResponse{
@@ -625,6 +635,15 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		Timestamp:          deletedAtMs,
 		NewTCount:          newTcount,
 		NewThreadLastMsgAt: newThreadLastMsgAt,
+	}
+
+	// Refresh the room preview so broadcast-worker can relay it. Skip hidden thread replies
+	// (never in the room timeline). nil preview → clients clear it (e.g. the last message was
+	// the one just deleted). Best-effort; a read failure also leaves it nil.
+	if msg.ThreadParentID == "" || msg.TShow {
+		if preview, ok := s.roomLastMessage(c, roomID, actualDeletedAt); ok {
+			canonicalEvt.PreviewMessage = &preview
+		}
 	}
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
