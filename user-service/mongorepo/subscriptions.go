@@ -181,6 +181,7 @@ func subscriptionProjection(extra bson.M) bson.M {
 		"alert":             1,
 		"muted":             1,
 		"favorite":          1,
+		"open":              1,
 		"restricted":        1,
 		"externalAccess":    1,
 		"favoriteUpdatedAt": 1,
@@ -242,6 +243,9 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	if favorite {
 		match["favorite"] = true
 	}
+	// Exclude rooms explicitly closed by the user; a missing field (defensive)
+	// and open:true both pass. Applied to subscription.list only.
+	match["open"] = bson.M{"$ne": false}
 	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
 	// rooms have no local room doc and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}

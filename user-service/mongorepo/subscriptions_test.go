@@ -274,6 +274,36 @@ func TestAggregateSubscriptions_Pagination_Integration(t *testing.T) {
 	assert.Equal(t, "c4", last.Data[0].ID)
 }
 
+func TestAggregateSubscriptions_ExcludesClosed(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r_open", "name": "Open", "siteId": "site-a", "userCount": 1, "lastMsgAt": now},
+		bson.M{"_id": "r_closed", "name": "Closed", "siteId": "site-a", "userCount": 1, "lastMsgAt": now},
+		bson.M{"_id": "r_missing", "name": "MissingField", "siteId": "site-a", "userCount": 1, "lastMsgAt": now},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "sub-open", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r_open",
+			"name": "Open", "roomType": "channel", "siteId": "site-a", "open": true, "_updatedAt": now, "createdAt": now},
+		bson.M{"_id": "sub-closed", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r_closed",
+			"name": "Closed", "roomType": "channel", "siteId": "site-a", "open": false, "_updatedAt": now, "createdAt": now},
+		bson.M{"_id": "sub-missing", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r_missing",
+			"name": "MissingField", "roomType": "channel", "siteId": "site-a", "_updatedAt": now, "createdAt": now},
+	)
+
+	res, err := r.AggregateSubscriptions(ctx, "alice", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 50})
+	require.NoError(t, err)
+	roomIDs := map[string]bool{}
+	for _, s := range res.Data {
+		roomIDs[s.RoomID] = true
+	}
+	assert.True(t, roomIDs["r_open"], "open:true subscription must be included")
+	assert.True(t, roomIDs["r_missing"], "subscription with no open field must be included")
+	assert.False(t, roomIDs["r_closed"], "explicitly closed subscription must be excluded")
+}
+
 func TestFindChannelsByMembers_Integration(t *testing.T) {
 	r, db := newTestSubscriptionRepo(t)
 	ctx := context.Background()
