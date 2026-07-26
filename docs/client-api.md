@@ -922,9 +922,9 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 ##### PreviewMessage
 
 A room's most-recent **eligible** message, resolved at read time and enriched for
-room-list rendering. Eligible = not soft-deleted, not a system message, not a
-quoted reply — an ineligible tail is walked back to an earlier survivor; a room with only
-ineligible messages omits `previewMessage`.
+room-list rendering. Eligible = not soft-deleted and not a system message (quoted
+replies are normal content and ARE eligible) — an ineligible tail is walked back to
+an earlier survivor; a room with only ineligible messages omits `previewMessage`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -3108,6 +3108,7 @@ The payload is flat (no zero-valued room fields):
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `previewMessage` | [PreviewMessage](#previewmessage) \| null | The room's refreshed preview after this edit (same resolution as `subscription.list`). A `PreviewMessage` object when the room still has an eligible message, or `null` when it has none left (clients should clear the room's preview). **Omitted** on hidden thread-reply edits (`tshow=false`), which don't affect the room preview. |
 
 ```json
 {
@@ -3120,7 +3121,13 @@ The payload is flat (no zero-valued room fields):
   "newContent": "morning team — updated",
   "editedBy": "alice",
   "editedAt": "2026-05-06T08:05:00Z",
-  "updatedAt": "2026-05-06T08:05:00Z"
+  "updatedAt": "2026-05-06T08:05:00Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "sender": { "account": "alice", "displayName": "Alice" },
+    "content": "morning team — updated",
+    "createdAt": "2026-05-06T08:00:00Z"
+  }
 }
 ```
 
@@ -3195,6 +3202,7 @@ The payload is flat:
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `previewMessage` | [PreviewMessage](#previewmessage) \| null | The room's refreshed preview after this delete (same resolution as `subscription.list`). A `PreviewMessage` object when an eligible message remains, or `null` when the room has none left — e.g. the deleted message was the last one (clients should clear the room's preview). **Omitted** on hidden thread-reply deletes (`tshow=false`), which don't affect the room preview. |
 
 ```json
 {
@@ -3205,7 +3213,8 @@ The payload is flat:
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "previewMessage": null
 }
 ```
 

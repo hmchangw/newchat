@@ -399,6 +399,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) \| null | The room's refreshed preview after this edit (same resolution as `subscription.list`). A `PreviewMessage` object when the room still has an eligible message, or `null` when it has none left (clear the room's preview). **Omitted** on hidden thread-reply edits (`tshow=false`). |
 
 ```json
 {
@@ -410,7 +411,13 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
   "newContent": "morning team — updated",
   "editedBy": "alice",
   "editedAt": "2026-05-06T08:05:00Z",
-  "updatedAt": "2026-05-06T08:05:00Z"
+  "updatedAt": "2026-05-06T08:05:00Z",
+  "previewMessage": {
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "sender": { "account": "alice", "displayName": "Alice" },
+    "content": "morning team — updated",
+    "createdAt": "2026-05-06T08:00:00Z"
+  }
 }
 ```
 
@@ -441,6 +448,7 @@ Thread-reply deletes **additionally** emit a
 | `deletedBy` | string | The sender's account. |
 | `deletedAt` | string | RFC 3339 timestamp. Domain time of the delete. |
 | `updatedAt` | string | RFC 3339 timestamp. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) \| null | The room's refreshed preview after this delete (same resolution as `subscription.list`). A `PreviewMessage` object when an eligible message remains, or `null` when the room has none left — e.g. the deleted message was the last one (clear the room's preview). **Omitted** on hidden thread-reply deletes (`tshow=false`). |
 
 ```json
 {
@@ -451,7 +459,8 @@ Thread-reply deletes **additionally** emit a
   "messageId": "01970a4f8c2d7c9aQRST",
   "deletedBy": "alice",
   "deletedAt": "2026-05-06T08:06:40Z",
-  "updatedAt": "2026-05-06T08:06:40Z"
+  "updatedAt": "2026-05-06T08:06:40Z",
+  "previewMessage": null
 }
 ```
 
