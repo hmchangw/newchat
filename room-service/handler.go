@@ -2389,7 +2389,7 @@ func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsRe
 		}
 		tabURL, ok := h.buildTabURL(app.ChannelTab.URL.Default, room)
 		if !ok {
-			slog.Warn("skipping app with empty or unparseable channelTab url",
+			slog.Warn("skipping app with empty, unparseable, or non-http(s) channelTab url",
 				"appId", app.ID, "roomId", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			continue
