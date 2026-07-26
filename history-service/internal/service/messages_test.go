@@ -120,6 +120,13 @@ func assertNotFoundErr(t *testing.T, err error, wantMsg string) {
 	assert.Equal(t, wantMsg, ec.Message)
 }
 
+// expectEmptyPreviewWalk stubs the edit/delete preview walk to find nothing, for tests that
+// don't assert on the refreshed preview.
+func expectEmptyPreviewWalk(msgs *mocks.MockMessageRepository) {
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil).AnyTimes()
+}
+
 func makePage(msgs []models.Message, hasNext bool) cassrepo.Page[models.Message] {
 	nextCursor := ""
 	if hasNext {
@@ -1429,9 +1436,7 @@ func TestHistoryService_EditMessage_PublishesCanonicalUpdatedEvent(t *testing.T)
 			return nil
 		})
 
-	// Preview walk after the edit (content not asserted here) — return no eligible message.
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	resp, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{
 		MessageID: "msg-1",
@@ -1480,8 +1485,7 @@ func TestHistoryService_EditMessage_CarriesAttachmentsAndCard(t *testing.T) {
 			return nil
 		})
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	_, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{
 		MessageID: "msg-1",
@@ -1509,8 +1513,7 @@ func TestHistoryService_EditMessage_PublishFailureDoesNotFailRPC(t *testing.T) {
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
 		Return(errors.New("nats down"))
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	resp, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{
 		MessageID: "msg-1",
@@ -1546,8 +1549,7 @@ func TestHistoryService_EditMessage_PassesDedupMessageID(t *testing.T) {
 			return nil
 		})
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	_, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "msg-1", NewMsg: "updated"})
 	require.NoError(t, err)
@@ -1804,8 +1806,7 @@ func TestHistoryService_DeleteMessage_PublishFails(t *testing.T) {
 		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
 		Return(fmt.Errorf("nats disconnected"))
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	resp, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "m-abc"})
 	require.NoError(t, err, "best-effort publish: failure is logged, not returned")
@@ -1847,8 +1848,7 @@ func TestHistoryService_DeleteMessage_PublishesCanonicalDeletedEvent(t *testing.
 			return nil
 		})
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	resp, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
@@ -2073,8 +2073,7 @@ func TestHistoryService_DeleteMessage_PassesDedupMessageID(t *testing.T) {
 			return nil
 		})
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
@@ -2464,8 +2463,7 @@ func TestHistoryService_DeleteMessage_EventDeletedCarriesContent(t *testing.T) {
 			return nil
 		})
 
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage(nil, false), nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
 
 	resp, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "m-content"})
 	require.NoError(t, err)

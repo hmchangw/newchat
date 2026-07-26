@@ -700,10 +700,8 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 	}
 }
 
-// previewJSON marshals the refreshed room preview for a room-level edit/delete fan-out event.
-// A nil preview marshals to the JSON literal null, signalling the client to clear its room
-// preview (the last eligible message was removed). Always returns non-nil so room-level events
-// always carry previewMessage; the thread path never calls this, leaving the field absent.
+// previewJSON marshals the room preview for an edit/delete fan-out. nil → the literal null
+// (clear the preview); always non-nil, so room-level events always carry previewMessage.
 func previewJSON(p *model.PreviewMessage) json.RawMessage {
 	b, err := sonic.Marshal(p) // p == nil -> "null"
 	if err != nil {

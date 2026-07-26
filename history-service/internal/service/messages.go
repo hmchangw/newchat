@@ -550,15 +550,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		Timestamp: editedAtMs,
 	}
 
-	// Refresh the room preview so broadcast-worker can relay it (same resolution as
-	// subscription.list). Skip hidden thread replies (TShow==false with a parent): they never
-	// appear in the room timeline, so the room preview can't have changed. Best-effort: a read
-	// failure leaves PreviewMessage nil (downstream treats nil as "cleared").
-	if msg.ThreadParentID == "" || msg.TShow {
-		if preview, ok := s.roomLastMessage(c, roomID, editedAt); ok {
-			canonicalEvt.PreviewMessage = &preview
-		}
-	}
+	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, editedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
 
 	return &models.EditMessageResponse{
@@ -637,20 +629,26 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
 
-	// Refresh the room preview so broadcast-worker can relay it. Skip hidden thread replies
-	// (never in the room timeline). nil preview → clients clear it (e.g. the last message was
-	// the one just deleted). Best-effort; a read failure also leaves it nil.
-	if msg.ThreadParentID == "" || msg.TShow {
-		if preview, ok := s.roomLastMessage(c, roomID, actualDeletedAt); ok {
-			canonicalEvt.PreviewMessage = &preview
-		}
-	}
+	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
 	return &models.DeleteMessageResponse{
 		MessageID: req.MessageID,
 		DeletedAt: deletedAtMs,
 	}, nil
+}
+
+// previewAfterMutation resolves the room preview to relay after an edit/delete, using the same
+// walk as subscription.list. Hidden thread replies (TShow==false with a parent) never appear in
+// the room timeline, so they leave it unchanged. nil result → clients clear the preview.
+func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
+	if msg.ThreadParentID != "" && !msg.TShow {
+		return nil
+	}
+	if preview, ok := s.roomLastMessage(c, roomID, at); ok {
+		return &preview
+	}
+	return nil
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).

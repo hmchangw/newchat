@@ -44,10 +44,8 @@ type MessageEvent struct {
 	// ThreadParentSenderAccount is the thread parent's author, resolved best-effort by the
 	// gatekeeper (empty on soft-fail/edit/delete); lets workers skip their own parent fetch.
 	ThreadParentSenderAccount string `json:"threadParentSenderAccount,omitempty" bson:"-"`
-	// PreviewMessage is the room's refreshed last-eligible message, computed by history-service
-	// after an edit/delete so broadcast-worker can relay it in the fan-out event. Same resolution
-	// as subscription.list. Set only on EventUpdated/EventDeleted for room-visible messages; nil
-	// otherwise (including "no eligible message remains" — treated as cleared downstream).
+	// PreviewMessage is the room's refreshed preview, computed by history-service on
+	// edit/delete for broadcast-worker to relay. nil for other events or when cleared.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
@@ -321,11 +319,8 @@ type EditRoomEvent struct {
 	EditedBy            string          `json:"editedBy" bson:"editedBy"`
 	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
-	// PreviewMessage is the room's refreshed preview after this edit (same resolution as
-	// subscription.list). On room-level edits: a serialized PreviewMessage object, or the JSON
-	// literal null when the room has no eligible message left (client clears its preview). Absent
-	// on thread-reply (TShow==false) edits, which don't affect the room preview. json.RawMessage
-	// (not *PreviewMessage) so the shared builder can distinguish absent (thread) from null (cleared).
+	// PreviewMessage is the room's refreshed preview after this edit. Object when one remains,
+	// null when cleared, absent on thread-reply edits. RawMessage encodes all three states.
 	PreviewMessage json.RawMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
 }
 
@@ -340,10 +335,8 @@ type DeleteRoomEvent struct {
 	DeletedBy      string        `json:"deletedBy" bson:"deletedBy"`
 	DeletedAt      time.Time     `json:"deletedAt" bson:"deletedAt"`
 	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
-	// PreviewMessage is the room's refreshed preview after this delete (same resolution as
-	// subscription.list). On room-level deletes: a serialized PreviewMessage object, or the JSON
-	// literal null when the room has no eligible message left (client clears its preview). Absent
-	// on thread-reply (TShow==false) deletes, which don't affect the room preview.
+	// PreviewMessage is the room's refreshed preview after this delete. Object when one remains,
+	// null when cleared (e.g. the last message was deleted), absent on thread-reply deletes.
 	PreviewMessage json.RawMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
 }
 
@@ -545,9 +538,8 @@ const (
 	MessageTypeTeamsMeetStarted = "teams_meet_started"
 )
 
-// systemMessageTypes is the set of Message.Type values denoting a system/event message
-// (not user-authored content). Used for fast membership checks — e.g. excluding system
-// messages from room-list previews. Keep in sync with the MessageType* constants above.
+// systemMessageTypes is the set of system/event Message.Type values (not user content),
+// for fast membership checks. Keep in sync with the MessageType* constants above.
 var systemMessageTypes = map[string]struct{}{
 	MessageTypeRoomCreated:      {},
 	MessageTypeMembersAdded:     {},
