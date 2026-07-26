@@ -80,7 +80,7 @@ func (s *mongoStore) RoomSite(ctx context.Context, roomID string) (string, model
 func (s *mongoStore) UserByAccount(ctx context.Context, account string) (*model.User, bool, error) {
 	var u model.User
 	err := s.users.FindOne(ctx, bson.M{"account": account},
-		options.FindOne().SetProjection(bson.M{"_id": 1, "account": 1, "engName": 1, "chineseName": 1, "deactivated": 1})).Decode(&u)
+		options.FindOne().SetProjection(bson.M{"_id": 1, "account": 1, "engName": 1, "chineseName": 1, "active": 1})).Decode(&u)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, false, nil
 	}

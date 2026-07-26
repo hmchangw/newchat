@@ -56,7 +56,7 @@ type userView struct {
 	StatusText            string           `json:"statusText,omitempty"`
 	Roles                 []model.UserRole `json:"roles,omitempty"`
 	RequirePasswordChange bool             `json:"requirePasswordChange,omitempty"`
-	Deactivated           bool             `json:"deactivated,omitempty"`
+	Active                bool             `json:"active"`
 }
 
 // toView converts a model.User to the projected userView (no Services/bcrypt).
@@ -80,7 +80,7 @@ func toView(u *model.User) userView {
 		StatusText:            u.StatusText,
 		Roles:                 u.Roles,
 		RequirePasswordChange: u.RequirePasswordChange,
-		Deactivated:           u.Deactivated,
+		Active:                u.IsActive(),
 	}
 }
 
@@ -247,7 +247,7 @@ type updateUserRequest struct {
 	EngName     *string           `json:"engName"`
 	ChineseName *string           `json:"chineseName"`
 	Roles       *[]model.UserRole `json:"roles"`
-	Deactivated *bool             `json:"deactivated"`
+	Active      *bool             `json:"active"`
 }
 
 // updateUser handles PATCH /v1/admin/users/:account — applies partial updates to a user.
@@ -267,16 +267,16 @@ func (h *Handler) updateUser(c *gin.Context) {
 	// leave a disabled account with a still-valid session. Every other patch
 	// (name/roles) stays a plain, non-transactional update.
 	//
-	// Mixing deactivated=true with other field edits in the same PATCH is
+	// Mixing active=false with other field edits in the same PATCH is
 	// rejected: the deactivate branch would silently drop the other fields,
 	// and the client (admin console) sends deactivation as a distinct action,
-	// so mixed patches indicate a client bug. Reactivation (deactivated=false)
+	// so mixed patches indicate a client bug. Reactivation (active=true)
 	// combined with other fields goes through the normal UpdateUser branch
 	// below — no session revoke needed.
-	if req.Deactivated != nil && *req.Deactivated {
+	if req.Active != nil && !*req.Active {
 		if req.EngName != nil || req.ChineseName != nil || req.Roles != nil {
 			errhttp.Write(ctx, c, errcode.BadRequest(
-				"deactivated=true cannot be combined with other field updates in a single PATCH",
+				"active=false cannot be combined with other field updates in a single PATCH",
 				errcode.WithReason(errcode.AdminMixedDeactivatePatch)))
 			return
 		}
@@ -303,8 +303,8 @@ func (h *Handler) updateUser(c *gin.Context) {
 	}
 
 	details := map[string]string{}
-	if req.Deactivated != nil {
-		details["deactivated"] = strconv.FormatBool(*req.Deactivated)
+	if req.Active != nil {
+		details["active"] = strconv.FormatBool(*req.Active)
 	}
 	h.audit(ctx, c, "user.update", "", account, details)
 

@@ -141,15 +141,16 @@ func TestHandleLogin_InvalidCredentials_Cases(t *testing.T) {
 			body: map[string]string{"username": "p_alice", "password": "wrong"},
 		},
 		{
-			name: "deactivated admin",
+			name: "inactive admin",
 			setup: func(t *testing.T) (AdminStore, session.Store) {
 				ctrl := gomock.NewController(t)
 				st := NewMockAdminStore(ctrl)
+				inactive := false
 				st.EXPECT().GetUserForAuth(gomock.Any(), "site-a", "p_alice").Return(&model.User{
 					ID: "u1", Account: "p_alice", SiteID: "site-a",
-					Roles:       []model.UserRole{model.UserRoleAdmin},
-					Deactivated: true,
-					Services:    model.Services{Password: model.PasswordCredentials{Bcrypt: mustHash(t, "right")}},
+					Roles:    []model.UserRole{model.UserRoleAdmin},
+					Active:   &inactive,
+					Services: model.Services{Password: model.PasswordCredentials{Bcrypt: mustHash(t, "right")}},
 				}, nil)
 				return st, &fakeSessionStore{}
 			},

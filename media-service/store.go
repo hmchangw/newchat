@@ -21,7 +21,7 @@ type avatarStore interface {
 	// local subscriptions. found=false when no local subscription exists.
 	RoomSite(ctx context.Context, roomID string) (siteID string, roomType model.RoomType, name string, found bool, err error)
 	// UserByAccount returns a user's identity fields (id, account, names,
-	// deactivated) for the drive.members probe. found=false when no user record
+	// active) for the drive.members probe. found=false when no user record
 	// exists for account.
 	UserByAccount(ctx context.Context, account string) (*model.User, bool, error)
 	// RoomMember reports whether account holds a subscription to roomID.

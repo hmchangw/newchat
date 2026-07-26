@@ -16,7 +16,7 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
   const [engName, setEngName] = useState(user.engName)
   const [chineseName, setChineseName] = useState(user.chineseName)
   const [roles, setRoles] = useState(user.roles)
-  const [deactivated, setDeactivated] = useState(user.deactivated)
+  const [deactivated, setDeactivated] = useState(!user.active)
   const [confirmingDeactivate, setConfirmingDeactivate] = useState(false)
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -34,7 +34,7 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
     if (trimmedEngName !== user.engName) patch.engName = trimmedEngName
     if (trimmedChineseName !== user.chineseName) patch.chineseName = trimmedChineseName
     if (!sameRoles(roles, user.roles)) patch.roles = roles
-    if (deactivated !== user.deactivated) patch.deactivated = deactivated
+    if (deactivated !== !user.active) patch.active = !deactivated
     return patch
   }
 
@@ -59,7 +59,7 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
       onClose()
       return
     }
-    if (patch.deactivated === true && !confirmingDeactivate) {
+    if (patch.active === false && !confirmingDeactivate) {
       setConfirmingDeactivate(true)
       return
     }

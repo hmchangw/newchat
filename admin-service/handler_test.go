@@ -479,6 +479,26 @@ func TestHandler_getUser(t *testing.T) {
 				assertNoSecret(t, raw)
 				assert.Equal(t, "u1", body["id"])
 				assert.Equal(t, "alice", body["account"])
+				assert.Equal(t, true, body["active"], "missing active field must read as active")
+				_, has := body["deactivated"]
+				assert.False(t, has, "deactivated must be gone from the wire")
+			},
+		},
+		{
+			name:   "inactive user – active=false in view",
+			userID: "u1b",
+			setupMock: func(m *MockAdminStore) {
+				inactive := false
+				m.EXPECT().GetUserByAccount(gomock.Any(), "site-A", "u1b").Return(&model.User{
+					ID:      "u1b",
+					Account: "mallory",
+					SiteID:  "site-A",
+					Active:  &inactive,
+				}, nil)
+			},
+			wantStatus: http.StatusOK,
+			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+				assert.Equal(t, false, body["active"])
 			},
 		},
 		{
@@ -556,17 +576,17 @@ func TestHandler_updateUser(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:   "deactivating user – atomic DeactivateAndRevoke",
+			name:   "deactivating user (active=false) – atomic DeactivateAndRevoke",
 			userID: "u2",
 			body: map[string]any{
-				"deactivated": true,
+				"active": false,
 			},
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2").Return(nil)
 				m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, e *AuditEntry) error {
 						assert.Equal(t, "user.update", e.Action)
-						assert.Equal(t, "true", e.Details["deactivated"])
+						assert.Equal(t, "false", e.Details["active"])
 						return nil
 					})
 			},
@@ -609,10 +629,10 @@ func TestHandler_updateUser(t *testing.T) {
 			wantReason: string(errcode.AdminUserNotFound),
 		},
 		{
-			name:   "deactivated=false – plain update",
+			name:   "active=true – plain update (reactivate)",
 			userID: "u5",
 			body: map[string]any{
-				"deactivated": false,
+				"active": true,
 			},
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().UpdateUser(gomock.Any(), "site-A", "u5", gomock.Any()).Return(nil)
@@ -621,13 +641,13 @@ func TestHandler_updateUser(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:   "deactivated=true with explicit pointer serialised",
+			name:   "active=false with explicit pointer serialised",
 			userID: "u6",
 			body: func() map[string]any {
 				type body struct {
-					Deactivated *bool `json:"deactivated"`
+					Active *bool `json:"active"`
 				}
-				b, _ := json.Marshal(body{Deactivated: &trueVal})
+				b, _ := json.Marshal(body{Active: &falseVal})
 				var m map[string]any
 				_ = json.Unmarshal(b, &m)
 				return m
@@ -639,11 +659,11 @@ func TestHandler_updateUser(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:   "deactivated=true + engName rejected as mixed patch",
+			name:   "active=false + engName rejected as mixed patch",
 			userID: "u7",
 			body: map[string]any{
-				"deactivated": true,
-				"engName":     "Would Be Dropped",
+				"active":  false,
+				"engName": "Would Be Dropped",
 			},
 			// no DeactivateAndRevoke / UpdateUser / AppendAudit — must reject before any write
 			setupMock:  func(m *MockAdminStore) {},
@@ -651,25 +671,25 @@ func TestHandler_updateUser(t *testing.T) {
 			wantReason: string(errcode.AdminMixedDeactivatePatch),
 		},
 		{
-			name:   "deactivated=true + roles rejected as mixed patch",
+			name:   "active=false + roles rejected as mixed patch",
 			userID: "u8",
 			body: map[string]any{
-				"deactivated": true,
-				"roles":       []string{"admin"},
+				"active": false,
+				"roles":  []string{"admin"},
 			},
 			setupMock:  func(m *MockAdminStore) {},
 			wantStatus: http.StatusBadRequest,
 			wantReason: string(errcode.AdminMixedDeactivatePatch),
 		},
 		{
-			name:   "deactivated=false + engName still goes through UpdateUser (reactivate + edit is fine)",
+			name:   "active=true + engName still goes through UpdateUser (reactivate + edit is fine)",
 			userID: "u9",
 			body: func() map[string]any {
 				type body struct {
-					Deactivated *bool  `json:"deactivated"`
-					EngName     string `json:"engName"`
+					Active  *bool  `json:"active"`
+					EngName string `json:"engName"`
 				}
-				b, _ := json.Marshal(body{Deactivated: &falseVal, EngName: "Reactivated Rita"})
+				b, _ := json.Marshal(body{Active: &trueVal, EngName: "Reactivated Rita"})
 				var m map[string]any
 				_ = json.Unmarshal(b, &m)
 				return m
@@ -725,7 +745,7 @@ func TestHandler_updateUser_DeactivateAndRevoke_TxError_Returns500(t *testing.T)
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPatch, "/users/u2b", bodyBytes(t, map[string]any{"deactivated": true}))
+	req := httptest.NewRequest(http.MethodPatch, "/users/u2b", bodyBytes(t, map[string]any{"active": false}))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 

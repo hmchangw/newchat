@@ -18,7 +18,7 @@ const USER = {
   engName: '',
   chineseName: '',
   roles: [],
-  deactivated: false,
+  active: true,
   requirePasswordChange: false,
 }
 

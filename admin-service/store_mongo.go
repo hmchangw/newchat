@@ -77,7 +77,7 @@ var userProjection = bson.M{
 	"statusText":            1,
 	"roles":                 1,
 	"requirePasswordChange": 1,
-	"deactivated":           1,
+	"active":                1,
 }
 
 func (s *storeMongo) SearchUsers(ctx context.Context, siteID, q string, page, limit int) ([]model.User, int64, error) {
@@ -143,7 +143,7 @@ var userAuthProjection = bson.M{
 	"siteId":                1,
 	"roles":                 1,
 	"requirePasswordChange": 1,
-	"deactivated":           1,
+	"active":                1,
 	"services":              1,
 }
 
@@ -184,8 +184,8 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 	if fields.Roles != nil {
 		set["roles"] = *fields.Roles
 	}
-	if fields.Deactivated != nil {
-		set["deactivated"] = *fields.Deactivated
+	if fields.Active != nil {
+		set["active"] = *fields.Active
 	}
 	if len(set) == 0 {
 		return nil
@@ -194,7 +194,7 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 	filter := bson.M{"account": account, "siteId": siteID}
 
 	// Deactivation no longer flows through UpdateUser — the handler routes
-	// Deactivated=true to DeactivateAndRevoke instead so the user-flag flip
+	// active=false to DeactivateAndRevoke instead so the user-flag flip
 	// and session-purge run in one Mongo transaction. UpdateUser stays
 	// non-transactional for the remaining patch fields (roles, names).
 	result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": set})
@@ -256,14 +256,14 @@ func (s *storeMongo) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, ac
 	})
 }
 
-// DeactivateAndRevoke atomically sets deactivated=true on the user and
+// DeactivateAndRevoke atomically sets active=false on the user and
 // deletes every session for the account, so a disabled account can't keep a
 // live token. Requires a replica set.
 func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account string) error {
 	filter := bson.M{"account": account, "siteId": siteID}
 
 	return s.withTransaction(ctx, func(ctx context.Context) error {
-		result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"deactivated": true}})
+		result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"active": false}})
 		if err != nil {
 			return fmt.Errorf("deactivate user: %w", err)
 		}

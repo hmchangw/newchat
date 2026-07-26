@@ -38,7 +38,7 @@ const USER = {
   engName: 'Alice',
   chineseName: '爱丽丝',
   roles: ['admin'],
-  deactivated: false,
+  active: true,
   requirePasswordChange: false,
 }
 

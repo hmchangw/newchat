@@ -402,13 +402,14 @@ func TestHandleLogin_UniformErrorBody_NoEnumeration(t *testing.T) {
 			username: "alice", password: "secret",
 		},
 		{
-			name: "deactivated account",
+			name: "inactive account",
 			setupMock: func(st *MockBotplatformStore) {
+				inactive := false
 				u := &model.User{
 					ID: "u2", Account: "deact.uniform.bot", SiteID: "site-a",
-					Roles:       []model.UserRole{model.UserRoleBot},
-					Services:    model.Services{Password: model.PasswordCredentials{Bcrypt: bcryptOf(t, "correct")}},
-					Deactivated: true,
+					Roles:    []model.UserRole{model.UserRoleBot},
+					Services: model.Services{Password: model.PasswordCredentials{Bcrypt: bcryptOf(t, "correct")}},
+					Active:   &inactive,
 				}
 				st.EXPECT().FindUserByAccount(gomock.Any(), "deact.uniform.bot").Return(u, nil)
 			},
@@ -472,16 +473,18 @@ func TestSessionHash_Stable(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestHandleLogin_DeactivatedAccountRejected verifies that a deactivated
-// account with otherwise-valid credentials (correct role, site, and password)
-// is rejected with the same uniform 401 invalid_credentials as wrong-password /
-// unknown-account, and that no session is inserted. It also verifies that an
-// active (non-deactivated) account's login response carries me.active == true.
-func TestHandleLogin_DeactivatedAccountRejected(t *testing.T) {
-	t.Run("deactivated account returns uniform 401, no session", func(t *testing.T) {
+// TestHandleLogin_InactiveAccountRejected verifies that an inactive account
+// (stored active:false) with otherwise-valid credentials (correct role, site,
+// and password) is rejected with the same uniform 401 invalid_credentials as
+// wrong-password / unknown-account, and that no session is inserted. It also
+// verifies that an account with no stored active field counts as active and
+// its login response carries me.active == true.
+func TestHandleLogin_InactiveAccountRejected(t *testing.T) {
+	t.Run("inactive account returns uniform 401, no session", func(t *testing.T) {
 		r, st, _ := newTestRouter(t)
 		u := botUser(t, "deact0000000000ab", "deact.bot", "site-a", "correct")
-		u.Deactivated = true
+		inactive := false
+		u.Active = &inactive
 		st.EXPECT().FindUserByAccount(gomock.Any(), "deact.bot").Return(u, nil)
 		// No InsertSession call expected — must be rejected before session creation.
 
@@ -490,13 +493,13 @@ func TestHandleLogin_DeactivatedAccountRejected(t *testing.T) {
 		assert.Contains(t, w.Body.String(), "invalid_credentials")
 	})
 
-	t.Run("active account me.active is true", func(t *testing.T) {
+	t.Run("missing active field counts as active — me.active is true", func(t *testing.T) {
 		rawToken := strings.Repeat("m", 43)
 		r, st, h := newTestRouter(t)
 		h.tokenGen = fixedTokenGen(rawToken)
 		h.now = stubClock(1)
 		u := botUser(t, "active000000000ab", "active.bot", "site-a", "correct")
-		// Deactivated defaults to false — active account.
+		// Active stays nil — a missing field must read as active.
 		st.EXPECT().FindUserByAccount(gomock.Any(), "active.bot").Return(u, nil)
 		st.EXPECT().InsertSession(gomock.Any(), gomock.Any()).Return(nil)
 		st.EXPECT().DeleteSessionsBeyondCap(gomock.Any(), u.Account, 100).Return(int64(0), nil)
@@ -506,6 +509,6 @@ func TestHandleLogin_DeactivatedAccountRejected(t *testing.T) {
 
 		var resp loginResponse
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		assert.True(t, resp.Data.Me.Active, "me.active must be true for a non-deactivated account")
+		assert.True(t, resp.Data.Me.Active, "me.active must be true when the stored field is absent")
 	})
 }

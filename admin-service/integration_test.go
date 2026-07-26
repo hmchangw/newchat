@@ -198,17 +198,17 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		assert.Equal(t, []model.UserRole{model.UserRoleAdmin}, got.Roles)
 	})
 
-	t.Run("update deactivated on this path does not touch sessions (handler routes Deactivated=true to DeactivateAndRevoke instead)", func(t *testing.T) {
+	t.Run("update active on this path does not touch sessions (handler routes active=false to DeactivateAndRevoke instead)", func(t *testing.T) {
 		sessStore := session.NewMongoStore(db)
 		seedSession(t, db, session.Session{ID: "eve-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 
-		deact := true
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Deactivated: &deact})
+		inactive := false
+		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Active: &inactive})
 		require.NoError(t, err)
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
-		assert.True(t, got.Deactivated)
+		assert.False(t, got.IsActive())
 
 		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
@@ -343,7 +343,7 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 	}
 	require.NoError(t, st.CreateUser(ctx, u))
 
-	t.Run("sets deactivated=true and kills every session for the account atomically", func(t *testing.T) {
+	t.Run("sets active=false and kills every session for the account atomically", func(t *testing.T) {
 		sessStore := session.NewMongoStore(db)
 		seedSession(t, db, session.Session{ID: "gwen-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 		seedSession(t, db, session.Session{ID: "gwen-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
@@ -352,13 +352,14 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 		require.NoError(t, err)
 
 		var raw struct {
-			Deactivated bool `bson:"deactivated"`
+			Active *bool `bson:"active"`
 		}
 		err = db.Collection("users").FindOne(ctx, bson.M{"_id": u.ID},
-			options.FindOne().SetProjection(bson.M{"deactivated": 1}),
+			options.FindOne().SetProjection(bson.M{"active": 1}),
 		).Decode(&raw)
 		require.NoError(t, err)
-		assert.True(t, raw.Deactivated)
+		require.NotNil(t, raw.Active, "deactivation must write an explicit active:false")
+		assert.False(t, *raw.Active)
 
 		sessions, err := sessStore.ListForAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)

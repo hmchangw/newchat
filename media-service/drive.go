@@ -108,7 +108,7 @@ func (h *handler) HandleDriveMembers(c *gin.Context) {
 			ID:       user.ID,
 			Username: user.Account,
 			Name:     user.DisplayName(),
-			Active:   !user.Deactivated,
+			Active:   user.IsActive(),
 		}}
 		resp.Data.Count = 1
 	}

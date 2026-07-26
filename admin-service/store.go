@@ -17,7 +17,7 @@ type UserUpdate struct {
 	EngName     *string
 	ChineseName *string
 	Roles       *[]model.UserRole
-	Deactivated *bool
+	Active      *bool
 }
 
 // AuditEntry records one mutating admin action. Details holds non-secret context
@@ -48,7 +48,7 @@ type AdminStore interface {
 	GetUserByAccount(ctx context.Context, siteID, account string) (*model.User, error)
 	// GetUserForAuth loads a user for password-verification paths (login and
 	// self-service change-password). Returns credential fields (services.password.bcrypt,
-	// roles, deactivated, requirePasswordChange, id, siteId, account) — the ONLY
+	// roles, active, requirePasswordChange, id, siteId, account) — the ONLY
 	// reads of the bcrypt hash in this service. Never call from admin management
 	// endpoints; those must use GetUserByAccount which scrubs the hash.
 	GetUserForAuth(ctx context.Context, siteID, account string) (*model.User, error)
@@ -63,7 +63,7 @@ type AdminStore interface {
 	// writes run in a single Mongo transaction — requires a replica set.
 	UpdateUserPasswordAndRevoke(ctx context.Context, siteID, account, bcryptHash string, requireChange bool, exceptSessionID string) error
 
-	// DeactivateAndRevoke atomically sets deactivated=true on the user AND
+	// DeactivateAndRevoke atomically sets active=false on the user AND
 	// deletes every session for the account. Runs in one Mongo transaction.
 	// Called only for the deactivate branch of updateUser; other UpdateUser
 	// patches (name/roles) stay non-transactional.
