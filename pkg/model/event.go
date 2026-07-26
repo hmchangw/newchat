@@ -529,6 +529,26 @@ const (
 	MessageTypeTeamsMeetStarted = "teams_meet_started"
 )
 
+// systemMessageTypes is the set of Message.Type values denoting a system/event message
+// (not user-authored content). Used for fast membership checks — e.g. excluding system
+// messages from room-list previews. Keep in sync with the MessageType* constants above.
+var systemMessageTypes = map[string]struct{}{
+	MessageTypeRoomCreated:      {},
+	MessageTypeMembersAdded:     {},
+	MessageTypeMemberRemoved:    {},
+	MessageTypeMemberLeft:       {},
+	MessageTypeRoomRenamed:      {},
+	MessageTypeRoomRestricted:   {},
+	MessageTypeTeamsMeetStarted: {},
+}
+
+// IsSystemMessageType reports whether t is a known system-message type. A normal
+// user message has Type == "" and returns false.
+func IsSystemMessageType(t string) bool {
+	_, ok := systemMessageTypes[t]
+	return ok
+}
+
 const (
 	// AsyncJobStatusOK indicates a successful async job result.
 	AsyncJobStatusOK = "ok"
