@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -795,4 +796,65 @@ func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", m.ID)
+}
+
+func TestNew_DefaultHTTPTimeout(t *testing.T) {
+	// The default bounds every Graph request end to end; services that need a
+	// longer budget opt in via WithHTTPTimeout rather than editing this.
+	g := New(Config{TenantID: "t"}).(*graphClient)
+	assert.Equal(t, 30*time.Second, g.httpClient.Timeout)
+}
+
+func TestWithHTTPTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{name: "raises the default", timeout: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "lowers the default", timeout: 5 * time.Second, want: 5 * time.Second},
+		{name: "zero keeps the default", timeout: 0, want: 30 * time.Second},
+		{name: "negative keeps the default", timeout: -1 * time.Second, want: 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := New(Config{TenantID: "t"}, WithHTTPTimeout(tt.timeout)).(*graphClient)
+			assert.Equal(t, tt.want, g.httpClient.Timeout)
+		})
+	}
+}
+
+func TestWithHTTPTimeout_SurvivesProxyAndTLSSkipVerify(t *testing.T) {
+	// teams-chat-sync builds its client with all three knobs at once; the
+	// timeout must not be dropped by the transport rewrites those two perform.
+	c, err := NewChatsClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL:              "http://proxy.corp:8080",
+			TLSInsecureSkipVerify: true,
+		},
+		WithHTTPTimeout(90*time.Second),
+	)
+	require.NoError(t, err)
+	g := c.(*graphClient)
+	assert.Equal(t, 90*time.Second, g.httpClient.Timeout)
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.Proxy, "proxy must still be configured alongside the timeout")
+	require.NotNil(t, tr.TLSClientConfig)
+	assert.True(t, tr.TLSClientConfig.InsecureSkipVerify, "TLS opt-out must survive the timeout option")
+}
+
+func TestWithHTTPTimeout_AppliesToROPCClients(t *testing.T) {
+	// The presence and directory ROPC clients wrap the same *http.Client New
+	// builds, so the option must reach them too.
+	p, err := NewPresenceClient(Config{TenantID: "t"}, ROPCCredentials{Username: "u", Password: "p"},
+		WithHTTPTimeout(45*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Second, p.(*presenceClient).hc.Timeout)
+
+	d, err := NewDirectoryROPCClient(Config{TenantID: "t"}, ROPCCredentials{Username: "u", Password: "p"},
+		WithHTTPTimeout(45*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Second, d.(*directoryClient).hc.Timeout)
 }

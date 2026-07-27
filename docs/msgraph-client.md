@@ -32,6 +32,22 @@ When the Teams credentials are unset, the deep-link call RPCs still work (they
 need only `TEAMS_EMAIL_DOMAIN`); the meetings RPC returns a not-configured
 error until the credentials are set.
 
+## Request timeout
+
+Every client `New` builds carries a **30s** `http.Client.Timeout`, which bounds
+one request end to end — connect, TLS handshake, response headers, body read —
+and covers the token fetch too. Exceeding it surfaces as
+`Client.Timeout exceeded while awaiting headers`, distinct from a caller `ctx`
+deadline. Only 429/503 are retried, so a transport timeout aborts the caller's
+whole pagination walk.
+
+Raise it per client with `WithHTTPTimeout(d)` (values `<= 0` keep the default).
+The batch sync jobs do, via `GRAPH_HTTP_TIMEOUT` (default `60s`):
+`teams-chat-sync`, `teams-chat-member-sync`, `teams-user-sync`, `teams-hr-sync`.
+Their Graph queries walk wide `$filter`/`$top` pages through an on-prem
+TLS-intercepting proxy, where waiting beats failing the run. `room-service` and
+`user-presence-service` are latency-sensitive and stay at the 30s default.
+
 ## Auth flow
 
 1. `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` with
@@ -107,7 +123,9 @@ takes options that point it at local stub servers:
 
 - `WithTokenURL(url)` — override the OAuth token endpoint.
 - `WithBaseURL(url)` — override the Graph API base URL.
-- `WithHTTPClient(c)` — inject a custom `*http.Client`.
+- `WithHTTPClient(c)` — inject a custom `*http.Client`. Note this **replaces**
+  the client `New` built, dropping the `TLSInsecureSkipVerify` transport — use
+  `WithHTTPTimeout` rather than a hand-rolled client just to change the timeout.
 
 `pkg/msgraph/msgraph_test.go` uses `httptest.NewServer` to stub **both** the
 token endpoint and the Graph API, covering: success, idempotent-same-externalId,

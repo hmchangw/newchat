@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // config is teams-hr-sync's environment configuration. The binary runs
@@ -24,6 +25,11 @@ type config struct {
 	// GraphTLSInsecureSkipVerify disables Graph TLS verification. Opt-in for
 	// on-prem gateways with self-signed certs; leave false in prod.
 	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
+	// GraphHTTPTimeout bounds a single Graph request end to end (connect, TLS,
+	// headers, body). Defaults above the msgraph package default because a
+	// 500-member group page can be slow to return headers, and a timeout
+	// aborts the whole member walk.
+	GraphHTTPTimeout time.Duration `env:"GRAPH_HTTP_TIMEOUT" envDefault:"60s"`
 
 	// SyncGroups is the JSON list of Graph groups to sync, each mapped to a
 	// site: [{"groupId":"…","siteId":"…"}]. Parsed via parseSyncGroups.

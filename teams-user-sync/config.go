@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // config is teams-user-sync's environment configuration. The binary runs
 // exactly one sync per invocation — scheduling and overlap prevention are
 // owned by the Kubernetes CronJob that triggers it (concurrencyPolicy:
@@ -21,6 +23,11 @@ type config struct {
 	// host, e.g. "http://proxy.corp:8080". Empty falls back to the standard proxy
 	// env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
+	// GraphHTTPTimeout bounds a single Graph request end to end (connect, TLS,
+	// headers, body). Defaults above the msgraph package default because a
+	// 500-user directory page through the on-prem proxy can be slow to return
+	// headers, and a timeout aborts the whole directory walk.
+	GraphHTTPTimeout time.Duration `env:"GRAPH_HTTP_TIMEOUT" envDefault:"60s"`
 
 	// Two Mongo clients, one per lane: the teams_user diff + hr lookup read
 	// through a secondary-preferred read client, the teams_user upserts write

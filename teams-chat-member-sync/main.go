@@ -45,6 +45,11 @@ type Config struct {
 	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
 	// proxy env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
+	// GraphHTTPTimeout bounds a single Graph request end to end (connect, TLS,
+	// headers, body). Defaults above the msgraph package default because the
+	// on-prem TLS-intercepting proxy adds latency and a timeout aborts that
+	// chat's member fetch, since only 429/503 are retried.
+	GraphHTTPTimeout time.Duration `env:"GRAPH_HTTP_TIMEOUT" envDefault:"60s"`
 }
 
 func main() {
@@ -105,7 +110,8 @@ func run() error {
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
-	}, msgraph.WithMaxIdleConns(cfg.MaxWorkers))
+	}, msgraph.WithMaxIdleConns(cfg.MaxWorkers),
+		msgraph.WithHTTPTimeout(cfg.GraphHTTPTimeout))
 	if err != nil {
 		return fmt.Errorf("build chat members client: %w", err)
 	}

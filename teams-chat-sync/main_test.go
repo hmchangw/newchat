@@ -128,3 +128,26 @@ func TestValidateConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_GraphHTTPTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{name: "defaults to 60s", env: "", want: 60 * time.Second},
+		{name: "override raises it", env: "3m", want: 3 * time.Minute},
+		{name: "override lowers it", env: "20s", want: 20 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			if tt.env != "" {
+				t.Setenv("GRAPH_HTTP_TIMEOUT", tt.env)
+			}
+			cfg, err := env.ParseAs[Config]()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.GraphHTTPTimeout)
+		})
+	}
+}

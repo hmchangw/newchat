@@ -145,6 +145,9 @@ const (
 	// tokenExpirySkew is subtracted from the token's reported lifetime so the
 	// cached token is refreshed before the server-side expiry.
 	tokenExpirySkew = 60 * time.Second
+	// defaultHTTPTimeout bounds a single Graph request end to end. Override per
+	// client via WithHTTPTimeout.
+	defaultHTTPTimeout = 30 * time.Second
 	// defaultUserAgent is sent on every app-only and presence Graph request when
 	// Config.UserAgent is empty. Microsoft Graph rejects requests without a
 	// User-Agent header, and a fronting corporate proxy/WAF commonly rejects
@@ -228,11 +231,27 @@ func WithMaxIdleConns(n int) Option {
 	}
 }
 
+// WithHTTPTimeout overrides the per-request timeout (defaultHTTPTimeout when
+// unset). It bounds a single Graph request end to end — connect, TLS
+// handshake, response headers, body read — and applies to the OAuth2 token
+// fetch as well. Raise it for batch/sync jobs whose Graph queries are slow to
+// return headers (a wide $filter walk, or a TLS-intercepting proxy adding
+// latency), where waiting is strictly better than failing the run: the chats
+// path retries only 429/503, so a transport timeout aborts the caller's whole
+// walk. Values <= 0 leave the default in place.
+func WithHTTPTimeout(d time.Duration) Option {
+	return func(g *graphClient) {
+		if d > 0 {
+			g.httpClient.Timeout = d
+		}
+	}
+}
+
 // New constructs a live Graph client for the given config.
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func New(cfg Config, opts ...Option) Client {
-	hc := &http.Client{Timeout: 30 * time.Second}
+	hc := &http.Client{Timeout: defaultHTTPTimeout}
 	if cfg.TLSInsecureSkipVerify {
 		// Clone the default transport so proxy (ProxyFromEnvironment) and dial
 		// settings survive — an on-prem Graph behind a self-signed cert is the

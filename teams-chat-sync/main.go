@@ -52,6 +52,12 @@ type Config struct {
 	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
 	// proxy env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
+	// GraphHTTPTimeout bounds a single Graph request end to end (connect, TLS,
+	// headers, body). Defaults above the msgraph package default because a
+	// list-chats page walks a wide $filter window through the on-prem proxy and
+	// can be slow to return headers; a timeout there aborts that user's whole
+	// walk, since only 429/503 are retried.
+	GraphHTTPTimeout time.Duration `env:"GRAPH_HTTP_TIMEOUT" envDefault:"60s"`
 }
 
 func main() {
@@ -119,7 +125,8 @@ func run() error {
 	}, msgraph.WithChatsPageSize(cfg.GraphChatsPageSize),
 		// Each worker issues one sequential Graph request at a time, so keep one
 		// warm idle connection per worker.
-		msgraph.WithMaxIdleConns(cfg.MaxWorkers))
+		msgraph.WithMaxIdleConns(cfg.MaxWorkers),
+		msgraph.WithHTTPTimeout(cfg.GraphHTTPTimeout))
 	if err != nil {
 		return fmt.Errorf("build chats client: %w", err)
 	}

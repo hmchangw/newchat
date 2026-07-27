@@ -69,7 +69,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var opts []msgraph.Option
+	opts := []msgraph.Option{msgraph.WithHTTPTimeout(cfg.GraphHTTPTimeout)}
 	if cfg.GraphBaseURL != "" {
 		opts = append(opts, msgraph.WithBaseURL(cfg.GraphBaseURL))
 	}

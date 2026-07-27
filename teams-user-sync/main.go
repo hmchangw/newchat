@@ -63,7 +63,7 @@ func run() error {
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
-	})
+	}, msgraph.WithHTTPTimeout(cfg.GraphHTTPTimeout))
 	if err != nil {
 		return fmt.Errorf("build user lister client: %w", err)
 	}
