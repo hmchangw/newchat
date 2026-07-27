@@ -100,17 +100,13 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 }
 
 func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) searchindex.SpotlightDoc {
-	var joinedAt int64
-	if evt.JoinedAt > 0 {
-		joinedAt = evt.JoinedAt
-	}
 	return searchindex.NewSpotlightDoc(searchindex.SpotlightFields{
 		UserAccount: account,
 		RoomID:      evt.RoomID,
 		RoomName:    evt.RoomName,
 		RoomType:    string(evt.RoomType),
 		SiteID:      evt.SiteID,
-		JoinedAt:    convertJoinedAt(joinedAt),
+		JoinedAt:    convertJoinedAt(evt.JoinedAt),
 	})
 }
 

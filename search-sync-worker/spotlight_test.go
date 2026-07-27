@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,18 @@ func baseInboxMemberEvent() *model.InboxMemberEvent {
 		JoinedAt:  joinedAt,
 		Timestamp: joinedAt,
 	}
+}
+
+func TestNewSpotlightSearchIndex_JoinedAtConverted(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng", JoinedAt: 1735689600000}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), doc.JoinedAt)
+}
+
+func TestNewSpotlightSearchIndex_ZeroJoinedAtStaysZeroTime(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng", JoinedAt: 0}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.True(t, doc.JoinedAt.IsZero())
 }
 
 func TestSpotlightCollection_Metadata(t *testing.T) {

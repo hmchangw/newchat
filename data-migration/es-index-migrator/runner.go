@@ -43,6 +43,9 @@ func runWithWorkerPool[T any](ctx context.Context, concurrency int, items []T, f
 // f is fed by up to WorkerConcurrency room workers concurrently; mu
 // serializes every f.Add call, matching flusher.go's documented contract
 // that it is not safe for concurrent use without external synchronization.
+// A message that fails to build (malformed row) is logged and recorded via
+// f.RecordSkipped rather than aborting the room — otherwise it would vanish
+// with no trace in the run's exit code (see flusher.go's RecordSkipped doc).
 //
 //nolint:gocritic // hugeParam: cfg is passed by value to match the task API contract (also consumed by main.go, Task 15); struct copy overhead is acceptable, not a hot path
 func runMessages(ctx context.Context, subs SubscriptionSource, messages MessageSource, f *flusher, cfg config) error {
@@ -55,12 +58,13 @@ func runMessages(ctx context.Context, subs SubscriptionSource, messages MessageS
 	runErr := runWithWorkerPool(ctx, cfg.WorkerConcurrency, roomIDs, func(ctx context.Context, roomID string) error {
 		err := messages.StreamMessages(ctx, cfg.SiteID, roomID, cfg.MigrationStartAt, cfg.MigrationEndAt, func(msg cassandra.Message) error {
 			action, err := buildMessageAction(msg, cfg.MsgIndexPrefix)
-			if err != nil {
-				slog.Error("skip message: build action failed", "roomId", roomID, "error", err)
-				return nil
-			}
 			mu.Lock()
 			defer mu.Unlock()
+			if err != nil {
+				slog.Error("skip message: build action failed", "roomId", roomID, "error", err)
+				f.RecordSkipped(1)
+				return nil
+			}
 			return f.Add(ctx, action)
 		})
 		if err != nil {
@@ -81,7 +85,8 @@ func runMessages(ctx context.Context, subs SubscriptionSource, messages MessageS
 // read). Flush always runs, matching runMessages' errors.Join reasoning.
 //
 // f is fed by up to WorkerConcurrency subscription workers concurrently;
-// mu serializes every f.Add call per flusher.go's documented contract.
+// mu serializes every f.Add call per flusher.go's documented contract. A
+// subscription that fails to build is logged and recorded via f.RecordSkipped.
 //
 //nolint:gocritic // hugeParam: cfg is passed by value to match the task API contract (also consumed by main.go, Task 15); struct copy overhead is acceptable, not a hot path
 func runSpotlight(ctx context.Context, subs SubscriptionSource, f *flusher, cfg config) error {
@@ -93,12 +98,13 @@ func runSpotlight(ctx context.Context, subs SubscriptionSource, f *flusher, cfg 
 	var mu sync.Mutex
 	runErr := runWithWorkerPool(ctx, cfg.WorkerConcurrency, rows, func(ctx context.Context, sub model.Subscription) error {
 		action, err := buildSpotlightAction(sub, cfg.SpotlightIndex)
-		if err != nil {
-			slog.Error("skip subscription: build spotlight action failed", "subscriptionId", sub.ID, "error", err)
-			return nil
-		}
 		mu.Lock()
 		defer mu.Unlock()
+		if err != nil {
+			slog.Error("skip subscription: build spotlight action failed", "subscriptionId", sub.ID, "error", err)
+			f.RecordSkipped(1)
+			return nil
+		}
 		return f.Add(ctx, action)
 	})
 
@@ -111,7 +117,9 @@ func runSpotlight(ctx context.Context, subs SubscriptionSource, f *flusher, cfg 
 // errors.Join reasoning.
 //
 // f is fed by up to WorkerConcurrency subscription workers concurrently;
-// mu serializes every f.Add call per flusher.go's documented contract.
+// mu serializes every f.Add call per flusher.go's documented contract. A
+// subscription that fails to build (not a bot-skip — see buildUserRoomAction)
+// is logged and recorded via f.RecordSkipped.
 //
 //nolint:gocritic // hugeParam: cfg is passed by value to match the task API contract (also consumed by main.go, Task 15); struct copy overhead is acceptable, not a hot path
 func runUserRoom(ctx context.Context, subs SubscriptionSource, f *flusher, cfg config) error {
@@ -123,12 +131,13 @@ func runUserRoom(ctx context.Context, subs SubscriptionSource, f *flusher, cfg c
 	var mu sync.Mutex
 	runErr := runWithWorkerPool(ctx, cfg.WorkerConcurrency, rows, func(ctx context.Context, sub model.Subscription) error {
 		action, err := buildUserRoomAction(sub, cfg.UserRoomIndex)
-		if err != nil {
-			slog.Error("skip subscription: build user-room action failed", "subscriptionId", sub.ID, "error", err)
-			return nil
-		}
 		mu.Lock()
 		defer mu.Unlock()
+		if err != nil {
+			slog.Error("skip subscription: build user-room action failed", "subscriptionId", sub.ID, "error", err)
+			f.RecordSkipped(1)
+			return nil
+		}
 		return f.Add(ctx, action)
 	})
 

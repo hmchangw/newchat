@@ -82,5 +82,11 @@ func (f *flusher) Flush(ctx context.Context) error {
 
 // FailedCount returns the running total of bulk items that failed across
 // every Flush call so far (including ones counted when Flush itself
-// returned a request-level error).
+// returned a request-level error), plus any rows recorded via RecordSkipped.
 func (f *flusher) FailedCount() int { return f.failedCount }
+
+// RecordSkipped adds n to the failure total for rows that never reached ES
+// at all — e.g. a build-action error (malformed source row). Without this,
+// a run that silently drops rows before the bulk call would still report
+// FailedCount() == 0 and exit 0, masking incomplete data.
+func (f *flusher) RecordSkipped(n int) { f.failedCount += n }

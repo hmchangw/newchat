@@ -72,6 +72,18 @@ func TestFlusher_HardFailureIsCounted(t *testing.T) {
 	assert.Equal(t, 1, f.FailedCount())
 }
 
+func TestFlusher_RecordSkippedIncrementsFailedCount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockESStore(ctrl)
+	// no EXPECT().Bulk(...) — a build-time skip never reaches ES
+
+	f := newFlusher(store, 10)
+	f.RecordSkipped(1)
+	f.RecordSkipped(2)
+
+	assert.Equal(t, 3, f.FailedCount(), "a row skipped before it ever reached ES must still count toward the run's failure total")
+}
+
 func TestFlusher_FlushOnEmptyBufferIsANoOp(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockESStore(ctrl)

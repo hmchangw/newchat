@@ -102,6 +102,64 @@ func TestRunUserRoom_SkipsBotSubscriptionsWithoutError(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRunMessages_BuildFailureIsRecordedAsSkipped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := NewMockSubscriptionSource(ctrl)
+	messages := NewMockMessageSource(ctrl)
+	store := NewMockESStore(ctrl)
+	cfg := testConfig()
+
+	subs.EXPECT().RoomIDs(gomock.Any(), cfg.SiteID).Return([]string{"room1"}, nil)
+	messages.EXPECT().StreamMessages(gomock.Any(), cfg.SiteID, "room1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, _, _ time.Time, fn func(cassandra.Message) error) error {
+			// Zero CreatedAt fails buildMessageAction's own validation.
+			return fn(cassandra.Message{MessageID: "m1", RoomID: "room1"})
+		})
+	// no EXPECT().Bulk(...) — a build failure never reaches ES
+
+	f := newFlusher(store, 500)
+	err := runMessages(context.Background(), subs, messages, f, cfg)
+
+	require.NoError(t, err, "a build failure is skipped, not a run-aborting error")
+	assert.Equal(t, 1, f.FailedCount(), "a message that fails to build must still count toward the run's failure total")
+}
+
+func TestRunSpotlight_BuildFailureIsRecordedAsSkipped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := NewMockSubscriptionSource(ctrl)
+	store := NewMockESStore(ctrl)
+	cfg := testConfig()
+
+	subs.EXPECT().Subscriptions(gomock.Any(), cfg.SiteID).Return([]model.Subscription{
+		{ID: "s1", RoomID: "", User: model.SubscriptionUser{Account: "alice"}, JoinedAt: time.Now()}, // empty RoomID fails validation
+	}, nil)
+	// no EXPECT().Bulk(...) — a build failure never reaches ES
+
+	f := newFlusher(store, 500)
+	err := runSpotlight(context.Background(), subs, f, cfg)
+
+	require.NoError(t, err, "a build failure is skipped, not a run-aborting error")
+	assert.Equal(t, 1, f.FailedCount(), "a subscription that fails to build must still count toward the run's failure total")
+}
+
+func TestRunUserRoom_BuildFailureIsRecordedAsSkipped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := NewMockSubscriptionSource(ctrl)
+	store := NewMockESStore(ctrl)
+	cfg := testConfig()
+
+	subs.EXPECT().Subscriptions(gomock.Any(), cfg.SiteID).Return([]model.Subscription{
+		{ID: "s1", RoomID: "", User: model.SubscriptionUser{Account: "alice"}, JoinedAt: time.Now()}, // empty RoomID fails validation
+	}, nil)
+	// no EXPECT().Bulk(...) — a build failure never reaches ES
+
+	f := newFlusher(store, 500)
+	err := runUserRoom(context.Background(), subs, f, cfg)
+
+	require.NoError(t, err, "a build failure is skipped, not a run-aborting error")
+	assert.Equal(t, 1, f.FailedCount(), "a subscription that fails to build must still count toward the run's failure total")
+}
+
 func TestRunSpotlight_EmptySubscriptionsIsANoOp(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := NewMockSubscriptionSource(ctrl)
