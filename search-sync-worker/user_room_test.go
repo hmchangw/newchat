@@ -13,12 +13,12 @@ import (
 )
 
 func TestUserRoomCollection_TemplateName_DerivesFromEnv(t *testing.T) {
-	c := newUserRoomCollection("user-room-mv-site-a")
+	c := newUserRoomCollection("user-room-mv-site-a", false)
 	assert.Equal(t, "user-room-mv-site-a_template", c.TemplateName())
 }
 
 func TestUserRoomCollection_Metadata(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 
 	assert.Equal(t, "user-room-sync", coll.ConsumerName())
 	assert.NotNil(t, coll.TemplateBody())
@@ -41,7 +41,7 @@ func TestUserRoomCollection_Metadata(t *testing.T) {
 }
 
 func TestUserRoomCollection_TemplateBody_PatternIsExactName(t *testing.T) {
-	c := newUserRoomCollection("user-room-mv-site-a")
+	c := newUserRoomCollection("user-room-mv-site-a", false)
 	body := c.TemplateBody()
 	require.NotNil(t, body)
 
@@ -54,7 +54,7 @@ func TestUserRoomCollection_TemplateBody_PatternIsExactName(t *testing.T) {
 }
 
 func TestUserRoomCollection_TemplateBody(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	body := coll.TemplateBody()
 	require.NotNil(t, body)
 
@@ -88,7 +88,7 @@ func TestUserRoomCollection_TemplateBody(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689600000
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, ts)
@@ -170,7 +170,7 @@ func TestUserRoomCollection_BuildAction_Bot_Indexed(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_MemberAdded_Restricted(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689700000
 	const hssVal int64 = 1735689500000
@@ -208,7 +208,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded_Restricted(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689700000
 	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, ts)
@@ -304,7 +304,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testin
 // seeded with `restrictedRooms[rid] = hss` and an empty `rooms[]`. All
 // actions share the same HSS (event-level field).
 func TestUserRoomCollection_BuildAction_BulkMixed_AllRestricted(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob", "carol"}
 	const hssVal int64 = 1735689500000
@@ -336,7 +336,7 @@ func TestUserRoomCollection_BuildAction_BulkMixed_AllRestricted(t *testing.T) {
 // restrictedRooms and guards with the LWW timestamp; the remove script evicts
 // from both slots regardless of which currently holds the rid.
 func TestUserRoomCollection_StoredScripts(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	scripts := coll.StoredScripts()
 	require.Len(t, scripts, 2)
 
@@ -372,7 +372,7 @@ func TestUserRoomCollection_StoredScripts(t *testing.T) {
 // with N accounts produces N distinct user-room update actions (each keyed
 // by a different account).
 func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob", "carol"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 12345)
@@ -394,7 +394,7 @@ func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 
 	t.Run("malformed inbox event", func(t *testing.T) {
 		_, err := coll.BuildAction([]byte("{invalid"))

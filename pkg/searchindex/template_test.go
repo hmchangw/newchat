@@ -188,7 +188,7 @@ func TestUserRoomTemplateName(t *testing.T) {
 }
 
 func TestUserRoomTemplateBody(t *testing.T) {
-	body := searchindex.UserRoomTemplateBody("user-room-site-a")
+	body := searchindex.UserRoomTemplateBody("user-room-site-a", false)
 	require.NotNil(t, body)
 
 	var parsed map[string]any
@@ -223,4 +223,16 @@ func TestUserRoomTemplateBody(t *testing.T) {
 	idx := tmpl["settings"].(map[string]any)["index"].(map[string]any)
 	assert.Equal(t, float64(1), idx["number_of_shards"])
 	assert.Equal(t, float64(1), idx["number_of_replicas"])
+}
+
+func TestUserRoomTemplateBody_DevMode(t *testing.T) {
+	body := searchindex.UserRoomTemplateBody("user-room-site-a", true)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(body, &parsed))
+
+	tmpl := parsed["template"].(map[string]any)
+	idx := tmpl["settings"].(map[string]any)["index"].(map[string]any)
+	assert.Equal(t, float64(0), idx["number_of_replicas"],
+		"a single-node dev ES cluster can never satisfy a replica shard")
 }

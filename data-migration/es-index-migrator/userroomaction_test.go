@@ -74,3 +74,8 @@ func TestBuildUserRoomAction_MissingRoomIDIsAnError(t *testing.T) {
 	_, err := buildUserRoomAction(model.Subscription{User: model.SubscriptionUser{Account: "alice"}}, "user-room-a")
 	require.Error(t, err)
 }
+
+func TestBuildUserRoomAction_MissingAccountIsAnError(t *testing.T) {
+	_, err := buildUserRoomAction(model.Subscription{RoomID: "room1"}, "user-room-a")
+	require.Error(t, err)
+}

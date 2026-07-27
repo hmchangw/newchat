@@ -208,7 +208,8 @@ func TestNewMessageSearchIndex(t *testing.T) {
 		},
 		SiteID: "site-a",
 	}
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
 	assert.Equal(t, "msg-1", doc.MessageID)
 	assert.Equal(t, "r1", doc.RoomID)
 	assert.Equal(t, "site-a", doc.SiteID)
@@ -236,7 +237,8 @@ func TestNewMessageSearchIndex_EditedUpdatedOmittedWhenNil(t *testing.T) {
 		},
 		SiteID: "site-a",
 	}
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
 	assert.Nil(t, doc.EditedAt)
 	assert.Nil(t, doc.UpdatedAt)
 
@@ -262,7 +264,8 @@ func TestNewMessageSearchIndex_TShowOmittedWhenFalse(t *testing.T) {
 		},
 		SiteID: "site-a",
 	}
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
 	assert.False(t, doc.TShow)
 
 	data, err := json.Marshal(doc)

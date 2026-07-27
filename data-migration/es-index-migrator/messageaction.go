@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
@@ -22,7 +23,7 @@ func buildMessageAction(msg cassandra.Message, indexPrefix string) (searchengine
 		return searchengine.BulkAction{}, fmt.Errorf("build message action: zero createdAt for message %s", msg.MessageID)
 	}
 
-	doc := searchindex.NewMessageDoc(searchindex.MessageFields{
+	doc, docErr := searchindex.NewMessageDoc(searchindex.MessageFields{
 		MessageID:             msg.MessageID,
 		RoomID:                msg.RoomID,
 		SiteID:                msg.SiteID,
@@ -38,6 +39,12 @@ func buildMessageAction(msg cassandra.Message, indexPrefix string) (searchengine
 		Attachments:           msg.Attachments,
 		Card:                  msg.Card,
 	})
+	if docErr != nil {
+		// Not fatal — the doc is still fully usable, just missing the skipped
+		// attachment(s). Logged so silent data loss across a bulk backfill is observable.
+		slog.Warn("message doc built with skipped attachments", "error", docErr,
+			"messageId", msg.MessageID, "roomId", msg.RoomID)
+	}
 
 	body, err := json.Marshal(doc)
 	if err != nil {

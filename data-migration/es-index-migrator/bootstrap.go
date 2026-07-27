@@ -32,7 +32,7 @@ func bootstrapPrerequisites(ctx context.Context, engine TemplateStore, cfg *conf
 	}{
 		{searchindex.MessageTemplateName(cfg.MsgIndexPrefix), searchindex.MessageTemplateBody(cfg.MsgIndexPrefix, false)},
 		{searchindex.SpotlightTemplateName(cfg.SpotlightIndex), searchindex.SpotlightTemplateBody(cfg.SpotlightIndex, false)},
-		{searchindex.UserRoomTemplateName(cfg.UserRoomIndex), searchindex.UserRoomTemplateBody(cfg.UserRoomIndex)},
+		{searchindex.UserRoomTemplateName(cfg.UserRoomIndex), searchindex.UserRoomTemplateBody(cfg.UserRoomIndex, false)},
 	}
 	for _, tpl := range templates {
 		if err := engine.UpsertTemplate(ctx, tpl.name, tpl.body); err != nil {

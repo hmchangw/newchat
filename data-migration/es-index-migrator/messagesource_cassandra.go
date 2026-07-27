@@ -88,13 +88,12 @@ func (s *cassandraMessageSource) StreamMessages(
 				row.SiteID = siteID
 			}
 			if err := rejectEncryptedMessage(&row); err != nil {
-				_ = iter.Close()
-				return err
+				return errors.Join(err, iter.Close())
 			}
 
 			if err := fn(row); err != nil {
-				_ = iter.Close()
-				return fmt.Errorf("handle message %s in room %s: %w", row.MessageID, roomID, err)
+				wrapped := fmt.Errorf("handle message %s in room %s: %w", row.MessageID, roomID, err)
+				return errors.Join(wrapped, iter.Close())
 			}
 
 			row = cassandra.Message{}

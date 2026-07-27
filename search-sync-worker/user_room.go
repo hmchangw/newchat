@@ -14,10 +14,11 @@ import (
 type userRoomCollection struct {
 	inboxMemberCollection
 	indexName string
+	devMode   bool
 }
 
-func newUserRoomCollection(indexName string) *userRoomCollection {
-	return &userRoomCollection{indexName: indexName}
+func newUserRoomCollection(indexName string, devMode bool) *userRoomCollection {
+	return &userRoomCollection{indexName: indexName, devMode: devMode}
 }
 
 func (c *userRoomCollection) ConsumerName() string {
@@ -29,7 +30,7 @@ func (c *userRoomCollection) TemplateName() string {
 }
 
 func (c *userRoomCollection) TemplateBody() json.RawMessage {
-	return searchindex.UserRoomTemplateBody(c.indexName)
+	return searchindex.UserRoomTemplateBody(c.indexName, c.devMode)
 }
 
 // StoredScripts registers the add/remove painless scripts as ES stored scripts; BuildAction

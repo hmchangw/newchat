@@ -34,17 +34,22 @@ func TestBootstrapPrerequisites_RegistersAllThreeTemplatesAndBothScripts(t *test
 	require.NoError(t, err)
 }
 
+var (
+	errStubTemplateFailure = errors.New("es down")
+	errStubScriptFailure   = errors.New("script rejected")
+)
+
 func TestBootstrapPrerequisites_TemplateErrorAbortsAndIsWrapped(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	engine := NewMockTemplateStore(ctrl)
 	cfg := testConfig()
 
 	engine.EXPECT().UpsertTemplate(gomock.Any(), searchindex.MessageTemplateName(cfg.MsgIndexPrefix), gomock.Any()).
-		Return(errors.New("es down"))
+		Return(errStubTemplateFailure)
 
 	err := bootstrapPrerequisites(context.Background(), engine, &cfg)
 
-	require.Error(t, err)
+	require.ErrorIs(t, err, errStubTemplateFailure, "the underlying failure's identity must survive the wrap")
 }
 
 func TestBootstrapPrerequisites_ScriptErrorIsWrapped(t *testing.T) {
@@ -53,9 +58,9 @@ func TestBootstrapPrerequisites_ScriptErrorIsWrapped(t *testing.T) {
 	cfg := testConfig()
 
 	engine.EXPECT().UpsertTemplate(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(3)
-	engine.EXPECT().PutScript(gomock.Any(), searchindex.AddRoomScriptID, gomock.Any()).Return(errors.New("script rejected"))
+	engine.EXPECT().PutScript(gomock.Any(), searchindex.AddRoomScriptID, gomock.Any()).Return(errStubScriptFailure)
 
 	err := bootstrapPrerequisites(context.Background(), engine, &cfg)
 
-	require.Error(t, err)
+	require.ErrorIs(t, err, errStubScriptFailure, "the underlying failure's identity must survive the wrap")
 }

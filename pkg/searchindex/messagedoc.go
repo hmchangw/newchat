@@ -59,10 +59,13 @@ type MessageFields struct {
 	Card        *cassandra.Card
 }
 
-// NewMessageDoc builds the ES document for the messages index from f.
+// NewMessageDoc builds the ES document for the messages index from f. The
+// returned doc is always complete and usable; a non-nil error only signals
+// that one or more of f.Attachments were malformed and skipped (see
+// cassandra.DecodeAttachments) — callers should log it, not treat it as fatal.
 //
 //nolint:gocritic // hugeParam: f is passed by value to satisfy the builder interface; struct copy is negligible for 200 bytes
-func NewMessageDoc(f MessageFields) MessageDoc {
+func NewMessageDoc(f MessageFields) (MessageDoc, error) {
 	doc := MessageDoc{
 		MessageID:             f.MessageID,
 		RoomID:                f.RoomID,
@@ -79,7 +82,7 @@ func NewMessageDoc(f MessageFields) MessageDoc {
 		TShow:                 f.TShow,
 	}
 
-	attachments, _ := cassandra.DecodeAttachments(f.Attachments)
+	attachments, skipped := cassandra.DecodeAttachments(f.Attachments)
 	doc.Attachments = attachments
 	var attachmentText []string
 	for i := range attachments {
@@ -98,7 +101,11 @@ func NewMessageDoc(f MessageFields) MessageDoc {
 		doc.CardData = string(f.Card.Data)
 	}
 
-	return doc
+	var err error
+	if skipped > 0 {
+		err = fmt.Errorf("skipped %d malformed attachment(s) for message %s", skipped, f.MessageID)
+	}
+	return doc, err
 }
 
 // MessageIndexName returns the monthly index name for a message with the

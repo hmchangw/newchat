@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchindex"
@@ -24,7 +25,8 @@ func TestNewMessageDoc(t *testing.T) {
 		TShow:       true,
 	}
 
-	doc := searchindex.NewMessageDoc(f)
+	doc, err := searchindex.NewMessageDoc(f)
+	require.NoError(t, err)
 
 	assert.Equal(t, "msg1", doc.MessageID)
 	assert.Equal(t, "room1", doc.RoomID)
@@ -41,7 +43,8 @@ func TestNewMessageDoc(t *testing.T) {
 }
 
 func TestNewMessageDoc_IsBotFromAccountSuffix(t *testing.T) {
-	doc := searchindex.NewMessageDoc(searchindex.MessageFields{UserAccount: "helper.bot"})
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{UserAccount: "helper.bot"})
+	require.NoError(t, err)
 	assert.True(t, doc.IsBot)
 }
 
@@ -49,27 +52,33 @@ func TestNewMessageDoc_AttachmentsDecodedAndTextJoined(t *testing.T) {
 	blob1, _ := jsonMarshal(cassandra.Attachment{Title: "invoice.pdf", Description: "Q3 numbers"})
 	blob2, _ := jsonMarshal(cassandra.Attachment{Title: "logo.png"})
 
-	doc := searchindex.NewMessageDoc(searchindex.MessageFields{
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{
 		MessageID:   "msg1",
 		Attachments: [][]byte{blob1, blob2},
 	})
 
+	require.NoError(t, err)
 	assert.Len(t, doc.Attachments, 2)
 	assert.Equal(t, "invoice.pdf Q3 numbers logo.png", doc.AttachmentText)
 }
 
 func TestNewMessageDoc_MalformedAttachmentBlobSkippedNotFatal(t *testing.T) {
 	good, _ := jsonMarshal(cassandra.Attachment{Title: "ok.png"})
-	doc := searchindex.NewMessageDoc(searchindex.MessageFields{
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{
+		MessageID:   "msg1",
 		Attachments: [][]byte{[]byte("not json"), good},
 	})
-	assert.Len(t, doc.Attachments, 1)
+
+	require.Error(t, err, "a malformed attachment blob must be surfaced, not silently dropped")
+	assert.Contains(t, err.Error(), "msg1")
+	assert.Len(t, doc.Attachments, 1, "the doc is still usable — only the malformed blob is skipped")
 	assert.Equal(t, "ok.png", doc.AttachmentText)
 }
 
 func TestNewMessageDoc_CardPopulatesCardData(t *testing.T) {
 	card := &cassandra.Card{Template: "t1", Data: []byte(`{"k":"v"}`)}
-	doc := searchindex.NewMessageDoc(searchindex.MessageFields{Card: card})
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{Card: card})
+	require.NoError(t, err)
 	assert.Equal(t, card, doc.Card)
 	assert.Equal(t, `{"k":"v"}`, doc.CardData)
 }

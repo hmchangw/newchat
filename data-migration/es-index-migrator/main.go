@@ -43,7 +43,17 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("mongodb connect: %w", err)
 	}
-	defer func() { _ = mongoClient.Disconnect(ctx) }()
+	// A fresh, independently-bounded context, not ctx: ctx is the shutdown-signal
+	// context and may already be canceled by the time this defer runs (SIGTERM/SIGINT),
+	// which would make the driver abort the disconnect handshake instead of draining
+	// pooled connections cleanly.
+	defer func() {
+		disconnectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := mongoClient.Disconnect(disconnectCtx); err != nil {
+			slog.Error("mongodb disconnect", "error", err)
+		}
+	}()
 	db := mongoClient.Database(cfg.MongoDB)
 
 	engine, err := searchengine.New(ctx, searchengine.Config{

@@ -8,19 +8,19 @@
 - An index mapping/template change discovered before go-live that requires a full reindex.
 - ES data loss or corruption that happened during the pre-live migration window itself.
 
-**Scope boundary — pre-live only.** This job is meant to run exactly once per site, after that site's bulk data migration into Cassandra/MongoDB finishes and before the site goes live. Once a site is live, `oplog-connector`'s CDC tail and `search-sync-worker`'s live event consumption take over as the system of record for search indexing — this job is not a general "rebuild ES for an already-live site" tool and must not be re-run against a site that has gone live. It has no mechanism to catch up on writes made after its own run; see "No at-rest decryption dependency" below for the concrete failure mode if it's pointed at live data anyway.
+**Scope boundary — pre-live only.** This job normally runs once per site, after that site's bulk data migration into Cassandra/MongoDB finishes and before the site goes live; pre-live reruns (e.g. to pick up a template/mapping fix) are supported, but only after clearing the target indices first — see "Rerunning this job" below. External versioning makes a duplicate write of the *same* data safe, but it does not remove a stale deleted-document or update an already-equal-version document, so it is not on its own a substitute for clearing indices before a rerun. Once a site is live, `oplog-connector`'s CDC tail and `search-sync-worker`'s live event consumption take over as the system of record for search indexing — this job is not a general "rebuild ES for an already-live site" tool and must not be re-run against a site that has gone live. It has no mechanism to catch up on writes made after its own run; see "No at-rest decryption dependency" below for the concrete failure mode if it's pointed at live data anyway.
 
 It is **not** an onboarding tool. Migrating a brand-new site off the legacy RocketChat source system is a separate, already-solved problem owned by `oplog-connector` + `oplog-collections-transformer` (also under `data-migration/`) — this job never reads legacy `rocketchat_*` collections and has no relationship to that pipeline.
 
 ## Why not route through the live pipeline
 
-Replaying history through `MESSAGES_CANONICAL`/`INBOX` would also fire `notification-worker`'s push notifications and `broadcast-worker`'s live delivery — both wrong for data that could be months or years old. This job bypasses those streams entirely and writes straight to Elasticsearch via `_bulk`, reusing the exact document shapes, field mappings, index names, and write semantics `search-sync-worker` uses on its live path (via the shared `pkg/searchindex`/`pkg/searchengine` packages — see "Shared code" below), so a document this job writes is indistinguishable from one the live worker would have produced.
+Replaying history through `MESSAGES_CANONICAL`/`INBOX` would also fire `notification-worker`'s push notifications and `broadcast-worker`'s live delivery — both wrong for data that could be months or years old. This job bypasses those streams entirely and writes straight to Elasticsearch via `_bulk`, reusing the exact document shapes, field mappings, index names, and template/script builders `search-sync-worker` uses on its live path (via the shared `pkg/searchindex`/`pkg/searchengine` packages — see "Shared code" below), so a document's *content* is indistinguishable from one the live worker would have produced. Versioning is the one intentional exception: this job versions messages by `CreatedAt` rather than the live path's event-publish timestamp — see "Write model" below for why that's fine under this job's pre-live-only contract.
 
 ## Site scoping
 
 Run once per site, against that site's own Cassandra/MongoDB/ES — no cross-site reads:
 
-- **Messages**: a room's history lives exclusively in the Cassandra of the site that owns the room. Room IDs are enumerated from the site's own `subscriptions` collection (every distinct `roomId` a local user is subscribed to), not a `SELECT DISTINCT` scan of Cassandra or a `rooms` collection query. A room a foreign site's user is subscribed to but this site doesn't own is a harmless empty-result Cassandra query — the room's messages simply don't exist in this site's keyspace.
+- **Messages**: a room's history lives exclusively in the Cassandra of the site that owns the room. Room IDs are enumerated from every distinct `roomId` in the site-scoped `subscriptions` collection — the same federated-subscriber-inclusive set described below for Spotlight/user-room, not just locally-owned rooms — rather than a `SELECT DISTINCT` scan of Cassandra or a `rooms` collection query. A room a foreign site's user is subscribed to but this site doesn't own is a harmless empty-result Cassandra query — the room's messages simply don't exist in this site's keyspace.
 - **Spotlight / user-room**: every subscription document in the site's own `subscriptions` collection is processed, whether the subscribing user is local to this site or federated in from elsewhere — `subscriptions` is already scoped by the subscribing user's `siteId`, so no extra filter is needed.
 
 Index **names** are identical across sites; isolation comes from each site's job pointing at its own `SEARCH_URL`.
@@ -76,6 +76,8 @@ This is an operational assumption tied directly to the job's pre-live scope (see
 3. Stream rows per bucket (never materializing a whole room's history in memory) via `SELECT ... FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at >= ? AND created_at < ?`.
 4. Skip rows where `deleted = true`.
 
+Both this `Distinct("roomId", ...)` and Collection 2/3's `subscriptions.find({siteId})` filter on `siteId` — a `{siteId: 1, roomId: 1}` index on `subscriptions` keeps both queries index-covered instead of falling back to a collection scan on a large site.
+
 **Field mapping** (Cassandra `Message` → `searchindex.MessageDoc`, via `searchindex.MessageFields`):
 
 | ES field | Cassandra column |
@@ -102,7 +104,7 @@ This is an operational assumption tied directly to the job's pre-live scope (see
 
 ## Collection 2 — Spotlight
 
-**Source:** every subscription document for the site (`subscriptions.find({siteId})`) — no time window (see Additive-only limitation: subscriptions represent current state, not append-only history, so a rebuild backfills all of them unconditionally).
+**Source:** every subscription document for the site (`subscriptions.find({siteId})`) — no time window (see Additive-only limitation: subscriptions represent current state, not append-only history, so a rebuild backfills all of them unconditionally). Per CLAUDE.md's "always project precisely" rule, this query uses an explicit projection covering only the top-level fields Collections 2/3 need — `_id`, `u` (the embedded participant, source of `account`/`isBot`), `roomId`, `siteId`, `name`, `roomType`, `historySharedSince`, `joinedAt` — never a whole-document fetch.
 
 **Field mapping** (`model.Subscription` → `searchindex.SpotlightDoc`, via `searchindex.SpotlightFields`):
 
@@ -154,7 +156,7 @@ Only `MIGRATION_START_AT`/`MIGRATION_END_AT` bound anything — spotlight and us
 ## Execution shape
 
 1. Parse config, fail fast on missing required vars.
-2. Connect to Cassandra, MongoDB, Elasticsearch.
+2. Connect to Cassandra (`cassutil.Connect` — `LocalQuorum` consistency, 10-second timeout, per repo convention), MongoDB, Elasticsearch.
 3. Idempotently **ensure** (not just verify) the three ES index templates and two user-room stored scripts exist, using the exact same builders `search-sync-worker` uses at its own startup — so this job can run standalone against a fresh site that has never run `search-sync-worker`.
 4. Run the three collections sequentially — messages, then spotlight, then user-room — to avoid the three phases contending for the same Cassandra/MongoDB connection pools; each collection internally parallelizes across rooms/subscriptions with a bounded worker pool (`WORKER_CONCURRENCY`).
 5. Buffer ES bulk actions per collection, flushing at `BULK_BATCH_SIZE`. A flush always runs at the end of each collection's pass, even if a worker in that collection failed — partial progress is never silently discarded.

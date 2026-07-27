@@ -264,7 +264,7 @@ func actionableEvent(e model.EventType) bool {
 }
 
 // newMessageSearchIndex maps a MessageEvent to a search index document.
-func newMessageSearchIndex(evt *model.MessageEvent) searchindex.MessageDoc {
+func newMessageSearchIndex(evt *model.MessageEvent) (searchindex.MessageDoc, error) {
 	return searchindex.NewMessageDoc(searchindex.MessageFields{
 		MessageID:             evt.Message.ID,
 		RoomID:                evt.Message.RoomID,
@@ -307,7 +307,13 @@ func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengin
 }
 
 func buildDocument(evt *model.MessageEvent) json.RawMessage {
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	if err != nil {
+		// Not fatal — the doc is still fully usable, just missing the skipped
+		// attachment(s). Logged so silent data loss is at least observable.
+		slog.Warn("message doc built with skipped attachments", "error", err,
+			"messageId", evt.Message.ID, "roomId", evt.Message.RoomID)
+	}
 	data, _ := json.Marshal(doc)
 	return data
 }

@@ -172,14 +172,20 @@ func UserRoomTemplateName(indexName string) string {
 
 // UserRoomTemplateBody builds the ES index template for user-room; index_patterns is the exact
 // configured index name so a custom USER_ROOM_INDEX still maps correctly, and roomTimestamps is `flattened` to avoid per-key mapping bloat.
-func UserRoomTemplateBody(indexName string) json.RawMessage {
+// devMode drops number_of_replicas to 0, matching MessageTemplateBody/SpotlightTemplateBody — a
+// single-node dev ES cluster can never satisfy a replica shard and would otherwise sit unhealthy.
+func UserRoomTemplateBody(indexName string, devMode bool) json.RawMessage {
+	replicas := 1
+	if devMode {
+		replicas = 0
+	}
 	tmpl := map[string]any{
 		"index_patterns": []string{indexName},
 		"template": map[string]any{
 			"settings": map[string]any{
 				"index": map[string]any{
 					"number_of_shards":   1,
-					"number_of_replicas": 1,
+					"number_of_replicas": replicas,
 				},
 			},
 			"mappings": map[string]any{

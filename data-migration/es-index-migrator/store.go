@@ -15,7 +15,8 @@ import (
 // to fn, one row at a time. fn must not retain row beyond its call —
 // implementations reuse row's underlying buffers across calls where
 // possible to avoid materializing a whole room's history in memory at
-// once. A non-nil error from fn aborts the stream and is returned as-is.
+// once. A non-nil error from fn aborts the stream and is wrapped with
+// context (message/room IDs) before being returned.
 type MessageSource interface {
 	StreamMessages(ctx context.Context, siteID, roomID string, from, to time.Time, fn func(cassandra.Message) error) error
 }
