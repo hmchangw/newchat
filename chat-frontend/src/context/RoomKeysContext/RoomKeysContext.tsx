@@ -68,6 +68,14 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
   // subsequent ensureKey calls short-circuit without waiting for a React
   // re-render to flush the state update into stateRef.
   const knownKeysRef = useRef<Set<string>>(new Set())
+  // Synchronous cache of raw key bytes keyed by `${roomId}|${version}`, written
+  // in lockstep with knownKeysRef. decrypt reads it FIRST so a key fetched via
+  // ensureKey can decrypt the very message that triggered the fetch: the
+  // caller (useRoomSubscriptions.decryptAndDispatch) retries decrypt in the
+  // same async tick, before React flushes KEY_RECEIVED into reducer state —
+  // reading only stateRef would still miss the just-fetched key and fall back
+  // to the "[encrypted message]" placeholder.
+  const keyBytesRef = useRef<Map<string, Uint8Array>>(new Map())
 
   const userAccount = nats.user?.account ?? null
 
@@ -103,6 +111,7 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
         aesKeyCacheRef.current.delete(`${evt.roomId}|${evt.version}`)
       }
       knownKeysRef.current.add(`${evt.roomId}|${evt.version}`)
+      keyBytesRef.current.set(`${evt.roomId}|${evt.version}`, privateKey)
       dispatch({
         type: 'KEY_RECEIVED',
         roomId: evt.roomId,
@@ -117,6 +126,7 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
       pendingRequestsRef.current.clear()
       failedAtRef.current.clear()
       knownKeysRef.current.clear()
+      keyBytesRef.current.clear()
       dispatch({ type: 'CLEAR_KEYS' })
     }
     // userAccount is a stable primitive (set once on login).
@@ -131,13 +141,18 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const decrypt = useCallback(async ({ roomId, version, nonceB64, ciphertextB64 }: DecryptInput): Promise<string | null> => {
-    const entry = stateRef.current.byRoom[roomId]?.[version]
-    if (!entry) return null
-
     const cacheKey = `${roomId}|${version}`
+    // Prefer the synchronous byte cache so a key just fetched by ensureKey is
+    // usable on the immediate retry, before the KEY_RECEIVED dispatch flushes
+    // into reducer state. Fall back to reducer state for keys seeded by paths
+    // that don't touch the ref (defensive; today both writers keep them in
+    // sync).
+    const privateKey = keyBytesRef.current.get(cacheKey) ?? stateRef.current.byRoom[roomId]?.[version]?.privateKey
+    if (!privateKey) return null
+
     let pending = aesKeyCacheRef.current.get(cacheKey)
     if (!pending) {
-      pending = importAesKey(entry.privateKey)
+      pending = importAesKey(privateKey)
       aesKeyCacheRef.current.set(cacheKey, pending)
     }
     try {
@@ -190,8 +205,10 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
           }
           // Mark the key as present synchronously before dispatch so
           // concurrent ensureKey callers short-circuit on the next tick
-          // without waiting for the React state flush.
+          // without waiting for the React state flush. keyBytesRef lets the
+          // caller's immediate decrypt retry read the key in this same tick.
           knownKeysRef.current.add(cacheKey)
+          keyBytesRef.current.set(cacheKey, privateKey)
           dispatch({
             type: 'KEY_RECEIVED',
             roomId,

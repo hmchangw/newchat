@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, act } from '@testing-library/react'
 import { RoomKeysProvider, useRoomKeys } from './RoomKeysContext'
+import fixture from '../../../test/fixtures/encrypted-message.json'
 
 vi.mock('@/api', () => ({
   subscribeToRoomKeyEvents: vi.fn(),
@@ -147,6 +148,41 @@ describe('RoomKeysProvider.ensureKey', () => {
     })
     await expect(lastDecryptHook.ensureKey('r1', 0, 'site-a')).resolves.toBe(true)
     expect(requestRoomKey).toHaveBeenCalledTimes(2)
+  })
+
+  it('decrypt succeeds immediately after ensureKey resolves, before a re-render', async () => {
+    // Regression: the on-demand key fetch must rescue the very message that
+    // triggered it. useRoomSubscriptions.decryptAndDispatch awaits ensureKey
+    // and then retries decrypt in the SAME async tick — before React has
+    // flushed the KEY_RECEIVED dispatch into reducer state. If decrypt can
+    // only see keys via reducer state, the retry reads stale state, returns
+    // null, and the message falls through to the "[encrypted message]"
+    // placeholder even though the key was just fetched successfully.
+    vi.mocked(requestRoomKey).mockResolvedValueOnce({
+      roomId: 'r1',
+      version: fixture.message.version,
+      privateKey: fixture.privateKey,
+    })
+
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    const ok = await lastDecryptHook.ensureKey('r1', fixture.message.version, 'site-a')
+    expect(ok).toBe(true)
+
+    // No waitFor / no act flush between ensureKey and decrypt — mirrors the
+    // real retry timing in decryptAndDispatch.
+    const plaintext = await lastDecryptHook.decrypt({
+      roomId: 'r1',
+      version: fixture.message.version,
+      nonceB64: fixture.message.nonce,
+      ciphertextB64: fixture.message.ciphertext,
+    })
+    expect(plaintext).toBe(fixture.plaintext)
   })
 
   it('short-circuits to true when the (roomId, version) is already cached', async () => {
