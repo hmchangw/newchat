@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -6168,59 +6167,40 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 		setupMock       func(*MockRoomStore)
 		wantErr         error
 		wantErrContains string
+		wantRoom        bool
 	}{
 		{
-			name: "member allowed",
+			name: "member allowed, room returned",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 					Return(&model.Subscription{
 						User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 						RoomID: "r1",
 					}, nil)
+				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+					Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 			},
-			wantErr: nil,
+			wantErr:  nil,
+			wantRoom: true,
 		},
 		{
-			name: "admin allowed (no sub, admin role, room exists)",
+			name: "denied: member but room vanished",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-				s.EXPECT().GetRoom(gomock.Any(), "r1").
-					Return(&model.Room{ID: "r1"}, nil)
-			},
-			wantErr: nil,
-		},
-		{
-			name: "denied: admin role but room does not exist",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-				s.EXPECT().GetRoom(gomock.Any(), "r1").
-					Return(nil, mongo.ErrNoDocuments)
+					Return(&model.Subscription{
+						User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+						RoomID: "r1",
+					}, nil)
+				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+					Return(nil, fmt.Errorf("room %q not found: %w", "r1", mongo.ErrNoDocuments))
 			},
 			wantErr: errAppAccessDenied,
 		},
 		{
-			name: "denied: no sub, no admin role",
+			name: "denied: no sub — admin role no longer grants access, GetUser never called",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleUser}}, nil)
-			},
-			wantErr: errAppAccessDenied,
-		},
-		{
-			name: "denied: no sub, user not found (cross-site admin path)",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(nil, ErrUserNotFound)
 			},
 			wantErr: errAppAccessDenied,
 		},
@@ -6233,26 +6213,17 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			wantErrContains: "check room membership",
 		},
 		{
-			name: "transient user-lookup error propagates",
+			name: "transient room-fetch error propagates",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
+					Return(&model.Subscription{
+						User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+						RoomID: "r1",
+					}, nil)
+				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
 					Return(nil, errors.New("mongo unavailable"))
 			},
-			wantErrContains: "check platform admin",
-		},
-		{
-			name: "transient room-existence error propagates (admin path)",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-				s.EXPECT().GetRoom(gomock.Any(), "r1").
-					Return(nil, errors.New("mongo unavailable"))
-			},
-			wantErrContains: "check room existence",
+			wantErrContains: "get room for app read",
 		},
 	}
 
@@ -6262,7 +6233,7 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			store := NewMockRoomStore(ctrl)
 			tt.setupMock(store)
 			h := &Handler{store: store, siteID: "site-a"}
-			err := h.authorizeRoomAppRead(context.Background(), "alice", "r1")
+			room, err := h.authorizeRoomAppRead(context.Background(), "alice", "r1")
 			switch {
 			case tt.wantErrContains != "":
 				require.Error(t, err)
@@ -6272,17 +6243,24 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			default:
 				assert.ErrorIs(t, err, tt.wantErr)
 			}
+			if tt.wantRoom {
+				assert.NotNil(t, room, "admin path must return the room it fetched")
+			} else {
+				assert.Nil(t, room)
+			}
 		})
 	}
 }
 
-func newTabsTestHandler(t *testing.T, siteURL string) (*Handler, *MockRoomStore, *gomock.Controller) {
+func newTabsTestHandler(t *testing.T) (*Handler, *MockRoomStore, *gomock.Controller) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
-	u, err := url.Parse(siteURL)
-	require.NoError(t, err)
-	return &Handler{store: store, siteID: "site-a", siteURL: u}, store, ctrl
+	return &Handler{
+		store:             store,
+		siteID:            "site-a",
+		legacyRoomOrigins: map[string]string{"site-a": "https://legacy.site-a.com"},
+	}, store, ctrl
 }
 
 func mockTabApp(id, tabName, urlTemplate string) model.App {
@@ -6296,65 +6274,143 @@ func mockTabApp(id, tabName, urlTemplate string) model.App {
 	}
 }
 
+func TestLegacyRoomType(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.RoomType
+		want string
+	}{
+		{name: "channel maps to p", in: model.RoomTypeChannel, want: "p"},
+		{name: "dm maps to d", in: model.RoomTypeDM, want: "d"},
+		{name: "botDM maps to d", in: model.RoomTypeBotDM, want: "d"},
+		{name: "discussion maps to p", in: model.RoomTypeDiscussion, want: "p"},
+		{name: "unknown type falls back to p", in: model.RoomType("livechat"), want: "p"},
+		{name: "empty type falls back to p", in: model.RoomType(""), want: "p"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, legacyRoomType(tt.in))
+		})
+	}
+}
+
 func TestHandler_buildTabURL(t *testing.T) {
-	validSiteURL, err := url.Parse("https://chat.example.com")
-	require.NoError(t, err)
+	origins := map[string]string{
+		"site-a": "https://legacy.site-a.com",
+		"site-b": "https://legacy.site-b.com",
+	}
+	channelRoom := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 
 	tests := []struct {
 		name    string
 		handler *Handler
 		tmpl    string
-		roomID  string
+		room    *model.Room
 		wantURL string
 		wantOK  bool
 	}{
 		{
-			name:    "happy path",
-			handler: &Handler{siteID: "site-a", siteURL: validSiteURL},
-			tmpl:    "https://upstream/tab/${roomId}/${siteId}",
-			roomID:  "r1",
-			wantURL: "https://chat.example.com/tab/r1/site-a",
+			name:    "full template preserved with all four variables substituted",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "https://template-a.com/tab?room=${roomId}&site=${siteId}&roomType=${roomType}&roomOrigin=${roomOrigin}",
+			room:    channelRoom,
+			wantURL: "https://template-a.com/tab?room=r1&site=site-a&roomType=p&roomOrigin=https://legacy.site-a.com",
+			wantOK:  true,
+		},
+		{
+			name:    "no SITE_URL rewrite: template scheme, host and path kept verbatim",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "https://upstream.example.com/deep/path/${roomId}",
+			room:    channelRoom,
+			wantURL: "https://upstream.example.com/deep/path/r1",
+			wantOK:  true,
+		},
+		{
+			// Non-channel case: ${roomType} varies end-to-end; full mapping in TestLegacyRoomType.
+			name:    "dm maps to d",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "https://t.example.com?rt=${roomType}",
+			room:    &model.Room{ID: "r1", Type: model.RoomTypeDM, SiteID: "site-a"},
+			wantURL: "https://t.example.com?rt=d",
+			wantOK:  true,
+		},
+		{
+			name:    "roomOrigin keyed by the room's own SiteID, not the local site",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "https://t.example.com?o=${roomOrigin}",
+			room:    &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-b"},
+			wantURL: "https://t.example.com?o=https://legacy.site-b.com",
+			wantOK:  true,
+		},
+		{
+			name:    "unmapped origin site substitutes empty string",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "https://t.example.com?o=${roomOrigin}&x=1",
+			room:    &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-x"},
+			wantURL: "https://t.example.com?o=&x=1",
+			wantOK:  true,
+		},
+		{
+			name:    "nil origins map substitutes empty string",
+			handler: &Handler{siteID: "site-a"},
+			tmpl:    "https://t.example.com?o=${roomOrigin}",
+			room:    channelRoom,
+			wantURL: "https://t.example.com?o=",
 			wantOK:  true,
 		},
 		{
 			name:    "empty template",
-			handler: &Handler{siteID: "site-a", siteURL: validSiteURL},
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
 			tmpl:    "",
-			roomID:  "r1",
-			wantOK:  false,
-		},
-		{
-			name:    "nil siteURL",
-			handler: &Handler{siteID: "site-a"},
-			tmpl:    "https://upstream/tab/${roomId}",
-			roomID:  "r1",
-			wantOK:  false,
-		},
-		{
-			name:    "non-URL-safe roomID",
-			handler: &Handler{siteID: "site-a", siteURL: validSiteURL},
-			tmpl:    "https://upstream/tab/${roomId}",
-			roomID:  "r1/../../etc",
-			wantOK:  false,
-		},
-		{
-			name:    "non-URL-safe siteID",
-			handler: &Handler{siteID: "site/../a", siteURL: validSiteURL},
-			tmpl:    "https://upstream/tab/${roomId}",
-			roomID:  "r1",
+			room:    channelRoom,
 			wantOK:  false,
 		},
 		{
 			name:    "malformed template",
-			handler: &Handler{siteID: "site-a", siteURL: validSiteURL},
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
 			tmpl:    "://malformed",
-			roomID:  "r1",
+			room:    channelRoom,
+			wantOK:  false,
+		},
+		{
+			name:    "non-URL-safe roomID",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "https://t.example.com/${roomId}",
+			room:    &model.Room{ID: "r1/../../etc", Type: model.RoomTypeChannel, SiteID: "site-a"},
+			wantOK:  false,
+		},
+		{
+			name:    "non-URL-safe siteID",
+			handler: &Handler{siteID: "site/../a", legacyRoomOrigins: origins},
+			tmpl:    "https://t.example.com/${roomId}",
+			room:    channelRoom,
+			wantOK:  false,
+		},
+		{
+			name:    "relative path template rejected (legacy pre-rewrite template)",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "/tab/${roomId}",
+			room:    channelRoom,
+			wantOK:  false,
+		},
+		{
+			name:    "scheme-relative template rejected",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "//upstream.example.com/tab/${roomId}",
+			room:    channelRoom,
+			wantOK:  false,
+		},
+		{
+			name:    "non-http scheme rejected",
+			handler: &Handler{siteID: "site-a", legacyRoomOrigins: origins},
+			tmpl:    "javascript:alert(1)",
+			room:    channelRoom,
 			wantOK:  false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := tt.handler.buildTabURL(tt.tmpl, tt.roomID)
+			got, ok := tt.handler.buildTabURL(tt.tmpl, tt.room)
 			assert.Equal(t, tt.wantOK, ok)
 			assert.Equal(t, tt.wantURL, got)
 		})
@@ -6362,11 +6418,13 @@ func TestHandler_buildTabURL(t *testing.T) {
 }
 
 func TestHandler_handleGetRoomAppTabs_MemberAllowed(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{
-		mockTabApp("app1", "Calendar", "https://upstream/cal/${roomId}/${siteId}/index"),
+		mockTabApp("app1", "Calendar", "https://upstream.example.com/cal/${roomId}/${siteId}?type=${roomType}&origin=${roomOrigin}"),
 	}, nil)
 
 	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
@@ -6374,52 +6432,28 @@ func TestHandler_handleGetRoomAppTabs_MemberAllowed(t *testing.T) {
 	require.Len(t, resp.Apps, 1)
 	assert.Equal(t, "app1", resp.Apps[0].ID)
 	assert.Equal(t, "Calendar", resp.Apps[0].Name)
-	assert.Equal(t, "https://chat.example.com/cal/r1/site-a/index", resp.Apps[0].TabURL)
+	assert.Equal(t, "https://upstream.example.com/cal/r1/site-a?type=p&origin=https://legacy.site-a.com", resp.Apps[0].TabURL)
 	require.NotNil(t, resp.Apps[0].Assistant)
 	assert.Equal(t, "app1.bot", resp.Apps[0].Assistant.Name)
 }
 
-func TestHandler_handleGetRoomAppTabs_AdminAllowed(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+// Membership is the only gate now: a platform admin without a subscription
+// is denied and no user lookup happens.
+func TestHandler_handleGetRoomAppTabs_NonMemberDenied(t *testing.T) {
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil)
-	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{}, nil)
-
-	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-	assert.Empty(t, resp.Apps)
-}
-
-func TestHandler_handleGetRoomAppTabs_Denied(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleUser}}, nil)
-
-	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	assert.ErrorIs(t, err, errAppAccessDenied)
-}
-
-func TestHandler_handleGetRoomAppTabs_DeniedNoUser(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(nil, ErrUserNotFound)
 
 	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	assert.ErrorIs(t, err, errAppAccessDenied)
 }
 
 func TestHandler_handleGetRoomAppTabs_EmptyResultIsEmptyArray(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return(nil, nil)
 
 	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
@@ -6431,51 +6465,28 @@ func TestHandler_handleGetRoomAppTabs_EmptyResultIsEmptyArray(t *testing.T) {
 	assert.Contains(t, string(data), `"apps":[]`)
 }
 
-func TestHandler_handleGetRoomAppTabs_URLRewritePathPrefix(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com/chat")
+func TestHandler_handleGetRoomAppTabs_TemplateURLPreserved(t *testing.T) {
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{
-		mockTabApp("app1", "Calendar", "https://upstream/tab/${roomId}"),
+		mockTabApp("app1", "X", "https://template-a.com/path?room=${roomId}#tab=${siteId}"),
 	}, nil)
 
 	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.NoError(t, err)
-	assert.Equal(t, "https://chat.example.com/chat/tab/r1", resp.Apps[0].TabURL)
+	assert.Equal(t, "https://template-a.com/path?room=r1#tab=site-a", resp.Apps[0].TabURL,
+		"template scheme/host must be preserved — no SITE_URL rewrite")
 }
 
-func TestHandler_handleGetRoomAppTabs_URLRewriteStripsUserinfo(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+func TestHandler_handleGetRoomAppTabs_SkipsEmptyAndMalformed(t *testing.T) {
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
-	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{
-		mockTabApp("app1", "X", "https://user:pass@upstream/path/${roomId}"),
-	}, nil)
-
-	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Apps[0].TabURL, "user")
-	assert.NotContains(t, resp.Apps[0].TabURL, "pass")
-	assert.Equal(t, "https://chat.example.com/path/r1", resp.Apps[0].TabURL)
-}
-
-func TestHandler_handleGetRoomAppTabs_URLRewritePreservesQueryAndFragment(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
-	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{
-		mockTabApp("app1", "X", "https://upstream/path?room=${roomId}#tab=${siteId}"),
-	}, nil)
-
-	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-	assert.Equal(t, "https://chat.example.com/path?room=r1#tab=site-a", resp.Apps[0].TabURL)
-}
-
-func TestHandler_handleGetRoomAppTabs_URLRewriteSkipsEmptyAndMalformed(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{
 		mockTabApp("ok1", "OK1", "https://upstream/ok1/${roomId}"),
 		mockTabApp("empty", "Empty", ""),
@@ -6491,9 +6502,11 @@ func TestHandler_handleGetRoomAppTabs_URLRewriteSkipsEmptyAndMalformed(t *testin
 }
 
 func TestHandler_handleGetRoomAppTabs_SkipsAppWithNilChannelTab(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	// One app has nil ChannelTab (invalid data), one is valid — only the valid one should appear.
 	appNoTab := model.App{ID: "notab", ChannelTab: nil}
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{
@@ -6508,9 +6521,11 @@ func TestHandler_handleGetRoomAppTabs_SkipsAppWithNilChannelTab(t *testing.T) {
 }
 
 func TestHandler_handleGetRoomAppTabs_StoreListError(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).
 		Return(nil, errors.New("mongo down"))
 
@@ -6519,8 +6534,31 @@ func TestHandler_handleGetRoomAppTabs_StoreListError(t *testing.T) {
 	assert.Contains(t, err.Error(), "mongo down")
 }
 
+func TestHandler_handleGetRoomAppTabs_RoomNotFound(t *testing.T) {
+	h, store, _ := newTabsTestHandler(t)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
+		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(nil, fmt.Errorf("room %q not found: %w", "r1", mongo.ErrNoDocuments))
+
+	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	assert.ErrorIs(t, err, errAppAccessDenied)
+}
+
+func TestHandler_handleGetRoomAppTabs_RoomFetchError(t *testing.T) {
+	h, store, _ := newTabsTestHandler(t)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
+		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(nil, errors.New("mongo down"))
+
+	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errAppAccessDenied, "infra failure must collapse to internal, not access-denied")
+}
+
 func TestHandler_handleGetRoomAppTabs_ContextTimeout(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t, "https://chat.example.com")
+	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		DoAndReturn(func(ctx context.Context, _, _ string) (*model.Subscription, error) {
 			<-ctx.Done()
@@ -6549,6 +6587,8 @@ func TestHandler_handleGetRoomAppCommandMenu_MemberAllowed_NoBots(t *testing.T) 
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1"}, nil)
 	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return([]RoomBotAppEntry{}, nil)
 	// ListActiveCmdMenus must NOT be called.
 
@@ -6565,6 +6605,8 @@ func TestHandler_handleGetRoomAppCommandMenu_MemberAllowed_WithMenus(t *testing.
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1"}, nil)
 	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return([]RoomBotAppEntry{
 		{AssistantName: "stocks.bot", AppName: "Stocks"},
 		{AssistantName: "weather.bot", AppName: "Weather"},
@@ -6590,6 +6632,8 @@ func TestHandler_handleGetRoomAppCommandMenu_MemberAllowed_BotWithoutMenu(t *tes
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1"}, nil)
 	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return([]RoomBotAppEntry{
 		{AssistantName: "silent.bot", AppName: "Silent"},
 	}, nil)
@@ -6604,27 +6648,10 @@ func TestHandler_handleGetRoomAppCommandMenu_MemberAllowed_BotWithoutMenu(t *tes
 	assert.Nil(t, resp.AppAssistants[0].CmdBlocks)
 }
 
-func TestHandler_handleGetRoomAppCommandMenu_AdminAllowed(t *testing.T) {
+func TestHandler_handleGetRoomAppCommandMenu_NonMemberDenied(t *testing.T) {
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-	store.EXPECT().GetRoom(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil)
-	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return([]RoomBotAppEntry{}, nil)
-
-	resp, err := h.getRoomAppCommandMenu(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-	assert.Len(t, resp.AppAssistants, 0)
-}
-
-func TestHandler_handleGetRoomAppCommandMenu_Denied(t *testing.T) {
-	h, store := newCmdMenuTestHandler(t)
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice"}, nil)
 
 	_, err := h.getRoomAppCommandMenu(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	assert.ErrorIs(t, err, errAppAccessDenied)
@@ -6634,6 +6661,8 @@ func TestHandler_handleGetRoomAppCommandMenu_StoreListRoomBotAppsError(t *testin
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1"}, nil)
 	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return(nil, errors.New("mongo down"))
 
 	_, err := h.getRoomAppCommandMenu(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
@@ -6645,6 +6674,8 @@ func TestHandler_handleGetRoomAppCommandMenu_StoreListActiveCmdMenusError(t *tes
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
+	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1"}, nil)
 	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return([]RoomBotAppEntry{
 		{AssistantName: "weather.bot", AppName: "Weather"},
 	}, nil)

@@ -60,6 +60,8 @@ type RoomBotAppEntry struct {
 
 type RoomStore interface {
 	GetRoom(ctx context.Context, id string) (*model.Room, error)
+	// GetRoomAppRead fetches only _id/type/siteId; same error contract as GetRoom.
+	GetRoomAppRead(ctx context.Context, id string) (*model.Room, error)
 	ListRoomsByIDs(ctx context.Context, ids []string) ([]model.Room, error)
 	GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error)
 	// CheckMembership verifies (account, roomID) has a subscription without

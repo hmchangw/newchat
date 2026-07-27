@@ -52,7 +52,7 @@ type Handler struct {
 	publishToStream          func(ctx context.Context, subj string, data []byte, msgID string) error
 	publishCore              func(ctx context.Context, subj string, data []byte) error
 	restrictedRoomMinMembers int
-	siteURL                  *url.URL
+	legacyRoomOrigins        map[string]string
 	maxResponseBytes         int64
 
 	// Microsoft Teams integration. graphClient is nil-safe: only the meetings
@@ -72,7 +72,7 @@ type Handler struct {
 	roomMembersCallLimit int
 }
 
-func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, siteURL *url.URL, maxResponseBytes int64) *Handler {
+func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64) *Handler {
 	return &Handler{
 		store:                    store,
 		keyStore:                 keyStore,
@@ -85,7 +85,7 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 		restrictedRoomMinMembers: restrictedRoomMinMembers,
 		publishToStream:          publishToStream,
 		publishCore:              publishCore,
-		siteURL:                  siteURL,
+		legacyRoomOrigins:        legacyRoomOrigins,
 		maxResponseBytes:         maxResponseBytes,
 	}
 }
@@ -2253,70 +2253,61 @@ func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, erro
 	return &model.OpenRoomResponse{Status: "ok", Open: sub.Open}, nil
 }
 
-// authorizeRoomAppRead allows the request iff the caller has a
-// subscription in roomID OR is a platform admin in the local users
-// collection AND the room actually exists. The room-existence check
-// gates only the admin bypass — without it, an admin could query app
-// metadata for a fabricated room ID and receive a plausible-looking
-// response (e.g. a non-empty default-tabs list, or an empty cmd-menu
-// list that looks like success). Cross-site admin authority is out of
-// scope: an admin whose users document lives on a different site is
-// denied.
-func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) error {
+// authorizeRoomAppRead admits room members only, returning the room narrowly
+// projected via GetRoomAppRead. A missing room reads as denied.
+func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) (*model.Room, error) {
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil && !errors.Is(err, model.ErrSubscriptionNotFound) {
-		return fmt.Errorf("check room membership: %w", err)
+		return nil, fmt.Errorf("check room membership: %w", err)
 	}
-	if model.IsRoomMember(sub) {
-		return nil
+	if !model.IsRoomMember(sub) {
+		return nil, errAppAccessDenied
 	}
-	user, err := h.store.GetUser(ctx, account)
-	if err != nil && !errors.Is(err, ErrUserNotFound) {
-		return fmt.Errorf("check platform admin: %w", err)
-	}
-	if !model.IsPlatformAdmin(user) {
-		return errAppAccessDenied
-	}
-	// Admin bypass: verify the room exists before allowing the read.
-	// Without this, admins could query app metadata for fabricated room
-	// IDs and get plausible-looking responses.
-	if _, err := h.store.GetRoom(ctx, roomID); err != nil {
+	room, err := h.store.GetRoomAppRead(ctx, roomID)
+	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return errAppAccessDenied
+			return nil, errAppAccessDenied
 		}
-		return fmt.Errorf("check room existence: %w", err)
+		return nil, fmt.Errorf("get room for app read: %w", err)
 	}
-	return nil
+	return room, nil
 }
 
-// buildTabURL applies the SITE_URL-based scheme/host/path-prefix
-// rewrite and the ${roomId}/${siteId} substitution to a channelTab URL
-// template. Returns (url, true) on success; (_, false) when the
-// template is empty, unparseable, or when siteURL is nil or the IDs
-// fail the URL-safety check.
-func (h *Handler) buildTabURL(tmpl, roomID string) (string, bool) {
+// legacyRoomTypes maps redesigned RoomTypes to the legacy ${roomType} vocabulary.
+var legacyRoomTypes = map[model.RoomType]string{
+	model.RoomTypeChannel:    "p",
+	model.RoomTypeDM:         "d",
+	model.RoomTypeBotDM:      "d",
+	model.RoomTypeDiscussion: "p",
+}
+
+// legacyRoomType maps t to the legacy vocabulary; unknown types fall back to "p".
+func legacyRoomType(t model.RoomType) string {
+	if v, ok := legacyRoomTypes[t]; ok {
+		return v
+	}
+	return "p"
+}
+
+// buildTabURL substitutes the ${…} variables into a full-URL channelTab template;
+// false unless absolute http(s), so legacy path-only templates fail safe.
+func (h *Handler) buildTabURL(tmpl string, room *model.Room) (string, bool) {
 	if tmpl == "" {
 		return "", false
 	}
-	if h.siteURL == nil {
+	if !isURLSafeIDToken(room.ID) || !isURLSafeIDToken(h.siteID) {
 		return "", false
 	}
-	if !isURLSafeIDToken(roomID) || !isURLSafeIDToken(h.siteID) {
-		return "", false
-	}
-	// Substitute BEFORE parsing so url.URL.String() doesn't percent-encode
-	// the substituted values (roomID/siteID are URL-safe by construction).
-	tmpl = strings.ReplaceAll(tmpl, "${roomId}", roomID)
+	// Substitute before parsing so url.Parse never percent-encodes the values.
+	tmpl = strings.ReplaceAll(tmpl, "${roomId}", room.ID)
 	tmpl = strings.ReplaceAll(tmpl, "${siteId}", h.siteID)
+	tmpl = strings.ReplaceAll(tmpl, "${roomType}", legacyRoomType(room.Type))
+	tmpl = strings.ReplaceAll(tmpl, "${roomOrigin}", h.legacyRoomOrigins[room.SiteID])
 	u, err := url.Parse(tmpl)
-	if err != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return "", false
 	}
-	joined := h.siteURL.JoinPath(u.Path)
-	joined.User = nil
-	joined.RawQuery = u.RawQuery
-	joined.Fragment = u.Fragment
-	return joined.String(), true
+	return tmpl, true
 }
 
 func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsResponse, error) {
@@ -2334,7 +2325,8 @@ func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsRe
 		)
 	}
 
-	if err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
+	room, err := h.authorizeRoomAppRead(ctx, account, roomID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -2352,9 +2344,9 @@ func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsRe
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			continue
 		}
-		tabURL, ok := h.buildTabURL(app.ChannelTab.URL.Default, roomID)
+		tabURL, ok := h.buildTabURL(app.ChannelTab.URL.Default, room)
 		if !ok {
-			slog.Warn("skipping app with empty or unparseable channelTab url",
+			slog.Warn("skipping app with empty, unparseable, or non-http(s) channelTab url",
 				"appId", app.ID, "roomId", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			continue
@@ -2384,7 +2376,7 @@ func (h *Handler) getRoomAppCommandMenu(c *natsrouter.Context) (*model.GetRoomAp
 		)
 	}
 
-	if err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
+	if _, err := h.authorizeRoomAppRead(ctx, account, roomID); err != nil {
 		return nil, err
 	}
 

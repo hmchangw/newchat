@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"time"
 
@@ -26,22 +26,24 @@ import (
 )
 
 type config struct {
-	NatsURL                  string          `env:"NATS_URL,required"`
-	NatsCredsFile            string          `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID                   string          `env:"SITE_ID"                   envDefault:"site-local"`
-	SiteURL                  string          `env:"SITE_URL,required"`
-	MongoURI                 string          `env:"MONGO_URI,required"`
-	MongoDB                  string          `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername            string          `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword            string          `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	NatsURL       string `env:"NATS_URL,required"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
+	// LEGACY_ROOM_ORIGINS is a JSON array of {siteID, origin} objects mapping
+	// each room-origin site to the legacy URL substituted into ${roomOrigin}.
+	LegacyRoomOrigins        legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
+	MongoURI                 string            `env:"MONGO_URI,required"`
+	MongoDB                  string            `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername            string            `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword            string            `env:"MONGO_PASSWORD"            envDefault:""`
+	MaxRoomSize              int               `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize             int               `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout        time.Duration     `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod       time.Duration     `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	HealthAddr               string            `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled             bool              `env:"PPROF_ENABLED" envDefault:"false"`
+	Bootstrap                bootstrapConfig   `envPrefix:"BOOTSTRAP_"`
+	RestrictedRoomMinMembers int               `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
 	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
 	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
@@ -80,6 +82,35 @@ type config struct {
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
 
+// legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
+type legacyRoomOrigin struct {
+	SiteID string `json:"siteID"`
+	Origin string `json:"origin"`
+}
+
+// legacyRoomOrigins is parsed from the LEGACY_ROOM_ORIGINS env var — a JSON
+// array of {siteID, origin} objects, indexed at parse time into a siteID→URL
+// map. Implements encoding.TextUnmarshaler so caarlos0/env populates it
+// directly from the env string (same pattern as media-service CLUSTER_DOMAINS).
+type legacyRoomOrigins struct {
+	byID map[string]string
+}
+
+func (l *legacyRoomOrigins) UnmarshalText(text []byte) error {
+	var entries []legacyRoomOrigin
+	if err := json.Unmarshal(text, &entries); err != nil {
+		return fmt.Errorf("parse LEGACY_ROOM_ORIGINS json: %w", err)
+	}
+	l.byID = make(map[string]string, len(entries))
+	for _, e := range entries {
+		if _, dup := l.byID[e.SiteID]; dup {
+			return fmt.Errorf("parse LEGACY_ROOM_ORIGINS json: duplicate siteID %q", e.SiteID)
+		}
+		l.byID[e.SiteID] = e.Origin
+	}
+	return nil
+}
+
 func main() {
 	logctx.SetupDefault(os.Stdout)
 
@@ -99,13 +130,6 @@ func main() {
 	}
 	if cfg.RestrictedRoomMinMembers <= 0 {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
-		os.Exit(1)
-	}
-
-	siteURL, err := url.Parse(cfg.SiteURL)
-	if err != nil || siteURL.Scheme == "" || siteURL.Host == "" {
-		slog.Error("invalid SITE_URL: must be an absolute URL with scheme and host",
-			"value", cfg.SiteURL, "error", err)
 		os.Exit(1)
 	}
 
@@ -236,7 +260,7 @@ func main() {
 			}
 			return nil
 		},
-		siteURL,
+		cfg.LegacyRoomOrigins.byID,
 		nc.NatsConn().MaxPayload(),
 	)
 	handler.dekProvisioner = dekProvisioner

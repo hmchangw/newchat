@@ -234,6 +234,21 @@ func (mr *MockRoomStoreMockRecorder) GetRoom(ctx, id any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoom", reflect.TypeOf((*MockRoomStore)(nil).GetRoom), ctx, id)
 }
 
+// GetRoomAppRead mocks base method.
+func (m *MockRoomStore) GetRoomAppRead(ctx context.Context, id string) (*model.Room, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRoomAppRead", ctx, id)
+	ret0, _ := ret[0].(*model.Room)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetRoomAppRead indicates an expected call of GetRoomAppRead.
+func (mr *MockRoomStoreMockRecorder) GetRoomAppRead(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomAppRead", reflect.TypeOf((*MockRoomStore)(nil).GetRoomAppRead), ctx, id)
+}
+
 // GetSubscription mocks base method.
 func (m *MockRoomStore) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
 	m.ctrl.T.Helper()
