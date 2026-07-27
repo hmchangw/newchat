@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 func newTeamsTestHandler(t *testing.T, store *MockSubscriptionStore) (*Handler, *[]publishedMsg) {
@@ -58,15 +59,21 @@ func membershipEvents(t *testing.T, published []publishedMsg, subjMatch string) 
 	return out
 }
 
-// TestProcessTeamsRoomCreate_AddOnly: a fresh room with two brand-new members —
-// one already known locally, one requiring the create+fanout external-identity path.
+// TestProcessTeamsRoomCreate_AddOnly: a fresh room with three brand-new members —
+// one known locally (alice), one unknown requiring the publish path (carol), and
+// one known at a remote site (dave) exercising cross-site federation.
 func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 	h, published := newTeamsTestHandler(t, store)
+	carolID := teamsmigrate.EmployeeIDFromGraphID("aad3")
 	h.publishUsers = func(_ context.Context, users []model.IUserWithChange) error {
-		require.Len(t, users, 1)
+		require.Len(t, users, 1, "only the unknown member is published")
+		// The publisher owns _id == employeeId (deterministic Graph-id hash) so every
+		// site's hr-sync-worker upserts the same identity.
 		assert.Equal(t, "carol", users[0].Account)
+		assert.Equal(t, carolID, users[0].ID)
+		assert.Equal(t, carolID, users[0].EmployeeID)
 		return nil
 	}
 
@@ -74,11 +81,10 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "carol").Return(nil, ErrUserNotFound)
-	store.EXPECT().UpsertExternalUserIdentity(gomock.Any(), &model.User{Account: "carol", SiteID: "site-a"}).Return(nil)
-	store.EXPECT().GetUser(gomock.Any(), "carol").Return(&model.User{ID: "u3", Account: "carol", SiteID: "site-b"}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "dave").Return(&model.User{ID: "u4", Account: "dave", SiteID: "site-b"}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, subs []*model.Subscription) error {
-			require.Len(t, subs, 2)
+			require.Len(t, subs, 3)
 			for _, s := range subs {
 				assert.Equal(t, "chat1", s.RoomID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
@@ -95,20 +101,21 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 		Members: []model.TeamsRoomCreateMember{
 			{ID: "aad1", Account: "alice"},
 			{ID: "aad3", Account: "carol"},
+			{ID: "aad4", Account: "dave"},
 		},
 		CreatedDateTime: time.Unix(0, 0).UTC(),
 	}
 	err := h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat))
 	require.NoError(t, err)
 
-	// Local InboxInternal member_added carries both added accounts; the federated
-	// outbox event targets carol's home site (site-b) with carol only.
+	// Local InboxInternal member_added carries all three added accounts; the
+	// federated outbox event targets dave's home site (site-b) with dave only.
 	local := membershipEvents(t, *published, "chat.inbox.site-a.internal.member_added")
 	require.Len(t, local, 1)
-	assert.ElementsMatch(t, []string{"alice", "carol"}, local[0].Accounts)
+	assert.ElementsMatch(t, []string{"alice", "carol", "dave"}, local[0].Accounts)
 	fed := membershipEvents(t, *published, "chat.outbox.site-a.site-b.member_added")
 	require.Len(t, fed, 1)
-	assert.Equal(t, []string{"carol"}, fed[0].Accounts)
+	assert.Equal(t, []string{"dave"}, fed[0].Accounts)
 	assert.Empty(t, membershipEvents(t, *published, "member_removed"), "add-only batch emits no removals")
 }
 
@@ -267,39 +274,39 @@ func TestResolveMember_AlignmentInvariant(t *testing.T) {
 	want := &model.User{ID: "u9", Account: "dave", SiteID: "site-a"}
 	store.EXPECT().GetUser(gomock.Any(), "dave").Return(want, nil)
 
-	got, err := h.resolveMember(context.Background(), "dave")
+	got, err := h.resolveMember(context.Background(), "dave", "aad-dave")
 	require.NoError(t, err)
 	assert.Same(t, want, got)
 }
 
-// TestResolveMember_CreatesExternalUser: an unknown account gets a keyless
-// external identity via publish-first-then-local-write, then a read-back.
-func TestResolveMember_CreatesExternalUser(t *testing.T) {
+// TestResolveMember_PublishesDeterministicIdentity: an unknown account is
+// published (never written locally first) with _id == employeeId == the
+// deterministic Graph-id hash, and that same user is returned for the caller to
+// build the subscription — no read-back.
+func TestResolveMember_PublishesDeterministicIdentity(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 	h, _ := newTeamsTestHandler(t, store)
 
-	var fanoutCalled, upsertCalled bool
+	wantID := teamsmigrate.EmployeeIDFromGraphID("aad-erin")
+	var fanoutCalled bool
 	h.publishUsers = func(_ context.Context, users []model.IUserWithChange) error {
 		fanoutCalled = true
 		require.Len(t, users, 1)
 		assert.Equal(t, "erin", users[0].Account)
+		assert.Equal(t, wantID, users[0].ID)
+		assert.Equal(t, wantID, users[0].EmployeeID)
 		assert.Equal(t, model.IChangeTypeNewHire, users[0].ChangeType)
-		assert.False(t, upsertCalled, "publish must happen before the local write (publish-first)")
 		return nil
 	}
 	store.EXPECT().GetUser(gomock.Any(), "erin").Return(nil, ErrUserNotFound)
-	store.EXPECT().UpsertExternalUserIdentity(gomock.Any(), &model.User{Account: "erin", SiteID: "site-a"}).DoAndReturn(
-		func(context.Context, *model.User) error {
-			upsertCalled = true
-			return nil
-		})
-	store.EXPECT().GetUser(gomock.Any(), "erin").Return(&model.User{ID: "u10", Account: "erin", SiteID: "site-a"}, nil)
 
-	got, err := h.resolveMember(context.Background(), "erin")
+	got, err := h.resolveMember(context.Background(), "erin", "aad-erin")
 	require.NoError(t, err)
 	assert.True(t, fanoutCalled)
-	assert.Equal(t, "u10", got.ID)
+	assert.Equal(t, wantID, got.ID)
+	assert.Equal(t, wantID, got.EmployeeID)
+	assert.Equal(t, "site-a", got.SiteID)
 }
 
 // TestProcessTeamsRoomCreate_MalformedBatch: an unparsable envelope is Permanent

@@ -471,20 +471,6 @@ func (mr *MockSubscriptionStoreMockRecorder) UpdateSubscriptionNamesForRoom(ctx,
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionNamesForRoom", reflect.TypeOf((*MockSubscriptionStore)(nil).UpdateSubscriptionNamesForRoom), ctx, roomID, newName, nameUpdatedAt)
 }
 
-// UpsertExternalUserIdentity mocks base method.
-func (m *MockSubscriptionStore) UpsertExternalUserIdentity(ctx context.Context, u *model.User) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpsertExternalUserIdentity", ctx, u)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// UpsertExternalUserIdentity indicates an expected call of UpsertExternalUserIdentity.
-func (mr *MockSubscriptionStoreMockRecorder) UpsertExternalUserIdentity(ctx, u any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertExternalUserIdentity", reflect.TypeOf((*MockSubscriptionStore)(nil).UpsertExternalUserIdentity), ctx, u)
-}
-
 // MockRoomKeyStore is a mock of RoomKeyStore interface.
 type MockRoomKeyStore struct {
 	ctrl     *gomock.Controller

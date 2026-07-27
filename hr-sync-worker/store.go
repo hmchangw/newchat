@@ -76,6 +76,13 @@ func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUs
 			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId")
 			continue
 		}
+		// A publisher that owns the _id (the Teams migration resolver, deterministic
+		// from the Graph id) carries it so every site converges on one _id; the HR
+		// feed leaves it empty and we mint a per-site one.
+		idOnInsert := u.ID
+		if idOnInsert == "" {
+			idOnInsert = idgen.GenerateUUIDv7()
+		}
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"employeeId": u.EmployeeID}).
 			SetUpdate(bson.M{
@@ -84,7 +91,7 @@ func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUs
 					"engName": u.EngName, "chineseName": u.ChineseName,
 					"employeeId": u.EmployeeID,
 				},
-				"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
+				"$setOnInsert": bson.M{"_id": idOnInsert},
 			}).
 			SetUpsert(true))
 	}

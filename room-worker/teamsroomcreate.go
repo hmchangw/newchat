@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // processTeamsRoomCreate reconciles each chat in a Teams room-creation batch
@@ -100,7 +101,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		if _, ok := existingByAccount[member.Account]; ok {
 			continue // already a member — no change
 		}
-		user, err := h.resolveMember(ctx, member.Account)
+		user, err := h.resolveMember(ctx, member.Account, member.ID)
 		if err != nil {
 			slog.WarnContext(ctx, "teams room-create: skip member, resolve failed",
 				"chat_id", chat.ID, "account", member.Account, "error", err)
@@ -165,10 +166,12 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	return nil
 }
 
-// resolveMember returns account's user, creating a keyless external identity
-// (publish-first) when none exists — mirrors message-worker's Teams sender
-// resolver so member and sender on the same account converge on one _id.
-func (h *Handler) resolveMember(ctx context.Context, account string) (*model.User, error) {
+// resolveMember returns account's user, publishing a new identity when none
+// exists. The publisher owns the deterministic _id so every site's hr-sync-worker
+// upserts the same one; nothing is written locally first, so a redelivery
+// re-derives the same _id instead of splitting the user. Mirrors message-worker's
+// Teams sender resolver.
+func (h *Handler) resolveMember(ctx context.Context, account, graphID string) (*model.User, error) {
 	u, err := h.store.GetUser(ctx, account)
 	if err == nil {
 		return u, nil
@@ -177,23 +180,18 @@ func (h *Handler) resolveMember(ctx context.Context, account string) (*model.Use
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 
-	nu := model.User{Account: account, SiteID: h.siteID}
-	iuc := model.IUserWithChange{User: nu, ChangeType: model.IChangeTypeNewHire}
+	// _id == employeeId == the deterministic Graph-id hash, so this person is one
+	// identity whether resolved here or via the HR feed, and hr-sync-worker keys
+	// its upsert on the (now non-empty) employeeId.
+	id := teamsmigrate.EmployeeIDFromGraphID(graphID)
+	nu := model.User{ID: id, Account: account, SiteID: h.siteID, EmployeeID: id}
 	if h.publishUsers != nil {
-		// Publish-first: if it failed after the local write, redelivery would
-		// find the user, skip the publish, and leave it un-fanned to other sites.
+		iuc := model.IUserWithChange{User: nu, ChangeType: model.IChangeTypeNewHire}
 		if err := h.publishUsers(ctx, []model.IUserWithChange{iuc}); err != nil {
 			return nil, fmt.Errorf("publish user identity fanout: %w", err)
 		}
 	}
-	if err := h.store.UpsertExternalUserIdentity(ctx, &nu); err != nil {
-		return nil, fmt.Errorf("upsert external user identity: %w", err)
-	}
-	created, err := h.store.GetUser(ctx, account)
-	if err != nil {
-		return nil, fmt.Errorf("read back created identity: %w", err)
-	}
-	return created, nil
+	return &nu, nil
 }
 
 // federateTeamsMembership publishes one local InboxInternal event (so
