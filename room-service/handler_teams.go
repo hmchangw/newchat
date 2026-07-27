@@ -133,7 +133,7 @@ func (h *Handler) teamsMeeting(c *natsrouter.Context, _ model.TeamsMeetingReques
 		return nil, errTeamsMeetingTooManyMembers
 	}
 
-	// Resolve organizer + attendee Azure AD object IDs via the app-only directory
+	// Resolve organizer + attendee Azure AD object IDs via the ROPC directory
 	// (User.Read.All). account@domain is only a guess; Graph createOrGet needs
 	// the real organizer identity in the path, so a failed organizer resolution
 	// is fatal. Attendees are best-effort — an unresolved attendee is dropped.

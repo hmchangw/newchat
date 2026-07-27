@@ -62,10 +62,9 @@ type Handler struct {
 	// roomMembersLimit / roomMembersCallLimit cap the member set for meetings and
 	// calls respectively.
 	graphClient msgraph.Client
-	// directoryClient resolves account local-parts to Azure AD object IDs via the
-	// app-only (client-credentials) User.Read.All permission. Required by the
-	// meetings RPC (nil -> errTeamsNotConfigured); the deep-link call RPCs do not
-	// use it.
+	// directoryClient resolves account local-parts to Azure AD object IDs via a
+	// ROPC User.Read.All service account. Required by the meetings RPC (nil ->
+	// errTeamsNotConfigured); the deep-link call RPCs do not use it.
 	directoryClient      msgraph.DirectoryReader
 	teamsMeetingStore    TeamsMeetingStore
 	teamsEmailDomain     string

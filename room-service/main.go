@@ -49,6 +49,13 @@ type config struct {
 	TeamsClientID     string `env:"TEAMS_CLIENT_ID"          envDefault:""`
 	TeamsClientSecret string `env:"TEAMS_CLIENT_SECRET"      envDefault:""`
 	TeamsEmailDomain  string `env:"TEAMS_EMAIL_DOMAIN"       envDefault:"dev.local"`
+	// TeamsROPCUsername/Password are the service-account resource-owner
+	// credentials for the ROPC (grant_type=password) directory lookup used to
+	// resolve meeting organizer/attendee Azure object IDs (User.Read.All). They
+	// reuse TeamsClientID/TeamsClientSecret as the confidential client. When
+	// unset the meetings RPC reports not-configured.
+	TeamsROPCUsername string `env:"TEAMS_ROPC_USERNAME"      envDefault:""`
+	TeamsROPCPassword string `env:"TEAMS_ROPC_PASSWORD"      envDefault:""`
 	// TeamsTLSInsecure disables Graph TLS verification (dev/on-prem self-signed
 	// certs only). Never enable in production.
 	TeamsTLSInsecure bool `env:"TEAMS_TLS_INSECURE" envDefault:"false"`
@@ -150,15 +157,11 @@ func main() {
 	// all MongoDB-backed and unaffected.
 	msgReader := newHistoryMessageReader(nc, cfg.SiteID)
 
-	// Graph client backs the meetings RPC. Constructed only when the Azure app
+	// Graph clients back the meetings RPC. Constructed only when the Azure app
 	// credentials are present; otherwise the meetings RPC reports not-configured
-	// while the deep-link RPCs keep working. The same app-only client also serves
-	// the directory lookup that resolves organizer/attendee Azure object IDs:
-	// User.Read.All is an application permission on this app (like
-	// OnlineMeetings.ReadWrite.All), so one client-credentials token serves both
-	// createOrGet and /users. A delegated/ROPC token cannot carry an application
-	// permission, so reusing the app-only client is required — not just an
-	// optimization.
+	// while the deep-link RPCs keep working. The directory client (ROPC,
+	// User.Read.All) resolves organizer/attendee object IDs and is required for
+	// meetings — it reuses the same app credentials as the confidential client.
 	var graphClient msgraph.Client
 	var directoryClient msgraph.DirectoryReader
 	if cfg.TeamsTenantID != "" && cfg.TeamsClientID != "" && cfg.TeamsClientSecret != "" {
@@ -178,12 +181,16 @@ func main() {
 			slog.Error("build graph meetings client", "error", err)
 			os.Exit(1)
 		}
-		dr, ok := graphClient.(msgraph.DirectoryReader)
-		if !ok {
-			slog.Error("graph meetings client does not implement DirectoryReader")
-			os.Exit(1)
+		if cfg.TeamsROPCUsername != "" && cfg.TeamsROPCPassword != "" {
+			directoryClient, err = msgraph.NewDirectoryROPCClient(graphCfg,
+				msgraph.ROPCCredentials{Username: cfg.TeamsROPCUsername, Password: cfg.TeamsROPCPassword})
+			if err != nil {
+				slog.Error("build graph directory client", "error", err)
+				os.Exit(1)
+			}
+		} else {
+			slog.Warn("TEAMS_ROPC_USERNAME/PASSWORD unset — Teams meetings RPC will report not-configured")
 		}
-		directoryClient = dr
 	}
 
 	// Eager at-rest DEK provisioning: when enabled, room creation provisions

@@ -701,46 +701,62 @@ func TestNewChatsClient_ProxyRejectsCustomRoundTripper(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestMeetingsClient_ResolvesDirectoryAppOnly locks in the auth flow for the
-// Teams-meeting object-ID lookup: the meetings client (NewMeetingsClient) is
-// ALSO a DirectoryReader, and its /users resolution uses the app-only
-// client_credentials grant — NOT a delegated/ROPC token. Directory reads in
-// this tenant use the application User.Read.All permission, which a delegated
-// token cannot carry (that mismatch returned 403). room-service reuses this one
-// app-only client for both createOrGet and ResolveAccountIDs.
-func TestMeetingsClient_ResolvesDirectoryAppOnly(t *testing.T) {
-	var grant string
+func TestNewDirectoryROPCClient_ResolvesWithPasswordGrant(t *testing.T) {
+	var grant, user, pass string
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		grant = r.Form.Get("grant_type")
-		assert.Empty(t, r.Form.Get("username"), "app-only flow must not send a username")
-		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "atok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+		user = r.Form.Get("username")
+		pass = r.Form.Get("password")
+		assert.Equal(t, graphScope, r.Form.Get("scope"))
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "dtok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
 	}))
 	defer tokenSrv.Close()
 
 	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer atok", r.Header.Get("Authorization"))
+		assert.Equal(t, "Bearer dtok", r.Header.Get("Authorization"))
 		assert.Equal(t, "eventual", r.Header.Get("ConsistencyLevel"))
-		assert.Contains(t, r.URL.Query().Get("$filter"), "startsWith(userPrincipalName,'alice@')")
+		filter := r.URL.Query().Get("$filter")
+		assert.Contains(t, filter, "startsWith(userPrincipalName,'alice@')")
 		_ = json.NewEncoder(w).Encode(map[string]any{"value": []GraphUser{
 			{ID: "ida", UserPrincipalName: "alice@corp.com"},
 		}})
 	}))
 	defer graphSrv.Close()
 
-	c, err := NewMeetingsClient(
+	d, err := NewDirectoryROPCClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
 	require.NoError(t, err)
 
-	dr, ok := c.(DirectoryReader)
-	require.True(t, ok, "meetings client must also satisfy DirectoryReader for room-service reuse")
-
-	got, err := dr.ResolveAccountIDs(context.Background(), []string{"alice"})
+	got, err := d.ResolveAccountIDs(context.Background(), []string{"alice"})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"alice": "ida"}, got)
-	assert.Equal(t, "client_credentials", grant, "/users lookup must use the app-only flow, not a delegated/ROPC token")
+	assert.Equal(t, "password", grant)
+	assert.Equal(t, "svc@corp.com", user)
+	assert.Equal(t, "pw", pass)
+}
+
+func TestNewDirectoryROPCClient_TokenErrorDoesNotLeakPassword(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(tokenResponse{Error: "invalid_grant"}) // #nosec G117 -- test mock OAuth error response; no token value
+	}))
+	defer tokenSrv.Close()
+
+	d, err := NewDirectoryROPCClient(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		ROPCCredentials{Username: "svc@corp.com", Password: "supersecret"},
+		WithTokenURL(tokenSrv.URL), WithBaseURL("http://unused"),
+	)
+	require.NoError(t, err)
+
+	_, err = d.ResolveAccountIDs(context.Background(), []string{"alice"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "supersecret")
+	assert.Contains(t, err.Error(), "invalid_grant")
 }
 
 func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
@@ -779,4 +795,27 @@ func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", m.ID)
+}
+
+// TestResolveAccountIDs_SurfacesGraphErrorCode: a non-200 from /users surfaces
+// the Graph error code (e.g. the 403 Authorization_RequestDenied seen when a
+// delegated token lacks admin-consented User.Read.All) without leaking the raw
+// error message.
+func TestResolveAccountIDs_SurfacesGraphErrorCode(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer tokenSrv.Close()
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"Authorization_RequestDenied","message":"secret-internal-detail-xyz"}}`))
+	}))
+	defer graphSrv.Close()
+
+	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	_, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "403")
+	assert.Contains(t, err.Error(), "Authorization_RequestDenied")
+	assert.NotContains(t, err.Error(), "secret-internal-detail-xyz", "raw response message must not leak")
 }

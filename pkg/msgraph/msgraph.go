@@ -408,9 +408,10 @@ func (g *graphClient) ResolveAccountIDs(ctx context.Context, accounts []string) 
 	return resolveAccountIDs(ctx, g.httpClient, g.baseURL, g.userAgent, token, accounts)
 }
 
-// resolveAccountIDs is the token-agnostic directory lookup backing
-// graphClient.ResolveAccountIDs: chunked startsWith filter, result keyed by
-// lowercased UPN local-part, first match wins.
+// resolveAccountIDs is the token-agnostic directory lookup shared by the
+// app-only graphClient and the ROPC directoryClient. Semantics match the
+// original graphClient.ResolveAccountIDs: chunked startsWith filter, result
+// keyed by lowercased UPN local-part, first match wins.
 func resolveAccountIDs(ctx context.Context, hc *http.Client, baseURL, userAgent, token string, accounts []string) (map[string]string, error) {
 	out := make(map[string]string, len(accounts))
 	if len(accounts) == 0 {
@@ -487,6 +488,19 @@ func resolveChunk(ctx context.Context, hc *http.Client, baseURL, userAgent, toke
 		return fmt.Errorf("read get-users response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		// Surface the Graph error code (e.g. Authorization_RequestDenied) without
+		// leaking the raw message — mirrors CreateOnlineMeeting. The code is the
+		// actionable signal: a 403 here means the token lacks effective directory
+		// read (e.g. delegated User.Read.All not admin-consented).
+		var graphErr struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &graphErr)
+		if graphErr.Error.Code != "" {
+			return fmt.Errorf("get users: graph returned status %d (%s)", resp.StatusCode, graphErr.Error.Code)
+		}
 		return fmt.Errorf("get users: graph returned status %d", resp.StatusCode)
 	}
 	var page struct {
