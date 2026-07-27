@@ -2253,55 +2253,46 @@ func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, erro
 	return &model.OpenRoomResponse{Status: "ok", Open: sub.Open}, nil
 }
 
-// authorizeRoomAppRead allows the request iff the caller has a
-// subscription in roomID OR is a platform admin in the local users
-// collection AND the room actually exists. The room-existence check
-// gates only the admin bypass — without it, an admin could query app
-// metadata for a fabricated room ID and receive a plausible-looking
-// response (e.g. a non-empty default-tabs list, or an empty cmd-menu
-// list that looks like success). Cross-site admin authority is out of
-// scope: an admin whose users document lives on a different site is
-// denied. Returns the room doc when the admin-bypass path fetched one
-// (nil on the member path, which never needs it).
+// authorizeRoomAppRead admits room members and local platform admins iff the
+// room exists, returning the room narrowly projected via GetRoomAppRead.
 func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) (*model.Room, error) {
+	type roomResult struct {
+		room *model.Room
+		err  error
+	}
+	// Fetch concurrently with the auth checks; a joined query would need a
+	// forbidden $lookup. Buffered so the goroutine exits on early denial.
+	roomCh := make(chan roomResult, 1)
+	go func() {
+		room, err := h.store.GetRoomAppRead(ctx, roomID)
+		roomCh <- roomResult{room, err}
+	}()
+
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil && !errors.Is(err, model.ErrSubscriptionNotFound) {
 		return nil, fmt.Errorf("check room membership: %w", err)
 	}
-	if model.IsRoomMember(sub) {
-		return nil, nil
-	}
-	user, err := h.store.GetUser(ctx, account)
-	if err != nil && !errors.Is(err, ErrUserNotFound) {
-		return nil, fmt.Errorf("check platform admin: %w", err)
-	}
-	if !model.IsPlatformAdmin(user) {
-		return nil, errAppAccessDenied
-	}
-	// Admin bypass: verify the room exists before allowing the read.
-	// Without this, admins could query app metadata for fabricated room
-	// IDs and get plausible-looking responses. The fetched doc is returned
-	// so callers that need it (getRoomAppTabs) don't re-fetch it.
-	return h.getRoomForAppRead(ctx, roomID)
-}
-
-// getRoomForAppRead fetches roomID for the app-read RPCs, collapsing a
-// missing room to errAppAccessDenied so callers can't distinguish a
-// nonexistent room from one they're not allowed to see.
-func (h *Handler) getRoomForAppRead(ctx context.Context, roomID string) (*model.Room, error) {
-	room, err := h.store.GetRoom(ctx, roomID)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+	if !model.IsRoomMember(sub) {
+		user, err := h.store.GetUser(ctx, account)
+		if err != nil && !errors.Is(err, ErrUserNotFound) {
+			return nil, fmt.Errorf("check platform admin: %w", err)
+		}
+		if !model.IsPlatformAdmin(user) {
 			return nil, errAppAccessDenied
 		}
-		return nil, fmt.Errorf("get room for app read: %w", err)
 	}
-	return room, nil
+	// A missing room reads as denied — never reveal room existence.
+	res := <-roomCh
+	if res.err != nil {
+		if errors.Is(res.err, mongo.ErrNoDocuments) {
+			return nil, errAppAccessDenied
+		}
+		return nil, fmt.Errorf("get room for app read: %w", res.err)
+	}
+	return res.room, nil
 }
 
-// legacyRoomTypes maps the redesigned RoomType vocabulary to the legacy
-// values pre-redesign channel-tab apps expect in their ${roomType} URL
-// template variable.
+// legacyRoomTypes maps redesigned RoomTypes to the legacy ${roomType} vocabulary.
 var legacyRoomTypes = map[model.RoomType]string{
 	model.RoomTypeChannel:    "p",
 	model.RoomTypeDM:         "d",
@@ -2309,8 +2300,7 @@ var legacyRoomTypes = map[model.RoomType]string{
 	model.RoomTypeDiscussion: "p",
 }
 
-// legacyRoomType returns the legacy vocabulary value for t, falling back
-// to "p" for unknown types so ${roomType} always resolves.
+// legacyRoomType maps t to the legacy vocabulary; unknown types fall back to "p".
 func legacyRoomType(t model.RoomType) string {
 	if v, ok := legacyRoomTypes[t]; ok {
 		return v
@@ -2318,16 +2308,8 @@ func legacyRoomType(t model.RoomType) string {
 	return "p"
 }
 
-// buildTabURL substitutes the ${roomId}, ${siteId}, ${roomType} and
-// ${roomOrigin} template variables into a channelTab URL template. The
-// template carries the full URL — no base-URL rewrite is applied.
-// ${roomType} is the legacy room-type vocabulary (legacyRoomType);
-// ${roomOrigin} is the legacy origin URL of the room's home site, or ""
-// when unconfigured. Returns (url, true) on success; (_, false) when the
-// template is empty, unparseable, or not an absolute http(s) URL, or the
-// IDs fail the URL-safety check. Rejecting non-absolute-http(s) results
-// makes legacy path-only templates (from the pre-rewrite era) fail safe —
-// Warn-skipped by the caller — instead of shipping a broken URL to clients.
+// buildTabURL substitutes the ${…} variables into a full-URL channelTab template;
+// false unless absolute http(s), so legacy path-only templates fail safe.
 func (h *Handler) buildTabURL(tmpl string, room *model.Room) (string, bool) {
 	if tmpl == "" {
 		return "", false
@@ -2335,8 +2317,7 @@ func (h *Handler) buildTabURL(tmpl string, room *model.Room) (string, bool) {
 	if !isURLSafeIDToken(room.ID) || !isURLSafeIDToken(h.siteID) {
 		return "", false
 	}
-	// Substitute BEFORE parsing so url.Parse only validates the final
-	// string and never percent-encodes the substituted values.
+	// Substitute before parsing so url.Parse never percent-encodes the values.
 	tmpl = strings.ReplaceAll(tmpl, "${roomId}", room.ID)
 	tmpl = strings.ReplaceAll(tmpl, "${siteId}", h.siteID)
 	tmpl = strings.ReplaceAll(tmpl, "${roomType}", legacyRoomType(room.Type))
@@ -2366,11 +2347,6 @@ func (h *Handler) getRoomAppTabs(c *natsrouter.Context) (*model.GetRoomAppTabsRe
 	room, err := h.authorizeRoomAppRead(ctx, account, roomID)
 	if err != nil {
 		return nil, err
-	}
-	if room == nil { // member path: authorization didn't need the room doc
-		if room, err = h.getRoomForAppRead(ctx, roomID); err != nil {
-			return nil, err
-		}
 	}
 
 	apps, err := h.store.ListDefaultChannelTabApps(ctx)

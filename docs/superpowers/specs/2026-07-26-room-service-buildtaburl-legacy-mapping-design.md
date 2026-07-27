@@ -83,26 +83,26 @@ Signature becomes `buildTabURL(tmpl string, room *model.Room) (string, bool)`.
 The handler needs a `roomID` no longer as a param — the room doc carries
 `room.ID`.
 
-`getRoomAppTabs` fetches the room once via the existing `store.GetRoom`
-**after** `authorizeRoomAppRead` succeeds:
+`authorizeRoomAppRead` authorizes AND returns the room, narrowly projected
+via a dedicated `store.GetRoomAppRead` (`_id`, `type`, `siteId`). The room
+fetch runs concurrently with the auth checks (separate collections; a single
+joined query would need a forbidden `$lookup`):
 
-- `mongo.ErrNoDocuments` ⇒ `errAppAccessDenied` (mirrors the admin-bypass
-  existence gate; a member-path race where the room vanished mid-request)
-- other error ⇒ `fmt.Errorf("get room: %w", err)` (collapses to `internal`)
+- `mongo.ErrNoDocuments` ⇒ `errAppAccessDenied` on every path — room
+  existence now gates members too, not just the admin bypass
+- other error ⇒ `fmt.Errorf("get room for app read: %w", err)` (⇒ `internal`)
 
-`authorizeRoomAppRead` is intentionally untouched — it is shared with
-`getRoomAppCommandMenu`, which does not need the room doc. The admin path
-performs one extra `GetRoom` (existence gate + tab fetch); accepted, the
-admin path is cold.
+Exactly one room read per request on all paths. `getRoomAppCommandMenu`
+discards the returned room (`_, err :=`).
 
 `Handler` gains a `legacyRoomOrigins map[string]string` field, injected via
 `NewHandler` (replacing the removed `siteURL` param).
 
 ### Projection
 
-`roomReadProjection` (`room-service/store_mongo.go`) gains
-`{Key: "siteId", Value: 1}` — `buildTabURL` reads `room.SiteID`. The
-projection drift-guard integration test is updated in the same change.
+A new `roomAppReadProjection` (`room-service/store_mongo.go`) backs
+`GetRoomAppRead` with only `_id`/`type`/`siteId`; `roomReadProjection`
+stays untouched. A drift-guard integration test pins the narrow set.
 
 ## Error handling
 

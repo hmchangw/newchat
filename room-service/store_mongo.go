@@ -243,11 +243,15 @@ func (s *MongoStore) InsertTeamsMeeting(ctx context.Context, record model.TeamsM
 // handler.go; the projection-field integration test guards drift.
 var roomReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "type", Value: 1}, {Key: "name", Value: 1},
-	{Key: "siteId", Value: 1},
 	{Key: "userCount", Value: 1}, {Key: "appCount", Value: 1},
 	{Key: "restricted", Value: 1}, {Key: "externalAccess", Value: 1},
 	{Key: "lastMsgAt", Value: 1}, {Key: "minUserLastSeenAt", Value: 1},
 	{Key: "lastMentionAllAt", Value: 1},
+}
+
+// roomAppReadProjection: only the fields the app-read RPCs consume.
+var roomAppReadProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "type", Value: 1}, {Key: "siteId", Value: 1},
 }
 
 // subscriptionReadProjection is the field set GetSubscription returns — the
@@ -265,6 +269,15 @@ var subscriptionReadProjection = bson.D{
 func (s *MongoStore) GetRoom(ctx context.Context, id string) (*model.Room, error) {
 	var room model.Room
 	opts := options.FindOne().SetProjection(roomReadProjection)
+	if err := s.rooms.FindOne(ctx, bson.M{"_id": id}, opts).Decode(&room); err != nil {
+		return nil, fmt.Errorf("room %q not found: %w", id, err)
+	}
+	return &room, nil
+}
+
+func (s *MongoStore) GetRoomAppRead(ctx context.Context, id string) (*model.Room, error) {
+	var room model.Room
+	opts := options.FindOne().SetProjection(roomAppReadProjection)
 	if err := s.rooms.FindOne(ctx, bson.M{"_id": id}, opts).Decode(&room); err != nil {
 		return nil, fmt.Errorf("room %q not found: %w", id, err)
 	}

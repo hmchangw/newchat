@@ -29,12 +29,8 @@ type config struct {
 	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
-	// LegacyRoomOrigins maps a room's origin siteID to the legacy origin URL
-	// substituted into channel-tab ${roomOrigin} template variables. Wire
-	// format: "site-a:https://legacy.site-a.com,site-b:https://legacy.site-b.com"
-	// (comma-separated, first-colon split — URL values keep "://"). Unset ⇒
-	// every ${roomOrigin} substitutes to "". Keyed like pkg/drive's
-	// GetBaseURLFromRoomOrigin (room-origin siteID → per-site base URL).
+	// LegacyRoomOrigins maps room-origin siteID → legacy URL for ${roomOrigin}.
+	// Format "site-a:https://legacy.site-a.com,…" (first-colon split); unset ⇒ "".
 	LegacyRoomOrigins        map[string]string `env:"LEGACY_ROOM_ORIGINS"`
 	MongoURI                 string            `env:"MONGO_URI,required"`
 	MongoDB                  string            `env:"MONGO_DB"                  envDefault:"chat"`
@@ -86,9 +82,7 @@ type config struct {
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
 
-// normalizeLegacyRoomOrigins trims whitespace around the keys and values of
-// the LEGACY_ROOM_ORIGINS map (tolerating "site-a: https://…" with a space
-// after the colon) and drops entries left empty after trimming.
+// normalizeLegacyRoomOrigins trims keys/values ("site-a: url" tolerated), drops empties.
 func normalizeLegacyRoomOrigins(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {

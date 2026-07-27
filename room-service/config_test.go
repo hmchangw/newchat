@@ -44,9 +44,8 @@ func TestNormalizeLegacyRoomOrigins(t *testing.T) {
 	}
 }
 
-// TestLegacyRoomOrigins_EnvWireFormat pins the LEGACY_ROOM_ORIGINS wire
-// format: comma-separated entries, first-colon key:value split (URL values
-// keep "://"), spaces after the colon tolerated via normalization.
+// TestLegacyRoomOrigins_EnvWireFormat pins the wire format: comma-separated,
+// first-colon split (URL values keep "://"), spaces tolerated via normalization.
 func TestLegacyRoomOrigins_EnvWireFormat(t *testing.T) {
 	type originsConfig struct {
 		LegacyRoomOrigins map[string]string `env:"LEGACY_ROOM_ORIGINS"`

@@ -127,7 +127,6 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, "rproj", got.ID)
 	assert.Equal(t, "proj-room", got.Name)
 	assert.Equal(t, model.RoomTypeChannel, got.Type)
-	assert.Equal(t, "site-a", got.SiteID, "siteId must be in the projection (buildTabURL reads room.SiteID for ${roomOrigin})")
 	assert.Equal(t, 7, got.UserCount)
 	assert.Equal(t, 3, got.AppCount)
 	assert.True(t, got.Restricted)
@@ -138,6 +137,26 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	assert.WithinDuration(t, minSeen, *got.MinUserLastSeenAt, time.Second)
 	require.NotNil(t, got.LastMentionAllAt, "lastMentionAllAt must be in the projection (read event computes hasGroupMention from it)")
 	assert.WithinDuration(t, lastMentionAll, *got.LastMentionAllAt, time.Second)
+}
+
+// Pins the narrow app-read projection: ID/Type/SiteID populated, all else zero.
+func TestMongoStore_GetRoomAppRead_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	mustInsertRoom(t, db, &model.Room{
+		ID: "rappread", Name: "proj-room", Type: model.RoomTypeChannel,
+		SiteID: "site-a", UserCount: 7,
+	})
+
+	got, err := store.GetRoomAppRead(ctx, "rappread")
+	require.NoError(t, err)
+	assert.Equal(t, "rappread", got.ID)
+	assert.Equal(t, model.RoomTypeChannel, got.Type)
+	assert.Equal(t, "site-a", got.SiteID)
+	assert.Empty(t, got.Name, "projection must exclude fields the app-read RPCs don't use")
+	assert.Zero(t, got.UserCount)
 }
 
 // TestMongoStore_GetSubscription_ProjectionFields_Integration pins the field
