@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
@@ -115,7 +114,7 @@ func TestIndexName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := indexName(tt.prefix, tt.createdAt)
+			got := searchindex.MessageIndexName(tt.prefix, tt.createdAt)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -190,44 +189,6 @@ func TestBuildMessageAction(t *testing.T) {
 		action := buildMessageAction(evt, "msgs-v1")
 		assert.Equal(t, searchengine.ActionIndex, action.Action)
 	})
-}
-
-func TestMessageTemplateProperties_MatchesStruct(t *testing.T) {
-	props := messageTemplateProperties()
-
-	// Every MessageSearchIndex field with an es tag must have a corresponding template property.
-	typ := reflect.TypeOf(MessageSearchIndex{})
-	for i := range typ.NumField() {
-		field := typ.Field(i)
-		esTag := field.Tag.Get("es")
-		if esTag == "" || esTag == "-" {
-			continue
-		}
-		jsonTag := field.Tag.Get("json")
-		name, _, _ := strings.Cut(jsonTag, ",")
-
-		prop, ok := props[name]
-		assert.True(t, ok, "template missing property for struct field %s (json: %s)", field.Name, name)
-
-		esType, _, _ := strings.Cut(esTag, ",")
-		propMap := prop.(map[string]any)
-		// object_disabled expands to a stored-only object mapping.
-		if esType == "object_disabled" {
-			assert.Equal(t, "object", propMap["type"], "type mismatch for field %s", name)
-			assert.Equal(t, false, propMap["enabled"], "field %s must not be indexed", name)
-			continue
-		}
-		assert.Equal(t, esType, propMap["type"], "type mismatch for field %s", name)
-	}
-
-	// Template should have exactly as many properties as struct fields with es tags.
-	esFieldCount := 0
-	for i := range typ.NumField() {
-		if tag := typ.Field(i).Tag.Get("es"); tag != "" && tag != "-" {
-			esFieldCount++
-		}
-	}
-	assert.Equal(t, esFieldCount, len(props), "template property count should match struct es-tagged field count")
 }
 
 func TestNewMessageSearchIndex(t *testing.T) {

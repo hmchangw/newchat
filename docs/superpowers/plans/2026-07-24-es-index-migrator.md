@@ -609,7 +609,7 @@ git commit -m "refactor(searchindex): extract SpotlightDoc into pkg/searchindex"
 
 **Interfaces:**
 - Consumes: `encoding/json`.
-- Produces: `searchindex.UserRoomUpsertDoc`, `searchindex.AddRoomScriptID`/`RemoveRoomScriptID` (string constants), `searchindex.AddRoomScript`/`RemoveRoomScript` (Painless source constants), `searchindex.StoredScriptBody(source string) json.RawMessage`, `searchindex.BuildAddRoomUpdateBody(rid string, ts, hss int64) json.RawMessage`, `searchindex.BuildRemoveRoomUpdateBody(rid string, ts int64) json.RawMessage` — consumed by `search-sync-worker/user_room.go` (this task) and the migrator's user-room action builder (Task 12) and bootstrap (Task 13).
+- Produces: `searchindex.UserRoomUpsertDoc`, `searchindex.AddRoomScriptID`/`RemoveRoomScriptID` (string constants), `searchindex.AddRoomScript`/`RemoveRoomScript` (Painless source constants), `searchindex.StoredScriptBody(source string) json.RawMessage`, `searchindex.BuildAddRoomUpdateBody(account, rid string, ts, hss int64) json.RawMessage` (matches production's existing `account`/`Rooms: []string{}`-seeding signature — verify against the current `search-sync-worker/user_room.go` before transcribing, not from memory), `searchindex.BuildRemoveRoomUpdateBody(rid string, ts int64) json.RawMessage` — consumed by `search-sync-worker/user_room.go` (this task) and the migrator's user-room action builder (Task 12) and bootstrap (Task 13).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -643,7 +643,7 @@ func TestStoredScriptBody(t *testing.T) {
 }
 
 func TestBuildAddRoomUpdateBody(t *testing.T) {
-	body := searchindex.BuildAddRoomUpdateBody("room1", 1000, 0)
+	body := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 0)
 
 	var decoded struct {
 		Script struct {
@@ -657,10 +657,11 @@ func TestBuildAddRoomUpdateBody(t *testing.T) {
 	assert.Equal(t, "room1", decoded.Script.Params["rid"])
 	assert.InDelta(t, 1000, decoded.Script.Params["ts"], 0)
 	assert.InDelta(t, 0, decoded.Script.Params["hss"], 0)
+	assert.Equal(t, "alice", decoded.Upsert.UserAccount)
 }
 
 func TestBuildAddRoomUpdateBody_RestrictedRoomSeedsRestrictedRoomsMap(t *testing.T) {
-	body := searchindex.BuildAddRoomUpdateBody("room1", 1000, 500)
+	body := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 500)
 
 	var decoded struct {
 		Upsert searchindex.UserRoomUpsertDoc `json:"upsert"`
@@ -671,7 +672,7 @@ func TestBuildAddRoomUpdateBody_RestrictedRoomSeedsRestrictedRoomsMap(t *testing
 }
 
 func TestBuildAddRoomUpdateBody_UnrestrictedRoomSeedsRoomsArray(t *testing.T) {
-	body := searchindex.BuildAddRoomUpdateBody("room1", 1000, 0)
+	body := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 0)
 
 	var decoded struct {
 		Upsert searchindex.UserRoomUpsertDoc `json:"upsert"`
@@ -794,14 +795,16 @@ func StoredScriptBody(source string) json.RawMessage {
 	return body
 }
 
-// BuildAddRoomUpdateBody builds the ActionUpdate body for adding rid to a
-// user's user-room doc at timestamp ts (millis), with hss the room's
+// BuildAddRoomUpdateBody builds the ActionUpdate body for adding rid to
+// account's user-room doc at timestamp ts (millis), with hss the room's
 // HistorySharedSince in millis (0 for unrestricted). The upsert seed makes
 // the first-insert document shape match what the script itself would
 // produce on a subsequent update.
-func BuildAddRoomUpdateBody(rid string, ts, hss int64) json.RawMessage {
+func BuildAddRoomUpdateBody(account, rid string, ts, hss int64) json.RawMessage {
 	now := time.UnixMilli(ts).UTC().Format(time.RFC3339Nano)
 	upsert := UserRoomUpsertDoc{
+		UserAccount:     account,
+		Rooms:           []string{},
 		RestrictedRooms: map[string]int64{},
 		RoomTimestamps:  map[string]int64{rid: ts},
 		CreatedAt:       now,
@@ -857,7 +860,7 @@ func (c *userRoomCollection) StoredScripts() map[string]json.RawMessage {
 }
 ```
 
-In `BuildAction`, where the per-account fan-out builds each `searchengine.BulkAction`, the doc ID stays `account` (the file already computes this) and the body becomes `searchindex.BuildAddRoomUpdateBody(roomID, ts, hss)` / `searchindex.BuildRemoveRoomUpdateBody(roomID, ts)` respectively — replace whatever local call the file currently makes with these.
+In `BuildAction`, where the per-account fan-out builds each `searchengine.BulkAction`, the doc ID stays `account` (the file already computes this) and the body becomes `searchindex.BuildAddRoomUpdateBody(account, roomID, ts, hss)` / `searchindex.BuildRemoveRoomUpdateBody(roomID, ts)` respectively — replace whatever local call the file currently makes with these.
 
 - [ ] **Step 6: Update `search-sync-worker/user_room_test.go`**
 
@@ -2075,7 +2078,7 @@ func buildUserRoomAction(sub model.Subscription, indexName string) (searchengine
 		Action: searchengine.ActionUpdate,
 		Index:  indexName,
 		DocID:  sub.User.Account,
-		Doc:    searchindex.BuildAddRoomUpdateBody(sub.RoomID, sub.JoinedAt.UnixMilli(), hss),
+		Doc:    searchindex.BuildAddRoomUpdateBody(sub.User.Account, sub.RoomID, sub.JoinedAt.UnixMilli(), hss),
 	}, nil
 }
 ```

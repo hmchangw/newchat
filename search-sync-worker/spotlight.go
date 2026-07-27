@@ -30,11 +30,11 @@ func (c *spotlightCollection) ConsumerName() string {
 }
 
 func (c *spotlightCollection) TemplateName() string {
-	return fmt.Sprintf("%s_template", searchindex.StripVersionBase(c.indexName))
+	return searchindex.SpotlightTemplateName(c.indexName)
 }
 
 func (c *spotlightCollection) TemplateBody() json.RawMessage {
-	return spotlightTemplateBody(c.indexName, c.devMode)
+	return searchindex.SpotlightTemplateBody(c.indexName, c.devMode)
 }
 
 // BuildAction fans a member_added / member_removed event out into one ES
@@ -99,77 +99,26 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 	return actions, nil
 }
 
-// SpotlightSearchIndex defines the Elasticsearch document structure for the
-// spotlight index. One doc per (user, room) pair.
-type SpotlightSearchIndex struct {
-	UserAccount string    `json:"userAccount" es:"keyword"`
-	RoomID      string    `json:"roomId"      es:"keyword"`
-	RoomName    string    `json:"roomName"    es:"search_as_you_type,custom_analyzer"`
-	RoomType    string    `json:"roomType"    es:"keyword"`
-	SiteID      string    `json:"siteId"      es:"keyword"`
-	JoinedAt    time.Time `json:"joinedAt"    es:"date"`
-}
-
-func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) SpotlightSearchIndex {
-	var joinedAt time.Time
+func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) searchindex.SpotlightDoc {
+	var joinedAt int64
 	if evt.JoinedAt > 0 {
-		joinedAt = time.UnixMilli(evt.JoinedAt).UTC()
+		joinedAt = evt.JoinedAt
 	}
-	return SpotlightSearchIndex{
+	return searchindex.NewSpotlightDoc(searchindex.SpotlightFields{
 		UserAccount: account,
 		RoomID:      evt.RoomID,
 		RoomName:    evt.RoomName,
 		RoomType:    string(evt.RoomType),
 		SiteID:      evt.SiteID,
-		JoinedAt:    joinedAt,
-	}
+		JoinedAt:    convertJoinedAt(joinedAt),
+	})
 }
 
-// spotlightTemplateBody builds the ES index template. The wildcard
-// index_patterns lets a single template cover the current versioned
-// index and any future reindex targets.
-func spotlightTemplateBody(indexName string, devMode bool) json.RawMessage {
-	shards := 3
-	replicas := 1
-	if devMode {
-		shards = 1
-		replicas = 0
+// convertJoinedAt converts a Unix millisecond timestamp to a UTC time.Time,
+// or returns a zero time.Time if the timestamp is 0.
+func convertJoinedAt(joinedAtMs int64) time.Time {
+	if joinedAtMs > 0 {
+		return time.UnixMilli(joinedAtMs).UTC()
 	}
-	tmpl := map[string]any{
-		"index_patterns": []string{searchindex.IndexPattern(indexName)},
-		"template": map[string]any{
-			"settings": map[string]any{
-				"index": map[string]any{
-					"number_of_shards":   shards,
-					"number_of_replicas": replicas,
-				},
-				"analysis": map[string]any{
-					"analyzer": map[string]any{
-						"custom_analyzer": map[string]any{
-							"type":      "custom",
-							"tokenizer": "custom_tokenizer",
-							"filter":    []string{"lowercase"},
-						},
-					},
-					"tokenizer": map[string]any{
-						// Whitespace tokenizer only supports max_token_length
-						// (default 255). `token_chars` is valid on ngram /
-						// edge_ngram tokenizers, not whitespace — sending it
-						// here would reject the UpsertTemplate request.
-						"custom_tokenizer": map[string]any{
-							"type": "whitespace",
-						},
-					},
-				},
-			},
-			"mappings": map[string]any{
-				"dynamic":    false,
-				"properties": esPropertiesFromStruct[SpotlightSearchIndex](),
-			},
-		},
-	}
-	// tmpl is built entirely from map/slice/string/int literals that are
-	// always JSON-marshalable, so the error cannot occur in practice.
-	data, _ := json.Marshal(tmpl)
-	return data
+	return time.Time{}
 }

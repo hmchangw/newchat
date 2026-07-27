@@ -153,7 +153,7 @@ func (h *Handler) Flush(ctx context.Context) {
 	for _, p := range pending {
 		allOK := true
 		for i := p.actionStart; i < p.actionStart+p.actionCount; i++ {
-			if isBulkItemSuccess(actions[i].Action, results[i]) {
+			if searchengine.IsBulkItemSuccess(actions[i].Action, results[i]) {
 				continue
 			}
 			allOK = false
@@ -197,72 +197,6 @@ func (h *Handler) startFlushSpan(ctx context.Context, pending []pendingMsg, acti
 		),
 		trace.WithLinks(links...),
 	)
-}
-
-// esErrDocumentMissing is the Elasticsearch `_bulk` response `error.type`
-// for an update against a missing document — a benign idempotent outcome
-// we ack rather than retry. All other 404 error types (including
-// `index_not_found_exception`) are treated as real failures.
-const esErrDocumentMissing = "document_missing_exception"
-
-// isBulkItemSuccess maps an ES bulk item result to a logical success/failure
-// per action type.
-//
-//   - 2xx is always success.
-//   - 409 is success ONLY for externally-versioned writes (ActionIndex,
-//     ActionDelete): it means external versioning rejected a stale write and
-//     the desired state is already reached or newer. ActionUpdate does NOT
-//     use external versioning (the adapter omits version/version_type on
-//     _update); idempotency there comes from the painless LWW guard via
-//     `params.ts > stored`. A 409 on an update means an internal
-//     version_conflict_engine_exception from concurrent writers — the script
-//     did NOT execute, so the update was dropped. We NAK so JetStream
-//     redelivers and retries.
-//   - 404 is success ONLY for specific idempotent outcomes:
-//   - ActionDelete with no error type set: delete of a missing doc
-//     sets `result:"not_found"` and no error block — desired state
-//     already reached.
-//   - ActionUpdate with ErrorType == "document_missing_exception": the
-//     user-room remove path emits a scriptless update which 404s if the
-//     user doc doesn't exist yet — desired state already reached.
-//     404 with any other error type (notably `index_not_found_exception`,
-//     which means the target ES index is missing / misconfigured) is
-//     treated as a real failure so we don't silently drop messages when the
-//     backing index/template is wrong.
-//   - ActionIndex 404 is always a failure because indexing is supposed to
-//     create the doc; a 404 there only happens when the index itself is
-//     missing.
-func isBulkItemSuccess(action searchengine.ActionType, result searchengine.BulkResult) bool {
-	if result.Status >= 200 && result.Status < 300 {
-		return true
-	}
-	if result.Status == 409 {
-		switch action {
-		case searchengine.ActionIndex, searchengine.ActionDelete:
-			return true
-		case searchengine.ActionUpdate:
-			return false
-		}
-	}
-	if result.Status == 404 {
-		switch action {
-		case searchengine.ActionDelete:
-			// Delete on a missing doc returns status=404 with result=not_found
-			// and NO error block (ErrorType is empty). Any other error type
-			// at 404 (e.g., index_not_found_exception) is a real failure.
-			return result.ErrorType == ""
-		case searchengine.ActionUpdate:
-			// Update on a missing doc reports `document_missing_exception`.
-			// Update on a missing INDEX reports `index_not_found_exception`
-			// — we want that to fail loudly, not get silently acked.
-			return result.ErrorType == esErrDocumentMissing
-		case searchengine.ActionIndex:
-			// Index is supposed to CREATE the doc; a 404 here only happens
-			// when the index itself is missing (config error). Always fail.
-			return false
-		}
-	}
-	return false
 }
 
 // nakAll naks every buffered source message for redelivery. Used on the

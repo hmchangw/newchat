@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -101,26 +99,6 @@ func TestSpotlightCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 	roomName := props["roomName"].(map[string]any)
 	assert.Equal(t, "search_as_you_type", roomName["type"])
 	assert.Equal(t, "custom_analyzer", roomName["analyzer"])
-}
-
-func TestSpotlightTemplateProperties_MatchesStruct(t *testing.T) {
-	props := esPropertiesFromStruct[SpotlightSearchIndex]()
-
-	typ := reflect.TypeOf(SpotlightSearchIndex{})
-	esFieldCount := 0
-	for i := range typ.NumField() {
-		field := typ.Field(i)
-		esTag := field.Tag.Get("es")
-		if esTag == "" || esTag == "-" {
-			continue
-		}
-		esFieldCount++
-		jsonTag := field.Tag.Get("json")
-		name, _, _ := strings.Cut(jsonTag, ",")
-		_, ok := props[name]
-		assert.True(t, ok, "template missing property for field %s (json %s)", field.Name, name)
-	}
-	assert.Equal(t, esFieldCount, len(props))
 }
 
 func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
