@@ -59,7 +59,7 @@ func TestBuildUserRoomAction_Restricted(t *testing.T) {
 	assert.InDelta(t, hss.UnixMilli(), decoded.Script.Params["hss"], 0)
 }
 
-func TestBuildUserRoomAction_BotSubscriptionIsSkipped(t *testing.T) {
+func TestBuildUserRoomAction_BotSubscriptionIsIndexed(t *testing.T) {
 	sub := model.Subscription{
 		RoomID: "room1", User: model.SubscriptionUser{Account: "helper.bot", IsBot: true}, JoinedAt: time.Now(),
 	}
@@ -67,7 +67,10 @@ func TestBuildUserRoomAction_BotSubscriptionIsSkipped(t *testing.T) {
 	action, err := buildUserRoomAction(sub, "user-room-a")
 
 	require.NoError(t, err)
-	assert.Equal(t, searchengine.BulkAction{}, action, "bot subscriptions must not be fanned into the user-room index (matches search-sync-worker's live BuildAction)")
+	assert.NotEqual(t, searchengine.BulkAction{}, action,
+		"bot subscriptions must be fanned into the user-room index — matches search-sync-worker's live BuildAction "+
+			"since #102 (support adding/removing bots in channel rooms), which dropped its own IsBot skip")
+	assert.Equal(t, "helper.bot", action.DocID)
 }
 
 func TestBuildUserRoomAction_MissingRoomIDIsAnError(t *testing.T) {

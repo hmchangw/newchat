@@ -187,13 +187,23 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 	for _, raw := range req.Messages {
 		var tm teamsmigrate.Message
 		if err := json.Unmarshal(raw, &tm); err != nil {
-			continue // one malformed record must not drop its valid siblings
+			// One malformed record must not drop its valid siblings, but a
+			// batch that should only ever contain what the migration writer
+			// itself persisted having an unparseable entry is unexpected —
+			// surface it instead of vanishing silently.
+			slog.Warn("skip teams migration record: unmarshal failed", "error", err)
+			continue
 		}
 		if tm.ID == "" || tm.RoomID == "" || tm.CreatedDateTime.IsZero() {
+			// The migration writer already filters these before persisting
+			// (see model.TeamsBatchSkipped), so this shouldn't normally
+			// trigger — log it as a signal that invariant was violated.
+			slog.Warn("skip teams migration record: missing id/roomId/createdAt",
+				"messageId", tm.ID, "roomId", tm.RoomID)
 			continue // can't address idempotently / no index bucket
 		}
 		if teamsmigrate.MessageType(tm.MessageType) != "" {
-			continue // system message — not indexed content
+			continue // system message — not indexed content, not a failure
 		}
 		keeps = append(keeps, tm)
 		if tm.From.ID != "" {

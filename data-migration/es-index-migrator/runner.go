@@ -112,14 +112,13 @@ func runSpotlight(ctx context.Context, subs SubscriptionSource, f *flusher, cfg 
 }
 
 // runUserRoom reads every current subscription for the site and buffers
-// one scripted user-room update per row (bot subscriptions skipped inside
-// buildUserRoomAction). Flush always runs, matching runMessages'
-// errors.Join reasoning.
+// one scripted user-room update per row, including bot subscriptions (see
+// buildUserRoomAction). Flush always runs, matching runMessages' errors.Join
+// reasoning.
 //
 // f is fed by up to WorkerConcurrency subscription workers concurrently;
 // mu serializes every f.Add call per flusher.go's documented contract. A
-// subscription that fails to build (not a bot-skip — see buildUserRoomAction)
-// is logged and recorded via f.RecordSkipped.
+// subscription that fails to build is logged and recorded via f.RecordSkipped.
 //
 //nolint:gocritic // hugeParam: cfg is passed by value to match the task API contract (also consumed by main.go, Task 15); struct copy overhead is acceptable, not a hot path
 func runUserRoom(ctx context.Context, subs SubscriptionSource, f *flusher, cfg config) error {

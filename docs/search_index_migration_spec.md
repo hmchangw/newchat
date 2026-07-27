@@ -125,7 +125,7 @@ Both this `Distinct("roomId", ...)` and Collection 2/3's `subscriptions.find({si
 
 **Source:** same subscriptions query as Spotlight, same "no window" reasoning. Iterate per subscription row — no full-doc-rebuild mode (matches the live worker's own per-event scripted-delta approach).
 
-**Bulk action, per subscription row:** `ActionUpdate` against `search-sync-user-room-add-v1`, doc ID = `u.account`, `params = {rid: roomId, ts: joinedAt.UnixMilli(), hss: historySharedSince != nil ? historySharedSince.UnixMilli() : 0}`. No external version — the script's own `roomTimestamps` guard is the ordering mechanism. **Bot subscriptions (`u.isBot == true`) are skipped** — bots don't search, and including them would only inflate the per-user access-control view (matches `search-sync-worker`'s live behavior).
+**Bulk action, per subscription row:** `ActionUpdate` against `search-sync-user-room-add-v1`, doc ID = `u.account`, `params = {rid: roomId, ts: joinedAt.UnixMilli(), hss: historySharedSince != nil ? historySharedSince.UnixMilli() : 0}`. No external version — the script's own `roomTimestamps` guard is the ordering mechanism. **Bot subscriptions are indexed like any other** — bots can be added to/removed from channel rooms as a first-class feature (matches `search-sync-worker`'s live behavior as of its own bot-room support).
 
 Index: `USER_ROOM_INDEX` (flat).
 

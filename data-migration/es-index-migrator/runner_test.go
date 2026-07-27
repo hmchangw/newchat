@@ -84,7 +84,7 @@ func TestRunSpotlight_OneActionPerSubscription(t *testing.T) {
 	assert.Equal(t, 0, f.FailedCount())
 }
 
-func TestRunUserRoom_SkipsBotSubscriptionsWithoutError(t *testing.T) {
+func TestRunUserRoom_IndexesBotSubscriptions(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := NewMockSubscriptionSource(ctrl)
 	store := NewMockESStore(ctrl)
@@ -94,7 +94,7 @@ func TestRunUserRoom_SkipsBotSubscriptionsWithoutError(t *testing.T) {
 		{ID: "s1", RoomID: "room1", User: model.SubscriptionUser{Account: "helper.bot", IsBot: true}, JoinedAt: time.Now()},
 		{ID: "s2", RoomID: "room1", User: model.SubscriptionUser{Account: "alice"}, JoinedAt: time.Now()},
 	}, nil)
-	store.EXPECT().Bulk(gomock.Any(), gomock.Len(1)).Return([]searchengine.BulkResult{{Status: 200}}, nil)
+	store.EXPECT().Bulk(gomock.Any(), gomock.Len(2)).Return([]searchengine.BulkResult{{Status: 200}, {Status: 200}}, nil)
 
 	f := newFlusher(store, 500)
 	err := runUserRoom(context.Background(), subs, f, cfg)

@@ -642,3 +642,26 @@ func TestMessageCollection_BuildAction_TeamsBatch_Skips(t *testing.T) {
 	require.Len(t, actions, 1)
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-4"), actions[0].DocID)
 }
+
+func TestMessageCollection_BuildAction_TeamsBatch_MalformedRecordDoesNotDropSiblings(t *testing.T) {
+	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	ts := time.Now().UTC()
+
+	valid, err := json.Marshal(teamsmigrate.Message{
+		ID: "tm-1", RoomID: "room-1", MessageType: "message",
+		From: teamsmigrate.User{ID: "g"}, CreatedDateTime: ts,
+	})
+	require.NoError(t, err)
+
+	req := model.TeamsBatchRequest{Messages: []json.RawMessage{
+		json.RawMessage("123"), // valid JSON syntax, wrong shape — fails to unmarshal into teamsmigrate.Message
+		valid,
+	}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	actions, buildErr := c.BuildAction(data)
+	require.NoError(t, buildErr)
+	require.Len(t, actions, 1, "the malformed record must be skipped, not abort the whole batch")
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
+}
