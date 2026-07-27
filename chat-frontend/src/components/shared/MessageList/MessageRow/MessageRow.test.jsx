@@ -263,6 +263,42 @@ describe('MessageRow — reply-count badge', () => {
     expect(screen.queryByRole('button', { name: /replies?/i })).not.toBeInTheDocument()
   })
 
+  it('prefers userDisplayName over sender.engName for the sender label', () => {
+    render(
+      <MessageRow
+        message={{ ...msg, userDisplayName: 'Alice Lee (愛麗絲)' }}
+        room={room}
+        context="main"
+        onThread={() => {}}
+        onReply={() => {}}
+        onJumpToMessage={() => {}}
+      />,
+    )
+    expect(screen.getByText('Alice Lee (愛麗絲)')).toBeInTheDocument()
+    expect(screen.queryByText('Alice')).not.toBeInTheDocument()
+  })
+
+  it('shows a pinned indicator when pinnedAt is set', () => {
+    render(
+      <MessageRow
+        message={{ ...msg, pinnedAt: '2026-05-13T11:00:00Z', pinnedBy: { account: 'bob', engName: 'Bob' } }}
+        room={room}
+        context="main"
+        onThread={() => {}}
+        onReply={() => {}}
+        onJumpToMessage={() => {}}
+      />,
+    )
+    expect(screen.getByLabelText(/pinned/i)).toBeInTheDocument()
+  })
+
+  it('renders no pinned indicator on an unpinned message', () => {
+    render(
+      <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+    )
+    expect(screen.queryByLabelText(/pinned/i)).not.toBeInTheDocument()
+  })
+
   it('no badge inside the thread panel even when tcount > 0', () => {
     render(
       <MessageRow message={{ ...msg, tcount: 5 }} room={room} context="thread-parent" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />

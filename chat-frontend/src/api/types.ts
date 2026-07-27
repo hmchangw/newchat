@@ -197,8 +197,15 @@ export interface Message {
   sysMsgData?: string
   sender?: Participant
   userAccount?: string
+  /** Server-composed render-ready sender name (engName + chineseName +
+   *  account fallback). Preferred over sender.* for display. */
+  userDisplayName?: string
   mentions?: Participant[]
   quotedParentMessage?: QuotedParentMessage
+  /** RFC3339 pin time; present on pinned messages. */
+  pinnedAt?: string
+  /** The actor who pinned the message. */
+  pinnedBy?: Participant
   threadParentMessageId?: string
   threadParentMessageCreatedAt?: string
   /** Outgoing local-only flag — set by optimistic appenders. Never

@@ -12,10 +12,19 @@ function formatTime(dateStr) {
 }
 
 function senderName(msg) {
+  // userDisplayName is the server-composed render-ready name (engName +
+  // chineseName + account fallback); prefer it over the raw sender fields.
+  if (msg.userDisplayName) return msg.userDisplayName
   if (msg.sender) {
     return msg.sender.engName || msg.sender.account || msg.sender.userId || 'Unknown'
   }
   return msg.userAccount || msg.userId || 'Unknown'
+}
+
+function pinnedLabel(msg) {
+  const by = msg.pinnedBy
+  const byName = by?.engName || by?.account
+  return byName ? `Pinned by ${byName}` : 'Pinned'
 }
 
 function senderInitial(msg) {
@@ -78,6 +87,16 @@ export default function MessageRow({
           <span className="message-sender">{senderName(message)}</span>
           <span className="message-time">{formatTime(message.createdAt)}</span>
           {message.editedAt && <span className="message-edited"> (edited)</span>}
+          {message.pinnedAt && (
+            <span
+              className="message-pinned"
+              role="img"
+              aria-label={pinnedLabel(message)}
+              title={pinnedLabel(message)}
+            >
+              📌
+            </span>
+          )}
         </div>
         {/* QuotedBlock sits OUTSIDE message-bubble-wrap so hovering the
             quote doesn't trigger the action toolbar. CSS pulls it flush
