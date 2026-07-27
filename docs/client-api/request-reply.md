@@ -2049,7 +2049,7 @@ Publish + async-reply pattern — no `_INBOX.>` reply. `translation-service` tra
 |---|---|---|---|
 | `requestId` | string | yes | 36-char hyphenated UUID. Async result delivered to `…response.{requestId}`. Empty ⇒ no result. |
 | `text` | string | yes | Text to translate. No length cap. |
-| `targetLang` | string | yes | One of `zhTW`, `zhCN`, `en`, `de`, `ja`. Passed through to the backend unchanged. |
+| `targetLang` | string | yes | BCP-47 tag; send the user's `settings.translateMessageInto` value unchanged (`en`, `en-US`, `zh-Hant-TW`, `zh-Hans-CN`, `de`, `ja`). See [../client-api.md §3.6](../client-api.md#supported-languages). |
 
 #### Async result
 

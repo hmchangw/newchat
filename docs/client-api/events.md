@@ -99,7 +99,7 @@ Delivered when a translate request completes. The client must already be subscri
 | `requestId` | string | Echoes the `requestId` from the request body. |
 | `status` | string | `"ok"` or `"error"`. |
 | `translatedText` | string | Optional. The translated text; present only when `status="ok"`. |
-| `targetLang` | string | Echoes the request `targetLang`. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag the client sent), not the resolved backend language. |
 | `error` | string | Optional. User-safe message; present only when `status="error"`. |
 | `code` | string | Optional. Errcode category (`bad_request`, `internal`). Present only when `status="error"`. |
 | `reason` | string | Optional. Domain reason (`unsupported_lang`, `empty_text`). Present only when `status="error"` and a reason was attached server-side. |
@@ -110,7 +110,7 @@ Delivered when a translate request completes. The client must already be subscri
   "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
   "status": "ok",
   "translatedText": "你好 世界",
-  "targetLang": "zhTW",
+  "targetLang": "zh-Hant-TW",
   "timestamp": 1700000000000
 }
 ```

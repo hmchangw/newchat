@@ -34,13 +34,15 @@ func TestTranslate_EndToEnd(t *testing.T) {
 		return nc.Publish(subj, data)
 	})
 	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-e2e", Text: "Hello", TargetLang: "en"}))
+	// BCP-47 targetLang from settings; the mock backend receives the mapped code (zhTW).
+	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-e2e", Text: "Hello", TargetLang: "zh-Hant-TW"}))
 
 	msg, err := sub.NextMsg(2 * time.Second)
 	require.NoError(t, err)
 	var res model.TranslateResult
 	require.NoError(t, json.Unmarshal(msg.Data, &res))
 	require.Equal(t, model.TranslateStatusOK, res.Status)
-	require.Equal(t, "[en] Hello", res.TranslatedText)
+	require.Equal(t, "[zhTW] Hello", res.TranslatedText)
+	require.Equal(t, "zh-Hant-TW", res.TargetLang) // client value echoed, not the backend code
 	require.Equal(t, "req-e2e", res.RequestID)
 }

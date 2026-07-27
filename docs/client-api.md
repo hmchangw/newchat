@@ -5580,7 +5580,21 @@ This RPC uses the **publish + async-reply** pattern, not the standard NATS reque
 |---|---|---|---|
 | `requestId` | string | yes | Client-generated correlation key (36-char hyphenated UUID). The result is published to `chat.user.{account}.response.{requestId}`. A request with an empty `requestId` yields no result (undeliverable). |
 | `text` | string | yes | The text to translate. No length cap is enforced by the service. |
-| `targetLang` | string | yes | Target language. One of `zhTW`, `zhCN`, `en`, `de`, `ja`. |
+| `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settings) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
+
+##### Supported languages
+
+`targetLang` is a BCP-47 tag matched **case-insensitively** and tolerant of region/script subtags, so the value stored in `settings.translateMessageInto` is sent as-is. It resolves to one of five backend languages:
+
+| Language | Example tags that resolve | Resolves to |
+|---|---|---|
+| English | `en`, `en-US`, `en-GB` | English |
+| German | `de`, `de-DE` | German |
+| Japanese | `ja`, `ja-JP` | Japanese |
+| Traditional Chinese | `zh-Hant-TW`, `zh-Hant`, `zh-TW`, `zh-HK` | Traditional Chinese |
+| Simplified Chinese | `zh-Hans-CN`, `zh-Hans`, `zh-CN`, `zh-SG` | Simplified Chinese |
+
+Chinese resolves by script (`Hant`/`Hans`) or, absent a script, by region. A bare `zh` (no script or region) is ambiguous and rejected as `unsupported_lang`, as is `""` (translation off — the client should not send a request) and any language outside the five above (e.g. `fr`, `ko`). The result's `targetLang` echoes the tag you sent, not the resolved language.
 
 #### Result — `TranslateResult`
 
@@ -5604,7 +5618,7 @@ Delivered on `chat.user.{account}.response.{requestID}`.
   "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
   "status": "ok",
   "translatedText": "你好 世界",
-  "targetLang": "zhTW",
+  "targetLang": "zh-Hant-TW",
   "timestamp": 1700000000000
 }
 ```
@@ -5614,7 +5628,7 @@ Delivered on `chat.user.{account}.response.{requestID}`.
 | Code | Reason | When |
 |---|---|---|
 | `bad_request` | `empty_text` | `text` is empty. |
-| `bad_request` | `unsupported_lang` | `targetLang` is not one of `zhTW`, `zhCN`, `en`, `de`, `ja`. |
+| `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
 | `internal` | — | Translation backend failure. |
 
 ```json

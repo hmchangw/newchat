@@ -13,10 +13,6 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-var allowedLangs = map[string]bool{
-	"zhTW": true, "zhCN": true, "en": true, "de": true, "ja": true,
-}
-
 // Handler validates translate requests, calls the backend, and publishes the
 // TranslateResult on the requester's async response subject.
 type Handler struct {
@@ -48,13 +44,17 @@ func (h *Handler) Translate(c *natsrouter.Context, req model.TranslateRequest) e
 			errcode.BadRequest("text is empty", errcode.WithReason(errcode.TranslateEmptyText)))
 		return nil
 	}
-	if !allowedLangs[req.TargetLang] {
+	// targetLang is a BCP-47 tag (the client sends its settings.translateMessageInto
+	// value unchanged); map it to the backend's language code. The result still echoes
+	// the client's original targetLang, not the mapped code.
+	backendLang, ok := normalizeTargetLang(req.TargetLang)
+	if !ok {
 		h.publishResult(c, account, req.RequestID, req.TargetLang, "",
 			errcode.BadRequest("unsupported targetLang", errcode.WithReason(errcode.TranslateUnsupportedLang)))
 		return nil
 	}
 
-	translated, err := h.translator.Translate(c, req.Text, req.TargetLang)
+	translated, err := h.translator.Translate(c, req.Text, backendLang)
 	if err != nil {
 		h.publishResult(c, account, req.RequestID, req.TargetLang, "",
 			fmt.Errorf("translate backend: %w", err))

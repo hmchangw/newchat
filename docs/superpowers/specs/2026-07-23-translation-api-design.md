@@ -115,14 +115,19 @@ const (
 
 ## Target Language
 
-The client sends one of a fixed set; the value is passed through to the backend
-**unchanged** (the frontend already sends the backend's expected codes):
+The client sends a **BCP-47 tag** — the user's `settings.translateMessageInto` value
+sent unchanged, so translate aligns with the settings representation (see issue #2).
+`translation-service` normalizes it to the backend's language code
+(`zhTW | zhCN | en | de | ja`) at the boundary:
 
-```
-zhTW | zhCN | en | de | ja
-```
+- `en*` / `de*` / `ja*` → `en` / `de` / `ja` (region/variant subtags dropped).
+- `zh` with script `Hant`/`Hans`, or region `TW/HK/MO` vs `CN/SG/MY` → `zhTW` / `zhCN`.
+- bare `zh`, `""` (translation off), or any other language → rejected as `unsupported_lang`.
 
-Validation lives in the handler. Unknown values are rejected before any backend call.
+Matching is case-insensitive. The mapping lives in `translation-service/lang.go`
+(`normalizeTargetLang`) as the single maintenance point for extending the supported
+set. The `TranslateResult` echoes the client's original tag, not the mapped code.
+Validation lives in the handler; unresolvable tags are rejected before any backend call.
 
 ## Handler Flow
 
@@ -296,8 +301,10 @@ Coverage ≥ 80% (target 90%+ on handler and translator).
 - **Pluggable `Translator`, mock first.** The SSE parse-and-merge logic is real and
   unit-tested now against an `httptest` stream; only the live third-party endpoint is
   deferred. Switching to production is config-only.
-- **Pass targetLang through unchanged.** The frontend sends the backend's codes
-  (`zhTW/zhCN/en/de/ja`); no mapping layer to drift.
+- **Client sends BCP-47, service maps to backend codes.** The frontend sends its
+  `settings.translateMessageInto` value unchanged; `normalizeTargetLang` maps it to
+  the backend's `zhTW/zhCN/en/de/ja` at one boundary, so the two services share one
+  representation instead of the frontend maintaining a lossy lookup table (issue #2).
 - **No length cap.** Per product requirement; the backend owns any size limits.
 - **Whitespace-preserving merge.** Fragments are concatenated verbatim so
   spacing/formatting from the backend survives intact.

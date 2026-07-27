@@ -39,22 +39,54 @@ func decodeResult(t *testing.T, cap *capturedPublish) model.TranslateResult {
 func TestHandler_Translate_Success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	tr := NewMockTranslator(ctrl)
+	// Client sends the BCP-47 tag from settings; the backend receives the mapped code.
 	tr.EXPECT().Translate(gomock.Any(), "Hello", "zhTW").Return("你好", nil)
 
 	var cap capturedPublish
 	h := newTestHandler(tr, &cap)
 	c := natsrouter.NewContext(map[string]string{"account": "alice"})
 
-	err := h.Translate(c, model.TranslateRequest{RequestID: "req-1", Text: "Hello", TargetLang: "zhTW"})
+	err := h.Translate(c, model.TranslateRequest{RequestID: "req-1", Text: "Hello", TargetLang: "zh-Hant-TW"})
 	require.NoError(t, err)
 
 	assert.Equal(t, "chat.user.alice.response.req-1", cap.subj)
 	res := decodeResult(t, &cap)
 	assert.Equal(t, model.TranslateStatusOK, res.Status)
 	assert.Equal(t, "你好", res.TranslatedText)
-	assert.Equal(t, "zhTW", res.TargetLang)
+	assert.Equal(t, "zh-Hant-TW", res.TargetLang) // echoes the client's BCP-47 value, not the backend code
 	assert.Equal(t, "req-1", res.RequestID)
 	assert.Equal(t, int64(1_700_000_000_000), res.Timestamp)
+}
+
+func TestHandler_Translate_MapsRegionTagToBaseLang(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	tr := NewMockTranslator(ctrl)
+	tr.EXPECT().Translate(gomock.Any(), "Hello", "en").Return("Hello", nil) // en-US → en
+
+	var cap capturedPublish
+	h := newTestHandler(tr, &cap)
+	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+
+	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-1a", Text: "Hello", TargetLang: "en-US"}))
+
+	res := decodeResult(t, &cap)
+	assert.Equal(t, model.TranslateStatusOK, res.Status)
+	assert.Equal(t, "en-US", res.TargetLang) // client value echoed verbatim
+}
+
+func TestHandler_Translate_AmbiguousChineseRejected(t *testing.T) {
+	var cap capturedPublish
+	h := newTestHandler(mockTranslator{}, &cap)
+	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+
+	// Bare "zh" cannot be resolved to Traditional or Simplified → unsupported.
+	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-3a", Text: "hi", TargetLang: "zh"}))
+
+	res := decodeResult(t, &cap)
+	assert.Equal(t, model.TranslateStatusError, res.Status)
+	assert.Equal(t, "bad_request", res.Code)
+	assert.Equal(t, "unsupported_lang", res.Reason)
+	assert.Equal(t, "zh", res.TargetLang)
 }
 
 func TestHandler_Translate_EmptyText(t *testing.T) {
