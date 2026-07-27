@@ -2309,7 +2309,7 @@ Empty body (`{}` is tolerated). All inputs come from the subject.
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Common errors: `"not authorized to access this room's apps"` (caller is neither a room member nor a platform admin on the room's site), `"response payload exceeds maximum size"` (rare: response would exceed the NATS server's `max_payload`).
+See [Error envelope](#6-error-envelope-reference). Common errors: `"not authorized to access this room's apps"` (caller is not a room member, or the room does not exist), `"response payload exceeds maximum size"` (rare: response would exceed the NATS server's `max_payload`).
 
 ##### Triggered events — success path
 

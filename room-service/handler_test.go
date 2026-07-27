@@ -6197,51 +6197,10 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			wantErr: errAppAccessDenied,
 		},
 		{
-			name: "admin allowed (no sub, admin role, room exists) returns the fetched room",
+			name: "denied: no sub — admin role no longer grants access, GetUser never called",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(&model.Room{ID: "r1"}, nil)
-			},
-			wantErr:  nil,
-			wantRoom: true,
-		},
-		{
-			name: "denied: admin role but room does not exist",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(nil, mongo.ErrNoDocuments)
-			},
-			wantErr: errAppAccessDenied,
-		},
-		{
-			name: "denied: no sub, no admin role",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleUser}}, nil)
-				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(&model.Room{ID: "r1"}, nil).AnyTimes() // concurrent fetch, result unread on denial
-			},
-			wantErr: errAppAccessDenied,
-		},
-		{
-			name: "denied: no sub, user not found (cross-site admin path)",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(nil, ErrUserNotFound)
-				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 			},
 			wantErr: errAppAccessDenied,
 		},
@@ -6250,30 +6209,17 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 					Return(nil, errors.New("mongo unavailable"))
-				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 			},
 			wantErrContains: "check room membership",
 		},
 		{
-			name: "transient user-lookup error propagates",
+			name: "transient room-fetch error propagates",
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(nil, errors.New("mongo unavailable"))
-				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(&model.Room{ID: "r1"}, nil).AnyTimes()
-			},
-			wantErrContains: "check platform admin",
-		},
-		{
-			name: "transient room-existence error propagates (admin path)",
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-					Return(nil, model.ErrSubscriptionNotFound)
-				s.EXPECT().GetUser(gomock.Any(), "alice").
-					Return(&model.User{ID: "u1", Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
+					Return(&model.Subscription{
+						User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+						RoomID: "r1",
+					}, nil)
 				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
 					Return(nil, errors.New("mongo unavailable"))
 			},
@@ -6491,42 +6437,12 @@ func TestHandler_handleGetRoomAppTabs_MemberAllowed(t *testing.T) {
 	assert.Equal(t, "app1.bot", resp.Apps[0].Assistant.Name)
 }
 
-func TestHandler_handleGetRoomAppTabs_AdminAllowed(t *testing.T) {
+// Membership is the only gate now: a platform admin without a subscription
+// is denied and no user lookup happens.
+func TestHandler_handleGetRoomAppTabs_NonMemberDenied(t *testing.T) {
 	h, store, _ := newTabsTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
-	store.EXPECT().ListDefaultChannelTabApps(gomock.Any()).Return([]model.App{}, nil)
-
-	resp, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-	assert.Empty(t, resp.Apps)
-}
-
-func TestHandler_handleGetRoomAppTabs_Denied(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t)
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleUser}}, nil)
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil).AnyTimes()
-
-	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	assert.ErrorIs(t, err, errAppAccessDenied)
-}
-
-func TestHandler_handleGetRoomAppTabs_DeniedNoUser(t *testing.T) {
-	h, store, _ := newTabsTestHandler(t)
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(nil, ErrUserNotFound)
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 
 	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	assert.ErrorIs(t, err, errAppAccessDenied)
@@ -6648,8 +6564,6 @@ func TestHandler_handleGetRoomAppTabs_ContextTimeout(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		})
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -6734,29 +6648,10 @@ func TestHandler_handleGetRoomAppCommandMenu_MemberAllowed_BotWithoutMenu(t *tes
 	assert.Nil(t, resp.AppAssistants[0].CmdBlocks)
 }
 
-func TestHandler_handleGetRoomAppCommandMenu_AdminAllowed(t *testing.T) {
+func TestHandler_handleGetRoomAppCommandMenu_NonMemberDenied(t *testing.T) {
 	h, store := newCmdMenuTestHandler(t)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil)
-	store.EXPECT().ListRoomBotApps(gomock.Any(), "r1").Return([]RoomBotAppEntry{}, nil)
-
-	resp, err := h.getRoomAppCommandMenu(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-	assert.Len(t, resp.AppAssistants, 0)
-}
-
-func TestHandler_handleGetRoomAppCommandMenu_Denied(t *testing.T) {
-	h, store := newCmdMenuTestHandler(t)
-	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
-		Return(nil, model.ErrSubscriptionNotFound)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 
 	_, err := h.getRoomAppCommandMenu(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	assert.ErrorIs(t, err, errAppAccessDenied)
@@ -6799,8 +6694,6 @@ func TestHandler_handleGetRoomAppCommandMenu_ContextTimeout(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		})
-	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()

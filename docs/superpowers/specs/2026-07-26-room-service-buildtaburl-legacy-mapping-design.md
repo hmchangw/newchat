@@ -84,17 +84,16 @@ Signature becomes `buildTabURL(tmpl string, room *model.Room) (string, bool)`.
 The handler needs a `roomID` no longer as a param — the room doc carries
 `room.ID`.
 
-`authorizeRoomAppRead` authorizes AND returns the room, narrowly projected
-via a dedicated `store.GetRoomAppRead` (`_id`, `type`, `siteId`). The room
-fetch runs concurrently with the auth checks (separate collections; a single
-joined query would need a forbidden `$lookup`):
+`authorizeRoomAppRead` is member-only and sequential: check the caller's
+subscription, then fetch and return the room, narrowly projected via a
+dedicated `store.GetRoomAppRead` (`_id`, `type`, `siteId`). The platform-admin
+bypass is removed — non-members are denied without a user lookup.
 
-- `mongo.ErrNoDocuments` ⇒ `errAppAccessDenied` on every path — room
-  existence now gates members too, not just the admin bypass
+- `mongo.ErrNoDocuments` ⇒ `errAppAccessDenied` (a missing room reads as denied)
 - other error ⇒ `fmt.Errorf("get room for app read: %w", err)` (⇒ `internal`)
 
-Exactly one room read per request on all paths. `getRoomAppCommandMenu`
-discards the returned room (`_, err :=`).
+Exactly one room read per request. `getRoomAppCommandMenu` discards the
+returned room (`_, err :=`).
 
 `Handler` gains a `legacyRoomOrigins map[string]string` field, injected via
 `NewHandler` (replacing the removed `siteURL` param).

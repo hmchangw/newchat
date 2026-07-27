@@ -2253,43 +2253,24 @@ func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, erro
 	return &model.OpenRoomResponse{Status: "ok", Open: sub.Open}, nil
 }
 
-// authorizeRoomAppRead admits room members and local platform admins iff the
-// room exists, returning the room narrowly projected via GetRoomAppRead.
+// authorizeRoomAppRead admits room members only, returning the room narrowly
+// projected via GetRoomAppRead. A missing room reads as denied.
 func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID string) (*model.Room, error) {
-	type roomResult struct {
-		room *model.Room
-		err  error
-	}
-	// Fetch concurrently with the auth checks; a joined query would need a
-	// forbidden $lookup. Buffered so the goroutine exits on early denial.
-	roomCh := make(chan roomResult, 1)
-	go func() {
-		room, err := h.store.GetRoomAppRead(ctx, roomID)
-		roomCh <- roomResult{room, err}
-	}()
-
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil && !errors.Is(err, model.ErrSubscriptionNotFound) {
 		return nil, fmt.Errorf("check room membership: %w", err)
 	}
 	if !model.IsRoomMember(sub) {
-		user, err := h.store.GetUser(ctx, account)
-		if err != nil && !errors.Is(err, ErrUserNotFound) {
-			return nil, fmt.Errorf("check platform admin: %w", err)
-		}
-		if !model.IsPlatformAdmin(user) {
+		return nil, errAppAccessDenied
+	}
+	room, err := h.store.GetRoomAppRead(ctx, roomID)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, errAppAccessDenied
 		}
+		return nil, fmt.Errorf("get room for app read: %w", err)
 	}
-	// A missing room reads as denied — never reveal room existence.
-	res := <-roomCh
-	if res.err != nil {
-		if errors.Is(res.err, mongo.ErrNoDocuments) {
-			return nil, errAppAccessDenied
-		}
-		return nil, fmt.Errorf("get room for app read: %w", res.err)
-	}
-	return res.room, nil
+	return room, nil
 }
 
 // legacyRoomTypes maps redesigned RoomTypes to the legacy ${roomType} vocabulary.
