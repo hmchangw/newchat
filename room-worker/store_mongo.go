@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
@@ -468,6 +469,27 @@ func (s *MongoStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID s
 		return 0, fmt.Errorf("delete subscriptions for room %q: %w", roomID, err)
 	}
 	return res.DeletedCount, nil
+}
+
+// UpsertExternalUserIdentity mirrors message-worker's mongoHRIdentityStore.UpsertUserIdentities:
+// a hand-built $set (never a full-doc replace) so this can never clobber
+// roles/password/services on the live auth store; account is the unique key.
+func (s *MongoStore) UpsertExternalUserIdentity(ctx context.Context, u *model.User) error {
+	if u.Account == "" {
+		return fmt.Errorf("upsert external user identity: empty account")
+	}
+	_, err := s.users.UpdateOne(ctx,
+		bson.M{"account": u.Account},
+		bson.M{
+			"$set":         bson.M{"siteId": u.SiteID, "chineseName": u.ChineseName},
+			"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
+		},
+		options.UpdateOne().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert external user identity: %w", err)
+	}
+	return nil
 }
 
 func (s *MongoStore) DeleteRoomMember(ctx context.Context, roomID string, memberType model.RoomMemberType, memberID string) error {

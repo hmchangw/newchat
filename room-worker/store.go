@@ -156,6 +156,13 @@ type SubscriptionStore interface {
 	// Used by the rename processor to bucket accounts by remote site for
 	// cross-site fan-out.
 	ListByRoom(ctx context.Context, roomID string) ([]model.Subscription, error)
+
+	// --- Teams room-reconcile flow ---
+
+	// UpsertExternalUserIdentity materializes a keyless external user keyed on the
+	// unique account ($setOnInsert a fresh _id), so a room member resolves to the
+	// same _id a message sender with that account would. Never touches roles/password.
+	UpsertExternalUserIdentity(ctx context.Context, u *model.User) error
 }
 
 // Key store used by room-worker: reads for fan-out, writes for rotation.

@@ -73,6 +73,9 @@ type Handler struct {
 	// O(room) member-count recompute; see config.MemberCountReconcileTTL.
 	// Zero means recompute on every add (the pre-optimisation behaviour).
 	reconcileTTL time.Duration
+	// publishUsers fans a new external user identity to every site
+	// (chat.hr.{siteID}.users.upsert). Nil in tests not exercising the reconcile.
+	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
 }
 
 func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender) *Handler {
@@ -225,6 +228,8 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		err = h.processAddMembers(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".member.remove"):
 		err = h.processRemoveMember(ctx, msg.Data())
+	case strings.HasSuffix(subj, ".teams.create"):
+		err = h.processTeamsRoomCreate(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".create"):
 		err = h.processCreateRoom(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".room.rename"):

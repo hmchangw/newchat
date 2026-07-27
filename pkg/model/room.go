@@ -28,7 +28,14 @@ type Room struct {
 	ExternalAccess    bool       `json:"externalAccess,omitempty" bson:"externalAccess,omitempty"`
 	UIDs              []string   `json:"uids,omitempty" bson:"uids,omitempty"`
 	Accounts          []string   `json:"accounts,omitempty" bson:"accounts,omitempty"`
+	// Origin identifies where the room came from — e.g. OriginTeams for a Teams
+	// migration import. Server-side provenance (persisted, not client-facing);
+	// empty for natively-created rooms.
+	Origin string `json:"-" bson:"origin,omitempty"`
 }
+
+// OriginTeams marks a room/subscription imported from the Teams migration.
+const OriginTeams = "teams"
 
 // RoomsInfoBatchRequest is the NATS request body for the batch room info RPC.
 type RoomsInfoBatchRequest struct {

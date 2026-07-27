@@ -44,7 +44,8 @@ func HeaderForContext(ctx context.Context) nats.Header {
 	id := RequestIDFromContext(ctx)
 	debug := DebugLevelFromContext(ctx)
 	payload := PayloadCaptureFromContext(ctx)
-	if id == "" && debug == DebugOff && !payload {
+	migration := migrationLiveFromContext(ctx)
+	if id == "" && debug == DebugOff && !payload && !migration {
 		return nil
 	}
 	h := nats.Header{}
@@ -56,6 +57,9 @@ func HeaderForContext(ctx context.Context) nats.Header {
 	}
 	if payload {
 		h[DebugPayloadHeader] = []string{"1"}
+	}
+	if migration {
+		h[HeaderMigration] = []string{MigrationLive}
 	}
 	return h
 }

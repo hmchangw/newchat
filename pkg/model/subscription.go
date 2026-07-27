@@ -70,6 +70,11 @@ type Subscription struct {
 	RolesUpdatedAt    *time.Time `json:"rolesUpdatedAt,omitempty"    bson:"rolesUpdatedAt,omitempty"`
 	NameUpdatedAt     *time.Time `json:"nameUpdatedAt,omitempty"     bson:"nameUpdatedAt,omitempty"`
 	RestrictUpdatedAt *time.Time `json:"restrictUpdatedAt,omitempty" bson:"restrictUpdatedAt,omitempty"`
+
+	// Origin identifies where the subscription came from — e.g. OriginTeams for a
+	// Teams-migration import. Server-side provenance (persisted, not client-facing);
+	// empty for natively-created subscriptions.
+	Origin string `json:"-" bson:"origin,omitempty"`
 }
 
 // EnrichedSubscription is the decode target for the subscription-list aggregation:

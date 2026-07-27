@@ -218,6 +218,44 @@ func TestUser_ActiveNeverSerializedToJSON(t *testing.T) {
 	assert.False(t, hasDeactivated, "deactivated must be gone from JSON payloads")
 }
 
+func TestOrigin_BSONOnly(t *testing.T) {
+	// Origin is server-side: persisted in BSON, never serialized to client JSON.
+	// roundTrip (JSON-only) can't cover a json:"-" field, so assert BSON explicitly.
+	var rr model.Room
+	rb, err := bson.Marshal(model.Room{ID: "r1", Origin: model.OriginTeams})
+	require.NoError(t, err)
+	require.NoError(t, bson.Unmarshal(rb, &rr))
+	assert.Equal(t, model.OriginTeams, rr.Origin, "room origin survives BSON round-trip")
+
+	var rs model.Subscription
+	sb, err := bson.Marshal(model.Subscription{ID: "s1", Origin: model.OriginTeams})
+	require.NoError(t, err)
+	require.NoError(t, bson.Unmarshal(sb, &rs))
+	assert.Equal(t, model.OriginTeams, rs.Origin, "subscription origin survives BSON round-trip")
+
+	rj, err := json.Marshal(model.Room{ID: "r1", Origin: model.OriginTeams})
+	require.NoError(t, err)
+	var rjRaw map[string]any
+	require.NoError(t, json.Unmarshal(rj, &rjRaw))
+	_, hasRoomOrigin := rjRaw["origin"]
+	assert.False(t, hasRoomOrigin, "room origin must not reach client JSON")
+
+	sj, err := json.Marshal(model.Subscription{Origin: model.OriginTeams})
+	require.NoError(t, err)
+	var sjRaw map[string]any
+	require.NoError(t, json.Unmarshal(sj, &sjRaw))
+	_, hasSubOrigin := sjRaw["origin"]
+	assert.False(t, hasSubOrigin, "subscription origin must not reach client JSON")
+
+	// empty Origin omitted from BSON too (omitempty).
+	var empty bson.M
+	eb, err := bson.Marshal(model.Room{ID: "r2"})
+	require.NoError(t, err)
+	require.NoError(t, bson.Unmarshal(eb, &empty))
+	_, hasEmpty := empty["origin"]
+	assert.False(t, hasEmpty, "empty origin omitted from BSON")
+}
+
 func TestRoomJSON(t *testing.T) {
 	lastMsg := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	lastMention := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
