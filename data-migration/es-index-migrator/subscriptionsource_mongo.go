@@ -19,6 +19,9 @@ type mongoSubscriptionSource struct {
 var _ SubscriptionSource = (*mongoSubscriptionSource)(nil)
 
 func newMongoSubscriptionSource(db *mongo.Database) *mongoSubscriptionSource {
+	if db == nil {
+		panic("newMongoSubscriptionSource: db must not be nil")
+	}
 	return &mongoSubscriptionSource{col: db.Collection("subscriptions")}
 }
 
@@ -51,6 +54,10 @@ var subscriptionProjection = bson.M{
 	"historySharedSince": 1, "joinedAt": 1,
 }
 
+// Subscriptions materializes every one of the site's subscriptions in
+// memory at once (cur.All) rather than streaming — acceptable for this
+// job's scope (a bounded, operator-run, one-time backfill per site) but
+// not a pattern to copy into a long-running or unbounded-scale path.
 func (s *mongoSubscriptionSource) Subscriptions(ctx context.Context, siteID string) ([]model.Subscription, error) {
 	cur, err := s.col.Find(ctx, bson.M{"siteId": siteID}, options.Find().SetProjection(subscriptionProjection))
 	if err != nil {

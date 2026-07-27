@@ -15,10 +15,10 @@ func TestToStringSlice_EmptyInput(t *testing.T) {
 	assert.Empty(t, toStringSlice(nil))
 }
 
-// TestNewMongoSubscriptionSource_NilDatabasePanics documents that db is a
-// required, non-nil dependency (newMongoSubscriptionSource resolves the
-// "subscriptions" collection eagerly at construction time) without opening
-// any real Mongo connection — the panic fires before any I/O occurs.
+// TestNewMongoSubscriptionSource_NilDatabasePanics verifies the explicit nil
+// check in newMongoSubscriptionSource — db is a required dependency, and
+// this fails fast at construction instead of relying on however the mongo
+// driver happens to behave when db.Collection is called on a nil receiver.
 func TestNewMongoSubscriptionSource_NilDatabasePanics(t *testing.T) {
-	assert.Panics(t, func() { newMongoSubscriptionSource(nil) })
+	assert.PanicsWithValue(t, "newMongoSubscriptionSource: db must not be nil", func() { newMongoSubscriptionSource(nil) })
 }

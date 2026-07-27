@@ -27,7 +27,7 @@ func TestEsPropertiesFromStruct_MessageDoc_MatchesStruct(t *testing.T) {
 		name, _, _ := strings.Cut(jsonTag, ",")
 
 		prop, ok := props[name]
-		assert.True(t, ok, "template missing property for struct field %s (json: %s)", field.Name, name)
+		require.True(t, ok, "template missing property for struct field %s (json: %s)", field.Name, name)
 
 		esType, _, _ := strings.Cut(esTag, ",")
 		propMap := prop.(map[string]any)

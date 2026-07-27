@@ -76,7 +76,7 @@ This is an operational assumption tied directly to the job's pre-live scope (see
 3. Stream rows per bucket (never materializing a whole room's history in memory) via `SELECT ... FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at >= ? AND created_at < ?`.
 4. Skip rows where `deleted = true`.
 
-Both this `Distinct("roomId", ...)` and Collection 2/3's `subscriptions.find({siteId})` filter on `siteId` — a `{siteId: 1, roomId: 1}` index on `subscriptions` keeps both queries index-covered instead of falling back to a collection scan on a large site.
+Both this `Distinct("roomId", ...)` and Collection 2/3's `subscriptions.find({siteId})` filter on `siteId` — a `{siteId: 1, roomId: 1}` index on `subscriptions` keeps both queries index-supported instead of falling back to a collection scan on a large site (Collection 2/3 also project fields outside this index, so the query isn't fully index-covered).
 
 **Field mapping** (Cassandra `Message` → `searchindex.MessageDoc`, via `searchindex.MessageFields`):
 
@@ -171,7 +171,7 @@ This job has no delete path for messages (see "Additive-only limitation" above) 
 1. Delete the site's existing indices before rerunning:
    - **Messages** are split into monthly indices (`{MSG_INDEX_PREFIX}-2026-01`, `{MSG_INDEX_PREFIX}-2026-02`, ...) — delete all of them for this site with a wildcard, e.g. `DELETE /{MSG_INDEX_PREFIX}-*` against the site's own `SEARCH_URL`.
    - **Spotlight** and **user-room** are each a single flat index — `DELETE /{SPOTLIGHT_INDEX}` and `DELETE /{USER_ROOM_INDEX}`.
-2. Just run the job again. Index **templates** and the two user-room Painless **scripts** do not need to be recreated manually — step 3 of "Execution shape" idempotently re-ensures them on every run, and Elasticsearch auto-creates each index from its template the moment this job's first write lands.
+2. Just run the job again. Index **templates** and the two user-room Painless **scripts** do not need to be recreated manually — step 3 of "Execution shape" idempotently re-ensures them on every run, and Elasticsearch auto-creates each index from its template the moment this job's first write lands. This relies on the cluster's `action.auto_create_index` permitting the target names (`{MSG_INDEX_PREFIX}-*`, `{SPOTLIGHT_INDEX}`, `{USER_ROOM_INDEX}`) — the same reliance `search-sync-worker`'s live writes already have in production, so no cluster-side change is needed unless that setting has been tightened beyond the existing production configuration.
 
 This is safe pre-live (no one is searching the site yet, so the brief window with no data during the delete-then-rerun isn't user-visible). It is not a safe procedure once a site is live — see "Scope boundary — pre-live only" above.
 

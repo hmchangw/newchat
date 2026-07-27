@@ -217,6 +217,9 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 	for i := range keeps {
 		tm := &keeps[i]
 		id := identities[tm.From.ID] // zero value (empty account/userID) when unresolved
+		// Built directly rather than via searchindex.NewMessageDoc: that
+		// constructor decodes cassandra.Message's attachment column, which
+		// has no counterpart in teamsmigrate.Message.
 		doc := searchindex.MessageDoc{
 			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
 			RoomID:      tm.RoomID,
