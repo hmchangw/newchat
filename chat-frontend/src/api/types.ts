@@ -147,6 +147,38 @@ export interface Participant {
   siteId?: string
 }
 
+/** Pixel size of an uploaded image. Mirrors cassandra.ImageDimensions. */
+export interface ImageDimensions {
+  width: number
+  height: number
+}
+
+/** Render-ready descriptor for an uploaded file. Mirrors
+ *  pkg/model/cassandra.Attachment. Media-specific fields are present only for
+ *  the matching MIME family. `titleLink` is a path RELATIVE to the media
+ *  gateway base URL. */
+export interface Attachment {
+  id: string
+  title: string
+  type: string
+  description?: string
+  titleLink: string
+  titleLinkDownload?: boolean
+  fileType?: string
+  imageUrl?: string
+  imageType?: string
+  imageSize?: number
+  imageDimensions?: ImageDimensions
+  /** Base64 32×32 blurred JPEG placeholder (image only). */
+  imagePreview?: string
+  audioUrl?: string
+  audioType?: string
+  audioSize?: number
+  videoUrl?: string
+  videoType?: string
+  videoSize?: number
+}
+
 /** Cassandra's QuotedParentMessage shape — what gets embedded on a
  *  reply's `quotedParentMessage` field. Note the legacy `messageId`
  *  and `msg` field names (server-side cassandra schema, distinct from
@@ -201,6 +233,8 @@ export interface Message {
    *  account fallback). Preferred over sender.* for display. */
   userDisplayName?: string
   mentions?: Participant[]
+  /** Decoded attachment objects (image/audio/video/file). */
+  attachments?: Attachment[]
   quotedParentMessage?: QuotedParentMessage
   /** RFC3339 pin time; present on pinned messages. */
   pinnedAt?: string

@@ -1,7 +1,9 @@
 import MessageActions from './MessageActions/MessageActions'
 import MessageContent from '@/components/shared/MessageContent/MessageContent'
+import MessageAttachments from '@/components/shared/MessageAttachments/MessageAttachments'
 import QuotedBlock from '@/components/shared/QuotedBlock/QuotedBlock'
 import useHoverWithDelay from '@/hooks/useHoverWithDelay'
+import { useNats } from '@/context/NatsContext'
 import { useSubscription } from '@/context/RoomEventsContext'
 import { redactInaccessibleQuoteSnapshot } from '@/lib/redactQuote'
 import './style.css'
@@ -58,6 +60,7 @@ export default function MessageRow({
   // Mirror history-service's quote redaction client-side: the live broadcast
   // path doesn't gate quote snapshots against the reader's access window, so
   // a quote of a message older than historySharedSince would otherwise leak.
+  const { user } = useNats()
   const subscription = useSubscription(room?.id)
   const quoteSnapshot = redactInaccessibleQuoteSnapshot(
     message.quotedParentMessage,
@@ -131,6 +134,9 @@ export default function MessageRow({
             </div>
           )}
         </div>
+        {message.attachments?.length > 0 && (
+          <MessageAttachments attachments={message.attachments} baseUrl={user?.baseUrl} />
+        )}
         {message.tcount > 0 && context !== 'thread' && context !== 'thread-parent' && (
           <button
             type="button"

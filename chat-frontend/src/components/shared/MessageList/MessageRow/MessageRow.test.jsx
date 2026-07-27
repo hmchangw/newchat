@@ -19,6 +19,11 @@ vi.mock('@/context/RoomEventsContext', () => ({
   useSubscription: () => mockSubscription,
 }))
 
+// MessageRow reads useNats for the current user's account + media base URL.
+vi.mock('@/context/NatsContext', () => ({
+  useNats: () => ({ user: { account: 'me', baseUrl: 'https://media.test' } }),
+}))
+
 const msg = {
   id: 'm1',
   content: 'hello world',
@@ -297,6 +302,22 @@ describe('MessageRow — reply-count badge', () => {
       <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
     )
     expect(screen.queryByLabelText(/pinned/i)).not.toBeInTheDocument()
+  })
+
+  it('renders attachments with URLs built from the media base', () => {
+    const message = {
+      ...msg,
+      attachments: [
+        { id: 'a1', title: 'doc.pdf', type: 'file', titleLink: 'api/v1/file/rooms/r1/file/a1', fileType: 'application/pdf' },
+      ],
+    }
+    render(
+      <MessageRow message={message} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+    )
+    expect(screen.getByRole('link', { name: /doc\.pdf/ })).toHaveAttribute(
+      'href',
+      'https://media.test/api/v1/file/rooms/r1/file/a1',
+    )
   })
 
   it('no badge inside the thread panel even when tcount > 0', () => {
