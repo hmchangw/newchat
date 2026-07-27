@@ -408,10 +408,9 @@ func (g *graphClient) ResolveAccountIDs(ctx context.Context, accounts []string) 
 	return resolveAccountIDs(ctx, g.httpClient, g.baseURL, g.userAgent, token, accounts)
 }
 
-// resolveAccountIDs is the token-agnostic directory lookup shared by the
-// app-only graphClient and the ROPC directoryClient. Semantics match the
-// original graphClient.ResolveAccountIDs: chunked startsWith filter, result
-// keyed by lowercased UPN local-part, first match wins.
+// resolveAccountIDs is the token-agnostic directory lookup backing
+// graphClient.ResolveAccountIDs: chunked startsWith filter, result keyed by
+// lowercased UPN local-part, first match wins.
 func resolveAccountIDs(ctx context.Context, hc *http.Client, baseURL, userAgent, token string, accounts []string) (map[string]string, error) {
 	out := make(map[string]string, len(accounts))
 	if len(accounts) == 0 {
