@@ -323,4 +323,6 @@ require a custom SDK.**
 
 See also: `docs/specs/o11y/o11y-trace-design.md` (expected traces),
 `docs/specs/o11y/o11y-local-trace-verification.md` (verification),
-`docs/specs/o11y/o11y-followups.md` (backend follow-ups).
+`docs/specs/o11y/o11y-followups.md` (backend follow-ups),
+`docs/specs/o11y/o11y-frontend-lib-evaluation.md` (packaging the primitives
+below into a reusable web/Swift library — build-vs-buy).
