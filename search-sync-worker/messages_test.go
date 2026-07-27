@@ -613,7 +613,7 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
 
-	var doc MessageSearchIndex
+	var doc searchindex.MessageDoc
 	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
 	assert.Equal(t, "uid-alice", doc.UserID)  // account-resolved user _id
 	assert.Equal(t, "alice", doc.UserAccount) // account from teams_user
@@ -622,7 +622,7 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 	assert.Equal(t, "one", doc.Content)
 	assert.Equal(t, ts, doc.CreatedAt)
 
-	var doc2 MessageSearchIndex
+	var doc2 searchindex.MessageDoc
 	require.NoError(t, json.Unmarshal(actions[1].Doc, &doc2))
 	assert.Equal(t, "**two**", doc2.Content) // html body renders to markdown
 }

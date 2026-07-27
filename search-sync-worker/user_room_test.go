@@ -140,7 +140,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	// Bots and the platform-admin pseudo-account can log into the chat frontend
 	// and use search like any user, so they enter the user-room index too.
@@ -158,7 +158,7 @@ func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_Bot_Indexed(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"weather.bot"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
@@ -247,7 +247,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 // document_missing_exception on a never-indexed doc is a benign ack (see
 // isBulkItemSuccess).
 func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"weather.bot", "p_adminsiteA"}
 	const ts int64 = 1735689800000
@@ -266,7 +266,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T
 		var body map[string]any
 		require.NoError(t, json.Unmarshal(action.Doc, &body))
 		script := body["script"].(map[string]any)
-		assert.Equal(t, removeRoomScriptID, script["id"])
+		assert.Equal(t, searchindex.RemoveRoomScriptID, script["id"])
 		_, hasUpsert := body["upsert"]
 		assert.False(t, hasUpsert, "remove update must not contain an upsert")
 		docIDs[i] = action.DocID
@@ -278,7 +278,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T
 // mixed removal fans out to a remove-room update for BOTH the human and the bot
 // — the human because they were indexed, the bot as defensive cleanup.
 func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "weather.bot"}
 	const ts int64 = 1735689800000
@@ -293,7 +293,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testin
 		assert.Equal(t, searchengine.ActionUpdate, action.Action)
 		var body map[string]any
 		require.NoError(t, json.Unmarshal(action.Doc, &body))
-		assert.Equal(t, removeRoomScriptID, body["script"].(map[string]any)["id"])
+		assert.Equal(t, searchindex.RemoveRoomScriptID, body["script"].(map[string]any)["id"])
 		docIDs[i] = action.DocID
 	}
 	assert.ElementsMatch(t, []string{"alice", "weather.bot"}, docIDs)

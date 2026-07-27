@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -208,7 +207,7 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 	for i := range keeps {
 		tm := &keeps[i]
 		id := identities[tm.From.ID] // zero value (empty account/userID) when unresolved
-		doc := MessageSearchIndex{
+		doc := searchindex.MessageDoc{
 			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
 			RoomID:      tm.RoomID,
 			SiteID:      c.siteID,
@@ -220,7 +219,7 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 		body, _ := json.Marshal(doc)
 		actions = append(actions, searchengine.BulkAction{
 			Action: searchengine.ActionIndex,
-			Index:  indexName(c.indexPrefix, tm.CreatedDateTime),
+			Index:  searchindex.MessageIndexName(c.indexPrefix, tm.CreatedDateTime),
 			DocID:  doc.MessageID,
 			// Deterministic id + createdAt as the external version make a batch replay
 			// idempotent (a re-index of the same doc 409s, handled as success).
