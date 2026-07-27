@@ -98,13 +98,16 @@ func TestWorker_EndToEnd(t *testing.T) {
 	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.IUserWithChange{
 		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.IChangeTypeNewHire},
 		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.IChangeTypeNewHire},
+		// publisher-owned _id (Teams migration): honored on insert so every site
+		// converges on the same one, rather than each minting a per-site _id
+		{User: model.User{ID: "mig-id-1", Account: "mgrace", SiteID: "site-a", EmployeeID: "mig-id-1"}, ChangeType: model.IChangeTypeNewHire},
 		// no employeeId → skipped, never written (an empty key would match and
 		// clobber every other keyless row); the count assertion below proves it
 		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.IChangeTypeNewHire},
 	})
 
 	awaitCount(t, ctx, db, EmployeeCollection, bson.M{}, 2)
-	awaitCount(t, ctx, db, UserCollection, bson.M{}, 2) // alice updated in place, carol inserted
+	awaitCount(t, ctx, db, UserCollection, bson.M{}, 3) // alice updated in place, carol + mgrace inserted
 
 	// identity upsert: alice's auth fields intact, identity fields updated
 	var alice bson.M
@@ -118,6 +121,9 @@ func TestWorker_EndToEnd(t *testing.T) {
 	require.NoError(t, db.Collection(UserCollection).FindOne(ctx, bson.M{"account": "carol"}).Decode(&carol))
 	assert.NotEmpty(t, carol["_id"], "inserted user gets a generated _id")
 	assert.Equal(t, "卡蘿", carol["chineseName"])
+	var mgrace bson.M
+	require.NoError(t, db.Collection(UserCollection).FindOne(ctx, bson.M{"account": "mgrace"}).Decode(&mgrace))
+	assert.Equal(t, "mig-id-1", mgrace["_id"], "publisher-supplied _id is honored, not regenerated")
 
 	// re-delivery (same batches again) → no dupes
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)
@@ -128,7 +134,7 @@ func TestWorker_EndToEnd(t *testing.T) {
 		Timestamp: 2, SiteID: "site-a", Accounts: []string{"alice", "bob"},
 	})
 	awaitCount(t, ctx, db, EmployeeCollection, bson.M{}, 0)
-	awaitCount(t, ctx, db, UserCollection, bson.M{}, 2)
+	awaitCount(t, ctx, db, UserCollection, bson.M{}, 3)
 }
 
 // awaitCount polls the collection until filter matches want (consume is async).

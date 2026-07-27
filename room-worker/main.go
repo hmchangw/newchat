@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -198,6 +199,18 @@ func main() {
 		return nil
 	}, keyStore, keySender)
 	handler.SetKeyFanoutWorkers(cfg.KeyFanoutWorkers)
+	// Teams room-reconcile's external-user-identity fanout (chat.hr.{siteID}.users.upsert),
+	// mirroring message-worker's Teams sender-resolver publish (feat/migrated-user-fanout).
+	handler.publishUsers = func(ctx context.Context, users []model.IUserWithChange) error {
+		data, err := json.Marshal(users)
+		if err != nil {
+			return fmt.Errorf("marshal user identity fanout: %w", err)
+		}
+		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data)); err != nil {
+			return fmt.Errorf("publish user identity fanout: %w", err)
+		}
+		return nil
+	}
 	handler.dekProvisioner = dekProvisioner
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
