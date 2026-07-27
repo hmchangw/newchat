@@ -12,7 +12,7 @@ services:
       - NATS_URL=nats://nats:4222
       - NATS_CREDS_FILE=/etc/nats/backend.creds
       - SITE_ID=site-local
-      - LEGACY_ROOM_ORIGINS=site-local:https://legacy.localhost
+      - 'LEGACY_ROOM_ORIGINS=[{"siteID":"site-local","origin":"https://legacy.localhost"},{"siteID":"site-a","origin":"https://legacy.site-a.example.com"},{"siteID":"site-b","origin":"https://legacy.site-b.example.com"}]'
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}

@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -29,9 +29,9 @@ type config struct {
 	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
-	// LegacyRoomOrigins maps room-origin siteID → legacy URL for ${roomOrigin}.
-	// Format "site-a:https://legacy.site-a.com,…" (first-colon split); unset ⇒ "".
-	LegacyRoomOrigins        map[string]string `env:"LEGACY_ROOM_ORIGINS"`
+	// LEGACY_ROOM_ORIGINS is a JSON array of {siteID, origin} objects mapping
+	// each room-origin site to the legacy URL substituted into ${roomOrigin}.
+	LegacyRoomOrigins        legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
 	MongoURI                 string            `env:"MONGO_URI,required"`
 	MongoDB                  string            `env:"MONGO_DB"                  envDefault:"chat"`
 	MongoUsername            string            `env:"MONGO_USERNAME"            envDefault:""`
@@ -82,17 +82,33 @@ type config struct {
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
 
-// normalizeLegacyRoomOrigins trims keys/values ("site-a: url" tolerated), drops empties.
-func normalizeLegacyRoomOrigins(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" || v == "" {
-			continue
-		}
-		out[k] = v
+// legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
+type legacyRoomOrigin struct {
+	SiteID string `json:"siteID"`
+	Origin string `json:"origin"`
+}
+
+// legacyRoomOrigins is parsed from the LEGACY_ROOM_ORIGINS env var — a JSON
+// array of {siteID, origin} objects, indexed at parse time into a siteID→URL
+// map. Implements encoding.TextUnmarshaler so caarlos0/env populates it
+// directly from the env string (same pattern as media-service CLUSTER_DOMAINS).
+type legacyRoomOrigins struct {
+	byID map[string]string
+}
+
+func (l *legacyRoomOrigins) UnmarshalText(text []byte) error {
+	var entries []legacyRoomOrigin
+	if err := json.Unmarshal(text, &entries); err != nil {
+		return fmt.Errorf("parse LEGACY_ROOM_ORIGINS json: %w", err)
 	}
-	return out
+	l.byID = make(map[string]string, len(entries))
+	for _, e := range entries {
+		if _, dup := l.byID[e.SiteID]; dup {
+			return fmt.Errorf("parse LEGACY_ROOM_ORIGINS json: duplicate siteID %q", e.SiteID)
+		}
+		l.byID[e.SiteID] = e.Origin
+	}
+	return nil
 }
 
 func main() {
@@ -244,7 +260,7 @@ func main() {
 			}
 			return nil
 		},
-		normalizeLegacyRoomOrigins(cfg.LegacyRoomOrigins),
+		cfg.LegacyRoomOrigins.byID,
 		nc.NatsConn().MaxPayload(),
 	)
 	handler.dekProvisioner = dekProvisioner

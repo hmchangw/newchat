@@ -46,15 +46,16 @@ channel→`p` chosen per product decision.)
 New config field in `room-service/main.go`:
 
 ```go
-LegacyRoomOrigins map[string]string `env:"LEGACY_ROOM_ORIGINS" envDefault:""`
+LegacyRoomOrigins legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
 ```
 
-- Wire format (native `caarlos0/env` v11 map parsing, `SplitN(pair, ":", 2)`
-  so URL values keep `://`):
-  `LEGACY_ROOM_ORIGINS=site-a:https://legacy.site-a.com,site-b:https://legacy.site-b.com`
-- Startup normalization: `strings.TrimSpace` each key and value (tolerates
-  `site-a: https://legacy.site-a.com`). Empty var ⇒ empty map (valid: every
-  `${roomOrigin}` substitutes to `""`).
+- Wire format: a **JSON array** of `{siteID, origin}` objects, mirroring
+  media-service's `CLUSTER_DOMAINS` (`legacyRoomOrigins` implements
+  `encoding.TextUnmarshaler`, indexed into a siteID→URL map at parse time
+  with duplicate-siteID rejection; malformed JSON fails startup):
+  `LEGACY_ROOM_ORIGINS=[{"siteID":"site-a","origin":"https://legacy.site-a.com"}]`
+- Unset or empty var ⇒ empty map (valid: every `${roomOrigin}`
+  substitutes to `""`).
 - Lookup key is **`room.SiteID`** — the room's origin site, consistent with
   `pkg/drive.GetBaseURLFromRoomOrigin`.
 - Miss policy: substitute the **empty string**; the tab is still returned

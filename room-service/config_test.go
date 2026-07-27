@@ -8,59 +8,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNormalizeLegacyRoomOrigins(t *testing.T) {
-	tests := []struct {
-		name string
-		in   map[string]string
-		want map[string]string
-	}{
-		{name: "nil map yields empty map", in: nil, want: map[string]string{}},
-		{
-			name: "trims whitespace around keys and values",
-			in:   map[string]string{" site-a": " https://legacy.site-a.com "},
-			want: map[string]string{"site-a": "https://legacy.site-a.com"},
-		},
-		{
-			name: "drops entries empty after trimming",
-			in:   map[string]string{"site-a": "  ", "": "https://x.example.com"},
-			want: map[string]string{},
-		},
-		{
-			name: "clean entries pass through",
-			in: map[string]string{
-				"site-a": "https://legacy.site-a.com",
-				"site-b": "https://legacy.site-b.com",
-			},
-			want: map[string]string{
-				"site-a": "https://legacy.site-a.com",
-				"site-b": "https://legacy.site-b.com",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, normalizeLegacyRoomOrigins(tt.in))
-		})
-	}
+func TestLegacyRoomOrigins_UnmarshalText(t *testing.T) {
+	var l legacyRoomOrigins
+	require.NoError(t, l.UnmarshalText([]byte(
+		`[{"siteID":"site-a","origin":"https://legacy.site-a.com"},`+
+			`{"siteID":"site-b","origin":"https://legacy.site-b.com"}]`)))
+	assert.Equal(t, "https://legacy.site-a.com", l.byID["site-a"])
+	assert.Equal(t, "https://legacy.site-b.com", l.byID["site-b"])
+	assert.Empty(t, l.byID["site-x"], "unconfigured site reads as empty string")
 }
 
-// TestLegacyRoomOrigins_EnvWireFormat pins the wire format: comma-separated,
-// first-colon split (URL values keep "://"), spaces tolerated via normalization.
-func TestLegacyRoomOrigins_EnvWireFormat(t *testing.T) {
+func TestLegacyRoomOrigins_UnmarshalText_Errors(t *testing.T) {
+	var l legacyRoomOrigins
+	assert.Error(t, l.UnmarshalText([]byte(`not-json`)))
+	assert.ErrorContains(t,
+		l.UnmarshalText([]byte(`[{"siteID":"s1","origin":"a"},{"siteID":"s1","origin":"b"}]`)),
+		"duplicate siteID")
+}
+
+// LEGACY_ROOM_ORIGINS is populated from a JSON env string; unset or empty is
+// valid and means every ${roomOrigin} substitutes to "".
+func TestLegacyRoomOrigins_EnvParse(t *testing.T) {
 	type originsConfig struct {
-		LegacyRoomOrigins map[string]string `env:"LEGACY_ROOM_ORIGINS"`
+		LegacyRoomOrigins legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
 	}
 
-	t.Setenv("LEGACY_ROOM_ORIGINS", "site-a:https://legacy.site-a.com,site-b: https://legacy.site-b.com")
+	t.Setenv("LEGACY_ROOM_ORIGINS", `[{"siteID":"site-a","origin":"https://legacy.site-a.com"}]`)
 	cfg, err := env.ParseAs[originsConfig]()
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{
-		"site-a": "https://legacy.site-a.com",
-		"site-b": "https://legacy.site-b.com",
-	}, normalizeLegacyRoomOrigins(cfg.LegacyRoomOrigins))
+	assert.Equal(t, "https://legacy.site-a.com", cfg.LegacyRoomOrigins.byID["site-a"])
 
 	t.Setenv("LEGACY_ROOM_ORIGINS", "")
 	cfg, err = env.ParseAs[originsConfig]()
-	require.NoError(t, err, "empty value must not be a parse error")
-	assert.Empty(t, normalizeLegacyRoomOrigins(cfg.LegacyRoomOrigins))
+	require.NoError(t, err)
+	assert.Empty(t, cfg.LegacyRoomOrigins.byID)
+
+	t.Setenv("LEGACY_ROOM_ORIGINS", `[{"siteID":"s1"`)
+	_, err = env.ParseAs[originsConfig]()
+	assert.Error(t, err, "malformed JSON must fail startup, not be silently ignored")
 }
