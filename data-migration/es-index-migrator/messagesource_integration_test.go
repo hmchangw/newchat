@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -19,63 +18,13 @@ import (
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-// setupCassandra creates the isolated keyspace's Participant/Card UDTs and a
-// messages_by_room table scoped to exactly the columns this service reads
-// (see messageColumns), then returns a session pinned to that keyspace so
-// production queries (which use unqualified table names) work unmodified.
+// setupCassandra returns a session on an isolated keyspace with the schema
+// this service reads (see messageColumns), via the shared helper in
+// cassandra_test_helpers_test.go.
 func setupCassandra(t *testing.T) *gocql.Session {
 	t.Helper()
-	keyspace, adminSession, host := testutil.CassandraKeyspace(t, "esmig")
-	cql := func(format string) string { return fmt.Sprintf(format, keyspace) }
-
-	stmts := []string{
-		cql(`CREATE TYPE IF NOT EXISTS %s."Participant" (
-			id           TEXT,
-			eng_name     TEXT,
-			company_name TEXT,
-			app_id       TEXT,
-			app_name     TEXT,
-			is_bot       BOOLEAN,
-			account      TEXT
-		)`),
-		cql(`CREATE TYPE IF NOT EXISTS %s."Card" (
-			template TEXT,
-			data     BLOB
-		)`),
-		cql(`CREATE TABLE IF NOT EXISTS %s.messages_by_room (
-			room_id                  TEXT,
-			bucket                   BIGINT,
-			created_at               TIMESTAMP,
-			message_id               TEXT,
-			sender                   FROZEN<"Participant">,
-			msg                      TEXT,
-			attachments              LIST<BLOB>,
-			card                     FROZEN<"Card">,
-			tshow                    BOOLEAN,
-			thread_parent_id         TEXT,
-			thread_parent_created_at TIMESTAMP,
-			deleted                  BOOLEAN,
-			site_id                  TEXT,
-			edited_at                TIMESTAMP,
-			updated_at               TIMESTAMP,
-			enc_payload              BLOB,
-			PRIMARY KEY ((room_id, bucket), created_at, message_id)
-		) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`),
-	}
-	for _, stmt := range stmts {
-		require.NoError(t, adminSession.Query(stmt).Exec())
-	}
-
-	// adminSession is keyspace-unscoped; open a session pinned to our isolated
-	// keyspace so production queries (unqualified table names) work as-is.
-	cluster := gocql.NewCluster(host)
-	cluster.Consistency = gocql.One
-	cluster.DisableInitialHostLookup = true
-	cluster.Keyspace = keyspace
-	ksSession, err := cluster.CreateSession()
-	require.NoError(t, err)
-	t.Cleanup(func() { ksSession.Close() })
-	return ksSession
+	_, _, session := newTestCassandraSession(t, "esmig")
+	return session
 }
 
 func insertTestMessage(t *testing.T, session *gocql.Session, roomID string, bucket int64, createdAt time.Time, msgID, msg string, deleted bool) {
