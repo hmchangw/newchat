@@ -12,6 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -54,10 +55,23 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		CreatedAt: chat.CreatedDateTime.UTC(),
 		UpdatedAt: acceptedAt,
 	}
-	// Teams-migrated rooms carry no E2E room key, matching #107's message path
-	// (which persists migrated history without one): nil key.
-	if _, err := h.store.CreateRoom(ctx, room, nil); err != nil {
+	// A migrated room stays live — members keep chatting — so a channel room needs
+	// an encryption key like any native channel: generate it, persist it with the
+	// room, and fan it out to members below. On redelivery reuse the persisted key.
+	newPair, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return fmt.Errorf("generate room key: %w", err)
+	}
+	inserted, err := h.store.CreateRoom(ctx, room, newPair)
+	if err != nil {
 		return fmt.Errorf("create room: %w", err)
+	}
+	pair := &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: *newPair}
+	if !inserted {
+		pair, err = h.existingRoomKey(ctx, room.ID, newPair)
+		if err != nil {
+			return err
+		}
 	}
 
 	existingSubs, err := h.store.ListByRoom(ctx, room.ID)
@@ -72,6 +86,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	wantAccounts := make(map[string]struct{}, len(chat.Members))
 	memberSite := make(map[string]string, len(chat.Members)) // account -> home site, for federation
 	var newSubs []*model.Subscription
+	var addedUsers []model.User // for the room-key fan-out
 
 	for _, member := range chat.Members {
 		if member.Account == "" {
@@ -99,6 +114,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			sub.HistorySharedSince = &t
 		}
 		newSubs = append(newSubs, sub)
+		addedUsers = append(addedUsers, *user)
 	}
 
 	var removed []string
@@ -132,6 +148,13 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		return fmt.Errorf("reconcile member counts: %w", err)
 	}
 	h.bustRoomMeta(ctx, room.ID)
+
+	// Fan the room key out to newly-added members so their clients can decrypt.
+	if len(addedUsers) > 0 {
+		if err := h.buildAndFanOutRoomKey(ctx, room.ID, pair, addedUsers); err != nil {
+			return fmt.Errorf("fan out room key: %w", err)
+		}
+	}
 
 	if err := h.federateTeamsMembership(ctx, room, added, model.InboxMemberAdded, memberSite, acceptedAt); err != nil {
 		return fmt.Errorf("federate added members: %w", err)

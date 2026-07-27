@@ -13,7 +13,9 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func newTeamsTestHandler(t *testing.T, store *MockSubscriptionStore) (*Handler, *[]publishedMsg) {
@@ -68,7 +70,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 		return nil
 	}
 
-	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Nil()).Return(true, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "carol").Return(nil, ErrUserNotFound)
@@ -110,6 +112,34 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	assert.Empty(t, membershipEvents(t, *published, "member_removed"), "add-only batch emits no removals")
 }
 
+// TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers: a migrated channel
+// room stays live, so it gets an encryption key fanned out to each added member
+// like a native channel — clients need it to decrypt ongoing chat.
+func TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		return pub.Publish(subj, data)
+	}
+	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub))
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "chat1").Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID: "chat1", Name: "Project Sync",
+		Members: []model.TeamsRoomCreateMember{{ID: "aad1", Account: "alice"}},
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+
+	assert.Contains(t, pub.subjects, subject.RoomKeyUpdate("alice"),
+		"added member must receive the room key")
+}
+
 // TestProcessTeamsRoomCreate_DedupsDuplicateAccounts: the same account listed
 // twice in a chat's members creates exactly one subscription (resolved once).
 func TestProcessTeamsRoomCreate_DedupsDuplicateAccounts(t *testing.T) {
@@ -117,7 +147,7 @@ func TestProcessTeamsRoomCreate_DedupsDuplicateAccounts(t *testing.T) {
 	store := NewMockSubscriptionStore(ctrl)
 	h, _ := newTeamsTestHandler(t, store)
 
-	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Nil()).Return(true, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil) // exactly once
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
@@ -145,7 +175,7 @@ func TestProcessTeamsRoomCreate_HardRemoveOnly(t *testing.T) {
 	store := NewMockSubscriptionStore(ctrl)
 	h, published := newTeamsTestHandler(t, store)
 
-	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Nil()).Return(false, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return([]model.Subscription{
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
 		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-b"},
@@ -179,7 +209,7 @@ func TestProcessTeamsRoomCreate_IdempotentNoOp(t *testing.T) {
 	store := NewMockSubscriptionStore(ctrl)
 	h, published := newTeamsTestHandler(t, store)
 
-	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Nil()).Return(false, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return([]model.Subscription{
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
 	}, nil)
@@ -202,7 +232,7 @@ func TestProcessTeamsRoomCreate_PerChatIsolation(t *testing.T) {
 	h, _ := newTeamsTestHandler(t, store)
 
 	// chat "bad" errors at CreateRoom; chat "good" proceeds normally.
-	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Nil()).DoAndReturn(
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, room *model.Room, _ *roomkeystore.RoomKeyPair) (bool, error) {
 			if room.ID == "bad" {
 				return false, assert.AnError
@@ -320,7 +350,7 @@ func TestProcessTeamsRoomCreate_StampsMigrationHeader(t *testing.T) {
 	}
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
 
-	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Nil()).Return(true, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
