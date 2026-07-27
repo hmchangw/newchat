@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,6 +82,61 @@ func TestListMembers_PagedWalkViaMsgraphClient(t *testing.T) {
 	require.Len(t, got, 3)
 	assert.Equal(t, "alice.wu@corp.example", got[0].UserPrincipalName)
 	assert.Equal(t, "EMP001", got[0].EmployeeID)
+}
+
+func TestListUsers_PagedWalkViaMsgraphClient(t *testing.T) {
+	_, srv := newTestServer(t)
+	lister, err := msgraph.NewUserListerClient(
+		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		msgraph.WithBaseURL(srv.URL+"/v1.0"),
+		msgraph.WithTokenURL(srv.URL+"/t/oauth2/v2.0/token"),
+	)
+	require.NoError(t, err)
+	var got []msgraph.GraphUser
+	pages := 0
+	require.NoError(t, lister.ListUsers(context.Background(), 2, func(users []msgraph.GraphUser) error {
+		pages++
+		got = append(got, users...)
+		return nil
+	}))
+	assert.Equal(t, 2, pages, "3 users at $top=2 walks 2 pages")
+	require.Len(t, got, 3)
+	assert.Equal(t, "alice.wu@corp.example", got[0].UserPrincipalName)
+}
+
+func TestListUserChats_ViaMsgraphClient(t *testing.T) {
+	_, srv := newTestServer(t)
+	chats, err := msgraph.NewChatsClient(
+		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		msgraph.WithBaseURL(srv.URL+"/v1.0"),
+		msgraph.WithTokenURL(srv.URL+"/t/oauth2/v2.0/token"),
+	)
+	require.NoError(t, err)
+	// u4 is a member of only the group chat; the DM has just u1+u2.
+	from := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+	got, err := chats.ListUserChats(context.Background(), "u4", from, to)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "19:chat-eng", got[0].ID)
+	require.Len(t, got[0].Members, 3, "chat carries its members inline (via $expand)")
+}
+
+func TestListChatMembers_ViaMsgraphClient(t *testing.T) {
+	_, srv := newTestServer(t)
+	reader, err := msgraph.NewChatMembersClient(
+		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		msgraph.WithBaseURL(srv.URL+"/v1.0"),
+		msgraph.WithTokenURL(srv.URL+"/t/oauth2/v2.0/token"),
+	)
+	require.NoError(t, err)
+	got, err := reader.ListChatMembers(context.Background(), "19:chat-eng")
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, "u1", got[0].UserID)
+
+	_, err = reader.ListChatMembers(context.Background(), "nope")
+	require.Error(t, err, "unknown chat id 404s")
 }
 
 func TestFixtureSwap(t *testing.T) {

@@ -21,5 +21,23 @@
         {"@odata.type": "#microsoft.graph.user", "id": "u6", "userPrincipalName": "frank.kao@corp.example", "displayName": "法蘭克", "givenName": "Frank", "surname": "Kao", "employeeId": "EMP006"}
       ]
     }
+  ],
+  "users": [
+    {"id": "u1", "userPrincipalName": "alice.wu@corp.example", "displayName": "愛麗絲"},
+    {"id": "u2", "userPrincipalName": "bob.lin@corp.example", "displayName": "鮑伯"},
+    {"id": "u4", "userPrincipalName": "dave.huang@corp.example", "displayName": "戴夫"}
+  ],
+  "chats": [
+    {"id": "19:chat-eng", "chatType": "group", "topic": "Project X", "createdDateTime": "2026-01-02T03:04:05Z", "lastUpdatedDateTime": "2026-06-01T00:00:00Z",
+     "members": [
+       {"userId": "u1", "visibleHistoryStartDateTime": "2026-01-02T03:04:05Z"},
+       {"userId": "u2"},
+       {"userId": "u4"}
+     ]},
+    {"id": "19:chat-dm", "chatType": "oneOnOne", "topic": "", "createdDateTime": "2026-02-02T00:00:00Z", "lastUpdatedDateTime": "2026-06-02T00:00:00Z",
+     "members": [
+       {"userId": "u1"},
+       {"userId": "u2"}
+     ]}
   ]
 }
