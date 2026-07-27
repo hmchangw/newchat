@@ -1,0 +1,27 @@
+.mention {
+  color: var(--mention);
+  font-weight: 600;
+}
+
+.mention-all {
+  color: var(--mention-all);
+}
+
+/* The reader's own name — stronger emphasis via the mention-all accent so a
+   self-mention is easy to spot in a busy channel. */
+.mention-self {
+  color: var(--mention-all);
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0 2px;
+}
+
+.message-link {
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-word;
+}
+
+.message-link:hover {
+  color: var(--accent-hover);
+}

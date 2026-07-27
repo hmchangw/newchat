@@ -1,4 +1,5 @@
 import MessageActions from './MessageActions/MessageActions'
+import MessageContent from '@/components/shared/MessageContent/MessageContent'
 import QuotedBlock from '@/components/shared/QuotedBlock/QuotedBlock'
 import useHoverWithDelay from '@/hooks/useHoverWithDelay'
 import { useSubscription } from '@/context/RoomEventsContext'
@@ -89,7 +90,13 @@ export default function MessageRow({
           />
         )}
         <div className="message-bubble-wrap" {...handlers}>
-          <div className="message-bubble">{messageContent(message)}</div>
+          <div className="message-bubble">
+            <MessageContent
+              content={messageContent(message)}
+              mentions={message.mentions}
+              selfAccount={subscription?.u?.account}
+            />
+          </div>
           {hovered && (
             <div className="message-actions-host" {...handlers}>
               <MessageActions
