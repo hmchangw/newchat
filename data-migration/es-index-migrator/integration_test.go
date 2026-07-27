@@ -4,7 +4,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -13,8 +16,35 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
+
+// getESDoc fetches a document's _source by ID via the real-time get API (no
+// refresh needed — unlike search, get-by-id reads directly from the primary).
+// Returns nil if the document doesn't exist.
+func getESDoc(t *testing.T, esURL, index, docID string) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/%s/_doc/%s", esURL, index, docID), nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var result struct {
+		Source map[string]any `json:"_source"`
+	}
+	require.NoError(t, json.Unmarshal(body, &result))
+	return result.Source
+}
 
 // setupCassandraForRun creates an isolated keyspace (via
 // testutil.CassandraKeyspace) with the Participant/Card UDTs and the
@@ -93,9 +123,17 @@ func TestRun_EndToEndBackfillIsIdempotentOnRerun(t *testing.T) {
 	require.NoError(t, err)
 
 	createdAt := joinedAt.Add(time.Hour)
+	// Bucket must be computed the same way run()'s own StreamMessages does
+	// (via pkg/msgbucket, epoch-aligned) — time.Time.Truncate is aligned to
+	// year 1, not the Unix epoch, and never agrees with msgbucket's bucket
+	// boundaries. A mismatched bucket here means the production query scans
+	// a different partition than the one this row was seeded into, so the
+	// row is silently invisible to run() and this test would pass without
+	// ever exercising the message-backfill path at all.
+	bucketSizer := msgbucket.New(72 * time.Hour) // matches cfg.MessageBucketHours below
 	err = cassSession.Query(
 		"INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, deleted, site_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		"room1", createdAt.Truncate(72*time.Hour).UnixMilli(), createdAt, "m1",
+		"room1", bucketSizer.Of(createdAt), createdAt, "m1",
 		cassandra.Participant{ID: "u1", Account: "alice"}, "hello world", false, "site-a",
 	).Exec()
 	require.NoError(t, err)
@@ -118,8 +156,25 @@ func TestRun_EndToEndBackfillIsIdempotentOnRerun(t *testing.T) {
 	err = run(context.Background(), cfg)
 	require.NoError(t, err)
 
+	msgDoc := getESDoc(t, esURL, searchindex.MessageIndexName(msgIndex, createdAt), "m1")
+	require.NotNil(t, msgDoc, "the seeded message must actually reach the messages index")
+	require.Equal(t, "hello world", msgDoc["content"])
+
+	spotlightDoc := getESDoc(t, esURL, spotlightIndex, "alice_room1")
+	require.NotNil(t, spotlightDoc, "the seeded subscription must actually reach the spotlight index")
+	require.Equal(t, "general", spotlightDoc["roomName"])
+
+	userRoomDoc := getESDoc(t, esURL, userRoomIndex, "alice")
+	require.NotNil(t, userRoomDoc, "the seeded subscription must actually reach the user-room index")
+
 	// A second identical run must not error and must not double-count
-	// failures — every write this job makes is versioned/idempotent.
+	// failures — every write this job makes is versioned/idempotent. It
+	// must also leave the exact same three documents in place, not
+	// duplicate or corrupt them.
 	err = run(context.Background(), cfg)
 	require.NoError(t, err)
+
+	require.Equal(t, msgDoc, getESDoc(t, esURL, searchindex.MessageIndexName(msgIndex, createdAt), "m1"))
+	require.Equal(t, spotlightDoc, getESDoc(t, esURL, spotlightIndex, "alice_room1"))
+	require.Equal(t, userRoomDoc, getESDoc(t, esURL, userRoomIndex, "alice"))
 }
