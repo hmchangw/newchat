@@ -79,6 +79,10 @@ type SendMessageRequest struct {
 	// (one JSON object per element). message-gatekeeper validates and copies them
 	// onto the canonical Message.
 	Attachments [][]byte `json:"attachments,omitempty"`
+	// Type is the optional client-settable message type. The only accepted value is
+	// MessageTypeImportant; message-gatekeeper rejects any system type or unknown
+	// value so a client can't inject a system event. Empty = a normal message.
+	Type string `json:"type,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's

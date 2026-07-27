@@ -585,6 +585,14 @@ func IsSystemMessageType(t string) bool {
 }
 
 const (
+	// MessageTypeImportant is the sole client-settable message type (重要訊息).
+	// Unlike the system MessageType* values above it is set by the client, and it
+	// previews + notifies like a normal message — IsSystemMessageType returns false
+	// for it, so the "Type != \"\" ⇒ system" convention doesn't suppress it.
+	MessageTypeImportant = "important"
+)
+
+const (
 	// AsyncJobStatusOK indicates a successful async job result.
 	AsyncJobStatusOK = "ok"
 	// AsyncJobStatusError indicates a failed async job result.

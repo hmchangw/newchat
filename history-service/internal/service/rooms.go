@@ -102,7 +102,7 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			}
 			return s.toPreviewMessage(ctx, &m), true
 		}
-		// Whole page ineligible (deleted/system/quoted). A short page means the walk
+		// Whole page ineligible (deleted/system). A short page means the walk
 		// is exhausted (no older messages) — stop. Otherwise page again strictly
 		// before the oldest one seen.
 		if len(page.Data) < lastMsgWalkPageSize {

@@ -13,7 +13,7 @@ bot app name — on top of the #104 system/quoted skip. Design: `../specs/2026-0
 ## File Structure
 
 - Modify: `pkg/model/message.go` — `LastMessage` → `PreviewMessage` (enriched); `RoomsGetResponse`.
-- Modify: `pkg/model/subscription.go` — `SubscriptionRoom.LastMessage` type.
+- Modify: `pkg/model/subscription.go` — `SubscriptionRoom.PreviewMessage` type.
 - Modify: `history-service/internal/models/message.go` — type alias.
 - Modify: `history-service/internal/service/rooms.go` — `toPreviewMessage` mapper.
 - Modify: `history-service/internal/service/reactions.go` — extract `botAwareDisplayName`.
@@ -26,7 +26,7 @@ bot app name — on top of the #104 system/quoted skip. Design: `../specs/2026-0
 ### Task 1: Wire type + rename
 
 - [ ] Add `attachments`/`mentions`/`visibleTo` to a renamed `PreviewMessage` (sender = wire `Participant`); `// TODO(#106): forwardSource`.
-- [ ] Ripple `LastMessage` → `PreviewMessage` across the alias + `user-service` consumers; keep the `SubscriptionRoom.LastMessage` field name.
+- [ ] Ripple `LastMessage` → `PreviewMessage` across the alias + `user-service` consumers; the field is `SubscriptionRoom.PreviewMessage` (renamed per review).
 - [ ] `go build ./...` clean.
 
 ### Task 2: Enrichment mapper
