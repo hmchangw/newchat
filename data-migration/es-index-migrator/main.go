@@ -115,6 +115,18 @@ func realMain() int {
 		return 1
 	}
 
+	// This is a one-shot batch job, not a long-lived server: run(ctx, cfg)
+	// below does bounded work and returns on its own once finished, whether
+	// that takes seconds or hours — it does not idle waiting to be told to
+	// stop. pkg/shutdown.Wait is built for the opposite shape (block until a
+	// signal arrives, then run cleanup funcs) and has no way to be triggered
+	// by "the work finished normally," so it doesn't fit here. This is the
+	// first strictly one-shot job in data-migration/ — every existing
+	// sibling there runs an indefinite JetStream consumer or Mongo
+	// change-stream watcher and uses shutdown.Wait correctly for that shape.
+	// signal.NotifyContext instead threads a cancelable ctx through run so
+	// in-flight Cassandra/Mongo/ES calls observe cancellation promptly on
+	// SIGTERM/SIGINT; cleanup runs via ordinary defer when run returns.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
