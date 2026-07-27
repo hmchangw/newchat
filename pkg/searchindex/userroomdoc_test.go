@@ -25,7 +25,8 @@ func TestStoredScriptBody(t *testing.T) {
 }
 
 func TestBuildAddRoomUpdateBody(t *testing.T) {
-	body := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 0)
+	body, err := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 0)
+	require.NoError(t, err)
 
 	var decoded struct {
 		Script struct {
@@ -43,7 +44,8 @@ func TestBuildAddRoomUpdateBody(t *testing.T) {
 }
 
 func TestBuildAddRoomUpdateBody_RestrictedRoomSeedsRestrictedRoomsMap(t *testing.T) {
-	body := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 500)
+	body, err := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 500)
+	require.NoError(t, err)
 
 	var decoded struct {
 		Upsert searchindex.UserRoomUpsertDoc `json:"upsert"`
@@ -55,7 +57,8 @@ func TestBuildAddRoomUpdateBody_RestrictedRoomSeedsRestrictedRoomsMap(t *testing
 }
 
 func TestBuildAddRoomUpdateBody_UnrestrictedRoomSeedsRoomsArray(t *testing.T) {
-	body := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 0)
+	body, err := searchindex.BuildAddRoomUpdateBody("alice", "room1", 1000, 0)
+	require.NoError(t, err)
 
 	var decoded struct {
 		Upsert searchindex.UserRoomUpsertDoc `json:"upsert"`
@@ -67,7 +70,8 @@ func TestBuildAddRoomUpdateBody_UnrestrictedRoomSeedsRoomsArray(t *testing.T) {
 }
 
 func TestBuildRemoveRoomUpdateBody_NoUpsertSeed(t *testing.T) {
-	body := searchindex.BuildRemoveRoomUpdateBody("room1", 2000)
+	body, err := searchindex.BuildRemoveRoomUpdateBody("room1", 2000)
+	require.NoError(t, err)
 
 	var decoded map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(body, &decoded))

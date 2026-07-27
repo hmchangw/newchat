@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 
@@ -56,4 +57,33 @@ func TestBucketRange_ToExactlyOnABucketBoundaryExcludesThatBucket(t *testing.T) 
 
 	// [from, to) — the bucket starting exactly at `to` holds no row < to, so it must not be walked.
 	assert.Equal(t, []int64{sizer.Of(from)}, buckets)
+}
+
+func TestRejectEncryptedMessage_PlaintextRowReturnsNil(t *testing.T) {
+	row := cassandra.Message{RoomID: "room1", MessageID: "m1", Msg: "hello"}
+
+	err := rejectEncryptedMessage(&row)
+
+	assert.NoError(t, err)
+}
+
+func TestRejectEncryptedMessage_EncryptedRowReturnsError(t *testing.T) {
+	row := cassandra.Message{RoomID: "room1", MessageID: "m1", EncPayload: []byte{0xDE, 0xAD}}
+
+	err := rejectEncryptedMessage(&row)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errEncryptedMessage)
+	assert.Contains(t, err.Error(), "m1")
+	assert.Contains(t, err.Error(), "room1")
+}
+
+func TestRejectEncryptedMessage_EmptyNonNilPayloadReturnsNil(t *testing.T) {
+	// A zero-length (but non-nil) slice is not a real encrypted payload —
+	// only a genuinely populated enc_payload should trip the guard.
+	row := cassandra.Message{RoomID: "room1", MessageID: "m1", EncPayload: []byte{}}
+
+	err := rejectEncryptedMessage(&row)
+
+	assert.NoError(t, err)
 }

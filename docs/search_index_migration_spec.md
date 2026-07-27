@@ -2,11 +2,13 @@
 
 ## Purpose
 
-`data-migration/es-index-migrator` is a standalone, one-time/rebuild job that backfills a site's three Elasticsearch indexes — **messages** (monthly), **spotlight**, and **user-room** — directly from that site's own current-stack Cassandra and MongoDB. It exists for situations where a site's ES data needs to be reconstructed from scratch:
+`data-migration/es-index-migrator` is a standalone, **one-time, pre-live** job that backfills a site's three Elasticsearch indexes — **messages** (monthly), **spotlight**, and **user-room** — directly from that site's own current-stack Cassandra and MongoDB, as part of that site's cutover *before* it starts taking live traffic. It exists for situations where a site's ES data needs to be built or reconstructed from scratch during that pre-live window:
 
-- ES cluster loss or corruption for a site already taking live traffic.
-- An index mapping/template change that requires a full reindex.
-- Enabling search for a site that was running without it.
+- Populating search for a site as part of its pre-live migration cutover, once the bulk Cassandra/MongoDB migration for that site has completed.
+- An index mapping/template change discovered before go-live that requires a full reindex.
+- ES data loss or corruption that happened during the pre-live migration window itself.
+
+**Scope boundary — pre-live only.** This job is meant to run exactly once per site, after that site's bulk data migration into Cassandra/MongoDB finishes and before the site goes live. Once a site is live, `oplog-connector`'s CDC tail and `search-sync-worker`'s live event consumption take over as the system of record for search indexing — this job is not a general "rebuild ES for an already-live site" tool and must not be re-run against a site that has gone live. It has no mechanism to catch up on writes made after its own run; see "No at-rest decryption dependency" below for the concrete failure mode if it's pointed at live data anyway.
 
 It is **not** an onboarding tool. Migrating a brand-new site off the legacy RocketChat source system is a separate, already-solved problem owned by `oplog-connector` + `oplog-collections-transformer` (also under `data-migration/`) — this job never reads legacy `rocketchat_*` collections and has no relationship to that pipeline.
 
@@ -43,9 +45,9 @@ Messages are read from Cassandra's append-only history table and are unaffected 
 
 ## Write model: every write is versioned / idempotent
 
-Every document this job writes is written the same idempotent way the live worker (`search-sync-worker`) would write it — a re-run of this job, or an overlapping live write from `search-sync-worker`, always converges instead of racing or duplicating:
+Every document this job writes is written using the same `version_type: external` (or scripted last-write-wins, for user-room) mechanism the live worker (`search-sync-worker`) uses — a re-run of this job always converges instead of racing or duplicating:
 
-- **Messages** — `ActionIndex`, `Version = Message.CreatedAt.UnixMilli()`, `version_type: external`. ES only accepts a write whose version is strictly greater than what's stored; a duplicate write with the same timestamp 409s, which `pkg/searchengine.IsBulkItemSuccess` already treats as a benign, expected outcome for `ActionIndex`.
+- **Messages** — `ActionIndex`, `Version = Message.CreatedAt.UnixMilli()`, `version_type: external`. ES only accepts a write whose version is strictly greater than what's stored; a duplicate write with the same timestamp 409s, which `pkg/searchengine.IsBulkItemSuccess` already treats as a benign, expected outcome for `ActionIndex`. Note this job versions by `CreatedAt`, while `search-sync-worker`'s live path versions by the event's publish timestamp (`evt.Timestamp`, which advances on edits — see CLAUDE.md's Event Timestamps convention) — the two are **not** version-comparable. That's fine under this job's pre-live-only scope (see "Scope boundary" above: no live-worker writes exist yet to converge against), but it means the "converges instead of racing" property holds only for reruns of this job itself, not for an "overlapping live write from `search-sync-worker`" — that scenario is out of scope by design, not something this versioning scheme was built to handle.
 - **Spotlight** — `ActionIndex`, `Version = Subscription.JoinedAt.UnixMilli()`. (There is no delete path here — see Additive-only limitation above: every subscription this job reads is a current, active membership.)
 - **User-room** — `ActionUpdate` against the same stored Painless script `search-sync-worker` registers at startup (`search-sync-user-room-add-v1`), with **no external ES version** — the script's own `roomTimestamps`-keyed last-write-wins guard (`params.ts > stored`, else `ctx.op = 'none'`) is the ordering mechanism, exactly as it is on the live path.
 
@@ -60,7 +62,9 @@ To guarantee this job can never drift from what `search-sync-worker` actually in
 
 ## No at-rest decryption dependency
 
-`message-worker`'s live write path can store message content encrypted in Cassandra's `enc_payload`/`enc_meta` columns when a site has `ATREST_ENABLED=true` (envelope encryption via `pkg/atrest`, DEKs wrapped by Vault's transit engine), and `history-service` decrypts those columns on its live read path. This job is different: the `messages_by_room` rows it reads were themselves written directly into the plaintext `msg`/`attachments`/`card` columns by the process that populated the table for this migration — never through the live at-rest-encryption write path. So this job reads those columns as-is, never touches `enc_payload`/`enc_meta`, and has no dependency on `pkg/atrest` or Vault at all — no Vault connectivity, no `room_data_keys` read access, no `ATREST_*`/`VAULT_*` config.
+`message-worker`'s live write path can store message content encrypted in Cassandra's `enc_payload`/`enc_meta` columns when a site has `ATREST_ENABLED=true` (envelope encryption via `pkg/atrest`, DEKs wrapped by Vault's transit engine), and `history-service` decrypts those columns on its live read path. This job is different: the `messages_by_room` rows it reads were themselves written directly into the plaintext `msg`/`attachments`/`card` columns by the pre-live bulk migration that populated the table for this site — never through the live at-rest-encryption write path. So this job reads those columns as-is, never touches `enc_payload`/`enc_meta` for indexing purposes, and has no dependency on `pkg/atrest` or Vault at all — no Vault connectivity, no `room_data_keys` read access, no `ATREST_*`/`VAULT_*` config.
+
+This is an operational assumption tied directly to the job's pre-live scope (see "Scope boundary" above), not something the schema enforces on its own. `messagesource_cassandra.go` does not rely on that assumption blindly: it also reads `enc_payload` (the column, not its content) purely to detect whether it's populated, and `rejectEncryptedMessage` hard-fails the affected room's stream the moment a row carries a non-empty encrypted payload, rather than silently indexing blank content. In normal pre-live use this should never trigger. If it does, it means this run has reached data written through the live at-rest-encryption path — i.e. the site is no longer in the pre-live window this job assumes — and the failure should be treated as a signal to abort and investigate, not retried or ignored.
 
 ## Collection 1 — Messages
 
@@ -152,11 +156,22 @@ Only `MIGRATION_START_AT`/`MIGRATION_END_AT` bound anything — spotlight and us
 1. Parse config, fail fast on missing required vars.
 2. Connect to Cassandra, MongoDB, Elasticsearch.
 3. Idempotently **ensure** (not just verify) the three ES index templates and two user-room stored scripts exist, using the exact same builders `search-sync-worker` uses at its own startup — so this job can run standalone against a fresh site that has never run `search-sync-worker`.
-4. Run the three collections concurrently (independent indexes/sources); each internally parallelizes across rooms/subscriptions with a bounded worker pool (`WORKER_CONCURRENCY`).
+4. Run the three collections sequentially — messages, then spotlight, then user-room — to avoid the three phases contending for the same Cassandra/MongoDB connection pools; each collection internally parallelizes across rooms/subscriptions with a bounded worker pool (`WORKER_CONCURRENCY`).
 5. Buffer ES bulk actions per collection, flushing at `BULK_BATCH_SIZE`. A flush always runs at the end of each collection's pass, even if a worker in that collection failed — partial progress is never silently discarded.
 6. `slog` JSON progress/error logs throughout, per repo convention.
 7. On a `_bulk` item failure, log the failing doc ID + error and continue — don't abort the whole run for a handful of bad rows — but track a failure count.
 8. Exit non-zero if any collection's read failed, or if any bulk item failed across any collection; exit 0 only on a fully clean run.
+
+## Rerunning this job
+
+This job has no delete path for messages (see "Additive-only limitation" above) — a message deleted in Cassandra between two runs is simply skipped on the later run, not removed from an index that already indexed it on an earlier run. So a rerun (e.g. to pick up a fixed index template/mapping, or a bug found in an earlier run) must always start from empty indices, not write on top of a prior run's data:
+
+1. Delete the site's existing indices before rerunning:
+   - **Messages** are split into monthly indices (`{MSG_INDEX_PREFIX}-2026-01`, `{MSG_INDEX_PREFIX}-2026-02`, ...) — delete all of them for this site with a wildcard, e.g. `DELETE /{MSG_INDEX_PREFIX}-*` against the site's own `SEARCH_URL`.
+   - **Spotlight** and **user-room** are each a single flat index — `DELETE /{SPOTLIGHT_INDEX}` and `DELETE /{USER_ROOM_INDEX}`.
+2. Just run the job again. Index **templates** and the two user-room Painless **scripts** do not need to be recreated manually — step 3 of "Execution shape" idempotently re-ensures them on every run, and Elasticsearch auto-creates each index from its template the moment this job's first write lands.
+
+This is safe pre-live (no one is searching the site yet, so the brief window with no data during the delete-then-rerun isn't user-visible). It is not a safe procedure once a site is live — see "Scope boundary — pre-live only" above.
 
 ## Related documents
 

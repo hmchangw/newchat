@@ -34,10 +34,15 @@ func buildUserRoomAction(sub model.Subscription, indexName string) (searchengine
 		hss = sub.HistorySharedSince.UnixMilli()
 	}
 
+	body, err := searchindex.BuildAddRoomUpdateBody(sub.User.Account, sub.RoomID, sub.JoinedAt.UnixMilli(), hss)
+	if err != nil {
+		return searchengine.BulkAction{}, fmt.Errorf("build user-room action for subscription %s: %w", sub.ID, err)
+	}
+
 	return searchengine.BulkAction{
 		Action: searchengine.ActionUpdate,
 		Index:  indexName,
 		DocID:  sub.User.Account,
-		Doc:    searchindex.BuildAddRoomUpdateBody(sub.User.Account, sub.RoomID, sub.JoinedAt.UnixMilli(), hss),
+		Doc:    body,
 	}, nil
 }

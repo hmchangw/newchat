@@ -58,6 +58,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			site_id                  TEXT,
 			edited_at                TIMESTAMP,
 			updated_at               TIMESTAMP,
+			enc_payload              BLOB,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
 		) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`),
 	}
@@ -112,6 +113,31 @@ func TestCassandraMessageSource_StreamMessages_MultiBucketWindow(t *testing.T) {
 	require.Len(t, got, 2, "expects m1 and m2 only: m3 is outside the window, m4 is deleted")
 	ids := []string{got[0].MessageID, got[1].MessageID}
 	require.ElementsMatch(t, []string{"m1", "m2"}, ids)
+}
+
+func TestCassandraMessageSource_StreamMessages_EncryptedRowAbortsStream(t *testing.T) {
+	session := setupCassandra(t)
+	sizer := msgbucket.New(72 * time.Hour)
+	source := newCassandraMessageSource(session, sizer)
+
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	insertTestMessage(t, session, "room3", sizer.Of(from), from, "plain1", "hello", false)
+	err := session.Query(
+		"INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, enc_payload, site_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"room3", sizer.Of(from), from.Add(time.Minute), "encrypted1", cassandra.Participant{ID: "u1", Account: "alice"},
+		[]byte{0xDE, 0xAD, 0xBE, 0xEF}, "site-a",
+	).Exec()
+	require.NoError(t, err)
+
+	var got []cassandra.Message
+	streamErr := source.StreamMessages(context.Background(), "site-a", "room3", from, to, func(m cassandra.Message) error {
+		got = append(got, m)
+		return nil
+	})
+
+	require.ErrorIs(t, streamErr, errEncryptedMessage,
+		"this migrator only supports plaintext-column data; an encrypted row must hard-fail rather than silently index blank content")
 }
 
 func TestCassandraMessageSource_StreamMessages_CallbackErrorAborts(t *testing.T) {

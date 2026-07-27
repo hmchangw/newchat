@@ -70,18 +70,26 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 
 		switch evt.Type {
 		case model.InboxMemberAdded:
+			body, err := searchindex.BuildAddRoomUpdateBody(account, roomID, ts, hss)
+			if err != nil {
+				return nil, fmt.Errorf("build user-room action: %w", err)
+			}
 			actions = append(actions, searchengine.BulkAction{
 				Action: searchengine.ActionUpdate,
 				Index:  c.indexName,
 				DocID:  account,
-				Doc:    searchindex.BuildAddRoomUpdateBody(account, roomID, ts, hss),
+				Doc:    body,
 			})
 		case model.InboxMemberRemoved:
+			body, err := searchindex.BuildRemoveRoomUpdateBody(roomID, ts)
+			if err != nil {
+				return nil, fmt.Errorf("build user-room action: %w", err)
+			}
 			actions = append(actions, searchengine.BulkAction{
 				Action: searchengine.ActionUpdate,
 				Index:  c.indexName,
 				DocID:  account,
-				Doc:    searchindex.BuildRemoveRoomUpdateBody(roomID, ts),
+				Doc:    body,
 			})
 		default:
 			return nil, fmt.Errorf("build user-room action: unsupported event type %q", evt.Type)

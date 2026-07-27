@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
@@ -58,16 +59,6 @@ type MessageFields struct {
 	Card        *cassandra.Card
 }
 
-// isBotAccount reports whether account looks like a bot account (".bot" suffix).
-// Duplicated here (rather than importing pkg/model, which would create an
-// import cycle: pkg/model already imports pkg/model/cassandra, and this
-// package's callers include services that import pkg/model) is avoided by
-// keeping this a plain string check with the same semantics as
-// model.IsBot — both must be kept in sync if the convention ever changes.
-func isBotAccount(account string) bool {
-	return strings.HasSuffix(account, ".bot")
-}
-
 // NewMessageDoc builds the ES document for the messages index from f.
 //
 //nolint:gocritic // hugeParam: f is passed by value to satisfy the builder interface; struct copy is negligible for 200 bytes
@@ -78,7 +69,7 @@ func NewMessageDoc(f MessageFields) MessageDoc {
 		SiteID:                f.SiteID,
 		UserID:                f.UserID,
 		UserAccount:           f.UserAccount,
-		IsBot:                 isBotAccount(f.UserAccount),
+		IsBot:                 model.IsBot(f.UserAccount),
 		Content:               f.Content,
 		CreatedAt:             f.CreatedAt,
 		EditedAt:              f.EditedAt,

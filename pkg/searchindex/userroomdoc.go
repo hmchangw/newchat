@@ -2,6 +2,7 @@ package searchindex
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -76,6 +77,8 @@ type UserRoomUpsertDoc struct {
 // StoredScriptBody wraps a Painless source string in the
 // `PUT /_scripts/{id}` request envelope ES expects.
 func StoredScriptBody(source string) json.RawMessage {
+	// Error discarded: source is always one of the AddRoomScript/RemoveRoomScript
+	// constants above, wrapped in a map[string]string — marshal cannot fail on that input.
 	body, _ := json.Marshal(map[string]any{
 		"script": map[string]string{"lang": "painless", "source": source},
 	})
@@ -87,7 +90,7 @@ func StoredScriptBody(source string) json.RawMessage {
 // HistorySharedSince in millis (0 for unrestricted). The upsert seed makes
 // the first-insert document shape match what the script itself would
 // produce on a subsequent update.
-func BuildAddRoomUpdateBody(account, rid string, ts, hss int64) json.RawMessage {
+func BuildAddRoomUpdateBody(account, rid string, ts, hss int64) (json.RawMessage, error) {
 	now := time.UnixMilli(ts).UTC().Format(time.RFC3339Nano)
 	upsert := UserRoomUpsertDoc{
 		UserAccount:     account,
@@ -103,14 +106,17 @@ func BuildAddRoomUpdateBody(account, rid string, ts, hss int64) json.RawMessage 
 		upsert.Rooms = []string{rid}
 	}
 
-	body, _ := json.Marshal(map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"script": map[string]any{
 			"id":     AddRoomScriptID,
 			"params": map[string]any{"rid": rid, "ts": ts, "hss": hss, "now": now},
 		},
 		"upsert": upsert,
 	})
-	return body
+	if err != nil {
+		return nil, fmt.Errorf("marshal add room update body for account %s room %s: %w", account, rid, err)
+	}
+	return body, nil
 }
 
 // BuildRemoveRoomUpdateBody builds the ActionUpdate body for removing rid
@@ -118,12 +124,15 @@ func BuildAddRoomUpdateBody(account, rid string, ts, hss int64) json.RawMessage 
 // removing from a nonexistent doc is the document_missing_exception 404
 // case searchengine.IsBulkItemSuccess treats as benign, matching how
 // search-sync-worker's own adapter calls this same script.
-func BuildRemoveRoomUpdateBody(rid string, ts int64) json.RawMessage {
-	body, _ := json.Marshal(map[string]any{
+func BuildRemoveRoomUpdateBody(rid string, ts int64) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
 		"script": map[string]any{
 			"id":     RemoveRoomScriptID,
 			"params": map[string]any{"rid": rid, "ts": ts},
 		},
 	})
-	return body
+	if err != nil {
+		return nil, fmt.Errorf("marshal remove room update body for room %s: %w", rid, err)
+	}
+	return body, nil
 }
