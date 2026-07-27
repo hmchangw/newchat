@@ -59,6 +59,11 @@ const MARK_READ_DEBOUNCE_MS = 500
  *   On-demand key fetch from RoomKeysContext. Called once when the initial
  *   decrypt returns null; if it resolves true, decrypt is retried once.
  *   Defaults to a no-op that always returns false (no retry).
+ * @param {(entries: { roomId: string; version: number; privateKey: string }[]) => void} [seedKeys]
+ *   Bulk key-seed from RoomKeysContext. Called once after BUCKETS_LOADED with
+ *   the room keys `subscription.list` delivered inline, so the first message
+ *   in each encrypted room decrypts without a placeholder or an on-demand
+ *   fetch. Defaults to a no-op.
  */
 export function useRoomSubscriptions(
   nats,
@@ -68,6 +73,7 @@ export function useRoomSubscriptions(
   threadMessageMutationHandlerRef,
   decrypt = async () => null,
   ensureKey = async () => false,
+  seedKeys = () => {},
 ) {
   const { user } = nats
   // Keep a live ref to `nats` so long-lived subscription callbacks see the
@@ -83,6 +89,10 @@ export function useRoomSubscriptions(
   // Keep a live ref to `ensureKey` for the same reason.
   const ensureKeyRef = useRef(ensureKey)
   ensureKeyRef.current = ensureKey
+
+  // Keep a live ref to `seedKeys` for the same reason.
+  const seedKeysRef = useRef(seedKeys)
+  seedKeysRef.current = seedKeys
 
   // Bumped on every login (re)cycle so the provider's async fetch
   // callbacks can detect stale-generation dispatches.
@@ -427,6 +437,18 @@ export function useRoomSubscriptions(
       .then((buckets) => {
         if (cancelledRef.current) return
         safeDispatch({ type: 'BUCKETS_LOADED', ...buckets })
+        // Seed room keys delivered inline on subscription.list so the first
+        // message in each encrypted room decrypts immediately — no placeholder,
+        // no on-demand key.get RPC. Rooms without a key (plaintext DMs, or no
+        // key provisioned) simply aren't seeded.
+        const keyEntries = []
+        for (const sub of Object.values(buckets.subscriptions ?? {})) {
+          const room = sub?.room
+          if (room?.privateKey && typeof room.keyVersion === 'number') {
+            keyEntries.push({ roomId: sub.roomId, version: room.keyVersion, privateKey: room.privateKey })
+          }
+        }
+        if (keyEntries.length > 0) seedKeysRef.current(keyEntries)
         for (const r of buckets.rooms) {
           if (r.type === 'channel') openChannelSub(r.id)
         }

@@ -209,3 +209,75 @@ describe('RoomKeysProvider.ensureKey', () => {
     expect(requestRoomKey).toHaveBeenCalledTimes(1) // no second RPC
   })
 })
+
+describe('RoomKeysProvider.seedKeys', () => {
+  beforeEach(() => {
+    lastDecryptHook = null
+    vi.mocked(subscribeToRoomKeyEvents).mockReset()
+    vi.mocked(requestRoomKey).mockReset()
+    vi.mocked(subscribeToRoomKeyEvents).mockReturnValue({ unsubscribe: vi.fn() })
+  })
+
+  it('seeds keys from bootstrap so decrypt works without a live event or fetch', async () => {
+    // Regression: on a fresh reload the client holds no keys until a live
+    // RoomKeyEvent fires or a message forces an on-demand fetch. subscription.list
+    // already carries the current room key, so seeding it up front means the
+    // first message in a room decrypts without a placeholder or an extra RPC.
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    act(() => {
+      lastDecryptHook.seedKeys([
+        { roomId: 'r1', version: fixture.message.version, privateKey: fixture.privateKey },
+      ])
+    })
+
+    const plaintext = await lastDecryptHook.decrypt({
+      roomId: 'r1',
+      version: fixture.message.version,
+      nonceB64: fixture.message.nonce,
+      ciphertextB64: fixture.message.ciphertext,
+    })
+    expect(plaintext).toBe(fixture.plaintext)
+    expect(requestRoomKey).not.toHaveBeenCalled()
+  })
+
+  it('skips entries with invalid base64 without throwing', async () => {
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    act(() => {
+      lastDecryptHook.seedKeys([{ roomId: 'r1', version: 1, privateKey: '!!!not-base64!!!' }])
+    })
+
+    expect(lastDecryptHook.hasKey('r1', 1)).toBe(false)
+  })
+
+  it('ignores malformed entries (missing roomId / version / privateKey)', async () => {
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    act(() => {
+      lastDecryptHook.seedKeys([
+        { roomId: '', version: 1, privateKey: fixture.privateKey },
+        { roomId: 'r1', version: undefined, privateKey: fixture.privateKey },
+        { roomId: 'r2', version: 1 },
+      ])
+    })
+
+    expect(lastDecryptHook.hasKey('r1', 1)).toBe(false)
+    expect(lastDecryptHook.hasKey('r2', 1)).toBe(false)
+  })
+})
