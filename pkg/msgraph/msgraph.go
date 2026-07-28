@@ -277,6 +277,23 @@ func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 	return g, nil
 }
 
+// NewMeetingsDirectoryClient returns the meetings (Client) and directory
+// (DirectoryReader) surfaces backed by a single app-only graphClient — one
+// token cache serves both. Honors cfg.ProxyURL like NewMeetingsClient (the bare
+// NewDirectoryClient does not). Both return values are the same instance.
+// room-service uses this so the meeting organizer/attendee object-ID lookup runs
+// on the same app-only User.Read.All Service Principal that creates the meeting,
+// with no resource-owner (ROPC) credentials.
+//
+//nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
+func NewMeetingsDirectoryClient(cfg Config, opts ...Option) (Client, DirectoryReader, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+		return nil, nil, err
+	}
+	return g, g, nil
+}
+
 // mutableTransport returns an *http.Transport for tuning hc's connection pool,
 // or nil when hc uses a custom (non-*http.Transport) RoundTripper — that
 // RoundTripper is left untouched, since idle/proxy settings can't be expressed
@@ -408,10 +425,9 @@ func (g *graphClient) ResolveAccountIDs(ctx context.Context, accounts []string) 
 	return resolveAccountIDs(ctx, g.httpClient, g.baseURL, g.userAgent, token, accounts)
 }
 
-// resolveAccountIDs is the token-agnostic directory lookup shared by the
-// app-only graphClient and the ROPC directoryClient. Semantics match the
-// original graphClient.ResolveAccountIDs: chunked startsWith filter, result
-// keyed by lowercased UPN local-part, first match wins.
+// resolveAccountIDs is the token-agnostic directory lookup backing
+// graphClient.ResolveAccountIDs: chunked startsWith filter, result keyed by
+// lowercased UPN local-part, first match wins.
 func resolveAccountIDs(ctx context.Context, hc *http.Client, baseURL, userAgent, token string, accounts []string) (map[string]string, error) {
 	out := make(map[string]string, len(accounts))
 	if len(accounts) == 0 {
