@@ -81,7 +81,7 @@ func (h *Handler) Add(msg jetstream.Msg) {
 // JetStream facade. Flush uses it as a span link source because one ES bulk
 // request can contain actions from multiple source messages.
 func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
-	data, err := decodePayload(msg)
+	data, err := natsutil.DecodePayload(msg)
 	if err != nil {
 		slog.Error("decode payload", "error", err)
 		natsutil.Ack(msg, "decode payload failed")
