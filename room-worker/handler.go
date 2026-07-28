@@ -229,7 +229,12 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	case strings.HasSuffix(subj, ".member.remove"):
 		err = h.processRemoveMember(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".teams.create"):
-		err = h.processTeamsRoomCreate(ctx, msg.Data())
+		var data []byte
+		if data, err = natsutil.DecodePayload(msg); err == nil {
+			err = h.processTeamsRoomCreate(ctx, data)
+		} else {
+			err = permanent(errcode.BadRequest("decode teams.create payload")) // corrupt frame never decodes on redelivery
+		}
 	case strings.HasSuffix(subj, ".create"):
 		err = h.processCreateRoom(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".room.rename"):

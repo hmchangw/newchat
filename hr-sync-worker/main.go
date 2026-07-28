@@ -123,7 +123,7 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			data, err := decodePayload(msg)
+			data, err := natsutil.DecodePayload(msg)
 			if err != nil {
 				// a bad frame won't decode on redelivery → poison
 				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest(fmt.Sprintf("decode payload: %s", err.Error()))))

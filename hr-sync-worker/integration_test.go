@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
@@ -40,7 +41,7 @@ func startWorker(t *testing.T, js jetstream.JetStream, h *Handler, siteID string
 	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consCfg)
 	require.NoError(t, err)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		data, derr := decodePayload(msg)
+		data, derr := natsutil.DecodePayload(msg)
 		require.NoError(t, derr)
 		jsretry.Settle(context.Background(), msg, jsretry.DefaultBackoff, h.HandleMessage(context.Background(), msg.Subject(), data))
 	})

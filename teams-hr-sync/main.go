@@ -172,7 +172,7 @@ func jetStreamPublish(js jetstream.JetStream) publishFunc {
 			if msg.Header == nil {
 				msg.Header = nats.Header{}
 			}
-			msg.Header.Set("Nats-Encoding", encoding)
+			msg.Header.Set(natsutil.HeaderNatsEncoding, encoding)
 		}
 		_, err := js.PublishMsg(ctx, msg)
 		return err
