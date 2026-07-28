@@ -481,7 +481,7 @@ platform admin. Channel rooms only.
 
 #### Success response
 
-`{ "members": MemberStatus[] }` — members with non-empty `statusText` only.
+`{ "members": MemberStatus[] }` — members with non-empty `statusText` and `statusIsShow=true` only.
 See `MemberStatus` schema in [../client-api.md §3.1](../client-api.md#get-member-statuses).
 
 #### Errors

@@ -1679,7 +1679,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"only room me
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Upper bound on returned rows. When omitted, the server uses `min(3, room.userCount)` (an empty room returns an empty list); when supplied, must be `> 0` and `<= room.userCount`. Fewer rows may come back — members with an empty `statusText` are omitted (see `members`). |
+| `limit` | number | no | Upper bound on returned rows. When omitted, the server uses `min(3, room.userCount)` (an empty room returns an empty list); when supplied, must be `> 0` and `<= room.userCount`. Fewer rows may come back — members with an empty `statusText` or with `statusIsShow=false` are omitted (see `members`). |
 
 ```json
 { "limit": 5 }
@@ -1689,7 +1689,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"only room me
 
 | Field | Type | Notes |
 |---|---|---|
-| `members` | array<MemberStatus> | One entry per room subscription **with a non-empty `statusText`**, projected from the joined `users` document. Members without a status set are omitted. |
+| `members` | array<MemberStatus> | One entry per room subscription **with a non-empty `statusText` and `statusIsShow=true`**, projected from the joined `users` document. Members without a status set, or who have opted out of surfacing it (`statusIsShow=false`), are omitted. |
 
 `MemberStatus`:
 
@@ -1698,7 +1698,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"only room me
 | `account` | string | The user's account. |
 | `engName` | string | English display name. |
 | `chineseName` | string | Chinese display name. |
-| `statusIsShow` | boolean | Whether the user has chosen to surface their status text. |
+| `statusIsShow` | boolean | Whether the user has chosen to surface their status text. Always `true` — members with `statusIsShow=false` are omitted from `members`. |
 | `statusText` | string | Free-form presence text (e.g. `"available"`, `"in a meeting"`); always non-empty — members without a status are omitted from `members`. |
 
 ```json
