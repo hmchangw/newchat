@@ -701,62 +701,58 @@ func TestNewChatsClient_ProxyRejectsCustomRoundTripper(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNewDirectoryROPCClient_ResolvesWithPasswordGrant(t *testing.T) {
-	var grant, user, pass string
+func TestNewMeetingsDirectoryClient_BothSurfacesUseAppOnlyToken(t *testing.T) {
+	var grant string
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		grant = r.Form.Get("grant_type")
-		user = r.Form.Get("username")
-		pass = r.Form.Get("password")
-		assert.Equal(t, graphScope, r.Form.Get("scope"))
-		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "dtok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "apptok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
 	}))
 	defer tokenSrv.Close()
 
 	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer dtok", r.Header.Get("Authorization"))
-		assert.Equal(t, "eventual", r.Header.Get("ConsistencyLevel"))
-		filter := r.URL.Query().Get("$filter")
-		assert.Contains(t, filter, "startsWith(userPrincipalName,'alice@')")
-		_ = json.NewEncoder(w).Encode(map[string]any{"value": []GraphUser{
-			{ID: "ida", UserPrincipalName: "alice@corp.com"},
-		}})
+		assert.Equal(t, "Bearer apptok", r.Header.Get("Authorization"))
+		if r.Method == http.MethodGet { // ResolveAccountIDs
+			assert.Equal(t, "eventual", r.Header.Get("ConsistencyLevel"))
+			assert.Contains(t, r.URL.Query().Get("$filter"), "startsWith(userPrincipalName,'alice@')")
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": []GraphUser{
+				{ID: "ida", UserPrincipalName: "alice@corp.com"},
+			}})
+			return
+		}
+		// CreateOnlineMeeting
+		assert.Contains(t, r.URL.Path, "/users/ida/onlineMeetings/createOrGet")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
 	}))
 	defer graphSrv.Close()
 
-	d, err := NewDirectoryROPCClient(
+	client, dir, err := NewMeetingsDirectoryClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
-		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
 		WithTokenURL(tokenSrv.URL), WithBaseURL(graphSrv.URL),
 	)
 	require.NoError(t, err)
 
-	got, err := d.ResolveAccountIDs(context.Background(), []string{"alice"})
+	got, err := dir.ResolveAccountIDs(context.Background(), []string{"alice"})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"alice": "ida"}, got)
-	assert.Equal(t, "password", grant)
-	assert.Equal(t, "svc@corp.com", user)
-	assert.Equal(t, "pw", pass)
+
+	mtg, err := client.CreateOnlineMeeting(context.Background(), CreateOnlineMeetingRequest{ExternalID: "k", OrganizerID: "ida"})
+	require.NoError(t, err)
+	assert.Equal(t, "https://join/1", mtg.JoinURL)
+
+	assert.Equal(t, "client_credentials", grant)
 }
 
-func TestNewDirectoryROPCClient_TokenErrorDoesNotLeakPassword(t *testing.T) {
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(tokenResponse{Error: "invalid_grant"}) // #nosec G117 -- test mock OAuth error response; no token value
-	}))
-	defer tokenSrv.Close()
-
-	d, err := NewDirectoryROPCClient(
-		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
-		ROPCCredentials{Username: "svc@corp.com", Password: "supersecret"},
-		WithTokenURL(tokenSrv.URL), WithBaseURL("http://unused"),
-	)
+func TestNewMeetingsDirectoryClient_SameInstance(t *testing.T) {
+	client, dir, err := NewMeetingsDirectoryClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"})
 	require.NoError(t, err)
+	assert.Same(t, client, dir, "both surfaces must be the same *graphClient (one token cache)")
+}
 
-	_, err = d.ResolveAccountIDs(context.Background(), []string{"alice"})
+func TestNewMeetingsDirectoryClient_InvalidProxyURL(t *testing.T) {
+	_, _, err := NewMeetingsDirectoryClient(Config{TenantID: "t", ProxyURL: "://nope"})
 	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "supersecret")
-	assert.Contains(t, err.Error(), "invalid_grant")
 }
 
 func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {

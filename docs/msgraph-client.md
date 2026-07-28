@@ -24,8 +24,6 @@ derive organizer/attendee addresses):
 | `TEAMS_CLIENT_ID` | App registration (client) id |
 | `TEAMS_CLIENT_SECRET` | App registration client secret |
 | `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev. Used only by the deep-link call RPCs — meetings resolve real object IDs (below). |
-| `TEAMS_ROPC_USERNAME` | Service-account UPN for the ROPC directory lookup (`User.Read.All`) that resolves meeting organizer/attendee Azure object IDs. Reuses `TEAMS_CLIENT_ID`/`TEAMS_CLIENT_SECRET` as the confidential client. Meetings RPC is not-configured until set. |
-| `TEAMS_ROPC_PASSWORD` | Service-account password for the ROPC directory lookup. |
 | `GRAPH_PROXY_URL` | Optional. Routes the meetings Graph client through this proxy (scheme+host, e.g. `http://proxy.corp:8080`), overriding `HTTPS_PROXY`/`HTTP_PROXY`. Empty falls back to the standard proxy env vars. |
 
 When the Teams credentials are unset, the deep-link call RPCs still work (they
@@ -63,19 +61,19 @@ room-service constructs this client via `NewMeetingsClient(cfg)`, which honors
 `Config.ProxyURL` (from `GRAPH_PROXY_URL`) and fails fast on a malformed proxy
 value at startup.
 
-## Resolving object IDs (ROPC directory reader)
+## Resolving object IDs (app-only directory reader)
 
 Because the organizer path and attendee identities are object IDs — not the
 guessed `account@TEAMS_EMAIL_DOMAIN` email — `room-service` first resolves them
-through a **ROPC** (`grant_type=password`) directory reader that holds the
-**`User.Read.All`** permission delegated to a service account. Construct via
-`NewDirectoryROPCClient(cfg, ROPCCredentials{Username, Password})`; it reuses
-`TEAMS_CLIENT_ID`/`TEAMS_CLIENT_SECRET` as the confidential client plus
-`TEAMS_ROPC_USERNAME`/`TEAMS_ROPC_PASSWORD`, and satisfies the `DirectoryReader`
-interface (`ResolveAccountIDs(ctx, accounts) → map[account]objectID`, matching
-`startsWith(userPrincipalName,'account@')` so any domain resolves). The organizer
-must resolve or the `teams.meeting` request fails; an attendee that does not
-resolve is dropped from the invite.
+through the **app-only** directory reader that holds the **`User.Read.All`**
+*application* permission — the same Service Principal (`TEAMS_CLIENT_ID`/
+`TEAMS_CLIENT_SECRET`) that creates the meeting, so no resource-owner
+credentials are involved. Construct both surfaces together via
+`NewMeetingsDirectoryClient(cfg)`, which returns the meetings `Client` and the
+`DirectoryReader` backed by one client (one token cache). `ResolveAccountIDs(ctx,
+accounts) → map[account]objectID` matches `startsWith(userPrincipalName,'account@')`
+so any domain resolves. The organizer must resolve or the `teams.meeting` request
+fails; an attendee that does not resolve is dropped from the invite.
 
 ## Listing users (paginated)
 
