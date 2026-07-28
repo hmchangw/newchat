@@ -86,8 +86,13 @@ func fromSubscription(sub *model.Subscription) SubAuth {
 // key, and on miss (or any L2 error) fall back to loader and repopulate L2 with
 // ttl when the loader reports subscribed=true. Fail-open — a nil client or any
 // Valkey error degrades to loader; only loader's result governs the error.
+// A non-positive ttl fully bypasses L2 (no read, no write) — Valkey treats
+// ttl==0 as "store forever", so this is the only safe way to honor a config
+// convention of "0 disables the cache" without caching an authz decision
+// without an expiry.
 func ReadThrough(ctx context.Context, client valkeyutil.Client, loader Loader, roomID, account string, ttl time.Duration, rec Recorder) (SubAuth, bool, error) {
-	if client != nil {
+	l2Enabled := client != nil && ttl > 0
+	if l2Enabled {
 		if auth, found := readL2(ctx, client, roomID, account, rec); found {
 			return auth, true, nil
 		}
@@ -96,7 +101,7 @@ func ReadThrough(ctx context.Context, client valkeyutil.Client, loader Loader, r
 	if err != nil {
 		return SubAuth{}, false, err
 	}
-	if subscribed && client != nil {
+	if subscribed && l2Enabled {
 		if err := valkeyutil.SetJSONWithTTL(ctx, client, SubKey(roomID, account), auth, ttl); err != nil {
 			slog.WarnContext(ctx, "subauth L2 populate failed (TTL will reconcile)",
 				"room_id", roomID, "error", err)

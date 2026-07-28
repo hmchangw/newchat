@@ -182,6 +182,31 @@ func TestReadThrough_ValkeySetError_SwallowedReturnsLoaded(t *testing.T) {
 	assert.Equal(t, 1, fv.setHits, "populate must have been attempted")
 }
 
+func TestReadThrough_NonPositiveTTL_BypassesL2(t *testing.T) {
+	cases := []struct {
+		name string
+		ttl  time.Duration
+	}{
+		{"zero ttl", 0},
+		{"negative ttl", -time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fv := newFakeValkey()
+			rec := &spyRecorder{}
+			loader := func(context.Context, string, string) (SubAuth, bool, error) {
+				return SubAuth{ID: "u1", Account: "alice"}, true, nil
+			}
+			got, subscribed, err := ReadThrough(context.Background(), fv, loader, "room1", "alice", tc.ttl, rec)
+			require.NoError(t, err)
+			assert.True(t, subscribed)
+			assert.Equal(t, "u1", got.ID)
+			assert.Equal(t, 0, fv.getHits, "non-positive ttl must skip the L2 read")
+			assert.Equal(t, 0, fv.setHits, "non-positive ttl must skip the L2 populate")
+		})
+	}
+}
+
 func TestReadThrough_ValkeyGetError_FailsOpenToLoader(t *testing.T) {
 	fv := newFakeValkey()
 	fv.getErr = errors.New("valkey unreachable")
