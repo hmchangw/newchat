@@ -111,7 +111,7 @@ func (h *Handler) SetManual(c *natsrouter.Context, req model.ManualStatusRequest
 		return nil, errcode.BadRequest("missing account")
 	}
 	switch req.Status {
-	case model.StatusNone, model.StatusOnline, model.StatusAway, model.StatusBusy, model.StatusAppearOffline:
+	case model.StatusNone, model.StatusOnline, model.StatusAway, model.StatusBusy, model.StatusAppearOffline, model.StatusDND, model.StatusBRB:
 	default:
 		return nil, errcode.BadRequest("invalid manual status")
 	}

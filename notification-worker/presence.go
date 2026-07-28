@@ -119,7 +119,7 @@ func chunkStrings(in []string, size int) [][]string {
 // shouldPush returns true unless the account is explicitly DND; fail-open on missing/unknown status.
 func shouldPush(p model.Presence) bool {
 	switch p.AggregatedStatus {
-	case "busy", "in-call":
+	case "busy", "in-call", "dnd":
 		return false
 	default:
 		return true

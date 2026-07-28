@@ -24,7 +24,9 @@ const (
 	StatusBusy          PresenceStatus = "busy"
 	StatusOffline       PresenceStatus = "offline"
 	StatusAppearOffline PresenceStatus = "appear_offline" // manual-only
-	StatusInCall        PresenceStatus = "in-call"        // external-only (Teams); DND, never manual
+	StatusBRB           PresenceStatus = "brb"            // manual-only; away-style, push-eligible
+	StatusInCall        PresenceStatus = "in-call"        // external-only (Teams), never manual
+	StatusDND           PresenceStatus = "dnd"            // manual-only; suppresses push
 	StatusNone          PresenceStatus = ""               // no manual override / clear
 )
 

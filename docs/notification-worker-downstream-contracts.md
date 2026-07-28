@@ -190,7 +190,7 @@ succeed on the first pass.
 **Status:** optional but recommended. The worker ships with
 `PRESENCE_RPC_ENABLED=false` and a no-op snapshotter, so **every push-eligible
 recipient is pushed regardless of presence** (fail-open). Implementing this RPC
-enables busy/in-call (DND) suppression. Flip `PRESENCE_RPC_ENABLED=true` once
+enables busy/in-call/`dnd` (DND) suppression while keeping `brb` push-eligible. Flip `PRESENCE_RPC_ENABLED=true` once
 it's live.
 
 ### Transport
@@ -220,7 +220,8 @@ it's live.
 
 - **`aggregatedStatus`** is the single field the worker reads. The presence
   service must **fold manual user overrides into this field** (the worker does
-  no override logic). One of: `online`, `offline`, `away`, `busy`, `in-call`.
+  no override logic). One of: `online`, `offline`, `away`, `busy`, `in-call`,
+  `dnd`, `brb`.
 - An account **absent from the reply map** is treated fail-open (pushed).
 - On error, reply with the repo-standard `model.ErrorResponse`
   (`{"error": "...", "code": "..."}`) via `natsutil.ReplyError`. The worker
@@ -235,6 +236,8 @@ it's live.
 | `away`    | yes | idle, not DND — fail-open |
 | `busy`    | **no** | Do-Not-Disturb |
 | `in-call` | **no** | treated as DND (mirrors Teams in-meeting muting) |
+| `dnd`     | **no** | explicit manual Do-Not-Disturb |
+| `brb`     | yes | away-style manual state; not DND |
 | absent / RPC error | yes | fail-open — never drop on a presence gap |
 
 ### Chunking / sizing

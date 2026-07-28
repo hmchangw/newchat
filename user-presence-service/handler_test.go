@@ -153,26 +153,37 @@ func TestHandler_Bye_PublishesOnChange(t *testing.T) {
 }
 
 func TestHandler_SetManual_Valid(t *testing.T) {
-	h, store, cap := newTestHandler(t, 100)
-	store.EXPECT().SetManual(gomock.Any(), "alice", model.StatusBusy).
-		Return(true, model.StatusBusy, nil)
+	// AC-2.1: validated manual modes are stored, returned, and published when effective state changes.
+	for _, status := range []model.PresenceStatus{model.StatusBusy, model.StatusDND, model.StatusBRB} {
+		t.Run(string(status), func(t *testing.T) {
+			h, store, cap := newTestHandler(t, 100)
+			store.EXPECT().SetManual(gomock.Any(), "alice", status).
+				Return(true, status, nil)
 
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-	resp, err := h.SetManual(c, model.ManualStatusRequest{Status: model.StatusBusy})
-	require.NoError(t, err)
-	assert.Equal(t, "alice", resp.Account)
-	assert.Equal(t, model.StatusBusy, resp.Status)
-	assert.Equal(t, model.StatusBusy, resp.Effective)
-	require.Len(t, cap.subjects, 1)
+			c := natsrouter.NewContext(map[string]string{"account": "alice"})
+			resp, err := h.SetManual(c, model.ManualStatusRequest{Status: status})
+			require.NoError(t, err)
+			assert.Equal(t, "alice", resp.Account)
+			assert.Equal(t, status, resp.Status)
+			assert.Equal(t, status, resp.Effective)
+			require.Len(t, cap.subjects, 1)
+		})
+	}
 }
 
 func TestHandler_SetManual_InvalidStatus(t *testing.T) {
-	h, _, _ := newTestHandler(t, 100)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-	_, err := h.SetManual(c, model.ManualStatusRequest{Status: model.PresenceStatus("bogus")})
-	require.Error(t, err)
-	var re *errcode.Error
-	require.ErrorAs(t, err, &re)
+	// AC-2.2: external-only and arbitrary values cannot enter the manual override store.
+	for _, status := range []model.PresenceStatus{model.StatusInCall, model.PresenceStatus("bogus")} {
+		t.Run(string(status), func(t *testing.T) {
+			h, _, cap := newTestHandler(t, 100)
+			c := natsrouter.NewContext(map[string]string{"account": "alice"})
+			_, err := h.SetManual(c, model.ManualStatusRequest{Status: status})
+			require.Error(t, err)
+			var re *errcode.Error
+			require.ErrorAs(t, err, &re)
+			assert.Empty(t, cap.subjects)
+		})
+	}
 }
 
 func TestHandler_QueryBatch_OverLimit(t *testing.T) {
