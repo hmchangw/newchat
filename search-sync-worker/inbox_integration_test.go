@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -322,8 +323,8 @@ func TestUserRoomSync_Integration(t *testing.T) {
 	require.NoError(t, err)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newUserRoomCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(userRoomTemplateBody(indexName))))
+	coll := newUserRoomCollection(indexName, true)
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.UserRoomTemplateBody(indexName, true))))
 	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
@@ -445,8 +446,8 @@ func TestUserRoomSync_BulkInvite(t *testing.T) {
 	require.NoError(t, err)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newUserRoomCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(userRoomTemplateBody(indexName))))
+	coll := newUserRoomCollection(indexName, true)
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.UserRoomTemplateBody(indexName, true))))
 	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
@@ -561,8 +562,8 @@ func TestUserRoomSync_LWWGuard(t *testing.T) {
 	require.NoError(t, err)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
-	coll := newUserRoomCollection(indexName)
-	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(userRoomTemplateBody(indexName))))
+	coll := newUserRoomCollection(indexName, true)
+	require.NoError(t, engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(searchindex.UserRoomTemplateBody(indexName, true))))
 	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)

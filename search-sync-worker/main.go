@@ -175,7 +175,7 @@ func main() {
 		botMsgColl,
 		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
 		newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
-		newUserRoomCollection(cfg.UserRoomIndex),
+		newUserRoomCollection(cfg.UserRoomIndex, cfg.DevMode),
 	}
 
 	for _, coll := range collections {

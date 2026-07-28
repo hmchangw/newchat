@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
@@ -115,7 +114,7 @@ func TestIndexName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := indexName(tt.prefix, tt.createdAt)
+			got := searchindex.MessageIndexName(tt.prefix, tt.createdAt)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -192,44 +191,6 @@ func TestBuildMessageAction(t *testing.T) {
 	})
 }
 
-func TestMessageTemplateProperties_MatchesStruct(t *testing.T) {
-	props := messageTemplateProperties()
-
-	// Every MessageSearchIndex field with an es tag must have a corresponding template property.
-	typ := reflect.TypeOf(MessageSearchIndex{})
-	for i := range typ.NumField() {
-		field := typ.Field(i)
-		esTag := field.Tag.Get("es")
-		if esTag == "" || esTag == "-" {
-			continue
-		}
-		jsonTag := field.Tag.Get("json")
-		name, _, _ := strings.Cut(jsonTag, ",")
-
-		prop, ok := props[name]
-		assert.True(t, ok, "template missing property for struct field %s (json: %s)", field.Name, name)
-
-		esType, _, _ := strings.Cut(esTag, ",")
-		propMap := prop.(map[string]any)
-		// object_disabled expands to a stored-only object mapping.
-		if esType == "object_disabled" {
-			assert.Equal(t, "object", propMap["type"], "type mismatch for field %s", name)
-			assert.Equal(t, false, propMap["enabled"], "field %s must not be indexed", name)
-			continue
-		}
-		assert.Equal(t, esType, propMap["type"], "type mismatch for field %s", name)
-	}
-
-	// Template should have exactly as many properties as struct fields with es tags.
-	esFieldCount := 0
-	for i := range typ.NumField() {
-		if tag := typ.Field(i).Tag.Get("es"); tag != "" && tag != "-" {
-			esFieldCount++
-		}
-	}
-	assert.Equal(t, esFieldCount, len(props), "template property count should match struct es-tagged field count")
-}
-
 func TestNewMessageSearchIndex(t *testing.T) {
 	ts := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
 	parentTS := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
@@ -247,7 +208,8 @@ func TestNewMessageSearchIndex(t *testing.T) {
 		},
 		SiteID: "site-a",
 	}
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
 	assert.Equal(t, "msg-1", doc.MessageID)
 	assert.Equal(t, "r1", doc.RoomID)
 	assert.Equal(t, "site-a", doc.SiteID)
@@ -275,7 +237,8 @@ func TestNewMessageSearchIndex_EditedUpdatedOmittedWhenNil(t *testing.T) {
 		},
 		SiteID: "site-a",
 	}
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
 	assert.Nil(t, doc.EditedAt)
 	assert.Nil(t, doc.UpdatedAt)
 
@@ -301,7 +264,8 @@ func TestNewMessageSearchIndex_TShowOmittedWhenFalse(t *testing.T) {
 		},
 		SiteID: "site-a",
 	}
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
 	assert.False(t, doc.TShow)
 
 	data, err := json.Marshal(doc)
@@ -649,7 +613,7 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
 
-	var doc MessageSearchIndex
+	var doc searchindex.MessageDoc
 	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
 	assert.Equal(t, "uid-alice", doc.UserID)  // account-resolved user _id
 	assert.Equal(t, "alice", doc.UserAccount) // account from teams_user
@@ -658,7 +622,7 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 	assert.Equal(t, "one", doc.Content)
 	assert.Equal(t, ts, doc.CreatedAt)
 
-	var doc2 MessageSearchIndex
+	var doc2 searchindex.MessageDoc
 	require.NoError(t, json.Unmarshal(actions[1].Doc, &doc2))
 	assert.Equal(t, "**two**", doc2.Content) // html body renders to markdown
 }
@@ -677,4 +641,27 @@ func TestMessageCollection_BuildAction_TeamsBatch_Skips(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-4"), actions[0].DocID)
+}
+
+func TestMessageCollection_BuildAction_TeamsBatch_MalformedRecordDoesNotDropSiblings(t *testing.T) {
+	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	ts := time.Now().UTC()
+
+	valid, err := json.Marshal(teamsmigrate.Message{
+		ID: "tm-1", RoomID: "room-1", MessageType: "message",
+		From: teamsmigrate.User{ID: "g"}, CreatedDateTime: ts,
+	})
+	require.NoError(t, err)
+
+	req := model.TeamsBatchRequest{Messages: []json.RawMessage{
+		json.RawMessage("123"), // valid JSON syntax, wrong shape — fails to unmarshal into teamsmigrate.Message
+		valid,
+	}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	actions, buildErr := c.BuildAction(data)
+	require.NoError(t, buildErr)
+	require.Len(t, actions, 1, "the malformed record must be skipped, not abort the whole batch")
+	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
 }
