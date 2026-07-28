@@ -320,6 +320,15 @@ describe('MessageRow — reply-count badge', () => {
     )
   })
 
+  it('renders reaction chips carried by the message', () => {
+    const message = { ...msg, reactions: { '👍': [{ account: 'bob', displayName: 'Bob' }] } }
+    render(
+      <MessageRow message={message} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+    )
+    expect(screen.getByText('👍')).toBeInTheDocument()
+    expect(screen.getByText('1')).toBeInTheDocument()
+  })
+
   it('no badge inside the thread panel even when tcount > 0', () => {
     render(
       <MessageRow message={{ ...msg, tcount: 5 }} room={room} context="thread-parent" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />

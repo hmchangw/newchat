@@ -12,6 +12,36 @@ function patchMessageById(list, messageId, patch) {
   return [...list.slice(0, idx), { ...list[idx], ...patch }, ...list.slice(idx + 1)]
 }
 
+// Apply a single reaction toggle to a message's reactions map, keyed by
+// shortcode with a list of {account, displayName}. Add is idempotent per
+// account; remove drops the account and the shortcode key when it empties.
+// Returns a new reactions object (never mutates).
+function applyReaction(reactions, { shortcode, action, account, displayName }) {
+  const next = { ...(reactions || {}) }
+  const list = next[shortcode] ? [...next[shortcode]] : []
+  const idx = list.findIndex((u) => u.account === account)
+  if (action === 'removed') {
+    if (idx < 0) return next
+    list.splice(idx, 1)
+  } else {
+    if (idx >= 0) return next
+    list.push({ account, displayName })
+  }
+  if (list.length === 0) delete next[shortcode]
+  else next[shortcode] = list
+  return next
+}
+
+// Like patchMessageById but computes the reaction patch per-matched-message.
+function patchReactionById(list, messageId, delta) {
+  if (!list || list.length === 0) return null
+  const idx = list.findIndex((m) => m.id === messageId)
+  if (idx < 0) return null
+  const msg = list[idx]
+  const reactions = applyReaction(msg.reactions, delta)
+  return [...list.slice(0, idx), { ...msg, reactions }, ...list.slice(idx + 1)]
+}
+
 export const BUFFER_MODE = {
   LIVE: 'live',
   HISTORICAL: 'historical',
@@ -653,6 +683,33 @@ export function roomEventsReducer(state, action) {
       const patch = { deleted: true }
       const messages = patchMessageById(prev.messages, action.messageId, patch)
       const pendingLiveMessages = patchMessageById(prev.pendingLiveMessages, action.messageId, patch)
+      if (!messages && !pendingLiveMessages) return state
+      return {
+        ...state,
+        roomState: {
+          ...state.roomState,
+          [action.roomId]: {
+            ...prev,
+            messages: messages ?? prev.messages,
+            pendingLiveMessages: pendingLiveMessages ?? prev.pendingLiveMessages,
+          },
+        },
+      }
+    }
+    case 'MESSAGE_REACTED': {
+      // Live `message_reacted` toggle. Mirrors MESSAGE_EDITED's dual-buffer
+      // patch so a reaction arriving while in historical mode isn't lost when
+      // pendingLiveMessages merges back.
+      const prev = state.roomState[action.roomId]
+      if (!prev) return state
+      const delta = {
+        shortcode: action.shortcode,
+        action: action.action,
+        account: action.account,
+        displayName: action.displayName,
+      }
+      const messages = patchReactionById(prev.messages, action.messageId, delta)
+      const pendingLiveMessages = patchReactionById(prev.pendingLiveMessages, action.messageId, delta)
       if (!messages && !pendingLiveMessages) return state
       return {
         ...state,

@@ -147,6 +147,13 @@ export interface Participant {
   siteId?: string
 }
 
+/** One reactor on a message reaction. Mirrors the wire `reactionUser`
+ *  (cassandra.Reactions.MarshalJSON): account + server-composed displayName. */
+export interface ReactionUser {
+  account: string
+  displayName: string
+}
+
 /** Pixel size of an uploaded image. Mirrors cassandra.ImageDimensions. */
 export interface ImageDimensions {
   width: number
@@ -235,6 +242,9 @@ export interface Message {
   mentions?: Participant[]
   /** Decoded attachment objects (image/audio/video/file). */
   attachments?: Attachment[]
+  /** Reactions grouped by shortcode → reactors (server emits map<emoji,
+   *  ReactionUser[]>, sorted oldest-first). */
+  reactions?: Record<string, ReactionUser[]>
   quotedParentMessage?: QuotedParentMessage
   /** RFC3339 pin time; present on pinned messages. */
   pinnedAt?: string

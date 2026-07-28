@@ -1,6 +1,7 @@
 import MessageActions from './MessageActions/MessageActions'
 import MessageContent from '@/components/shared/MessageContent/MessageContent'
 import MessageAttachments from '@/components/shared/MessageAttachments/MessageAttachments'
+import MessageReactions from '@/components/shared/MessageReactions/MessageReactions'
 import QuotedBlock from '@/components/shared/QuotedBlock/QuotedBlock'
 import useHoverWithDelay from '@/hooks/useHoverWithDelay'
 import { useNats } from '@/context/NatsContext'
@@ -137,6 +138,7 @@ export default function MessageRow({
         {message.attachments?.length > 0 && (
           <MessageAttachments attachments={message.attachments} baseUrl={user?.baseUrl} />
         )}
+        <MessageReactions reactions={message.reactions} selfAccount={subscription?.u?.account} />
         {message.tcount > 0 && context !== 'thread' && context !== 'thread-parent' && (
           <button
             type="button"

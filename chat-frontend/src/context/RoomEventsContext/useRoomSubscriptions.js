@@ -204,6 +204,19 @@ export function useRoomSubscriptions(
         fanThreadMutation({ kind: 'deleted', messageId })
         return true
       }
+      if (evt?.type === 'message_reacted' && evt.messageId && evt.shortcode) {
+        // ReactRoomEvent: {messageId, shortcode, action: added|removed, actor}.
+        safeDispatch({
+          type: 'MESSAGE_REACTED',
+          roomId: evt.roomId,
+          messageId: evt.messageId,
+          shortcode: evt.shortcode,
+          action: evt.action,
+          account: evt.actor?.account,
+          displayName: evt.actor?.engName || evt.actor?.account,
+        })
+        return true
+      }
       return false
     }
 
