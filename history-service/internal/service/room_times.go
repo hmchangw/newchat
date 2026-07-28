@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -13,7 +14,8 @@ import (
 )
 
 // resolveRoomTimesOrError calls resolveRoomTimes and translates the result for
-// handler return: mongo.ErrNoDocuments → errcode.NotFound; anything else wraps.
+// handler return: mongo.ErrNoDocuments → errcode.NotFound; any other error
+// (e.g. a Mongo outage) fails open to zero times rather than blocking the read.
 func (s *HistoryService) resolveRoomTimesOrError(
 	ctx context.Context,
 	roomID string,
@@ -27,7 +29,12 @@ func (s *HistoryService) resolveRoomTimesOrError(
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return time.Time{}, time.Time{}, errcode.NotFound("room not found")
 	}
-	return time.Time{}, time.Time{}, fmt.Errorf("resolving room metadata for %s: %w", roomID, err)
+	// Fail-open: a transient room-times failure (Mongo outage) must not block a
+	// read. Zero times make the walk use now as the ceiling and the configured
+	// history floor as the floor — a wider but correct bucket walk.
+	slog.WarnContext(ctx, "room-times unavailable, falling back to now/floor (fail-open)",
+		"room_id", roomID, "error", err)
+	return time.Time{}, time.Time{}, nil
 }
 
 // clockSkewTolerance bounds how far in the future a client LastMsgAt hint may sit before the

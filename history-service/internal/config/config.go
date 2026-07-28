@@ -65,6 +65,24 @@ type Config struct {
 	RoomCacheSize int           `env:"HISTORY_ROOM_CACHE_SIZE" envDefault:"50000"`
 	RoomCacheTTL  time.Duration `env:"HISTORY_ROOM_CACHE_TTL"  envDefault:"10s"`
 
+	// Valkey cluster fronting the shared subauthcache L2. Empty ValkeyAddrs
+	// disables the L2 tier (the L1 subscription cache falls straight through
+	// to Mongo, breaker-guarded).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+
+	// SubL2TTL is the shared Valkey L2 retention for subscription authz — the
+	// outage buffer. Long by design (default 90m) so an L2 hit carries the
+	// access decision through a Mongo outage. 0 disables the L2 tier.
+	SubL2TTL time.Duration `env:"HISTORY_SUB_L2_TTL" envDefault:"90m"`
+
+	// MongoBreakerFails/MongoBreakerCooldown configure the circuit breaker
+	// guarding the subauthcache Mongo loader: opens after MongoBreakerFails
+	// consecutive failures and stays open for MongoBreakerCooldown before a
+	// half-open probe.
+	MongoBreakerFails    int           `env:"HISTORY_MONGO_BREAKER_FAILS"    envDefault:"5"`
+	MongoBreakerCooldown time.Duration `env:"HISTORY_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -100,6 +118,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.RoomCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_ROOM_CACHE_TTL must be >= 0, got %s", cfg.RoomCacheTTL)
+	}
+	if cfg.SubL2TTL < 0 {
+		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2TTL)
+	}
+	if cfg.MongoBreakerFails < 0 {
+		return fmt.Errorf("HISTORY_MONGO_BREAKER_FAILS must be >= 0, got %d", cfg.MongoBreakerFails)
+	}
+	if cfg.MongoBreakerCooldown < 0 {
+		return fmt.Errorf("HISTORY_MONGO_BREAKER_COOLDOWN must be >= 0, got %s", cfg.MongoBreakerCooldown)
 	}
 	return nil
 }

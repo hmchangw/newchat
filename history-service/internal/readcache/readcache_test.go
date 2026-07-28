@@ -44,7 +44,7 @@ func (f *fakeSubSource) GetSubscription(_ context.Context, _, _ string) (*pkgmod
 func TestSubscriptionCache_CachesPositive(t *testing.T) {
 	ts := time.Now().UTC()
 	src := &fakeSubSource{sharedSince: &ts, subscribed: true}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	got1, sub1, err1 := c.GetHistorySharedSince(context.Background(), "alice", "r1")
@@ -64,7 +64,7 @@ func TestSubscriptionCache_CachesPositive(t *testing.T) {
 
 func TestSubscriptionCache_DoesNotCacheNegative(t *testing.T) {
 	src := &fakeSubSource{subscribed: false}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	for i := 0; i < 3; i++ {
@@ -78,7 +78,7 @@ func TestSubscriptionCache_DoesNotCacheNegative(t *testing.T) {
 
 func TestSubscriptionCache_DoesNotCacheError(t *testing.T) {
 	src := &fakeSubSource{err: errors.New("mongo down")}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	_, _, err1 := c.GetHistorySharedSince(context.Background(), "alice", "r1")
@@ -91,7 +91,7 @@ func TestSubscriptionCache_DoesNotCacheError(t *testing.T) {
 func TestSubscriptionCache_KeysByAccountAndRoom(t *testing.T) {
 	ts := time.Now().UTC()
 	src := &fakeSubSource{sharedSince: &ts, subscribed: true}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	_, _, _ = c.GetHistorySharedSince(context.Background(), "alice", "r1")
@@ -103,7 +103,7 @@ func TestSubscriptionCache_KeysByAccountAndRoom(t *testing.T) {
 func TestSubscriptionCache_Expiry(t *testing.T) {
 	ts := time.Now().UTC()
 	src := &fakeSubSource{sharedSince: &ts, subscribed: true}
-	c, err := NewSubscriptionCache(src, 100, 20*time.Millisecond)
+	c, err := NewSubscriptionCache(src, nil, 100, 20*time.Millisecond)
 	require.NoError(t, err)
 
 	_, _, _ = c.GetHistorySharedSince(context.Background(), "alice", "r1")
@@ -120,7 +120,7 @@ func TestSubscriptionCache_SingleflightDedupesConcurrentMisses(t *testing.T) {
 		block:       make(chan struct{}),
 		started:     make(chan struct{}, 1),
 	}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	const n = 16
@@ -141,10 +141,33 @@ func TestSubscriptionCache_SingleflightDedupesConcurrentMisses(t *testing.T) {
 
 func TestNewSubscriptionCache_InvalidConfig(t *testing.T) {
 	src := &fakeSubSource{}
-	_, err := NewSubscriptionCache(src, 0, time.Minute)
+	_, err := NewSubscriptionCache(src, nil, 0, time.Minute)
 	assert.Error(t, err)
-	_, err = NewSubscriptionCache(src, 100, 0)
+	_, err = NewSubscriptionCache(src, nil, 100, 0)
 	assert.Error(t, err)
+}
+
+// TestSubscriptionCache_UsesL2WhenProvided pins that when an l2 read-through is
+// configured, the L1 loader delegates to it instead of inner — inner must
+// never be called — and that an L1 hit skips l2 on the second call.
+func TestSubscriptionCache_UsesL2WhenProvided(t *testing.T) {
+	calls := 0
+	l2 := func(_ context.Context, account, roomID string) (*time.Time, bool, error) {
+		calls++
+		return nil, true, nil
+	}
+	// inner must NOT be called when l2 is set.
+	inner := &fakeSubSource{err: errors.New("inner must not be called")}
+	c, err := NewSubscriptionCache(inner, l2, 100, time.Minute)
+	require.NoError(t, err)
+	_, subscribed, err := c.GetHistorySharedSince(context.Background(), "alice", "room1")
+	require.NoError(t, err)
+	assert.True(t, subscribed)
+	assert.Equal(t, 1, calls)
+	// second call is an L1 hit -> l2 not called again
+	_, _, err = c.GetHistorySharedSince(context.Background(), "alice", "room1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls)
 }
 
 type fakeRoomSource struct {
@@ -239,7 +262,7 @@ func TestSubscriptionCache_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
 		block:       make(chan struct{}),
 		started:     make(chan struct{}),
 	}
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
@@ -279,7 +302,7 @@ func TestSubscriptionCache_CallerCancelReturnsCtxErr(t *testing.T) {
 		started:     make(chan struct{}),
 	}
 	defer close(src.block)
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	c, err := NewSubscriptionCache(src, nil, 100, time.Minute)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
