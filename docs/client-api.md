@@ -5580,7 +5580,7 @@ This RPC uses the **publish + async-reply** pattern, not the standard NATS reque
 |---|---|---|---|
 | `requestId` | string | yes | Client-generated correlation key (36-char hyphenated UUID). The result is published to `chat.user.{account}.response.{requestId}`. A request with an empty `requestId` yields no result (undeliverable). |
 | `text` | string | yes | The text to translate. No length cap is enforced by the service. |
-| `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settings) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
+| `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settingsget) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
 
 ##### Supported languages
 
@@ -5595,6 +5595,8 @@ This RPC uses the **publish + async-reply** pattern, not the standard NATS reque
 | Simplified Chinese | `zh-Hans-CN`, `zh-Hans`, `zh-CN`, `zh-SG` | Simplified Chinese |
 
 Chinese resolves by script (`Hant`/`Hans`) or, absent a script, by region. A bare `zh` (no script or region) is ambiguous and rejected as `unsupported_lang`, as is `""` (translation off — the client should not send a request) and any language outside the five above (e.g. `fr`, `ko`). The result's `targetLang` echoes the tag you sent, not the resolved language.
+
+> **Breaking change:** `targetLang` now requires a BCP-47 tag. The former backend short codes `zhTW` / `zhCN` are **no longer accepted** and return `unsupported_lang` — send the BCP-47 form (`zh-Hant-TW` / `zh-Hans-CN`, or the user's `settings.translateMessageInto`) instead. (`en` / `de` / `ja` are unaffected, being valid BCP-47 tags already.) Deploy this in lockstep with the client that sends the settings value.
 
 #### Result — `TranslateResult`
 

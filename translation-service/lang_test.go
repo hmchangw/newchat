@@ -25,6 +25,7 @@ func TestNormalizeTargetLang(t *testing.T) {
 		{"zh-Hant script only", "zh-Hant", "zhTW", true},
 		{"zh-TW region only", "zh-TW", "zhTW", true},
 		{"zh-HK region", "zh-HK", "zhTW", true},
+		{"zh-MO region", "zh-MO", "zhTW", true},
 		{"zh-Hant-HK script wins", "zh-Hant-HK", "zhTW", true},
 		{"zh-hant lowercase", "zh-hant-tw", "zhTW", true},
 		// Simplified Chinese — script or region resolves to zhCN.
@@ -32,6 +33,7 @@ func TestNormalizeTargetLang(t *testing.T) {
 		{"zh-Hans script only", "zh-Hans", "zhCN", true},
 		{"zh-CN region only", "zh-CN", "zhCN", true},
 		{"zh-SG region", "zh-SG", "zhCN", true},
+		{"zh-MY region", "zh-MY", "zhCN", true},
 		// Ambiguous / unsupported.
 		{"bare zh ambiguous", "zh", "", false},
 		{"empty off", "", "", false},
