@@ -7,6 +7,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 
 	"github.com/hmchangw/chat/pkg/displayfmt"
+	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -32,21 +33,19 @@ type HRIdentityStore interface {
 	AccountByTeamsID(ctx context.Context, teamsUserID string) (string, error)
 	// FindUserByAccount returns the single user with account (globally unique), or (nil,nil).
 	FindUserByAccount(ctx context.Context, account string) (*model.User, error)
-	// UpsertUserIdentities $sets IDENTITY FIELDS ONLY (siteId, engName, chineseName)
-	// keyed by account; it never touches roles/services/password.
-	UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error
 }
 
 // senderResolver reuses the #70 HR store to map Teams users to nextgen identities.
 // The cache is process-wide (injected), shared across every batch the handler runs.
 type senderResolver struct {
-	store  HRIdentityStore
-	siteID string
-	cache  *lru.Cache[string, resolvedSender]
+	store        HRIdentityStore
+	siteID       string
+	cache        *lru.Cache[string, resolvedSender]
+	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
 }
 
-func newSenderResolver(store HRIdentityStore, siteID string, cache *lru.Cache[string, resolvedSender]) *senderResolver {
-	return &senderResolver{store: store, siteID: siteID, cache: cache}
+func newSenderResolver(store HRIdentityStore, siteID string, cache *lru.Cache[string, resolvedSender], publishUsers func(ctx context.Context, users []model.IUserWithChange) error) *senderResolver {
+	return &senderResolver{store: store, siteID: siteID, cache: cache, publishUsers: publishUsers}
 }
 
 // resolve order: (1) map the AAD id to its account via teams_user — the globally-unique
@@ -79,24 +78,18 @@ func (r *senderResolver) resolve(ctx context.Context, teamsUserID, displayName s
 		return s, nil
 	}
 
-	// Create a keyless external user: displayName lands in chineseName to mirror the HR
-	// mapping (teams-hr-sync writes it there); the upsert mints a fresh UUIDv7 _id.
-	nu := model.User{Account: account, SiteID: r.siteID, ChineseName: displayName}
-	if err := r.store.UpsertUserIdentities(ctx, []model.IUserWithChange{{User: nu}}); err != nil {
-		return resolvedSender{}, fmt.Errorf("upsert user identity: %w", err)
+	// New external user: the publisher owns a deterministic _id (Graph-id hash) so
+	// this person is one identity at every site (hr-sync-worker keys on account).
+	// No employeeId — externals aren't employees. displayName lands in chineseName
+	// to mirror the HR mapping. Nothing is written locally first, so a redelivery
+	// re-derives the same _id instead of splitting the user.
+	id := idgen.DeterministicID([]byte(teamsUserID))
+	nu := model.User{ID: id, Account: account, SiteID: r.siteID, ChineseName: displayName}
+	iuc := model.IUserWithChange{User: nu, ChangeType: model.IChangeTypeNewHire}
+	if err := r.publishUsers(ctx, []model.IUserWithChange{iuc}); err != nil {
+		return resolvedSender{}, fmt.Errorf("publish user identity fanout: %w", err)
 	}
-	// Read back by account so the sender carries the minted UserID; a nil read-back is
-	// defensive-only (the row was just written).
-	created, err := r.store.FindUserByAccount(ctx, account)
-	if err != nil {
-		return resolvedSender{}, fmt.Errorf("read back created identity: %w", err)
-	}
-	var s resolvedSender
-	if created != nil {
-		s = senderFromUser(created)
-	} else {
-		s = resolvedSender{Account: account, ChineseName: displayName, DisplayName: displayfmt.CombineWithFallback("", displayName, account)}
-	}
+	s := senderFromUser(&nu)
 	r.cache.Add(teamsUserID, s)
 	return s, nil
 }

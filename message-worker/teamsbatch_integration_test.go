@@ -39,7 +39,8 @@ func TestTeamsBatch_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	store := NewCassandraStore(cass, msgbucket.New(24*time.Hour), nil)
-	teams := newTeamsBatchHandler(store, newMongoHRIdentityStore(mongoDB), "site-a")
+	teams := newTeamsBatchHandler(store, newMongoHRIdentityStore(mongoDB), "site-a",
+		func(context.Context, []model.IUserWithChange) error { return nil })
 
 	raw := mustJSON(teamsmigrate.Message{
 		ID: "tm-1", RoomID: "room-1", MessageType: "message",

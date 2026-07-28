@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
-	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 func newTeamsTestHandler(t *testing.T, store *MockSubscriptionStore) (*Handler, *[]publishedMsg) {
@@ -66,14 +66,14 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 	h, published := newTeamsTestHandler(t, store)
-	carolID := teamsmigrate.EmployeeIDFromGraphID("aad3")
+	carolID := idgen.DeterministicID([]byte("aad3"))
 	h.publishUsers = func(_ context.Context, users []model.IUserWithChange) error {
 		require.Len(t, users, 1, "only the unknown member is published")
-		// The publisher owns _id == employeeId (deterministic Graph-id hash) so every
-		// site's hr-sync-worker upserts the same identity.
+		// The publisher owns a deterministic _id (Graph-id hash) so every site's
+		// hr-sync-worker upserts the same identity; no employeeId — not an employee.
 		assert.Equal(t, "carol", users[0].Account)
 		assert.Equal(t, carolID, users[0].ID)
-		assert.Equal(t, carolID, users[0].EmployeeID)
+		assert.Empty(t, users[0].EmployeeID, "externals aren't employees — no employeeId")
 		return nil
 	}
 
@@ -288,14 +288,14 @@ func TestResolveMember_PublishesDeterministicIdentity(t *testing.T) {
 	store := NewMockSubscriptionStore(ctrl)
 	h, _ := newTeamsTestHandler(t, store)
 
-	wantID := teamsmigrate.EmployeeIDFromGraphID("aad-erin")
+	wantID := idgen.DeterministicID([]byte("aad-erin"))
 	var fanoutCalled bool
 	h.publishUsers = func(_ context.Context, users []model.IUserWithChange) error {
 		fanoutCalled = true
 		require.Len(t, users, 1)
 		assert.Equal(t, "erin", users[0].Account)
 		assert.Equal(t, wantID, users[0].ID)
-		assert.Equal(t, wantID, users[0].EmployeeID)
+		assert.Empty(t, users[0].EmployeeID, "externals aren't employees — no employeeId")
 		assert.Equal(t, model.IChangeTypeNewHire, users[0].ChangeType)
 		return nil
 	}
@@ -305,7 +305,7 @@ func TestResolveMember_PublishesDeterministicIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, fanoutCalled)
 	assert.Equal(t, wantID, got.ID)
-	assert.Equal(t, wantID, got.EmployeeID)
+	assert.Empty(t, got.EmployeeID)
 	assert.Equal(t, "site-a", got.SiteID)
 }
 

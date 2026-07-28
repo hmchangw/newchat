@@ -109,17 +109,3 @@ func (mr *MockHRIdentityStoreMockRecorder) FindUserByAccount(ctx, account any) *
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUserByAccount", reflect.TypeOf((*MockHRIdentityStore)(nil).FindUserByAccount), ctx, account)
 }
-
-// UpsertUserIdentities mocks base method.
-func (m *MockHRIdentityStore) UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpsertUserIdentities", ctx, users)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// UpsertUserIdentities indicates an expected call of UpsertUserIdentities.
-func (mr *MockHRIdentityStoreMockRecorder) UpsertUserIdentities(ctx, users any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertUserIdentities", reflect.TypeOf((*MockHRIdentityStore)(nil).UpsertUserIdentities), ctx, users)
-}
