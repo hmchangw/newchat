@@ -24,6 +24,21 @@ const (
 	StateHalfOpen
 )
 
+// String renders the state as a lowercase, hyphenated label suitable for log
+// fields and metric values (e.g. "closed", "half-open").
+func (s State) String() string {
+	switch s {
+	case StateClosed:
+		return "closed"
+	case StateOpen:
+		return "open"
+	case StateHalfOpen:
+		return "half-open"
+	default:
+		return "unknown"
+	}
+}
+
 // Breaker is a concurrency-safe circuit breaker. The zero value is not usable;
 // construct with New.
 type Breaker struct {
@@ -31,11 +46,12 @@ type Breaker struct {
 	cooldown  time.Duration
 	now       func() time.Time
 
-	mu       sync.Mutex
-	state    State
-	failures int
-	openedAt time.Time
-	probing  bool // true while a half-open probe is in flight
+	mu           sync.Mutex
+	state        State
+	failures     int
+	openedAt     time.Time
+	probing      bool // true while a half-open probe is in flight
+	onTransition func(from, to State)
 }
 
 // Option configures a Breaker at construction.
@@ -44,6 +60,24 @@ type Option func(*Breaker)
 // WithClock overrides the time source (for tests).
 func WithClock(now func() time.Time) Option {
 	return func(b *Breaker) { b.now = now }
+}
+
+// WithOnTransition registers a callback invoked on every state change, after
+// the state has already been updated and the breaker's lock released — the
+// callback runs outside b.mu so it can safely call back into the breaker
+// (e.g. b.State()) without deadlocking. It is never invoked when the state
+// does not change (e.g. a failure below threshold, or a State() call that
+// doesn't advance open->half-open).
+func WithOnTransition(fn func(from, to State)) Option {
+	return func(b *Breaker) { b.onTransition = fn }
+}
+
+// fireTransition invokes cb with (old, new) when the state actually changed.
+// Called after the breaker's lock has been released.
+func fireTransition(cb func(from, to State), old, newState State) {
+	if cb != nil && old != newState {
+		cb(old, newState)
+	}
 }
 
 // New builds a breaker that opens after threshold consecutive failures and
@@ -60,9 +94,13 @@ func New(threshold int, cooldown time.Duration, opts ...Option) *Breaker {
 // cooldown has elapsed.
 func (b *Breaker) State() State {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	old := b.state
 	b.maybeHalfOpenLocked()
-	return b.state
+	newState := b.state
+	cb := b.onTransition
+	b.mu.Unlock()
+	fireTransition(cb, old, newState)
+	return newState
 }
 
 // Do runs fn unless the breaker is open. When open (and past cooldown, unless a
@@ -71,25 +109,32 @@ func (b *Breaker) State() State {
 // counter and may (re)open it.
 func (b *Breaker) Do(fn func() error) error {
 	b.mu.Lock()
+	prologueOld := b.state
 	b.maybeHalfOpenLocked()
+	prologueNew := b.state
+	prologueCB := b.onTransition
+
 	switch b.state {
 	case StateOpen:
 		b.mu.Unlock()
+		fireTransition(prologueCB, prologueOld, prologueNew)
 		return ErrOpen
 	case StateHalfOpen:
 		if b.probing {
 			b.mu.Unlock()
+			fireTransition(prologueCB, prologueOld, prologueNew)
 			return ErrOpen
 		}
 		b.probing = true
 	default: // StateClosed: pass through
 	}
 	b.mu.Unlock()
+	fireTransition(prologueCB, prologueOld, prologueNew)
 
 	err := fn()
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	epilogueOld := b.state
 	b.probing = false
 	if err != nil {
 		b.failures++
@@ -97,11 +142,16 @@ func (b *Breaker) Do(fn func() error) error {
 			b.state = StateOpen
 			b.openedAt = b.now()
 		}
-		return err
+	} else {
+		b.failures = 0
+		b.state = StateClosed
 	}
-	b.failures = 0
-	b.state = StateClosed
-	return nil
+	epilogueNew := b.state
+	epilogueCB := b.onTransition
+	b.mu.Unlock()
+	fireTransition(epilogueCB, epilogueOld, epilogueNew)
+
+	return err
 }
 
 // maybeHalfOpenLocked transitions open->half-open once the cooldown elapses.

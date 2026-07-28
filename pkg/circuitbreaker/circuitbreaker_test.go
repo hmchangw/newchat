@@ -60,3 +60,55 @@ func TestBreaker_HalfOpenProbeFailureReopens(t *testing.T) {
 	// still open immediately after (cooldown restarts)
 	require.ErrorIs(t, b.Do(func() error { return nil }), ErrOpen)
 }
+
+func TestBreaker_OnTransitionFires(t *testing.T) {
+	now := time.Unix(0, 0)
+	var transitions []string
+	b := New(1, time.Minute,
+		WithClock(func() time.Time { return now }),
+		WithOnTransition(func(from, to State) {
+			transitions = append(transitions, from.String()+"->"+to.String())
+		}),
+	)
+	require.ErrorIs(t, b.Do(func() error { return errBoom }), errBoom) // closed->open
+	now = now.Add(2 * time.Minute)
+	require.NoError(t, b.Do(func() error { return nil })) // half-open probe -> closed
+	assert.Equal(t, []string{"closed->open", "open->half-open", "half-open->closed"}, transitions)
+}
+
+func TestBreaker_OnTransitionNilCallbackIsSafe(t *testing.T) {
+	b := New(1, time.Minute)
+	require.ErrorIs(t, b.Do(func() error { return errBoom }), errBoom)
+	assert.Equal(t, StateOpen, b.State())
+}
+
+func TestBreaker_OnTransitionSkipsNoOpStateChecks(t *testing.T) {
+	var transitions []string
+	b := New(3, time.Minute, WithOnTransition(func(from, to State) {
+		transitions = append(transitions, from.String()+"->"+to.String())
+	}))
+	// Below threshold: state stays closed, no transition should fire.
+	require.ErrorIs(t, b.Do(func() error { return errBoom }), errBoom)
+	assert.Empty(t, transitions)
+	// A State() call that doesn't advance open->half-open must not fire either.
+	assert.Equal(t, StateClosed, b.State())
+	assert.Empty(t, transitions)
+}
+
+func TestState_String(t *testing.T) {
+	tests := []struct {
+		name string
+		s    State
+		want string
+	}{
+		{"closed", StateClosed, "closed"},
+		{"open", StateOpen, "open"},
+		{"half-open", StateHalfOpen, "half-open"},
+		{"unknown", State(99), "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.s.String())
+		})
+	}
+}

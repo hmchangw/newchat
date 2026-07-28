@@ -6,6 +6,9 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
@@ -169,7 +172,18 @@ func main() {
 	// subscription L1's loader runs through the shared Valkey L2 (subauthcache),
 	// itself breaker-guarded so a Mongo outage fails open instead of stalling.
 	subscriptionsColl := db.Collection("subscriptions")
-	breaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown)
+	mongoBreakerState, err := otel.Meter("history-service").Int64Gauge("mongo_breaker_state",
+		metric.WithDescription("Mongo circuit breaker state (0=closed, 1=open, 2=half-open)"))
+	if err != nil {
+		slog.Error("create mongo breaker state gauge failed", "error", err)
+		os.Exit(1)
+	}
+	breaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.WithOnTransition(func(from, to circuitbreaker.State) {
+			slog.Warn("mongo circuit breaker transition", "from", from.String(), "to", to.String())
+			mongoBreakerState.Record(ctx, int64(to))
+		}),
+	)
 	subRec := cachemetrics.For("subauth", "l2")
 	subL2 := func(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
 		loader := func(ctx context.Context, roomID, account string) (subauthcache.SubAuth, bool, error) {

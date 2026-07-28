@@ -11,6 +11,8 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
@@ -118,7 +120,18 @@ func main() {
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
 
-	breaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool)
+	mongoBreakerState, err := otel.Meter("message-gatekeeper").Int64Gauge("mongo_breaker_state",
+		metric.WithDescription("Mongo circuit breaker state (0=closed, 1=open, 2=half-open)"))
+	if err != nil {
+		slog.Error("create mongo breaker state gauge failed", "error", err)
+		os.Exit(1)
+	}
+	breaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.WithOnTransition(func(from, to circuitbreaker.State) {
+			slog.Warn("mongo circuit breaker transition", "from", from.String(), "to", to.String())
+			mongoBreakerState.Record(ctx, int64(to))
+		}),
+	)
 	mongoStore := NewMongoStore(db, metaValkey, cfg.RoomMetaL2TTL, cfg.SubL2TTL, breaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
