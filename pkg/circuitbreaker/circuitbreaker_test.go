@@ -76,6 +76,21 @@ func TestBreaker_OnTransitionFires(t *testing.T) {
 	assert.Equal(t, []string{"closed->open", "open->half-open", "half-open->closed"}, transitions)
 }
 
+func TestBreaker_OnTransitionFires_HalfOpenReopen(t *testing.T) {
+	now := time.Unix(0, 0)
+	var transitions []string
+	b := New(1, time.Minute,
+		WithClock(func() time.Time { return now }),
+		WithOnTransition(func(from, to State) {
+			transitions = append(transitions, from.String()+"->"+to.String())
+		}),
+	)
+	require.ErrorIs(t, b.Do(func() error { return errBoom }), errBoom) // closed->open
+	now = now.Add(2 * time.Minute)
+	require.ErrorIs(t, b.Do(func() error { return errBoom }), errBoom) // half-open probe fails -> open
+	assert.Equal(t, []string{"closed->open", "open->half-open", "half-open->open"}, transitions)
+}
+
 func TestBreaker_OnTransitionNilCallbackIsSafe(t *testing.T) {
 	b := New(1, time.Minute)
 	require.ErrorIs(t, b.Do(func() error { return errBoom }), errBoom)
