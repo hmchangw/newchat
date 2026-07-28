@@ -207,6 +207,18 @@ func TestReadThrough_NonPositiveTTL_BypassesL2(t *testing.T) {
 	}
 }
 
+func TestReadThrough_NilRecorder_DoesNotPanic(t *testing.T) {
+	fv := newFakeValkey()
+	loader := func(context.Context, string, string) (SubAuth, bool, error) {
+		return SubAuth{ID: "u1", Account: "alice"}, true, nil
+	}
+	// A nil Recorder must fall back to the no-op recorder, not nil-panic.
+	got, subscribed, err := ReadThrough(context.Background(), fv, loader, "room1", "alice", time.Hour, nil)
+	require.NoError(t, err)
+	assert.True(t, subscribed)
+	assert.Equal(t, "u1", got.ID)
+}
+
 func TestReadThrough_ValkeyGetError_FailsOpenToLoader(t *testing.T) {
 	fv := newFakeValkey()
 	fv.getErr = errors.New("valkey unreachable")

@@ -42,6 +42,15 @@ type Recorder interface {
 	Error(ctx context.Context)
 }
 
+// noopRecorder is the fallback used when a nil Recorder reaches ReadThrough, so
+// the exported API can't nil-panic. Production callers pass cachemetrics.For(...)
+// and never hit this path.
+type noopRecorder struct{}
+
+func (noopRecorder) Hit(context.Context)   {}
+func (noopRecorder) Miss(context.Context)  {}
+func (noopRecorder) Error(context.Context) {}
+
 // Loader fetches a fresh SubAuth from the source of truth. It returns
 // (auth, subscribed, err): subscribed=false is a confirmed non-subscriber (not
 // an error). The caller injects the circuit breaker by wrapping FetchFromMongo
@@ -91,6 +100,9 @@ func fromSubscription(sub *model.Subscription) SubAuth {
 // convention of "0 disables the cache" without caching an authz decision
 // without an expiry.
 func ReadThrough(ctx context.Context, client valkeyutil.Client, loader Loader, roomID, account string, ttl time.Duration, rec Recorder) (SubAuth, bool, error) {
+	if rec == nil {
+		rec = noopRecorder{}
+	}
 	l2Enabled := client != nil && ttl > 0
 	if l2Enabled {
 		if auth, found := readL2(ctx, client, roomID, account, rec); found {
