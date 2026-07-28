@@ -46,4 +46,28 @@ describe('MessageContent', () => {
     const { container } = render(<MessageContent content="" mentions={[]} />)
     expect(container.textContent).toBe('')
   })
+
+  it('renders bold, italic and strikethrough markdown', () => {
+    const { container } = render(<MessageContent content="**b** *i* ~~s~~" mentions={[]} />)
+    expect(container.querySelector('strong')).toHaveTextContent('b')
+    expect(container.querySelector('em')).toHaveTextContent('i')
+    expect(container.querySelector('del')).toHaveTextContent('s')
+  })
+
+  it('renders inline code and fenced code blocks', () => {
+    const { container } = render(<MessageContent content={'`x` more'} mentions={[]} />)
+    expect(container.querySelector('code')).toHaveTextContent('x')
+
+    const { container: c2 } = render(<MessageContent content={'```\nx = 1\n```'} mentions={[]} />)
+    expect(c2.querySelector('pre')).toHaveTextContent('x = 1')
+  })
+
+  it('renders a mention nested inside bold', () => {
+    const { container } = render(
+      <MessageContent content="**@alice**" mentions={[{ account: 'alice', engName: 'Alice' }]} />,
+    )
+    const strong = container.querySelector('strong')
+    expect(strong).toBeInTheDocument()
+    expect(strong.querySelector('.mention')).toHaveTextContent('@Alice')
+  })
 })

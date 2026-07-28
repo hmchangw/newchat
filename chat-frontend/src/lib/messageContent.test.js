@@ -101,3 +101,77 @@ describe('parseMessageContent', () => {
     ])
   })
 })
+
+describe('parseMessageContent — markdown', () => {
+  it('parses bold, italic and strikethrough into wrapper nodes', () => {
+    expect(parseMessageContent('**b**', [])).toEqual([
+      { type: 'strong', children: [{ type: 'text', text: 'b' }] },
+    ])
+    expect(parseMessageContent('*i*', [])).toEqual([
+      { type: 'em', children: [{ type: 'text', text: 'i' }] },
+    ])
+    expect(parseMessageContent('~~s~~', [])).toEqual([
+      { type: 'del', children: [{ type: 'text', text: 's' }] },
+    ])
+  })
+
+  it('parses inline code as a literal (no inner parsing)', () => {
+    expect(parseMessageContent('`@alice *x*`', [{ account: 'alice' }])).toEqual([
+      { type: 'code', text: '@alice *x*' },
+    ])
+  })
+
+  it('parses a fenced code block literally', () => {
+    expect(parseMessageContent('```\nx = 1\n```', [])).toEqual([
+      { type: 'codeblock', text: 'x = 1' },
+    ])
+  })
+
+  it('strips the info string off a fenced block', () => {
+    expect(parseMessageContent('```js\nconst a = 1\n```', [])).toEqual([
+      { type: 'codeblock', text: 'const a = 1' },
+    ])
+  })
+
+  it('resolves mentions nested inside emphasis', () => {
+    expect(parseMessageContent('**@alice**', [{ account: 'alice', engName: 'Alice' }])).toEqual([
+      {
+        type: 'strong',
+        children: [{ type: 'mention', account: 'alice', all: false, display: 'Alice' }],
+      },
+    ])
+  })
+
+  it('does not let underscores in a URL break the link', () => {
+    expect(parseMessageContent('see https://x.io/a_b_c done', [])).toEqual([
+      { type: 'text', text: 'see ' },
+      { type: 'link', href: 'https://x.io/a_b_c', text: 'https://x.io/a_b_c' },
+      { type: 'text', text: ' done' },
+    ])
+  })
+
+  it('does not italicize intraword underscores or asterisks', () => {
+    expect(parseMessageContent('foo_bar_baz', [])).toEqual([{ type: 'text', text: 'foo_bar_baz' }])
+    expect(parseMessageContent('2*3*4', [])).toEqual([{ type: 'text', text: '2*3*4' }])
+  })
+
+  it('mixes markdown with plain text and links', () => {
+    expect(parseMessageContent('see **bold** at https://x.io', [])).toEqual([
+      { type: 'text', text: 'see ' },
+      { type: 'strong', children: [{ type: 'text', text: 'bold' }] },
+      { type: 'text', text: ' at ' },
+      { type: 'link', href: 'https://x.io', text: 'https://x.io' },
+    ])
+  })
+
+  it('supports underscore/double-underscore emphasis at word boundaries', () => {
+    expect(parseMessageContent('a _i_ b', [])).toEqual([
+      { type: 'text', text: 'a ' },
+      { type: 'em', children: [{ type: 'text', text: 'i' }] },
+      { type: 'text', text: ' b' },
+    ])
+    expect(parseMessageContent('__b__', [])).toEqual([
+      { type: 'strong', children: [{ type: 'text', text: 'b' }] },
+    ])
+  })
+})

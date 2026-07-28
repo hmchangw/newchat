@@ -25,3 +25,28 @@
 .message-link:hover {
   color: var(--accent-hover);
 }
+
+.message-code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.9em;
+  padding: 0 4px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-muted, rgba(127, 127, 127, 0.16));
+}
+
+.message-codeblock {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.9em;
+  margin: var(--space-1, 4px) 0;
+  padding: var(--space-2, 8px);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-muted, rgba(127, 127, 127, 0.16));
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.message-codeblock code {
+  font-family: inherit;
+  background: none;
+  padding: 0;
+}
