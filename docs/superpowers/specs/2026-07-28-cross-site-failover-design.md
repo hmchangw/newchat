@@ -55,20 +55,36 @@ site. It fits the existing architecture because data is already **`siteID`-scope
 end-to-end** (rooms/subs/members carry `SiteID`; streams are `<STREAM>_<siteID>`),
 so the backup simply runs per-origin-site namespaces.
 
-**Replication mechanism: Variant A — reuse the event federation.** The backup is
-modeled as "a peer subscribed to everything." It receives each site's
-membership / subscription / room-metadata events over the OUTBOX→INBOX lanes
-that already exist and materializes them with the existing `inbox-worker`
-apply logic, and it runs a `message-worker`-style consumer on each site's
-canonical message stream to persist recent history into its own Cassandra.
-This adds mostly configuration plus one "materialize-everything" consumer set —
-no new storage-replication subsystem.
+**Replication mechanism: Variant A — event-derived materialization, over a
+dedicated backup feed.** The backup is modeled as "a peer that holds a copy of
+everything." Two channels feed it, and the distinction is load-bearing:
 
-Rejected alternative — **Variant B (storage-layer replication):** Cassandra
-multi-DC (backup as an extra DC per ring) + Mongo change-stream/replica
-shipping. Higher fidelity but N multi-DC rings and a Mongo replication pipeline —
-more machinery and more than the lifeboat scope needs. Retained as the growth
-path if fidelity requirements ever exceed the event-derived slice.
+- **Messages** — a `message-worker`-style consumer sources each site's **whole**
+  `MESSAGES_CANONICAL_{siteID}` (1× per message, *before* the ×F fan-out) and
+  persists recent history into the backup's own Cassandra under the same bucketed
+  schema.
+- **Operational state** (rooms / subscriptions / members / user slice) — a
+  **dedicated, membership-independent DR feed** that ships *every* room's state
+  to the backup, applied with the same `inbox-worker`-style insert/delete/upsert
+  semantics.
+
+**Why not reuse the existing OUTBOX→INBOX federation for operational state:** that
+federation is **membership-driven** — it only fires when a room has a member on
+*another active site*. Same-site ("local") rooms produce no federation events at
+all, and (post the local/global subject work — see §7) they are the **majority**.
+Reusing federation would therefore leave the backup blind to most rooms. The DR
+feed is a distinct, backup-directed, unconditional whole-site channel — carried
+below the client-facing interest graph (JetStream / Mongo change-streams), so it
+neither depends on nor perturbs room locality. This pulls the *operational-state*
+slice partway toward Variant B mechanics while the *message* slice stays purely
+event-derived.
+
+Rejected alternative — **Variant B (full storage-layer replication):** Cassandra
+multi-DC (backup as an extra DC per ring) + full Mongo change-stream/replica
+shipping for *all* collections. Higher fidelity but N multi-DC rings and a broad
+Mongo replication pipeline — more machinery and more than the lifeboat scope
+needs. Retained as the growth path if fidelity requirements ever exceed the
+event-derived slice.
 
 **Two knobs, at recommended defaults:**
 - **Failover trigger:** automatic health-detection with a manual operator
@@ -80,29 +96,35 @@ path if fidelity requirements ever exceed the event-derived slice.
 ## 4. Architecture
 
 ```
-   Active Site A ──┐   (membership/sub/room events via OUTBOX→INBOX)
-   Active Site B ──┼──►  Backup "Lifeboat" Site
-   Active Site C ──┘   (canonical messages via cross-site consumer)
+   Active Site A ──┐   dedicated DR feed (unconditional, all rooms):
+   Active Site B ──┼──►    · whole MESSAGES_CANONICAL_{site}  (1×, no fan-out)
+   Active Site C ──┘       · rooms/subs/members/user-slice    (change-stream/feed)
+                          │
+                          ▼  Backup "Lifeboat" Site
                           │  materializes per-siteID namespaces:
                           │    Mongo: rooms, subs, members, users (slice)
-                          │    Cassandra: recent history (72h window)
+                          │    Cassandra: recent history (72h read window)
                           │
    portal-service ────────┘  routing brain / split-brain fence:
      account → (home site if healthy | backup if home down)
 ```
 
 ### 4.1 Backup site — materialization
-- Runs a per-origin-site set of consumers. For each active `siteID`, it
-  consumes that site's federated membership/subscription/room events (the lanes
-  `inbox-worker` already understands) and applies them with the **same
-  insert/delete/upsert semantics** `inbox-worker` uses today, into a
-  `siteID`-namespaced Mongo.
-- Runs a `message-worker`-style consumer against each site's
-  `MESSAGES_CANONICAL_{siteID}` (cross-site), persisting messages into its own
-  Cassandra under the same bucketed schema. History retention on the backup is
-  capped to the lifeboat window.
+- Runs a per-origin-site set of consumers. For each active `siteID`:
+  - **Messages:** a `message-worker`-style consumer sources the whole
+    `MESSAGES_CANONICAL_{siteID}` and persists into the backup's own Cassandra
+    under the same bucketed schema. The Cassandra **read window** is capped to the
+    lifeboat window (72h); the **restore log** (the canonical stream itself) is
+    retained far longer — see §6.
+  - **Operational state:** a dedicated DR feed ships *every* room's
+    room/subscription/member state (not just cross-site rooms), applied with the
+    same insert/delete/upsert semantics `inbox-worker` uses today, into a
+    `siteID`-namespaced Mongo.
 - Holds the **identity slice** (user roster + the room/subscription state) needed
   to authorize and serve `send`/`receive` — not full user-service parity.
+- Materializes the room **`CrossSite` locality flag** (see §7) so the backup's
+  broadcast path picks the correct subject prefix and `subscription.list` returns
+  the right locality to reconnecting clients.
 
 ### 4.2 Routing brain — `portal-service`
 - Becomes the **single source of truth** for "who serves account X *right now*."
@@ -124,9 +146,10 @@ path if fidelity requirements ever exceed the event-derived slice.
 ## 5. Data flow
 
 ### 5.1 Steady state (all sites up)
-Active sites federate their events to the backup exactly as they federate to
-peers today; the backup materializes them. The backup serves **no** live client
-traffic — it is warm, not hot.
+Active sites stream their DR feed (§4.1) to the backup, which materializes it.
+This is a **separate, unconditional, backup-directed channel** — not the
+membership-driven OUTBOX→INBOX peer federation, which skips same-site rooms. The
+backup serves **no** live client traffic — it is warm, not hot.
 
 ### 5.2 Failover (site A down)
 1. Health detection marks A down (auto, with manual override).
@@ -138,26 +161,184 @@ traffic — it is warm, not hot.
    Cassandra (and flow through the backup's canonical pipeline for delivery).
 
 ### 5.3 Failback (site A recovers)
-1. A comes back but is **not yet** re-designated as serving its accounts (portal
-   still points them at the backup).
-2. The backup **replays its outage-window messages** for A back into A over the
-   canonical/federation path. Because messages are **append-only with unique IDs
-   and Cassandra bucketing**, replay is **idempotent and conflict-free** (unique
-   `Nats-Msg-Id` / message-ID dedup absorbs duplicates).
-3. Once A has caught up, portal atomically flips A's accounts home; clients
-   reconnect to A.
+See §6 — the restore/failback protocol is detailed there.
 
-## 6. Reconciliation
+## 6. Failback & data restoration
 
-Lifeboat scope makes reconciliation simple: since room/DM creation and
-membership changes are **out of scope** during failover, the only new writes at
-the backup are **append-only messages**. There is no membership divergence to
-merge — only message backfill, which the existing dedup + bucketing make safe to
-replay. A periodic anti-entropy sweep (as in the membership-federation design
-§3.4) can serve as an unconditional backstop for any messages missed by the
-replay.
+When A returns, everything written at the backup during the outage must land in
+A (A is the permanent home of those rooms and messages). Because lifeboat scope
+confined new writes to **append-only messages** (plus best-effort read-state),
+restoration is a **replay, not a merge**.
 
-## 7. Failure modes
+### 6.1 What diverged
+Only two kinds of writes happened at the backup while it impersonated A:
+1. **New messages** into existing rooms — append-only, globally unique IDs
+   (`idgen.GenerateMessageID`), written to the backup's Cassandra *and* its
+   canonical stream for A.
+2. **Read-state** — `lastSeenAt` / read watermarks / receipts, monotonic
+   (max-wins).
+
+Explicitly **not** diverged: rooms, memberships, roles, profiles — those RPCs
+were blocked at the backup. No topology divergence ⇒ **no merge-conflict class**.
+
+### 6.2 The restore log
+Because the backup ran A's canonical pipeline during the outage, it already holds
+a **durable, ordered JetStream log of exactly the outage writes** (A's canonical
+namespace on the backup). Restore = **replay that log into A's front door**: the
+events re-enter A's normal `message-worker` (persist) → `search-sync-worker`
+(index), as if freshly federated.
+
+### 6.3 Failback choreography (ordering prevents split-brain and races)
+1. **A's infra recovers, but portal still points A's accounts at the backup.** A
+   is "up but not serving." Users keep writing to the backup — a stable source
+   while draining.
+2. **Replay the outage log backup → A** into A's `MESSAGES_CANONICAL_{A}`;
+   runs continuously, chasing A's lag toward zero.
+3. **Backfill read-state** as monotonic (`$max`-guarded) updates — order-
+   independent, best-effort. Skipping it only re-surfaces a few messages as
+   "unread"; never data loss.
+4. **Verify convergence** — a directional, outage-window-scoped anti-entropy diff
+   (latest message / counts per `(room, bucket)`) between the backup's A-copy and
+   A; reconcile anything replay missed. This is the §3.4-style backstop, narrowed
+   to one window and one direction.
+5. **Flip portal → home (A)** once lag ≈ 0. Clients reconnect to A, re-read
+   `subscription.list` (now current), and resume — reusing the reconnect-self-heal
+   path (§7). The replay stream stays alive briefly past the flip to sweep any
+   tail writes (safe — idempotent).
+6. **Tear down** the backup's A-impersonation; retain the outage log until
+   convergence is confirmed, then GC.
+
+### 6.4 Why replay is safe
+- **No duplicates:** Cassandra keys on `(room_id, bucket, message_id)` ⇒
+  idempotent upsert; JetStream `Nats-Msg-Id` (= DedupID) absorbs redelivery.
+- **Order-independent:** clustering key is the message's own `created_at` (stamped
+  at original send time), so any replay order still sorts correctly and history
+  reads by timestamp stay correct.
+- **Buckets line up:** `bucket = floor(created_at / window)` with the original
+  `created_at` ⇒ messages land in the same bucket they'd have occupied had A never
+  died (requires backup and A share `MESSAGE_BUCKET_HOURS` — already mandated).
+- **No double-delivery:** a remote member on a healthy site who saw a message live
+  during the outage is not re-notified; a re-fired broadcast is deduped client-side
+  by message ID.
+
+### 6.5 Retention — two tiers, and the long-outage case
+- **Fast path:** ordered stream replay.
+- **Backstop:** state-diff anti-entropy (§6.3 step 4) re-derives anything missed.
+- **Retention rule:** the restore log is the backup's **canonical stream**, not
+  its 72h Cassandra read window. Since canonical is 1× (no fan-out) and small,
+  size that stream's `MaxAge` **≥ the max tolerated outage** (days/weeks is cheap).
+  Do **not** depend on the 72h read window for restore — a longer outage would age
+  its earliest messages out before A returns.
+
+### 6.6 Operational must-dos on the backfill path
+- **Suppress push notifications** — replayed messages are stale; `notification-
+  worker` skips events flagged as replay.
+- **Suppress (or client-dedup) re-broadcast** — restore is about durability in A,
+  not re-delivering to users who have moved on.
+
+### 6.7 The forward gap (A's last pre-crash writes)
+Messages A persisted just before crashing that never replicated to the backup
+(the RPO tail) were **never lost** — they are durable in A's own Cassandra, merely
+invisible during the outage, and reappear when users are pointed home. Remote
+members who missed them recover via the client's normal history/gap fetch.
+
+## 7. Compatibility with local/global room subjects
+
+A separate design (`.../2026-07-28-local-global-room-subjects-design.md`) reduces
+NATS gateway interest-map memory by routing **same-site ("local") rooms** onto a
+`chat.local.room.{id}.>` prefix that the platform team **denies at the leaf node**
+(never advertised across the supercluster), while cross-site ("global") rooms keep
+the propagated `chat.room.{id}.>`. Locality is a sticky `CrossSite` flag on the
+`Room` doc: global iff ≥1 member's home site ≠ `room.SiteID`.
+
+The two designs are compatible, and split cleanly by locality:
+
+- **Global rooms** stay on the propagated prefix; during A's outage the backup
+  publishes globally and delivery reaches both the displaced member (intra-cluster
+  on the backup) and any member on a still-healthy site (via the backup→peer
+  gateway — requires the backup to be a full supercluster gateway peer). These are
+  exactly the rooms the membership-driven federation already covers.
+- **Local rooms** need only **intra-cluster** delivery on the backup: because
+  "local" ⇒ all members share one home site, they **all fail over to the same
+  backup together**, so the `chat.local.` leaf filter (which only blocks
+  *cross-gateway* interest) is irrelevant to their delivery.
+
+Classification is **home-site-based**, so a user being transiently relocated to
+the backup during failover does **not** perturb any room's `CrossSite` flag.
+
+**Integration requirements (must hold when both ship):**
+1. **Backup auth-service must grant `chat.local.room.>` subscribe** in the JWTs it
+   mints for displaced users. Missing it silently breaks subscription to local
+   rooms — i.e. the majority of the lifeboat's own promise. Highest-risk coupling.
+2. **Backup must materialize *and* honor `CrossSite`** — carried on the DR feed
+   (§4.1), read by the backup's broadcast path for prefix choice and returned on
+   `subscription.list`.
+3. **Leaf-node `chat.local.>` deny must also apply to the backup's leaf**, and
+   displaced clients must connect to the backup's own NATS (intra-cluster) — which
+   the portal reroute already does.
+
+**Synergy:** the reduction's reconnect-self-heal (reconnect → re-read
+`subscription.list` → subscribe on the correct prefix) *is* the failover/failback
+reconnect path; and the per-user tree (`chat.user.{account}.>`) stays global in
+its Phase 1, so reroute signaling and the locality-transition nudge still work
+through the backup.
+
+## 8. Performance & sizing
+
+**The structural fact that makes this affordable:** DR replication rides the
+**canonical plane (1× per message)**, not the **fan-out plane (×F, F≈100)**. The
+backup sources one copy per message and persists it; the ×F broadcast
+amplification happens only at *serving* time, and only for the one failed site
+during an actual failover.
+
+- **Replication cost ∝ M** (message count) — paid continuously by the backup.
+- **Serving cost ∝ M × F** — paid only for 1 site, only during failover.
+
+Reference load (`docs/nats-traffic-estimation.md`): ~4.5M msg/day per site
+(~52/s avg, ~250–500/s peak), canonical payload ~0.5–1.5 KB.
+
+**Steady state (N sites healthy):**
+
+| Resource | Load on the backup | Magnitude |
+|---|---|---|
+| Ingest compute | ~N `message-worker`-equivalents + N materializers, 24/7 | N × ~52/s avg; Cassandra shrugs |
+| WAN egress (each site→backup) | 1× canonical + tiny op events | ~50 KB/s avg, ~0.25–0.5 MB/s peak **per site** — trivial |
+| Cassandra storage | 72h window × aggregate volume | ~13 GB/site × N (bounded by window) |
+| Mongo storage | operational state for all servable rooms | not windowed by default — main storage lever |
+
+Ingest is sized to the **aggregate of N sites**, but on the cheap (1×) plane, so
+it is a modest continuous load — not a ×F blow-up.
+
+**Failover burst (the real peak):** backup = (continued N−1-site ingest) + (full
+live serving of 1 site, *now* with ×F fan-out) + (a reconnect thundering herd:
+TLS + JWT-mint storm + `subscription.list` bootstrap storm). Size the **serving**
+tier for one (largest) site's peak; size the **ingest** tier for the N-site
+aggregate — two different capacity numbers. Mitigate the herd with client
+reconnect backoff/jitter, rate-limited/pre-warmed auth, and pre-warmed Valkey.
+
+**Latency:** steady-state replication is async and off every user's critical path
+(zero user-facing impact; the lag *is* the RPO). At failover, displaced users'
+perceived latency = their RTT to the backup — a function of backup geography.
+
+**Relation to the reduction (different resources):** the reduction saves gateway
+**interest-map memory** (an ~O(clients × rooms) all-to-all RAM cost); DR
+replication costs backup **CPU/IO/disk ∝ Σ throughput** to **one** destination
+plus a cheap per-site WAN stream. DR does not re-inflate the interest graph. The
+one honest note: local-room canonical messages now leave their home site for the
+first time (a single 1× copy to the backup) — new inter-site traffic, but cheap.
+
+**Risks & levers:**
+- **Silent RPO decay** if the backup can't keep up with aggregate ingest — its lag
+  grows and the DR guarantee quietly weakens. **Monitor per-site replication lag**
+  (reuse the membership-federation lag signal) and alert.
+- **Warm-standby idle waste** — N-way ingest runs 24/7 while serving ~nothing. If
+  RTO can relax, a **colder** standby (buffer + replay-on-promote) cuts continuous
+  compute, trading RTO for cost.
+- **Biggest storage lever is Mongo, not Cassandra** (already windowed). Windowing
+  Mongo to recently-active rooms bounds it but risks a failover user not finding a
+  long-idle room — a scope decision.
+
+## 9. Failure modes
 
 | Vector | Handling |
 |---|---|
@@ -167,27 +348,35 @@ replay.
 | **Last in-flight messages at outage instant** | Async RPO ⇒ seconds of potential loss accepted for lifeboat scope. |
 | **Identity key compromise on backup** | Mitigated by shared/KMS-fronted signing rather than raw NKey copies; backup hardened accordingly. |
 | **Replay duplicates on failback** | Idempotent: message-ID / `Nats-Msg-Id` dedup + append-only bucketed writes. |
+| **Silent RPO decay** (backup can't keep up with N-aggregate ingest) | Per-site replication-lag monitoring + alert (§8); the lag *is* the live RPO. |
+| **Outage longer than history window** | Restore uses the canonical **stream** log (`MaxAge` ≥ max outage), not the 72h Cassandra read window (§6.5); anti-entropy backstop re-derives the rest. |
+| **Local room not materialized on backup** | DR feed is unconditional/whole-site (§4.1), not membership-driven federation, so same-site rooms are covered. |
 
-## 8. Non-goals
+## 10. Non-goals
 
 - No room/DM creation, membership, admin, search, presence, or media parity
-  during failover (lifeboat scope only).
+  during failover (lifeboat scope only). This constraint is **load-bearing**: it
+  is what keeps failback a replay rather than a bidirectional merge (§6).
 - No synchronous/zero-RPO cross-site replication.
 - No full-fidelity byte-for-byte DB replica of any site (that is Variant B, a
   future growth path).
 - No active-active (multi-primary) serving — the backup is warm-passive and
   serves only while a home site is down.
 
-## 9. Open questions / follow-ups
+## 11. Open questions / follow-ups
 
-1. **History window** exact size and per-room caps on the backup's Cassandra.
-2. **Health-detection mechanism** and the manual-override control surface
+1. **DR feed mechanism** for operational state — Mongo change-streams vs a new
+   backup-directed event fan-out; and how `CrossSite` rides it (§4.1, §7).
+2. **History read window** size and per-room caps on the backup's Cassandra, vs
+   the (longer) canonical restore-log `MaxAge` (§6.5).
+3. **Health-detection mechanism** and the manual-override control surface
    (likely portal-service-owned).
-3. **Identity key custody** — concrete shared-signing / KMS scheme for the
-   backup minting cross-site JWTs.
-4. **Backup capacity sizing** — headroom target (largest single site) and the
-   documented multi-site-outage degradation behavior.
-5. **Failback cutover protocol** — precise drain/flip sequencing and how clients
-   are signaled to reconnect home.
-6. **Reconciliation cadence** — replay-on-recovery plus the periodic
-   anti-entropy backstop interval.
+4. **Identity key custody** — concrete shared-signing / KMS scheme for the
+   backup minting cross-site JWTs, incl. the `chat.local.room.>` grant (§7).
+5. **Backup capacity sizing** — separate ingest (N-aggregate) vs serving
+   (largest single site) targets, and documented multi-site-outage degradation.
+6. **Failback cutover protocol** — precise drain/flip sequencing, tail-sweep
+   window, and how clients are signaled to reconnect home (§6.3).
+7. **Reconciliation cadence** — replay-on-recovery plus the periodic anti-entropy
+   backstop interval.
+8. **Per-site replication-lag monitoring** — the RPO-decay signal (§8).
