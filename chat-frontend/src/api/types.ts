@@ -113,6 +113,9 @@ export interface User {
   engName?: string
   chineseName?: string
   employeeId?: string
+  /** Media/API gateway origin (portal baseUrl). Set on connect; used to build
+   *  absolute attachment URLs and authenticate media uploads/downloads. */
+  baseUrl?: string
 }
 
 /** Mirrors model.Room. Timestamps come down as RFC-3339 strings.
@@ -184,6 +187,9 @@ export interface Attachment {
   videoUrl?: string
   videoType?: string
   videoSize?: number
+  /** Client-only: a local object URL for an optimistic just-sent image.
+   *  Never arrives from the server; preferred as the <img> src when present. */
+  localUrl?: string
 }
 
 /** Cassandra's QuotedParentMessage shape — what gets embedded on a

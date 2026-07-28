@@ -1,22 +1,39 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import RoomMessageInput from './RoomMessageInput'
 
 const publish = vi.fn()
 const dispatch = vi.fn()
 vi.mock('@/context/NatsContext', () => ({
-  useNats: () => ({ user: { account: 'alice', siteId: 's1' }, publish }),
+  useNats: () => ({ user: { account: 'alice', siteId: 's1', baseUrl: 'https://media.test' }, publish }),
 }))
 vi.mock('@/context/RoomEventsContext', () => ({
   useRoomDispatch: () => dispatch,
 }))
 vi.mock('@/lib/idgen', () => ({ generateMessageID: () => '12345678901234567890' }))
 vi.mock('uuid', () => ({ v4: () => 'req-uuid' }))
+// Keep the real sendMessage (→ publish) but stub the HTTP uploadImage.
+vi.mock('@/api', async (orig) => ({ ...(await orig()), uploadImage: vi.fn() }))
+import { uploadImage } from '@/api'
 
 const room = { id: 'r1', name: 'general', type: 'channel' }
 
+function pickFile(container, file) {
+  const fileInput = container.querySelector('input[type="file"]')
+  fireEvent.change(fileInput, { target: { files: [file] } })
+}
+
 describe('RoomMessageInput', () => {
-  beforeEach(() => { publish.mockClear(); dispatch.mockClear() })
+  beforeEach(() => {
+    publish.mockClear()
+    dispatch.mockClear()
+    vi.mocked(uploadImage).mockReset()
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => 'blob:preview'),
+      revokeObjectURL: vi.fn(),
+    })
+  })
 
   it('renders the form disabled when no room is selected', () => {
     render(<RoomMessageInput room={null} />)
@@ -95,6 +112,39 @@ describe('RoomMessageInput', () => {
         _local: true,
       }),
     }))
+  })
+
+  it('uploads a picked image and sends it as a base64 attachment (empty text allowed)', async () => {
+    const att = { id: 'f1', title: 'p.png', type: 'file', titleLink: 'api/v1/file/rooms/r1/file/f1', fileType: 'image/png' }
+    vi.mocked(uploadImage).mockResolvedValue(att)
+    const { container } = render(<RoomMessageInput room={room} />)
+    pickFile(container, new File(['x'], 'p.png', { type: 'image/png' }))
+    // Preview chip shows the picked image name.
+    expect(await screen.findByText('p.png')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
+
+    await waitFor(() => expect(publish).toHaveBeenCalled())
+    expect(uploadImage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ roomId: 'r1', file: expect.any(File) }),
+    )
+    const [, payload] = publish.mock.calls[0]
+    expect(payload.attachments).toHaveLength(1)
+    expect(typeof payload.attachments[0]).toBe('string')
+    // Optimistic message carries the attachment with a local preview URL.
+    const optimistic = dispatch.mock.calls.find((c) => c[0]?.type === 'MESSAGE_SENT_LOCAL')[0].message
+    expect(optimistic.attachments[0]).toMatchObject({ id: 'f1', localUrl: expect.any(String) })
+  })
+
+  it('does not send when the image upload fails', async () => {
+    vi.mocked(uploadImage).mockRejectedValue(new Error('413'))
+    const { container } = render(<RoomMessageInput room={room} />)
+    pickFile(container, new File(['x'], 'p.png', { type: 'image/png' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
+    await waitFor(() => expect(uploadImage).toHaveBeenCalled())
+    expect(publish).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
   })
 
   it('optimistic message carries a server-shaped quotedParentMessage snapshot', () => {

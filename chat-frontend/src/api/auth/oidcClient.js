@@ -73,3 +73,19 @@ export async function renewSsoToken() {
   }
   return user.access_token
 }
+
+/**
+ * Read the current stored SSO access token (no renewal, no redirect). Used to
+ * authenticate protected media HTTP calls (upload / setCookie). Returns null
+ * when there's no OIDC session — e.g. dev-mode login, which has no access
+ * token; those callers must handle the null.
+ */
+export async function getAccessToken() {
+  try {
+    const mgr = getOidcManager()
+    const user = await mgr.getUser()
+    return user?.access_token ?? null
+  } catch {
+    return null
+  }
+}

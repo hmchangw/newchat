@@ -51,4 +51,45 @@ describe('MessageInputForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /clear quoted message/i }))
     expect(onClearQuote).toHaveBeenCalled()
   })
+
+  it('shows the attach button only when onPickImage is provided, and forwards the picked file', () => {
+    const onPickImage = vi.fn()
+    const { rerender, container } = render(
+      <MessageInputForm value="" onChange={() => {}} onSubmit={() => {}} placeholder="x" />,
+    )
+    expect(screen.queryByRole('button', { name: /attach image/i })).not.toBeInTheDocument()
+
+    rerender(
+      <MessageInputForm value="" onChange={() => {}} onSubmit={() => {}} placeholder="x" onPickImage={onPickImage} />,
+    )
+    expect(screen.getByRole('button', { name: /attach image/i })).toBeInTheDocument()
+    const file = new File(['x'], 'p.png', { type: 'image/png' })
+    fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [file] } })
+    expect(onPickImage).toHaveBeenCalledWith(file)
+  })
+
+  it('renders the pending image chip and allows removal; Send is enabled with an image but empty text', () => {
+    const onClearImage = vi.fn()
+    const onSubmit = vi.fn()
+    render(
+      <MessageInputForm
+        value=""
+        onChange={() => {}}
+        onSubmit={onSubmit}
+        placeholder="x"
+        onPickImage={() => {}}
+        pendingImage={{ name: 'p.png', url: 'blob:preview' }}
+        onClearImage={onClearImage}
+      />,
+    )
+    expect(screen.getByText('p.png')).toBeInTheDocument()
+    // Empty text but a pending image → Send enabled.
+    const send = screen.getByRole('button', { name: /^send$/i })
+    expect(send).not.toBeDisabled()
+    fireEvent.click(send)
+    expect(onSubmit).toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /remove image/i }))
+    expect(onClearImage).toHaveBeenCalled()
+  })
 })

@@ -67,3 +67,18 @@ export function mediaUrl(baseUrl, relativePath) {
   if (/^https?:\/\//i.test(relativePath)) return relativePath
   return `${baseUrl.replace(/\/+$/, '')}/${relativePath.replace(/^\/+/, '')}`
 }
+
+/**
+ * Encode one Attachment as a base64 string of its JSON — the wire form of a
+ * `msg.send` `attachments` entry (the backend stores the bytes opaquely and
+ * returns decoded Attachment objects). UTF-8 safe.
+ *
+ * @param {import('../api/types').Attachment} att
+ * @returns {string}
+ */
+export function encodeAttachment(att) {
+  const bytes = new TextEncoder().encode(JSON.stringify(att))
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
+}

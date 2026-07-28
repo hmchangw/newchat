@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { attachmentKind, attachmentSize, formatFileSize, mediaUrl } from './attachment'
+import { attachmentKind, attachmentSize, encodeAttachment, formatFileSize, mediaUrl } from './attachment'
 
 describe('attachmentKind', () => {
   it('classifies by the present media URL', () => {
@@ -66,5 +66,16 @@ describe('mediaUrl', () => {
     expect(mediaUrl('https://site.example.com', 'https://cdn.example.com/f')).toBe(
       'https://cdn.example.com/f',
     )
+  })
+})
+
+describe('encodeAttachment', () => {
+  it('round-trips an attachment through base64 JSON (UTF-8 safe)', () => {
+    const att = { id: 'f1', title: '照片.png', type: 'file', titleLink: 'api/v1/file/x' }
+    const encoded = encodeAttachment(att)
+    expect(typeof encoded).toBe('string')
+    const bytes = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))
+    const decoded = JSON.parse(new TextDecoder().decode(bytes))
+    expect(decoded).toEqual(att)
   })
 })

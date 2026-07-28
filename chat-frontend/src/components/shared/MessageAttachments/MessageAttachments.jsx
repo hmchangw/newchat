@@ -34,9 +34,10 @@ function AttachmentItem({ att, baseUrl }) {
   const preview = att.imagePreview ? `data:image/jpeg;base64,${att.imagePreview}` : undefined
 
   if (kind === 'image') {
-    // Load the full image from the gateway URL when we have a base; if it
-    // fails (auth/network) fall back to the embedded blurred preview so the
-    // attachment always renders something inline. No base at all → preview.
+    // Prefer a local object URL (an optimistic just-sent image) so the sender
+    // sees it instantly; otherwise load from the gateway URL, falling back to
+    // the embedded blurred preview if that fails (auth/network) or is absent.
+    const src = att.localUrl || href || preview
     return (
       <a
         className="attachment attachment-image"
@@ -47,7 +48,7 @@ function AttachmentItem({ att, baseUrl }) {
       >
         <img
           className="attachment-image-img"
-          src={href || preview}
+          src={src}
           alt={att.title || 'image attachment'}
           loading="lazy"
           width={att.imageDimensions?.width || undefined}
