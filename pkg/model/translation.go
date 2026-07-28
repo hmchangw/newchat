@@ -3,8 +3,9 @@ package model
 // TranslateRequest is the client→server payload published to
 // chat.user.{account}.request.translate.{siteID}. RequestID is the
 // client-generated correlation key; the result is published to
-// chat.user.{account}.response.{RequestID}. TargetLang is one of
-// zhTW/zhCN/en/de/ja and is passed through to the backend unchanged.
+// chat.user.{account}.response.{RequestID}. TargetLang is a BCP-47 tag (the
+// user's settings.translateMessageInto value); translation-service normalizes it
+// to the backend's language code (zhTW/zhCN/en/de/ja).
 type TranslateRequest struct {
 	RequestID  string `json:"requestId"`
 	Text       string `json:"text"`

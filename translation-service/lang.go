@@ -35,14 +35,15 @@ func normalizeTargetLang(tag string) (backend string, ok bool) {
 func normalizeChinese(rest []string) (backend string, ok bool) {
 	var region string
 	for _, sub := range rest {
-		switch strings.ToLower(sub) {
+		low := strings.ToLower(sub)
+		switch low {
 		case "hant":
 			return "zhTW", true
 		case "hans":
 			return "zhCN", true
 		}
-		if region == "" && len(sub) == 2 {
-			region = strings.ToLower(sub)
+		if region == "" && len(low) == 2 {
+			region = low
 		}
 	}
 	switch region {
