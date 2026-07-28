@@ -55,6 +55,25 @@ func checkConfig(cfg *config.Config) {
 	}
 }
 
+// subL2Source is the always-present subscription base source. The access check
+// (GetHistorySharedSince) runs through the shared Valkey L2 read-through, itself
+// breaker-guarded, so a Mongo outage fails open regardless of whether the L1
+// process-local cache is enabled. The full-subscription read (GetSubscription,
+// pin/unpin) delegates to the raw Mongo repo unchanged. This keeps L2/breaker
+// outage survival active symmetrically with message-gatekeeper.
+type subL2Source struct {
+	l2    readcache.SubAuthReadThrough
+	inner service.SubscriptionRepository
+}
+
+func (s subL2Source) GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+	return s.l2(ctx, account, roomID)
+}
+
+func (s subL2Source) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
+	return s.inner.GetSubscription(ctx, account, roomID)
+}
+
 func main() {
 	logctx.SetupDefault(os.Stdout)
 
@@ -120,8 +139,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Shared subauthcache L2 (Valkey). nil disables the L2 tier — the L1
-	// subscription cache falls straight through to the breaker-guarded Mongo loader.
+	// Shared subauthcache L2 (Valkey). nil disables the L2 tier — the base
+	// source's read-through then falls straight through to the breaker-guarded
+	// Mongo loader (still fronted, regardless of the L1 cache).
 	var subValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
 		subValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
@@ -213,9 +233,15 @@ func main() {
 		return ss, true, nil
 	}
 
-	var subSource service.SubscriptionRepository = subRepo
+	// The breaker-guarded L2 read-through is the ALWAYS-present base source, so
+	// outage survival stays active even when the L1 cache is disabled
+	// (SubCacheSize/TTL = 0). The L1 cache, when enabled, layers on top with a
+	// nil l2 param — its loader then falls through to base.GetHistorySharedSince,
+	// which already runs the L2/breaker chain.
+	base := subL2Source{l2: subL2, inner: subRepo}
+	var subSource service.SubscriptionRepository = base
 	if cfg.SubCacheSize > 0 && cfg.SubCacheTTL > 0 {
-		sc, err := readcache.NewSubscriptionCache(subRepo, subL2, cfg.SubCacheSize, cfg.SubCacheTTL)
+		sc, err := readcache.NewSubscriptionCache(base, nil, cfg.SubCacheSize, cfg.SubCacheTTL)
 		if err != nil {
 			slog.Error("init subscription cache failed", "error", err)
 			os.Exit(1)
@@ -223,6 +249,11 @@ func main() {
 		subSource = sc
 		slog.Info("subscription cache enabled",
 			"size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL,
+			"sub_l2_ttl", cfg.SubL2TTL,
+			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+		)
+	} else {
+		slog.Info("subscription L1 cache disabled; L2/breaker outage survival remains active",
 			"sub_l2_ttl", cfg.SubL2TTL,
 			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
 		)
