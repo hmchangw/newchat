@@ -168,6 +168,20 @@ func TestReadThrough_NilClient_FailsOpenToLoader(t *testing.T) {
 	assert.Equal(t, "u1", got.ID)
 }
 
+func TestReadThrough_ValkeySetError_SwallowedReturnsLoaded(t *testing.T) {
+	fv := newFakeValkey()
+	fv.setErr = errors.New("valkey unreachable")
+	rec := &spyRecorder{}
+	loader := func(context.Context, string, string) (SubAuth, bool, error) {
+		return SubAuth{ID: "u1", Account: "alice"}, true, nil
+	}
+	got, subscribed, err := ReadThrough(context.Background(), fv, loader, "room1", "alice", time.Hour, rec)
+	require.NoError(t, err, "a Valkey Set failure must be swallowed, not fail the call")
+	assert.True(t, subscribed)
+	assert.Equal(t, "u1", got.ID)
+	assert.Equal(t, 1, fv.setHits, "populate must have been attempted")
+}
+
 func TestReadThrough_ValkeyGetError_FailsOpenToLoader(t *testing.T) {
 	fv := newFakeValkey()
 	fv.getErr = errors.New("valkey unreachable")
