@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,11 +13,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
+
+// These integration tests run in CI (Docker required for the Valkey/Mongo
+// testcontainers); they are excluded from the default unit run by the
+// integration build tag.
 
 func TestMongoStore_GetRoomMeta_ReadsThroughL2(t *testing.T) {
 	ctx := context.Background()
@@ -29,7 +37,8 @@ func TestMongoStore_GetRoomMeta_ReadsThroughL2(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := NewMongoStore(db, client, time.Minute, 90*time.Minute, circuitbreaker.New(5, 10*time.Second))
+	store := NewMongoStore(db, client, time.Minute, 90*time.Minute,
+		circuitbreaker.New(5, 10*time.Second), circuitbreaker.New(5, 10*time.Second))
 
 	got, err := store.GetRoomMeta(ctx, "r1")
 	require.NoError(t, err)
@@ -49,54 +58,63 @@ func TestMongoStore_GetRoomMeta_ReadsThroughL2(t *testing.T) {
 	assert.Equal(t, model.RoomTypeChannel, again.Type)
 }
 
-// TestMongoStore_SubscriptionSurvivesMongoOutage proves the send-path
-// outage-survival contract end to end: a warm subscription resolves from the
-// Valkey L2 tier without touching Mongo, while a cold (never-cached)
-// subscription is denied with a retryable infra error once Mongo is
-// unavailable and the breaker has tripped.
+// TestSubauthReadThrough_SurvivesMongoOutage_ViaWarmedL2 proves the send-path
+// outage-survival contract against a REAL Valkey L2: a warm subscription
+// resolves from L2 without consulting the (unavailable) Mongo loader, while a
+// cold (never-cached) subscription drives the loader, errors, trips the breaker,
+// and is denied.
 //
-// NOTE: pkg/testutil has no StopMongo/TerminateMongo-for-one-test helper —
-// TerminateMongo tears down the process-shared container for every test in
-// the binary, which would break sibling tests. Instead this simulates the
-// outage per the task brief's documented fallback: after warming the L2 with
-// a normal-deadline context, subsequent calls use a context whose deadline
-// has already elapsed, so the L2-miss Mongo read times out exactly as it
-// would against a wedged/unreachable Mongo, and the breaker trips on it.
-func TestMongoStore_SubscriptionSurvivesMongoOutage(t *testing.T) {
+// The outage is simulated soundly — a HEALTHY context throughout, with the
+// Mongo unavailability modeled by a spy Loader that deterministically errors
+// (exactly the shape production wires: breaker.Do around subauthcache.FetchFromMongo).
+// This avoids the unsound "expired shared context" pattern, which also kills the
+// Valkey L2 read and so never actually exercises the L2-through-outage path.
+func TestSubauthReadThrough_SurvivesMongoOutage_ViaWarmedL2(t *testing.T) {
 	ctx := context.Background()
-	db := testutil.MongoDB(t, "gk_outage")
-	valkey := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
 	t.Cleanup(func() { testutil.FlushValkey(t) })
+	valkey := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
 
-	// Seed a subscription in Mongo.
-	_, err := db.Collection("subscriptions").InsertOne(ctx, bson.M{
-		"_id": "s1", "roomId": "room1", "roles": []string{},
-		"u": bson.M{"_id": "u1", "account": "alice"},
-	})
+	const (
+		roomID  = "room1"
+		account = "alice"
+		ttl     = 90 * time.Minute
+	)
+	rec := cachemetrics.For("subauth", "l2")
+
+	// Warm the real Valkey L2 with a healthy loader (Mongo up).
+	warmAuth := subauthcache.SubAuth{ID: "u1", Account: account}
+	_, subscribed, err := subauthcache.ReadThrough(ctx, valkey,
+		func(context.Context, string, string) (subauthcache.SubAuth, bool, error) {
+			return warmAuth, true, nil
+		}, roomID, account, ttl, rec)
 	require.NoError(t, err)
+	require.True(t, subscribed)
 
-	breaker := circuitbreaker.New(1, 50*time.Millisecond)
-	store := NewMongoStore(db, valkey, 15*time.Minute, 90*time.Minute, breaker)
+	// Simulate Mongo down: a spy loader wrapped in the breaker, exactly as the
+	// store wires it, that deterministically errors. Context stays healthy so the
+	// Valkey read is unaffected — only the Mongo loader is "down".
+	breaker := circuitbreaker.New(1, 10*time.Second)
+	var loaderCalls atomic.Int32
+	outageLoader := func(context.Context, string, string) (subauthcache.SubAuth, bool, error) {
+		var auth subauthcache.SubAuth
+		var sub bool
+		err := breaker.Do(func() error {
+			loaderCalls.Add(1)
+			return errors.New("mongo unreachable")
+		})
+		return auth, sub, err
+	}
 
-	// Warm the L2 while Mongo is up.
-	sub, err := store.GetSubscription(ctx, "alice", "room1")
-	require.NoError(t, err)
-	require.Equal(t, "u1", sub.User.ID)
-
-	// Simulate Mongo down: an already-expired deadline makes any Mongo op this
-	// context reaches fail with context.DeadlineExceeded, same as a wedged
-	// connection would eventually time out.
-	outageCtx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
-	defer cancel()
-
-	// Warm room still resolves from L2 (no Mongo hit — the expired deadline
-	// never reaches a Mongo call).
-	got, err := store.GetSubscription(outageCtx, "alice", "room1")
+	// Warm key: L2 hit, loader NOT consulted, success.
+	got, subscribed, err := subauthcache.ReadThrough(ctx, valkey, outageLoader, roomID, account, ttl, rec)
 	require.NoError(t, err, "warm subscription must survive the outage via L2")
-	require.Equal(t, "u1", got.User.ID)
+	require.True(t, subscribed)
+	assert.Equal(t, "u1", got.ID)
+	assert.Equal(t, int32(0), loaderCalls.Load(), "warm L2 hit must not consult the Mongo loader")
 
-	// Cold room: not in L2, Mongo unreachable -> error (denied). Trips the
-	// breaker via the expired-context Mongo failure.
-	_, err = store.GetSubscription(outageCtx, "bob", "coldroom")
-	require.Error(t, err)
+	// Cold key: L2 miss, loader invoked, errors, breaker trips, denied.
+	_, _, err = subauthcache.ReadThrough(ctx, valkey, outageLoader, "coldroom", "bob", ttl, rec)
+	require.Error(t, err, "cold subscription must be denied once Mongo is unavailable")
+	assert.GreaterOrEqual(t, loaderCalls.Load(), int32(1), "cold L2 miss must consult the loader")
+	assert.Equal(t, circuitbreaker.StateOpen, breaker.State(), "the cold-miss loader failure must trip the breaker")
 }

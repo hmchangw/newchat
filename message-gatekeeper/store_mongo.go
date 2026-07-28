@@ -21,19 +21,25 @@ type MongoStore struct {
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
 	subTTL        time.Duration
-	breaker       *circuitbreaker.Breaker
+	subBreaker    *circuitbreaker.Breaker // guards the subscription-authz Mongo loader
+	metaBreaker   *circuitbreaker.Breaker // guards the room-meta read-through, independently
 	metaRec       roommetacache.Recorder
 	subRec        subauthcache.Recorder
 }
 
-func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, breaker *circuitbreaker.Breaker) *MongoStore {
+// NewMongoStore wires the subscription and room-meta reads behind two
+// independent circuit breakers. Keeping them separate is load-bearing: a warm
+// room-meta L2 hit must not reset the subscription breaker's failure count, or
+// cold subscription misses would never trip fast-fail during a Mongo outage.
+func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, subBreaker, metaBreaker *circuitbreaker.Breaker) *MongoStore {
 	return &MongoStore{
 		subscriptions: db.Collection("subscriptions"),
 		rooms:         db.Collection("rooms"),
 		valkey:        valkey,
 		metaTTL:       metaTTL,
 		subTTL:        subTTL,
-		breaker:       breaker,
+		subBreaker:    subBreaker,
+		metaBreaker:   metaBreaker,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
 		subRec:        cachemetrics.For("subauth", "l2"),
 	}
@@ -45,7 +51,7 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 			auth       subauthcache.SubAuth
 			subscribed bool
 		)
-		err := s.breaker.Do(func() error {
+		err := s.subBreaker.Do(func() error {
 			var e error
 			auth, subscribed, e = subauthcache.FetchFromMongo(ctx, s.subscriptions, roomID, account)
 			return e
@@ -67,7 +73,7 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
 	var meta roommetacache.Meta
-	err := s.breaker.Do(func() error {
+	err := s.metaBreaker.Do(func() error {
 		var e error
 		meta, e = roommetacache.ReadThrough(ctx, s.valkey, s.rooms, roomID, s.metaTTL, s.metaRec)
 		return e
