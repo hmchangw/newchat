@@ -122,18 +122,30 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defa
 	}
 }
 
-// summary is the per-run outcome reported in the final log line. Total and
-// Skipped are written only by the dispatching goroutine; the atomics are
-// updated by workers.
+// summary is the per-run outcome reported in the final log line. Total,
+// Skipped and Dispatched are written only by the dispatching goroutine; the
+// atomics are updated by workers.
 type summary struct {
-	Total, Skipped    int
-	Succeeded, Failed atomic.Int64
-	Upserted          atomic.Int64
+	Total, Skipped, Dispatched int
+	Succeeded, Failed          atomic.Int64
+	// Aborted counts users whose sync was interrupted by run cancellation
+	// (SIGTERM / CronJob deadline) rather than by a real fault. Kept separate
+	// from Failed so a terminated run doesn't report every in-flight user as
+	// broken.
+	Aborted  atomic.Int64
+	Upserted atomic.Int64
 }
 
 // run executes one full sync: load the user cache, fan eligible users out to
 // MaxWorkers workers, wait, and report. It returns an error when any user
 // failed so main exits non-zero and the CronJob records the failure.
+//
+// Cancellation (SIGTERM on pod deletion, or the CronJob's
+// activeDeadlineSeconds) is an abort, not a fault: dispatch stops at the next
+// user instead of running the remainder into Graph calls that fail instantly,
+// and the run reports the cancellation itself rather than one ERROR per
+// remaining user. Watermarks are untouched either way, so an aborted run is
+// simply resumed by the next one.
 func (s *syncer) run(ctx context.Context) error {
 	users, err := s.users.ListUsers(ctx)
 	if err != nil {
@@ -156,6 +168,14 @@ func (s *syncer) run(ctx context.Context) error {
 			defer wg.Done()
 			for u := range jobs {
 				if err := s.syncUser(ctx, u, to, cache, &sum); err != nil {
+					// Once the run is cancelled every error is a shutdown
+					// artifact, not a diagnosis: the user was interrupted, so
+					// count it as aborted and stay silent rather than logging a
+					// Graph URL per remaining user.
+					if ctx.Err() != nil {
+						sum.Aborted.Add(1)
+						continue
+					}
 					sum.Failed.Add(1)
 					slog.Error("teams chat sync: user failed", "userID", u.ID, "error", err)
 					continue
@@ -165,20 +185,33 @@ func (s *syncer) run(ctx context.Context) error {
 		}()
 	}
 	for _, u := range users {
+		if ctx.Err() != nil {
+			break
+		}
 		if !s.effectiveFrom(u).Before(to) {
 			sum.Skipped++
 			continue
 		}
-		jobs <- u
+		select {
+		case jobs <- u:
+			sum.Dispatched++
+		case <-ctx.Done():
+		}
 	}
 	close(jobs)
 	wg.Wait()
 
 	slog.Info("teams chat sync: run complete",
 		"usersTotal", sum.Total, "usersSucceeded", sum.Succeeded.Load(),
-		"usersFailed", sum.Failed.Load(), "usersSkipped", sum.Skipped,
-		"chatsUpserted", sum.Upserted.Load())
+		"usersFailed", sum.Failed.Load(), "usersAborted", sum.Aborted.Load(),
+		"usersSkipped", sum.Skipped, "chatsUpserted", sum.Upserted.Load())
 
+	// Cancellation outranks the per-user tally: report why the run stopped
+	// instead of how many users the shutdown happened to catch.
+	if ctx.Err() != nil {
+		return fmt.Errorf("run aborted after dispatching %d of %d users (%d completed): %w",
+			sum.Dispatched, sum.Total, sum.Succeeded.Load(), ctx.Err())
+	}
 	if failed := sum.Failed.Load(); failed > 0 {
 		return fmt.Errorf("%d of %d users failed", failed, sum.Total)
 	}

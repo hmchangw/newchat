@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,6 +265,105 @@ func TestRun_EmptySiteIDVote_ConfiguredDefaultIsUsed(t *testing.T) {
 	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
 
 	require.NoError(t, s.run(context.Background()))
+}
+
+// cancelTestUsers builds n teams_user docs with no watermark, so every one of
+// them is eligible for dispatch.
+func cancelTestUsers(n int) []model.TeamsUser {
+	out := make([]model.TeamsUser, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, model.TeamsUser{ID: fmt.Sprintf("u%d", i), SiteID: "site-a"})
+	}
+	return out
+}
+
+// captureLogs redirects the default slog logger into a buffer for the duration
+// of the test, restoring the previous logger on cleanup.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestRun_CancellationStopsDispatch is the regression guard for the SIGTERM
+// error flood: when the run's context is cancelled (pod deletion, CronJob
+// activeDeadlineSeconds), the dispatcher must stop feeding users instead of
+// pushing every remaining one through a Graph call that fails instantly with
+// `get chats: Get "<graph url>": context canceled`.
+func TestRun_CancellationStopsDispatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := NewMockTeamsUserStore(ctrl)
+	chats := NewMockTeamsChatStore(ctrl)
+	graph := NewMockchatsFetcher(ctrl)
+	s := newSyncer(users, chats, graph, syncConfig{
+		MaxWorkers: 1, DefaultFrom: wtDefaultFrom, Now: fixedNow, DefaultSiteID: "site-default",
+	})
+	_ = chats
+
+	const total = 50
+	users.EXPECT().ListUsers(gomock.Any()).Return(cancelTestUsers(total), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var graphCalls atomic.Int64
+	graph.EXPECT().ListUserChats(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(reqCtx context.Context, userID string, _, _ time.Time) ([]msgraph.Chat, error) {
+			if graphCalls.Add(1) == 1 {
+				cancel() // SIGTERM lands while the first user is in flight
+			}
+			// Mirrors what msgraph returns once the request context is cancelled:
+			// net/http surfaces context.Cause verbatim inside a *url.Error.
+			return nil, fmt.Errorf("get chats: Get %q: %w",
+				"https://graph.microsoft.com/v1.0/users/"+userID+"/chats", reqCtx.Err())
+		}).AnyTimes()
+
+	err := s.run(ctx)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled,
+		"a cancelled run must report cancellation, not an opaque N-of-M-users-failed")
+	assert.LessOrEqual(t, graphCalls.Load(), int64(2),
+		"dispatch must stop once the context is cancelled, not run every remaining user into a doomed Graph call")
+}
+
+// TestRun_CancellationDoesNotLogPerUserFailures pins the operator-facing
+// symptom: one terminate signal must not produce one ERROR line per remaining
+// user, each carrying an opaque Graph URL.
+func TestRun_CancellationDoesNotLogPerUserFailures(t *testing.T) {
+	logs := captureLogs(t)
+
+	ctrl := gomock.NewController(t)
+	users := NewMockTeamsUserStore(ctrl)
+	chats := NewMockTeamsChatStore(ctrl)
+	graph := NewMockchatsFetcher(ctrl)
+	s := newSyncer(users, chats, graph, syncConfig{
+		MaxWorkers: 1, DefaultFrom: wtDefaultFrom, Now: fixedNow, DefaultSiteID: "site-default",
+	})
+	_ = chats
+
+	users.EXPECT().ListUsers(gomock.Any()).Return(cancelTestUsers(50), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var graphCalls atomic.Int64
+	graph.EXPECT().ListUserChats(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(reqCtx context.Context, userID string, _, _ time.Time) ([]msgraph.Chat, error) {
+			if graphCalls.Add(1) == 1 {
+				cancel()
+			}
+			return nil, fmt.Errorf("get chats: Get %q: %w",
+				"https://graph.microsoft.com/v1.0/users/"+userID+"/chats", reqCtx.Err())
+		}).AnyTimes()
+
+	require.Error(t, s.run(ctx))
+
+	assert.NotContains(t, logs.String(), "user failed",
+		"cancellation is not a per-user failure; it must not be logged as one")
+	assert.NotContains(t, logs.String(), "graph.microsoft.com",
+		"a cancelled run must not spray Graph URLs into the log")
 }
 
 func TestRun_ListUsersFailure(t *testing.T) {
