@@ -74,45 +74,34 @@ func TestHandler_Translate_MapsRegionTagToBaseLang(t *testing.T) {
 	assert.Equal(t, "en-US", res.TargetLang) // client value echoed verbatim
 }
 
-func TestHandler_Translate_AmbiguousChineseRejected(t *testing.T) {
-	var cap capturedPublish
-	h := newTestHandler(mockTranslator{}, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+func TestHandler_Translate_ValidationErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		text       string
+		targetLang string
+		wantReason string
+	}{
+		{"empty text", "", "en", "empty_text"},
+		{"unsupported lang", "hi", "fr", "unsupported_lang"},
+		{"ambiguous bare zh", "hi", "zh", "unsupported_lang"}, // cannot resolve Traditional vs Simplified
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cap capturedPublish
+			h := newTestHandler(mockTranslator{}, &cap)
+			c := natsrouter.NewContext(map[string]string{"account": "alice"})
 
-	// Bare "zh" cannot be resolved to Traditional or Simplified → unsupported.
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-3a", Text: "hi", TargetLang: "zh"}))
+			require.NoError(t, h.Translate(c, model.TranslateRequest{
+				RequestID: "req-val", Text: tc.text, TargetLang: tc.targetLang,
+			}))
 
-	res := decodeResult(t, &cap)
-	assert.Equal(t, model.TranslateStatusError, res.Status)
-	assert.Equal(t, "bad_request", res.Code)
-	assert.Equal(t, "unsupported_lang", res.Reason)
-	assert.Equal(t, "zh", res.TargetLang)
-}
-
-func TestHandler_Translate_EmptyText(t *testing.T) {
-	var cap capturedPublish
-	h := newTestHandler(mockTranslator{}, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-2", Text: "", TargetLang: "en"}))
-
-	res := decodeResult(t, &cap)
-	assert.Equal(t, model.TranslateStatusError, res.Status)
-	assert.Equal(t, "bad_request", res.Code)
-	assert.Equal(t, "empty_text", res.Reason)
-}
-
-func TestHandler_Translate_UnsupportedLang(t *testing.T) {
-	var cap capturedPublish
-	h := newTestHandler(mockTranslator{}, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-3", Text: "hi", TargetLang: "fr"}))
-
-	res := decodeResult(t, &cap)
-	assert.Equal(t, model.TranslateStatusError, res.Status)
-	assert.Equal(t, "bad_request", res.Code)
-	assert.Equal(t, "unsupported_lang", res.Reason)
+			res := decodeResult(t, &cap)
+			assert.Equal(t, model.TranslateStatusError, res.Status)
+			assert.Equal(t, "bad_request", res.Code)
+			assert.Equal(t, tc.wantReason, res.Reason)
+			assert.Equal(t, tc.targetLang, res.TargetLang) // client value echoed even on error
+		})
+	}
 }
 
 func TestHandler_Translate_BackendError(t *testing.T) {

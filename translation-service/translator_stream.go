@@ -39,16 +39,14 @@ type streamChunk struct {
 // SSE chunks into one string. It authenticates with a J2 token obtained from
 // tokens (J1 → accessToken API → J2).
 type streamTranslator struct {
-	client   *resty.Client
-	endpoint string
-	tokens   *tokenProvider
+	client *resty.Client
+	tokens *tokenProvider
 }
 
 func newStreamTranslator(endpoint, accessTokenURL, j1Token string, timeout, skew time.Duration) *streamTranslator {
 	return &streamTranslator{
-		client:   restyutil.New(endpoint, restyutil.WithTimeout(timeout)),
-		endpoint: endpoint,
-		tokens:   newTokenProvider(accessTokenURL, j1Token, timeout, skew),
+		client: restyutil.New(endpoint, restyutil.WithTimeout(timeout)),
+		tokens: newTokenProvider(accessTokenURL, j1Token, timeout, skew),
 	}
 }
 
@@ -102,6 +100,7 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 	var nonSSE strings.Builder // accumulates a non-SSE body (potential error JSON)
 	sawData := false
 	sawDone := false
+readLoop:
 	for {
 		line, readErr := reader.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
@@ -111,8 +110,7 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 			if payload == "[DONE]" {
 				sawDone = true
-				readErr = io.EOF // stop scanning after the terminator
-				break
+				break readLoop
 			}
 			var chunk streamChunk
 			if uerr := json.Unmarshal([]byte(payload), &chunk); uerr != nil {
@@ -129,7 +127,7 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
-				break
+				break readLoop
 			}
 			return "", false, fmt.Errorf("read stream: %w", readErr)
 		}
