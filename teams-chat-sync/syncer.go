@@ -131,7 +131,7 @@ type summary struct {
 	Upserted                   atomic.Int64
 }
 
-// run executes one full sync: load the user cache, fan eligible users out to
+// run executes one full sync: load the user cache, fan all users out to
 // MaxWorkers workers, wait, and report. It returns an error when any user
 // failed so main exits non-zero and the CronJob records the failure.
 func (s *syncer) run(ctx context.Context) error {
