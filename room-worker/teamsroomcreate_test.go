@@ -73,6 +73,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 		// hr-sync-worker upserts the same identity; no employeeId — not an employee.
 		assert.Equal(t, "carol", users[0].Account)
 		assert.Equal(t, carolID, users[0].ID)
+		assert.Equal(t, "Carol Wang 王小美", users[0].ChineseName, "displayName lands in ChineseName")
 		assert.Empty(t, users[0].EmployeeID, "externals aren't employees — no employeeId")
 		return nil
 	}
@@ -100,7 +101,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 		Name: "Project Sync",
 		Members: []model.TeamsRoomCreateMember{
 			{ID: "aad1", Account: "alice"},
-			{ID: "aad3", Account: "carol"},
+			{ID: "aad3", Account: "carol", DisplayName: "Carol Wang 王小美"},
 			{ID: "aad4", Account: "dave"},
 		},
 		CreatedDateTime: time.Unix(0, 0).UTC(),
@@ -274,9 +275,9 @@ func TestResolveMember_AlignmentInvariant(t *testing.T) {
 	want := &model.User{ID: "u9", Account: "dave", SiteID: "site-a"}
 	store.EXPECT().GetUser(gomock.Any(), "dave").Return(want, nil)
 
-	got, err := h.resolveMember(context.Background(), "dave", "aad-dave")
+	got, err := h.resolveMember(context.Background(), "dave", "aad-dave", "Dave 大衛")
 	require.NoError(t, err)
-	assert.Same(t, want, got)
+	assert.Same(t, want, got) // existing user returned unchanged — displayName ignored
 }
 
 // TestResolveMember_PublishesDeterministicIdentity: an unknown account is
@@ -295,16 +296,18 @@ func TestResolveMember_PublishesDeterministicIdentity(t *testing.T) {
 		require.Len(t, users, 1)
 		assert.Equal(t, "erin", users[0].Account)
 		assert.Equal(t, wantID, users[0].ID)
+		assert.Equal(t, "Erin Wang 王小恩", users[0].ChineseName, "displayName lands in ChineseName")
 		assert.Empty(t, users[0].EmployeeID, "externals aren't employees — no employeeId")
 		assert.Equal(t, model.IChangeTypeNewHire, users[0].ChangeType)
 		return nil
 	}
 	store.EXPECT().GetUser(gomock.Any(), "erin").Return(nil, ErrUserNotFound)
 
-	got, err := h.resolveMember(context.Background(), "erin", "aad-erin")
+	got, err := h.resolveMember(context.Background(), "erin", "aad-erin", "Erin Wang 王小恩")
 	require.NoError(t, err)
 	assert.True(t, fanoutCalled)
 	assert.Equal(t, wantID, got.ID)
+	assert.Equal(t, "Erin Wang 王小恩", got.ChineseName)
 	assert.Empty(t, got.EmployeeID)
 	assert.Equal(t, "site-a", got.SiteID)
 }
