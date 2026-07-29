@@ -157,6 +157,12 @@ function emptyRoomState() {
     bufferMode: BUFFER_MODE.LIVE,
     pendingLiveMessages: [],
     focusMessageId: null,
+    // Older-message pagination. `hasMoreOlder` starts true (unknown ⇒
+    // assume there may be older history) and is set from the fetched
+    // page's fullness once history loads. `loadingOlder` guards the
+    // in-flight older-page fetch and drives the top spinner.
+    hasMoreOlder: true,
+    loadingOlder: false,
   }
 }
 
@@ -488,7 +494,59 @@ export function roomEventsReducer(state, action) {
             messages: merged,
             hasLoadedHistory: true,
             historyError: null,
+            // Whether a full first page came back (⇒ older pages may follow).
+            // Absent action field leaves the prior value untouched.
+            hasMoreOlder: action.hasMoreOlder ?? prev.hasMoreOlder,
+            loadingOlder: false,
           },
+        },
+      }
+    }
+    case 'HISTORY_OLDER_LOADING': {
+      const prev = state.roomState[action.roomId] ?? emptyRoomState()
+      return {
+        ...state,
+        roomState: {
+          ...state.roomState,
+          [action.roomId]: { ...prev, loadingOlder: true, historyError: null },
+        },
+      }
+    }
+    case 'HISTORY_OLDER_LOADED': {
+      const prev = state.roomState[action.roomId] ?? emptyRoomState()
+      // Prepend the older block ahead of the current buffer, deduping any id
+      // already present. Unlike the live tail, older pages are NOT trimmed to
+      // MAX_CACHED from the front — trimming the front would discard exactly
+      // the messages the user paginated up to see. The buffer is allowed to
+      // grow while the user is actively browsing older history.
+      const existingIds = new Set(prev.messages.map((m) => m.id))
+      const older = (action.messages ?? []).filter((m) => !existingIds.has(m.id))
+      const messages = older.length ? [...older, ...prev.messages] : prev.messages
+      return {
+        ...state,
+        roomState: {
+          ...state.roomState,
+          [action.roomId]: {
+            ...prev,
+            messages,
+            loadingOlder: false,
+            hasMoreOlder: !!action.hasMoreOlder,
+            historyError: null,
+          },
+        },
+      }
+    }
+    case 'HISTORY_OLDER_FAILED': {
+      const prev = state.roomState[action.roomId] ?? emptyRoomState()
+      // Only stop the spinner. Leave hasMoreOlder untouched so the next
+      // scroll-to-top retries, and don't hoist the failure into the
+      // room-wide historyError banner — a failed older page shouldn't blank
+      // the messages the user is already reading.
+      return {
+        ...state,
+        roomState: {
+          ...state.roomState,
+          [action.roomId]: { ...prev, loadingOlder: false },
         },
       }
     }
@@ -517,6 +575,10 @@ export function roomEventsReducer(state, action) {
             bufferMode: BUFFER_MODE.HISTORICAL,
             focusMessageId: action.focusMessageId ?? null,
             pendingLiveMessages: [],
+            // A jumped-to window sits in the middle of history — older
+            // messages exist above it, so re-enable upward pagination.
+            hasMoreOlder: true,
+            loadingOlder: false,
           },
         },
       }

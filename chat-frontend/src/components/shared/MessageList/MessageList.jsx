@@ -1,7 +1,12 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import MessageRow from './MessageRow/MessageRow'
 import SystemMessage from './SystemMessage/SystemMessage'
 import './style.css'
+
+/** Scroll distance from the top (px) at which we trigger an older-page load.
+ *  A small band above 0 so the fetch starts just before the user hits the
+ *  very top, hiding the request latency. */
+const LOAD_OLDER_THRESHOLD_PX = 120
 
 export default function MessageList({
   messages,
@@ -18,6 +23,9 @@ export default function MessageList({
   onEdit,
   onDelete,
   onJumpToMessage,
+  onLoadOlder,
+  hasMoreOlder,
+  loadingOlder,
   bottomRef,
   ariaLive,
   onRetry,
@@ -28,6 +36,39 @@ export default function MessageList({
   const listRef = useRef(null)
   const localBottomRef = useRef(null)
   const effectiveBottomRef = bottomRef ?? localBottomRef
+
+  // Scroll-position anchor captured at the moment an older-page load is
+  // triggered, so the useLayoutEffect below can keep the viewport pinned to
+  // the same message once the older block is prepended (otherwise the growing
+  // content above the viewport would shove the reading position downward).
+  const olderAnchorRef = useRef(null)
+  const prevFirstIdRef = useRef(null)
+
+  const handleScroll = () => {
+    const el = listRef.current
+    if (!el || !onLoadOlder || !hasMoreOlder || loadingOlder) return
+    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) {
+      // Capture BEFORE the prepend so we can restore the offset after.
+      olderAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+      onLoadOlder()
+    }
+  }
+
+  // After an older page prepends (first message id changed), restore the
+  // scroll position by the height the prepend added. Runs synchronously
+  // before paint so the user never sees a jump. Skips live appends (which
+  // change the LAST id, not the first) via the first-id guard.
+  useLayoutEffect(() => {
+    const el = listRef.current
+    const firstId = messages[0]?.id ?? null
+    const anchor = olderAnchorRef.current
+    if (el && anchor && firstId !== prevFirstIdRef.current) {
+      const delta = el.scrollHeight - anchor.scrollHeight
+      if (delta > 0) el.scrollTop = anchor.scrollTop + delta
+      olderAnchorRef.current = null
+    }
+    prevFirstIdRef.current = firstId
+  }, [messages])
 
   useEffect(() => {
     if (!focusMessageId || !listRef.current) return
@@ -56,8 +97,10 @@ export default function MessageList({
     <div
       className="message-list"
       ref={listRef}
+      onScroll={onLoadOlder ? handleScroll : undefined}
       {...(ariaLive ? { 'aria-live': ariaLive } : {})}
     >
+      {loadingOlder && <div className="message-loading-older">Loading earlier messages…</div>}
       {historyLoading && <div className="message-loading">Loading messages…</div>}
       {historyError && <div className="message-error">{historyError}</div>}
       {visibleMessages.map((msg) => {

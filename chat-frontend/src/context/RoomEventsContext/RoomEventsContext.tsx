@@ -29,7 +29,15 @@ interface RoomBufferState {
   bufferMode: 'live' | 'historical'
   pendingLiveMessages: Message[]
   focusMessageId: string | null
+  /** True while more older messages may exist above the buffer. */
+  hasMoreOlder: boolean
+  /** True while an older-page fetch is in flight (drives the top spinner). */
+  loadingOlder: boolean
 }
+
+/** Page size for both the initial history load and each older page. A
+ *  returned page of exactly this size means older messages may follow. */
+const HISTORY_PAGE_SIZE = 50
 
 /** Sidebar summary — derived from `model.Room` + the user's
  *  Subscription. Only the fields the sidebar / chat header read. */
@@ -94,6 +102,7 @@ interface RoomEventsContextValue {
   state: RoomEventsState
   dispatch: Dispatch<{ type: string; [k: string]: unknown }>
   loadHistory: (roomId: string) => Promise<unknown> | void
+  loadOlderHistory: (roomId: string) => Promise<unknown> | void
   setActiveRoom: (roomId: string | null) => void
   jumpToMessage: (roomId: string, messageId: string) => Promise<void> | void
   resetToLiveTail: (roomId: string) => void
@@ -120,6 +129,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
   ]
 
   const inflightHistory = useRef(new Map<string, Promise<unknown>>())
+  const inflightOlder = useRef(new Map<string, Promise<unknown>>())
   const stateRef = useRef(state)
   stateRef.current = state
 
@@ -164,12 +174,14 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       const gen = currentGeneration()
       const promise = (async () => {
         try {
-          const resp = await fetchMessageHistory(nats, { roomId, siteId: user.siteId, limit: 50 })
+          const resp = await fetchMessageHistory(nats, { roomId, siteId: user.siteId, limit: HISTORY_PAGE_SIZE })
           // history-service ships newest-first; the UI reads chronological.
           // Normalisation to the broadcast `Message` shape now happens inside
           // the api op.
           const asc = [...(resp.messages ?? [])].reverse()
-          if (currentGeneration() === gen) dispatch({ type: 'HISTORY_LOADED', roomId, messages: asc })
+          // A full page back ⇒ there may be older messages to paginate to.
+          const hasMoreOlder = (resp.messages?.length ?? 0) >= HISTORY_PAGE_SIZE
+          if (currentGeneration() === gen) dispatch({ type: 'HISTORY_LOADED', roomId, messages: asc, hasMoreOlder })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           if (currentGeneration() === gen) dispatch({ type: 'HISTORY_FAILED', roomId, error: message })
@@ -179,6 +191,49 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
         }
       })()
       inflightHistory.current.set(roomId, promise)
+      return promise
+    },
+    [user, nats, currentGeneration],
+  )
+
+  // Fetch the page of messages immediately older than the buffer's current
+  // top, prepending them. Triggered by MessageList when the user scrolls near
+  // the top. No-ops until the initial history has loaded, when nothing older
+  // remains, or when a fetch is already in flight (coalesced via inflightOlder).
+  const loadOlderHistory = useCallback(
+    async (roomId: string) => {
+      if (!user || !roomId) return
+      const rs = stateRef.current.roomState[roomId]
+      if (!rs || !rs.hasLoadedHistory) return
+      if (rs.loadingOlder || !rs.hasMoreOlder) return
+      if (inflightOlder.current.has(roomId)) return inflightOlder.current.get(roomId)
+      const oldest = rs.messages[0]
+      if (!oldest) return
+      // `before` is an exclusive cursor (history-service: created_at < before),
+      // so the oldest loaded message's own timestamp fetches strictly older rows.
+      const before = new Date(oldest.createdAt).getTime()
+      if (!Number.isFinite(before)) return
+      const summary = stateRef.current.summaries.find((r) => r.id === roomId)
+      const siteId = summary?.siteId ?? user.siteId
+
+      const gen = currentGeneration()
+      dispatch({ type: 'HISTORY_OLDER_LOADING', roomId })
+      const promise = (async () => {
+        try {
+          const resp = await fetchMessageHistory(nats, { roomId, siteId, limit: HISTORY_PAGE_SIZE, before })
+          const asc = [...(resp.messages ?? [])].reverse()
+          const hasMoreOlder = (resp.messages?.length ?? 0) >= HISTORY_PAGE_SIZE
+          if (currentGeneration() === gen) {
+            dispatch({ type: 'HISTORY_OLDER_LOADED', roomId, messages: asc, hasMoreOlder })
+          }
+        } catch (err) {
+          if (currentGeneration() === gen) dispatch({ type: 'HISTORY_OLDER_FAILED', roomId })
+          throw err
+        } finally {
+          inflightOlder.current.delete(roomId)
+        }
+      })()
+      inflightOlder.current.set(roomId, promise)
       return promise
     },
     [user, nats, currentGeneration],
@@ -239,6 +294,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       state,
       dispatch,
       loadHistory,
+      loadOlderHistory,
       setActiveRoom,
       jumpToMessage,
       resetToLiveTail,
@@ -249,6 +305,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       state,
       dispatch,
       loadHistory,
+      loadOlderHistory,
       setActiveRoom,
       jumpToMessage,
       resetToLiveTail,
@@ -267,9 +324,14 @@ function useRoomEventsInternal(): RoomEventsContextValue {
 }
 
 export function useRoomEvents(roomId: string | null | undefined) {
-  const { state, dispatch, loadHistory, jumpToMessage, resetToLiveTail } = useRoomEventsInternal()
+  const { state, dispatch, loadHistory, loadOlderHistory, jumpToMessage, resetToLiveTail } =
+    useRoomEventsInternal()
   const room = roomId ? state.roomState[roomId] : undefined
   const load = useCallback(() => (roomId ? loadHistory(roomId) : undefined), [loadHistory, roomId])
+  const loadOlder = useCallback(
+    () => (roomId ? loadOlderHistory(roomId) : undefined),
+    [loadOlderHistory, roomId],
+  )
   const jump = useCallback(
     (messageId: string) => (roomId ? jumpToMessage(roomId, messageId) : undefined),
     [jumpToMessage, roomId],
@@ -281,6 +343,9 @@ export function useRoomEvents(roomId: string | null | undefined) {
       hasLoadedHistory: !!room?.hasLoadedHistory,
       historyError: room?.historyError ?? null,
       loadHistory: load,
+      loadOlder,
+      hasMoreOlder: room?.hasMoreOlder ?? true,
+      loadingOlder: !!room?.loadingOlder,
       bufferMode: room?.bufferMode ?? BUFFER_MODE.LIVE,
       pendingCount: room?.pendingLiveMessages?.length ?? 0,
       focusMessageId: room?.focusMessageId ?? null,
@@ -288,7 +353,7 @@ export function useRoomEvents(roomId: string | null | undefined) {
       resetToLiveTail: reset,
       dispatch,
     }),
-    [room, load, jump, reset, dispatch],
+    [room, load, loadOlder, jump, reset, dispatch],
   )
 }
 
