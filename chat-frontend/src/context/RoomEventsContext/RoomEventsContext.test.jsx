@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act, waitFor } from '@testing-library/react'
 import { useState } from 'react'
+import { PAGE_LIMIT } from '@/api'
 import { NatsContext } from '../NatsContext/NatsContext'
 import { RoomEventsProvider, useRoomEvents, useRoomSummaries, useSidebarSections, useSubscription } from './RoomEventsContext'
 import { BUFFER_MODE } from './reducer'
@@ -508,7 +509,7 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith(
         'chat.user.alice.request.user.site-A.subscription.list',
-        { type: 'rooms' },
+        { type: 'rooms', offset: 0, limit: PAGE_LIMIT },
       )
     )
 
@@ -652,7 +653,7 @@ describe('RoomEventsProvider message.read wiring', () => {
     render(wrap(<Probe />, nats))
     await waitFor(() => expect(request).toHaveBeenCalledWith(
       'chat.user.alice.request.user.site-A.subscription.list',
-      { type: 'rooms' },
+      { type: 'rooms', offset: 0, limit: PAGE_LIMIT },
     ))
 
     act(() => { captured('g1') })
@@ -1038,12 +1039,13 @@ describe('RoomEventsProvider sidebar buckets bootstrap', () => {
     const getApps = calls.find((c) => c.payload?.type === 'apps')
     const getRooms = calls.find((c) => c.payload?.type === 'rooms')
 
+    // Each bucket is paginated: the first-page request carries offset/limit.
     expect(getCurrent.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
-    expect(getCurrent.payload).toEqual({ type: 'current', favorite: true })
+    expect(getCurrent.payload).toEqual({ type: 'current', favorite: true, offset: 0, limit: PAGE_LIMIT })
     expect(getApps.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
-    expect(getApps.payload).toEqual({ type: 'apps' })
+    expect(getApps.payload).toEqual({ type: 'apps', offset: 0, limit: PAGE_LIMIT })
     expect(getRooms.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
-    expect(getRooms.payload).toEqual({ type: 'rooms' })
+    expect(getRooms.payload).toEqual({ type: 'rooms', offset: 0, limit: PAGE_LIMIT })
 
     // No `rooms.list` RPC was made.
     expect(calls.find((c) => c.subject.endsWith('.rooms.list'))).toBeUndefined()
