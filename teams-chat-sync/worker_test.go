@@ -271,3 +271,98 @@ func TestRun_ListUsersFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "load teams users")
 }
+
+// wtD5 is wtNow advanced five days — the clock a worker sees when it reaches a
+// user late in a multi-day run. wtToD5 is its startOfDayUTC.
+var (
+	wtD5   = time.Date(2026, 7, 19, 10, 30, 0, 0, time.UTC)
+	wtToD5 = time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+)
+
+// advancingNow returns a Now func that yields each time in order and then sticks
+// on the last one. Mutex-guarded: workers call it concurrently under -race.
+func advancingNow(times ...time.Time) func() time.Time {
+	var mu sync.Mutex
+	i := 0
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		t := times[i]
+		if i < len(times)-1 {
+			i++
+		}
+		return t
+	}
+}
+
+// TestRun_ToTracksExecutionTime pins the core of this change: each user's window
+// end comes from the clock when its worker picks it up, not from run start. With
+// one worker the users are processed in order, so u1 sees day 0 and u2 sees day 5.
+func TestRun_ToTracksExecutionTime(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := NewMockTeamsUserStore(ctrl)
+	chats := NewMockTeamsChatStore(ctrl)
+	graph := NewMockchatsFetcher(ctrl)
+	s := newSyncer(users, chats, graph, syncConfig{
+		MaxWorkers: 1, DefaultFrom: wtDefaultFrom,
+		Now: advancingNow(wtNow, wtD5), DefaultSiteID: "site-default",
+	})
+
+	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
+		{ID: "u1", SiteID: "site-a", Account: "alice"},
+		{ID: "u2", SiteID: "site-b", Account: "bob"},
+	}, nil)
+	// No chats returned, so buildChat never runs and each user consumes exactly
+	// one Now() call — keeping the clock sequence aligned with the user order.
+	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).Return(nil, nil)
+	graph.EXPECT().ListUserChats(gomock.Any(), "u2", wtDefaultFrom, wtToD5).Return(nil, nil)
+	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
+	users.EXPECT().SetFrom(gomock.Any(), "u2", wtToD5).Return(nil)
+
+	require.NoError(t, s.run(context.Background()))
+}
+
+// TestRun_GateEvaluatedAtProcessingTime is the intended behavior change: a user
+// whose watermark already sits at the run's start day is no longer skipped, on
+// the strength of the clock having moved on by the time a worker reaches it.
+func TestRun_GateEvaluatedAtProcessingTime(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := NewMockTeamsUserStore(ctrl)
+	chats := NewMockTeamsChatStore(ctrl)
+	graph := NewMockchatsFetcher(ctrl)
+	s := newSyncer(users, chats, graph, syncConfig{
+		MaxWorkers: 1, DefaultFrom: wtDefaultFrom,
+		Now: advancingNow(wtNow, wtD5), DefaultSiteID: "site-default",
+	})
+
+	from := wtTo // u2's watermark is already at the run's start day
+	users.EXPECT().ListUsers(gomock.Any()).Return([]model.TeamsUser{
+		{ID: "u1", SiteID: "site-a", Account: "alice"},
+		{ID: "u2", SiteID: "site-b", Account: "bob", From: &from},
+	}, nil)
+	graph.EXPECT().ListUserChats(gomock.Any(), "u1", wtDefaultFrom, wtTo).Return(nil, nil)
+	users.EXPECT().SetFrom(gomock.Any(), "u1", wtTo).Return(nil)
+	// The assertion: u2 is synced for [D0, D5), not gated out at dispatch.
+	graph.EXPECT().ListUserChats(gomock.Any(), "u2", wtTo, wtToD5).Return(nil, nil)
+	users.EXPECT().SetFrom(gomock.Any(), "u2", wtToD5).Return(nil)
+
+	require.NoError(t, s.run(context.Background()))
+}
+
+// TestSyncUser_SkipReturnsSkippedNotSuccess guards the run accounting: a skipped
+// user must report skipped=true with no error, so the worker counts it once as
+// skipped rather than falling through to the success counter.
+func TestSyncUser_SkipReturnsSkippedNotSuccess(t *testing.T) {
+	s, _, _, _ := newTestSyncer(t, 1)
+	from := wtTo // watermark already at startOfDayUTC(wtNow): empty window
+	var sum summary
+
+	// No mock expectations are set, so any Graph or store call fails the test.
+	skipped, err := s.syncUser(context.Background(),
+		model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice", From: &from},
+		map[string]cachedUser{}, &sum)
+
+	require.NoError(t, err)
+	assert.True(t, skipped, "a user with an empty window reports skipped")
+	assert.Equal(t, int64(0), sum.Upserted.Load(), "a skipped user upserts nothing")
+}

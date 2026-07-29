@@ -122,13 +122,13 @@ func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defa
 	}
 }
 
-// summary is the per-run outcome reported in the final log line. Total and
-// Skipped are written only by the dispatching goroutine; the atomics are
-// updated by workers.
+// summary is the per-run outcome reported in the final log line. Total is set
+// once by the dispatching goroutine before fan-out; every other field is an
+// atomic written by workers.
 type summary struct {
-	Total, Skipped    int
-	Succeeded, Failed atomic.Int64
-	Upserted          atomic.Int64
+	Total                      int
+	Succeeded, Failed, Skipped atomic.Int64
+	Upserted                   atomic.Int64
 }
 
 // run executes one full sync: load the user cache, fan eligible users out to
@@ -144,7 +144,6 @@ func (s *syncer) run(ctx context.Context) error {
 		cache[u.ID] = cachedUser{siteID: u.SiteID, account: u.Account}
 	}
 
-	to := startOfDayUTC(s.cfg.Now())
 	var sum summary
 	sum.Total = len(users)
 
@@ -155,20 +154,19 @@ func (s *syncer) run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for u := range jobs {
-				if err := s.syncUser(ctx, u, to, cache, &sum); err != nil {
+				switch skipped, err := s.syncUser(ctx, u, cache, &sum); {
+				case err != nil:
 					sum.Failed.Add(1)
 					slog.Error("teams chat sync: user failed", "userID", u.ID, "error", err)
-					continue
+				case skipped:
+					sum.Skipped.Add(1)
+				default:
+					sum.Succeeded.Add(1)
 				}
-				sum.Succeeded.Add(1)
 			}
 		}()
 	}
 	for _, u := range users {
-		if !s.effectiveFrom(u).Before(to) {
-			sum.Skipped++
-			continue
-		}
 		jobs <- u
 	}
 	close(jobs)
@@ -176,7 +174,7 @@ func (s *syncer) run(ctx context.Context) error {
 
 	slog.Info("teams chat sync: run complete",
 		"usersTotal", sum.Total, "usersSucceeded", sum.Succeeded.Load(),
-		"usersFailed", sum.Failed.Load(), "usersSkipped", sum.Skipped,
+		"usersFailed", sum.Failed.Load(), "usersSkipped", sum.Skipped.Load(),
 		"chatsUpserted", sum.Upserted.Load())
 
 	if failed := sum.Failed.Load(); failed > 0 {
@@ -198,16 +196,34 @@ func (s *syncer) effectiveFrom(u model.TeamsUser) time.Time {
 
 // syncUser fetches one user's chat window, upserts every chat it lists, and
 // advances the user's watermark only after everything succeeded — a failed user
-// keeps its old watermark and is retried next run.
+// keeps its old watermark and is retried next run. The window end is derived
+// here, from a single Now() call taken when this worker picks the user up, so a
+// run spanning several days credits each user with the day it was actually
+// processed rather than the day the run started. That same Now() stamps
+// UpdatedAt on every chat built below.
+//
+// It reports skipped=true when the user's watermark already reached the current
+// UTC day, which means no Graph call and no watermark write. Note this is
+// evaluated inside the worker, so "skipped" means a worker looked at the user
+// and returned early — not that nothing ever touched it.
 //
 //nolint:gocritic // hugeParam: u is consumed once per user on a batch path; passing by value keeps the worker pure.
-func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, cache map[string]cachedUser, sum *summary) error {
-	graphChats, err := s.graph.ListUserChats(ctx, u.ID, s.effectiveFrom(u), to)
+func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, cache map[string]cachedUser, sum *summary) (bool, error) {
+	now := s.cfg.Now()
+	to := startOfDayUTC(now)
+	from := s.effectiveFrom(u)
+	// Empty window: the watermark already reached today. Gating here, against the
+	// same `to` the window and the watermark write use, is what makes a negative
+	// window structurally impossible.
+	if !from.Before(to) {
+		return true, nil
+	}
+
+	graphChats, err := s.graph.ListUserChats(ctx, u.ID, from, to)
 	if err != nil {
-		return fmt.Errorf("list user chats: %w", err)
+		return false, fmt.Errorf("list user chats: %w", err)
 	}
 	batch := make([]model.TeamsChat, 0, len(graphChats))
-	now := s.cfg.Now()
 	for _, gc := range graphChats {
 		built := buildChat(gc, cache, now, s.cfg.DefaultSiteID)
 		// Defensive: DefaultSiteID is required,notEmpty in production, so this
@@ -220,12 +236,12 @@ func (s *syncer) syncUser(ctx context.Context, u model.TeamsUser, to time.Time, 
 	}
 	if len(batch) > 0 {
 		if err := s.chats.UpsertChats(ctx, batch); err != nil {
-			return fmt.Errorf("upsert chats: %w", err)
+			return false, fmt.Errorf("upsert chats: %w", err)
 		}
 		sum.Upserted.Add(int64(len(batch)))
 	}
 	if err := s.users.SetFrom(ctx, u.ID, to); err != nil {
-		return fmt.Errorf("advance watermark: %w", err)
+		return false, fmt.Errorf("advance watermark: %w", err)
 	}
-	return nil
+	return false, nil
 }
