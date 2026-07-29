@@ -1,0 +1,22 @@
+name: translation-service
+
+services:
+  translation-service:
+    build:
+      context: ../..
+      dockerfile: translation-service/deploy/Dockerfile
+    environment:
+      - OTEL_SERVICE_NAME=translation-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      - TRANSLATION_BACKEND=mock
+    volumes:
+      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

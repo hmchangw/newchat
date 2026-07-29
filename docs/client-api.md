@@ -63,6 +63,8 @@ paths.
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
+   - [3.6 translation-service](#36-translation-service)
+     - [Translate Text](#translate-text)
 4. [Message Send](#4-message-send)
 5. [Room Encryption](#5-room-encryption)
 6. [Error envelope reference](#6-error-envelope-reference)
@@ -5560,6 +5562,92 @@ See [Error envelope](#6-error-envelope-reference).
 ##### Triggered events — error path
 
 `None — error returned only via the reply subject.`
+
+---
+
+### 3.6 translation-service
+
+#### Translate Text
+
+**Subject:** `chat.user.{account}.request.translate.{siteID}`
+**Result subject:** `chat.user.{account}.response.{requestID}` — the client must subscribe to `chat.user.{account}.>` (the user wildcard) to receive it. The `{requestID}` value is the `requestId` field from the request body.
+
+This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the translate subject (no `_INBOX.>` reply expected). `translation-service` validates the request, calls the translation backend, and publishes a `TranslateResult` to `chat.user.{account}.response.{requestID}` — `status: "ok"` with the translated text, or `status: "error"` with the error envelope.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `requestId` | string | yes | Client-generated correlation key (36-char hyphenated UUID). The result is published to `chat.user.{account}.response.{requestId}`. A request with an empty `requestId` yields no result (undeliverable). |
+| `text` | string | yes | The text to translate. No length cap is enforced by the service. |
+| `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settingsget) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
+
+##### Supported languages
+
+`targetLang` is a BCP-47 tag matched **case-insensitively** and tolerant of region/script subtags, so the value stored in `settings.translateMessageInto` is sent as-is. It resolves to one of five backend languages:
+
+| Language | Example tags that resolve | Resolves to |
+|---|---|---|
+| English | `en`, `en-US`, `en-GB` | English |
+| German | `de`, `de-DE` | German |
+| Japanese | `ja`, `ja-JP` | Japanese |
+| Traditional Chinese | `zh-Hant-TW`, `zh-Hant`, `zh-TW`, `zh-HK` | Traditional Chinese |
+| Simplified Chinese | `zh-Hans-CN`, `zh-Hans`, `zh-CN`, `zh-SG` | Simplified Chinese |
+
+Chinese resolves by script (`Hant`/`Hans`) or, absent a script, by region. A bare `zh` (no script or region) is ambiguous and rejected as `unsupported_lang`, as is `""` (translation off — the client should not send a request) and any language outside the five above (e.g. `fr`, `ko`). The result's `targetLang` echoes the tag you sent, not the resolved language.
+
+> **Breaking change:** `targetLang` now requires a BCP-47 tag. The former backend short codes `zhTW` / `zhCN` are **no longer accepted** and return `unsupported_lang` — send the BCP-47 form (`zh-Hant-TW` / `zh-Hans-CN`, or the user's `settings.translateMessageInto`) instead. (`en` / `de` / `ja` are unaffected, being valid BCP-47 tags already.) Deploy this in lockstep with the client that sends the settings value.
+
+#### Result — `TranslateResult`
+
+Delivered on `chat.user.{account}.response.{requestID}`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `requestId` | string | Echoes the request `requestId`. |
+| `status` | string | `ok` or `error`. |
+| `translatedText` | string | Present when `status` is `ok`. |
+| `targetLang` | string | Echoes the request `targetLang`. |
+| `error` | string | User-facing message when `status` is `error`. |
+| `code` | string | Error envelope code when `status` is `error` (e.g. `bad_request`, `internal`). See [Error envelope](#6-error-envelope-reference). |
+| `reason` | string | Domain reason when present (`unsupported_lang`, `empty_text`). |
+| `timestamp` | int64 | Publish time (UTC ms). |
+
+##### Success result
+
+```json
+{
+  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+  "status": "ok",
+  "translatedText": "你好 世界",
+  "targetLang": "zh-Hant-TW",
+  "timestamp": 1700000000000
+}
+```
+
+##### Error result
+
+| Code | Reason | When |
+|---|---|---|
+| `bad_request` | `empty_text` | `text` is empty. |
+| `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
+| `internal` | — | Translation backend failure. |
+
+```json
+{
+  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+  "status": "error",
+  "targetLang": "fr",
+  "error": "unsupported targetLang",
+  "code": "bad_request",
+  "reason": "unsupported_lang",
+  "timestamp": 1700000000000
+}
+```
+
+##### Triggered events
+
+`None — the TranslateResult on the response subject is the only output.`
 
 ---
 

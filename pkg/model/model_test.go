@@ -4931,3 +4931,35 @@ func TestMessage_TypeBSONOmitEmpty(t *testing.T) {
 	_, ok := raw["type"]
 	assert.False(t, ok, "empty Type must be absent in BSON")
 }
+
+func TestTranslateRequestJSON(t *testing.T) {
+	r := model.TranslateRequest{
+		RequestID:  "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		Text:       "Hello world",
+		TargetLang: "zhTW",
+	}
+	roundTrip(t, &r, &model.TranslateRequest{})
+}
+
+func TestTranslateResultJSON_OK(t *testing.T) {
+	r := model.TranslateResult{
+		RequestID:      "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		Status:         model.TranslateStatusOK,
+		TranslatedText: "你好 世界",
+		TargetLang:     "zhTW",
+		Timestamp:      1_700_000_000_000,
+	}
+	roundTrip(t, &r, &model.TranslateResult{})
+}
+
+func TestTranslateResultJSON_Error(t *testing.T) {
+	r := model.TranslateResult{
+		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		Status:    model.TranslateStatusError,
+		Error:     "unsupported targetLang",
+		Code:      "bad_request",
+		Reason:    "unsupported_lang",
+		Timestamp: 1_700_000_000_000,
+	}
+	roundTrip(t, &r, &model.TranslateResult{})
+}
