@@ -3638,7 +3638,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		})
 		mustInsertUser(t, db, &model.User{
 			ID: "u-bob", Account: "bob", EngName: "Bob Chen", ChineseName: "陳博",
-			StatusIsShow: false, StatusText: "in a meeting",
+			StatusIsShow: true, StatusText: "in a meeting",
 		})
 		mustInsertSub(t, db, &model.Subscription{
 			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -3662,8 +3662,63 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		}, byAcct["alice"])
 		assert.Equal(t, model.MemberStatus{
 			Account: "bob", EngName: "Bob Chen", ChineseName: "陳博",
-			StatusIsShow: false, StatusText: "in a meeting",
+			StatusIsShow: true, StatusText: "in a meeting",
 		}, byAcct["bob"])
+	})
+
+	t.Run("members with statusIsShow=false are excluded", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛",
+			StatusIsShow: true, StatusText: "available",
+		})
+		// Non-empty statusText but the user has not opted to surface it; must be dropped.
+		mustInsertUser(t, db, &model.User{
+			ID: "u-bob", Account: "bob", EngName: "Bob", ChineseName: "博",
+			StatusIsShow: false, StatusText: "in a meeting",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-b", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "member with statusIsShow=false must be excluded")
+		assert.Equal(t, "alice", got[0].Account)
+	})
+
+	t.Run("member whose user doc lacks statusIsShow is excluded", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛",
+			StatusIsShow: true, StatusText: "available",
+		})
+		// Legacy doc: statusText present but no statusIsShow field at all — decodes
+		// as false, so it must be dropped like an explicit false.
+		_, err := db.Collection("users").InsertOne(ctx, bson.M{
+			"_id": "u-carol", "account": "carol", "engName": "Carol", "statusText": "busy",
+		})
+		require.NoError(t, err)
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-c", User: model.SubscriptionUser{ID: "u-carol", Account: "carol"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "member whose user doc lacks statusIsShow must be excluded")
+		assert.Equal(t, "alice", got[0].Account)
 	})
 
 	t.Run("members with empty statusText are excluded", func(t *testing.T) {
@@ -3721,7 +3776,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		store := NewMongoStore(db)
 		for i := 0; i < 5; i++ {
 			acct := fmt.Sprintf("user%d", i)
-			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct, StatusText: acct})
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct, StatusIsShow: true, StatusText: acct})
 			mustInsertSub(t, db, &model.Subscription{
 				ID: "sub-" + acct, User: model.SubscriptionUser{ID: "u-" + acct, Account: acct},
 				RoomID: "r1", SiteID: "site-a",
@@ -3736,7 +3791,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
 		mustInsertUser(t, db, &model.User{
-			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛", StatusText: "x",
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛", StatusIsShow: true, StatusText: "x",
 		})
 		mustInsertSub(t, db, &model.Subscription{
 			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -3772,7 +3827,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		// Then 3 live subs.
 		for i := 0; i < 3; i++ {
 			acct := fmt.Sprintf("live%d", i)
-			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, StatusText: acct})
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, StatusIsShow: true, StatusText: acct})
 			mustInsertSub(t, db, &model.Subscription{
 				ID:     fmt.Sprintf("sub-live%d", i),
 				User:   model.SubscriptionUser{ID: "u-" + acct, Account: acct},

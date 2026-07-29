@@ -1477,7 +1477,8 @@ func (s *MongoStore) ListActiveCmdMenus(ctx context.Context, assistantNames []st
 }
 
 // ListMemberStatuses returns up to limit members of roomID (projected from the joined
-// user doc); orphan subs and empty-statusText members are dropped before the post-join $limit.
+// user doc); orphan subs, empty-statusText members, and members with statusIsShow=false
+// (opted out of surfacing their status) are dropped before the post-join $limit.
 func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limit int) ([]model.MemberStatus, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"roomId": roomID}}},
@@ -1504,8 +1505,13 @@ func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limi
 		}}},
 		{{Key: "$unwind", Value: bson.M{"path": "$user", "preserveNullAndEmptyArrays": false}}},
 		{{Key: "$replaceWith", Value: "$user"}},
-		// Exclude members with no status set; an empty statusText is not a presence to surface.
-		{{Key: "$match", Value: bson.M{"statusText": bson.M{"$nin": bson.A{"", nil}}}}},
+		// Exclude members who aren't surfacing a status: an empty statusText is not
+		// a presence to show, and statusIsShow=false (incl. legacy docs missing the
+		// field, which decode as false) means the user opted out of surfacing it.
+		{{Key: "$match", Value: bson.M{
+			"statusText":   bson.M{"$nin": bson.A{"", nil}},
+			"statusIsShow": true,
+		}}},
 		{{Key: "$limit", Value: int64(limit)}},
 	}
 	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)

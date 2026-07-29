@@ -74,8 +74,10 @@ type RoomStore interface {
 	// ListMemberStatuses returns up to `limit` members of roomID, each
 	// projected from the corresponding users document as {account, engName,
 	// chineseName, statusIsShow, statusText}. Subscriptions whose user
-	// document is missing are dropped. Caller is responsible for the limit
-	// cap (handler enforces > 0 and <= room.UserCount).
+	// document is missing, whose statusText is empty, or whose statusIsShow is
+	// false (opted out of surfacing their status) are dropped — every returned
+	// row has statusIsShow=true. Caller is responsible for the limit cap
+	// (handler enforces > 0 and <= room.UserCount).
 	ListMemberStatuses(ctx context.Context, roomID string, limit int) ([]model.MemberStatus, error)
 	// ListMentionableSubscriptions returns up to `limit` mentionable members
 	// of roomID (users + apps), excluding excludeAccount, whose searchable
