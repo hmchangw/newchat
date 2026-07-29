@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -115,6 +116,17 @@ func TestBuildMembers_ResolvesAllViaLookup(t *testing.T) {
 		{ID: "u1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: raw[0].VisibleHistoryStartDateTime},
 		{ID: "u2", Account: "bob", DisplayName: "Bob Jones"},
 	}, got)
+}
+
+func TestBuildMembers_ResolveFailureIsWrapped(t *testing.T) {
+	s, _, users, _ := newTestSyncer(t, 1)
+	sentinel := errors.New("mongo down")
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).Return(nil, sentinel)
+
+	_, err := s.buildMembers(context.Background(), []msgraph.ChatMemberDetail{{UserID: "u1"}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, sentinel, "the underlying failure stays matchable")
+	assert.Contains(t, err.Error(), "resolve member identity", "buildMembers names what it was doing")
 }
 
 func TestBuildMembers_UnknownUserHasEmptyAccountAndDisplayName(t *testing.T) {

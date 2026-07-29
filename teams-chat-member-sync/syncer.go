@@ -92,7 +92,7 @@ func (s *syncer) buildMembers(ctx context.Context, raw []msgraph.ChatMemberDetai
 	}
 	refs, err := s.cache.resolve(ctx, ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve member identity: %w", err)
 	}
 
 	members := make([]model.TeamsChatMember, 0, len(raw))
