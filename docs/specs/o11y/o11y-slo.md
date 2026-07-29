@@ -105,13 +105,13 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 | # | Journey | SLI = good / valid | Target | Today |
 |---|---|---|---|---|
 | SLO-1a | J1 | canonical message persisted to Cassandra / **canonical messages published** | 99.9% | 🔧 P2 · approximate (lag-enforced) |
-| SLO-1b | J1 | **channel** broadcast fan-out published (all/partial/failed per message) / canonical channel messages published | 99.9% | 🔧 P2 · approximate · core-NATS boundary |
-| SLO-2 | J1 | channel fan-out published **within 1 s** of canonical acceptance / canonical channel messages published | 99% | 🔧 P2 · approximate |
+| SLO-1b | J1 | **channel** broadcast fan-out published (**good = `outcome=all`**; partial/failed both burn) / canonical channel messages published | 99.9% | 🔧 P2 · approximate · core-NATS boundary |
+| SLO-2 | J1 | channel fan-out published **within 1 s** of canonical acceptance (late = bad) / canonical channel messages published | 99% | 🔧 P2 · approximate |
 | SLO-3 | J2 | successful login **within 1 s** / eligible login attempts | 99% | ✅ (auth leg — proxy) |
 | SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 |
 | SLO-5 | J2 | thread open succeeds **within 300 ms** / eligible thread opens | 99% | 🔧 P1 |
 | SLO-6 | J3 | push event accepted into `PUSH_NOTIFICATION` / notifiable recipients | 99.9% | 🔧 P4 · handoff only (see §4) |
-| SLO-7 | J4 | search returns ok / search requests | 99.5% | ✅ |
+| SLO-7 | J4 | search returns ok / search requests | 99.5% | ✅ partial-failure · outage needs backstop (§5) |
 | SLO-8 | J4 | **successful** search returns **within 1 s** / successful searches | 95% | 🔧 P4 (needs status label) |
 | SLO-9 | J5 | outbox event forwarded to remote INBOX **within 30 s** / outbox events published | 99% | 🔧 P4 · deadline-based · approximate |
 
@@ -160,16 +160,19 @@ gets nothing. v1 commits only to persistence + publication and names them so.
 - **Numerators**, one outcome per logical message (approximate — see §0.1):
   - `messages_persisted_total{outcome}` (message-worker) → SLO-1a
   - `broadcast_fanout_total{outcome=all|partial|failed}` (broadcast-worker) →
-    SLO-1b. **Core-NATS boundary:** broadcast-worker publishes via
-    `nc.PublishMsg` (core NATS, fire-and-forget) — a nil return means the publish
-    call was *enqueued locally*, **not** server-acknowledged. And fan-out is
-    **per recipient** (channel emits a room event + one user-room event per
-    account; DM/thread emit per recipient), tolerating partial failure. So the
-    outcome is a **logical all/partial/failed per message**, not a single ack.
-  - `broadcast_fanout_age_seconds` = `now − evt.Timestamp` → SLO-2.
-    `evt.Timestamp` is the canonical event's server-set timestamp
-    (`gatekeeper handler.go`, `now.UnixMilli()`) → "canonical acceptance →
-    fan-out published".
+    SLO-1b. **Good predicate: `outcome=all` only** — `partial` and `failed` both
+    burn budget (any recipient the message didn't reach is a miss). **Core-NATS
+    boundary:** broadcast-worker publishes via `nc.PublishMsg` (core NATS,
+    fire-and-forget) — a nil return means the publish call was *enqueued locally*,
+    **not** server-acknowledged. And fan-out is **per recipient** (channel emits a
+    room event + one user-room event per account; DM/thread emit per recipient),
+    tolerating partial failure. So the outcome is a **logical all/partial/failed
+    per message**, not a single ack.
+  - `broadcast_fanout_age_seconds` = `now − evt.Timestamp` → SLO-2. **Good
+    predicate: age ≤ 1 s**; a publication later than the bound is **bad** (stays
+    in valid, not counted good). `evt.Timestamp` is the canonical event's
+    server-set timestamp (`gatekeeper handler.go`, `now.UnixMilli()`) →
+    "canonical acceptance → fan-out published".
 - **v1 scope: channel messages only.** DM/thread per-recipient partial-failure
   semantics are deferred; SLO-1b/2 denominators count canonical **channel**
   messages in v1.
@@ -241,11 +244,18 @@ publishes `PushNotificationEvent` into the `PUSH_NOTIFICATION` stream; the actua
 provider retries and terminal delivery outcome live in the downstream
 **push-service**, which this repo does not own. So:
 
-- **SLO-6 (enforced v1) — push-stream handoff**: `good = push event accepted into
-  PUSH_NOTIFICATION` / `valid = notifiable recipients` (policy-suppressed —
-  mutes, quiet hours — are **not** valid). Instruments in notification-worker:
-  `push_events_enqueued_total`, `push_recipients_total` (denominator),
-  `notifications_suppressed_total{reason}` (diagnostic). §8 P4.
+- **SLO-6 (enforced v1) — push-stream handoff**: `good = recipient durably
+  accepted into PUSH_NOTIFICATION` / `valid = notifiable recipients`
+  (policy-suppressed — mutes, quiet hours — are **not** valid).
+  **Recipient-granular, both sides.** notification-worker emits **batched** push
+  events (one `PushNotificationEvent` carries N accounts, `handler.go`), so the
+  numerator counts **recipients**, not events: `push_recipients_accepted_total`
+  incremented by `len(batchAccounts)` on a successful emit, matched against
+  `push_recipients_total` (denominator). Counting events over recipients would
+  mismatch units. **"Accepted" = a JetStream `PubAck`** (the emitter's
+  `js.PublishMsg` returns durably, `emit.go`) — a *durable stream ack*, not a
+  local enqueue, so unlike SLO-1b there is no core-NATS caveat here.
+  `notifications_suppressed_total{reason}` stays diagnostic. §8 P4.
 - **Declared (not owned here) — notification delivery**: `delivered to provider
   within retry budget / recipients requested`, one terminal outcome per logical
   notification, retries not changing the unit. This must be emitted by
@@ -266,13 +276,22 @@ user was notified. No latency SLO in v1.
   `valid = successful searches`. **Gated on success** so a fast failure can't
   improve the number.
 
-**Measurement.** ✅ SLO-7 today (`search_service_requests_total{type,status}`).
-🔧 **SLO-8 is not measurable yet**: `search_service_request_duration_seconds` has
-no status/outcome label, so successful requests can't be isolated — add that
-label (§8 P4) before enforcing SLO-8. `…es_duration_seconds` stays diagnostic.
+**Measurement.** ✅ SLO-7 for **partial/elevated failures**
+(`search_service_requests_total{type,status}` — the ratio catches error responses
+while traffic flows). 🔧 **SLO-8 is not measurable yet**:
+`search_service_request_duration_seconds` has no status/outcome label, so
+successful requests can't be isolated — add that label (§8 P4) before enforcing
+SLO-8. `…es_duration_seconds` stays diagnostic.
 
-**Caveat.** Index freshness (how fast a new message becomes searchable) is out of
-v1 — §8 P7.
+**Caveats.**
+- **Full-outage blind spot.** The denominator is search-service-local, so a total
+  outage reads as *no traffic*, not failures (the §0.1 self-emitted-denominator
+  trap). SLO-7's ratio therefore covers partial degradation only; a complete
+  outage is caught by the **health-check / uptime backstop** (and the synthetic
+  prober, §8 P6), not the request ratio. Until the prober lands, pair SLO-7 with
+  a request-rate-drop / probe alert.
+- Index freshness (how fast a new message becomes searchable) is out of v1 —
+  §8 P7.
 
 ---
 
@@ -291,9 +310,12 @@ the numerator → counted as a failure, not a missing sample.
 - **Denominator: `outbox_events_published_total{dest_site, event_type}`**, emitted
   **producer-side** (room-service / room-worker at OUTBOX publish) — upstream of
   outbox-worker, so worker downtime can't suppress it.
-- **Numerator: forwarded within bound** — `outbox_forwarded_total{dest_site}`
-  gated on age ≤ bound. Age = `now − event.Timestamp`, both timestamps
-  origin-side (no cross-site skew). **Approximate:** outbox consumers use
+- **Numerator: forwarded within bound** — `outbox_forwarded_total{dest_site,
+  event_type}` gated on age ≤ bound. **Same label set as the denominator** so the
+  ratio is `sum by(dest_site)(forwarded_within_bound) / sum by(dest_site)(published)`
+  — event_type is carried for slicing and aggregated away for the SLO. Age =
+  `now − event.Timestamp`, both timestamps origin-side (no cross-site skew).
+  **Approximate:** outbox consumers use
   `MaxDeliver=-1` (retry forever — there is no exhaustion terminal event), and
   exact one-time forwarded accounting needs explicit dedup/Ack semantics not yet
   in place. So the ratio is deadline-based and approximate.
@@ -336,7 +358,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
 | P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker publications + publication-age; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer lag **and** oldest-pending age from consumer state | outage backstop for 1a/1b/2/6/9 |
-| P4 | notification-worker push-stream handoff (enqueued/recipients) · **search duration `status` label** · outbox producer-side published + forwarded-within-bound | SLO-6/8/9 |
+| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** · outbox producer-side published + forwarded-within-bound (matching label sets) | SLO-6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
 | P6 | Synthetic prober from `tools/loadgen` + SLO assertion mode (§10) | declared last-mile SLI; login→connect→initial-data; sparse-journey floor; SLO-aware load asserts |
 | P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion — makes 1a/1b/6/9 exact instead of approximate) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
