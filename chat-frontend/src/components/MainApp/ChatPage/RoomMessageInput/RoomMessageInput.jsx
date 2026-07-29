@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useNats } from '@/context/NatsContext'
 import { useRoomDispatch } from '@/context/RoomEventsContext'
-import { sendMessage } from '@/api'
+import { sendMessage, uploadImage } from '@/api'
+import { encodeAttachment } from '@/lib/attachment'
 import { generateMessageID } from '@/lib/idgen'
 import { roomPrefix, roomDisplayName } from '@/lib/roomFormat'
 import MessageInputForm from '@/components/shared/MessageInputForm/MessageInputForm'
@@ -12,35 +13,43 @@ export default function RoomMessageInput({ room, quotedTarget, onClearQuote }) {
   const { user } = nats
   const dispatch = useRoomDispatch()
   const [text, setText] = useState('')
+  // { file, url } — url is a local object URL for the compose-time preview.
+  const [pendingImage, setPendingImage] = useState(null)
+  const [sending, setSending] = useState(false)
   const inputRef = useRef(null)
 
-  // Auto-focus the input when a quote is freshly staged (e.g., user clicked
-  // Reply on a message) so they can start typing immediately without an
-  // extra click. Re-runs whenever the staged target changes id.
   useEffect(() => {
     if (quotedTarget?.id) {
       inputRef.current?.focus()
     }
   }, [quotedTarget?.id])
 
+  // Revoke the preview object URL when it's replaced or the input unmounts.
+  useEffect(() => {
+    const url = pendingImage?.url
+    return () => {
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [pendingImage?.url])
+
   const placeholder = room
     ? `Message ${roomPrefix(room.type)}${roomDisplayName(room)}`
     : 'Select a room...'
-  const disabled = !room || !user
+  const disabled = !room || !user || sending
 
-  const handleSubmit = () => {
-    if (disabled || !text.trim()) return
-    const id = generateMessageID()
+  const pickImage = (file) => {
+    if (!file || !file.type?.startsWith('image/')) return
+    setPendingImage({ file, url: URL.createObjectURL(file) })
+  }
+  const clearImage = () => setPendingImage(null)
+
+  const handleSubmit = async () => {
     const content = text.trim()
-    const payload = {
-      id,
-      content,
-      requestId: uuidv4(),
-    }
-    // Build an optimistic message that mirrors the server's broadcast shape
-    // (so MessageRow / QuotedBlock render it identically). The snapshot uses
-    // the server-side cassandra.QuotedParentMessage field names (messageId,
-    // sender.engName, msg) so a later broadcast for the same id is a no-op.
+    if (!room || !user || sending) return
+    if (!content && !pendingImage) return
+
+    const id = generateMessageID()
+    const payload = { id, content, requestId: uuidv4() }
     const optimistic = {
       id,
       content,
@@ -56,9 +65,33 @@ export default function RoomMessageInput({ room, quotedTarget, onClearQuote }) {
         msg: quotedTarget.content,
       }
     }
+
+    // Upload the image (if any) BEFORE optimistic insert — we need the server
+    // Attachment to send, and a failed upload must not leave a dangling row.
+    if (pendingImage) {
+      setSending(true)
+      let attachment
+      try {
+        attachment = await uploadImage(nats, { roomId: room.id, file: pendingImage.file })
+      } catch (err) {
+        setSending(false)
+        // eslint-disable-next-line no-console
+        console.warn('image upload failed:', err?.message ?? err)
+        return
+      }
+      setSending(false)
+      payload.attachments = [encodeAttachment(attachment)]
+      // Show the actual image immediately via a local object URL (a fresh one,
+      // owned by the message — the preview URL is revoked when we clear the
+      // composer below). The server echo carries the same Attachment and
+      // renders from the gateway URL.
+      optimistic.attachments = [{ ...attachment, localUrl: URL.createObjectURL(pendingImage.file) }]
+    }
+
     dispatch({ type: 'MESSAGE_SENT_LOCAL', roomId: room.id, message: optimistic })
     sendMessage(nats, { roomId: room.id, siteId: user.siteId, payload })
     setText('')
+    setPendingImage(null) // effect revokes the preview object URL
     onClearQuote?.()
   }
 
@@ -72,6 +105,9 @@ export default function RoomMessageInput({ room, quotedTarget, onClearQuote }) {
       disabled={disabled}
       quotedTarget={quotedTarget}
       onClearQuote={onClearQuote}
+      onPickImage={pickImage}
+      pendingImage={pendingImage ? { name: pendingImage.file.name, url: pendingImage.url } : null}
+      onClearImage={clearImage}
     />
   )
 }

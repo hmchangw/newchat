@@ -1,6 +1,10 @@
 import MessageActions from './MessageActions/MessageActions'
+import MessageContent from '@/components/shared/MessageContent/MessageContent'
+import MessageAttachments from '@/components/shared/MessageAttachments/MessageAttachments'
+import MessageReactions from '@/components/shared/MessageReactions/MessageReactions'
 import QuotedBlock from '@/components/shared/QuotedBlock/QuotedBlock'
 import useHoverWithDelay from '@/hooks/useHoverWithDelay'
+import { useNats } from '@/context/NatsContext'
 import { useSubscription } from '@/context/RoomEventsContext'
 import { redactInaccessibleQuoteSnapshot } from '@/lib/redactQuote'
 import './style.css'
@@ -11,10 +15,19 @@ function formatTime(dateStr) {
 }
 
 function senderName(msg) {
+  // userDisplayName is the server-composed render-ready name (engName +
+  // chineseName + account fallback); prefer it over the raw sender fields.
+  if (msg.userDisplayName) return msg.userDisplayName
   if (msg.sender) {
     return msg.sender.engName || msg.sender.account || msg.sender.userId || 'Unknown'
   }
   return msg.userAccount || msg.userId || 'Unknown'
+}
+
+function pinnedLabel(msg) {
+  const by = msg.pinnedBy
+  const byName = by?.engName || by?.account
+  return byName ? `Pinned by ${byName}` : 'Pinned'
 }
 
 function senderInitial(msg) {
@@ -48,6 +61,7 @@ export default function MessageRow({
   // Mirror history-service's quote redaction client-side: the live broadcast
   // path doesn't gate quote snapshots against the reader's access window, so
   // a quote of a message older than historySharedSince would otherwise leak.
+  const { user } = useNats()
   const subscription = useSubscription(room?.id)
   const quoteSnapshot = redactInaccessibleQuoteSnapshot(
     message.quotedParentMessage,
@@ -77,6 +91,16 @@ export default function MessageRow({
           <span className="message-sender">{senderName(message)}</span>
           <span className="message-time">{formatTime(message.createdAt)}</span>
           {message.editedAt && <span className="message-edited"> (edited)</span>}
+          {message.pinnedAt && (
+            <span
+              className="message-pinned"
+              role="img"
+              aria-label={pinnedLabel(message)}
+              title={pinnedLabel(message)}
+            >
+              📌
+            </span>
+          )}
         </div>
         {/* QuotedBlock sits OUTSIDE message-bubble-wrap so hovering the
             quote doesn't trigger the action toolbar. CSS pulls it flush
@@ -89,7 +113,13 @@ export default function MessageRow({
           />
         )}
         <div className="message-bubble-wrap" {...handlers}>
-          <div className="message-bubble">{messageContent(message)}</div>
+          <div className="message-bubble">
+            <MessageContent
+              content={messageContent(message)}
+              mentions={message.mentions}
+              selfAccount={subscription?.u?.account}
+            />
+          </div>
           {hovered && (
             <div className="message-actions-host" {...handlers}>
               <MessageActions
@@ -105,6 +135,10 @@ export default function MessageRow({
             </div>
           )}
         </div>
+        {message.attachments?.length > 0 && (
+          <MessageAttachments attachments={message.attachments} baseUrl={user?.baseUrl} />
+        )}
+        <MessageReactions reactions={message.reactions} selfAccount={subscription?.u?.account} />
         {message.tcount > 0 && context !== 'thread' && context !== 'thread-parent' && (
           <button
             type="button"
