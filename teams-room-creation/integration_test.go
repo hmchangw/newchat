@@ -30,7 +30,7 @@ import (
 // satisfy that parameter). The connection is drained on test cleanup.
 func dial(t *testing.T) (*o11ynats.Conn, o11ynats.JetStream) {
 	t.Helper()
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 	js, err := nc.JetStream()

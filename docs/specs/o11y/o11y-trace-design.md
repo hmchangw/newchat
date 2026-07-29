@@ -56,11 +56,10 @@ What `otelnats` does at each hop:
   span (`PRODUCER`) **as a child of the active span** (so within the producing
   service it stays in the same trace), then injects W3C `traceparent` into the
   message headers.
-- **Consumer** (`Subscribe` / `QueueSubscribe` / JetStream `Consume` / `Fetch`): extracts
-  the producer's span context, then starts a **detached** `<subject> deliver`
-  span (new root, empty parent) carrying a **LINK** to the producer span, and a
-  `process <subject>` span (`CONSUMER`) under it (also linked). Handler work and
-  DB spans hang off `process`.
+- **Consumer** (`Subscribe` / `QueueSubscribe` / JetStream `Consume` / `Fetch`):
+  extracts the producer's span context, then starts one **detached**
+  `process <subject>` span (`CONSUMER`; new root, empty parent) carrying a
+  **LINK** to the producer span. Handler work and DB spans hang off `process`.
 - **Go request/reply response** (`Conn.Request` + responder `Conn.Respond`):
   the responder reply is sent through the traced publish path, and the requester
   creates a short `receive <subject>` consumer span with a link to that reply.
@@ -69,7 +68,7 @@ What `otelnats` does at each hop:
   by links but may not land in the same trace.
 
 Net effect: **one logical flow = a constellation of per-service traces**, each
-rooted at a `deliver`/`process` pair and stitched to its upstream by a span
+rooted at a `process` consumer span and stitched to its upstream by a span
 **link** (navigable in Tempo, but not a single trace tree).
 
 Three consequences to keep in mind:
@@ -88,9 +87,10 @@ Three consequences to keep in mind:
    browser span; new trace). A browser→backend **HTTP** hop (`auth` / `portal` /
    `upload` via `o11y/gin`) is **parent-child** (the server span is a *child* of
    the browser span — genuinely one trace).
-3. **NATS tracing is gated** on `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` +
-   `OTEL_NATS_TRACING_ENABLED`; `pkg/natsutil.Connect` force-enables them.
-   Without them, **none** of the NATS spans/links below exist.
+3. **NATS tracing follows the SDK's resolved toggle.**
+   `pkg/natsutil.Connect` passes `sdk.Toggles.Trace` through
+   `o11ynats.WithTracingEnabled`. When false, the connection uses the
+   direct/native path and none of the NATS spans/links below exist.
 
 Legend for the diagrams: **solid arrow = parent→child (same trace)**,
 **dashed arrow = span link (trace boundary)**, `〔…〕 = one trace`.
@@ -102,9 +102,8 @@ actual **frontend** span names follow `nats <operation> <subject>` —
 Tempo trace list is legible at a glance
 instead of a wall of `nats.request`. The subject is *also* carried on the
 `messaging.destination.name` attribute (with `chat.request_id` on requests), so
-you can filter by span name **or** by attribute. **Backend** `process
-<subject>` / `<subject> deliver` spans are named by `otelnats` from the subject
-directly.
+you can filter by span name **or** by attribute. Backend consumer spans are
+named `process <subject>` by `otelnats` from the subject directly.
 
 ---
 
@@ -132,14 +131,14 @@ flowchart TB
     end
 
     subgraph TMW["〔Trace: message-worker〕"]
-      MWp["canonical.created deliver → process (CONSUMER)"]
+      MWp["process canonical.created (CONSUMER)"]
       MWcass["cassandra messages_by_room INSERT"]
       MWthread["mongo thread_subscriptions upsert (thread reply)"]
       MWp --> MWcass --> MWthread
     end
 
     subgraph TBW["〔Trace: broadcast-worker〕"]
-      BWp["canonical.created deliver → process (CONSUMER)"]
+      BWp["process canonical.created (CONSUMER)"]
       BWmeta["mongo rooms/subscriptions.find + valkey GET (room meta/members)"]
       BWkey["mongo roomkeys.find (E2E, if enabled)"]
       BWout["send chat.room.{r}.event.* → room members (PRODUCER ×N)"]
@@ -147,7 +146,7 @@ flowchart TB
     end
 
     subgraph TNW["〔Trace: notification-worker〕"]
-      NWp["canonical.created deliver → process (CONSUMER)"]
+      NWp["process canonical.created (CONSUMER)"]
       NWdb["mongo subscriptions/rooms.find + valkey GET (roomsub cache)"]
       NWpush["send chat.server.notification.push.{s}.send (PRODUCER)"]
       NWp --> NWdb --> NWpush
@@ -169,8 +168,8 @@ flowchart TB
 - **gatekeeper** (1 trace, root): `process …msg.send` → `mongo subscriptions.find`
   (+ `valkey GET` / `mongo rooms.find` on cache miss) → `send …canonical.created`
   + `send {reply}`.
-- **message-worker** (1 trace, linked): `…canonical.created deliver` → `process`
-  → `cassandra … INSERT` (+ `mongo thread_subscriptions` for thread replies).
+- **message-worker** (1 trace, linked): `process …canonical.created` →
+  `cassandra … INSERT` (+ `mongo thread_subscriptions` for thread replies).
 - **broadcast-worker** (1 trace, linked): `process` → `mongo`/`valkey` room
   meta+members (+ `mongo roomkeys` if E2E) → N× `send chat.room.{r}.event.*`.
 - **notification-worker** (1 trace, linked): `process` → `mongo`/`valkey` →
@@ -215,7 +214,7 @@ flowchart TB
 
     Client -. "span link (browser → history)" .-> HSp
     Client -. "span link (browser → read write)" .-> RRp
-    RRpub -. "span link" .-> BW2["〔Trace: broadcast-worker (deliver read badge)〕"]
+    RRpub -. "span link" .-> BW2["〔Trace: broadcast-worker (process read badge)〕"]
 ```
 
 ### What to assert
@@ -275,12 +274,12 @@ flowchart LR
       Op --> Osend
     end
     subgraph TRelay["〔Trace: outbox-worker @ origin site〕"]
-      Rp["outbox deliver → process (CONSUMER)"]
+      Rp["process outbox (CONSUMER)"]
       Rsend["send chat.inbox.{dest}.external.{event} (PRODUCER)"]
       Rp --> Rsend
     end
     subgraph TDest["〔Trace: inbox-worker @ dest site〕"]
-      Dp["external.{event} deliver → process (CONSUMER)"]
+      Dp["process external.{event} (CONSUMER)"]
       Dmongo["mongo subscriptions/rooms upsert"]
       Dp --> Dmongo
     end
@@ -340,7 +339,7 @@ flowchart TB
     end
 
     subgraph TRW["〔Trace: room-worker〕 (linked to member-add publish)"]
-      RWp["member-add deliver → process (CONSUMER)"]
+      RWp["process member-add (CONSUMER)"]
       RWmongo["mongo subscription create"]
       RWkey["roomkeysender: distribute room key (PRODUCER)"]
       RWcanon["send canonical member events (PRODUCER)"]
@@ -378,7 +377,7 @@ Client → `history-service` (`…request.room.{r}.{s}.msg.edit` / `…msg.delet
 - `〔Trace: history-service〕` (linked to browser) `process …msg.edit` →
   `mongo` access checks → `cassandra … UPDATE` (or soft-delete) → `send
   …canonical.edited` (PRODUCER, link target) + reply.
-- `〔Trace: broadcast-worker〕` `…canonical.edited deliver → process` (linked) →
+- `〔Trace: broadcast-worker〕` `process …canonical.edited` (linked) →
   `mongo`/`valkey` → `send chat.room.{r}.event.*` (edit).
 - `search-sync-worker` reindex: JetStream `Fetch` consume is linked to the
   canonical producer; `search-sync bulk flush` links to the source message spans
@@ -414,7 +413,7 @@ Prometheus) with NATS tracing enabled, then in Tempo assert:
 The `pkg/natsutil` continuity integration test asserts the correct **link-based**
 contract across a publish→consume hop — the consumer handler gets a *valid* span
 context whose span carries a **link** back to the producer, **not** a shared
-trace ID (ground truth: `o11y` v0.8.0 / `otel-nats` v0.2.11 add
+trace ID (ground truth: `o11y` v0.9.1 / `akira-core/otel-nats` v0.7.0 add
 `trace.WithLinks(originSpanCtx)` on the consumer span per the OTel messaging
 semconv). Asserting `traceId` equality across a hop would be *wrong*. These
 scenarios extend that single-hop gate to the real multi-service pipelines.

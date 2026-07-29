@@ -16,46 +16,38 @@ import (
 
 func TestConnect_MissingCredsFileFailsFast(t *testing.T) {
 	_, err := natsutil.Connect(context.Background(), "nats://127.0.0.1:1", "/definitely/does/not/exist.creds",
-		noop.NewTracerProvider(), propagation.TraceContext{})
+		noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.Error(t, err)
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
-// unsetForTest removes an env var for the duration of the test and restores the
-// original value on cleanup (t.Setenv snapshots it), so a Connect that mutates
-// the NATS-gate env can't leak into sibling tests.
-func unsetForTest(t *testing.T, k string) {
-	t.Helper()
-	t.Setenv(k, "")
-	_ = os.Unsetenv(k)
-}
+// The caller passes the SDK's already-resolved trace toggle. Connect must relay
+// it exactly so tracing-off uses the direct/native upstream path and tracing-on
+// retains propagation and spans.
+func TestConnect_TracingEnabledFollowsResolvedToggle(t *testing.T) {
+	native := startTestNATS(t)
 
-// enableNATSTracing runs at the top of Connect, before the connect attempt — so
-// a Connect that fails to dial still exercises the gate logic. With the master
-// switch off (default), the NATS trace gate must be left unset so otelnats
-// skips per-message span work (native hot-path cost).
-func TestConnect_NATSGate_MasterOff_LeavesGateUnset(t *testing.T) {
-	unsetForTest(t, "OTEL_NATS_TRACING_ENABLED")
-	unsetForTest(t, "OTEL_INSTRUMENTATION_GO_TRACING_ENABLED")
-	t.Setenv("O11Y_ENABLED", "false")
-
-	_, _ = natsutil.Connect(context.Background(), "nats://127.0.0.1:1", "",
-		noop.NewTracerProvider(), propagation.TraceContext{})
-
-	_, ok := os.LookupEnv("OTEL_NATS_TRACING_ENABLED")
-	require.False(t, ok, "master off must not force the NATS trace gate on")
-}
-
-func TestConnect_NATSGate_MasterOn_SetsGate(t *testing.T) {
-	unsetForTest(t, "OTEL_NATS_TRACING_ENABLED")
-	unsetForTest(t, "OTEL_INSTRUMENTATION_GO_TRACING_ENABLED")
-	t.Setenv("O11Y_ENABLED", "true")
-
-	_, _ = natsutil.Connect(context.Background(), "nats://127.0.0.1:1", "",
-		noop.NewTracerProvider(), propagation.TraceContext{})
-
-	require.Equal(t, "true", os.Getenv("OTEL_NATS_TRACING_ENABLED"))
-	require.Equal(t, "true", os.Getenv("OTEL_INSTRUMENTATION_GO_TRACING_ENABLED"))
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled selects direct path", enabled: false},
+		{name: "enabled selects traced path", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := natsutil.Connect(
+				context.Background(),
+				native.ConnectedUrl(),
+				"",
+				noop.NewTracerProvider(),
+				propagation.TraceContext{},
+				tc.enabled,
+			)
+			require.NoError(t, err)
+			t.Cleanup(conn.Close)
+			require.Equal(t, tc.enabled, conn.TracingEnabled())
+		})
+	}
 }
 
 func TestConnect_PresentCredsFilePassesPrecheck(t *testing.T) {
@@ -67,6 +59,6 @@ func TestConnect_PresentCredsFilePassesPrecheck(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("not-a-real-creds-file"), 0o600))
 
 	_, err := natsutil.Connect(context.Background(), "nats://127.0.0.1:1", path,
-		noop.NewTracerProvider(), propagation.TraceContext{})
+		noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.False(t, errors.Is(err, os.ErrNotExist), "precheck should pass when file exists, got: %v", err)
 }

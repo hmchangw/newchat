@@ -41,11 +41,10 @@ impact**:
   the SDK builds **only noop providers + a stdout logger** — **no exporters, no
   Prometheus `:2112` listener, no runtime-metrics goroutine, no OTLP
   connections**.
-- `pkg/natsutil.Connect` leaves the NATS trace gate **unset** when
-  `O11Y_ENABLED` is off, so `otelnats` **skips per-message header
-  inject/extract and span work** — the NATS hot path runs at ~native cost (the
-  "off" row in §4 is the noop-tracer cost; master-off is cheaper still because
-  the machinery is bypassed, not just pointed at a noop).
+- `pkg/natsutil.Connect` passes the SDK's resolved `sdk.Toggles.Trace` into
+  `o11ynats.WithTracingEnabled`. When `O11Y_ENABLED` is off, o11y selects its
+  direct/native path and skips per-message header inject/extract and span work;
+  the machinery is bypassed rather than merely pointed at a noop tracer.
 - **stdout JSON logging is always retained** — turning observability off does
   not silence application logs, it only stops OTLP/metrics export.
 
@@ -145,11 +144,11 @@ so with detached roots **each hop is sampled independently**. Consequences:
   its DB spans share one decision); it does **not** stitch across the link
   boundary because the link doesn't carry the parent's sampled flag as a parent.
 
-**Why standard fixes don't fully solve it.** Ground truth from
-`otelnats` (`ConsumerContextWithDeliver`): the consumer `deliver` span is started
-with an **empty parent** (a fresh root) and only a *link* to the origin — so it
-gets a **new trace ID** and is sampled **independently** by the ratio; the
-origin's sampled flag is **not** inherited across the link.
+**Why standard fixes don't fully solve it.** In o11y v0.9.1's
+`akira-core/otel-nats` v0.7.0 integration, the consumer `process` span is
+started with an **empty parent** (a fresh root) and only a *link* to the origin
+— so it gets a **new trace ID** and is sampled **independently** by the ratio;
+the origin's sampled flag is **not** inherited across the link.
 
 - **Head `traceidratio`, same rate everywhere → fragments.** Each hop is an
   independent coin flip; a 5-hop flow at 10% rarely survives whole.
@@ -161,7 +160,7 @@ origin's sampled flag is **not** inherited across the link.
   "keep whole flows".)
 
 **The real fix — consistent head sampling driven by the entry decision:** make
-the detached `deliver` span **inherit the origin's sampled flag** (from the
+the detached `process` span **inherit the origin's sampled flag** (from the
 incoming `traceparent`) instead of rolling the ratio afresh. Then one decision at
 the true entry (browser / first backend hop) cascades through every hop's
 `traceparent` → every detached root honors it → the **whole flow is kept or

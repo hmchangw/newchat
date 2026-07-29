@@ -130,7 +130,7 @@ func runStreamMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 
 	// One-shot job: no obs.Init — a noop tracer keeps natsutil's wiring happy
 	// without dragging the full observability stack into a CronJob binary.
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	if err != nil {
 		return runStats{}, fmt.Errorf("connect nats: %w", err)
 	}
