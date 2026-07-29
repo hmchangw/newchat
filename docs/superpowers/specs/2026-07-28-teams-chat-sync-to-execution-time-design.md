@@ -179,8 +179,10 @@ Coverage: `syncer.go` is core business logic, so the 90% target applies
 
 ## 7. Docs
 
-This spec supersedes lines 157-161 of `2026-07-14-teams-chat-sync-design.md`.
-That document is left unedited as the historical record of the original design.
+This spec supersedes step 2 of the "Sync flow" section in
+`2026-07-14-teams-chat-sync-design.md`. That document is amended in place: an
+"Amended by" pointer in its header, and an inline superseded note on step 2
+itself, so the stale run-level `to` cannot be read without the correction.
 
 No `docs/client-api.md` change: `teams-chat-sync` is a CronJob that registers no
 NATS handler and no HTTP route, so the client-facing-handler rule in CLAUDE.md

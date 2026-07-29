@@ -1,7 +1,12 @@
 # teams-chat-sync — Design
 
 **Date:** 2026-07-14
-**Status:** Approved
+**Status:** Approved — partially superseded, see "Amended by" below
+
+**Amended by:**
+- `2026-07-19-teams-chat-sync-improvements-design.md`
+- `2026-07-28-teams-chat-sync-to-execution-time-design.md` — supersedes step 2
+  of "Sync flow" (the run-level `to`)
 
 ## Purpose
 
@@ -159,6 +164,16 @@ set) even as `teams_chat` grows. Writes/upserts keyed on `_id` and the
    updated exactly at a boundary lands in exactly one run. Users with
    `from >= to` are **skipped** (empty window — e.g. a second run the same
    day); no Graph call, no watermark write.
+
+   > **Superseded 2026-07-28.** `to` is no longer a single run-level value
+   > computed once at startup — it is computed per user, from a `Now()` call
+   > made when a worker picks that user up, and the skip gate moved into
+   > `syncUser` alongside it. A full run takes ~7 days, so a run-level `to` had
+   > users processed on day 5 recording a day-0 watermark, compounding staleness
+   > to one-to-two run lengths. The half-open `[from, to)` window, the
+   > skip-on-`from >= to` rule, and the watermark-equals-queried-`to` invariant
+   > are all unchanged. See
+   > `2026-07-28-teams-chat-sync-to-execution-time-design.md`.
 3. **Fan-out.** Users are sent down a channel consumed by `MAX_WORKERS`
    goroutines (default 8 — Graph throttling makes large pools
    counterproductive), tracked by `sync.WaitGroup`. No `time.Sleep`
