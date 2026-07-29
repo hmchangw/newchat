@@ -82,10 +82,13 @@ introduced. The account is provided by natsrouter as the `{account}` path parame
 // TranslateRequest is the client→server payload published to
 // chat.user.{account}.request.translate.{siteID}. RequestID is the client-generated
 // correlation key; the result is published to chat.user.{account}.response.{RequestID}.
+// TargetLang is a BCP-47 tag normalized to a backend code (zhTW/zhCN/en/de/ja).
+// Timestamp is the client-side publish time (UTC ms); the service does not act on it.
 type TranslateRequest struct {
     RequestID  string `json:"requestId"`
     Text       string `json:"text"`
     TargetLang string `json:"targetLang"`
+    Timestamp  int64  `json:"timestamp"`
 }
 
 // TranslateResult is the async server→client result delivered on
@@ -133,16 +136,18 @@ Validation lives in the handler; unresolvable tags are rejected before any backe
 
 `translation-service/handler.go`:
 
-1. Unmarshal `TranslateRequest` from the message payload. Malformed JSON →
-   `BadRequest` result.
-2. Extract `account` from the delivered subject.
+1. `natsrouter` decodes the JSON payload into `TranslateRequest` before the handler
+   runs. A malformed payload cannot be decoded — and carries no usable `requestId` —
+   so there is no response subject to address; the router logs and drops it rather
+   than publishing a result (no async error is promised for undecodable input).
+2. `account` is the `{account}` path token, read via `c.Param("account")`.
 3. Validate:
    - `RequestID` empty → drop (cannot address a response subject); log at warn. No
      result can be delivered without a correlation key.
    - `Text` empty → `BadRequest`, reason `TranslateEmptyText`.
-   - `TargetLang` not in the allowed set → `BadRequest`, reason
+   - `TargetLang` does not resolve via `normalizeTargetLang` → `BadRequest`, reason
      `TranslateUnsupportedLang`.
-4. Call `Translator.Translate(ctx, text, targetLang)`.
+4. Call `Translator.Translate(ctx, text, backendLang)` with the normalized code.
 5. On success → publish `TranslateResult{Status: ok, TranslatedText, TargetLang}`.
 6. On error → classify via `errcode.Classify` and fill `Error/Code/Reason`
    (same shape as `AsyncJobResult`), publish `TranslateResult{Status: error, ...}`.

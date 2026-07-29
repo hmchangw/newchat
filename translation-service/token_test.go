@@ -85,13 +85,34 @@ func TestTokenProvider_ForceRefresh(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
 
-func TestTokenProvider_ErrorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
+func TestTokenProvider_FetchErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{"unauthorized status", http.StatusUnauthorized, "", "status 401"},
+		{"malformed json", http.StatusOK, `{not json`, "decode access token response"},
+		{"missing token", http.StatusOK, `{"token":"","expiresAt":"` + rfc3339In(time.Hour) + `"}`, "missing token"},
+		{"invalid expiresAt", http.StatusOK, `{"token":"J2","expiresAt":"not-a-date"}`, "parse access token expiresAt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.status != http.StatusOK {
+					w.WriteHeader(tc.status)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
 
-	p := newTokenProvider(srv.URL, "J1", 5*time.Second, time.Minute)
-	_, err := p.Token(context.Background())
-	require.Error(t, err)
+			p := newTokenProvider(srv.URL, "J1", 5*time.Second, time.Minute)
+			_, err := p.Token(context.Background())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

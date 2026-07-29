@@ -104,6 +104,7 @@ func TestTranslateRequestJSON(t *testing.T) {
 		RequestID:  "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		Text:       "Hello world",
 		TargetLang: "zhTW",
+		Timestamp:  1_700_000_000_000,
 	}
 	roundTrip(t, &r, &model.TranslateRequest{})
 }
@@ -146,12 +147,15 @@ package model
 // TranslateRequest is the client→server payload published to
 // chat.user.{account}.request.translate.{siteID}. RequestID is the
 // client-generated correlation key; the result is published to
-// chat.user.{account}.response.{RequestID}. TargetLang is one of
-// zhTW/zhCN/en/de/ja and is passed through to the backend unchanged.
+// chat.user.{account}.response.{RequestID}. TargetLang is a BCP-47 tag (the
+// user's settings.translateMessageInto value); translation-service normalizes it
+// to the backend's language code (zhTW/zhCN/en/de/ja). Timestamp is the
+// client-side publish time (UTC ms); the service does not act on it.
 type TranslateRequest struct {
-	RequestID  string `json:"requestId"`
-	Text       string `json:"text"`
-	TargetLang string `json:"targetLang"`
+	RequestID  string `json:"requestId"  bson:"requestId"`
+	Text       string `json:"text"       bson:"text"`
+	TargetLang string `json:"targetLang" bson:"targetLang"`
+	Timestamp  int64  `json:"timestamp"  bson:"timestamp"`
 }
 
 // TranslateResult is the async server→client result delivered on
@@ -160,14 +164,14 @@ type TranslateRequest struct {
 // carry the classified errcode envelope, typed as string so pkg/model does not
 // import pkg/errcode. Timestamp is the event-level publish time (UTC ms).
 type TranslateResult struct {
-	RequestID      string `json:"requestId"`
-	Status         string `json:"status"`
-	TranslatedText string `json:"translatedText,omitempty"`
-	TargetLang     string `json:"targetLang,omitempty"`
-	Error          string `json:"error,omitempty"`
-	Code           string `json:"code,omitempty"`
-	Reason         string `json:"reason,omitempty"`
-	Timestamp      int64  `json:"timestamp"`
+	RequestID      string `json:"requestId"                bson:"requestId"`
+	Status         string `json:"status"                   bson:"status"`
+	TranslatedText string `json:"translatedText,omitempty" bson:"translatedText,omitempty"`
+	TargetLang     string `json:"targetLang,omitempty"     bson:"targetLang,omitempty"`
+	Error          string `json:"error,omitempty"          bson:"error,omitempty"`
+	Code           string `json:"code,omitempty"           bson:"code,omitempty"`
+	Reason         string `json:"reason,omitempty"         bson:"reason,omitempty"`
+	Timestamp      int64  `json:"timestamp"                bson:"timestamp"`
 }
 
 const (
@@ -394,17 +398,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"io"
 	"strings"
 	"time"
 
-	"github.com/hmchangw/chat/pkg/restyutil"
-
 	"github.com/go-resty/resty/v2"
+
+	"github.com/hmchangw/chat/pkg/restyutil"
 )
 
 // successReturnCode is the third-party "success" sentinel for a stream chunk.
 const successReturnCode = 96200
+
+// jwtFailureMessage is the message the translate API returns when the J2 token is
+// rejected. On this response the client refreshes J2 and retries once.
+const jwtFailureMessage = "failed to verify jwt"
 
 type backendRequest struct {
 	Text       string `json:"text"`
@@ -421,66 +429,128 @@ type streamChunk struct {
 }
 
 // streamTranslator calls the third-party streaming translation API and merges the
-// SSE chunks into one string.
+// SSE chunks into one string. It authenticates with a J2 token obtained from a
+// tokenProvider (J1 → accessToken API → J2; cached, mutex-guarded — see token.go).
 type streamTranslator struct {
 	client   *resty.Client
 	endpoint string
+	tokens   *tokenProvider
 }
 
-func newStreamTranslator(endpoint, apiKey string, timeout time.Duration) *streamTranslator {
-	opts := []restyutil.Option{restyutil.WithTimeout(timeout)}
-	if apiKey != "" {
-		opts = append(opts, restyutil.WithBearerToken(apiKey))
+func newStreamTranslator(endpoint, accessTokenURL, j1Token string, timeout, skew time.Duration) *streamTranslator {
+	return &streamTranslator{
+		client:   restyutil.New(endpoint, restyutil.WithTimeout(timeout)),
+		endpoint: endpoint,
+		tokens:   newTokenProvider(accessTokenURL, j1Token, timeout, skew),
 	}
-	return &streamTranslator{client: restyutil.New(endpoint, opts...), endpoint: endpoint}
 }
 
+// Translate fetches a J2 token and calls the translate API. If the token is
+// rejected ("failed to verify jwt"), it force-refreshes J2 and retries once.
 func (t *streamTranslator) Translate(ctx context.Context, text, targetLang string) (string, error) {
+	token, err := t.tokens.Token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+
+	result, jwtFailed, err := t.translateOnce(ctx, text, targetLang, token)
+	if err != nil {
+		return "", err
+	}
+	if jwtFailed {
+		token, err = t.tokens.Refresh(ctx, token)
+		if err != nil {
+			return "", fmt.Errorf("refresh access token after jwt failure: %w", err)
+		}
+		result, jwtFailed, err = t.translateOnce(ctx, text, targetLang, token)
+		if err != nil {
+			return "", err
+		}
+		if jwtFailed {
+			return "", fmt.Errorf("translate rejected: %s (after token refresh)", jwtFailureMessage)
+		}
+	}
+	return result, nil
+}
+
+// translateOnce performs a single translate call, sending the raw J2 token as the
+// Authorization header (no Bearer prefix). It returns jwtFailed=true (with nil
+// error) when the response is a "failed to verify jwt" auth rejection, so the
+// caller can refresh and retry. A non-success returnCode or a stream ending
+// without [DONE] is an error; ReturnMessage is never propagated (third-party text).
+func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, token string) (result string, jwtFailed bool, err error) {
 	resp, err := t.client.R().
 		SetContext(ctx).
 		SetHeader("Accept", "text/event-stream").
+		SetHeader("Authorization", token).
 		SetBody(backendRequest{Text: text, TargetLang: targetLang, ApplyWiki: false}).
 		SetDoNotParseResponse(true).
 		Post("")
 	if err != nil {
-		return "", fmt.Errorf("translate request: %w", err)
+		return "", false, fmt.Errorf("translate request: %w", err)
 	}
 	body := resp.RawBody()
 	defer body.Close()
-	if resp.StatusCode() != http.StatusOK {
-		return "", fmt.Errorf("translate backend status %d", resp.StatusCode())
+
+	reader := bufio.NewReader(body)
+	var merged strings.Builder
+	var nonSSE strings.Builder // accumulates a non-SSE body (potential error JSON)
+	sawData := false
+	sawDone := false
+	for {
+		line, readErr := reader.ReadString('\n')
+		trimmed := strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(trimmed, "data:"):
+			sawData = true
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if payload == "[DONE]" {
+				sawDone = true
+				readErr = io.EOF // stop scanning after the terminator
+				break
+			}
+			var chunk streamChunk
+			if uerr := json.Unmarshal([]byte(payload), &chunk); uerr != nil {
+				return "", false, fmt.Errorf("decode stream chunk: %w", uerr)
+			}
+			if chunk.ReturnCode != successReturnCode {
+				return "", false, fmt.Errorf("translate backend rejected request (returnCode %d)", chunk.ReturnCode)
+			}
+			merged.WriteString(chunk.ReturnData.Translation) // verbatim, whitespace preserved
+		case trimmed != "":
+			nonSSE.WriteString(trimmed)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return "", false, fmt.Errorf("read stream: %w", readErr)
+		}
 	}
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var merged strings.Builder
-	sawDone := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue // skip blank lines / other SSE fields
+	if !sawData {
+		// No SSE payload — the response is an error body, possibly a JWT rejection.
+		if isJWTFailure(nonSSE.String()) {
+			return "", true, nil
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			sawDone = true
-			break
-		}
-		var chunk streamChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return "", fmt.Errorf("decode stream chunk: %w", err)
-		}
-		if chunk.ReturnCode != successReturnCode {
-			return "", fmt.Errorf("translate backend returnCode %d: %s", chunk.ReturnCode, chunk.ReturnMessage)
-		}
-		merged.WriteString(chunk.ReturnData.Translation) // verbatim, whitespace preserved
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("read stream: %w", err)
+		return "", false, fmt.Errorf("translate backend error (status %d)", resp.StatusCode())
 	}
 	if !sawDone {
-		return "", fmt.Errorf("stream ended without [DONE]")
+		return "", false, fmt.Errorf("stream ended without [DONE]")
 	}
-	return merged.String(), nil
+	return merged.String(), false, nil
+}
+
+// isJWTFailure reports whether body is a `{"message": "...failed to verify jwt..."}`
+// auth-rejection response. The J1/J2 tokenProvider itself lives in token.go.
+func isJWTFailure(body string) bool {
+	var e struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(e.Message), jwtFailureMessage)
 }
 ```
 
@@ -1081,7 +1151,8 @@ Add a "Translate text" subsection under the user-RPC area. Include:
 |-------|------|-------|
 | `requestId` | string | 36-char hyphenated UUID; correlation key for the async result |
 | `text` | string | text to translate (no length cap) |
-| `targetLang` | string | one of `zhTW`, `zhCN`, `en`, `de`, `ja` |
+| `targetLang` | string | BCP-47 tag (the user's `settings.translateMessageInto` value, e.g. `zh-Hant-TW`, `zh-Hans-CN`, `en`, `de`, `ja`); the service normalizes it to a backend code |
+| `timestamp` | int64 | client publish time (UTC ms); optional, informational |
 
 - **Async result subject:** `chat.user.{account}.response.{requestID}` (client must already be subscribed to `chat.user.{account}.>`).
 - **`TranslateResult`** field table:
@@ -1104,12 +1175,12 @@ Add a "Translate text" subsection under the user-RPC area. Include:
   "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
   "status": "ok",
   "translatedText": "你好 世界",
-  "targetLang": "zhTW",
+  "targetLang": "zh-Hant-TW",
   "timestamp": 1700000000000
 }
 ```
 
-- **Error cases:** `bad_request` / `empty_text` (empty `text`); `bad_request` / `unsupported_lang` (targetLang not in the set); `internal` (backend failure). A request with an empty `requestId` yields no result (undeliverable).
+- **Error cases:** `bad_request` / `empty_text` (empty `text`); `bad_request` / `unsupported_lang` (targetLang does not resolve to a supported language); `internal` (backend failure). A request with an empty `requestId` yields no result (undeliverable).
 - **Triggered events:** none.
 
 - [ ] **Step 3: Update the derived views**

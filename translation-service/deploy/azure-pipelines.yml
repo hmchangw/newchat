@@ -47,6 +47,18 @@ stages:
           - script: go build -o /dev/null ./$(SERVICE_NAME)/
             displayName: 'Build $(SERVICE_NAME)'
 
+          # Lint + SAST via the repo Makefile targets, so this pipeline runs the
+          # same gates as .github/workflows/ci.yml (golangci-lint, and gosec +
+          # govulncheck + semgrep failing on medium+).
+          - script: make tools
+            displayName: 'Install lint & SAST tooling'
+
+          - script: make lint
+            displayName: 'Lint (golangci-lint)'
+
+          - script: make sast
+            displayName: 'SAST (gosec + govulncheck + semgrep, fail on medium+)'
+
   - stage: Build
     displayName: 'Build & Push Image'
     dependsOn: Validate

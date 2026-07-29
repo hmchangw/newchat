@@ -25,7 +25,7 @@ func TestTranslate_EndToEnd(t *testing.T) {
 	url := testutil.NATS(t)
 	nc, err := nats.Connect(url)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = nc.Drain() })
+	t.Cleanup(func() { require.NoError(t, nc.Drain()) })
 
 	sub, err := nc.SubscribeSync(subject.UserResponse("alice", "req-e2e"))
 	require.NoError(t, err)

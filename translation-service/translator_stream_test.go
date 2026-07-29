@@ -19,8 +19,15 @@ func sseServer(t *testing.T, lines []string, captured *map[string]any) *httptest
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if captured != nil {
-			body, _ := io.ReadAll(r.Body)
-			require.NoError(t, json.Unmarshal(body, captured))
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read request body: %v", err)
+				return
+			}
+			if err := json.Unmarshal(body, captured); err != nil {
+				t.Errorf("decode request body: %v", err)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, ln := range lines {
