@@ -712,6 +712,66 @@ describe('MESSAGE_EDITED / MESSAGE_DELETED — live broadcast', () => {
   })
 })
 
+describe('MESSAGE_REACTED — live reaction toggles', () => {
+  const seedRoom = (msgs, pending = []) => ({
+    ...initialState,
+    roomState: {
+      r1: {
+        messages: msgs,
+        hasLoadedHistory: true, historyError: null,
+        unreadCount: 0, hasMention: false, mentionAll: false,
+        lastMsgAt: null, lastMsgId: null,
+        bufferMode: 'live', pendingLiveMessages: pending, focusMessageId: null,
+      },
+    },
+  })
+  const react = (over) => ({
+    type: 'MESSAGE_REACTED', roomId: 'r1', messageId: 'a',
+    shortcode: '👍', action: 'added', account: 'bob', displayName: 'Bob', ...over,
+  })
+
+  it('adds a reactor under the shortcode', () => {
+    const out = roomEventsReducer(seedRoom([{ id: 'a', content: 'x' }]), react())
+    expect(out.roomState.r1.messages[0].reactions).toEqual({
+      '👍': [{ account: 'bob', displayName: 'Bob' }],
+    })
+  })
+
+  it('appends a second distinct reactor to the same shortcode', () => {
+    const s1 = roomEventsReducer(seedRoom([{ id: 'a' }]), react())
+    const out = roomEventsReducer(s1, react({ account: 'carol', displayName: 'Carol' }))
+    expect(out.roomState.r1.messages[0].reactions['👍']).toEqual([
+      { account: 'bob', displayName: 'Bob' },
+      { account: 'carol', displayName: 'Carol' },
+    ])
+  })
+
+  it('is idempotent — re-adding the same account does not duplicate', () => {
+    const s1 = roomEventsReducer(seedRoom([{ id: 'a' }]), react())
+    const out = roomEventsReducer(s1, react())
+    expect(out.roomState.r1.messages[0].reactions['👍']).toHaveLength(1)
+  })
+
+  it('removes a reactor and drops the shortcode key when it empties', () => {
+    const s1 = roomEventsReducer(seedRoom([{ id: 'a' }]), react())
+    const out = roomEventsReducer(s1, react({ action: 'removed' }))
+    expect(out.roomState.r1.messages[0].reactions).toEqual({})
+  })
+
+  it('patches pendingLiveMessages when the target lives there', () => {
+    const seed = seedRoom([{ id: 'a' }], [{ id: 'p1' }])
+    const out = roomEventsReducer(seed, react({ messageId: 'p1' }))
+    expect(out.roomState.r1.pendingLiveMessages[0].reactions['👍']).toHaveLength(1)
+    expect(out.roomState.r1.messages).toBe(seed.roomState.r1.messages)
+  })
+
+  it('no-ops when the room or message is unknown', () => {
+    const seed = seedRoom([{ id: 'a' }])
+    expect(roomEventsReducer(seed, react({ roomId: 'nope' }))).toBe(seed)
+    expect(roomEventsReducer(seed, react({ messageId: 'ghost' }))).toBe(seed)
+  })
+})
+
 describe('MESSAGE_RECEIVED — server echo overwrites optimistic createdAt', () => {
   // Regression for: every thread reply silently failing message-worker's
   // IF EXISTS stamp on messages_by_id because the parent message in

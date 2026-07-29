@@ -1051,6 +1051,44 @@ describe('RoomEventsProvider sidebar buckets bootstrap', () => {
     expect(calls.find((c) => c.subject.endsWith('.rooms.list'))).toBeUndefined()
   })
 
+  it('seeds room keys carried by subscription.list into RoomKeysContext', async () => {
+    // subscription.list embeds the current room key under sub.room for
+    // encrypted channels. Seeding it at bootstrap means the first message in
+    // the room decrypts without a placeholder or an on-demand key fetch.
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    try {
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+          return Promise.resolve({
+            subscriptions: [
+              {
+                roomId: 'c1',
+                roomType: 'channel',
+                name: 'c1',
+                siteId: 'site-A',
+                room: { privateKey: 'AQIDBA==', keyVersion: 4 },
+              },
+              // No room key → not seeded (plaintext DM / no key provisioned).
+              { roomId: 'd1', roomType: 'dm', name: 'd1', siteId: 'site-A' },
+            ],
+          })
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+        throw new Error('unexpected subject: ' + subject)
+      })
+      const nats = mockNats({ request })
+
+      render(wrap(<SummariesProbe />, nats))
+      await waitFor(() => expect(seedKeys).toHaveBeenCalled())
+      expect(seedKeys).toHaveBeenCalledWith([
+        { roomId: 'c1', version: 4, privateKey: 'AQIDBA==' },
+      ])
+    } finally {
+      currentRoomKeysMock = prevMock
+    }
+  })
+
   it('degrades gracefully (Promise.allSettled) when one bucket RPC fails', async () => {
     // getApps rejects; getCurrent + getRooms resolve. Sidebar should
     // still bootstrap with the rooms from getRooms; the Apps bucket

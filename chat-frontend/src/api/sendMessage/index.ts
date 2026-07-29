@@ -8,6 +8,9 @@ export interface SendMessagePayload {
   quotedParentMessageId?: string
   threadParentMessageId?: string
   threadParentMessageCreatedAt?: number
+  /** Base64-encoded Attachment JSON blobs (see lib/attachment.encodeAttachment).
+   *  Max 1 today; content may be empty when attachments are present. */
+  attachments?: string[]
 }
 
 export interface SendMessageArgs {

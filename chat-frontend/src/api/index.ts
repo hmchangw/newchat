@@ -30,12 +30,14 @@ export { requestRoomKey } from './requestRoomKey'
 export { searchMessages } from './searchMessages'
 export { searchRooms } from './searchRooms'
 export { sendMessage } from './sendMessage'
+export { setMediaCookie } from './setMediaCookie'
 export { subscribeToRoomEvents } from './subscribeToRoomEvents'
 export { subscribeToRoomMetadataUpdates } from './subscribeToRoomMetadataUpdates'
 export { subscribeToRoomKeyEvents } from './subscribeToRoomKeyEvents'
 export { subscribeToSubscriptionUpdates } from './subscribeToSubscriptionUpdates'
 export { subscribeToUserRoomEvents } from './subscribeToUserRoomEvents'
 export { updateMemberRole } from './updateMemberRole'
+export { uploadImage } from './uploadImage'
 
 // Transport-level error utilities that callers legitimately need.
 // `_transport/` stays internal otherwise.
