@@ -20,7 +20,11 @@ also stamps `UpdatedAt`. All changes are in one file.
 ## Global Constraints
 
 - All commands go through the root `Makefile` — never run raw `go` commands
-  (CLAUDE.md §2).
+  (CLAUDE.md §2). **One carve-out:** the coverage check in Task 1 Step 7. The
+  Makefile has no general coverage target (only the scoped
+  `coverage-loadgen-soak`), so that step invokes `go test -coverprofile` and the
+  repo's own `tools/coveragecheck` directly. This is the only permitted raw `go`
+  invocation in this plan.
 - TDD is mandatory: Red → Green → Refactor → Commit. Never write implementation
   before its test exists, and never skip confirming the test fails first
   (CLAUDE.md §4).
@@ -359,21 +363,31 @@ stale.
 
 - [ ] **Step 7: Confirm coverage holds**
 
-Run: `make test SERVICE=teams-chat-sync` first, then check the syncer's coverage:
+This is the plan's one permitted raw `go` invocation (see Global Constraints).
+It uses `tools/coveragecheck`, the same gate the `coverage-loadgen-soak` target
+uses — it exits non-zero below the threshold, so these are real assertions, not
+output to eyeball:
 
 ```bash
 cd /home/user/newchat && \
   go test -race -coverprofile=cov.out ./teams-chat-sync/ && \
-  go tool cover -func=cov.out | grep -E 'syncer.go|total'
+  go run ./tools/coveragecheck -profile cov.out -include teams-chat-sync/ -min 80 && \
+  go run ./tools/coveragecheck -profile cov.out -include teams-chat-sync/syncer.go -min 90
 ```
 
-Delete `cov.out` afterwards — it must not be committed.
+Expected: both checks exit 0 — the package clears the 80% floor and `syncer.go`
+clears the 90% target for core business logic.
 
-Expected: `run` and `syncUser` at or above 90%, total at or above the 80% floor.
-This is the one place a raw `go` command is warranted — the Makefile has no
-coverage target. If `syncUser`'s skip branch shows as uncovered, that means
-`TestSyncUser_SkipReturnsSkippedNotSuccess` is not reaching it; fix the test
-rather than lowering the bar.
+Then delete the profile so it is never committed:
+
+```bash
+rm -f /home/user/newchat/cov.out
+```
+
+If the 90% check fails, inspect which lines are uncovered with
+`go tool cover -func=cov.out | grep syncer.go`. The likely culprit is
+`syncUser`'s skip branch, which means `TestSyncUser_SkipReturnsSkippedNotSuccess`
+is not reaching it — fix the test rather than lowering the threshold.
 
 - [ ] **Step 8: Lint**
 
