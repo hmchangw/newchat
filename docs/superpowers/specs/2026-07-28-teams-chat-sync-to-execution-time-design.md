@@ -200,6 +200,18 @@ Both were raised and deferred; neither is blocked by this change.
 - **Graph settle margin.** `startOfDayUTC(now)` yields 0-24h of Graph indexing
   lag tolerance depending on when a worker lands. A user processed at 00:00:30
   UTC gets a `to` thirty seconds old, and anything Graph has not yet indexed is
-  skipped permanently once the watermark advances past it. This exists in the
-  current code, but per-user `to` crosses that boundary once per midnight rather
-  than once per run, so it fires more often.
+  skipped permanently once the watermark advances past it.
+
+  This predates the change, but the change alters its *distribution*, and not
+  purely for the better. Before, the margin was fixed by the CronJob schedule and
+  identical for every user in a run — if the schedule was safe, it was safe for
+  everyone. After, the margin is distributed roughly uniformly over [0, 24h)
+  across users, so a small slice of each run lands near zero. Expected exposure
+  is on the order of `indexing_lag / 1440` of a run's users. Whether this is a
+  net regression depends on the CronJob schedule, which is not in this repo.
+
+  The mitigation is one line — `startOfDayUTC(now.Add(-settleMargin))` — and it
+  is one line precisely because this change consolidated the gate, the Graph
+  filter, and the watermark write onto a single `to`. Under the old two-boundary
+  arrangement the same fix would have had to be applied consistently in two
+  places. Tracked as a follow-up, not folded in here.
