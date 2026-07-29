@@ -18,29 +18,32 @@ func TestAccountCache_BatchesAndCachesHitsAndMisses(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	users := NewMockTeamsUserStore(ctrl)
 	// First resolve: u1,u2 uncached -> one batched call. u2 unknown -> miss.
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, ids []string) (map[string]string, error) {
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, ids []string) (map[string]teamsUserRef, error) {
 			assert.ElementsMatch(t, []string{"u1", "u2"}, ids)
-			return map[string]string{"u1": "alice"}, nil
+			return map[string]teamsUserRef{"u1": {account: "alice", displayName: "Alice Smith"}}, nil
 		}).Times(1)
 
 	c := newAccountCache(users)
+	want := map[string]teamsUserRef{"u1": {account: "alice", displayName: "Alice Smith"}, "u2": {}}
 	got, err := c.resolve(context.Background(), []string{"u1", "u2"})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"u1": "alice", "u2": ""}, got, "miss cached as empty")
+	assert.Equal(t, want, got, "miss cached as the zero ref")
 
 	// Second resolve of the same ids issues NO new query (mock capped at 1).
 	got2, err := c.resolve(context.Background(), []string{"u1", "u2"})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"u1": "alice", "u2": ""}, got2)
+	assert.Equal(t, want, got2)
 }
 
 func TestAccountCache_OnlyQueriesUncached(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	users := NewMockTeamsUserStore(ctrl)
 	gomock.InOrder(
-		users.EXPECT().AccountsByIDs(gomock.Any(), []string{"u1"}).Return(map[string]string{"u1": "alice"}, nil),
-		users.EXPECT().AccountsByIDs(gomock.Any(), []string{"u2"}).Return(map[string]string{"u2": "bob"}, nil),
+		users.EXPECT().UsersByIDs(gomock.Any(), []string{"u1"}).
+			Return(map[string]teamsUserRef{"u1": {account: "alice", displayName: "Alice Smith"}}, nil),
+		users.EXPECT().UsersByIDs(gomock.Any(), []string{"u2"}).
+			Return(map[string]teamsUserRef{"u2": {account: "bob", displayName: "Bob Jones"}}, nil),
 	)
 	c := newAccountCache(users)
 	_, err := c.resolve(context.Background(), []string{"u1"})
@@ -48,17 +51,20 @@ func TestAccountCache_OnlyQueriesUncached(t *testing.T) {
 	// u1 now cached; only u2 is queried.
 	got, err := c.resolve(context.Background(), []string{"u1", "u2"})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"u1": "alice", "u2": "bob"}, got)
+	assert.Equal(t, map[string]teamsUserRef{
+		"u1": {account: "alice", displayName: "Alice Smith"},
+		"u2": {account: "bob", displayName: "Bob Jones"},
+	}, got)
 }
 
 func TestAccountCache_ConcurrentResolveNoRace(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	users := NewMockTeamsUserStore(ctrl)
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, ids []string) (map[string]string, error) {
-			out := make(map[string]string, len(ids))
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, ids []string) (map[string]teamsUserRef, error) {
+			out := make(map[string]teamsUserRef, len(ids))
 			for _, id := range ids {
-				out[id] = "acct-" + id
+				out[id] = teamsUserRef{account: "acct-" + id, displayName: "name-" + id}
 			}
 			return out, nil
 		}).AnyTimes()
@@ -91,22 +97,36 @@ func newTestSyncer(t *testing.T, workers int) (*syncer, *MockTeamsChatStore, *Mo
 func TestBuildMembers_ResolvesAllViaLookup(t *testing.T) {
 	s, _, users, _ := newTestSyncer(t, 1)
 	// Every member is resolved from teams_user by userId in one batched call.
-	// ghost is not in teams_user, so it comes back absent -> account "".
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, ids []string) (map[string]string, error) {
-			assert.ElementsMatch(t, []string{"u1", "u2", "ghost"}, ids)
-			return map[string]string{"u1": "alice", "u2": "bob"}, nil
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, ids []string) (map[string]teamsUserRef, error) {
+			assert.ElementsMatch(t, []string{"u1", "u2"}, ids)
+			return map[string]teamsUserRef{
+				"u1": {account: "alice", displayName: "Alice Smith"},
+				"u2": {account: "bob", displayName: "Bob Jones"},
+			}, nil
 		})
 	raw := []msgraph.ChatMemberDetail{
 		{UserID: "u1", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
 		{UserID: "u2"},
-		{UserID: "ghost"}, // unknown -> ""
 	}
 	got, err := s.buildMembers(context.Background(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, []model.TeamsChatMember{
-		{ID: "u1", Account: "alice", VisibleHistoryStartDateTime: raw[0].VisibleHistoryStartDateTime},
-		{ID: "u2", Account: "bob"},
-		{ID: "ghost", Account: ""},
+		{ID: "u1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: raw[0].VisibleHistoryStartDateTime},
+		{ID: "u2", Account: "bob", DisplayName: "Bob Jones"},
+	}, got)
+}
+
+func TestBuildMembers_UnknownUserHasEmptyAccountAndDisplayName(t *testing.T) {
+	s, _, users, _ := newTestSyncer(t, 1)
+	// ghost is not in teams_user, so it comes back absent from the lookup.
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]teamsUserRef{"u1": {account: "alice", displayName: "Alice Smith"}}, nil)
+
+	got, err := s.buildMembers(context.Background(), []msgraph.ChatMemberDetail{{UserID: "u1"}, {UserID: "ghost"}})
+	require.NoError(t, err)
+	assert.Equal(t, []model.TeamsChatMember{
+		{ID: "u1", Account: "alice", DisplayName: "Alice Smith"},
+		{ID: "ghost", Account: "", DisplayName: ""},
 	}, got)
 }

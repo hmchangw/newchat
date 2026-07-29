@@ -68,8 +68,8 @@ func TestVoteSiteID(t *testing.T) {
 
 func TestBuildChat(t *testing.T) {
 	cache := map[string]cachedUser{
-		"a1": {siteID: "site-a", account: "alice"},
-		"b1": {siteID: "site-b", account: "bob"},
+		"a1": {siteID: "site-a", account: "alice", displayName: "Alice Smith"},
+		"b1": {siteID: "site-b", account: "bob", displayName: "Bob Jones"},
 	}
 	gc := msgraph.Chat{
 		ID: "19:g1", ChatType: "group", Topic: "Project X",
@@ -89,9 +89,9 @@ func TestBuildChat(t *testing.T) {
 	assert.True(t, c.UpdatedAt.Equal(buildNow), "UpdatedAt stamped with now at build time")
 	assert.False(t, c.NeedMemberSync, "a small group (< inlineMemberThreshold members) is finalized inline, no member sync")
 	assert.Equal(t, []model.TeamsChatMember{
-		{ID: "a1", Account: "alice", VisibleHistoryStartDateTime: gc.Members[0].VisibleHistoryStartDateTime},
-		{ID: "ghost", Account: "", VisibleHistoryStartDateTime: gc.Members[1].VisibleHistoryStartDateTime},
-	}, c.Members, "unknown members kept with empty account")
+		{ID: "a1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: gc.Members[0].VisibleHistoryStartDateTime},
+		{ID: "ghost", Account: "", DisplayName: "", VisibleHistoryStartDateTime: gc.Members[1].VisibleHistoryStartDateTime},
+	}, c.Members, "unknown members kept with empty account and display name")
 }
 
 func TestBuildChat_OneOnOne(t *testing.T) {

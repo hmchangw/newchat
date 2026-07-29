@@ -4718,8 +4718,8 @@ func TestTeamsChatJSON(t *testing.T) {
 		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{
-			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
-			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+			{ID: "aad-user-1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", DisplayName: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 		SiteID:         "site-a",
 		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
@@ -4788,8 +4788,8 @@ func TestTeamsChatBSON(t *testing.T) {
 		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{
-			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
-			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+			{ID: "aad-user-1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", DisplayName: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 		SiteID:         "site-a",
 		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
@@ -4824,6 +4824,7 @@ func TestTeamsChatBSON(t *testing.T) {
 	for i, member := range c.Members {
 		assert.Equal(t, member.ID, dst.Members[i].ID)
 		assert.Equal(t, member.Account, dst.Members[i].Account)
+		assert.Equal(t, member.DisplayName, dst.Members[i].DisplayName)
 		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
 	}
 }
@@ -4859,6 +4860,7 @@ func TestTeamsRoomCreateEventJSON(t *testing.T) {
 			Members: []model.TeamsRoomCreateMember{{
 				ID:                          "aad-user-1",
 				Account:                     "alice",
+				DisplayName:                 "Alice Smith",
 				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 			}},
 		}},

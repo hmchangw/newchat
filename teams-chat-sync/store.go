@@ -14,7 +14,7 @@ import (
 // advances per-user watermarks. Satisfied by *mongoStore.
 type TeamsUserStore interface {
 	// ListUsers returns every teams_user projected to exactly the fields the
-	// sync needs (_id, siteID, account, from).
+	// sync needs (_id, siteID, account, displayName, from).
 	ListUsers(ctx context.Context) ([]model.TeamsUser, error)
 	// SetFrom advances one user's watermark after that user fully succeeded.
 	SetFrom(ctx context.Context, userID string, from time.Time) error

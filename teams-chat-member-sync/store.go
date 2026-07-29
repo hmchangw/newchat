@@ -39,12 +39,20 @@ type TeamsChatStore interface {
 	SetMembersSynced(ctx context.Context, chatID string, seenUpdatedAt time.Time, members []model.TeamsChatMember, now time.Time) error
 }
 
-// TeamsUserStore resolves userIds to accounts from teams_user (read client),
-// for members whose Graph UPN was absent. Satisfied by *mongoStore.
+// teamsUserRef is the teams_user projection a stored member is built from.
+// The zero value stands for a userId with no teams_user record.
+type teamsUserRef struct {
+	account     string
+	displayName string
+}
+
+// TeamsUserStore resolves userIds to their teams_user identity fields (read
+// client), since Graph's member payload carries neither. Satisfied by
+// *mongoStore.
 type TeamsUserStore interface {
-	// AccountsByIDs returns userId->account for the ids present in teams_user;
+	// UsersByIDs returns userId->ref for the ids present in teams_user;
 	// ids without a record are absent from the map.
-	AccountsByIDs(ctx context.Context, ids []string) (map[string]string, error)
+	UsersByIDs(ctx context.Context, ids []string) (map[string]teamsUserRef, error)
 }
 
 // membersFetcher is the Graph surface the sync consumes (interface defined in

@@ -35,8 +35,8 @@ func TestMongoStore_ListUsers(t *testing.T) {
 	store := newMongoStore(db)
 	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	seedUsers(t, store,
-		model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice", From: &from},
-		model.TeamsUser{ID: "u2", SiteID: "site-b", Account: "bob"},
+		model.TeamsUser{ID: "u1", SiteID: "site-a", Account: "alice", DisplayName: "Alice Smith", From: &from},
+		model.TeamsUser{ID: "u2", SiteID: "site-b", Account: "bob", DisplayName: "Bob Jones"},
 	)
 
 	users, err := store.ListUsers(context.Background())
@@ -47,6 +47,7 @@ func TestMongoStore_ListUsers(t *testing.T) {
 	assert.True(t, byID["u1"].From.Equal(from))
 	assert.Equal(t, "site-a", byID["u1"].SiteID)
 	assert.Equal(t, "alice", byID["u1"].Account)
+	assert.Equal(t, "Alice Smith", byID["u1"].DisplayName, "displayName is projected for member build")
 	assert.Nil(t, byID["u2"].From, "user without watermark loads with nil From")
 }
 

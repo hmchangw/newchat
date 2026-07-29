@@ -71,20 +71,21 @@ func setMembersSyncedUpdate(members []model.TeamsChatMember, now time.Time) bson
 	}}
 }
 
-// AccountsByIDs resolves userIds to accounts from teams_user (read client),
-// projecting _id and account. Ids without a record are absent from the map.
-func (s *mongoStore) AccountsByIDs(ctx context.Context, ids []string) (map[string]string, error) {
-	out := make(map[string]string, len(ids))
+// UsersByIDs resolves userIds to their teams_user identity fields (read
+// client), projecting _id, account and displayName. Ids without a record are
+// absent from the map.
+func (s *mongoStore) UsersByIDs(ctx context.Context, ids []string) (map[string]teamsUserRef, error) {
+	out := make(map[string]teamsUserRef, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
 	users, err := s.readUsers.FindMany(ctx, bson.M{"_id": bson.M{"$in": ids}},
-		mongoutil.WithProjection(bson.M{"_id": 1, "account": 1}))
+		mongoutil.WithProjection(bson.M{"_id": 1, "account": 1, "displayName": 1}))
 	if err != nil {
 		return nil, fmt.Errorf("find teams users by id: %w", err)
 	}
 	for _, u := range users {
-		out[u.ID] = u.Account
+		out[u.ID] = teamsUserRef{account: u.Account, displayName: u.DisplayName}
 	}
 	return out, nil
 }

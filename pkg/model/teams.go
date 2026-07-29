@@ -60,11 +60,13 @@ type TeamsMeetingRecord struct {
 // never changes after creation, so the sync inserts it once and never updates.
 const TeamsChatTypeOneOnOne = "oneOnOne"
 
-// TeamsChatMember is one member of a synced Teams chat. Account is empty when
-// the member is not in teams_user (guests / users outside the system).
+// TeamsChatMember is one member of a synced Teams chat. Account and
+// DisplayName are both resolved from teams_user, so both are empty when the
+// member is not in teams_user (guests / users outside the system).
 type TeamsChatMember struct {
 	ID                          string    `json:"id" bson:"id"`
 	Account                     string    `json:"account" bson:"account"`
+	DisplayName                 string    `json:"displayName" bson:"displayName"`
 	VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime" bson:"visibleHistoryStartDateTime"`
 }
 
