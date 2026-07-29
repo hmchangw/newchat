@@ -4809,6 +4809,19 @@ func TestTeamsChatBSON(t *testing.T) {
 	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, true, rawDoc["needMemberSync"])
 
+	// Member subdoc keys are asserted raw: a round-trip is symmetric, so it
+	// would accept a misspelled tag, but stores and projections read these
+	// exact names.
+	var rawMembers struct {
+		Members []bson.M `bson:"members"`
+	}
+	require.NoError(t, bson.Unmarshal(data, &rawMembers))
+	require.Len(t, rawMembers.Members, 2)
+	for _, key := range []string{"id", "account", "displayName", "visibleHistoryStartDateTime"} {
+		assert.Contains(t, rawMembers.Members[0], key, "member subdoc must use the %q BSON key", key)
+	}
+	assert.Equal(t, "Alice Smith", rawMembers.Members[0]["displayName"])
+
 	// Round-trip to struct and verify equality
 	var dst model.TeamsChat
 	require.NoError(t, bson.Unmarshal(data, &dst))
