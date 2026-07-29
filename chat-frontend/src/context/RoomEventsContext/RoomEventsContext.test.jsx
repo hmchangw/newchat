@@ -494,24 +494,23 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
 
     function Probe() {
       const { messages, focusMessageId, bufferMode, jumpToMessage } = useRoomEvents('r1')
+      const { summaries } = useRoomSummaries()
       return (
         <div>
           <button onClick={() => jumpToMessage('m11').catch(() => {})}>jump</button>
           <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
           <div data-testid="focus">{focusMessageId ?? ''}</div>
           <div data-testid="mode">{bufferMode}</div>
+          <div data-testid="summaries">{summaries.length}</div>
         </div>
       )
     }
 
     render(wrap(<Probe />, nats))
-    // Wait for rooms list to load so summary is present (so jumpToMessage uses room siteId)
-    await waitFor(() =>
-      expect(request).toHaveBeenCalledWith(
-        'chat.user.alice.request.user.site-A.subscription.list',
-        { type: 'rooms', offset: 0, limit: PAGE_LIMIT },
-      )
-    )
+    // Wait for the bootstrap reply to land in state.summaries — not merely for
+    // the request to be issued — so jumpToMessage reads the room's site-B
+    // siteId rather than racing the reply and falling back to the user's site.
+    await waitFor(() => expect(screen.getByTestId('summaries').textContent).toBe('1'))
 
     await act(async () => {
       screen.getByText('jump').click()
@@ -1481,5 +1480,104 @@ describe('RoomEventsProvider missing-key path', () => {
 
     expect(ensureKey).not.toHaveBeenCalled()
     expect(decrypt).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  // Server ships newest-first. Build a newest-first block of `n` messages
+  // whose timestamps ascend with the id index (m0 oldest … m<n-1> newest).
+  function serverPage(prefix, n, baseMinute = 0) {
+    const asc = Array.from({ length: n }, (_, i) => ({
+      id: `${prefix}${i}`,
+      roomId: 'a',
+      content: `${prefix}${i}`,
+      createdAt: new Date(Date.UTC(2026, 3, 17, 8, baseMinute + i, 0)).toISOString(),
+      sender: { account: 'bob' },
+    }))
+    return asc.reverse() // newest-first, as history-service returns
+  }
+
+  function OlderProbe() {
+    const { messages, loadHistory, loadOlder, hasMoreOlder, loadingOlder } = useRoomEvents('a')
+    return (
+      <div>
+        <button onClick={() => loadHistory()}>load</button>
+        <button onClick={() => loadOlder()?.catch?.(() => {})}>older</button>
+        <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
+        <div data-testid="hasMore">{String(hasMoreOlder)}</div>
+        <div data-testid="loadingOlder">{String(loadingOlder)}</div>
+      </div>
+    )
+  }
+
+  it('prepends an older page, fetched with a `before` cursor at the current top', async () => {
+    // Initial page is FULL (50) → hasMoreOlder true. Older page follows.
+    const first = serverPage('n', 50, 10) // n0 (08:10) … n49 (08:59)
+    const older = serverPage('o', 3, 0) // o0 (08:00) … o2 (08:02)
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.includes('.msg.history')) {
+        return Promise.resolve({ messages: payload?.before ? older : first })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    await act(async () => { screen.getByText('load').click() })
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('true'))
+    // Buffer starts at the newest page, oldest-first.
+    expect(screen.getByTestId('messages').textContent.startsWith('n0,n1')).toBe(true)
+
+    await act(async () => { screen.getByText('older').click() })
+    await waitFor(() =>
+      expect(screen.getByTestId('messages').textContent.startsWith('o0,o1,o2,n0')).toBe(true),
+    )
+
+    // The older fetch used `before` = the oldest loaded message's epoch millis.
+    const beforeCursor = new Date(Date.UTC(2026, 3, 17, 8, 10, 0)).getTime()
+    expect(request).toHaveBeenCalledWith(
+      'chat.user.alice.request.room.a.site-A.msg.history',
+      { limit: 50, before: beforeCursor },
+    )
+    // Older page was short (3 < 50) → no more older remain.
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('false'))
+  })
+
+  it('no-ops when the initial page was short (hasMoreOlder false)', async () => {
+    const first = serverPage('n', 5, 10) // short page → reached start
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.includes('.msg.history')) return Promise.resolve({ messages: first })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    await act(async () => { screen.getByText('load').click() })
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('false'))
+
+    const historyCallsBefore = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
+    await act(async () => { screen.getByText('older').click() })
+    const historyCallsAfter = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
+    // loadOlder must not fire a second history RPC.
+    expect(historyCallsAfter).toBe(historyCallsBefore)
+  })
+
+  it('no-ops before the initial history has loaded', async () => {
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      if (subject.includes('.msg.history')) return Promise.resolve({ messages: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    // Click older WITHOUT loading first.
+    await act(async () => { screen.getByText('older').click() })
+    const historyCalls = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
+    expect(historyCalls).toBe(0)
   })
 })
