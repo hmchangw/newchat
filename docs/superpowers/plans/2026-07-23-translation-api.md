@@ -899,7 +899,7 @@ type NATSConfig struct {
 
 type Config struct {
 	SiteID      string        `env:"SITE_ID,required"`
-	Backend     string        `env:"TRANSLATION_BACKEND"      envDefault:"mock"`
+	Backend     string        `env:"TRANSLATION_BACKEND,required"` // no default: fail fast, never default to mock in prod
 	Endpoint    string        `env:"TRANSLATION_ENDPOINT"     envDefault:""`
 	APIKey      string        `env:"TRANSLATION_API_KEY"      envDefault:""`
 	HTTPTimeout time.Duration `env:"TRANSLATION_HTTP_TIMEOUT" envDefault:"30s"`

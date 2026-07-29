@@ -189,7 +189,7 @@ type Translator interface {
 
 Selected at startup by config `TRANSLATION_BACKEND`:
 
-### `mock` (default — used this iteration)
+### `mock` (used this iteration for dev/CI; must be selected explicitly)
 
 Returns deterministic mock output without any network call, e.g.
 `"[<targetLang>] " + text` (exact form finalized in the plan). No credentials
@@ -232,7 +232,7 @@ or `TRANSLATION_J1_TOKEN` is empty when `TRANSLATION_BACKEND=stream`.
 | `NATS_URL` | — | required |
 | `SITE_ID` | — | required |
 | `LOG_LEVEL` | `info` | |
-| `TRANSLATION_BACKEND` | `mock` | `mock` \| `stream` |
+| `TRANSLATION_BACKEND` | — | required (no default); `mock` \| `stream` |
 | `TRANSLATION_ENDPOINT` | `` | translate API URL; required when backend=`stream` |
 | `TRANSLATION_ACCESS_TOKEN_URL` | `` | accessToken (J1→J2) API URL; required when backend=`stream` |
 | `TRANSLATION_J1_TOKEN` | `` | secret J1 token; required when backend=`stream`; never logged |

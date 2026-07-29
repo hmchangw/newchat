@@ -22,8 +22,10 @@ type NATSConfig struct {
 }
 
 type Config struct {
-	SiteID         string        `env:"SITE_ID,required"`
-	Backend        string        `env:"TRANSLATION_BACKEND"          envDefault:"mock"`
+	SiteID string `env:"SITE_ID,required"`
+	// Required (no default): an omitted TRANSLATION_BACKEND fails fast at startup
+	// instead of silently serving mock translations in a deployed environment.
+	Backend        string        `env:"TRANSLATION_BACKEND,required"`
 	Endpoint       string        `env:"TRANSLATION_ENDPOINT"         envDefault:""`
 	AccessTokenURL string        `env:"TRANSLATION_ACCESS_TOKEN_URL" envDefault:""`
 	J1Token        string        `env:"TRANSLATION_J1_TOKEN"         envDefault:""`
