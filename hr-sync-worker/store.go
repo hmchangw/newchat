@@ -25,9 +25,9 @@ const (
 type Store interface {
 	// UpsertEmployees replaces hr_employee docs keyed by employeeId.
 	UpsertEmployees(ctx context.Context, employees []model.IEmployeeWithChange) error
-	// UpsertUserIdentities upserts users by employeeId, writing IDENTITY FIELDS
-	// ONLY (account, siteId, engName, chineseName, employeeId). It must never
-	// touch roles/services/password/active/status fields — users is the
+	// UpsertUserIdentities upserts users by account, writing IDENTITY FIELDS
+	// ONLY (siteId, engName, chineseName, and employeeId when present). It must
+	// never touch roles/services/password/active/status fields — users is the
 	// live auth store.
 	UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error
 	// QuitTeamsEmployees deletes hr_employee rows for the given accounts.
@@ -70,10 +70,10 @@ func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUs
 	models := make([]mongo.WriteModel, 0, len(users))
 	for i := range users {
 		u := &users[i].User
-		// employeeId is the identity key; an empty one would match every other
-		// keyless row and clobber it, so skip rather than corrupt.
-		if u.EmployeeID == "" {
-			slog.WarnContext(ctx, "skip user identity upsert: empty employeeId")
+		// account is the identity key (globally unique); it covers HR-feed users
+		// and migrated externals alike, and an empty one would clobber other rows.
+		if u.Account == "" {
+			slog.WarnContext(ctx, "skip user identity upsert: empty account")
 			continue
 		}
 		// A publisher that owns the _id (the Teams migration resolver, deterministic
@@ -83,19 +83,21 @@ func (s *MongoStore) UpsertUserIdentities(ctx context.Context, users []model.IUs
 		if idOnInsert == "" {
 			idOnInsert = idgen.GenerateUUIDv7()
 		}
+		// Migrated externals carry no employeeId (they aren't employees); only set
+		// it for HR-feed users that have one, so an external's row stays clean.
+		set := bson.M{"siteId": u.SiteID, "engName": u.EngName, "chineseName": u.ChineseName}
+		if u.EmployeeID != "" {
+			set["employeeId"] = u.EmployeeID
+		}
 		models = append(models, mongo.NewUpdateOneModel().
-			SetFilter(bson.M{"employeeId": u.EmployeeID}).
+			SetFilter(bson.M{"account": u.Account}).
 			SetUpdate(bson.M{
-				"$set": bson.M{
-					"account": u.Account, "siteId": u.SiteID,
-					"engName": u.EngName, "chineseName": u.ChineseName,
-					"employeeId": u.EmployeeID,
-				},
+				"$set":         set,
 				"$setOnInsert": bson.M{"_id": idOnInsert},
 			}).
 			SetUpsert(true))
 	}
-	// All inputs had an empty employeeId → nothing to write; BulkWrite errors on
+	// All inputs had an empty account → nothing to write; BulkWrite errors on
 	// an empty slice (mongo.ErrEmptySlice), so no-op cleanly instead.
 	if len(models) == 0 {
 		return nil

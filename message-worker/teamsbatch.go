@@ -32,9 +32,9 @@ type teamsBatchHandler struct {
 	tr       MessageTransformer
 }
 
-func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string) *teamsBatchHandler {
+func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, publishUsers func(ctx context.Context, users []model.IUserWithChange) error) *teamsBatchHandler {
 	cache, _ := lru.New[string, resolvedSender](teamsSenderCacheSize) // errors only on size<=0
-	resolver := newSenderResolver(hrStore, siteID, cache)
+	resolver := newSenderResolver(hrStore, siteID, cache, publishUsers)
 	return &teamsBatchHandler{
 		store:    store,
 		siteID:   siteID,

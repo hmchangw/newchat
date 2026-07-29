@@ -14,7 +14,6 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
-	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // processTeamsRoomCreate reconciles each chat in a Teams room-creation batch
@@ -180,11 +179,11 @@ func (h *Handler) resolveMember(ctx context.Context, account, graphID string) (*
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 
-	// _id == employeeId == the deterministic Graph-id hash, so this person is one
-	// identity whether resolved here or via the HR feed, and hr-sync-worker keys
-	// its upsert on the (now non-empty) employeeId.
-	id := teamsmigrate.EmployeeIDFromGraphID(graphID)
-	nu := model.User{ID: id, Account: account, SiteID: h.siteID, EmployeeID: id}
+	// A deterministic _id from the Graph id means this person maps to one identity
+	// at every site (hr-sync-worker keys the upsert on account). No employeeId —
+	// migrated externals aren't employees.
+	id := idgen.DeterministicID([]byte(graphID))
+	nu := model.User{ID: id, Account: account, SiteID: h.siteID}
 	if h.publishUsers != nil {
 		iuc := model.IUserWithChange{User: nu, ChangeType: model.IChangeTypeNewHire}
 		if err := h.publishUsers(ctx, []model.IUserWithChange{iuc}); err != nil {
