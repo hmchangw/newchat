@@ -161,3 +161,56 @@ func TestStreamTranslator_JWTFailurePersistsAfterRefresh(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to verify jwt")
 }
+
+// An accessToken fetch failure surfaces before any translate call is made.
+func TestStreamTranslator_TokenFetchError(t *testing.T) {
+	atSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer atSrv.Close()
+
+	// The translate endpoint is never reached because the token fetch fails first.
+	tr := newStreamTranslator("http://translate.invalid", atSrv.URL, "J1", 5*time.Second, time.Minute)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "get access token")
+}
+
+// A jwt failure whose forced refresh also fails returns the refresh error, not a retry.
+func TestStreamTranslator_RefreshErrorAfterJWTFailure(t *testing.T) {
+	tSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message": "failed to verify jwt"}`)
+	}))
+	defer tSrv.Close()
+
+	var atCalls int32
+	atSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&atCalls, 1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"token":"J2","expiresAt":"`+rfc3339In(time.Hour)+`","username":"u","jwtRequestId":"j"}`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError) // the forced refresh fails
+	}))
+	defer atSrv.Close()
+
+	tr := newStreamTranslator(tSrv.URL, atSrv.URL, "J1", 5*time.Second, time.Minute)
+	_, err := tr.Translate(context.Background(), "hi", "zhTW")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refresh access token after jwt failure")
+}
+
+// A non-JWT error body with no SSE data surfaces a sanitized backend error.
+func TestStreamTranslator_BackendErrorNonJWT(t *testing.T) {
+	tSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `<html>internal server error</html>`) // not SSE, not JWT JSON
+	}))
+	defer tSrv.Close()
+
+	tr := streamTranslatorTo(t, tSrv.URL)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "translate backend error")
+}

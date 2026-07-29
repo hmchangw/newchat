@@ -31,6 +31,7 @@ type Config struct {
 	J1Token        string        `env:"TRANSLATION_J1_TOKEN"         envDefault:""`
 	HTTPTimeout    time.Duration `env:"TRANSLATION_HTTP_TIMEOUT"     envDefault:"30s"`
 	TokenSkew      time.Duration `env:"TRANSLATION_TOKEN_SKEW"       envDefault:"60s"`
+	MaxWorkers     int           `env:"MAX_WORKERS"                  envDefault:"100"`
 	NATS           NATSConfig    `envPrefix:"NATS_"`
 }
 
@@ -89,7 +90,10 @@ func main() {
 	}
 
 	handler := NewHandler(translator, publish)
-	router := natsrouter.Default(nc, "translation-service")
+	// Cap in-flight handlers so a slow translate backend can't accumulate goroutines
+	// and outbound connections without ceiling; saturation drops the fire-and-forget
+	// request (logged) rather than piling up.
+	router := natsrouter.Default(nc, "translation-service", natsrouter.WithMaxConcurrency(cfg.MaxWorkers))
 	natsrouter.RegisterVoid(router, subject.TranslateRequestPattern(cfg.SiteID), handler.Translate)
 
 	slog.Info("translation-service running", "site", cfg.SiteID, "backend", cfg.Backend)
