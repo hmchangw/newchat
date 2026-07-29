@@ -5581,6 +5581,7 @@ This RPC uses the **publish + async-reply** pattern, not the standard NATS reque
 | `requestId` | string | yes | Client-generated correlation key (36-char hyphenated UUID). The result is published to `chat.user.{account}.response.{requestId}`. A request with an empty `requestId` yields no result (undeliverable). |
 | `text` | string | yes | The text to translate. No length cap is enforced by the service. |
 | `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settingsget) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
+| `timestamp` | int64 | no | Client publish time (UTC ms). Informational — the service does not require or act on it. |
 
 ##### Supported languages
 

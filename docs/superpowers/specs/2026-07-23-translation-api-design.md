@@ -41,7 +41,7 @@ channel `msg.send` and `AsyncJobResult` already use).
 JetStream — the request/result flow is core NATS pub/sub. It does not participate in
 message federation and does not touch any stream.
 
-```
+```text
 client ──publish TranslateRequest──▶ chat.user.{account}.request.translate.{siteID}
                                              │  (queue group: translation-service)
                                              ▼
@@ -64,17 +64,17 @@ func TranslateRequest(account, siteID string) string {
     return fmt.Sprintf("chat.user.%s.request.translate.%s", account, siteID)
 }
 
-// TranslateRequestPattern is the wildcard the service QueueSubscribes to (raw NATS,
-// account is a wildcard token extracted from the delivered subject).
+// TranslateRequestPattern is the natsrouter registration pattern; {account} is a
+// named token read via c.Param("account").
 func TranslateRequestPattern(siteID string) string {
-    return fmt.Sprintf("chat.user.*.request.translate.%s", siteID)
+    return fmt.Sprintf("chat.user.{account}.request.translate.%s", siteID)
 }
 ```
 
 The result is published to the **existing** `UserResponse(account, requestID)`
 builder — `chat.user.{account}.response.{requestID}` — no new result subject is
-introduced. The account is extracted from the delivered request subject (token index
-2, `chat.user.<account>.request.translate.<siteID>`).
+introduced. The account is provided by natsrouter as the `{account}` path parameter
+(`c.Param("account")`) of `chat.user.{account}.request.translate.{siteID}`.
 
 ## Request / Result Types (`pkg/model/translation.go`)
 

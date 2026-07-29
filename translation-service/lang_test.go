@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestNormalizeTargetLang(t *testing.T) {
 	cases := []struct {
@@ -45,12 +49,8 @@ func TestNormalizeTargetLang(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := normalizeTargetLang(tc.tag)
-			if ok != tc.wantOK {
-				t.Fatalf("normalizeTargetLang(%q) ok = %v, want %v", tc.tag, ok, tc.wantOK)
-			}
-			if got != tc.want {
-				t.Fatalf("normalizeTargetLang(%q) = %q, want %q", tc.tag, got, tc.want)
-			}
+			require.Equal(t, tc.wantOK, ok, "normalizeTargetLang(%q) ok", tc.tag)
+			require.Equal(t, tc.want, got, "normalizeTargetLang(%q)", tc.tag)
 		})
 	}
 }

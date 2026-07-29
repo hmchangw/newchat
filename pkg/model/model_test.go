@@ -4937,6 +4937,7 @@ func TestTranslateRequestJSON(t *testing.T) {
 		RequestID:  "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		Text:       "Hello world",
 		TargetLang: "zhTW",
+		Timestamp:  1_700_000_000_000,
 	}
 	roundTrip(t, &r, &model.TranslateRequest{})
 }

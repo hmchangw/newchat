@@ -119,7 +119,9 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 				return "", false, fmt.Errorf("decode stream chunk: %w", uerr)
 			}
 			if chunk.ReturnCode != successReturnCode {
-				return "", false, fmt.Errorf("translate backend returnCode %d: %s", chunk.ReturnCode, chunk.ReturnMessage)
+				// ReturnMessage is third-party-controlled — do not propagate it into
+				// caller-visible errors; keep only the trusted numeric returnCode.
+				return "", false, fmt.Errorf("translate backend rejected request (returnCode %d)", chunk.ReturnCode)
 			}
 			merged.WriteString(chunk.ReturnData.Translation) // verbatim, whitespace preserved
 		case trimmed != "":

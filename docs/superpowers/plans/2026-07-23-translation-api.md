@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Go 1.25; module `github.com/hmchangw/chat`; single root `go.mod`.
-- Use `make` targets, never raw `go`: `make test SERVICE=translation-service`, `make generate SERVICE=translation-service`, `make build SERVICE=translation-service`, `make lint`.
+- Prefer `make` targets for whole-suite runs: `make test SERVICE=translation-service`, `make generate SERVICE=translation-service`, `make build SERVICE=translation-service`, `make lint`. The steps below use raw `go test ... -run <Name>` only for targeted single-test TDD iterations that the `make` wrappers do not expose.
 - TDD Red-Green-Refactor for all code; ≥80% coverage (target 90%+ on handler/translator).
 - All NATS payloads are typed structs from `pkg/model`, JSON via `encoding/json` (this service is not a hot-path sonic worker).
 - Errors: named `errcode` constructors + `WithReason`; infra failures raw-wrapped `fmt.Errorf("...: %w", err)`.
@@ -20,7 +20,7 @@
 - Config via `caarlos0/env` typed struct; `SCREAMING_SNAKE_CASE`; secrets `required`, never defaulted, never logged.
 - Service layout: flat `package main` at repo root; `deploy/` with Dockerfile (`golang:1.25.12-alpine` → `alpine:3.21`), docker-compose.yml, azure-pipelines.yml.
 - Client-facing wire changes update `docs/client-api.md` **and** derived views `docs/client-api/request-reply.md` + `docs/client-api/events.md`.
-- Target languages (pass through unchanged, validate at handler): `zhTW`, `zhCN`, `en`, `de`, `ja`.
+- Target language: the client sends a **BCP-47 tag** (the user's `settings.translateMessageInto` value, unchanged); the handler normalizes it via `normalizeTargetLang` (`lang.go`) to a backend code (`zhTW`, `zhCN`, `en`, `de`, `ja`) and rejects unresolvable tags as `unsupported_lang`.
 
 ---
 
@@ -648,9 +648,8 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-var allowedLangs = map[string]bool{
-	"zhTW": true, "zhCN": true, "en": true, "de": true, "ja": true,
-}
+// normalizeTargetLang (in lang.go) maps the client's BCP-47 targetLang tag to a
+// backend code (zhTW/zhCN/en/de/ja) and reports ok=false for unresolvable tags.
 
 // Handler validates translate requests, calls the backend, and publishes the
 // TranslateResult on the requester's async response subject.
@@ -683,13 +682,16 @@ func (h *Handler) Translate(c *natsrouter.Context, req model.TranslateRequest) e
 			errcode.BadRequest("text is empty", errcode.WithReason(errcode.TranslateEmptyText)))
 		return nil
 	}
-	if !allowedLangs[req.TargetLang] {
+	// targetLang is a BCP-47 tag; normalize it to the backend code. The result
+	// still echoes the client's original tag, not the mapped code.
+	backendLang, ok := normalizeTargetLang(req.TargetLang)
+	if !ok {
 		h.publishResult(c, account, req.RequestID, req.TargetLang, "",
 			errcode.BadRequest("unsupported targetLang", errcode.WithReason(errcode.TranslateUnsupportedLang)))
 		return nil
 	}
 
-	translated, err := h.translator.Translate(c, req.Text, req.TargetLang)
+	translated, err := h.translator.Translate(c, req.Text, backendLang)
 	if err != nil {
 		h.publishResult(c, account, req.RequestID, req.TargetLang, "",
 			fmt.Errorf("translate backend: %w", err))
