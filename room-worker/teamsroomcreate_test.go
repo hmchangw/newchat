@@ -277,7 +277,8 @@ func TestResolveMember_AlignmentInvariant(t *testing.T) {
 
 	got, err := h.resolveMember(context.Background(), "dave", "aad-dave", "Dave 大衛")
 	require.NoError(t, err)
-	assert.Same(t, want, got) // existing user returned unchanged — displayName ignored
+	assert.Same(t, want, got)
+	assert.Empty(t, got.ChineseName, "existing user keeps its name — the passed displayName is ignored")
 }
 
 // TestResolveMember_PublishesDeterministicIdentity: an unknown account is
