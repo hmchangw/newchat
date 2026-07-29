@@ -104,7 +104,7 @@ func TestRun_ListChatsFailure(t *testing.T) {
 func TestRun_SharedMemberResolvedOncePerRun(t *testing.T) {
 	s, chats, users, graph := newTestSyncer(t, 4)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:a", UpdatedAt: wtNow}, {ID: "19:b", UpdatedAt: wtNow}}, nil)
-	// Both chats contain the same member u9; the account cache resolves it once.
+	// Both chats contain the same member u9; the user-ref cache resolves it once.
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:a").
 		Return([]msgraph.ChatMemberDetail{member("u9")}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:b").

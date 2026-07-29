@@ -104,10 +104,11 @@ const inlineMemberThreshold = 25
 func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defaultSiteID string) model.TeamsChat {
 	members := make([]model.TeamsChatMember, 0, len(gc.Members))
 	for _, m := range gc.Members {
+		cu := cache[m.UserID]
 		members = append(members, model.TeamsChatMember{
 			ID:                          m.UserID,
-			Account:                     cache[m.UserID].account,
-			DisplayName:                 cache[m.UserID].displayName,
+			Account:                     cu.account,
+			DisplayName:                 cu.displayName,
 			VisibleHistoryStartDateTime: m.VisibleHistoryStartDateTime,
 		})
 	}

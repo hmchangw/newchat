@@ -63,6 +63,11 @@ const TeamsChatTypeOneOnOne = "oneOnOne"
 // TeamsChatMember is one member of a synced Teams chat. Account and
 // DisplayName are both resolved from teams_user, so both are empty when the
 // member is not in teams_user (guests / users outside the system).
+//
+// DisplayName mirrors teams_user.displayName — Graph's raw value, NOT the
+// render-ready name other services compose via displayfmt.CombineWithFallback.
+// A consumer that needs the composed form must build it from the user's
+// engName/chineseName rather than rendering this field directly.
 type TeamsChatMember struct {
 	ID                          string    `json:"id" bson:"id"`
 	Account                     string    `json:"account" bson:"account"`

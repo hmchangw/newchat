@@ -47,8 +47,8 @@ type teamsUserRef struct {
 }
 
 // TeamsUserStore resolves userIds to their teams_user identity fields (read
-// client), since Graph's member payload carries neither. Satisfied by
-// *mongoStore.
+// client), since Graph's member payload carries neither the account nor the
+// display name. Satisfied by *mongoStore.
 type TeamsUserStore interface {
 	// UsersByIDs returns userId->ref for the ids present in teams_user;
 	// ids without a record are absent from the map.

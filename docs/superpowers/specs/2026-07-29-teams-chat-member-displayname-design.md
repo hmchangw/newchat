@@ -67,7 +67,8 @@ behaviour account resolution has today.
 from `{_id, account}` to `{_id, account, displayName}`. Still one query, still
 served by the read client.
 
-**`syncer.go`** — `accountCache.cache` becomes `map[string]teamsUserRef`. The
+**`syncer.go`** — `accountCache` is renamed `userRefCache` and its `cache`
+becomes `map[string]teamsUserRef` (it no longer caches an account). The
 batching, the mutex discipline, and the cache-the-miss semantics are unchanged;
 only the cached value type widens. `buildMembers` sets `DisplayName` from the
 same resolved ref it already reads `Account` from.
@@ -111,7 +112,7 @@ JSON and BSON round-trips and to the `TeamsRoomCreateEvent` round-trip, so the
 new tags are covered in both codecs.
 
 **`teams-chat-member-sync`**
-- Rework the `accountCache` tests (batching, only-queries-uncached,
+- Rework the `userRefCache` tests (batching, only-queries-uncached,
   concurrent-resolve-no-race) and `TestBuildMembers_ResolvesAllViaLookup` onto
   `UsersByIDs`/`teamsUserRef`.
 - Add: a member absent from `teams_user` yields both `Account` and
