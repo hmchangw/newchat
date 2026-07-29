@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -46,10 +47,18 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		return errors.New("chat has no id")
 	}
 
+	// A Teams chat id (…@thread.v2 / …@unq.gbl.spaces) can't be a room id — its
+	// dots/@ break NATS subject tokenisation — so derive a base62 id from it
+	// deterministically (same id on every redelivery). Name falls back to the
+	// members when the chat has no topic (a DM or an unnamed group).
+	name := chat.Name
+	if name == "" {
+		name = composeMigratedRoomName(chat.Members)
+	}
 	room := &model.Room{
-		ID:        chat.ID, // chat id is the room id — idempotent on redelivery
-		Name:      chat.Name,
-		Type:      model.RoomTypeChannel,
+		ID:        idgen.DeterministicID([]byte(chat.ID)),
+		Name:      name,
+		Type:      roomTypeFromTeamsChatID(chat.ID),
 		SiteID:    h.siteID,
 		Origin:    model.OriginTeams,
 		CreatedAt: chat.CreatedDateTime.UTC(),
@@ -163,6 +172,31 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		return fmt.Errorf("federate departed members: %w", err)
 	}
 	return nil
+}
+
+// teamsDMChatIDSuffix marks a Teams 1:1 chat id; group/meeting ids end in @thread.v2.
+const teamsDMChatIDSuffix = "@unq.gbl.spaces"
+
+// roomTypeFromTeamsChatID classifies a migrated room by the Teams chat id suffix:
+// a 1:1 (…@unq.gbl.spaces) is a DM, anything else (group/meeting) a channel.
+func roomTypeFromTeamsChatID(chatID string) model.RoomType {
+	if strings.HasSuffix(chatID, teamsDMChatIDSuffix) {
+		return model.RoomTypeDM
+	}
+	return model.RoomTypeChannel
+}
+
+// composeMigratedRoomName joins the members' display names with ", " — the room
+// name for a DM or an unnamed group (a chat with no Teams topic). Isolated so the
+// format is a one-place change.
+func composeMigratedRoomName(members []model.TeamsRoomCreateMember) string {
+	names := make([]string, 0, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			names = append(names, m.DisplayName)
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // resolveMember returns account's user, publishing a new identity when none

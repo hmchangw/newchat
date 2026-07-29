@@ -79,7 +79,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	}
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "carol").Return(nil, ErrUserNotFound)
 	store.EXPECT().GetUser(gomock.Any(), "dave").Return(&model.User{ID: "u4", Account: "dave", SiteID: "site-b"}, nil)
@@ -87,14 +87,14 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 		func(_ context.Context, subs []*model.Subscription) error {
 			require.Len(t, subs, 3)
 			for _, s := range subs {
-				assert.Equal(t, "chat1", s.RoomID)
+				assert.Equal(t, idgen.DeterministicID([]byte("chat1")), s.RoomID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
 				assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
 				assert.Equal(t, model.OriginTeams, s.Origin)
 			}
 			return nil
 		})
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "chat1").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{
 		ID:   "chat1",
@@ -133,10 +133,10 @@ func TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers(t *testing.T) {
 	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub))
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "chat1").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{
 		ID: "chat1", Name: "Project Sync",
@@ -156,7 +156,7 @@ func TestProcessTeamsRoomCreate_DedupsDuplicateAccounts(t *testing.T) {
 	h, _ := newTeamsTestHandler(t, store)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil) // exactly once
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, subs []*model.Subscription) error {
@@ -164,7 +164,7 @@ func TestProcessTeamsRoomCreate_DedupsDuplicateAccounts(t *testing.T) {
 			assert.Equal(t, "alice", subs[0].User.Account)
 			return nil
 		})
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "chat1").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{
 		ID: "chat1",
@@ -184,12 +184,12 @@ func TestProcessTeamsRoomCreate_HardRemoveOnly(t *testing.T) {
 	h, published := newTeamsTestHandler(t, store)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return([]model.Subscription{
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
 		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-b"},
 	}, nil)
-	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), "chat1", []string{"bob"}).Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "chat1").Return(nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), []string{"bob"}).Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{
 		ID:      "chat1",
@@ -218,7 +218,7 @@ func TestProcessTeamsRoomCreate_IdempotentNoOp(t *testing.T) {
 	h, published := newTeamsTestHandler(t, store)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return([]model.Subscription{
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
 	}, nil)
 
@@ -242,15 +242,15 @@ func TestProcessTeamsRoomCreate_PerChatIsolation(t *testing.T) {
 	// chat "bad" errors at CreateRoom; chat "good" proceeds normally.
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, room *model.Room, _ *roomkeystore.RoomKeyPair) (bool, error) {
-			if room.ID == "bad" {
+			if room.ID == idgen.DeterministicID([]byte("bad")) {
 				return false, assert.AnError
 			}
 			return true, nil
 		}).Times(2)
-	store.EXPECT().ListByRoom(gomock.Any(), "good").Return(nil, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "good").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chats := []model.TeamsRoomCreateChat{
 		{ID: "bad", Members: []model.TeamsRoomCreateMember{{ID: "x", Account: "zoe"}}},
@@ -313,6 +313,70 @@ func TestResolveMember_PublishesDeterministicIdentity(t *testing.T) {
 	assert.Equal(t, "site-a", got.SiteID)
 }
 
+func TestRoomTypeFromTeamsChatID(t *testing.T) {
+	cases := []struct {
+		name, id string
+		want     model.RoomType
+	}{
+		{"1:1 dm", "19:abc@unq.gbl.spaces", model.RoomTypeDM},
+		{"group", "19:abc@thread.v2", model.RoomTypeChannel},
+		{"meeting", "19:meeting_abc@thread.v2", model.RoomTypeChannel},
+		{"no suffix", "chat1", model.RoomTypeChannel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, roomTypeFromTeamsChatID(tc.id))
+		})
+	}
+}
+
+func TestComposeMigratedRoomName(t *testing.T) {
+	assert.Equal(t, "Alice 愛麗絲, Bob 鮑伯", composeMigratedRoomName([]model.TeamsRoomCreateMember{
+		{Account: "alice", DisplayName: "Alice 愛麗絲"},
+		{Account: "bob", DisplayName: "Bob 鮑伯"},
+	}))
+	assert.Equal(t, "Alice 愛麗絲", composeMigratedRoomName([]model.TeamsRoomCreateMember{
+		{Account: "alice", DisplayName: "Alice 愛麗絲"},
+		{Account: "ghost", DisplayName: ""}, // unresolved member — no name to add
+	}))
+	assert.Empty(t, composeMigratedRoomName(nil))
+}
+
+// TestReconcileTeamsRoom_DerivesIdTypeName: a 1:1 chat (@unq.gbl.spaces, no topic)
+// becomes a DM room with a base62 id derived from the chat id and a name composed
+// from the two members' display names.
+func TestReconcileTeamsRoom_DerivesIdTypeName(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+	chatID := "19:dm-abc@unq.gbl.spaces"
+	wantRoomID := idgen.DeterministicID([]byte(chatID))
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, room *model.Room, _ *roomkeystore.RoomKeyPair) (bool, error) {
+			assert.Equal(t, wantRoomID, room.ID, "id derived from chat id, not the raw Teams id")
+			assert.Equal(t, model.RoomTypeDM, room.Type, "@unq.gbl.spaces → dm")
+			assert.Equal(t, "Alice 愛麗絲, Bob 鮑伯", room.Name, "no topic → composed member names")
+			return true, nil
+		})
+	store.EXPECT().ListByRoom(gomock.Any(), wantRoomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "bob").Return(&model.User{ID: "u2", Account: "bob", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), wantRoomID).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:   chatID,
+		Name: "",
+		Members: []model.TeamsRoomCreateMember{
+			{ID: "aad-a", Account: "alice", DisplayName: "Alice 愛麗絲"},
+			{ID: "aad-b", Account: "bob", DisplayName: "Bob 鮑伯"},
+		},
+		CreatedDateTime: time.Unix(0, 0).UTC(),
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+}
+
 // TestProcessTeamsRoomCreate_MalformedBatch: an unparsable envelope is Permanent
 // (poison) — never redelivered.
 func TestProcessTeamsRoomCreate_MalformedBatch(t *testing.T) {
@@ -362,10 +426,10 @@ func TestProcessTeamsRoomCreate_StampsMigrationHeader(t *testing.T) {
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), "chat1").Return(nil, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "chat1").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
 
 	chat := model.TeamsRoomCreateChat{
 		ID:      "chat1",
