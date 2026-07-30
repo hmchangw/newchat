@@ -88,7 +88,7 @@ func TestTransformer_InsertToCanonical(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	// Native JetStream context: this verification consumer uses Fetch (batch pull),
@@ -189,7 +189,7 @@ func TestTransformer_SoftDeleteToHistory(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 

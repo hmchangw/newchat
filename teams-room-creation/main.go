@@ -63,7 +63,7 @@ func run() error {
 	// No OTel SDK wired for this job (plain slog, like the sibling teams-* jobs);
 	// NATS still needs a tracer/propagator, so pass no-ops. o11y/nats also gates
 	// header work on O11Y_ENABLED, so this stays off the hot path.
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}

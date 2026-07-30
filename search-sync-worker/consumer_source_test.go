@@ -33,6 +33,7 @@ func (f fakeO11yBatch) Messages() <-chan o11ynats.FetchedMessage {
 }
 
 func (f fakeO11yBatch) Error() error { return nil }
+func (f fakeO11yBatch) Stop()        {}
 
 // fakeO11yConsumer embeds o11ynats.Consumer (nil) and overrides Fetch.
 type fakeO11yConsumer struct {

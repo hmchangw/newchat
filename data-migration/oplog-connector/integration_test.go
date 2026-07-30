@@ -94,14 +94,14 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sdkShutdown(context.Background()) })
 
-	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator)
+	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer conn.Close()
 
 	_, err = source.InsertOne(ctx, bson.M{"_id": "m1", "msg": "hi"})
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())
@@ -345,7 +345,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sdkShutdown(context.Background()) })
 
-	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator)
+	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -354,7 +354,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 	_, err = msgs.InsertOne(ctx, bson.M{"_id": "m1", "msg": "hi"}) // no watcher — must not be forwarded
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())
