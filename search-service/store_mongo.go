@@ -43,13 +43,19 @@ func (s *mongoStore) ensureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (u.account, roomId) index: %w", err)
 	}
+	// users.account is owned by user-service and is UNIQUE — match that spec so
+	// the shared account_1 index doesn't conflict (a non-unique one collides).
 	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "account", Value: 1}},
+		Keys:    bson.D{{Key: "account", Value: 1}},
+		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		return fmt.Errorf("ensure users (account) index: %w", err)
 	}
+	// apps.assistant.name is owned by user-service with the explicit name
+	// assistant_name_idx — match it (auto-naming here collides on the same keys).
 	if _, err := s.apps.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "assistant.name", Value: 1}},
+		Keys:    bson.D{{Key: "assistant.name", Value: 1}},
+		Options: options.Index().SetName("assistant_name_idx"),
 	}); err != nil {
 		return fmt.Errorf("ensure apps (assistant.name) index: %w", err)
 	}
