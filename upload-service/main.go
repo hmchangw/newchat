@@ -68,6 +68,8 @@ type config struct {
 	MinioDownloadTimeout time.Duration `env:"MINIO_DOWNLOAD_TIMEOUT" envDefault:"5m"`
 
 	Drive drive.Config `envPrefix:"DRIVE_"`
+	// LegacyDrive backs the /api/v3 download: a separate backend with its own LEGACY_DRIVE_* config; point its baseurls path at a distinct file (envDefault matches Drive's).
+	LegacyDrive drive.Config `envPrefix:"LEGACY_DRIVE_"`
 }
 
 func main() {
@@ -85,6 +87,7 @@ func run() error {
 
 	ctx := context.Background()
 	cfg.Drive.LoadBaseURLs()
+	cfg.LegacyDrive.LoadBaseURLs()
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
@@ -97,6 +100,7 @@ func run() error {
 	}
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
 	driveClient := drive.NewClient(&cfg.Drive)
+	legacyDriveClient := drive.NewClient(&cfg.LegacyDrive)
 
 	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))
 	if err != nil {
@@ -126,7 +130,8 @@ func run() error {
 
 	mimeFilter := newMediaTypeFilter(cfg.FileUploadMediaTypeWhitelist, cfg.FileUploadMediaTypeBlacklist)
 	handler := NewHandler(store, driveClient, s3Store, cfg.MaxImages, cfg.MaxAttachments, cfg.MaxImageSizeBytes,
-		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned)
+		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
+		legacyDriveClient)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
