@@ -68,8 +68,16 @@ func ensureCassandraSession() (string, *gocql.Session, error) {
 		cluster.Timeout = 30 * time.Second
 		// Cassandra in Docker reports its rpc_address as the container's internal IP; skip discovery to use the mapped port.
 		cluster.DisableInitialHostLookup = true
-		s, err := cluster.CreateSession()
-		if err != nil {
+		// The "Starting listening for CQL clients" log line fires before the port
+		// reliably completes a handshake: under CI load Cassandra accepts the
+		// connection and immediately closes it, which gocql reports as "unable to
+		// discover protocol version: EOF". Retry until it genuinely answers.
+		var s *gocql.Session
+		if err := retryUntil(2*time.Minute, func() error {
+			var sessErr error
+			s, sessErr = cluster.CreateSession()
+			return sessErr
+		}); err != nil {
 			_ = container.Terminate(ctx)
 			cassInitErr = fmt.Errorf("create cassandra session: %w", err)
 			return

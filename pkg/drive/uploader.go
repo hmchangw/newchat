@@ -66,7 +66,7 @@ func (c *Client) UploadGroupImages(userID, username, email, groupID, origin stri
 		"email":    email,
 	}
 	for i, f := range files {
-		req.SetMultipartField(fmt.Sprintf("files[%d].file", i), f.Filename, defaultContentType, f.File)
+		req.SetFileReader(fmt.Sprintf("files[%d].file", i), f.Filename, f.File)
 		formData[fmt.Sprintf("files[%d].fileName", i)] = f.Filename
 		formData[fmt.Sprintf("files[%d].mode", i)] = "Normal"
 	}
