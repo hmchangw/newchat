@@ -193,6 +193,7 @@ func main() {
 		SpotlightReadPattern:    spotlightReadPattern,
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
 	})
+	handler.room = newRoomClient(nc)
 
 	router := natsrouter.New(nc, "search-service")
 	router.Use(natsrouter.RequestID())

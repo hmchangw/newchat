@@ -4946,3 +4946,30 @@ func TestMessage_TypeBSONOmitEmpty(t *testing.T) {
 	_, ok := raw["type"]
 	assert.False(t, ok, "empty Type must be absent in BSON")
 }
+
+func TestSearchMessageEnrichmentJSON(t *testing.T) {
+	m := model.SearchMessage{
+		MessageID:   "m1",
+		RoomID:      "r1",
+		SiteID:      "site-a",
+		UserAccount: "alice",
+		Content:     "hi",
+		CreatedAt:   time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+		TShow:       true,
+		Sender:      &model.MessageSender{Account: "alice", DisplayName: "Alice Wong"},
+		Room: &model.MessageRoom{
+			ID:     "r1",
+			Name:   "Bob Chan",
+			Type:   model.RoomTypeDM,
+			HRInfo: &model.SubscriptionHRInfo{Account: "bob", Name: "陳", EngName: "Bob Chan"},
+		},
+	}
+	roundTrip(t, &m, &model.SearchMessage{})
+
+	// omitempty: a zero-value SearchMessage must not emit room/sender/tshow keys.
+	b, err := json.Marshal(model.SearchMessage{MessageID: "x"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "\"room\"")
+	assert.NotContains(t, string(b), "\"sender\"")
+	assert.NotContains(t, string(b), "\"tshow\"")
+}

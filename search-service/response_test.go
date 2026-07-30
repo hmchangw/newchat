@@ -294,3 +294,18 @@ func TestToSearchOrg_ProjectsAllFields(t *testing.T) {
 		DivisionID: "DIV1",
 	}, got)
 }
+
+func TestParseMessagesResponse_DecodesTShow(t *testing.T) {
+	raw := json.RawMessage(`{"hits":{"total":{"value":1},"hits":[
+		{"_source":{"messageId":"m1","roomId":"r1","siteId":"s","userAccount":"a",
+		 "content":"c","createdAt":"2026-04-01T12:00:00Z","threadParentMessageId":"p0","tshow":true}}
+	]}}`)
+	hits, total, err := parseMessagesResponse(raw)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Len(t, hits, 1)
+	assert.True(t, hits[0].TShow)
+
+	msg := toSearchMessage(&hits[0])
+	assert.True(t, msg.TShow)
+}
