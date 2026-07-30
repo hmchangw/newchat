@@ -37,9 +37,8 @@ type tokenProvider struct {
 }
 
 func newTokenProvider(accessTokenURL, j1Token string, timeout, skew time.Duration) *tokenProvider {
-	// The token exchange is a quick auth call; cap its client timeout well below a
-	// translate call so a hung accessToken endpoint can't hold the single-flight lock
-	// (and thus every waiting translate) for the full translate timeout.
+	// Cap the token-exchange timeout well below a translate call so a hung accessToken
+	// endpoint can't hold the lock (and every waiting translate) for the full timeout.
 	tokenTimeout := timeout
 	if tokenTimeout > 5*time.Second {
 		tokenTimeout = 5 * time.Second
