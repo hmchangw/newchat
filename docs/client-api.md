@@ -666,6 +666,53 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 ---
 
+#### GET /api/v3/rooms/:roomId/protected-image/:fileId
+
+**Endpoint:** `GET /api/v3/rooms/:roomId/protected-image/:fileId`
+**Reply:** synchronous HTTP response (raw file bytes, not JSON)
+
+Backward-compatible download for inline images referenced by **legacy message
+data** (produced by a prior system version). Behaves exactly like
+`GET /api/v1/file/rooms/:roomId/file/:fileId` above, except the bytes are proxied
+from a **separate (legacy) Drive backend** with its own credentials. The client
+calls this with the old-style path preserved in legacy messages.
+
+#### Request
+
+| Field | Source | Type | Required | Notes |
+|---|---|---|---|---|
+| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
+| `fileId` | path | string | yes | Legacy Drive file ID (from the original message data). |
+| `drive_host` | query | string | yes | Legacy Drive base URL carried in the legacy message data. |
+
+#### Success response
+
+`HTTP 200` — raw image binary streamed directly (not JSON), with the upstream
+`Content-Type` (defaulting to `application/octet-stream`).
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). HTTP statuses:
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is required" }` — also `roomId is required`, `fileId is required`. |
+| 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
+| 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
+| 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context. |
+| 503 | `unavailable` | — | `{ "code": "unavailable", "error": "failed to retrieve file" }` — Drive signer/download failure. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+---
+
 #### GET /api/v1/file-upload/:fileId/:fileName
 
 **Endpoint:** `GET /api/v1/file-upload/:fileId/:fileName`

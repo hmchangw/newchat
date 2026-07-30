@@ -29,6 +29,7 @@ For connection, auth, shared schemas, and error reference, see [../client-api.md
    - [POST /api/v1/file/rooms/:roomId/upload/images](#post-apiv1fileroomsroomiduploadimages)
    - [POST /api/v1/file/rooms/:roomId/upload/file](#post-apiv1fileroomsroomiduploadfile)
    - [GET /api/v1/file/rooms/:roomId/file/:fileId](#get-apiv1fileroomsroomidfilefileid)
+   - [GET /api/v3/rooms/:roomId/protected-image/:fileId](#get-apiv3roomsroomidprotected-imagefileid)
    - [GET /api/v1/file-upload/:fileId/:fileName](#get-apiv1file-uploadfileidfilename)
    - [Media Service — avatar endpoints](#media-service--avatar-endpoints)
    - [Media Service — emoji endpoints](#media-service--emoji-endpoints)
@@ -142,6 +143,23 @@ header wins); caller must be a room member. `drive_host` query param required.
 Called with the `relativePath` (image upload) or `titleLink` (file upload)
 returned by the upload endpoints. See
 [../client-api.md §2.4](../client-api.md#get-apiv1fileroomsroomidfilefileid).
+
+**Emits:** `None — HTTP-only.`
+
+---
+
+### GET /api/v3/rooms/:roomId/protected-image/:fileId
+
+**Endpoint:** `GET /api/v3/rooms/:roomId/protected-image/:fileId`
+**Reply:** synchronous HTTP response (raw file bytes, any type)
+
+Backward-compatible download for inline images in **legacy message data** (prior
+system version). Identical to `GET /api/v1/file/rooms/:roomId/file/:fileId` but
+proxied from a separate (legacy) Drive backend with its own credentials.
+`ssoToken` required (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie`
+for browser `<img>` downloads; header wins); caller must be a room member.
+`drive_host` query param required. See
+[../client-api.md §2.4](../client-api.md#get-apiv3roomsroomidprotected-imagefileid).
 
 **Emits:** `None — HTTP-only.`
 
