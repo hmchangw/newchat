@@ -38,6 +38,7 @@ type messageSearchHit struct {
 	UpdatedAt             *time.Time         `json:"updatedAt,omitempty"`
 	ThreadParentID        string             `json:"threadParentMessageId,omitempty"`
 	ThreadParentCreatedAt *time.Time         `json:"threadParentMessageCreatedAt,omitempty"`
+	TShow                 bool               `json:"tshow,omitempty"`
 	Attachments           []model.Attachment `json:"attachments,omitempty"`
 	Card                  *model.Card        `json:"card,omitempty"`
 }
@@ -74,10 +75,9 @@ func parseMessagesResponse(raw json.RawMessage) ([]messageSearchHit, int64, erro
 	return out, rr.Hits.Total.Value, nil
 }
 
-// toSearchMessage projects an internal messageSearchHit into the public
-// model.SearchMessage wire type. Display enrichment (user name, room name)
-// is the client's responsibility — resolve via user-service lookups (or
-// cache locally) using the UserAccount and RoomID returned here.
+// toSearchMessage projects an internal messageSearchHit into the base
+// model.SearchMessage wire type. Room/sender enrichment is layered on top by
+// enrichMessages; this builder carries only the fields sourced from the index.
 func toSearchMessage(hit *messageSearchHit) model.SearchMessage {
 	return model.SearchMessage{
 		MessageID:                    hit.MessageID,
@@ -90,6 +90,7 @@ func toSearchMessage(hit *messageSearchHit) model.SearchMessage {
 		UpdatedAt:                    hit.UpdatedAt,
 		ThreadParentMessageID:        hit.ThreadParentID,
 		ThreadParentMessageCreatedAt: hit.ThreadParentCreatedAt,
+		TShow:                        hit.TShow,
 		Attachments:                  hit.Attachments,
 		Card:                         hit.Card,
 	}
