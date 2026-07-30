@@ -100,7 +100,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		if _, ok := existingByAccount[member.Account]; ok {
 			continue // already a member — no change
 		}
-		user, err := h.resolveMember(ctx, member.Account, member.ID)
+		user, err := h.resolveMember(ctx, member.Account, member.ID, member.DisplayName)
 		if err != nil {
 			slog.WarnContext(ctx, "teams room-create: skip member, resolve failed",
 				"chat_id", chat.ID, "account", member.Account, "error", err)
@@ -170,7 +170,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 // upserts the same one; nothing is written locally first, so a redelivery
 // re-derives the same _id instead of splitting the user. Mirrors message-worker's
 // Teams sender resolver.
-func (h *Handler) resolveMember(ctx context.Context, account, graphID string) (*model.User, error) {
+func (h *Handler) resolveMember(ctx context.Context, account, graphID, displayName string) (*model.User, error) {
 	u, err := h.store.GetUser(ctx, account)
 	if err == nil {
 		return u, nil
@@ -183,7 +183,8 @@ func (h *Handler) resolveMember(ctx context.Context, account, graphID string) (*
 	// at every site (hr-sync-worker keys the upsert on account). No employeeId —
 	// migrated externals aren't employees.
 	id := idgen.DeterministicID([]byte(graphID))
-	nu := model.User{ID: id, Account: account, SiteID: h.siteID}
+	// displayName lands in ChineseName (mirrors message-worker's sender resolver).
+	nu := model.User{ID: id, Account: account, SiteID: h.siteID, ChineseName: displayName}
 	if h.publishUsers != nil {
 		iuc := model.IUserWithChange{User: nu, ChangeType: model.IChangeTypeNewHire}
 		if err := h.publishUsers(ctx, []model.IUserWithChange{iuc}); err != nil {

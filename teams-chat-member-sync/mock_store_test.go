@@ -96,19 +96,19 @@ func (m *MockTeamsUserStore) EXPECT() *MockTeamsUserStoreMockRecorder {
 	return m.recorder
 }
 
-// AccountsByIDs mocks base method.
-func (m *MockTeamsUserStore) AccountsByIDs(ctx context.Context, ids []string) (map[string]string, error) {
+// UsersByIDs mocks base method.
+func (m *MockTeamsUserStore) UsersByIDs(ctx context.Context, ids []string) (map[string]teamsUserRef, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "AccountsByIDs", ctx, ids)
-	ret0, _ := ret[0].(map[string]string)
+	ret := m.ctrl.Call(m, "UsersByIDs", ctx, ids)
+	ret0, _ := ret[0].(map[string]teamsUserRef)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// AccountsByIDs indicates an expected call of AccountsByIDs.
-func (mr *MockTeamsUserStoreMockRecorder) AccountsByIDs(ctx, ids any) *gomock.Call {
+// UsersByIDs indicates an expected call of UsersByIDs.
+func (mr *MockTeamsUserStoreMockRecorder) UsersByIDs(ctx, ids any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AccountsByIDs", reflect.TypeOf((*MockTeamsUserStore)(nil).AccountsByIDs), ctx, ids)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UsersByIDs", reflect.TypeOf((*MockTeamsUserStore)(nil).UsersByIDs), ctx, ids)
 }
 
 // MockmembersFetcher is a mock of membersFetcher interface.
