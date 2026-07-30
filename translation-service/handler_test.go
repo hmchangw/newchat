@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 
@@ -10,30 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
-type capturedPublish struct {
-	subj string
-	data []byte
-	n    int
-}
-
-func newTestHandler(tr Translator, cap *capturedPublish) *Handler {
-	h := NewHandler(tr, func(_ context.Context, subj string, data []byte) error {
-		cap.subj, cap.data, cap.n = subj, data, cap.n+1
-		return nil
-	})
-	h.now = func() int64 { return 1_700_000_000_000 }
-	return h
-}
-
-func decodeResult(t *testing.T, cap *capturedPublish) model.TranslateResult {
-	t.Helper()
-	var r model.TranslateResult
-	require.NoError(t, json.Unmarshal(cap.data, &r))
-	return r
+func testContext() *natsrouter.Context {
+	return natsrouter.NewContext(nil)
 }
 
 func TestHandler_Translate_Success(t *testing.T) {
@@ -42,20 +23,13 @@ func TestHandler_Translate_Success(t *testing.T) {
 	// Client sends the BCP-47 tag from settings; the backend receives the mapped code.
 	tr.EXPECT().Translate(gomock.Any(), "Hello", "zhTW").Return("你好", nil)
 
-	var cap capturedPublish
-	h := newTestHandler(tr, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+	res, err := NewHandler(tr).Translate(testContext(),
+		model.TranslateRequest{Text: "Hello", TargetLang: "zh-Hant-TW"})
 
-	err := h.Translate(c, model.TranslateRequest{RequestID: "req-1", Text: "Hello", TargetLang: "zh-Hant-TW"})
 	require.NoError(t, err)
-
-	assert.Equal(t, "chat.user.alice.response.req-1", cap.subj)
-	res := decodeResult(t, &cap)
-	assert.Equal(t, model.TranslateStatusOK, res.Status)
+	require.NotNil(t, res)
 	assert.Equal(t, "你好", res.TranslatedText)
 	assert.Equal(t, "zh-Hant-TW", res.TargetLang) // echoes the client's BCP-47 value, not the backend code
-	assert.Equal(t, "req-1", res.RequestID)
-	assert.Equal(t, int64(1_700_000_000_000), res.Timestamp)
 }
 
 func TestHandler_Translate_MapsRegionTagToBaseLang(t *testing.T) {
@@ -63,14 +37,10 @@ func TestHandler_Translate_MapsRegionTagToBaseLang(t *testing.T) {
 	tr := NewMockTranslator(ctrl)
 	tr.EXPECT().Translate(gomock.Any(), "Hello", "en").Return("Hello", nil) // en-US → en
 
-	var cap capturedPublish
-	h := newTestHandler(tr, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+	res, err := NewHandler(tr).Translate(testContext(),
+		model.TranslateRequest{Text: "Hello", TargetLang: "en-US"})
 
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-1a", Text: "Hello", TargetLang: "en-US"}))
-
-	res := decodeResult(t, &cap)
-	assert.Equal(t, model.TranslateStatusOK, res.Status)
+	require.NoError(t, err)
 	assert.Equal(t, "en-US", res.TargetLang) // client value echoed verbatim
 }
 
@@ -79,27 +49,22 @@ func TestHandler_Translate_ValidationErrors(t *testing.T) {
 		name       string
 		text       string
 		targetLang string
-		wantReason string
+		wantReason errcode.Reason
 	}{
-		{"empty text", "", "en", "empty_text"},
-		{"unsupported lang", "hi", "fr", "unsupported_lang"},
-		{"ambiguous bare zh", "hi", "zh", "unsupported_lang"}, // cannot resolve Traditional vs Simplified
+		{"empty text", "", "en", errcode.TranslateEmptyText},
+		{"unsupported lang", "hi", "fr", errcode.TranslateUnsupportedLang},
+		{"ambiguous bare zh", "hi", "zh", errcode.TranslateUnsupportedLang}, // cannot resolve Traditional vs Simplified
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var cap capturedPublish
-			h := newTestHandler(mockTranslator{}, &cap)
-			c := natsrouter.NewContext(map[string]string{"account": "alice"})
+			res, err := NewHandler(mockTranslator{}).Translate(testContext(),
+				model.TranslateRequest{Text: tc.text, TargetLang: tc.targetLang})
 
-			require.NoError(t, h.Translate(c, model.TranslateRequest{
-				RequestID: "req-val", Text: tc.text, TargetLang: tc.targetLang,
-			}))
-
-			res := decodeResult(t, &cap)
-			assert.Equal(t, model.TranslateStatusError, res.Status)
-			assert.Equal(t, "bad_request", res.Code)
-			assert.Equal(t, tc.wantReason, res.Reason)
-			assert.Equal(t, tc.targetLang, res.TargetLang) // client value echoed even on error
+			assert.Nil(t, res)
+			var ec *errcode.Error
+			require.ErrorAs(t, err, &ec)
+			assert.Equal(t, errcode.CodeBadRequest, ec.Code)
+			assert.Equal(t, tc.wantReason, ec.Reason)
 		})
 	}
 }
@@ -109,38 +74,13 @@ func TestHandler_Translate_BackendError(t *testing.T) {
 	tr := NewMockTranslator(ctrl)
 	tr.EXPECT().Translate(gomock.Any(), "hi", "en").Return("", errors.New("upstream down"))
 
-	var cap capturedPublish
-	h := newTestHandler(tr, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
+	res, err := NewHandler(tr).Translate(testContext(),
+		model.TranslateRequest{Text: "hi", TargetLang: "en"})
 
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-4", Text: "hi", TargetLang: "en"}))
-
-	res := decodeResult(t, &cap)
-	assert.Equal(t, model.TranslateStatusError, res.Status)
-	assert.Equal(t, "internal", res.Code)             // raw error collapses to internal
-	assert.NotContains(t, res.Error, "upstream down") // internal cause never leaks
-}
-
-func TestHandler_Translate_MissingRequestID_NoPublish(t *testing.T) {
-	var cap capturedPublish
-	h := newTestHandler(mockTranslator{}, &cap)
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "", Text: "hi", TargetLang: "en"}))
-	assert.Equal(t, 0, cap.n) // cannot address a response subject without requestId
-}
-
-func TestHandler_Translate_PublishErrorIsLoggedNotReturned(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	tr := NewMockTranslator(ctrl)
-	tr.EXPECT().Translate(gomock.Any(), "hi", "en").Return("hola", nil)
-
-	h := NewHandler(tr, func(_ context.Context, _ string, _ []byte) error {
-		return errors.New("nats down")
-	})
-	h.now = func() int64 { return 1 }
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-
-	// A publish failure is best-effort: logged, never returned to the router.
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-5", Text: "hi", TargetLang: "en"}))
+	assert.Nil(t, res)
+	require.Error(t, err)
+	// A backend failure is returned as a raw wrapped error (not a typed errcode), so
+	// it collapses to `internal` at the boundary and the cause never reaches the client.
+	var ec *errcode.Error
+	assert.False(t, errors.As(err, &ec), "backend error must stay untyped so it classifies to internal")
 }

@@ -1,24 +1,31 @@
-# Translation Service — Async Text Translation API Design
+# Translation Service — Text Translation API Design
+
+> **Revision (transport):** the RPC is now **synchronous NATS request/reply**
+> (`natsrouter.Register`), not the fire-and-forget publish + async-response-subject
+> shape this document originally described. A data-returning RPC gets an immediate,
+> correlated reply, and handler saturation surfaces as an `unavailable` reply instead
+> of a silent drop. Sections below have been updated; the canonical client contract is
+> [client-api.md §3.6](../../client-api.md#36-translation-service).
 
 ## Summary
 
 A new `translation-service` exposes an on-demand text-translation API to clients
-over NATS. The client **publishes** a translate request; the service performs the
-translation and **publishes** the result (success or failure) back on the client's
-async response subject. The translation backend is a third-party streaming API; for
-this iteration the backend is a **mock** (no network), behind a pluggable
-`Translator` interface so the real streaming client can be swapped in later without
-touching the handler.
+over NATS. The client sends a translate request via **NATS request/reply**; the
+service performs the translation and **replies** — a `TranslateResult` on success, or
+the standard errcode envelope on failure — on the auto-generated `_INBOX` reply
+subject. The translation backend is a third-party streaming API; for this iteration
+the backend is a **mock** (no network), behind a pluggable `Translator` interface so
+the real streaming client can be swapped in later without touching the handler.
 
-The flow is pure pub/sub (no synchronous reply), reusing the codebase's existing
-async-result convention (`chat.user.{account}.response.{requestID}`, the same
-channel `msg.send` and `AsyncJobResult` already use).
+The flow is synchronous request/reply — the same shape every other data-returning RPC
+in the codebase uses (`natsrouter.Register`). The service fully merges the backend's
+SSE stream into one string before replying, so the client-facing hop is unary.
 
 ## Scope
 
 **In scope**
 - New `translation-service` (flat `package main` service at repo root).
-- Client-facing async translate RPC: request subject + result on the response subject.
+- Client-facing synchronous translate RPC: request subject + reply on the caller's `_INBOX`.
 - `pkg/model` request/result types; `pkg/subject` subject builders; `pkg/errcode`
   reason codes.
 - Pluggable `Translator` backend: a **mock** implementation (default, used now) and a
@@ -38,11 +45,11 @@ channel `msg.send` and `AsyncJobResult` already use).
 ## Architecture
 
 `translation-service` is a stateless NATS consumer. No MongoDB, no Cassandra, no
-JetStream — the request/result flow is core NATS pub/sub. It does not participate in
-message federation and does not touch any stream.
+JetStream — the request/reply flow is core NATS. It does not participate in message
+federation and does not touch any stream.
 
 ```text
-client ──publish TranslateRequest──▶ chat.user.{account}.request.translate.{siteID}
+client ──request TranslateRequest──▶ chat.user.{account}.request.translate.{siteID}
                                              │  (queue group: translation-service)
                                              ▼
                                      translation-service handler
@@ -50,8 +57,7 @@ client ──publish TranslateRequest──▶ chat.user.{account}.request.trans
                                              ▼
                                      mock | streaming third-party (SSE, merged)
                                              │
-client ◀─TranslateResult (ok|error)── chat.user.{account}.response.{requestID}
-   (client already subscribed to chat.user.{account}.> )
+client ◀── TranslateResult | errcode envelope ──  reply on _INBOX (NATS request/reply)
 ```
 
 ## NATS Subjects
@@ -59,58 +65,40 @@ client ◀─TranslateResult (ok|error)── chat.user.{account}.response.{requ
 Added to `pkg/subject/subject.go`:
 
 ```go
-// TranslateRequest is the concrete subject a client publishes a TranslateRequest to.
+// TranslateRequest is the concrete subject a client sends a TranslateRequest to.
 func TranslateRequest(account, siteID string) string {
     return fmt.Sprintf("chat.user.%s.request.translate.%s", account, siteID)
 }
 
 // TranslateRequestPattern is the natsrouter registration pattern; {account} is a
-// named token read via c.Param("account").
+// named token that scopes the subject to the caller.
 func TranslateRequestPattern(siteID string) string {
     return fmt.Sprintf("chat.user.{account}.request.translate.%s", siteID)
 }
 ```
 
-The result is published to the **existing** `UserResponse(account, requestID)`
-builder — `chat.user.{account}.response.{requestID}` — no new result subject is
-introduced. The account is provided by natsrouter as the `{account}` path parameter
-(`c.Param("account")`) of `chat.user.{account}.request.translate.{siteID}`.
+The reply travels on the auto-generated `_INBOX` subject that NATS request/reply
+provides — no result subject is introduced and the handler does not read `{account}`
+(the token only scopes the subject to the caller via their NATS-JWT permissions).
 
 ## Request / Result Types (`pkg/model/translation.go`)
 
 ```go
-// TranslateRequest is the client→server payload published to
-// chat.user.{account}.request.translate.{siteID}. RequestID is the client-generated
-// correlation key; the result is published to chat.user.{account}.response.{RequestID}.
-// TargetLang is a BCP-47 tag normalized to a backend code (zhTW/zhCN/en/de/ja).
-// Timestamp is the client-side publish time (UTC ms); the service does not act on it.
+// TranslateRequest is the client→server request/reply payload on
+// chat.user.{account}.request.translate.{siteID}. TargetLang is a BCP-47 tag
+// normalized to a backend code (zhTW/zhCN/en/de/ja).
 type TranslateRequest struct {
-    RequestID  string `json:"requestId"`
     Text       string `json:"text"`
     TargetLang string `json:"targetLang"`
-    Timestamp  int64  `json:"timestamp"`
 }
 
-// TranslateResult is the async server→client result delivered on
-// chat.user.{account}.response.{requestID}. It mirrors AsyncJobResult's envelope:
-// Status is TranslateStatusOK / TranslateStatusError; on error Error/Code/Reason
-// carry the classified errcode envelope, typed as string so pkg/model does not
-// import pkg/errcode. Timestamp is set at publish via time.Now().UTC().UnixMilli().
+// TranslateResult is the server→client reply for a SUCCESSFUL translate RPC.
+// Failures are returned as a standard errcode error envelope instead, so this type
+// carries only the success payload. TargetLang echoes the client's original tag.
 type TranslateResult struct {
-    RequestID      string `json:"requestId"`
-    Status         string `json:"status"`
-    TranslatedText string `json:"translatedText,omitempty"`
-    TargetLang     string `json:"targetLang,omitempty"`
-    Error          string `json:"error,omitempty"`
-    Code           string `json:"code,omitempty"`
-    Reason         string `json:"reason,omitempty"`
-    Timestamp      int64  `json:"timestamp"`
+    TranslatedText string `json:"translatedText"`
+    TargetLang     string `json:"targetLang"`
 }
-
-const (
-    TranslateStatusOK    = "ok"
-    TranslateStatusError = "error"
-)
 ```
 
 `model_test.go` gains round-trip coverage for both types via the existing generic
@@ -134,36 +122,33 @@ Validation lives in the handler; unresolvable tags are rejected before any backe
 
 ## Handler Flow
 
-`translation-service/handler.go`:
+`translation-service/handler.go` — registered via `natsrouter.Register`, so the
+handler signature is `func(*natsrouter.Context, TranslateRequest) (*TranslateResult, error)`:
 
 1. `natsrouter` decodes the JSON payload into `TranslateRequest` before the handler
-   runs. A malformed payload cannot be decoded — and carries no usable `requestId` —
-   so there is no response subject to address; the router logs and drops it rather
-   than publishing a result (no async error is promised for undecodable input).
-2. `account` is the `{account}` path token, read via `c.Param("account")`.
-3. Validate:
-   - `RequestID` empty → drop (cannot address a response subject); log at warn. No
-     result can be delivered without a correlation key.
-   - `Text` empty → `BadRequest`, reason `TranslateEmptyText`.
-   - `TargetLang` does not resolve via `normalizeTargetLang` → `BadRequest`, reason
-     `TranslateUnsupportedLang`.
-4. Call `Translator.Translate(ctx, text, backendLang)` with the normalized code.
-5. On success → publish `TranslateResult{Status: ok, TranslatedText, TargetLang}`.
-6. On error → classify via `errcode.Classify` and fill `Error/Code/Reason`
-   (same shape as `AsyncJobResult`), publish `TranslateResult{Status: error, ...}`.
-7. Publish to `subject.UserResponse(account, req.RequestID)`; best-effort (log on
-   publish failure).
+   runs. A malformed payload is rejected by the router with a `bad_request` reply on
+   the caller's `_INBOX` — the handler never sees it.
+2. Validate:
+   - `Text` empty → return `errcode.BadRequest(..., WithReason(TranslateEmptyText))`.
+   - `TargetLang` does not resolve via `normalizeTargetLang` → return
+     `errcode.BadRequest(..., WithReason(TranslateUnsupportedLang))`.
+3. Call `Translator.Translate(ctx, text, backendLang)` with the normalized code.
+4. On success → return `&TranslateResult{TranslatedText, TargetLang}`; the router
+   marshals it as the reply.
+5. On backend error → return `fmt.Errorf("translate backend: %w", err)`; it collapses
+   to `internal` at the boundary.
 
 No length cap on `Text`.
 
 ### Error handling
 
-Because delivery is async pub/sub (no synchronous reply), errors are **not** returned
-through `errnats.Reply`. Instead the handler classifies the error once
-(`errcode.Classify`) and embeds the envelope in the `TranslateResult` — mirroring
-`room-worker`'s `fillAsyncError`. Validation errors use `errcode.BadRequest(...,
-errcode.WithReason(...))`; backend failures are raw-wrapped `fmt.Errorf` and collapse
-to `internal` at classification.
+Delivery is synchronous request/reply, so the handler simply returns a typed error and
+the router (`natsrouter.Register` → `errnats.Marshal`/`errcode.Classify`) replies with
+the `{code, reason?, error}` envelope on the caller's `_INBOX`, logging the cause once
+server-side. Validation errors use `errcode.BadRequest(..., errcode.WithReason(...))`;
+backend failures are raw-wrapped `fmt.Errorf` and collapse to `internal` at
+classification. Handler saturation (the `WithMaxConcurrency` semaphore) is replied as
+`errcode.Unavailable("service busy")` — a structured retry signal, never a silent drop.
 
 New reasons in `pkg/errcode/codes_translation.go`:
 
@@ -255,18 +240,18 @@ o11y wired once via `pkg/obs.Init`. Graceful shutdown via `pkg/shutdown.Wait`
   non-`96200` chunk → error; stream without `[DONE]` (EOF) → error; request body
   carries `applyWiki:false` and the pass-through `targetLang`.
 - `translation-service/translator_mock_test.go` — mock output shape.
-- `translation-service/handler_test.go` — table-driven with a mocked `Translator`:
-  valid translate → `ok` result on `UserResponse`; empty text → `BadRequest`/
+- `translation-service/handler_test.go` — table-driven with a mocked `Translator`,
+  calling the handler directly and asserting the returned `(*TranslateResult, error)`:
+  valid translate → result with the translated text; empty text → `BadRequest`/
   `empty_text`; unsupported lang → `BadRequest`/`unsupported_lang`; backend error →
-  `error` result with `internal` code; malformed payload → `BadRequest`; missing
-  `requestId` → no publish. The publish function is injected as a field so tests
-  capture published subject + payload without a real NATS connection.
+  raw (untyped) error that collapses to `internal`.
 
 ### Integration (optional, `//go:build integration`)
 
-- `translation-service/integration_test.go` — `testutil.NATS(t)` + an `httptest`
-  fake SSE backend; publish a `TranslateRequest`, subscribe to the response subject,
-  assert the merged `TranslateResult`. `TestMain` calls `testutil.RunTests(m)`.
+- `translation-service/integration_test.go` — registers the handler on a
+  `natsrouter` against `testutil.NATS(t)` and drives it via `nc.Request`, asserting
+  both a success `TranslateResult` reply and a `bad_request` envelope reply.
+  `TestMain` calls `testutil.RunTests(m)`.
 
 Coverage ≥ 80% (target 90%+ on handler and translator).
 
@@ -277,10 +262,10 @@ Coverage ≥ 80% (target 90%+ on handler and translator).
 | `pkg/errcode/codes_translation.go` | new — `TranslateUnsupportedLang`, `TranslateEmptyText` |
 | `pkg/subject/subject.go` | add `TranslateRequest`, `TranslateRequestPattern` |
 | `pkg/subject/subject_test.go` | add subject tests |
-| `pkg/model/translation.go` | new — `TranslateRequest`, `TranslateResult`, status consts |
+| `pkg/model/translation.go` | new — `TranslateRequest`, `TranslateResult` |
 | `pkg/model/model_test.go` | add round-trip cases |
-| `translation-service/main.go` | new — config, wiring, subscribe, shutdown |
-| `translation-service/handler.go` | new — request handler |
+| `translation-service/main.go` | new — config, wiring, register, shutdown |
+| `translation-service/handler.go` | new — request/reply handler |
 | `translation-service/handler_test.go` | new |
 | `translation-service/translator.go` | new — `Translator` iface + mock + stream + `//go:generate` |
 | `translation-service/translator_stream_test.go` | new |
@@ -290,19 +275,20 @@ Coverage ≥ 80% (target 90%+ on handler and translator).
 | `translation-service/deploy/Dockerfile` | new (multi-stage `golang:1.25.12-alpine` → `alpine:3.21`) |
 | `translation-service/deploy/docker-compose.yml` | new (NATS only) |
 | `translation-service/deploy/azure-pipelines.yml` | new |
-| `docs/client-api.md` | document the translate RPC (request + async result + errors) |
+| `docs/client-api.md` | document the translate RPC (request + reply + errors) |
 | `docs/client-api/request-reply.md` | derived view update |
-| `docs/client-api/events.md` | derived view update (async result) |
+| `docs/client-api/events.md` | derived view update (remove async result) |
 
 ## Design Decisions
 
-- **Pub/sub over request/reply.** The client publishes and receives the result on
-  `chat.user.{account}.response.{requestID}` — the existing async-result channel used
-  by `msg.send` and `AsyncJobResult`. No new event subject is invented; the frontend's
-  existing `chat.user.{account}.>` subscription already receives it.
-- **`TranslateResult` mirrors `AsyncJobResult`.** Same `Status` + `Error/Code/Reason`
-  string-typed envelope, so pkg/model stays free of a pkg/errcode import and the
-  frontend parses one error shape everywhere.
+- **Synchronous request/reply.** A data-returning RPC replies on the caller's `_INBOX`
+  the same way every other `natsrouter.Register` RPC does. The caller gets an immediate,
+  correlated result; validation errors surface at once; and handler saturation replies
+  `unavailable` instead of the silent drop a fire-and-forget publish would incur.
+- **Errors via the standard errcode envelope.** The handler returns a typed error and
+  the router replies `{code, reason?, error}`, so success and failure are two distinct
+  shapes (a `TranslateResult` vs. an envelope) rather than one union with a `status`
+  discriminator — matching the rest of the API.
 - **Pluggable `Translator`, mock first.** The SSE parse-and-merge logic is real and
   unit-tested now against an `httptest` stream; only the live third-party endpoint is
   deferred. Switching to production is config-only.

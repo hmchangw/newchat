@@ -2038,27 +2038,32 @@ error table. Key errors:
 ### Translate Text
 
 **Subject:** `chat.user.{account}.request.translate.{siteID}`
-**Async result:** `chat.user.{account}.response.{requestID}` (subscribe to `chat.user.{account}.>` to receive it)
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Publish + async-reply pattern — no `_INBOX.>` reply. `translation-service` translates
-`text` into `targetLang` and publishes a [`TranslateResult`](events.md#translateresult--async-completion).
+Synchronous RPC. `translation-service` translates `text` into `targetLang` and replies
+with a `TranslateResult`, or the standard error envelope on failure.
 
 #### Request body
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `requestId` | string | yes | 36-char hyphenated UUID. Async result delivered to `…response.{requestId}`. Empty ⇒ no result. |
 | `text` | string | yes | Text to translate. No length cap. |
 | `targetLang` | string | yes | BCP-47 tag; send the user's `settings.translateMessageInto` value unchanged (`en`, `en-US`, `zh-Hant-TW`, `zh-Hans-CN`, `de`, `ja`). See [../client-api.md §3.6](../client-api.md#supported-languages). |
-| `timestamp` | int64 | no | Client publish time (UTC ms). Informational; the service does not act on it. |
 
-#### Async result
+#### Success response
 
-Delivered on `chat.user.{account}.response.{requestId}` as a [`TranslateResult`](events.md#translateresult--async-completion): `status: "ok"` with `translatedText`, or `status: "error"` with the error envelope (`code`/`reason`).
+| Field | Type | Notes |
+|---|---|---|
+| `translatedText` | string | The translated text. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag sent), not the resolved backend language. |
 
-Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `internal` for a backend failure. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+`{ "translatedText": "你好 世界", "targetLang": "zh-Hant-TW" }`
 
-**Emits:** none — the `TranslateResult` on the response subject is the only output.
+#### Error response
+
+Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `internal` for a backend failure. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+
+**Emits:** none — the reply is the only output.
 
 ---
 

@@ -2,9 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a `translation-service` that translates client text on demand over NATS pub/sub — client publishes a `TranslateRequest`, service publishes a `TranslateResult` (success or failure) on the client's async response subject.
+> **Revision (transport):** the RPC is now **synchronous NATS request/reply**
+> (`natsrouter.Register`, handler returns `(*TranslateResult, error)`), not the
+> `RegisterVoid` publish + async-response-subject shape this plan was written against.
+> The step-by-step tasks and code snippets below reflect the original async design and
+> are kept as a build log; the shipped contract is the design spec
+> ([2026-07-23-translation-api-design.md](../specs/2026-07-23-translation-api-design.md))
+> and [client-api.md §3.6](../../client-api.md#36-translation-service).
 
-**Architecture:** Stateless NATS consumer (no DB, core NATS, no JetStream). A `natsrouter.RegisterVoid` handler validates the request, calls a pluggable `Translator` backend, and publishes the result to `chat.user.{account}.response.{requestID}` (the existing async-result channel). The backend is a **mock** now; a third-party SSE-streaming implementation is built and unit-tested behind the same interface, enabled later by config.
+**Goal:** Build a `translation-service` that translates client text on demand over NATS — the client sends a `TranslateRequest` and receives a `TranslateResult` (or an errcode envelope) as a synchronous request/reply.
+
+**Architecture:** Stateless NATS consumer (no DB, core NATS, no JetStream). A `natsrouter.Register` handler validates the request, calls a pluggable `Translator` backend, and replies with the `TranslateResult` (or the errcode envelope on failure) on the caller's `_INBOX`. The backend is a **mock** now; a third-party SSE-streaming implementation is built and unit-tested behind the same interface, enabled later by config.
 
 **Tech Stack:** Go 1.25, `nats.go`, `pkg/natsrouter`, `pkg/subject`, `pkg/model`, `pkg/errcode`, `pkg/obs`, `pkg/shutdown`, `pkg/restyutil` (resty v2), `go.uber.org/mock`, `testify`.
 

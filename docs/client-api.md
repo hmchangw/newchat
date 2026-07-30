@@ -5570,18 +5570,16 @@ See [Error envelope](#6-error-envelope-reference).
 #### Translate Text
 
 **Subject:** `chat.user.{account}.request.translate.{siteID}`
-**Result subject:** `chat.user.{account}.response.{requestID}` — the client must subscribe to `chat.user.{account}.>` (the user wildcard) to receive it. The `{requestID}` value is the `requestId` field from the request body.
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the translate subject (no `_INBOX.>` reply expected). `translation-service` validates the request, calls the translation backend, and publishes a `TranslateResult` to `chat.user.{account}.response.{requestID}` — `status: "ok"` with the translated text, or `status: "error"` with the error envelope.
+Synchronous RPC. `translation-service` validates the request, calls the translation backend, and replies with a `TranslateResult` (the translated text) on success, or the standard [error envelope](#6-error-envelope-reference) on failure. Under handler saturation the router replies `unavailable` (`"service busy"`) so the client can retry.
 
 #### Request body
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `requestId` | string | yes | Client-generated correlation key (36-char hyphenated UUID). The result is published to `chat.user.{account}.response.{requestId}`. A request with an empty `requestId` yields no result (undeliverable). |
 | `text` | string | yes | The text to translate. No length cap is enforced by the service. |
 | `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settingsget) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
-| `timestamp` | int64 | no | Client publish time (UTC ms). Informational — the service does not require or act on it. |
 
 ##### Supported languages
 
@@ -5599,56 +5597,42 @@ Chinese resolves by script (`Hant`/`Hans`) or, absent a script, by region. A bar
 
 > **Breaking change:** `targetLang` now requires a BCP-47 tag. The former backend short codes `zhTW` / `zhCN` are **no longer accepted** and return `unsupported_lang` — send the BCP-47 form (`zh-Hant-TW` / `zh-Hans-CN`, or the user's `settings.translateMessageInto`) instead. (`en` / `de` / `ja` are unaffected, being valid BCP-47 tags already.) Deploy this in lockstep with the client that sends the settings value.
 
-#### Result — `TranslateResult`
-
-Delivered on `chat.user.{account}.response.{requestID}`.
+#### Success response — `TranslateResult`
 
 | Field | Type | Notes |
 |---|---|---|
-| `requestId` | string | Echoes the request `requestId`. |
-| `status` | string | `ok` or `error`. |
-| `translatedText` | string | Present when `status` is `ok`. |
-| `targetLang` | string | Echoes the request `targetLang`. |
-| `error` | string | User-facing message when `status` is `error`. |
-| `code` | string | Error envelope code when `status` is `error` (e.g. `bad_request`, `internal`). See [Error envelope](#6-error-envelope-reference). |
-| `reason` | string | Domain reason when present (`unsupported_lang`, `empty_text`). |
-| `timestamp` | int64 | Publish time (UTC ms). |
-
-##### Success result
+| `translatedText` | string | The translated text. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag the client sent), not the resolved backend language. |
 
 ```json
 {
-  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
-  "status": "ok",
   "translatedText": "你好 世界",
-  "targetLang": "zh-Hant-TW",
-  "timestamp": 1700000000000
+  "targetLang": "zh-Hant-TW"
 }
 ```
 
-##### Error result
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code, reason?, error }` envelope:
 
 | Code | Reason | When |
 |---|---|---|
 | `bad_request` | `empty_text` | `text` is empty. |
 | `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
-| `internal` | — | Translation backend failure. |
+| `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
+| `internal` | — | Translation backend failure. The raw cause is logged server-side, never returned. |
 
 ```json
 {
-  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
-  "status": "error",
-  "targetLang": "fr",
-  "error": "unsupported targetLang",
   "code": "bad_request",
   "reason": "unsupported_lang",
-  "timestamp": 1700000000000
+  "error": "unsupported targetLang"
 }
 ```
 
 ##### Triggered events
 
-`None — the TranslateResult on the response subject is the only output.`
+`None — the reply is the only output.`
 
 ---
 

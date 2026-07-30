@@ -8,9 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	o11ynats "github.com/flywindy/o11y/nats"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -19,30 +24,46 @@ import (
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-// Drives the handler in-process while publishing the result over a real NATS
-// connection, verifying the TranslateResult round-trips on the response subject.
+// Registers the real handler on a natsrouter against a live NATS server and
+// exercises the synchronous request/reply path end to end: a success reply and
+// an error envelope both flow back on the caller's _INBOX subject.
 func TestTranslate_EndToEnd(t *testing.T) {
-	url := testutil.NATS(t)
-	nc, err := nats.Connect(url)
+	nc, err := o11ynats.Connect(context.Background(), testutil.NATS(t),
+		noop.NewTracerProvider(), propagation.TraceContext{})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, nc.Drain()) })
+	t.Cleanup(nc.Close)
 
-	sub, err := nc.SubscribeSync(subject.UserResponse("alice", "req-e2e"))
-	require.NoError(t, err)
+	const siteID = "site-a"
+	router := natsrouter.Default(nc, "translation-service")
+	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), NewHandler(mockTranslator{}).Translate)
+	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.Background())) })
 
-	h := NewHandler(mockTranslator{}, func(_ context.Context, subj string, data []byte) error {
-		return nc.Publish(subj, data)
+	reqSubject := subject.TranslateRequest("alice", siteID)
+
+	t.Run("success reply", func(t *testing.T) {
+		// BCP-47 targetLang from settings; the mock backend receives the mapped code (zhTW).
+		body, err := json.Marshal(model.TranslateRequest{Text: "Hello", TargetLang: "zh-Hant-TW"})
+		require.NoError(t, err)
+
+		msg, err := nc.Request(context.Background(), reqSubject, body, 2*time.Second)
+		require.NoError(t, err)
+
+		var res model.TranslateResult
+		require.NoError(t, json.Unmarshal(msg.Data, &res))
+		assert.Equal(t, "[zhTW] Hello", res.TranslatedText)
+		assert.Equal(t, "zh-Hant-TW", res.TargetLang) // client value echoed, not the backend code
 	})
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-	// BCP-47 targetLang from settings; the mock backend receives the mapped code (zhTW).
-	require.NoError(t, h.Translate(c, model.TranslateRequest{RequestID: "req-e2e", Text: "Hello", TargetLang: "zh-Hant-TW"}))
 
-	msg, err := sub.NextMsg(2 * time.Second)
-	require.NoError(t, err)
-	var res model.TranslateResult
-	require.NoError(t, json.Unmarshal(msg.Data, &res))
-	require.Equal(t, model.TranslateStatusOK, res.Status)
-	require.Equal(t, "[zhTW] Hello", res.TranslatedText)
-	require.Equal(t, "zh-Hant-TW", res.TargetLang) // client value echoed, not the backend code
-	require.Equal(t, "req-e2e", res.RequestID)
+	t.Run("validation error replies with envelope", func(t *testing.T) {
+		body, err := json.Marshal(model.TranslateRequest{Text: "", TargetLang: "en"})
+		require.NoError(t, err)
+
+		msg, err := nc.Request(context.Background(), reqSubject, body, 2*time.Second)
+		require.NoError(t, err)
+
+		var env errcode.Error
+		require.NoError(t, json.Unmarshal(msg.Data, &env))
+		assert.Equal(t, errcode.CodeBadRequest, env.Code)
+		assert.Equal(t, errcode.TranslateEmptyText, env.Reason)
+	})
 }

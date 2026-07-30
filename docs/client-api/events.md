@@ -16,7 +16,6 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 ## Table of contents
 
 1. [AsyncJobResult — async completion](#asyncjobresult--async-completion)
-   - [TranslateResult — async completion](#translateresult--async-completion)
 2. [subscription.update — membership / state changes](#subscriptionupdate--membership--state-changes)
 3. [settings.update — user settings sync](#settingsupdate--user-settings-sync)
 4. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
@@ -43,7 +42,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 
 | Subject | Events delivered |
 |---|---|
-| `chat.user.{account}.response.{requestID}` | AsyncJobResult (one-shot async job completion); TranslateResult (translate completion) |
+| `chat.user.{account}.response.{requestID}` | AsyncJobResult (one-shot async job completion) |
 | `chat.user.{account}.event.subscription.update` | SubscriptionUpdateEvent / SubscriptionRemovedEvent |
 | `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
@@ -82,36 +81,6 @@ Member, Update Member Role (see
   "status": "ok",
   "roomId": "01970a4f8c2d7c9aQ",
   "timestamp": 1746518400456
-}
-```
-
----
-
-## TranslateResult — async completion
-
-**Subject:** `chat.user.{account}.response.{requestID}`
-
-Delivered when a translate request completes. The client must already be subscribed to
-`chat.user.{account}.>` to receive it. Triggered by [Translate Text](request-reply.md#translate-text).
-
-| Field | Type | Notes |
-|---|---|---|
-| `requestId` | string | Echoes the `requestId` from the request body. |
-| `status` | string | `"ok"` or `"error"`. |
-| `translatedText` | string | Optional. The translated text; present only when `status="ok"`. |
-| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag the client sent), not the resolved backend language. |
-| `error` | string | Optional. User-safe message; present only when `status="error"`. |
-| `code` | string | Optional. Errcode category (`bad_request`, `internal`). Present only when `status="error"`. |
-| `reason` | string | Optional. Domain reason (`unsupported_lang`, `empty_text`). Present only when `status="error"` and a reason was attached server-side. |
-| `timestamp` | number | Epoch ms (UTC). |
-
-```json
-{
-  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789f",
-  "status": "ok",
-  "translatedText": "你好 世界",
-  "targetLang": "zh-Hant-TW",
-  "timestamp": 1700000000000
 }
 ```
 

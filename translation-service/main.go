@@ -85,16 +85,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	publish := func(ctx context.Context, subj string, data []byte) error {
-		return nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
-	}
-
-	handler := NewHandler(translator, publish)
+	handler := NewHandler(translator)
 	// Cap in-flight handlers so a slow translate backend can't accumulate goroutines
-	// and outbound connections without ceiling; saturation drops the fire-and-forget
-	// request (logged) rather than piling up.
+	// and outbound connections without ceiling; on saturation the router replies
+	// errcode.Unavailable("service busy") so the caller can retry immediately.
 	router := natsrouter.Default(nc, "translation-service", natsrouter.WithMaxConcurrency(cfg.MaxWorkers))
-	natsrouter.RegisterVoid(router, subject.TranslateRequestPattern(cfg.SiteID), handler.Translate)
+	natsrouter.Register(router, subject.TranslateRequestPattern(cfg.SiteID), handler.Translate)
 
 	slog.Info("translation-service running", "site", cfg.SiteID, "backend", cfg.Backend)
 
