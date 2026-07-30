@@ -62,6 +62,128 @@ func TestClient_UploadGroupImages(t *testing.T) {
 	}
 }
 
+// partContentTypeServer captures the Content-Type of every uploaded file part,
+// keyed by the part's form field name.
+func partContentTypeServer(t *testing.T, got map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// #nosec G120 -- test httptest server with a fixed 10MiB bound; not exposed to untrusted traffic
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Errorf("parse multipart form: %v", err)
+		}
+		for field, headers := range r.MultipartForm.File {
+			got[field] = headers[0].Header.Get("Content-Type")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+}
+
+// Magic-byte prefixes are all http.DetectContentType needs to classify a part.
+const (
+	pngMagic  = "\x89PNG\r\n\x1a\n....."
+	jpegMagic = "\xff\xd8\xff....."
+	pdfMagic  = "%PDF-1.7\n....."
+	// HEIC is an ISO-BMFF 'ftyp' box. Go's sniffer only recognizes the mp4 brand,
+	// so heic falls through to octet-stream — the one format sniffing can't name.
+	heicMagic = "\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic"
+)
+
+// The part Content-Type is sniffed from the leading bytes, so the true media type
+// reaches Drive without any caller having to declare it.
+func TestClient_UploadGroupImages_SniffsPartContentType(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		body     string
+		want     string
+	}{
+		{name: "png", filename: "a.png", body: pngMagic, want: "image/png"},
+		{name: "jpeg", filename: "a.jpg", body: jpegMagic, want: "image/jpeg"},
+		{name: "pdf", filename: "a.pdf", body: pdfMagic, want: "application/pdf"},
+		{name: "text", filename: "a.txt", body: "hello there", want: "text/plain; charset=utf-8"},
+		{name: "heic sniffs as octet-stream", filename: "a.heic", body: heicMagic, want: defaultContentType},
+		{name: "unrecognized binary", filename: "a.bin", body: "\x07\x08\x09\x00\x01\x02\x03", want: defaultContentType},
+		// DetectContentType treats no bytes as text, not octet-stream.
+		{name: "empty body sniffs as text", filename: "a.bin", body: "", want: "text/plain; charset=utf-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := map[string]string{}
+			srv := partContentTypeServer(t, got)
+			defer srv.Close()
+
+			c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+			_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
+				[]MultipartFile{{File: fakeMultipart(tt.body), Filename: tt.filename}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got["files[0].file"] != tt.want {
+				t.Fatalf("part content type = %q, want %q", got["files[0].file"], tt.want)
+			}
+		})
+	}
+}
+
+// Sniffing must not consume the leading bytes: Drive has to receive the whole file.
+func TestClient_UploadGroupImages_SniffPreservesFullBody(t *testing.T) {
+	body := pngMagic + strings.Repeat("payload", 200)
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// #nosec G120 -- test httptest server with a fixed 10MiB bound; not exposed to untrusted traffic
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Errorf("parse multipart form: %v", err)
+		}
+		f, err := r.MultipartForm.File["files[0].file"][0].Open()
+		if err != nil {
+			t.Errorf("open part: %v", err)
+			return
+		}
+		defer f.Close()
+		b, err := io.ReadAll(f)
+		if err != nil {
+			t.Errorf("read part: %v", err)
+		}
+		got = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+	_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
+		[]MultipartFile{{File: fakeMultipart(body), Filename: "a.png"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != body {
+		t.Fatalf("part body = %d bytes, want %d (sniffing must not swallow the prefix)", len(got), len(body))
+	}
+}
+
+// Multiple files must each be sniffed independently and keep their index mapping.
+func TestClient_UploadGroupImages_SniffsEachPartIndependently(t *testing.T) {
+	got := map[string]string{}
+	srv := partContentTypeServer(t, got)
+	defer srv.Close()
+
+	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+	_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", []MultipartFile{
+		{File: fakeMultipart(pngMagic), Filename: "a.png"},
+		{File: fakeMultipart(pdfMagic), Filename: "b.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["files[0].file"] != "image/png" {
+		t.Fatalf("part 0 content type = %q, want image/png", got["files[0].file"])
+	}
+	if got["files[1].file"] != "application/pdf" {
+		t.Fatalf("part 1 content type = %q, want application/pdf", got["files[1].file"])
+	}
+}
+
 func TestClient_UploadGroupImages_ServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
