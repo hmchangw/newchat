@@ -49,7 +49,7 @@ JetStream — the request/reply flow is core NATS. It does not participate in me
 federation and does not touch any stream.
 
 ```text
-client ──request TranslateRequest──▶ chat.user.{account}.request.translate.{siteID}
+client ──request TranslateRequest──▶ chat.user.{account}.request.translate.{siteID}.text
                                              │  (queue group: translation-service)
                                              ▼
                                      translation-service handler
@@ -66,14 +66,16 @@ Added to `pkg/subject/subject.go`:
 
 ```go
 // TranslateRequest is the concrete subject a client sends a TranslateRequest to.
+// The trailing `.text` action segment matches the repo's `<resource>.{siteID}.<action>`
+// family (search.{siteID}.messages, …) and leaves room for a future `.batch`.
 func TranslateRequest(account, siteID string) string {
-    return fmt.Sprintf("chat.user.%s.request.translate.%s", account, siteID)
+    return fmt.Sprintf("chat.user.%s.request.translate.%s.text", account, siteID)
 }
 
 // TranslateRequestPattern is the natsrouter registration pattern; {account} is a
 // named token that scopes the subject to the caller.
 func TranslateRequestPattern(siteID string) string {
-    return fmt.Sprintf("chat.user.{account}.request.translate.%s", siteID)
+    return fmt.Sprintf("chat.user.{account}.request.translate.%s.text", siteID)
 }
 ```
 
@@ -90,7 +92,7 @@ like `msg.send`.
 
 ```go
 // TranslateRequest is the client→server request/reply payload on
-// chat.user.{account}.request.translate.{siteID}. TargetLang is a BCP-47 tag
+// chat.user.{account}.request.translate.{siteID}.text. TargetLang is a BCP-47 tag
 // normalized to a backend code (zhTW/zhCN/en/de/ja).
 type TranslateRequest struct {
     Text       string `json:"text"`

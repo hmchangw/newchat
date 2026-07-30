@@ -5569,7 +5569,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 #### Translate Text
 
-**Subject:** `chat.user.{account}.request.translate.{siteID}`
+**Subject:** `chat.user.{account}.request.translate.{siteID}.text`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
 - `{siteID}` is the caller's **own (local) site ID** — the local `translation-service` handles the request. Translation is stateless and not federated across sites, so unlike `msg.send` there is no origin-site rule: always use your own site.

@@ -2037,7 +2037,7 @@ error table. Key errors:
 
 ### Translate Text
 
-**Subject:** `chat.user.{account}.request.translate.{siteID}`
+**Subject:** `chat.user.{account}.request.translate.{siteID}.text`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
 `{siteID}` is the caller's own (local) site ID — translation is stateless and not

@@ -1149,8 +1149,8 @@ func TestOpenRoom_ParseUserRoomSubject(t *testing.T) {
 }
 
 func TestTranslateSubjects(t *testing.T) {
-	assert.Equal(t, "chat.user.alice.request.translate.site-a",
+	assert.Equal(t, "chat.user.alice.request.translate.site-a.text",
 		subject.TranslateRequest("alice", "site-a"))
-	assert.Equal(t, "chat.user.{account}.request.translate.site-a",
+	assert.Equal(t, "chat.user.{account}.request.translate.site-a.text",
 		subject.TranslateRequestPattern("site-a"))
 }
