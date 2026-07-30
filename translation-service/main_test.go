@@ -34,16 +34,25 @@ func TestNewTranslator_StreamRequiresJ1Token(t *testing.T) {
 }
 
 func TestNewTranslator_StreamRejectsNonPositiveTimeout(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		_, err := newTranslator(&Config{
-			Backend:        "stream",
-			Endpoint:       "http://x",
-			AccessTokenURL: "http://a",
-			J1Token:        "j1",
-			HTTPTimeout:    d,
+	cases := []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := newTranslator(&Config{
+				Backend:        "stream",
+				Endpoint:       "http://x",
+				AccessTokenURL: "http://a",
+				J1Token:        "j1",
+				HTTPTimeout:    tc.timeout,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "TRANSLATION_HTTP_TIMEOUT")
 		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "TRANSLATION_HTTP_TIMEOUT")
 	}
 }
 
