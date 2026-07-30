@@ -135,52 +135,93 @@ func TestRefreshEndToEnd(t *testing.T) {
 	assert.JSONEq(t, `{"_tcardVersion":"v1","title":"Profile"}`, w.Body.String())
 }
 
-// TestRegisterEndToEnd drives POST /register through the real store: a valid
-// card inserts and is servable at once; the semver ordering rule is enforced.
-func TestRegisterEndToEnd(t *testing.T) {
+// TestGetTemplateEndToEnd drives the GET wildcard against a real store: a migrated
+// doc serves without its bookkeeping fields, and the wildcard lists each depth.
+func TestGetTemplateEndToEnd(t *testing.T) {
 	db := testutil.MongoDB(t, "tcard")
 	store := newMongoCardStore(db)
-	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	_, err := db.Collection("cards").InsertOne(ctx, bson.M{
+		"_id": "c-legacy", "migratedAt": "2026-01-02T03:04:05Z",
+		"path": "greetings/en/welcome", "_tcardVersion": "1.0.0", "type": "AdaptiveCard",
+		"body": bson.A{bson.M{"type": "TextBlock", "id": "greeting", "text": "Hi"}},
+	})
+	require.NoError(t, err)
+
+	cache := newCardCache()
+	r := setupRouter(t, NewCardHandler(cache, store))
+	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/api/v1/cards/refresh").Code)
+
+	// The bookkeeping fields must be absent from the cached snapshot itself,
+	// not merely filtered on the way out.
+	cached, ok := cache.Get("greetings/en/welcome", "1.0.0")
+	require.True(t, ok)
+	assert.NotContains(t, string(cached), "migratedAt", "migratedAt must never enter the cache")
+	assert.NotContains(t, string(cached), "_id")
+
+	w := doRequest(t, r, http.MethodGet, "/api/v1/cards/greetings/en/welcome@1.0.0.template.json")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{
+		"_tcardVersion":"1.0.0","type":"AdaptiveCard",
+		"body":[{"type":"TextBlock","id":"greeting","text":"Hi"}]
+	}`, w.Body.String(), "an element id inside body is template content and survives")
+
+	assert.NotContains(t, w.Body.String(), "migratedAt")
+	assert.NotContains(t, w.Body.String(), "_id")
+
+	// The same wildcard route lists folders and cards at each depth.
+	assert.JSONEq(t, `{"statusCode":200,"cards":[],"folders":["greetings"]}`,
+		doRequest(t, r, http.MethodGet, "/api/v1/cards/").Body.String())
+	assert.JSONEq(t, `{"statusCode":200,"cards":[],"folders":["greetings/en"]}`,
+		doRequest(t, r, http.MethodGet, "/api/v1/cards/greetings").Body.String())
+	assert.JSONEq(t, `{"statusCode":200,"cards":["greetings/en/welcome@1.0.0"],"folders":[]}`,
+		doRequest(t, r, http.MethodGet, "/api/v1/cards/greetings/en").Body.String())
+}
+
+// TestValidateEndToEnd drives POST /validate against a real Mongo-backed cache:
+// ordering is judged from the loaded snapshot and nothing is written back.
+func TestValidateEndToEnd(t *testing.T) {
+	db := testutil.MongoDB(t, "tcard")
+	store := newMongoCardStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("cards").InsertOne(ctx,
+		bson.M{"path": "onboard/en/welcome", "_tcardVersion": "1.0.0", "title": "Welcome"})
+	require.NoError(t, err)
 
 	r := setupRouter(t, NewCardHandler(newCardCache(), store))
 	mk := func(path, version string) string {
-		// maxLines is a 2^53+1 int — it must round-trip without float64 rounding.
 		return `{"path":"` + path + `","_tcardVersion":"` + version + `","type":"AdaptiveCard",` +
 			`"schema":"http://adaptivecards.io/schemas/adaptive-card.json","version":"1.5",` +
-			`"body":[{"type":"TextBlock","text":"Hi","maxLines":9007199254740993}],"cardUsage":"greeting"}`
+			`"body":[{"type":"TextBlock","text":"Hi"}],"cardUsage":"greeting"}`
 	}
 
-	// Load the (empty) cache so registered cards land in a live snapshot.
+	// Until the cache loads there is no snapshot to order against.
+	require.Equal(t, http.StatusServiceUnavailable,
+		doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", mk("onboard/en/welcome", "1.1.0")).Code)
+
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/api/v1/cards/refresh").Code)
 
-	// Valid card → 201, then immediately servable with _id and path stripped.
-	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", mk("onboard/en/welcome", "1.0.0"))
-	require.Equal(t, http.StatusCreated, w.Code)
+	// Strictly higher than the stored 1.0.0 → valid.
+	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", mk("onboard/en/welcome", "1.1.0"))
+	require.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"success":true}`, w.Body.String())
 
-	got := doRequest(t, r, http.MethodGet, "/api/v1/cards/onboard/en/welcome@1.0.0.template.json")
-	require.Equal(t, http.StatusOK, got.Code)
-	assert.JSONEq(t, `{
-		"_tcardVersion":"1.0.0","type":"AdaptiveCard",
-		"schema":"http://adaptivecards.io/schemas/adaptive-card.json","version":"1.5",
-		"body":[{"type":"TextBlock","text":"Hi","maxLines":9007199254740993}],"cardUsage":"greeting"
-	}`, got.Body.String())
-
-	// A lower or equal _tcardVersion for the same path is a conflict.
+	// An equal or lower _tcardVersion for the same path is a conflict.
 	require.Equal(t, http.StatusConflict,
-		doJSON(t, r, http.MethodPost, "/api/v1/cards/register", mk("onboard/en/welcome", "1.0.0")).Code)
+		doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", mk("onboard/en/welcome", "1.0.0")).Code)
 	require.Equal(t, http.StatusConflict,
-		doJSON(t, r, http.MethodPost, "/api/v1/cards/register", mk("onboard/en/welcome", "0.9.0")).Code)
+		doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", mk("onboard/en/welcome", "0.9.0")).Code)
 
-	// A strictly higher _tcardVersion succeeds and is servable.
-	require.Equal(t, http.StatusCreated,
-		doJSON(t, r, http.MethodPost, "/api/v1/cards/register", mk("onboard/en/welcome", "1.1.0")).Code)
+	// A path with no cached versions has nothing to beat.
 	require.Equal(t, http.StatusOK,
-		doRequest(t, r, http.MethodGet, "/api/v1/cards/onboard/en/welcome@1.1.0.template.json").Code)
+		doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", mk("onboard/fr/bienvenue", "0.0.1")).Code)
 
-	// The registered cards appear in the directory listing.
-	list := doRequest(t, r, http.MethodGet, "/api/v1/cards/onboard/en")
-	require.Equal(t, http.StatusOK, list.Code)
-	assert.JSONEq(t, `{"statusCode":200,"cards":["onboard/en/welcome@1.0.0","onboard/en/welcome@1.1.0"],"folders":[]}`,
-		list.Body.String())
+	// Nothing was written: the validated card is neither stored nor servable.
+	n, err := db.Collection("cards").CountDocuments(ctx, bson.M{"path": "onboard/en/welcome"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n, "validate must not insert")
+	assert.Equal(t, http.StatusNotFound,
+		doRequest(t, r, http.MethodGet, "/api/v1/cards/onboard/en/welcome@1.1.0.template.json").Code)
 }

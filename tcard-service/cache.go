@@ -48,7 +48,7 @@ type cardKey struct {
 }
 
 // cardCache is the in-memory (path, cardVersion) → template snapshot behind an
-// atomic.Pointer: reads are lock-free; writers (Load/Add) serialize on writeMu.
+// atomic.Pointer: reads are lock-free; concurrent Loads serialize on writeMu.
 type cardCache struct {
 	entries atomic.Pointer[map[cardKey]json.RawMessage]
 	writeMu sync.Mutex
@@ -68,21 +68,20 @@ func (c *cardCache) Get(path, cardVersion string) (json.RawMessage, bool) {
 	return tmpl, ok
 }
 
-// Add copy-on-writes one card into the snapshot so a freshly registered card is
-// servable at once; serialized with Load via writeMu. No-op until the first Load.
-func (c *cardCache) Add(cd card) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+// Versions returns every cached version of path, in no particular order; nil
+// when the path is unknown or the cache has not loaded yet.
+func (c *cardCache) Versions(path string) []string {
 	m := c.entries.Load()
 	if m == nil {
-		return
+		return nil
 	}
-	next := make(map[cardKey]json.RawMessage, len(*m)+1)
-	for k, v := range *m {
-		next[k] = v
+	var versions []string
+	for k := range *m {
+		if k.path == path {
+			versions = append(versions, k.cardVersion)
+		}
 	}
-	next[cardKey{path: cd.Path, cardVersion: cd.CardVersion}] = cd.Template
-	c.entries.Store(&next)
+	return versions
 }
 
 // Ready reports whether at least one load has succeeded (the /readyz signal).
@@ -92,7 +91,7 @@ func (c *cardCache) Ready() bool {
 }
 
 // Load reads the full cards collection and swaps it in (writeMu held across the
-// read so a concurrent Add isn't clobbered by a stale scan). Returns the count.
+// read so a slower concurrent scan can't clobber a newer snapshot). Returns the count.
 func (c *cardCache) Load(ctx context.Context, store CardStore) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, cacheLoadTimeout)
 	defer cancel()

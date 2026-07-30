@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -81,8 +79,8 @@ func (h *CardHandler) HandleGetTemplate(c *gin.Context) {
 		errhttp.Write(ctx, c, errcode.BadRequest("card template file name is empty"))
 		return
 	}
-	// Split on the last "@": registration rejects "@" in paths, so this equals
-	// Index for all registered cards, but legacy data with "@" still resolves.
+	// Split on the last "@" so a path that itself contains one (legacy or
+	// out-of-band data) still resolves.
 	at := strings.LastIndex(spec, "@")
 	if at < 0 {
 		errhttp.Write(ctx, c, errcode.BadRequest("card template request must include a version: {path}@{version}"+templateSuffix))
@@ -136,14 +134,14 @@ func (h *CardHandler) HandleReady(c *gin.Context) {
 }
 
 const (
-	registerType    = "AdaptiveCard"
-	registerSchema  = "http://adaptivecards.io/schemas/adaptive-card.json"
-	registerVersion = "1.5"
+	cardType          = "AdaptiveCard"
+	cardSchema        = "http://adaptivecards.io/schemas/adaptive-card.json"
+	cardSchemaVersion = "1.5"
 )
 
-// HandleRegister validates a card, inserts it, and adds it to the cache so it
-// is servable at once. 400 on field/format, 409 on not-highest/duplicate.
-func (h *CardHandler) HandleRegister(c *gin.Context) {
+// HandleValidate checks a card document and stores nothing: 400 on field/format,
+// 409 when _tcardVersion is not the highest cached one, 503 before the first load.
+func (h *CardHandler) HandleValidate(c *gin.Context) {
 	ctx := reqCtx(c)
 
 	var doc cardDoc
@@ -151,51 +149,29 @@ func (h *CardHandler) HandleRegister(c *gin.Context) {
 		errhttp.Write(ctx, c, errcode.BadRequest("invalid card JSON"))
 		return
 	}
-	if err := validateRegister(&doc); err != nil {
+	if err := validateCard(&doc); err != nil {
 		errhttp.Write(ctx, c, err)
 		return
 	}
 
-	// This check and the insert aren't serialized: concurrent same-path registers
-	// can both insert different versions; only an exact (path, _tcardVersion) dupe fails. Accepted.
-	versions, err := h.store.ListVersions(ctx, doc.Path)
-	if err != nil {
-		errhttp.Write(ctx, c, fmt.Errorf("list card versions: %w", err))
+	// Ordering is judged against the cache, so there is nothing to compare
+	// against until the first load lands.
+	if !h.cache.Ready() {
+		errhttp.Write(ctx, c, errcode.Unavailable("card cache not loaded"))
 		return
 	}
-	if !isHighest(doc.CardVersion, versions) {
+	// The snapshot is as fresh as the last refresh: a card written to Mongo
+	// out-of-band since then is not yet counted in the ordering.
+	if !isHighest(doc.CardVersion, h.cache.Versions(doc.Path)) {
 		errhttp.Write(ctx, c, errcode.Conflict("_tcardVersion must be the highest for this path"))
 		return
 	}
-	if err := h.store.InsertCard(ctx, &doc); err != nil {
-		// Reachable only under a concurrent same-version register; otherwise
-		// isHighest already rejects an equal version.
-		if errors.Is(err, ErrDuplicateCard) {
-			errhttp.Write(ctx, c, errcode.Conflict("card already exists for this (path, _tcardVersion)"))
-			return
-		}
-		errhttp.Write(ctx, c, err)
-		return
-	}
-
-	// Add to the cache so the card is servable at once; a failure here is logged,
-	// not surfaced (it is persisted and appears on the next refresh).
-	switch cd, ok, err := h.store.GetCard(ctx, doc.Path, doc.CardVersion); {
-	case err != nil:
-		slog.Warn("card registered but not cached",
-			"path", doc.Path, "cardVersion", doc.CardVersion, "error", err)
-	case !ok:
-		slog.Warn("card registered but not cached",
-			"path", doc.Path, "cardVersion", doc.CardVersion)
-	default:
-		h.cache.Add(cd)
-	}
-	c.JSON(http.StatusCreated, gin.H{"success": true})
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
-// validateRegister runs the field/format checks: required fields, a 3-segment
+// validateCard runs the field/format checks: required fields, a 3-segment
 // path, semver _tcardVersion, pinned type/schema/version, and a non-empty array body.
-func validateRegister(doc *cardDoc) error {
+func validateCard(doc *cardDoc) error {
 	switch {
 	case doc.Path == "":
 		return errcode.BadRequest("path is required")
@@ -223,13 +199,13 @@ func validateRegister(doc *cardDoc) error {
 	if _, ok := parseSemver(doc.CardVersion); !ok {
 		return errcode.BadRequest("_tcardVersion must be a semantic version a.b.c")
 	}
-	if doc.Type != registerType {
+	if doc.Type != cardType {
 		return errcode.BadRequest(`type must be "AdaptiveCard"`)
 	}
-	if doc.Schema != registerSchema {
-		return errcode.BadRequest("schema must be " + registerSchema)
+	if doc.Schema != cardSchema {
+		return errcode.BadRequest("schema must be " + cardSchema)
 	}
-	if doc.Version != registerVersion {
+	if doc.Version != cardSchemaVersion {
 		return errcode.BadRequest(`version must be "1.5"`)
 	}
 	var body []json.RawMessage
