@@ -52,6 +52,11 @@ func newTranslator(cfg *Config) (Translator, error) {
 		if cfg.J1Token == "" {
 			return nil, fmt.Errorf("TRANSLATION_J1_TOKEN is required when TRANSLATION_BACKEND=stream")
 		}
+		// A non-positive timeout reaches resty's http.Client.Timeout as 0 (no timeout),
+		// so token/translate calls could hang forever — fail fast instead.
+		if cfg.HTTPTimeout <= 0 {
+			return nil, fmt.Errorf("TRANSLATION_HTTP_TIMEOUT must be positive when TRANSLATION_BACKEND=stream")
+		}
 		return newStreamTranslator(cfg.Endpoint, cfg.AccessTokenURL, cfg.J1Token, cfg.HTTPTimeout, cfg.TokenSkew), nil
 	default:
 		return nil, fmt.Errorf("unknown TRANSLATION_BACKEND %q (want mock|stream)", cfg.Backend)

@@ -81,6 +81,11 @@ The reply travels on the auto-generated `_INBOX` subject that NATS request/reply
 provides — no result subject is introduced and the handler does not read `{account}`
 (the token only scopes the subject to the caller via their NATS-JWT permissions).
 
+`{siteID}` is the caller's **own (local) site ID** — the local `translation-service`
+registers `TranslateRequestPattern(cfg.SiteID)`. Translation is stateless and not
+federated, so clients always address their local site; there is no origin-site rule
+like `msg.send`.
+
 ## Request / Result Types (`pkg/model/translation.go`)
 
 ```go

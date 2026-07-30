@@ -2040,6 +2040,9 @@ error table. Key errors:
 **Subject:** `chat.user.{account}.request.translate.{siteID}`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
+`{siteID}` is the caller's own (local) site ID — translation is stateless and not
+federated, so always use your own site (no origin-site rule like `msg.send`).
+
 Synchronous RPC. `translation-service` translates `text` into `targetLang` and replies
 with a `TranslateResult`, or the standard error envelope on failure.
 

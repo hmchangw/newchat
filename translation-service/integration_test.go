@@ -66,4 +66,13 @@ func TestTranslate_EndToEnd(t *testing.T) {
 		assert.Equal(t, errcode.CodeBadRequest, env.Code)
 		assert.Equal(t, errcode.TranslateEmptyText, env.Reason)
 	})
+
+	t.Run("malformed payload replies with bad_request", func(t *testing.T) {
+		msg, err := nc.Request(context.Background(), reqSubject, []byte("{ not json"), 2*time.Second)
+		require.NoError(t, err)
+
+		var env errcode.Error
+		require.NoError(t, json.Unmarshal(msg.Data, &env))
+		assert.Equal(t, errcode.CodeBadRequest, env.Code) // router rejects undecodable input before the handler
+	})
 }
