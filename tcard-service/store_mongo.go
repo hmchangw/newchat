@@ -1,10 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -33,10 +30,14 @@ func (s *mongoCardStore) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
-// ListCards returns every card keyed by (path, _tcardVersion), each rendered to
-// relaxed ext-JSON minus _id and path; docs missing either key are skipped.
+// ListCards returns every card keyed by (path, _tcardVersion) as relaxed
+// ext-JSON minus the routing and storage-only keys; unkeyable docs are skipped.
 func (s *mongoCardStore) ListCards(ctx context.Context) ([]card, error) {
-	proj := options.Find().SetProjection(bson.D{{Key: "_id", Value: 0}})
+	// Bandwidth only — docToCard is the correctness guarantee. Templates are
+	// schemaless, so the wanted fields can't be enumerated.
+	proj := options.Find().SetProjection(bson.D{
+		{Key: "_id", Value: 0}, {Key: "migratedAt", Value: 0},
+	})
 	cursor, err := s.cards.Find(ctx, bson.D{}, proj)
 	if err != nil {
 		return nil, fmt.Errorf("find cards: %w", err)
@@ -65,22 +66,8 @@ func (s *mongoCardStore) ListCards(ctx context.Context) ([]card, error) {
 	return cards, nil
 }
 
-// GetCard fetches one card by (path, _tcardVersion); ok is false if none matches.
-func (s *mongoCardStore) GetCard(ctx context.Context, path, cardVersion string) (card, bool, error) {
-	proj := options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 0}})
-	filter := bson.D{{Key: "path", Value: path}, {Key: "_tcardVersion", Value: cardVersion}}
-	var doc bson.D
-	if err := s.cards.FindOne(ctx, filter, proj).Decode(&doc); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return card{}, false, nil
-		}
-		return card{}, false, fmt.Errorf("find card %q@%q: %w", path, cardVersion, err)
-	}
-	return docToCard(doc)
-}
-
-// docToCard renders one _id-projected cards document to a cache card: the
-// template is the doc minus path; ok is false when it can't be keyed.
+// docToCard renders a cards doc to a cache card, dropping path and the
+// storage-only top-level keys; ok is false when it can't be keyed.
 func docToCard(doc bson.D) (card, bool, error) {
 	var path, cardVersion string
 	payload := make(bson.D, 0, len(doc))
@@ -91,6 +78,8 @@ func docToCard(doc bson.D) (card, bool, error) {
 		case "_tcardVersion":
 			cardVersion, _ = e.Value.(string)
 			payload = append(payload, e)
+		case "_id", "migratedAt":
+			// Top-level only, so an element id inside body stays template content.
 		default:
 			payload = append(payload, e)
 		}
@@ -103,87 +92,4 @@ func docToCard(doc bson.D) (card, bool, error) {
 		return card{}, false, fmt.Errorf("render card %q@%q to JSON: %w", path, cardVersion, err)
 	}
 	return card{Path: path, CardVersion: cardVersion, Template: tmpl}, true, nil
-}
-
-// ListVersions returns the _tcardVersion of every document for path.
-func (s *mongoCardStore) ListVersions(ctx context.Context, path string) ([]string, error) {
-	proj := options.Find().SetProjection(bson.D{{Key: "_tcardVersion", Value: 1}, {Key: "_id", Value: 0}})
-	cursor, err := s.cards.Find(ctx, bson.D{{Key: "path", Value: path}}, proj)
-	if err != nil {
-		return nil, fmt.Errorf("find card versions: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var versions []string
-	for cursor.Next(ctx) {
-		if v, ok := cursor.Current.Lookup("_tcardVersion").StringValueOK(); ok {
-			versions = append(versions, v)
-		}
-	}
-	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("iterate card versions: %w", err)
-	}
-	return versions, nil
-}
-
-// InsertCard writes one validated card, mapping a duplicate key to ErrDuplicateCard.
-func (s *mongoCardStore) InsertCard(ctx context.Context, doc *cardDoc) error {
-	body, err := jsonToBSON(doc.Body)
-	if err != nil {
-		return fmt.Errorf("decode body: %w", err)
-	}
-	d := bson.M{
-		"path": doc.Path, "_tcardVersion": doc.CardVersion,
-		"type": doc.Type, "schema": doc.Schema, "version": doc.Version, "body": body,
-	}
-	if len(doc.CardUsage) > 0 {
-		usage, err := jsonToBSON(doc.CardUsage)
-		if err != nil {
-			return fmt.Errorf("decode cardUsage: %w", err)
-		}
-		d["cardUsage"] = usage
-	}
-	if _, err := s.cards.InsertOne(ctx, d); err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			return ErrDuplicateCard
-		}
-		return fmt.Errorf("insert card: %w", err)
-	}
-	return nil
-}
-
-// jsonToBSON turns raw JSON into a value the mongo driver can marshal, decoding
-// with UseNumber so large integers survive instead of rounding through float64.
-func jsonToBSON(raw json.RawMessage) (any, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, fmt.Errorf("unmarshal json: %w", err)
-	}
-	return normalizeNumbers(v), nil
-}
-
-// normalizeNumbers converts json.Number to int64 (else float64) recursively so
-// integers store as BSON int64/double rather than a rounded float64.
-func normalizeNumbers(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, val := range t {
-			t[k] = normalizeNumbers(val)
-		}
-	case []any:
-		for i, val := range t {
-			t[i] = normalizeNumbers(val)
-		}
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return i
-		}
-		if f, err := t.Float64(); err == nil {
-			return f
-		}
-		return t.String()
-	}
-	return v
 }
