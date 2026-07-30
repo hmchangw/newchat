@@ -325,14 +325,17 @@ the numerator → counted as a failure, not a missing sample.
 
 ### Outage-safe contract
 
-- **Denominator: `outbox_events_published_total{dest_site, event_type}`**, emitted
-  **producer-side** (room-service / room-worker at OUTBOX publish) — upstream of
-  outbox-worker, so worker downtime can't suppress it.
-- **Numerator: forwarded within bound** — `outbox_forwarded_total{dest_site,
-  event_type}` gated on age ≤ bound. **Same label set as the denominator** so the
-  ratio is `sum by(dest_site)(forwarded_within_bound) / sum by(dest_site)(published)`
-  — event_type is carried for slicing and aggregated away for the SLO. Age =
-  `now − event.Timestamp`, both timestamps origin-side (no cross-site skew).
+- **Denominator: `outbox_events_published_total{origin_site, dest_site, event_type}`**,
+  emitted **producer-side** (room-service / room-worker at OUTBOX publish) —
+  upstream of outbox-worker, so worker downtime can't suppress it.
+- **Numerator: forwarded within bound** — `outbox_forwarded_total{origin_site,
+  dest_site, event_type}` gated on age ≤ bound. **Same label set as the
+  denominator** so the ratio is
+  `sum by(origin_site, dest_site)(forwarded_within_bound) / sum by(origin_site, dest_site)(published)`
+  — `origin_site`+`dest_site` keep the budget isolated **per peer pair** (a busy
+  or failing origin can't dilute another's), `event_type` is carried for slicing
+  and aggregated away for the SLO. Age = `now − event.Timestamp`, both timestamps
+  origin-side (no cross-site skew).
   **Approximate:** outbox consumers use
   `MaxDeliver=-1` (retry forever — there is no exhaustion terminal event), and
   exact one-time forwarded accounting needs explicit dedup/Ack semantics not yet
