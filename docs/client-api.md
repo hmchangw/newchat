@@ -3901,6 +3901,14 @@ See [Error envelope](#6-error-envelope-reference).
       "card": {
         "template": "expense-approval-v1",
         "data": "eyJhbW91bnQiOjQyfQ=="
+      },
+      "tshow": true,
+      "sender": { "account": "alice", "displayName": "Alice Wong" },
+      "room": {
+        "id": "r1",
+        "name": "Bob Chan",
+        "type": "dm",
+        "hrInfo": { "account": "bob", "name": "陳大文", "engName": "Bob Chan" }
       }
     }
   ],
@@ -3913,7 +3921,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `messages` | SearchMessage[] | Per-hit projection. Always an array (empty `[]` when no results). |
 | `total` | integer | Total matching hits (may exceed `messages.length` when paginating). |
 
-**`SearchMessage` fields** (all sourced directly from the ES message index — no Mongo round-trip):
+**`SearchMessage` fields** (base fields from the ES message index; `room`/`sender` resolved server-side):
 
 | Field | Type | Omitted when |
 |---|---|---|
@@ -3929,10 +3937,30 @@ See [Error envelope](#6-error-envelope-reference).
 | `threadParentMessageCreatedAt` | RFC3339 timestamp (nullable) | omitted when not a thread reply |
 | `attachments` | [Attachment](#attachment)[] | omitted when the message has no attachments |
 | `card` | [MessageCard](#messagecard) | omitted when the message carries no tcard |
+| `tshow` | boolean | omitted when false — set on a thread reply that is also shown in the parent channel timeline |
+| `sender` | [MessageSender](#messagesender) | present on every hit; `account` always set, `displayName` best-effort |
+| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`appInfo`/`hrInfo` best-effort |
 
 `attachments` and `card` are the message's payloads mirrored as-is from the index (same wire shape as history reads — decoded `Attachment` objects; `card.data` is base64-encoded bytes), so the client can render a hit (file row, tcard) without a follow-up history-service load.
 
-Display fields (user name, room name) are intentionally NOT carried in the response. Clients resolve them via their own subscription cache, subscription enrichment (HRInfo), or [profile.getByName](#profilegetbyname) (§3.4).
+`room` and `sender` are resolved server-side and are **best-effort**: individual fields are omitted when they cannot be resolved (e.g. the caller has no subscription for the room, or a federated channel's origin site is unreachable). The base message fields are always present.
+
+##### MessageSender
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | sender's account |
+| `displayName` | string | engName+chineseName (fallback account); the app's display name for a bot sender. Omitted when empty. |
+
+##### MessageRoom
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | roomId |
+| `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
+| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
+| `appInfo` | [AppSubscription](#appsubscription) | present **only for `botDM` rooms** |
+| `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | present **only for `dm` rooms** |
 
 ##### Error response
 
