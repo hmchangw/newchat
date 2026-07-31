@@ -52,16 +52,15 @@ type SearchMessage struct {
 }
 
 // MessageRoom is the enriched room object attached to a SearchMessage.
-// Type is the room type from the caller's subscription. AppInfo is set only
-// for botDM rooms; HRInfo only for dm rooms. Name is the app name (botDM),
-// the counterpart's display name (dm), or the canonical room name (channel/
-// discussion, from the RoomsInfoBatch RPC).
+// Type is the room type from the caller's subscription. HRInfo is set only
+// for dm rooms. Name is the app name (botDM), the counterpart's display
+// name (dm), or the canonical room name (channel/discussion, from the
+// RoomsInfoBatch RPC).
 type MessageRoom struct {
-	ID      string              `json:"id"`
-	Name    string              `json:"name,omitempty"`
-	Type    RoomType            `json:"type,omitempty"`
-	AppInfo *AppSubscription    `json:"appInfo,omitempty"`
-	HRInfo  *SubscriptionHRInfo `json:"hrInfo,omitempty"`
+	ID     string              `json:"id"`
+	Name   string              `json:"name,omitempty"`
+	Type   RoomType            `json:"type,omitempty"`
+	HRInfo *SubscriptionHRInfo `json:"hrInfo,omitempty"`
 }
 
 // MessageSender is the enriched author object attached to a SearchMessage.

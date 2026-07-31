@@ -31,7 +31,7 @@ func TestMongoStore_EnrichLookups(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = db.Collection("apps").InsertMany(ctx, []any{
-		bson.M{"_id": "app-1", "name": "Helper", "assistant": bson.M{"name": "helper.bot", "enabled": true}},
+		bson.M{"_id": "app-1", "name": "Helper", "description": "a bot", "version": "1.0", "assistant": bson.M{"name": "helper.bot", "enabled": true}},
 	})
 	require.NoError(t, err)
 
@@ -57,6 +57,9 @@ func TestMongoStore_EnrichLookups(t *testing.T) {
 	apps, err := store.AppsByAssistantNames(ctx, []string{"helper.bot", "ghost.bot"})
 	require.NoError(t, err)
 	assert.Equal(t, "Helper", apps["helper.bot"].Name)
+	// projection: only name and assistant.name come back
+	assert.Empty(t, apps["helper.bot"].Description)
+	assert.Empty(t, apps["helper.bot"].Version)
 	_, ok = apps["ghost.bot"]
 	assert.False(t, ok)
 
