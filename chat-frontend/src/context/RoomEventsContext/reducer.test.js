@@ -712,6 +712,66 @@ describe('MESSAGE_EDITED / MESSAGE_DELETED — live broadcast', () => {
   })
 })
 
+describe('MESSAGE_REACTED — live reaction toggles', () => {
+  const seedRoom = (msgs, pending = []) => ({
+    ...initialState,
+    roomState: {
+      r1: {
+        messages: msgs,
+        hasLoadedHistory: true, historyError: null,
+        unreadCount: 0, hasMention: false, mentionAll: false,
+        lastMsgAt: null, lastMsgId: null,
+        bufferMode: 'live', pendingLiveMessages: pending, focusMessageId: null,
+      },
+    },
+  })
+  const react = (over) => ({
+    type: 'MESSAGE_REACTED', roomId: 'r1', messageId: 'a',
+    shortcode: '👍', action: 'added', account: 'bob', displayName: 'Bob', ...over,
+  })
+
+  it('adds a reactor under the shortcode', () => {
+    const out = roomEventsReducer(seedRoom([{ id: 'a', content: 'x' }]), react())
+    expect(out.roomState.r1.messages[0].reactions).toEqual({
+      '👍': [{ account: 'bob', displayName: 'Bob' }],
+    })
+  })
+
+  it('appends a second distinct reactor to the same shortcode', () => {
+    const s1 = roomEventsReducer(seedRoom([{ id: 'a' }]), react())
+    const out = roomEventsReducer(s1, react({ account: 'carol', displayName: 'Carol' }))
+    expect(out.roomState.r1.messages[0].reactions['👍']).toEqual([
+      { account: 'bob', displayName: 'Bob' },
+      { account: 'carol', displayName: 'Carol' },
+    ])
+  })
+
+  it('is idempotent — re-adding the same account does not duplicate', () => {
+    const s1 = roomEventsReducer(seedRoom([{ id: 'a' }]), react())
+    const out = roomEventsReducer(s1, react())
+    expect(out.roomState.r1.messages[0].reactions['👍']).toHaveLength(1)
+  })
+
+  it('removes a reactor and drops the shortcode key when it empties', () => {
+    const s1 = roomEventsReducer(seedRoom([{ id: 'a' }]), react())
+    const out = roomEventsReducer(s1, react({ action: 'removed' }))
+    expect(out.roomState.r1.messages[0].reactions).toEqual({})
+  })
+
+  it('patches pendingLiveMessages when the target lives there', () => {
+    const seed = seedRoom([{ id: 'a' }], [{ id: 'p1' }])
+    const out = roomEventsReducer(seed, react({ messageId: 'p1' }))
+    expect(out.roomState.r1.pendingLiveMessages[0].reactions['👍']).toHaveLength(1)
+    expect(out.roomState.r1.messages).toBe(seed.roomState.r1.messages)
+  })
+
+  it('no-ops when the room or message is unknown', () => {
+    const seed = seedRoom([{ id: 'a' }])
+    expect(roomEventsReducer(seed, react({ roomId: 'nope' }))).toBe(seed)
+    expect(roomEventsReducer(seed, react({ messageId: 'ghost' }))).toBe(seed)
+  })
+})
+
 describe('MESSAGE_RECEIVED — server echo overwrites optimistic createdAt', () => {
   // Regression for: every thread reply silently failing message-worker's
   // IF EXISTS stamp on messages_by_id because the parent message in
@@ -1542,5 +1602,134 @@ describe('roomEventsReducer: readSeq (post-mark-read refetch trigger)', () => {
       roomId: 'a',
     })
     expect(next.readSeq).toBe(1)
+  })
+})
+
+// Helper: build an ascending block of history messages m<start>..m<end>.
+function histBlock(ids, roomId = 'a') {
+  return ids.map((id, i) => ({
+    id,
+    roomId,
+    content: id,
+    createdAt: new Date(Date.UTC(2026, 3, 17, 8, i, 0)).toISOString(),
+    sender: { account: 'bob' },
+  }))
+}
+
+describe('roomEventsReducer: older-message pagination', () => {
+  it('HISTORY_LOADED records hasMoreOlder from the action', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m1', 'm2']),
+      hasMoreOlder: true,
+    })
+    expect(next.roomState.a.hasMoreOlder).toBe(true)
+    expect(next.roomState.a.loadingOlder).toBe(false)
+  })
+
+  it('a fresh room state defaults hasMoreOlder true / loadingOlder false', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m1']),
+      hasMoreOlder: false,
+    })
+    // hasMoreOlder reflects the action; loadingOlder starts false.
+    expect(next.roomState.a.hasMoreOlder).toBe(false)
+    expect(next.roomState.a.loadingOlder).toBe(false)
+  })
+
+  it('HISTORY_OLDER_LOADING flips loadingOlder true and clears historyError', () => {
+    const loaded = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m5', 'm6']),
+      hasMoreOlder: true,
+    })
+    const next = roomEventsReducer(loaded, { type: 'HISTORY_OLDER_LOADING', roomId: 'a' })
+    expect(next.roomState.a.loadingOlder).toBe(true)
+    expect(next.roomState.a.historyError).toBe(null)
+  })
+
+  it('HISTORY_OLDER_LOADED prepends the older block ahead of existing messages', () => {
+    const loaded = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m5', 'm6']),
+      hasMoreOlder: true,
+    })
+    const loading = roomEventsReducer(loaded, { type: 'HISTORY_OLDER_LOADING', roomId: 'a' })
+    const next = roomEventsReducer(loading, {
+      type: 'HISTORY_OLDER_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m3', 'm4']),
+      hasMoreOlder: true,
+    })
+    expect(next.roomState.a.messages.map((m) => m.id)).toEqual(['m3', 'm4', 'm5', 'm6'])
+    expect(next.roomState.a.loadingOlder).toBe(false)
+    expect(next.roomState.a.hasMoreOlder).toBe(true)
+  })
+
+  it('HISTORY_OLDER_LOADED dedupes ids already present', () => {
+    const loaded = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m4', 'm5']),
+      hasMoreOlder: true,
+    })
+    const next = roomEventsReducer(loaded, {
+      type: 'HISTORY_OLDER_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m3', 'm4']), // m4 overlaps
+      hasMoreOlder: false,
+    })
+    expect(next.roomState.a.messages.map((m) => m.id)).toEqual(['m3', 'm4', 'm5'])
+    expect(next.roomState.a.hasMoreOlder).toBe(false)
+  })
+
+  it('HISTORY_OLDER_LOADED does NOT trim the front (keeps older beyond the live cap)', () => {
+    // Seed a full-cap buffer of newest messages, then prepend older ones.
+    const newest = histBlock(Array.from({ length: 200 }, (_, i) => `n${i}`))
+    const loaded = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: newest,
+      hasMoreOlder: true,
+    })
+    const older = histBlock(['o1', 'o2', 'o3'])
+    const next = roomEventsReducer(loaded, {
+      type: 'HISTORY_OLDER_LOADED',
+      roomId: 'a',
+      messages: older,
+      hasMoreOlder: true,
+    })
+    expect(next.roomState.a.messages.length).toBe(203)
+    expect(next.roomState.a.messages.slice(0, 3).map((m) => m.id)).toEqual(['o1', 'o2', 'o3'])
+  })
+
+  it('HISTORY_OLDER_FAILED clears loadingOlder and keeps hasMoreOlder for retry', () => {
+    const loaded = roomEventsReducer(initialState, {
+      type: 'HISTORY_LOADED',
+      roomId: 'a',
+      messages: histBlock(['m5']),
+      hasMoreOlder: true,
+    })
+    const loading = roomEventsReducer(loaded, { type: 'HISTORY_OLDER_LOADING', roomId: 'a' })
+    const next = roomEventsReducer(loading, { type: 'HISTORY_OLDER_FAILED', roomId: 'a' })
+    expect(next.roomState.a.loadingOlder).toBe(false)
+    expect(next.roomState.a.hasMoreOlder).toBe(true)
+  })
+
+  it('REPLACE_ROOM_BUFFER (jump) resets hasMoreOlder true so a jumped window can page up', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'REPLACE_ROOM_BUFFER',
+      roomId: 'a',
+      messages: histBlock(['j1', 'j2']),
+      focusMessageId: 'j1',
+    })
+    expect(next.roomState.a.hasMoreOlder).toBe(true)
+    expect(next.roomState.a.loadingOlder).toBe(false)
+    expect(next.roomState.a.bufferMode).toBe(BUFFER_MODE.HISTORICAL)
   })
 })

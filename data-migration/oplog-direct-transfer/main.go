@@ -83,7 +83,7 @@ func main() {
 		filterSubjects = append(filterSubjects, subject.MigrationOplog(cfg.SiteID, coll, "*"))
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, targetClient)

@@ -38,6 +38,7 @@ type handler struct {
 	mongo MongoStore
 	users SearchUsersClient
 	cache RestrictedRoomCache
+	room  RoomInfoClient
 	cfg   handlerConfig
 }
 
@@ -120,10 +121,7 @@ func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessages
 		return nil, fmt.Errorf("parsing search response: %w", err)
 	}
 
-	messages := make([]model.SearchMessage, 0, len(hits))
-	for i := range hits {
-		messages = append(messages, toSearchMessage(&hits[i]))
-	}
+	messages := h.enrichMessages(ctx, account, hits)
 	return &model.SearchMessagesResponse{Messages: messages, Total: total}, nil
 }
 

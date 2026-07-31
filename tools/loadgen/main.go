@@ -40,7 +40,7 @@ import (
 // telemetry of its own, so it wires noop trace providers — the connection is
 // still the o11y/nats Conn used everywhere else.
 func dialNATS(url, credsFile string) (*o11ynats.Conn, error) {
-	return natsutil.Connect(context.Background(), url, credsFile, noop.NewTracerProvider(), propagation.TraceContext{})
+	return natsutil.Connect(context.Background(), url, credsFile, noop.NewTracerProvider(), propagation.TraceContext{}, false)
 }
 
 // bottleneckConfig tunes the max-rps(messages) bottleneck attribution. It is

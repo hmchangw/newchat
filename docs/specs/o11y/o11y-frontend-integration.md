@@ -148,8 +148,9 @@ export function withLinkedSpan(name, attributes, headers, fn, kind = SpanKind.CO
 ```
 
 Rooted at `ROOT_CONTEXT` (**detached — a new trace**) with a **link** back to
-the upstream producer. This is the deliberate mirror of the backend's detached
-`deliver` span; it is *not* a bug that the receive side is a separate trace.
+the upstream producer. This deliberately mirrors the backend's detached
+`process` consumer span; it is *not* a bug that the receive side is a separate
+trace.
 
 ### 4.4 `natsSpanName` — naming convention
 
@@ -236,11 +237,11 @@ You do not have to configure these — but know they exist:
    `traceparent`, `tracestate`, `baggage` on cross-origin HTTP, and OPTIONS
    preflight is handled *before* the server-span middleware (no preflight noise
    in Tempo). Your OTLP collector endpoint must also allow the browser origin.
-2. **NATS tracing gate is on.** Backend `pkg/natsutil.Connect` force-enables
-   `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` + `OTEL_NATS_TRACING_ENABLED`, so
-   backend producers inject `traceparent` into NATS headers and consumers emit
-   `deliver`/`process` spans with links. Without this the browser's injected
-   context would be dropped at the first backend hop.
+2. **NATS tracing follows the SDK toggle.** Backend `pkg/natsutil.Connect`
+   passes the resolved `sdk.Toggles.Trace` value to o11y. When enabled,
+   producers inject `traceparent` into NATS headers and consumers emit detached
+   `process` spans with links. When disabled, o11y selects the direct/native
+   path and deliberately skips propagation and span work.
 3. **Propagation model.**
    - browser → backend over **NATS** = **span link** (new trace each hop).
    - browser → backend over **HTTP** (`auth`/`portal`/`upload` via `o11y/gin`)

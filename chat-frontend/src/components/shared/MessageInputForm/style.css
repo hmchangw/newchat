@@ -102,3 +102,44 @@
 }
 .message-input-form button[type='submit']:hover:not(:disabled) { background: var(--accent-hover); }
 .message-input-form button[type='submit']:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.message-input-attach-btn {
+  flex: 0 0 auto;
+  padding: 0 var(--space-sm, 8px);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-lg, 1.125rem);
+  line-height: 1;
+}
+.message-input-attach-btn:hover:not(:disabled) { background: var(--bg-muted, rgba(127,127,127,0.12)); }
+.message-input-attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.message-input-attachment {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 8px);
+  padding: var(--space-xs, 4px) 0;
+}
+.message-input-attachment-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 4px);
+}
+.message-input-attachment-name {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.message-input-attachment-remove {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}

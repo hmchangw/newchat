@@ -200,7 +200,10 @@ export function NatsProvider({ children }) {
 
       authUrlRef.current = nextAuthUrl
       ncRef.current = nc
-      setUser({ ...userInfo, siteId: portal.siteId })
+      // baseUrl is the media/API gateway origin — components build absolute
+      // attachment (image/file) URLs from it + the attachment's relative
+      // titleLink. Exposed here so MessageAttachments doesn't reach into the ref.
+      setUser({ ...userInfo, siteId: portal.siteId, baseUrl: nextAuthUrl })
       setConnected(true)
 
       // Persist the bot/admin bundle so a tab reload resumes the session.

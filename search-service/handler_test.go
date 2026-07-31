@@ -229,6 +229,19 @@ type fakeMongo struct {
 	searchAppsCalls   []searchAppsCall
 	searchAppsResults []model.App
 	searchAppsErr     error
+
+	// enrichment lookups
+	subs     map[string]SubscriptionMeta
+	subsErr  error
+	users    map[string]HRUser
+	usersErr error
+	apps     map[string]model.App
+	appsErr  error
+
+	subsAccount string
+	subsRoomIDs []string
+	userAccts   []string
+	appBots     []string
 }
 
 type searchAppsCall struct {
@@ -252,6 +265,30 @@ func (f *fakeMongo) SearchAppsByName(
 		return nil, f.searchAppsErr
 	}
 	return f.searchAppsResults, nil
+}
+
+func (f *fakeMongo) SubscriptionsByRoomIDs(_ context.Context, account string, roomIDs []string) (map[string]SubscriptionMeta, error) {
+	f.subsAccount, f.subsRoomIDs = account, roomIDs
+	if f.subsErr != nil {
+		return nil, f.subsErr
+	}
+	return f.subs, nil
+}
+
+func (f *fakeMongo) UsersByAccounts(_ context.Context, accounts []string) (map[string]HRUser, error) {
+	f.userAccts = accounts
+	if f.usersErr != nil {
+		return nil, f.usersErr
+	}
+	return f.users, nil
+}
+
+func (f *fakeMongo) AppsByAssistantNames(_ context.Context, bots []string) (map[string]model.App, error) {
+	f.appBots = bots
+	if f.appsErr != nil {
+		return nil, f.appsErr
+	}
+	return f.apps, nil
 }
 
 func TestHandler_SearchRooms_HappyPath(t *testing.T) {
@@ -661,8 +698,8 @@ func TestHandler_SearchUsers_AccountExtractedForLogging(t *testing.T) {
 
 func TestHandler_SearchMessages_HitProjection(t *testing.T) {
 	// ES returns a hit; verify it projects into SearchMessage with the
-	// ES-sourced fields populated. No Mongo enrichment — display fields
-	// (user/room name) are resolved by the client via user-service lookups.
+	// ES-sourced base fields populated (enrichment lookups return nothing here,
+	// so room/sender degrade to id/account only).
 	store := &fakeStore{
 		searchBody: json.RawMessage(`{"hits":{"total":{"value":1},"hits":[{"_source":{` +
 			`"messageId":"m1","roomId":"r1","siteId":"site-a","userId":"u1",` +
@@ -671,7 +708,7 @@ func TestHandler_SearchMessages_HitProjection(t *testing.T) {
 	cache := newFakeCache()
 	cache.store["alice"] = map[string]int64{}
 
-	h := newTestHandler(store, nil, nil, cache)
+	h := newTestHandler(store, &fakeMongo{}, nil, cache)
 
 	resp, err := h.searchMessages(ctxWithAccount("alice"), model.SearchMessagesRequest{Query: "hello"})
 	require.NoError(t, err)
@@ -834,4 +871,30 @@ func TestHandler_SearchOrgs_QueryTrimmedBeforeQueryBuild(t *testing.T) {
 	require.NoError(t, json.Unmarshal(store.searchCalls[0].body, &body))
 	mm := body["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)[0].(map[string]any)["multi_match"].(map[string]any)
 	assert.Equal(t, "engineering", mm["query"], "trimmed query must flow to the ES body, not the padded string")
+}
+
+func TestMongoStoreInterfaceShape(t *testing.T) {
+	var _ MongoStore = (*mongoStore)(nil) // must satisfy the extended interface
+}
+
+func TestSearchMessages_EnrichesResponse(t *testing.T) {
+	store := &fakeStore{searchBody: json.RawMessage(`{"hits":{"total":{"value":1},"hits":[
+		{"_source":{"messageId":"m1","roomId":"rDM","siteId":"site-a","userAccount":"alice",
+		 "content":"hi","createdAt":"2026-04-01T12:00:00Z"}}
+	]}}`)}
+	m := &fakeMongo{
+		subs:  map[string]SubscriptionMeta{"rDM": {RoomType: model.RoomTypeDM, Name: "bob"}},
+		users: map[string]HRUser{"bob": {Account: "bob", EngName: "Bob Chan"}, "alice": {Account: "alice", EngName: "Alice"}},
+	}
+	h := newTestHandler(store, m, nil, newFakeCache())
+	h.room = &fakeRoom{}
+
+	resp, err := h.searchMessages(ctxWithAccount("alice"), model.SearchMessagesRequest{Query: "hi"})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	require.NotNil(t, resp.Messages[0].Room)
+	assert.Equal(t, model.RoomTypeDM, resp.Messages[0].Room.Type)
+	assert.Equal(t, "Bob Chan", resp.Messages[0].Room.Name)
+	require.NotNil(t, resp.Messages[0].Sender)
+	assert.Equal(t, "Alice", resp.Messages[0].Sender.DisplayName)
 }

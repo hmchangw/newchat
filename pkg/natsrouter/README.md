@@ -7,7 +7,14 @@ Handles subject pattern matching, parameter extraction, JSON marshal/unmarshal, 
 ## Quick Start
 
 ```go
-nc, err := natsutil.Connect(natsURL, credsFile)
+nc, err := natsutil.Connect(
+    ctx,
+    natsURL,
+    credsFile,
+    sdk.TracerProvider(),
+    sdk.Propagator,
+    sdk.Toggles.Trace,
+)
 if err != nil {
     log.Fatal(err)
 }

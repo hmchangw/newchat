@@ -79,7 +79,7 @@ paths.
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
-    - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/register (admin)](#112-http--post-apiv1cardsregister-admin)
+    - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/validate (admin)](#112-http--post-apiv1cardsvalidate-admin)
 
 ---
 
@@ -3903,6 +3903,14 @@ See [Error envelope](#6-error-envelope-reference).
       "card": {
         "template": "expense-approval-v1",
         "data": "eyJhbW91bnQiOjQyfQ=="
+      },
+      "tshow": true,
+      "sender": { "account": "alice", "displayName": "Alice Wong" },
+      "room": {
+        "id": "r1",
+        "name": "Bob Chan",
+        "type": "dm",
+        "hrInfo": { "account": "bob", "name": "陳大文", "engName": "Bob Chan" }
       }
     }
   ],
@@ -3915,7 +3923,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `messages` | SearchMessage[] | Per-hit projection. Always an array (empty `[]` when no results). |
 | `total` | integer | Total matching hits (may exceed `messages.length` when paginating). |
 
-**`SearchMessage` fields** (all sourced directly from the ES message index — no Mongo round-trip):
+**`SearchMessage` fields** (base fields from the ES message index; `room`/`sender` resolved server-side):
 
 | Field | Type | Omitted when |
 |---|---|---|
@@ -3931,10 +3939,30 @@ See [Error envelope](#6-error-envelope-reference).
 | `threadParentMessageCreatedAt` | RFC3339 timestamp (nullable) | omitted when not a thread reply |
 | `attachments` | [Attachment](#attachment)[] | omitted when the message has no attachments |
 | `card` | [MessageCard](#messagecard) | omitted when the message carries no tcard |
+| `tshow` | boolean | omitted when false — set on a thread reply that is also shown in the parent channel timeline |
+| `sender` | [MessageSender](#messagesender) | present on every hit; `account` always set, `displayName` best-effort |
+| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`appInfo`/`hrInfo` best-effort |
 
 `attachments` and `card` are the message's payloads mirrored as-is from the index (same wire shape as history reads — decoded `Attachment` objects; `card.data` is base64-encoded bytes), so the client can render a hit (file row, tcard) without a follow-up history-service load.
 
-Display fields (user name, room name) are intentionally NOT carried in the response. Clients resolve them via their own subscription cache, subscription enrichment (HRInfo), or [profile.getByName](#profilegetbyname) (§3.4).
+`room` and `sender` are resolved server-side and are **best-effort**: individual fields are omitted when they cannot be resolved (e.g. the caller has no subscription for the room, or a federated channel's origin site is unreachable). The base message fields are always present.
+
+##### MessageSender
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | sender's account |
+| `displayName` | string | engName+chineseName (fallback account); the app's display name for a bot sender. Omitted when empty. |
+
+##### MessageRoom
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | roomId |
+| `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
+| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
+| `appInfo` | [AppSubscription](#appsubscription) | present **only for `botDM` rooms** |
+| `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | present **only for `dm` rooms** |
 
 ##### Error response
 
@@ -7312,33 +7340,33 @@ Same catalogue as §10.4 plus:
 
 ## 11. tcard-service
 
-Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client publishes new templates (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.
+Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client validates candidate templates before publishing them (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.
 
 ### 11.1 HTTP — GET /api/v1/cards/{path}@{cardVersion}.template.json
 
 **Endpoint:** `GET /api/v1/cards/{path}@{cardVersion}.template.json`
 **Reply:** synchronous HTTP response
 
-Fetches one card template by `path` and `cardVersion`, served from cache with no per-request database read. The filename is a single URL segment: the service strips the `.template.json` suffix, splits the remainder on the **last** `@` into `path` and `cardVersion`, and returns the stored document verbatim minus the Mongo `_id` and the routing `path`.
+Fetches one card template by `path` and `cardVersion`, served from cache with no per-request database read. The service strips the `.template.json` suffix, splits the remainder on the **last** `@` into `path` and `cardVersion`, and returns the stored document verbatim minus the routing `path` and the storage-only fields `_id` and `migratedAt`. Only top-level keys are removed — an `id` on an element inside `body` is preserved.
 
 #### Request
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `path` | URL | string | yes | The card path — everything before the last `@`. May contain `@` but never `/`. |
+| `path` | URL | string | yes | The card path — everything before the last `@`. Contains `/` separators (`a/b/c`), matched by the route's trailing wildcard, so it spans multiple URL segments. |
 | `cardVersion` | URL | string | yes | Semantic version `a.b.c` — between the last `@` and the `.template.json` suffix. |
 
 ```http
-GET /api/v1/cards/welcome@1.0.0.template.json
+GET /api/v1/cards/greetings/en/welcome@1.0.0.template.json
 ```
 
 #### Success response
 
-`HTTP 200`, `Content-Type: application/json`. The stored card document minus `_id` and `path`.
+`HTTP 200`, `Content-Type: application/json`. The stored card document minus `path`, `_id` and `migratedAt`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `cardVersion` | string | The document's semantic version. |
+| `_tcardVersion` | string | The document's semantic version. |
 | `cardUsage` | any | Optional usage metadata; absent when the card has none. |
 | `type` | string | `"AdaptiveCard"`. |
 | `schema` | string | `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
@@ -7347,12 +7375,12 @@ GET /api/v1/cards/welcome@1.0.0.template.json
 
 ```json
 {
-  "cardVersion": "1.0.0",
+  "_tcardVersion": "1.0.0",
   "cardUsage": "greeting",
   "type": "AdaptiveCard",
   "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "version": "1.5",
-  "body": [{ "type": "TextBlock", "text": "Hi" }]
+  "body": [{ "type": "TextBlock", "id": "greeting", "text": "Hi" }]
 }
 ```
 
@@ -7362,8 +7390,24 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
-| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "card template request must include a version: {path}@{cardVersion}.template.json" }` — missing `.template.json` suffix, missing `@` version separator, or empty path/version. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "card template request must include a version: {path}@{version}.template.json" }` — missing `@` version separator or empty path/version. A request without the `.template.json` suffix is a directory listing instead (see below), not an error. |
 | 404 | `not_found` | — | `{ "code": "not_found", "error": "card template not found" }` — no cached card for that `(path, cardVersion)`. |
+
+#### Directory listing
+
+The same route without the `.template.json` suffix lists the **direct children** of the requested prefix. `GET /api/v1/cards/` lists the root; `GET /api/v1/cards/greetings/en` lists that folder.
+
+| Field | Type | Notes |
+|---|---|---|
+| `statusCode` | integer | Always `200`. |
+| `cards` | string[] | Direct child cards as `path@cardVersion`, sorted by path then descending semver. Empty array when none. |
+| `folders` | string[] | Direct child folders as full paths from root, sorted. Empty array when none. |
+
+```json
+{ "statusCode": 200, "cards": ["greetings/en/welcome@1.0.0"], "folders": [] }
+```
+
+Listing errors: `400 bad_request` `no version specified for card "<prefix>"` when the prefix names a card exactly (add `@version.template.json`); `404 not_found` `given path "<prefix>" for card list not found` for an unknown prefix; `404 not_found` `no paths or cards exist` before the cache's first load.
 
 #### Triggered events — success path
 
@@ -7375,34 +7419,34 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 ---
 
-### 11.2 HTTP — POST /api/v1/cards/register (admin)
+### 11.2 HTTP — POST /api/v1/cards/validate (admin)
 
-**Endpoint:** `POST /api/v1/cards/register`
+**Endpoint:** `POST /api/v1/cards/validate`
 **Reply:** synchronous HTTP response
 
-**Admin only.** Publishes a new card template: an admin reviews a submitted card and calls this to validate and insert it, after which it is immediately servable via §11.1. Not for end-user browsers. The request body is the full card document.
+**Admin only.** Checks a card document and stores nothing: an admin review client calls this to confirm a submitted card is well-formed and correctly versioned before it is published. A validated card is **not** inserted into `cards` and **not** added to the cache — it becomes servable via §11.1 only once it is written to the collection and the cache reloads. Not for end-user browsers. The request body is the full card document.
 
 #### Request
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `path` | string | yes | Card path. Must not contain `/`. |
-| `cardVersion` | string | yes | Semantic version `a.b.c`, no leading zeros. Must be **strictly greater** than the highest existing `cardVersion` for this `path`. |
-| `cardUsage` | any | no | Optional usage metadata. |
+| `path` | string | yes | Card path: exactly 3 non-empty `/`-separated segments (`a/b/c`). Must not contain `@`. |
+| `_tcardVersion` | string | yes | Semantic version `a.b.c`, no leading zeros. Must be **strictly greater** than every cached `_tcardVersion` for this `path`. |
+| `cardUsage` | any | no | Optional usage metadata. Not validated. |
 | `type` | string | yes | Must equal `"AdaptiveCard"`. |
 | `schema` | string | yes | Must equal `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
 | `version` | string | yes | Must equal `"1.5"`. |
 | `body` | array | yes | Non-empty AdaptiveCard body array. |
 
 ```http
-POST /api/v1/cards/register
+POST /api/v1/cards/validate
 Content-Type: application/json
 ```
 
 ```json
 {
-  "path": "welcome",
-  "cardVersion": "1.0.0",
+  "path": "greetings/en/welcome",
+  "_tcardVersion": "1.0.0",
   "cardUsage": "greeting",
   "type": "AdaptiveCard",
   "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -7413,7 +7457,7 @@ Content-Type: application/json
 
 #### Success response
 
-`HTTP 201`.
+`HTTP 200`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -7429,9 +7473,13 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
-| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "body must be a non-empty array" }` — a missing/empty required field, a `path` containing `/`, a non-semver or leading-zero `cardVersion`, a non-array `body`, or a `type`/`schema`/`version` that isn't the pinned value. |
-| 409 | `conflict` | — | `{ "code": "conflict", "error": "cardVersion must be the highest for this path" }` — `cardVersion` isn't strictly higher than the current max, or `(path, cardVersion)` already exists. |
-| 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — Mongo failure. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "body must be a non-empty array" }` — malformed JSON, a missing/empty required field, a `path` that isn't 3 non-empty segments or that contains `@`, a non-semver or leading-zero `_tcardVersion`, a non-array `body`, or a `type`/`schema`/`version` that isn't the pinned value. |
+| 409 | `conflict` | — | `{ "code": "conflict", "error": "_tcardVersion must be the highest for this path" }` — `_tcardVersion` isn't strictly higher than every cached version for this `path`. |
+| 503 | `unavailable` | — | `{ "code": "unavailable", "error": "card cache not loaded" }` — the cache has not finished its first load, so version ordering can't be judged yet. |
+
+Ordering is judged against the in-memory cache, which is as fresh as the last refresh (at startup, daily, or on demand). A card written to `cards` out-of-band since then is not yet counted.
+
+**This endpoint is advisory — it does not reserve the version or gate publishing.** The publishing path writes to `cards` directly and is not required to call this first; the collection's only hard constraint is the unique `(path, _tcardVersion)` index, which rejects an exact duplicate but accepts a *lower* version. A `200` means the card was well-formed and correctly ordered at the time of the call, not that publishing it is guaranteed safe.
 
 #### Triggered events — success path
 

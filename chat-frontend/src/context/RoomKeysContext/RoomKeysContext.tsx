@@ -14,8 +14,21 @@ type DecryptInput = {
   ciphertextB64: string
 }
 
+/** One room key delivered at bootstrap by `subscription.list`. privateKey is
+ *  base64 (same wire shape as `RoomKeyGetResponse`). */
+type SeedKeyEntry = {
+  roomId: string
+  version: number
+  privateKey: string
+}
+
 type RoomKeysContextValue = {
   hasKey(roomId: string, version: number): boolean
+  /** Seed room keys known at bootstrap (from `subscription.list`) so the first
+   *  message in a room decrypts without waiting for a live event or an
+   *  on-demand fetch. Malformed / undecodable entries are skipped; identical
+   *  already-held keys no-op (via the reducer's bytesEqual guard). */
+  seedKeys(entries: SeedKeyEntry[]): void
   /** Returns null if the key is not (yet) known for that (roomId, version),
    *  or if decryption fails. */
   decrypt(input: DecryptInput): Promise<string | null>
@@ -68,6 +81,14 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
   // subsequent ensureKey calls short-circuit without waiting for a React
   // re-render to flush the state update into stateRef.
   const knownKeysRef = useRef<Set<string>>(new Set())
+  // Synchronous cache of raw key bytes keyed by `${roomId}|${version}`, written
+  // in lockstep with knownKeysRef. decrypt reads it FIRST so a key fetched via
+  // ensureKey can decrypt the very message that triggered the fetch: the
+  // caller (useRoomSubscriptions.decryptAndDispatch) retries decrypt in the
+  // same async tick, before React flushes KEY_RECEIVED into reducer state —
+  // reading only stateRef would still miss the just-fetched key and fall back
+  // to the "[encrypted message]" placeholder.
+  const keyBytesRef = useRef<Map<string, Uint8Array>>(new Map())
 
   const userAccount = nats.user?.account ?? null
 
@@ -76,14 +97,11 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
 
     const liveNats = natsRef.current
 
-    // TODO: seed initial keys from sub.room.privateKey + sub.room.keyVersion
-    // delivered by subscription.list. The backend now populates these fields
-    // (SubscriptionRoom.PrivateKey / KeyVersion in pkg/model). Wiring them
-    // here requires exposing a seedKey() method on RoomKeysContextValue and
-    // calling it from useRoomSubscriptions.js after the BUCKETS_LOADED
-    // dispatch. Until that follow-up lands, RoomKeysContext populates from
-    // live RoomKeyEvent subscriptions only; reconnecting users re-acquire
-    // keys when a rotation or membership change next fires for each room.
+    // Initial keys are seeded from sub.room.privateKey + sub.room.keyVersion
+    // (delivered inline on subscription.list) via the `seedKeys` method, called
+    // from useRoomSubscriptions after BUCKETS_LOADED. This subscription handles
+    // the live delta: keys that rotate or are granted mid-session via
+    // RoomKeyEvent. On-demand fetches (ensureKey) cover any remaining gap.
     const sub = subscribeToRoomKeyEvents(liveNats, (raw) => {
       const evt = raw as RoomKeyEvent
       if (!evt || typeof evt.roomId !== 'string' || typeof evt.version !== 'number' || typeof evt.privateKey !== 'string') return
@@ -103,6 +121,7 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
         aesKeyCacheRef.current.delete(`${evt.roomId}|${evt.version}`)
       }
       knownKeysRef.current.add(`${evt.roomId}|${evt.version}`)
+      keyBytesRef.current.set(`${evt.roomId}|${evt.version}`, privateKey)
       dispatch({
         type: 'KEY_RECEIVED',
         roomId: evt.roomId,
@@ -117,6 +136,7 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
       pendingRequestsRef.current.clear()
       failedAtRef.current.clear()
       knownKeysRef.current.clear()
+      keyBytesRef.current.clear()
       dispatch({ type: 'CLEAR_KEYS' })
     }
     // userAccount is a stable primitive (set once on login).
@@ -131,13 +151,18 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const decrypt = useCallback(async ({ roomId, version, nonceB64, ciphertextB64 }: DecryptInput): Promise<string | null> => {
-    const entry = stateRef.current.byRoom[roomId]?.[version]
-    if (!entry) return null
-
     const cacheKey = `${roomId}|${version}`
+    // Prefer the synchronous byte cache so a key just fetched by ensureKey is
+    // usable on the immediate retry, before the KEY_RECEIVED dispatch flushes
+    // into reducer state. Fall back to reducer state for keys seeded by paths
+    // that don't touch the ref (defensive; today both writers keep them in
+    // sync).
+    const privateKey = keyBytesRef.current.get(cacheKey) ?? stateRef.current.byRoom[roomId]?.[version]?.privateKey
+    if (!privateKey) return null
+
     let pending = aesKeyCacheRef.current.get(cacheKey)
     if (!pending) {
-      pending = importAesKey(entry.privateKey)
+      pending = importAesKey(privateKey)
       aesKeyCacheRef.current.set(cacheKey, pending)
     }
     try {
@@ -190,8 +215,10 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
           }
           // Mark the key as present synchronously before dispatch so
           // concurrent ensureKey callers short-circuit on the next tick
-          // without waiting for the React state flush.
+          // without waiting for the React state flush. keyBytesRef lets the
+          // caller's immediate decrypt retry read the key in this same tick.
           knownKeysRef.current.add(cacheKey)
+          keyBytesRef.current.set(cacheKey, privateKey)
           dispatch({
             type: 'KEY_RECEIVED',
             roomId,
@@ -216,7 +243,36 @@ export function RoomKeysProvider({ children }: { children: React.ReactNode }) {
     [],
   )
 
-  const value: RoomKeysContextValue = { hasKey, decrypt, ensureKey }
+  const seedKeys = useCallback((entries: SeedKeyEntry[]) => {
+    if (!Array.isArray(entries)) return
+    for (const entry of entries) {
+      const { roomId, version, privateKey } = entry ?? {}
+      if (!roomId || typeof version !== 'number' || typeof privateKey !== 'string' || !privateKey) {
+        continue
+      }
+      let bytes: Uint8Array
+      try {
+        bytes = b64decode(privateKey)
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('seedKeys: invalid base64 privateKey, skipping', { roomId, version }, err)
+        continue
+      }
+      const cacheKey = `${roomId}|${version}`
+      // Already hold identical bytes → nothing to do (mirrors the live-event
+      // handler's no-op path; avoids evicting a derived AES key).
+      const existing = stateRef.current.byRoom[roomId]?.[version]
+      if (existing && bytesEqual(existing.privateKey, bytes)) continue
+      // Different bytes for a version we already cached → drop the stale
+      // derived AES key so decrypt re-imports from the new bytes.
+      if (existing) aesKeyCacheRef.current.delete(cacheKey)
+      knownKeysRef.current.add(cacheKey)
+      keyBytesRef.current.set(cacheKey, bytes)
+      dispatch({ type: 'KEY_RECEIVED', roomId, version, privateKey: bytes })
+    }
+  }, [])
+
+  const value: RoomKeysContextValue = { hasKey, decrypt, ensureKey, seedKeys }
 
   return <RoomKeysContext.Provider value={value}>{children}</RoomKeysContext.Provider>
 }

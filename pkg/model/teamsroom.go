@@ -21,9 +21,13 @@ type TeamsRoomCreateChat struct {
 }
 
 // TeamsRoomCreateMember is one member reference in a room-creation event: the
-// member's user id, account, and history-visibility cutoff.
+// member's user id, account, display name, and history-visibility cutoff.
+// Field-identical to TeamsChatMember by design — teams-room-creation converts
+// between them directly. DisplayName carries the same raw Graph value; see
+// TeamsChatMember.
 type TeamsRoomCreateMember struct {
 	ID                          string    `json:"id" bson:"id"` // member's AAD user object id (the teams_user _id)
 	Account                     string    `json:"account" bson:"account"`
+	DisplayName                 string    `json:"displayName" bson:"displayName"`
 	VisibleHistoryStartDateTime time.Time `json:"visibleHistoryStartDateTime" bson:"visibleHistoryStartDateTime"`
 }

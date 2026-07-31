@@ -152,6 +152,21 @@ func (m *MockMongoStore) EXPECT() *MockMongoStoreMockRecorder {
 	return m.recorder
 }
 
+// AppsByAssistantNames mocks base method.
+func (m *MockMongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AppsByAssistantNames", ctx, botAccounts)
+	ret0, _ := ret[0].(map[string]model.App)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AppsByAssistantNames indicates an expected call of AppsByAssistantNames.
+func (mr *MockMongoStoreMockRecorder) AppsByAssistantNames(ctx, botAccounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppsByAssistantNames", reflect.TypeOf((*MockMongoStore)(nil).AppsByAssistantNames), ctx, botAccounts)
+}
+
 // SearchAppsByName mocks base method.
 func (m *MockMongoStore) SearchAppsByName(ctx context.Context, query, account string, assistantEnabled *bool, offset, limit int) ([]model.App, error) {
 	m.ctrl.T.Helper()
@@ -165,6 +180,75 @@ func (m *MockMongoStore) SearchAppsByName(ctx context.Context, query, account st
 func (mr *MockMongoStoreMockRecorder) SearchAppsByName(ctx, query, account, assistantEnabled, offset, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SearchAppsByName", reflect.TypeOf((*MockMongoStore)(nil).SearchAppsByName), ctx, query, account, assistantEnabled, offset, limit)
+}
+
+// SubscriptionsByRoomIDs mocks base method.
+func (m *MockMongoStore) SubscriptionsByRoomIDs(ctx context.Context, account string, roomIDs []string) (map[string]SubscriptionMeta, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SubscriptionsByRoomIDs", ctx, account, roomIDs)
+	ret0, _ := ret[0].(map[string]SubscriptionMeta)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SubscriptionsByRoomIDs indicates an expected call of SubscriptionsByRoomIDs.
+func (mr *MockMongoStoreMockRecorder) SubscriptionsByRoomIDs(ctx, account, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SubscriptionsByRoomIDs", reflect.TypeOf((*MockMongoStore)(nil).SubscriptionsByRoomIDs), ctx, account, roomIDs)
+}
+
+// UsersByAccounts mocks base method.
+func (m *MockMongoStore) UsersByAccounts(ctx context.Context, accounts []string) (map[string]HRUser, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UsersByAccounts", ctx, accounts)
+	ret0, _ := ret[0].(map[string]HRUser)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UsersByAccounts indicates an expected call of UsersByAccounts.
+func (mr *MockMongoStoreMockRecorder) UsersByAccounts(ctx, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UsersByAccounts", reflect.TypeOf((*MockMongoStore)(nil).UsersByAccounts), ctx, accounts)
+}
+
+// MockRoomInfoClient is a mock of RoomInfoClient interface.
+type MockRoomInfoClient struct {
+	ctrl     *gomock.Controller
+	recorder *MockRoomInfoClientMockRecorder
+	isgomock struct{}
+}
+
+// MockRoomInfoClientMockRecorder is the mock recorder for MockRoomInfoClient.
+type MockRoomInfoClientMockRecorder struct {
+	mock *MockRoomInfoClient
+}
+
+// NewMockRoomInfoClient creates a new mock instance.
+func NewMockRoomInfoClient(ctrl *gomock.Controller) *MockRoomInfoClient {
+	mock := &MockRoomInfoClient{ctrl: ctrl}
+	mock.recorder = &MockRoomInfoClientMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockRoomInfoClient) EXPECT() *MockRoomInfoClientMockRecorder {
+	return m.recorder
+}
+
+// GetRoomsInfo mocks base method.
+func (m *MockRoomInfoClient) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRoomsInfo", ctx, siteID, roomIDs)
+	ret0, _ := ret[0].([]model.RoomInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetRoomsInfo indicates an expected call of GetRoomsInfo.
+func (mr *MockRoomInfoClientMockRecorder) GetRoomsInfo(ctx, siteID, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomsInfo", reflect.TypeOf((*MockRoomInfoClient)(nil).GetRoomsInfo), ctx, siteID, roomIDs)
 }
 
 // MockSearchUsersClient is a mock of SearchUsersClient interface.

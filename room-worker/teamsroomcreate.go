@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -46,10 +47,18 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		return errors.New("chat has no id")
 	}
 
+	// A Teams chat id (…@thread.v2 / …@unq.gbl.spaces) can't be a room id — its
+	// dots/@ break NATS subject tokenisation — so derive a base62 id from it
+	// deterministically (same id on every redelivery). Name falls back to the
+	// members when the chat has no topic (a DM or an unnamed group).
+	name := chat.Name
+	if name == "" {
+		name = composeMigratedRoomName(chat.Members)
+	}
 	room := &model.Room{
-		ID:        chat.ID, // chat id is the room id — idempotent on redelivery
-		Name:      chat.Name,
-		Type:      model.RoomTypeChannel,
+		ID:        idgen.DeterministicID([]byte(chat.ID)),
+		Name:      name,
+		Type:      roomTypeFromTeamsChatID(chat.ID),
 		SiteID:    h.siteID,
 		Origin:    model.OriginTeams,
 		CreatedAt: chat.CreatedDateTime.UTC(),
@@ -100,7 +109,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		if _, ok := existingByAccount[member.Account]; ok {
 			continue // already a member — no change
 		}
-		user, err := h.resolveMember(ctx, member.Account, member.ID)
+		user, err := h.resolveMember(ctx, member.Account, member.ID, member.DisplayName)
 		if err != nil {
 			slog.WarnContext(ctx, "teams room-create: skip member, resolve failed",
 				"chat_id", chat.ID, "account", member.Account, "error", err)
@@ -165,12 +174,37 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	return nil
 }
 
+// teamsDMChatIDSuffix marks a Teams 1:1 chat id; group/meeting ids end in @thread.v2.
+const teamsDMChatIDSuffix = "@unq.gbl.spaces"
+
+// roomTypeFromTeamsChatID classifies a migrated room by the Teams chat id suffix:
+// a 1:1 (…@unq.gbl.spaces) is a DM, anything else (group/meeting) a channel.
+func roomTypeFromTeamsChatID(chatID string) model.RoomType {
+	if strings.HasSuffix(chatID, teamsDMChatIDSuffix) {
+		return model.RoomTypeDM
+	}
+	return model.RoomTypeChannel
+}
+
+// composeMigratedRoomName joins the members' display names with ", " — the room
+// name for a DM or an unnamed group (a chat with no Teams topic). Isolated so the
+// format is a one-place change.
+func composeMigratedRoomName(members []model.TeamsRoomCreateMember) string {
+	names := make([]string, 0, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			names = append(names, m.DisplayName)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
 // resolveMember returns account's user, publishing a new identity when none
 // exists. The publisher owns the deterministic _id so every site's hr-sync-worker
 // upserts the same one; nothing is written locally first, so a redelivery
 // re-derives the same _id instead of splitting the user. Mirrors message-worker's
 // Teams sender resolver.
-func (h *Handler) resolveMember(ctx context.Context, account, graphID string) (*model.User, error) {
+func (h *Handler) resolveMember(ctx context.Context, account, graphID, displayName string) (*model.User, error) {
 	u, err := h.store.GetUser(ctx, account)
 	if err == nil {
 		return u, nil
@@ -183,7 +217,8 @@ func (h *Handler) resolveMember(ctx context.Context, account, graphID string) (*
 	// at every site (hr-sync-worker keys the upsert on account). No employeeId —
 	// migrated externals aren't employees.
 	id := idgen.DeterministicID([]byte(graphID))
-	nu := model.User{ID: id, Account: account, SiteID: h.siteID}
+	// displayName lands in ChineseName (mirrors message-worker's sender resolver).
+	nu := model.User{ID: id, Account: account, SiteID: h.siteID, ChineseName: displayName}
 	if h.publishUsers != nil {
 		iuc := model.IUserWithChange{User: nu, ChangeType: model.IChangeTypeNewHire}
 		if err := h.publishUsers(ctx, []model.IUserWithChange{iuc}); err != nil {

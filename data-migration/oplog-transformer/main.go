@@ -70,7 +70,7 @@ func main() {
 	sourceColl := client.Database(cfg.SourceDB).
 		Collection(cfg.SourceMessageCollection, options.Collection().SetReadPreference(rp))
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, client)

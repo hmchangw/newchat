@@ -1,4 +1,4 @@
-.PHONY: lint fmt test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
+.PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev \
         obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
@@ -61,6 +61,10 @@ lint:
 # Run goimports via golangci-lint to format all .go files
 fmt:
 	golangci-lint fmt ./...
+
+# Synchronize module requirements and checksums after dependency changes.
+tidy:
+	go mod tidy
 
 # Run all unit tests with race detector (excludes integration tests)
 test:

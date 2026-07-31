@@ -40,36 +40,6 @@ func (m *MockCardStore) EXPECT() *MockCardStoreMockRecorder {
 	return m.recorder
 }
 
-// GetCard mocks base method.
-func (m *MockCardStore) GetCard(ctx context.Context, path, cardVersion string) (card, bool, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetCard", ctx, path, cardVersion)
-	ret0, _ := ret[0].(card)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// GetCard indicates an expected call of GetCard.
-func (mr *MockCardStoreMockRecorder) GetCard(ctx, path, cardVersion any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCard", reflect.TypeOf((*MockCardStore)(nil).GetCard), ctx, path, cardVersion)
-}
-
-// InsertCard mocks base method.
-func (m *MockCardStore) InsertCard(ctx context.Context, doc *cardDoc) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "InsertCard", ctx, doc)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// InsertCard indicates an expected call of InsertCard.
-func (mr *MockCardStoreMockRecorder) InsertCard(ctx, doc any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InsertCard", reflect.TypeOf((*MockCardStore)(nil).InsertCard), ctx, doc)
-}
-
 // ListCards mocks base method.
 func (m *MockCardStore) ListCards(ctx context.Context) ([]card, error) {
 	m.ctrl.T.Helper()
@@ -83,19 +53,4 @@ func (m *MockCardStore) ListCards(ctx context.Context) ([]card, error) {
 func (mr *MockCardStoreMockRecorder) ListCards(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListCards", reflect.TypeOf((*MockCardStore)(nil).ListCards), ctx)
-}
-
-// ListVersions mocks base method.
-func (m *MockCardStore) ListVersions(ctx context.Context, path string) ([]string, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListVersions", ctx, path)
-	ret0, _ := ret[0].([]string)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ListVersions indicates an expected call of ListVersions.
-func (mr *MockCardStoreMockRecorder) ListVersions(ctx, path any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListVersions", reflect.TypeOf((*MockCardStore)(nil).ListVersions), ctx, path)
 }

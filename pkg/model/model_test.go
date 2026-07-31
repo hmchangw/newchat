@@ -4718,8 +4718,8 @@ func TestTeamsChatJSON(t *testing.T) {
 		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{
-			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
-			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+			{ID: "aad-user-1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", DisplayName: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 		SiteID:         "site-a",
 		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
@@ -4788,8 +4788,8 @@ func TestTeamsChatBSON(t *testing.T) {
 		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{
-			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
-			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+			{ID: "aad-user-1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", DisplayName: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 		SiteID:         "site-a",
 		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
@@ -4809,6 +4809,19 @@ func TestTeamsChatBSON(t *testing.T) {
 	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, true, rawDoc["needMemberSync"])
 
+	// Member subdoc keys are asserted raw: a round-trip is symmetric, so it
+	// would accept a misspelled tag, but stores and projections read these
+	// exact names.
+	var rawMembers struct {
+		Members []bson.M `bson:"members"`
+	}
+	require.NoError(t, bson.Unmarshal(data, &rawMembers))
+	require.Len(t, rawMembers.Members, 2)
+	for _, key := range []string{"id", "account", "displayName", "visibleHistoryStartDateTime"} {
+		assert.Contains(t, rawMembers.Members[0], key, "member subdoc must use the %q BSON key", key)
+	}
+	assert.Equal(t, "Alice Smith", rawMembers.Members[0]["displayName"])
+
 	// Round-trip to struct and verify equality
 	var dst model.TeamsChat
 	require.NoError(t, bson.Unmarshal(data, &dst))
@@ -4824,6 +4837,7 @@ func TestTeamsChatBSON(t *testing.T) {
 	for i, member := range c.Members {
 		assert.Equal(t, member.ID, dst.Members[i].ID)
 		assert.Equal(t, member.Account, dst.Members[i].Account)
+		assert.Equal(t, member.DisplayName, dst.Members[i].DisplayName)
 		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
 	}
 }
@@ -4859,6 +4873,7 @@ func TestTeamsRoomCreateEventJSON(t *testing.T) {
 			Members: []model.TeamsRoomCreateMember{{
 				ID:                          "aad-user-1",
 				Account:                     "alice",
+				DisplayName:                 "Alice Smith",
 				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 			}},
 		}},
@@ -4946,4 +4961,31 @@ func TestTranslateResult_JSON(t *testing.T) {
 		TargetLang:     "zh-Hant-TW",
 	}
 	roundTrip(t, &r, &model.TranslateResult{})
+}
+
+func TestSearchMessageEnrichmentJSON(t *testing.T) {
+	m := model.SearchMessage{
+		MessageID:   "m1",
+		RoomID:      "r1",
+		SiteID:      "site-a",
+		UserAccount: "alice",
+		Content:     "hi",
+		CreatedAt:   time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+		TShow:       true,
+		Sender:      &model.MessageSender{Account: "alice", DisplayName: "Alice Wong"},
+		Room: &model.MessageRoom{
+			ID:     "r1",
+			Name:   "Bob Chan",
+			Type:   model.RoomTypeDM,
+			HRInfo: &model.SubscriptionHRInfo{Account: "bob", Name: "陳", EngName: "Bob Chan"},
+		},
+	}
+	roundTrip(t, &m, &model.SearchMessage{})
+
+	// omitempty: a zero-value SearchMessage must not emit room/sender/tshow keys.
+	b, err := json.Marshal(model.SearchMessage{MessageID: "x"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "\"room\"")
+	assert.NotContains(t, string(b), "\"sender\"")
+	assert.NotContains(t, string(b), "\"tshow\"")
 }

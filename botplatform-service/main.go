@@ -64,7 +64,7 @@ func run() error {
 	h := newHandler(st, &cfg)
 	h.subs = subStore
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}

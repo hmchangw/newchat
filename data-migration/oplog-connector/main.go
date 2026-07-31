@@ -58,7 +58,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := start(ctx, &cfg, m, sdk, sdk.Propagator)
+	conn, err := start(ctx, &cfg, m, sdk, sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
@@ -112,7 +112,7 @@ type connector struct {
 }
 
 // start connects Mongo + NATS, bootstraps the stream, and launches one watcher per collection. Returns a running connector driven via Fatal()/Close().
-func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Observability, prop propagation.TextMapPropagator) (*connector, error) {
+func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Observability, prop propagation.TextMapPropagator, tracingEnabled bool) (*connector, error) {
 	if cfg.StartResumeToken != "" || cfg.StartAtTime != "" {
 		// One-off seed overrides: left set, they force a reseed (ignoring the checkpoint)
 		// on every restart — so warn loudly. Prefer a seed checkpoint doc.
@@ -125,7 +125,7 @@ func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Obser
 		return nil, fmt.Errorf("source mongo connect: %w", err)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, obsProv.TracerProvider(), prop)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, obsProv.TracerProvider(), prop, tracingEnabled)
 	if err != nil {
 		mongoutil.Disconnect(ctx, client)
 		return nil, fmt.Errorf("nats connect: %w", err)

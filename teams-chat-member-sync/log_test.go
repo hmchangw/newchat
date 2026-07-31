@@ -63,8 +63,8 @@ func TestSyncChat_LogsMemberCountSet(t *testing.T) {
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: wtNow}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
 		Return([]msgraph.ChatMemberDetail{member("u1"), member("u2")}, nil)
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
-		Return(map[string]string{"u1": "alice", "u2": "bob"}, nil)
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]teamsUserRef{"u1": {account: "alice"}, "u2": {account: "bob"}}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", wtNow, gomock.Len(2), wtNow).Return(nil)
 
 	require.NoError(t, s.run(context.Background()))

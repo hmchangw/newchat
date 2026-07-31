@@ -152,7 +152,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -193,6 +193,7 @@ func main() {
 		SpotlightReadPattern:    spotlightReadPattern,
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
 	})
+	handler.room = newRoomClient(nc)
 
 	router := natsrouter.New(nc, "search-service")
 	router.Use(natsrouter.RequestID())

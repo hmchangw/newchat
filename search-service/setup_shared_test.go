@@ -75,7 +75,7 @@ func TestMain(m *testing.M) {
 func setupRouter(t *testing.T, queueGroup string, register func(*natsrouter.Router)) *nats.Conn {
 	t.Helper()
 	natsURL := testutil.NATS(t)
-	serverNC, err := natsutil.Connect(context.Background(), natsURL, "", noop.NewTracerProvider(), propagation.TraceContext{})
+	serverNC, err := natsutil.Connect(context.Background(), natsURL, "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err, "connect nats (server side)")
 	t.Cleanup(func() { _ = serverNC.Drain() })
 

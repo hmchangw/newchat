@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, act } from '@testing-library/react'
 import { RoomKeysProvider, useRoomKeys } from './RoomKeysContext'
+import fixture from '../../../test/fixtures/encrypted-message.json'
 
 vi.mock('@/api', () => ({
   subscribeToRoomKeyEvents: vi.fn(),
@@ -149,6 +150,41 @@ describe('RoomKeysProvider.ensureKey', () => {
     expect(requestRoomKey).toHaveBeenCalledTimes(2)
   })
 
+  it('decrypt succeeds immediately after ensureKey resolves, before a re-render', async () => {
+    // Regression: the on-demand key fetch must rescue the very message that
+    // triggered it. useRoomSubscriptions.decryptAndDispatch awaits ensureKey
+    // and then retries decrypt in the SAME async tick — before React has
+    // flushed the KEY_RECEIVED dispatch into reducer state. If decrypt can
+    // only see keys via reducer state, the retry reads stale state, returns
+    // null, and the message falls through to the "[encrypted message]"
+    // placeholder even though the key was just fetched successfully.
+    vi.mocked(requestRoomKey).mockResolvedValueOnce({
+      roomId: 'r1',
+      version: fixture.message.version,
+      privateKey: fixture.privateKey,
+    })
+
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    const ok = await lastDecryptHook.ensureKey('r1', fixture.message.version, 'site-a')
+    expect(ok).toBe(true)
+
+    // No waitFor / no act flush between ensureKey and decrypt — mirrors the
+    // real retry timing in decryptAndDispatch.
+    const plaintext = await lastDecryptHook.decrypt({
+      roomId: 'r1',
+      version: fixture.message.version,
+      nonceB64: fixture.message.nonce,
+      ciphertextB64: fixture.message.ciphertext,
+    })
+    expect(plaintext).toBe(fixture.plaintext)
+  })
+
   it('short-circuits to true when the (roomId, version) is already cached', async () => {
     render(
       <RoomKeysProvider>
@@ -171,5 +207,77 @@ describe('RoomKeysProvider.ensureKey', () => {
 
     await expect(lastDecryptHook.ensureKey('r1', 0, 'site-a')).resolves.toBe(true)
     expect(requestRoomKey).toHaveBeenCalledTimes(1) // no second RPC
+  })
+})
+
+describe('RoomKeysProvider.seedKeys', () => {
+  beforeEach(() => {
+    lastDecryptHook = null
+    vi.mocked(subscribeToRoomKeyEvents).mockReset()
+    vi.mocked(requestRoomKey).mockReset()
+    vi.mocked(subscribeToRoomKeyEvents).mockReturnValue({ unsubscribe: vi.fn() })
+  })
+
+  it('seeds keys from bootstrap so decrypt works without a live event or fetch', async () => {
+    // Regression: on a fresh reload the client holds no keys until a live
+    // RoomKeyEvent fires or a message forces an on-demand fetch. subscription.list
+    // already carries the current room key, so seeding it up front means the
+    // first message in a room decrypts without a placeholder or an extra RPC.
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    act(() => {
+      lastDecryptHook.seedKeys([
+        { roomId: 'r1', version: fixture.message.version, privateKey: fixture.privateKey },
+      ])
+    })
+
+    const plaintext = await lastDecryptHook.decrypt({
+      roomId: 'r1',
+      version: fixture.message.version,
+      nonceB64: fixture.message.nonce,
+      ciphertextB64: fixture.message.ciphertext,
+    })
+    expect(plaintext).toBe(fixture.plaintext)
+    expect(requestRoomKey).not.toHaveBeenCalled()
+  })
+
+  it('skips entries with invalid base64 without throwing', async () => {
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    act(() => {
+      lastDecryptHook.seedKeys([{ roomId: 'r1', version: 1, privateKey: '!!!not-base64!!!' }])
+    })
+
+    expect(lastDecryptHook.hasKey('r1', 1)).toBe(false)
+  })
+
+  it('ignores malformed entries (missing roomId / version / privateKey)', async () => {
+    render(
+      <RoomKeysProvider>
+        <Probe />
+      </RoomKeysProvider>,
+    )
+    await waitFor(() => expect(lastDecryptHook).not.toBeNull())
+
+    act(() => {
+      lastDecryptHook.seedKeys([
+        { roomId: '', version: 1, privateKey: fixture.privateKey },
+        { roomId: 'r1', version: undefined, privateKey: fixture.privateKey },
+        { roomId: 'r2', version: 1 },
+      ])
+    })
+
+    expect(lastDecryptHook.hasKey('r1', 1)).toBe(false)
+    expect(lastDecryptHook.hasKey('r2', 1)).toBe(false)
   })
 })

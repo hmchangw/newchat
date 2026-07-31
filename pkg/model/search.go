@@ -23,11 +23,10 @@ type SearchMessagesResponse struct {
 	Total    int64           `json:"total"`
 }
 
-// SearchMessage is the per-hit projection returned by search.messages.
-// Every field is sourced directly from the ES messages-* index — no
-// Mongo enrichment occurs server-side. Display fields (user name, room
-// name) are the client's responsibility; resolve via the user-service
-// lookups or a local subscription cache.
+// SearchMessage is the per-hit projection returned by search.messages, with
+// room/sender enrichment resolved server-side (see MessageRoom / MessageSender).
+// The base fields are sourced from the ES messages-* index; the enrichment
+// fields are best-effort and omitted when they could not be resolved.
 type SearchMessage struct {
 	MessageID                    string     `json:"messageId"`
 	RoomID                       string     `json:"roomId"`
@@ -44,6 +43,33 @@ type SearchMessage struct {
 	// history reads) so the client can render hits without a second lookup.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Card        *Card        `json:"card,omitempty"`
+
+	// Enrichment resolved server-side by search-service (best-effort; a field is
+	// omitted when it could not be resolved).
+	TShow  bool           `json:"tshow,omitempty"`
+	Room   *MessageRoom   `json:"room,omitempty"`
+	Sender *MessageSender `json:"sender,omitempty"`
+}
+
+// MessageRoom is the enriched room object attached to a SearchMessage.
+// Type is the room type from the caller's subscription. AppInfo is set only
+// for botDM rooms; HRInfo only for dm rooms. Name is the app name (botDM),
+// the counterpart's display name (dm), or the canonical room name (channel/
+// discussion, from the RoomsInfoBatch RPC).
+type MessageRoom struct {
+	ID      string              `json:"id"`
+	Name    string              `json:"name,omitempty"`
+	Type    RoomType            `json:"type,omitempty"`
+	AppInfo *AppSubscription    `json:"appInfo,omitempty"`
+	HRInfo  *SubscriptionHRInfo `json:"hrInfo,omitempty"`
+}
+
+// MessageSender is the enriched author object attached to a SearchMessage.
+// DisplayName is the human display name (engName+chineseName, fallback account)
+// or, for a bot sender, the app's display name.
+type MessageSender struct {
+	Account     string `json:"account"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 // SearchRoomsRequest is the NATS payload for

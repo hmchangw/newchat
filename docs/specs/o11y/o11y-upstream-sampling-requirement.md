@@ -1,10 +1,10 @@
 # Upstream requirement — consistent sampling across NATS links
 
 **For:** maintainers of `github.com/flywindy/o11y` and its dependency
-`github.com/Marz32onE/instrumentation-go/otel-nats` (the `otelnats` /
+`github.com/akira-core/instrumentation-go/otel-nats` (the `otelnats` /
 `oteljetstream` packages).
 
-**From:** the `flywindy/chat` platform, which uses `o11y` v0.8.0 across ~16 Go
+**From:** the `flywindy/chat` platform, which uses `o11y` v0.9.1 across its Go
 services communicating over NATS/JetStream.
 
 **One-line ask:** provide a way for a message consumer's span to **inherit the
@@ -21,9 +21,9 @@ parent-child, per the OTel messaging semantic conventions:
 
 - a **producer** starts a `send <subject>` span and injects W3C `traceparent`
   into the message headers;
-- a **consumer** extracts that context and starts a `<subject> deliver` /
-  `process <subject>` span as a **new root** (fresh trace ID) carrying a **link**
-  back to the producer's span context.
+- a **consumer** extracts that context and starts a `process <subject>` span as
+  a **new root** (fresh trace ID) carrying a **link** back to the producer's span
+  context.
 
 This gives clean, per-service traces navigable by links in Tempo. We are **not**
 asking to change this model — separate traces per hop is desirable.
@@ -47,27 +47,24 @@ The origin's sampled flag **is** present (extracted into the origin
 `SpanContext`, and attached as a link), but it is **not used** to drive the
 consumer span's sampling decision.
 
-### Current code (otel-nats v0.2.11, `otelnats/conn.go`)
+### Current code (akira-core/otel-nats v0.7.0, simplified)
 
 ```go
-// ConsumerContextWithDeliver: starts the consumer-side "deliver" span.
-func (c *Conn) ConsumerContextWithDeliver(ctx context.Context, subject string, origin trace.SpanContext) context.Context {
-    ...
-    // Empty parent → the deliver span is a NEW ROOT → sampled independently by the ratio.
-    detachedCtx := trace.ContextWithSpanContext(ctx, trace.SpanContext{})
-    _, deliverSpan := c.deliverTracer.Start(detachedCtx,
-        subject+" deliver",
-        trace.WithSpanKind(trace.SpanKindProducer),
-        trace.WithAttributes(...),
-        trace.WithLinks(trace.Link{SpanContext: origin}), // origin.IsSampled() is available but unused for sampling
-    )
-    deliverSpan.End()
-    return trace.ContextWithRemoteSpanContext(detachedCtx, deliverSpan.SpanContext())
+msgCtx := propagator.Extract(context.Background(), headers)
+origin := trace.SpanContextFromContext(msgCtx)
+opts := []trace.SpanStartOption{
+    trace.WithSpanKind(trace.SpanKindConsumer),
 }
+if origin.IsValid() {
+    opts = append(opts, trace.WithLinks(trace.Link{SpanContext: origin}))
+}
+// context.Background means the process span is a NEW ROOT and the configured
+// ratio sampler decides independently from origin.IsSampled().
+ctx, processSpan := tracer.Start(context.Background(), "process "+subject, opts...)
 ```
 
 `origin.TraceFlags().IsSampled()` is known here but does not influence whether
-`deliverSpan` is sampled.
+`processSpan` is sampled.
 
 ## 3. Desired behavior
 
@@ -78,7 +75,7 @@ Each hop keeps its **own trace ID** (the detached-root model is preserved) — o
 the sampled **decision** propagates, carried by the existing `traceparent`
 sampled flag.
 
-Concretely: `deliverSpan`'s sampled bit should be derived from
+Concretely: `processSpan`'s sampled bit should be derived from
 `origin.TraceFlags().IsSampled()`, not from an independent ratio roll on the new
 trace ID.
 
@@ -88,16 +85,16 @@ trace ID.
    for a root span carrying a link, returns `RecordAndSample` iff any link's
    `SpanContext.IsSampled()` is true (else defers to a wrapped sampler for true
    roots with no sampled link). Ship it from `o11y` and let `otelnats` create the
-   `deliver` span through a tracer configured with it — or expose it as an o11y
+   `process` span through a tracer configured with it — or expose it as an o11y
    option (`WithLinkConsistentSampling()`), so `flywindy/chat` opts in via
    `pkg/obs`.
 
 2. **Seed the root's `TraceState`/flags from the origin**: when starting the
-   `deliver` span, copy the origin's sampled flag onto the new root's decision
+   `process` span, copy the origin's sampled flag onto the new root's decision
    (e.g. via a custom `SpanContext` with the same `TraceFlags`, or a sampler that
    reads it). Keep the new `TraceID`.
 
-3. **Config passthrough**: at minimum, expose whether the deliver span should
+3. **Config passthrough**: at minimum, expose whether the process span should
    "inherit sampled from origin link" as an `otelnats`/`o11y` option, defaulting
    off (current behavior) so it is non-breaking.
 

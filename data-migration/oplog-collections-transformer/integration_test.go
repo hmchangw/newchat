@@ -138,7 +138,7 @@ func TestInboxPublisher_RoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 
@@ -233,7 +233,7 @@ func TestEndToEnd_UserInsert(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())
@@ -294,7 +294,7 @@ func TestEndToEnd_RoomInsert_PublishesRoomSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())
@@ -396,7 +396,7 @@ func TestEndToEnd_ThreadSub_NakThenResolve(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fullDoc)
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())

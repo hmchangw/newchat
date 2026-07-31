@@ -8,6 +8,7 @@
 }
 
 .message-loading,
+.message-loading-older,
 .message-error {
   padding: var(--space-md);
   text-align: center;
