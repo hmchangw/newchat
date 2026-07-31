@@ -111,11 +111,14 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	if set.FullWidth != nil {
 		fields["settings.fullWidth"] = *set.FullWidth
 	}
+	if set.ThemePreference != nil {
+		fields["settings.themePreference"] = *set.ThemePreference
+	}
 	if set.TranslateMessageInto != nil {
 		fields["settings.translateMessageInto"] = *set.TranslateMessageInto
 	}
-	if set.ShowMessagePreviewInSidebarList != nil {
-		fields["settings.showMessagePreviewInSidebarList"] = *set.ShowMessagePreviewInSidebarList
+	if set.MessagePreviewEnabled != nil {
+		fields["settings.messagePreviewEnabled"] = *set.MessagePreviewEnabled
 	}
 	if set.MuteAllNotifications != nil {
 		fields["settings.muteAllNotifications"] = *set.MuteAllNotifications
@@ -126,8 +129,8 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	if set.ShowNotificationsDuringCallsAndMeetings != nil {
 		fields["settings.showNotificationsDuringCallsAndMeetings"] = *set.ShowNotificationsDuringCallsAndMeetings
 	}
-	if set.ScrollToBottomInChat != nil {
-		fields["settings.scrollToBottomInChat"] = *set.ScrollToBottomInChat
+	if set.InitialChatScrollPosition != nil {
+		fields["settings.initialChatScrollPosition"] = *set.InitialChatScrollPosition
 	}
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After).

@@ -190,12 +190,13 @@ UserSettings — every field optional, present only when explicitly set:
 | Field | Type |
 |---|---|
 | `fullWidth` | boolean |
+| `themePreference` | string (`system`\|`light`\|`dark`) |
 | `translateMessageInto` | string |
-| `showMessagePreviewInSidebarList` | boolean |
+| `messagePreviewEnabled` | boolean |
 | `muteAllNotifications` | boolean |
 | `showMessagesAndPreviewsInNotifications` | boolean |
 | `showNotificationsDuringCallsAndMeetings` | boolean |
-| `scrollToBottomInChat` | boolean |
+| `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 
 ```json
 {

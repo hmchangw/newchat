@@ -4507,23 +4507,25 @@ None (empty payload).
 
 ##### Success response
 
-The stored settings object. All seven fields are optional and appear only when the user has explicitly set them:
+The stored settings object. All eight fields are optional and appear only when the user has explicitly set them:
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `fullWidth` | boolean | Full-width layout. |
+| `themePreference` | string | Theme: `"system"` \| `"light"` \| `"dark"`. |
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
-| `showMessagePreviewInSidebarList` | boolean | Show message previews in the sidebar list. |
+| `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. |
 | `showMessagesAndPreviewsInNotifications` | boolean | Show message content and previews in notifications. |
 | `showNotificationsDuringCallsAndMeetings` | boolean | Show notifications during calls and meetings. |
-| `scrollToBottomInChat` | boolean | Scroll to bottom when entering a chat. |
+| `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 
 ```json
 {
   "fullWidth": true,
+  "themePreference": "dark",
   "translateMessageInto": "en-US",
-  "showMessagePreviewInSidebarList": true
+  "messagePreviewEnabled": true
 }
 ```
 
@@ -4551,17 +4553,18 @@ Partially updates the calling user's settings: **only the fields present in the 
 
 ##### Request body
 
-Any non-empty subset of the seven settings fields (same types as [`settings.get`](#settingsget)):
+Any non-empty subset of the eight settings fields (same types as [`settings.get`](#settingsget)):
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `fullWidth` | boolean | no | |
+| `themePreference` | string | no | One of `"system"`, `"light"`, `"dark"`; any other value is rejected. |
 | `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); or `""` to explicitly turn translation off. No value whitelist. |
-| `showMessagePreviewInSidebarList` | boolean | no | |
+| `messagePreviewEnabled` | boolean | no | |
 | `muteAllNotifications` | boolean | no | |
 | `showMessagesAndPreviewsInNotifications` | boolean | no | |
 | `showNotificationsDuringCallsAndMeetings` | boolean | no | |
-| `scrollToBottomInChat` | boolean | no | |
+| `initialChatScrollPosition` | string | no | One of `"lastRead"`, `"newest"`; any other value is rejected. |
 
 ```json
 { "fullWidth": false, "translateMessageInto": "ja" }

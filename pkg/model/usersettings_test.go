@@ -29,6 +29,19 @@ func TestUserSettings_PartialRoundTrip(t *testing.T) {
 	assert.Nil(t, out.MuteAllNotifications)
 }
 
+// The renamed + added fields marshal under their new wire keys.
+func TestUserSettings_ThemeAndScrollWireKeys(t *testing.T) {
+	theme, scroll, preview := ThemePreferenceDark, InitialChatScrollNewest, true
+	in := UserSettings{ThemePreference: &theme, InitialChatScrollPosition: &scroll, MessagePreviewEnabled: &preview}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"themePreference":"dark","initialChatScrollPosition":"newest","messagePreviewEnabled":true}`, string(data))
+
+	var out UserSettings
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, in, out)
+}
+
 func TestSettingsUpdateEvent_Shape(t *testing.T) {
 	fw := false
 	data, err := json.Marshal(SettingsUpdateEvent{Timestamp: 123, Settings: UserSettings{FullWidth: &fw}})

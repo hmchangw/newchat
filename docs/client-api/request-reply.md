@@ -1518,17 +1518,18 @@ None (empty payload).
 
 #### Success response
 
-The stored settings object. All seven fields optional, present only when explicitly set:
+The stored settings object. All eight fields optional, present only when explicitly set:
 
 | Field | Type |
 |---|---|
 | `fullWidth` | boolean |
+| `themePreference` | string (`system`\|`light`\|`dark`) |
 | `translateMessageInto` | string |
-| `showMessagePreviewInSidebarList` | boolean |
+| `messagePreviewEnabled` | boolean |
 | `muteAllNotifications` | boolean |
 | `showMessagesAndPreviewsInNotifications` | boolean |
 | `showNotificationsDuringCallsAndMeetings` | boolean |
-| `scrollToBottomInChat` | boolean |
+| `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 
 `{ "fullWidth": true, "translateMessageInto": "en-US" }`
 
