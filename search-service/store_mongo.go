@@ -117,13 +117,16 @@ func (s *mongoStore) UsersByAccounts(ctx context.Context, accounts []string) (ma
 }
 
 // AppsByAssistantNames returns apps keyed by their assistant.name (bot account).
+// Only name and assistant.name are projected — callers use the map for
+// display-name resolution only.
 func (s *mongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error) {
 	out := map[string]model.App{}
 	if len(botAccounts) == 0 {
 		return out, nil
 	}
 	filter := bson.M{"assistant.name": bson.M{"$in": botAccounts}}
-	cur, err := s.apps.Find(ctx, filter)
+	proj := bson.M{"name": 1, "assistant.name": 1}
+	cur, err := s.apps.Find(ctx, filter, options.Find().SetProjection(proj))
 	if err != nil {
 		return nil, fmt.Errorf("find apps by assistant: %w", err)
 	}

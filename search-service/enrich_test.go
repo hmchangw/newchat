@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -51,7 +52,6 @@ func TestEnrichMessages_DM(t *testing.T) {
 	require.NotNil(t, out[0].Room.HRInfo)
 	assert.Equal(t, "陳", out[0].Room.HRInfo.Name)
 	assert.Equal(t, "Bob Chan", out[0].Room.HRInfo.EngName)
-	assert.Nil(t, out[0].Room.AppInfo)
 	require.NotNil(t, out[0].Sender)
 	assert.Equal(t, "alice", out[0].Sender.Account)
 	assert.Equal(t, "Alice", out[0].Sender.DisplayName)
@@ -68,9 +68,11 @@ func TestEnrichMessages_BotDM(t *testing.T) {
 	require.NotNil(t, out[0].Room)
 	assert.Equal(t, model.RoomTypeBotDM, out[0].Room.Type)
 	assert.Equal(t, "Helper", out[0].Room.Name)
-	require.NotNil(t, out[0].Room.AppInfo)
-	assert.Equal(t, "app1", out[0].Room.AppInfo.AppID)
 	assert.Nil(t, out[0].Room.HRInfo)
+	// the room carries only the app's name — no appInfo enrichment
+	b, err := json.Marshal(out[0].Room)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "appInfo")
 	// bot sender display name = app name
 	assert.Equal(t, "Helper", out[0].Sender.DisplayName)
 }
@@ -87,7 +89,6 @@ func TestEnrichMessages_ChannelUsesRoomBatch(t *testing.T) {
 	out := h.enrichMessages(context.Background(), "alice", []messageSearchHit{hit("m1", "rCh", "site-b", "alice")})
 	assert.Equal(t, model.RoomTypeChannel, out[0].Room.Type)
 	assert.Equal(t, "General", out[0].Room.Name)
-	assert.Nil(t, out[0].Room.AppInfo)
 	assert.Nil(t, out[0].Room.HRInfo)
 	assert.Equal(t, 1, r.calls)
 }

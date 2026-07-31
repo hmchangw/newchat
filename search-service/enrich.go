@@ -124,7 +124,6 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 				}
 			case model.RoomTypeBotDM:
 				if app, ok := apps[meta.Name]; ok {
-					room.AppInfo = model.AppSubscriptionFromApp(&app)
 					room.Name = app.Name
 				} else {
 					room.Name = meta.Name

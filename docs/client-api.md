@@ -3941,7 +3941,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `card` | [MessageCard](#messagecard) | omitted when the message carries no tcard |
 | `tshow` | boolean | omitted when false — set on a thread reply that is also shown in the parent channel timeline |
 | `sender` | [MessageSender](#messagesender) | present on every hit; `account` always set, `displayName` best-effort |
-| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`appInfo`/`hrInfo` best-effort |
+| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`hrInfo` best-effort |
 
 `attachments` and `card` are the message's payloads mirrored as-is from the index (same wire shape as history reads — decoded `Attachment` objects; `card.data` is base64-encoded bytes), so the client can render a hit (file row, tcard) without a follow-up history-service load.
 
@@ -3961,7 +3961,6 @@ See [Error envelope](#6-error-envelope-reference).
 | `id` | string | roomId |
 | `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
 | `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
-| `appInfo` | [AppSubscription](#appsubscription) | present **only for `botDM` rooms** |
 | `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | present **only for `dm` rooms** |
 
 ##### Error response
