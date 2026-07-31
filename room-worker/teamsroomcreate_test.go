@@ -89,7 +89,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 			for _, s := range subs {
 				assert.Equal(t, idgen.DeterministicID([]byte("chat1")), s.RoomID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
-				assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+				assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, s.Roles)
 				assert.Equal(t, model.OriginTeams, s.Origin)
 			}
 			return nil
@@ -118,6 +118,33 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	require.Len(t, fed, 1)
 	assert.Equal(t, []string{"dave"}, fed[0].Accounts)
 	assert.Empty(t, membershipEvents(t, *published, "member_removed"), "add-only batch emits no removals")
+}
+
+// TestProcessTeamsRoomCreate_BotMemberStaysMemberOnly: a bot account (".bot"
+// suffix) must not get the owner role a human member receives.
+func TestProcessTeamsRoomCreate_BotMemberStaysMemberOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(&model.User{ID: "u1", Account: "helper.bot", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, subs []*model.Subscription) error {
+			require.Len(t, subs, 1)
+			assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles)
+			return nil
+		})
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:      "chat1",
+		Name:    "Project Sync",
+		Members: []model.TeamsRoomCreateMember{{ID: "aad1", Account: "helper.bot"}},
+	}
+	err := h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat))
+	require.NoError(t, err)
 }
 
 // TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers: a migrated channel
