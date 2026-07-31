@@ -123,11 +123,14 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	if set.MuteAllNotifications != nil {
 		fields["settings.muteAllNotifications"] = *set.MuteAllNotifications
 	}
-	if set.ShowMessagesAndPreviewsInNotifications != nil {
-		fields["settings.showMessagesAndPreviewsInNotifications"] = *set.ShowMessagesAndPreviewsInNotifications
+	if set.AlwaysAllowPriorityNotifications != nil {
+		fields["settings.alwaysAllowPriorityNotifications"] = *set.AlwaysAllowPriorityNotifications
 	}
-	if set.ShowNotificationsDuringCallsAndMeetings != nil {
-		fields["settings.showNotificationsDuringCallsAndMeetings"] = *set.ShowNotificationsDuringCallsAndMeetings
+	if set.ShowPreviewsInNotifications != nil {
+		fields["settings.showPreviewsInNotifications"] = *set.ShowPreviewsInNotifications
+	}
+	if set.ShowNotificationsInCall != nil {
+		fields["settings.showNotificationsInCall"] = *set.ShowNotificationsInCall
 	}
 	if set.InitialChatScrollPosition != nil {
 		fields["settings.initialChatScrollPosition"] = *set.InitialChatScrollPosition

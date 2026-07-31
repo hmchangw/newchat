@@ -4507,7 +4507,7 @@ None (empty payload).
 
 ##### Success response
 
-The stored settings object. All eight fields are optional and appear only when the user has explicitly set them:
+The stored settings object. All nine fields are optional and appear only when the user has explicitly set them:
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -4516,8 +4516,9 @@ The stored settings object. All eight fields are optional and appear only when t
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. |
-| `showMessagesAndPreviewsInNotifications` | boolean | Show message content and previews in notifications. |
-| `showNotificationsDuringCallsAndMeetings` | boolean | Show notifications during calls and meetings. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. |
+| `showPreviewsInNotifications` | boolean | Show previews in notifications. |
+| `showNotificationsInCall` | boolean | Show notifications in call. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 
 ```json
@@ -4553,7 +4554,7 @@ Partially updates the calling user's settings: **only the fields present in the 
 
 ##### Request body
 
-Any non-empty subset of the eight settings fields (same types as [`settings.get`](#settingsget)):
+Any non-empty subset of the nine settings fields (same types as [`settings.get`](#settingsget)):
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -4562,8 +4563,9 @@ Any non-empty subset of the eight settings fields (same types as [`settings.get`
 | `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); or `""` to explicitly turn translation off. No value whitelist. |
 | `messagePreviewEnabled` | boolean | no | |
 | `muteAllNotifications` | boolean | no | |
-| `showMessagesAndPreviewsInNotifications` | boolean | no | |
-| `showNotificationsDuringCallsAndMeetings` | boolean | no | |
+| `alwaysAllowPriorityNotifications` | boolean | no | |
+| `showPreviewsInNotifications` | boolean | no | |
+| `showNotificationsInCall` | boolean | no | |
 | `initialChatScrollPosition` | string | no | One of `"lastRead"`, `"newest"`; any other value is rejected. |
 
 ```json

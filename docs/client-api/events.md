@@ -194,8 +194,9 @@ UserSettings — every field optional, present only when explicitly set:
 | `translateMessageInto` | string |
 | `messagePreviewEnabled` | boolean |
 | `muteAllNotifications` | boolean |
-| `showMessagesAndPreviewsInNotifications` | boolean |
-| `showNotificationsDuringCallsAndMeetings` | boolean |
+| `alwaysAllowPriorityNotifications` | boolean |
+| `showPreviewsInNotifications` | boolean |
+| `showNotificationsInCall` | boolean |
 | `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 
 ```json

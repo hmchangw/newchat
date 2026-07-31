@@ -16,14 +16,15 @@ const (
 // default — the server stores only what the user explicitly set and never
 // injects defaults.
 type UserSettings struct {
-	FullWidth                               *bool   `json:"fullWidth,omitempty"                               bson:"fullWidth,omitempty"`
-	ThemePreference                         *string `json:"themePreference,omitempty"                         bson:"themePreference,omitempty"`
-	TranslateMessageInto                    *string `json:"translateMessageInto,omitempty"                    bson:"translateMessageInto,omitempty"`
-	MessagePreviewEnabled                   *bool   `json:"messagePreviewEnabled,omitempty"                   bson:"messagePreviewEnabled,omitempty"`
-	MuteAllNotifications                    *bool   `json:"muteAllNotifications,omitempty"                    bson:"muteAllNotifications,omitempty"`
-	ShowMessagesAndPreviewsInNotifications  *bool   `json:"showMessagesAndPreviewsInNotifications,omitempty"  bson:"showMessagesAndPreviewsInNotifications,omitempty"`
-	ShowNotificationsDuringCallsAndMeetings *bool   `json:"showNotificationsDuringCallsAndMeetings,omitempty" bson:"showNotificationsDuringCallsAndMeetings,omitempty"`
-	InitialChatScrollPosition               *string `json:"initialChatScrollPosition,omitempty"               bson:"initialChatScrollPosition,omitempty"`
+	FullWidth                        *bool   `json:"fullWidth,omitempty"                               bson:"fullWidth,omitempty"`
+	ThemePreference                  *string `json:"themePreference,omitempty"                         bson:"themePreference,omitempty"`
+	TranslateMessageInto             *string `json:"translateMessageInto,omitempty"                    bson:"translateMessageInto,omitempty"`
+	MessagePreviewEnabled            *bool   `json:"messagePreviewEnabled,omitempty"                   bson:"messagePreviewEnabled,omitempty"`
+	MuteAllNotifications             *bool   `json:"muteAllNotifications,omitempty"                    bson:"muteAllNotifications,omitempty"`
+	AlwaysAllowPriorityNotifications *bool   `json:"alwaysAllowPriorityNotifications,omitempty"        bson:"alwaysAllowPriorityNotifications,omitempty"`
+	ShowPreviewsInNotifications      *bool   `json:"showPreviewsInNotifications,omitempty"             bson:"showPreviewsInNotifications,omitempty"`
+	ShowNotificationsInCall          *bool   `json:"showNotificationsInCall,omitempty"                 bson:"showNotificationsInCall,omitempty"`
+	InitialChatScrollPosition        *string `json:"initialChatScrollPosition,omitempty"               bson:"initialChatScrollPosition,omitempty"`
 }
 
 // IsEmpty reports whether no field is set — the "nothing to write" guard for
@@ -31,8 +32,8 @@ type UserSettings struct {
 func (s *UserSettings) IsEmpty() bool {
 	return s.FullWidth == nil && s.ThemePreference == nil && s.TranslateMessageInto == nil &&
 		s.MessagePreviewEnabled == nil && s.MuteAllNotifications == nil &&
-		s.ShowMessagesAndPreviewsInNotifications == nil &&
-		s.ShowNotificationsDuringCallsAndMeetings == nil && s.InitialChatScrollPosition == nil
+		s.AlwaysAllowPriorityNotifications == nil && s.ShowPreviewsInNotifications == nil &&
+		s.ShowNotificationsInCall == nil && s.InitialChatScrollPosition == nil
 }
 
 // SettingsUpdateEvent is the client-facing settings.update fanout payload.
