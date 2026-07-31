@@ -125,6 +125,8 @@ readLoop:
 		case trimmed != "":
 			nonSSE.WriteString(trimmed)
 		}
+		// Check readErr after the switch: ReadString returns the last line together
+		// with io.EOF (no trailing newline), so that line must be processed first.
 		if readErr != nil {
 			if readErr == io.EOF {
 				break readLoop
