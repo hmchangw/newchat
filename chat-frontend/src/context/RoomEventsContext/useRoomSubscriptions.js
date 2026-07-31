@@ -119,13 +119,24 @@ export function useRoomSubscriptions(
     cancelledRef.current = false
     generationRef.current += 1
 
+    // Snapshot this effect run's generation. A logout→login (or nats reconnect)
+    // tears this effect down and starts a fresh one, which flips cancelledRef
+    // back to false and bumps the generation. A subscription callback still in
+    // flight from the PRIOR run — e.g. a channel/DM message whose decryption
+    // resolves after the teardown — would otherwise pass the cancelledRef gate
+    // (now reset) and leak a stale-session event into the new session. Gate
+    // every dispatch and every post-decryption continuation on this value so
+    // work started under one login never lands under the next.
+    const effectGeneration = generationRef.current
+    const isCurrent = () => !cancelledRef.current && generationRef.current === effectGeneration
+
     // Capture the nats value at effect-run time for the one-shot
     // listRooms() below. Long-lived callbacks read natsRef.current
     // directly so they pick up a fresh nc after a reconnect.
     const liveNats = natsRef.current
 
     const safeDispatch = (action) => {
-      if (cancelledRef.current) return
+      if (!isCurrent()) return
       dispatch(action)
     }
 
@@ -335,6 +346,11 @@ export function useRoomSubscriptions(
         // eslint-disable-next-line no-console
         console.warn('decryptAndDispatch failed; forwarding original event', err)
       }
+      // The await(s) above span the effect-teardown window: if a logout→login
+      // cycled the effect while decryption was in flight, drop the whole
+      // continuation (dispatch + thread fan-out + mark-read) so a prior
+      // session's message can't surface in the new one.
+      if (!isCurrent()) return
       finalize(decoded)
     }
 
@@ -354,9 +370,22 @@ export function useRoomSubscriptions(
       })
     })
 
-    const openChannelSub = (roomId) => {
-      if (channelSubs.current.has(roomId)) return
-      const sub = subscribeToRoomEvents(natsRef.current, { roomId }, (evt) => {
+    // `crossSite` selects the subject namespace (see subscribeToRoomEvents /
+    // roomEvent) — global `chat.room.…` when true, local `chat.local.room.…`
+    // when false. Bookkeeping is keyed on that resolved value alongside the
+    // roomId: a repeat call with the SAME crossSite is a no-op, but a call
+    // that carries a DIFFERENT crossSite (the room's cross-site status
+    // flipped between the sub that opened it and this one) tears down the
+    // stale subject's subscription and opens the new one, so a room is
+    // never double-subscribed or left on a stale namespace.
+    const openChannelSub = (roomId, crossSite) => {
+      const existing = channelSubs.current.get(roomId)
+      if (existing) {
+        if (existing.crossSite === crossSite) return
+        existing.sub.unsubscribe()
+        channelSubs.current.delete(roomId)
+      }
+      const sub = subscribeToRoomEvents(natsRef.current, { roomId, crossSite }, (evt) => {
         enqueueByRoom(evt?.roomId ?? roomId, () => {
           if (evt?.type === 'new_message') {
             return decryptAndDispatch(evt, (decoded) => {
@@ -380,13 +409,13 @@ export function useRoomSubscriptions(
           handleMutationEvent(evt)
         })
       })
-      channelSubs.current.set(roomId, sub)
+      channelSubs.current.set(roomId, { sub, crossSite })
     }
 
     const closeChannelSub = (roomId) => {
-      const sub = channelSubs.current.get(roomId)
-      if (sub) {
-        sub.unsubscribe()
+      const entry = channelSubs.current.get(roomId)
+      if (entry) {
+        entry.sub.unsubscribe()
         channelSubs.current.delete(roomId)
       }
     }
@@ -412,7 +441,11 @@ export function useRoomSubscriptions(
           subscriptionName: sub.name,
         }
         safeDispatch({ type: 'ROOM_ADDED', room })
-        if (sub.roomType === 'channel') openChannelSub(sub.roomId)
+        // crossSite is absent on this event's embedded room today (the
+        // live "added" payload carries the stored Subscription, not the
+        // read-time enrichment) — default to true (global), the server's
+        // fail-safe, rather than assume same-site.
+        if (sub.roomType === 'channel') openChannelSub(sub.roomId, sub.room?.crossSite ?? true)
       } else if (evt.action === 'removed') {
         const roomId = evt.subscription?.roomId
         if (!roomId) return
@@ -463,7 +496,7 @@ export function useRoomSubscriptions(
         }
         if (keyEntries.length > 0) seedKeysRef.current(keyEntries)
         for (const r of buckets.rooms) {
-          if (r.type === 'channel') openChannelSub(r.id)
+          if (r.type === 'channel') openChannelSub(r.id, r.crossSite)
         }
       })
       .catch((err) => {
@@ -476,7 +509,7 @@ export function useRoomSubscriptions(
       dmSub.unsubscribe()
       subUpdate.unsubscribe()
       metaUpdate.unsubscribe()
-      for (const sub of channelSubs.current.values()) sub.unsubscribe()
+      for (const entry of channelSubs.current.values()) entry.sub.unsubscribe()
       channelSubs.current.clear()
       dispatchChains.clear()
       // Cancel any in-flight mark-read trailing timer so it doesn't
