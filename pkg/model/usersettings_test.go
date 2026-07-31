@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // Never-set settings must marshal as {} — the server never injects defaults.
@@ -39,6 +40,25 @@ func TestUserSettings_ThemeAndScrollWireKeys(t *testing.T) {
 
 	var out UserSettings
 	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, in, out)
+}
+
+// BSON round-trip guards the bson tags used by the Mongo store + cross-site replica —
+// a JSON-only test wouldn't catch a bson-tag regression on the new/renamed fields.
+func TestUserSettings_BSONRoundTrip(t *testing.T) {
+	theme, scroll := ThemePreferenceDark, InitialChatScrollLastRead
+	preview, priority, inCall := true, true, false
+	in := UserSettings{
+		ThemePreference:                  &theme,
+		MessagePreviewEnabled:            &preview,
+		InitialChatScrollPosition:        &scroll,
+		AlwaysAllowPriorityNotifications: &priority,
+		ShowNotificationsInCall:          &inCall,
+	}
+	data, err := bson.Marshal(in)
+	require.NoError(t, err)
+	var out UserSettings
+	require.NoError(t, bson.Unmarshal(data, &out))
 	assert.Equal(t, in, out)
 }
 

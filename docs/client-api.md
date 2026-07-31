@@ -4603,7 +4603,7 @@ The payload carries the **full post-update settings** (replace, don't merge):
 | Field | Type | Notes |
 |-------|------|-------|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | The full post-update settings — same seven optional fields as [`settings.get`](#settingsget). |
+| `settings` | UserSettings | The full post-update settings — same nine optional fields as [`settings.get`](#settingsget). |
 
 ```json
 {

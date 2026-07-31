@@ -183,7 +183,7 @@ server never injects defaults).
 | Field | Type | Notes |
 |---|---|---|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | Full post-update settings; all seven fields optional. |
+| `settings` | UserSettings | Full post-update settings; all nine fields optional. |
 
 UserSettings — every field optional, present only when explicitly set:
 
