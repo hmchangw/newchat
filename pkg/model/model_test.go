@@ -4947,6 +4947,22 @@ func TestMessage_TypeBSONOmitEmpty(t *testing.T) {
 	assert.False(t, ok, "empty Type must be absent in BSON")
 }
 
+func TestTranslateRequest_JSON(t *testing.T) {
+	r := model.TranslateRequest{
+		Text:       "Hello world",
+		TargetLang: "zh-Hant-TW",
+	}
+	roundTrip(t, &r, &model.TranslateRequest{})
+}
+
+func TestTranslateResult_JSON(t *testing.T) {
+	r := model.TranslateResult{
+		TranslatedText: "你好 世界",
+		TargetLang:     "zh-Hant-TW",
+	}
+	roundTrip(t, &r, &model.TranslateResult{})
+}
+
 func TestSearchMessageEnrichmentJSON(t *testing.T) {
 	m := model.SearchMessage{
 		MessageID:   "m1",

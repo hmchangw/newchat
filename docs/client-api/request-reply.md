@@ -2039,6 +2039,41 @@ error table. Key errors:
 
 ---
 
+### Translate Text
+
+**Subject:** `chat.user.{account}.request.translate.{siteID}.text`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+`{siteID}` is the caller's own (local) site ID — translation is stateless and not
+federated, so always use your own site (no origin-site rule like `msg.send`).
+
+Synchronous RPC. `translation-service` translates `text` into `targetLang` and replies
+with a `TranslateResult`, or the standard error envelope on failure.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | string | yes | Text to translate. No length cap. |
+| `targetLang` | string | yes | BCP-47 tag; send the user's `settings.translateMessageInto` value unchanged (`en`, `en-US`, `zh-Hant-TW`, `zh-Hans-CN`, `de`, `ja`). See [../client-api.md §3.6](../client-api.md#supported-languages). |
+
+#### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `translatedText` | string | The translated text. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag sent), not the resolved backend language. |
+
+`{ "translatedText": "你好 世界", "targetLang": "zh-Hant-TW" }`
+
+#### Error response
+
+Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `internal` for a backend failure. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+
+**Emits:** none — the reply is the only output.
+
+---
+
 ### Room Encryption Key Get
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.key.get`

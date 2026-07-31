@@ -63,6 +63,8 @@ paths.
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
+   - [3.6 translation-service](#36-translation-service)
+     - [Translate Text](#translate-text)
 4. [Message Send](#4-message-send)
 5. [Room Encryption](#5-room-encryption)
 6. [Error envelope reference](#6-error-envelope-reference)
@@ -5588,6 +5590,79 @@ See [Error envelope](#6-error-envelope-reference).
 ##### Triggered events — error path
 
 `None — error returned only via the reply subject.`
+
+---
+
+### 3.6 translation-service
+
+#### Translate Text
+
+**Subject:** `chat.user.{account}.request.translate.{siteID}.text`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` is the caller's **own (local) site ID** — the local `translation-service` handles the request. Translation is stateless and not federated across sites, so unlike `msg.send` there is no origin-site rule: always use your own site.
+
+Synchronous RPC. `translation-service` validates the request, calls the translation backend, and replies with a `TranslateResult` (the translated text) on success, or the standard [error envelope](#6-error-envelope-reference) on failure. Under handler saturation the router replies `unavailable` (`"service busy"`) so the client can retry.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | string | yes | The text to translate. No length cap is enforced by the service. |
+| `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settingsget) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
+
+##### Supported languages
+
+`targetLang` is a BCP-47 tag matched **case-insensitively** and tolerant of region/script subtags, so the value stored in `settings.translateMessageInto` is sent as-is. It resolves to one of five backend languages:
+
+| Language | Example tags that resolve | Resolves to |
+|---|---|---|
+| English | `en`, `en-US`, `en-GB` | English |
+| German | `de`, `de-DE` | German |
+| Japanese | `ja`, `ja-JP` | Japanese |
+| Traditional Chinese | `zh-Hant-TW`, `zh-Hant`, `zh-TW`, `zh-HK` | Traditional Chinese |
+| Simplified Chinese | `zh-Hans-CN`, `zh-Hans`, `zh-CN`, `zh-SG` | Simplified Chinese |
+
+Chinese resolves by script (`Hant`/`Hans`) or, absent a script, by region. A bare `zh` (no script or region) is ambiguous and rejected as `unsupported_lang`, as is `""` (translation off — the client should not send a request) and any language outside the five above (e.g. `fr`, `ko`). The result's `targetLang` echoes the tag you sent, not the resolved language.
+
+> **Breaking change:** `targetLang` now requires a BCP-47 tag. The former backend short codes `zhTW` / `zhCN` are **no longer accepted** and return `unsupported_lang` — send the BCP-47 form (`zh-Hant-TW` / `zh-Hans-CN`, or the user's `settings.translateMessageInto`) instead. (`en` / `de` / `ja` are unaffected, being valid BCP-47 tags already.) Deploy this in lockstep with the client that sends the settings value.
+
+#### Success response — `TranslateResult`
+
+| Field | Type | Notes |
+|---|---|---|
+| `translatedText` | string | The translated text. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag the client sent), not the resolved backend language. |
+
+```json
+{
+  "translatedText": "你好 世界",
+  "targetLang": "zh-Hant-TW"
+}
+```
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code, reason?, error }` envelope:
+
+| Code | Reason | When |
+|---|---|---|
+| `bad_request` | `empty_text` | `text` is empty. |
+| `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
+| `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
+| `internal` | — | Translation backend failure. The raw cause is logged server-side, never returned. |
+
+```json
+{
+  "code": "bad_request",
+  "reason": "unsupported_lang",
+  "error": "unsupported targetLang"
+}
+```
+
+##### Triggered events
+
+`None — the reply is the only output.`
 
 ---
 

@@ -1464,3 +1464,19 @@ func OrgSyncUsersUpsert(centralSiteID string) string {
 func EmployeesQuit(siteID string) string {
 	return fmt.Sprintf("chat.hr.%s.employees.quit", siteID)
 }
+
+// TranslateRequest is the subject a client sends a TranslateRequest to via NATS
+// request/reply. The trailing `.text` is the action segment (matching the repo's
+// `<resource>.{siteID}.<action>` family, e.g. search.{siteID}.messages), leaving
+// room for a future `.batch`. The service registers TranslateRequestPattern and
+// replies with a TranslateResult (or an errcode envelope) on the auto-generated
+// _INBOX subject.
+func TranslateRequest(account, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.translate.%s.text", account, siteID)
+}
+
+// TranslateRequestPattern is the natsrouter registration pattern; {account} is a
+// named token that scopes the subject to the caller (the handler does not read it).
+func TranslateRequestPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.translate.%s.text", siteID)
+}

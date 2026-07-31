@@ -1,0 +1,81 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - translation-service/
+      - pkg/
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - translation-service/
+      - pkg/
+
+variables:
+  GO_VERSION: '1.25.12'
+  SERVICE_NAME: translation-service
+  REGISTRY: '$(containerRegistry)'
+
+stages:
+  - stage: Validate
+    displayName: 'Lint & Test'
+    jobs:
+      - job: LintAndTest
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: GoTool@0
+            inputs:
+              version: '$(GO_VERSION)'
+            displayName: 'Install Go $(GO_VERSION)'
+
+          - script: go vet ./$(SERVICE_NAME)/... ./pkg/...
+            displayName: 'Go Vet'
+
+          - script: go test ./pkg/... -v -race -coverprofile=coverage-pkg.out
+            displayName: 'Test shared packages'
+
+          - script: go test ./$(SERVICE_NAME)/... -v -race -coverprofile=coverage-$(SERVICE_NAME).out
+            displayName: 'Test $(SERVICE_NAME)'
+
+          - script: go build -o /dev/null ./$(SERVICE_NAME)/
+            displayName: 'Build $(SERVICE_NAME)'
+
+          # Lint + SAST via the repo Makefile targets, so this pipeline runs the
+          # same gates as .github/workflows/ci.yml (golangci-lint, and gosec +
+          # govulncheck + semgrep failing on medium+).
+          - script: make tools
+            displayName: 'Install lint & SAST tooling'
+
+          - script: make lint
+            displayName: 'Lint (golangci-lint)'
+
+          - script: make sast
+            displayName: 'SAST (gosec + govulncheck + semgrep, fail on medium+)'
+
+  - stage: Build
+    displayName: 'Build & Push Image'
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: BuildImage
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: 'chat/$(SERVICE_NAME)'
+              command: 'buildAndPush'
+              Dockerfile: '$(SERVICE_NAME)/deploy/Dockerfile'
+              buildContext: '.'
+              tags: |
+                $(Build.BuildId)
+                latest
+            displayName: 'Build & push $(SERVICE_NAME)'
