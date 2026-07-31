@@ -13,6 +13,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // newFanoutTestHandler builds a Handler via NewHandler so future field
@@ -21,7 +22,7 @@ import (
 // are unused by it.
 func newFanoutTestHandler(t *testing.T, keySender *roomkeysender.Sender, workers int) *Handler {
 	t.Helper()
-	h := NewHandler(nil, "test-site", nil, testKeyStore, keySender)
+	h := NewHandler(nil, "test-site", nil, testKeyStore, keySender, subject.RouteGlobal)
 	h.SetKeyFanoutWorkers(workers)
 	return h
 }

@@ -389,6 +389,7 @@ func buildLocalRoom(sub *model.EnrichedSubscription) *model.SubscriptionRoom {
 	room := &model.SubscriptionRoom{
 		SiteID:            sub.SiteID,
 		Name:              sub.RoomName,
+		CrossSite:         sub.CrossSite,
 		UserCount:         sub.UserCount,
 		AppCount:          sub.AppCount,
 		LastMsgAt:         sub.LastMsgAt,
@@ -427,6 +428,7 @@ func applyRoomInfo(sub *model.Subscription, info *model.RoomInfo) bool {
 	room := &model.SubscriptionRoom{
 		SiteID:            info.SiteID,
 		Name:              info.Name,
+		CrossSite:         info.CrossSite,
 		UserCount:         info.UserCount,
 		AppCount:          info.AppCount,
 		LastMsgAt:         timeutil.MillisToTime(info.LastMsgAt),

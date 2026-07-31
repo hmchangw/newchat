@@ -59,6 +59,7 @@ type config struct {
 	PProfEnabled         bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr          string                  `env:"METRICS_ADDR"             envDefault:":9090"`
 	Mode                 stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	RoomSubjectMode      string                  `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
 	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
@@ -80,6 +81,12 @@ func main() {
 
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
+		os.Exit(1)
+	}
+
+	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
+	if err != nil {
+		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
 		os.Exit(1)
 	}
 
@@ -189,7 +196,7 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled)
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.

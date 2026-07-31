@@ -56,6 +56,9 @@ type AddMemberCandidate struct {
 	Account                 string `bson:"account"`
 	HasSubscription         bool   `bson:"hasSubscription"`
 	HasIndividualRoomMember bool   `bson:"hasIndividualRoomMember"`
+	// SiteID is the candidate's home site (from the users lookup); lets callers
+	// classify cross-site membership from the full candidate set, redelivery-safe.
+	SiteID string `bson:"siteId"`
 }
 
 type SubscriptionStore interface {
@@ -78,10 +81,8 @@ type SubscriptionStore interface {
 	// periodic recompute (the drift safety net) restores convergence.
 	ApplyMemberCountDelta(ctx context.Context, roomID string, userDelta, appDelta int, ttl time.Duration) (reconcileDue bool, err error)
 	GetRoom(ctx context.Context, roomID string) (*model.Room, error)
-	// GetRoomMeta returns a room populated with only its stable fields
-	// (ID/Type/Name/SiteID/UserCount); CreatedAt/UpdatedAt are zero. It is the
-	// add-member hot path's read and is served from the meta cache when enabled.
-	// Callers needing time-sensitive fields (e.g. CreatedAt) must use GetRoom.
+	// GetRoomMeta returns a room with only its stable fields (CreatedAt/UpdatedAt zero),
+	// served from the meta cache when enabled. Need time-sensitive fields? Use GetRoom.
 	GetRoomMeta(ctx context.Context, roomID string) (*model.Room, error)
 	GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error)
 	GetUser(ctx context.Context, account string) (*model.User, error)
@@ -156,6 +157,9 @@ type SubscriptionStore interface {
 	// Used by the rename processor to bucket accounts by remote site for
 	// cross-site fan-out.
 	ListByRoom(ctx context.Context, roomID string) ([]model.Subscription, error)
+
+	// SetRoomCrossSite marks a room global. Sticky/idempotent: only ever sets crossSite=true.
+	SetRoomCrossSite(ctx context.Context, roomID string) error
 }
 
 // Key store used by room-worker: reads for fan-out, writes for rotation.

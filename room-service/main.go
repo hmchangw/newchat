@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type config struct {
@@ -73,6 +74,8 @@ type config struct {
 	DebugLog logctx.Config      `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
+	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -123,6 +126,11 @@ func main() {
 	}
 	if cfg.RestrictedRoomMinMembers <= 0 {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
+		os.Exit(1)
+	}
+	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
+	if err != nil {
+		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
 		os.Exit(1)
 	}
 
@@ -246,6 +254,7 @@ func main() {
 		},
 		cfg.LegacyRoomOrigins.byID,
 		nc.NatsConn().MaxPayload(),
+		roomRouteMode,
 	)
 	handler.dekProvisioner = dekProvisioner
 	handler.graphClient = graphClient

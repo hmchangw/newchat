@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type recordingHandler struct {
@@ -135,7 +136,7 @@ func TestProcessRemoveMember_DebugEdge(t *testing.T) {
 		store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil).AnyTimes()
 		store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil).AnyTimes()
 		expectThreadCleanupAny(store)
-		h := NewHandler(store, siteID, func(context.Context, string, []byte, string) error { return nil }, testKeyStore, testKeySender)
+		h := NewHandler(store, siteID, func(context.Context, string, []byte, string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
 		req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
 		data, _ := json.Marshal(req)
 		return h, data

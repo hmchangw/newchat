@@ -26,7 +26,7 @@ func newTeamsTestHandler(t *testing.T, store *MockSubscriptionStore) (*Handler, 
 		published = append(published, publishedMsg{subj: subj, data: data})
 		return nil
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 	return h, &published
 }
 
@@ -130,7 +130,7 @@ func TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers(t *testing.T) {
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
 		return pub.Publish(subj, data)
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub))
+	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub), subject.RouteGlobal)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
@@ -400,7 +400,7 @@ func TestFederateTeamsMembership_MigrationHeaderStamped(t *testing.T) {
 		gotHeader = natsutil.HeaderForContext(ctx).Get(natsutil.HeaderMigration) == natsutil.MigrationLive
 		return nil
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
 	ctx := natsutil.WithMigrationLiveContext(context.Background())
 	room := &model.Room{ID: "chat1", Name: "n", Type: model.RoomTypeChannel, SiteID: "site-a"}
@@ -423,7 +423,7 @@ func TestProcessTeamsRoomCreate_StampsMigrationHeader(t *testing.T) {
 		}
 		return nil
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)

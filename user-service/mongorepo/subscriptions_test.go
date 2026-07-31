@@ -304,6 +304,83 @@ func TestAggregateSubscriptions_ExcludesClosed(t *testing.T) {
 	assert.False(t, roomIDs["r_closed"], "explicitly closed subscription must be excluded")
 }
 
+// TestAggregateSubscriptions_CrossSite_Integration exercises the roomsEnrichStages
+// pipeline (shared by AggregateSubscriptions/GetDMSubscription/GetSubscriptionByRoomID/
+// GetActiveSubscriptions): a locally-hosted room with room.crossSite:true (≥1 remote
+// member) must decode as EnrichedSubscription.CrossSite=&true; a room without the flag
+// must decode as nil (absent → nil, resolving to global via the fail-safe — NOT false,
+// which would assert confirmed same-site). Distinct from the existing "cross-site room has no local doc"
+// cases — this room DOES have a local doc, it just has remote members.
+func TestAggregateSubscriptions_CrossSite_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-xsite-flag", "name": "Federated", "siteId": "site-a", "userCount": 3, "lastMsgAt": now, "crossSite": true},
+		bson.M{"_id": "r-local-only", "name": "Local", "siteId": "site-a", "userCount": 2, "lastMsgAt": now},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "sub-xsite-flag", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-xsite-flag",
+			"name": "Federated", "roomType": "channel", "siteId": "site-a", "_updatedAt": now, "createdAt": now},
+		bson.M{"_id": "sub-local-only", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-local-only",
+			"name": "Local", "roomType": "channel", "siteId": "site-a", "_updatedAt": now, "createdAt": now},
+	)
+
+	page, err := r.AggregateSubscriptions(ctx, "alice", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
+	require.NoError(t, err)
+	byID := map[string]bool{}
+	crossSite := map[string]*bool{}
+	for _, sub := range page.Data {
+		byID[sub.ID] = true
+		crossSite[sub.ID] = sub.CrossSite
+	}
+	require.True(t, byID["sub-xsite-flag"])
+	require.True(t, byID["sub-local-only"])
+	require.NotNil(t, crossSite["sub-xsite-flag"])
+	assert.True(t, *crossSite["sub-xsite-flag"], "room.crossSite:true must decode as EnrichedSubscription.CrossSite=true")
+	// A room with no crossSite field at all (unclassified) must decode as nil,
+	// never false — coercing it to false would defeat the fail-safe.
+	assert.Nil(t, crossSite["sub-local-only"], "room without crossSite must decode as nil (unclassified)")
+}
+
+// TestFindChannelsByMembers_CrossSite_Integration exercises the SEPARATE roomMatchStages
+// pipeline plus the terminal subscriptionProjection — an inclusion-only $project that
+// silently drops any field not explicitly whitelisted, so crossSite must be listed there
+// too even though roomsEnrichStages already carries it.
+func TestFindChannelsByMembers_CrossSite_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-fed", "name": "Fed", "siteId": "site-a", "userCount": 2, "createdAt": now, "crossSite": true},
+		bson.M{"_id": "r-plain", "name": "Plain", "siteId": "site-a", "userCount": 2, "createdAt": now},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "a-fed", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-fed",
+			"name": "Fed", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+		bson.M{"_id": "c-fed", "u": bson.M{"_id": "u-carol", "account": "carol"}, "roomId": "r-fed",
+			"name": "Fed", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+		bson.M{"_id": "a-plain", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-plain",
+			"name": "Plain", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+		bson.M{"_id": "c-plain", "u": bson.M{"_id": "u-carol", "account": "carol"}, "roomId": "r-plain",
+			"name": "Plain", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+	)
+
+	page, err := r.FindChannelsByMembers(ctx, "alice", []string{"carol"}, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
+	require.NoError(t, err)
+	crossSite := map[string]*bool{}
+	for _, sub := range page.Data {
+		crossSite[sub.RoomID] = sub.CrossSite
+	}
+	require.Contains(t, crossSite, "r-fed")
+	require.Contains(t, crossSite, "r-plain")
+	require.NotNil(t, crossSite["r-fed"])
+	assert.True(t, *crossSite["r-fed"], "matched room's crossSite must survive subscriptionProjection's inclusion whitelist")
+	assert.Nil(t, crossSite["r-plain"], "room without crossSite must decode as nil (unclassified), never coerced to false")
+}
+
 func TestFindChannelsByMembers_Integration(t *testing.T) {
 	r, db := newTestSubscriptionRepo(t)
 	ctx := context.Background()
