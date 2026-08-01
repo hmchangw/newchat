@@ -45,13 +45,6 @@ type Room struct {
 // OriginTeams marks a room/subscription imported from the Teams migration.
 const OriginTeams = "teams"
 
-// RoutesGlobal reports whether r resolves to the global namespace (nil or true
-// CrossSite; only explicit false is local). Nil-safe mirror of the
-// pkg/subject.RoomEventTargets fail-safe; a nil room is not routed global.
-func (r *Room) RoutesGlobal() bool {
-	return r != nil && (r.CrossSite == nil || *r.CrossSite)
-}
-
 // RoomsInfoBatchRequest is the NATS request body for the batch room info RPC.
 type RoomsInfoBatchRequest struct {
 	RoomIDs []string `json:"roomIds"`
