@@ -1822,7 +1822,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
 
-This is a **synchronous RPC** — `room-service` performs all writes inline before replying. The handler validates room membership, recomputes the per-subscription `alert` flag, persists the new `lastSeenAt` and `alert` on the user's `Subscription`, and optionally recomputes `Room.MinUserLastSeenAt`.
+This is a **synchronous RPC** — `room-service` performs all writes inline before replying. The handler validates room membership, persists the new `lastSeenAt` on the user's `Subscription` (clearing `alert` and `hasMention`), and optionally recomputes `Room.MinUserLastSeenAt`.
 
 ##### Request body
 
@@ -1931,7 +1931,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 - **Cross-site federation:** if the user's home site differs from the handler's site, the handler emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `thread_read` event (at-least-once) to `chat.inbox.{userSite}.external.thread_read` with payload `{account, roomId, threadRoomId, parentMessageId, lastSeenAt, timestamp}` (timestamps as `int64` UnixMilli). The destination `inbox-worker` applies `lastSeenAt`+`updatedAt`+`hasMention=false` to the local ThreadSubscription with an `$lt` order-safety guard so out-of-order delivery cannot regress the thread's read position.
 - **Not following the thread:** if the caller holds no `ThreadSubscription` for the supplied `threadId` in the room, the RPC is an idempotent no-op — it runs no `ThreadSubscription` write, no cross-site federation, and no floor recompute, and returns `{ "status": "accepted" }`.
 - **Defensive `roomId` filter:** the thread-subscription lookup additionally enforces that the supplied `threadId` belongs to the room named in the subject. A thread that belongs to a different room matches no `ThreadSubscription` and so is treated as the not-following no-op above (rather than clearing an unrelated thread).
-- **Thread-room read-floor recompute:** after both writes succeed, `room-service` recomputes `thread_rooms.minUserLastSeenAt` = `MIN(lastSeenAt)` across all `thread_subscriptions` for the thread room. The floor is set only when every subscriber has a usable `lastSeenAt`; otherwise it is cleared. The recompute is best-effort — a failure is logged but does not fail the RPC. The stored value is also available via [Get Thread Messages](#get-thread-messages).
+- **Thread-room read-floor recompute:** after the `ThreadSubscription` write succeeds, `room-service` recomputes `thread_rooms.minUserLastSeenAt` = `MIN(lastSeenAt)` across all `thread_subscriptions` for the thread room. The floor is set only when every subscriber has a usable `lastSeenAt`; otherwise it is cleared. The recompute is best-effort — a failure is logged but does not fail the RPC. The stored value is also available via [Get Thread Messages](#get-thread-messages).
 - **Read-floor fan-out:** when (and only when) the recompute above changes `thread_rooms.minUserLastSeenAt`, the server publishes a `thread_message_read` event (routed by the **parent** room's type) carrying the new floor, so peers can advance thread read-receipt UI live. Best-effort (a publish failure does not fail the RPC); never fires when the floor is unchanged or the thread room is missing.
 - **No system message:** thread reads are silent; only the requester receives the `accepted` reply.
 

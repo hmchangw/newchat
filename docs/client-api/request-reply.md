@@ -526,7 +526,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.read`
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Synchronous RPC. Advances the caller's `lastSeenAt`, recomputes the per-subscription
+Synchronous RPC. Advances the caller's `lastSeenAt` and clears the per-subscription
 `alert` flag. No request body required.
 
 #### Success response
@@ -1832,7 +1832,7 @@ failures degrade into `unavailableSites` rather than erroring.
 `{siteID}` is the **caller's own home site**. Clears the unread status of all of the
 user's threads across every site — the "mark all threads read" action. `user-service`
 asks each owning site's `room-service` to clear that user's thread-subscription read
-state and room-subscription thread-unread state; each remote site converges the user's
+state; each remote site converges the user's
 home replica via one `thread_read_all` inbox event.
 
 #### Request body
