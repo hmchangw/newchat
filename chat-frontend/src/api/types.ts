@@ -59,7 +59,6 @@ export interface Subscription {
   joinedAt: string
   lastSeenAt?: string
   hasMention: boolean
-  threadUnread?: string[]
   alert: boolean
   /** Room-level metadata nested under `room` after enrichment by
    *  user-service. Present on `subscription.list` replies; absent on
