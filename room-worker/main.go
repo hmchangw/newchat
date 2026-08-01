@@ -74,6 +74,8 @@ type config struct {
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
+	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
+	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
 }
 
 func main() {
@@ -101,6 +103,7 @@ func main() {
 		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
 		os.Exit(1)
 	}
+	subject.SetRoomLocalityGrace(cfg.RoomLocalityGrace)
 
 	ctx := context.Background()
 

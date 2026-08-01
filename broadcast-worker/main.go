@@ -35,35 +35,37 @@ type encryptionConfig struct {
 }
 
 type config struct {
-	NatsURL              string                  `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
-	NatsCredsFile        string                  `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID               string                  `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI             string                  `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB              string                  `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername        string                  `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword        string                  `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxWorkers           int                     `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration           `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
-	UserCacheSize        int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL         time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	RoomMetaCacheSize    int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL     time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomKeyGracePeriod   time.Duration           `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	RoomKeyCacheTTL      time.Duration           `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
-	RoomKeyCacheSize     int                     `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
-	RoomMetaL2TTL        time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	ValkeyAddrs          []string                `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword       string                  `env:"VALKEY_PASSWORD"           envDefault:""`
-	ValkeyKeyGracePeriod time.Duration           `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
-	HealthAddr           string                  `env:"HEALTH_ADDR"              envDefault:":8081"`
-	PProfEnabled         bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr          string                  `env:"METRICS_ADDR"             envDefault:":9090"`
-	Mode                 stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	RoomSubjectMode      string                  `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
-	Consumer             stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap            bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	Encryption           encryptionConfig        `envPrefix:"ENCRYPTION_"`
-	DebugLog             logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	NatsURL              string          `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
+	NatsCredsFile        string          `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID               string          `env:"SITE_ID"                   envDefault:"default"`
+	MongoURI             string          `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB              string          `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername        string          `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword        string          `env:"MONGO_PASSWORD"            envDefault:""`
+	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
+	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
+	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL     time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	RoomKeyCacheTTL      time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
+	RoomKeyCacheSize     int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
+	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
+	HealthAddr           string          `env:"HEALTH_ADDR"              envDefault:":8081"`
+	PProfEnabled         bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr          string          `env:"METRICS_ADDR"             envDefault:":9090"`
+	Mode                 stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	RoomSubjectMode      string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
+	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
+	RoomLocalityGrace time.Duration           `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
+	Consumer          stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap         bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	Encryption        encryptionConfig        `envPrefix:"ENCRYPTION_"`
+	DebugLog          logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
@@ -89,6 +91,7 @@ func main() {
 		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
 		os.Exit(1)
 	}
+	subject.SetRoomLocalityGrace(cfg.RoomLocalityGrace)
 
 	ctx := context.Background()
 

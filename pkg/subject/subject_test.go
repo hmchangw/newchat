@@ -1180,7 +1180,7 @@ func TestRoomEventTargets(t *testing.T) {
 
 // TestRoomEventTargets_TransitionGrace covers the post-flip grace window: a room
 // that just flipped same-site→cross-site (crossSite=&true with crossSiteAt set)
-// keeps a LOCAL copy for RoomLocalityGrace when the mode uses local subjects, so
+// keeps a LOCAL copy for the grace window when the mode uses local subjects, so
 // same-site members still on the local subject don't go dark until they
 // re-subscribe.
 func TestRoomEventTargets_TransitionGrace(t *testing.T) {
@@ -1188,8 +1188,8 @@ func TestRoomEventTargets_TransitionGrace(t *testing.T) {
 	l := "chat.local.room.r1.event"
 	trueP := true
 	flip := time.Unix(1_700_000_000, 0).UTC()
-	within := flip.Add(subject.RoomLocalityGrace - time.Minute)
-	after := flip.Add(subject.RoomLocalityGrace + time.Minute)
+	within := flip.Add(subject.DefaultRoomLocalityGrace - time.Minute)
+	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
 
 	// Within grace: local + global in local/dual modes.
 	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, within))
@@ -1200,7 +1200,26 @@ func TestRoomEventTargets_TransitionGrace(t *testing.T) {
 	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, after))
 	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteDual, after))
 	// Exactly at the boundary is already expired (now.Before is strict).
-	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(subject.RoomLocalityGrace)))
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(subject.DefaultRoomLocalityGrace)))
+}
+
+// TestSetRoomLocalityGrace verifies the startup override widens/narrows the
+// window, and that a non-positive value is ignored (keeps the default).
+func TestSetRoomLocalityGrace(t *testing.T) {
+	t.Cleanup(func() { subject.SetRoomLocalityGrace(subject.DefaultRoomLocalityGrace) })
+	g := "chat.room.r1.event"
+	l := "chat.local.room.r1.event"
+	trueP := true
+	flip := time.Unix(1_700_000_000, 0).UTC()
+
+	subject.SetRoomLocalityGrace(time.Hour)
+	// A point past the 1h override but well within the default is now expired.
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(2*time.Hour)))
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(30*time.Minute)))
+
+	// Non-positive is ignored: window stays at 1h, not reset to zero.
+	subject.SetRoomLocalityGrace(0)
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(30*time.Minute)))
 }
 
 func TestParseRoomRouteMode(t *testing.T) {

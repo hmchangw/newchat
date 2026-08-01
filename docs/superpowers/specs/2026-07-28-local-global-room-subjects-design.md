@@ -161,11 +161,15 @@ Publishers default to global if the flag is absent/unknown (fail-safe).
 
 - **Transition grace window closes the flip gap server-side.** When a *previously
   confirmed same-site* room (`crossSite==false`) flips to cross-site, the flip time is
-  recorded as `Room.CrossSiteAt`, and for `RoomLocalityGrace` (15 min) afterward every
+  recorded as `Room.CrossSiteAt`, and for the locality grace window afterward every
   publisher emits the room's `.event` to **both** the local and global subjects (see
-  `pkg/subject.RoomEventTargets`). So a same-site member still subscribed to the local
-  subject keeps receiving in real time until it re-subscribes — the gap depends only on
-  the client reconnecting/reconciling within the window, not on any proactive push. The
+  `pkg/subject.RoomEventTargets`). The window is `ROOM_LOCALITY_GRACE` (default 1 week,
+  `subject.DefaultRoomLocalityGrace`) — long enough that essentially every client
+  reconnects and re-subscribes the room within it, so it decays to zero double-publishing
+  once the local audience has drained; all publisher services MUST use the same value. So
+  a same-site member still subscribed to the local subject keeps receiving in real time
+  until it re-subscribes — the gap depends only on the client reconnecting/reconciling
+  within the window, not on any proactive push. The
   double-publish is bounded (only rooms actively flipping, only for the window) and
   site-local on the leaf-filtered subject, so the steady-state interest-map savings are
   preserved. Rooms *born* cross-site get no `CrossSiteAt` and no grace (they never had a
@@ -241,18 +245,18 @@ publishing all rooms on the global prefix only.
 **Per-room flip after rollout — bounded by the grace window.** A local→global room
 **flip** (a same-site room gains a cross-site member) re-routes an already-connected
 client only when it re-subscribes. The **transition grace window** (see Client Routing &
-Transition: publishers dual-publish a flipped room to both subjects for `RoomLocalityGrace`)
-makes this gapless server-side for any client that re-subscribes within the window —
-whether via the nudge or its normal reconnect / periodic `subscription.list` reconcile.
-The nudge is therefore a latency optimization, not a correctness dependency.
+Transition: publishers dual-publish a flipped room to both subjects for the locality
+grace window) makes this gapless server-side for any client that re-subscribes within the
+window via its normal reconnect / periodic `subscription.list` reconcile. With the default
+1-week window this covers essentially every client, since clients re-read
+`subscription.list` and re-subscribe on every reconnect (network change, deploy, app
+foreground).
 
-**Client contract for the flip (for the official client, not the internal
-chat-frontend test client):** to re-route *promptly* rather than at the next reconcile,
-subscribe to `chat.user.{account}.event.room.update` (the server's
-`subject.UserRoomUpdate` nudge — distinct from the general `event.room.metadata.update`)
-and, on receipt, refresh `subscription.list` and re-subscribe the room by its new
-`crossSite`. Correctness still rests on the persisted flag + history/gap fetch, so a
-client that only reconciles periodically is still correct as long as its reconcile
-interval is within the grace window. (The chat-frontend test client does not implement
-this yet; document the subject + event in `docs/client-api.md` before the official
-client is built.)
+**Client contract for the flip:** the client re-routes when it next reads
+`subscription.list` and re-subscribes the room by its `crossSite` value — on reconnect or
+periodic reconcile. Correctness rests on the persisted flag + history/gap fetch, so a
+client is correct as long as it reconnects/reconciles within the grace window; anything
+past it is recovered by the normal history fetch. (An earlier design added a per-user
+`event.room.update` push to trigger an immediate re-subscribe; it was dropped in review —
+mass-nudging every subscriber is heavy for large rooms and the grace window already covers
+the gap.)
