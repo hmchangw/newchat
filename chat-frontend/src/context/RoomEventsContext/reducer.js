@@ -1,4 +1,5 @@
 import { appendBounded, mergeById, MAX_CACHED } from '@/lib/messageBuffer'
+import { defaultChatlistState } from '@/lib/chatlist'
 
 export { MAX_CACHED }
 
@@ -83,6 +84,15 @@ export const initialState = {
    * pkg/model.Subscription (see chat-frontend/src/api/types.ts).
    */
   subscriptions: {},
+  /**
+   * The per-user chatlist section-definition overlay (ChatlistState) — the
+   * section names, display order, and sortMode. Membership is NOT here; it
+   * rides each subscription's sectionId/sectionOrder. Seeded by
+   * CHATLIST_LOADED (chatlist.get) and replaced wholesale by CHATLIST_UPDATED
+   * (chatlist.update event, last-write-wins on lastUpdatedAt). Defaults to the
+   * four derived built-ins for a never-customized user.
+   */
+  chatlist: defaultChatlistState(),
 }
 
 
@@ -309,6 +319,36 @@ export function roomEventsReducer(state, action) {
         s.id === sub.roomId ? mergeSubscriptionIntoSummary(s, sub) : s
       )
       return { ...state, summaries, subscriptions }
+    }
+    case 'SUBSCRIPTION_SECTION_MOVED': {
+      // A chat's chatlist section membership/order changed (subscription.update
+      // action "section_moved"). Unlike SUBSCRIPTION_UPSERTED's spread-merge,
+      // set BOTH fields explicitly — a remove clears them (a spread of an
+      // omitempty-absent field would leave the chat stuck in its old section).
+      const { roomId } = action
+      if (!roomId) return state
+      const prev = state.subscriptions[roomId]
+      if (!prev) return state
+      if (prev.sectionId === action.sectionId && prev.sectionOrder === action.sectionOrder) {
+        return state
+      }
+      const next = { ...prev, sectionId: action.sectionId, sectionOrder: action.sectionOrder }
+      return { ...state, subscriptions: { ...state.subscriptions, [roomId]: next } }
+    }
+    case 'CHATLIST_LOADED': {
+      // Initial section-definition overlay (chatlist.get). Replaces the
+      // built-in default wholesale.
+      if (!action.chatlist) return state
+      return { ...state, chatlist: action.chatlist }
+    }
+    case 'CHATLIST_UPDATED': {
+      // Live chatlist.update — full-state replace, last-write-wins on the
+      // overlay's high-water mark. A stale event (older lastUpdatedAt) is
+      // dropped.
+      const incoming = action.chatlist
+      if (!incoming) return state
+      if (state.chatlist && incoming.lastUpdatedAt < state.chatlist.lastUpdatedAt) return state
+      return { ...state, chatlist: incoming }
     }
     case 'ROOM_METADATA_UPDATED': {
       const existing = state.summaries.find((r) => r.id === action.roomId)
