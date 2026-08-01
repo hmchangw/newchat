@@ -1034,13 +1034,13 @@ func (s *MongoStore) FindExistingAccounts(ctx context.Context, accounts []string
 	return out, nil
 }
 
-// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
-// keyed by (roomID, account). Returns model.ErrSubscriptionNotFound when no
-// subscription matches.
-func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+// UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
+// (roomID, account), clearing alert and hasMention. Returns
+// model.ErrSubscriptionNotFound when no subscription matches.
+func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error {
 	res, err := s.subscriptions.UpdateOne(ctx,
 		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert, "hasMention": false}},
+		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": false, "hasMention": false}},
 	)
 	if err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)

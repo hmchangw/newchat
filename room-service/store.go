@@ -122,10 +122,11 @@ type RoomStore interface {
 	// candidates pipeline and the async job reports success despite the
 	// requested user never being added.
 	FindExistingAccounts(ctx context.Context, accounts []string) ([]string, error)
-	// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
-	// keyed by (roomID, account). Returns model.ErrSubscriptionNotFound
-	// (wrapped) when no subscription matches.
-	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
+	// UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
+	// (roomID, account), clearing alert and hasMention (reading the room
+	// dismisses both). Returns model.ErrSubscriptionNotFound (wrapped) when
+	// no subscription matches.
+	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error
 	// ToggleSubscriptionMute atomically flips muted via a single FindOneAndUpdate,
 	// stamping muteUpdatedAt so the origin doc carries the same high-water mark the
 	// federated event publishes (inbox-worker guards remote applies against it).

@@ -1306,10 +1306,9 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, fmt.Errorf("get subscription: %w", err)
 	}
 
-	newAlert := sub.Alert && len(sub.ThreadUnread) > 0
 	now := time.Now().UTC()
 
-	if err := h.store.UpdateSubscriptionRead(ctx, roomID, account, now, newAlert); err != nil {
+	if err := h.store.UpdateSubscriptionRead(ctx, roomID, account, now); err != nil {
 		return nil, fmt.Errorf("update subscription read: %w", err)
 	}
 
@@ -1346,8 +1345,10 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 			Account:    account,
 			RoomID:     roomID,
 			LastSeenAt: now.UnixMilli(),
-			Alert:      newAlert,
-			Timestamp:  now.UnixMilli(),
+			// Reading the room always clears the alert; the field stays on the
+			// event because data-migration CDC ships real values through it.
+			Alert:     false,
+			Timestamp: now.UnixMilli(),
 		}
 		payloadData, err := json.Marshal(payload)
 		if err != nil {
@@ -1371,7 +1372,7 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 	if !model.IsBot(account) {
 		updatedSub := *sub
 		updatedSub.LastSeenAt = &now
-		updatedSub.Alert = newAlert
+		updatedSub.Alert = false
 		// Set the derived flags explicitly (don't rely on the projection omitting
 		// them). Reading the room clears both hasMention and hasGroupMention.
 		updatedSub.HasMention = false

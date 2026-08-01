@@ -1976,7 +1976,7 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, false))
+	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
 
 	got, err := store.GetSubscription(ctx, "alice", "r1")
 	require.NoError(t, err)
@@ -1984,7 +1984,7 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
 
-	err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now, false)
+	err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now)
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
@@ -2006,7 +2006,7 @@ func TestMongoStore_UpdateSubscriptionRead_ClearsHasMention(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, false))
+	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
 
 	var raw model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&raw))
