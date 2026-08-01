@@ -117,8 +117,11 @@ false after unsubscribing while the room row remains).
 - `SubscriptionsByRoomIDs`: projection adds `isSubscribed`; `SubscriptionMeta`
   gains `IsSubscribed bool`.
 - `AppsByAssistantNames`: projection becomes `{_id, name, assistant.name}`
-  (adds `_id` for `appInfo.id`; everything else still excluded).
-- No interface signature changes; no new store methods; no new queries.
+  (adds `_id` for `appInfo.id`; everything else still excluded), and the
+  method returns a dedicated `AppRef{ID, Name, AssistantName}` projection
+  struct (mirroring `SubscriptionMeta`/`HRUser`) instead of hollow
+  `model.App` values.
+- No new store methods; no new queries.
 
 ## Docs
 
