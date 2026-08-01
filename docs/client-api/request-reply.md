@@ -1270,8 +1270,12 @@ with `AND`) — terms split across e.g. message text and a filename match nothin
 (omitted when not a reply), `threadParentMessageCreatedAt` (omitted when not a reply),
 `attachments` (`Attachment[]`, omitted when the message has no attachments),
 `card` (`MessageCard`, omitted when the message carries no tcard),
-`tshow` (boolean, omitted when false), `sender` (`{account, displayName}`),
-`room` (`{id, name, type, hrInfo?}` — `hrInfo` only for `dm`).
+`tshow` (boolean, omitted when false),
+`sender` (`{account, hr?, appInfo?}` — `hr` `{account, chineseName, engName}` for
+human senders, `appInfo` `{id, name, assistantName}` for bot senders),
+`room` (`{id, name, type, hrInfo?, appInfo?}` — `hrInfo` `{account, chineseName,
+engName}` only for `dm`, `appInfo` `{id, name, assistantName, isSubscribed}` only
+for `botDM`).
 Base fields are sourced from ES; `room`/`sender` are resolved server-side (best-effort,
 individual fields omitted when unresolved). `attachments`/`card` mirror the message
 payloads as-is (same wire shape as history reads) so hits render without a follow-up

@@ -3905,12 +3905,15 @@ See [Error envelope](#6-error-envelope-reference).
         "data": "eyJhbW91bnQiOjQyfQ=="
       },
       "tshow": true,
-      "sender": { "account": "alice", "displayName": "Alice Wong" },
+      "sender": {
+        "account": "alice",
+        "hr": { "account": "alice", "chineseName": "王愛麗", "engName": "Alice Wong" }
+      },
       "room": {
         "id": "r1",
         "name": "Bob Chan",
         "type": "dm",
-        "hrInfo": { "account": "bob", "name": "陳大文", "engName": "Bob Chan" }
+        "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" }
       }
     }
   ],
@@ -3940,8 +3943,8 @@ See [Error envelope](#6-error-envelope-reference).
 | `attachments` | [Attachment](#attachment)[] | omitted when the message has no attachments |
 | `card` | [MessageCard](#messagecard) | omitted when the message carries no tcard |
 | `tshow` | boolean | omitted when false — set on a thread reply that is also shown in the parent channel timeline |
-| `sender` | [MessageSender](#messagesender) | present on every hit; `account` always set, `displayName` best-effort |
-| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`hrInfo` best-effort |
+| `sender` | [MessageSender](#messagesender) | present on every hit; `account` always set, `hr`/`appInfo` best-effort |
+| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`hrInfo`/`appInfo` best-effort |
 
 `attachments` and `card` are the message's payloads mirrored as-is from the index (same wire shape as history reads — decoded `Attachment` objects; `card.data` is base64-encoded bytes), so the client can render a hit (file row, tcard) without a follow-up history-service load.
 
@@ -3952,7 +3955,8 @@ See [Error envelope](#6-error-envelope-reference).
 | Field | Type | Notes |
 |---|---|---|
 | `account` | string | sender's account |
-| `displayName` | string | engName+chineseName (fallback account); the app's display name for a bot sender. Omitted when empty. |
+| `hr` | [MessageHRInfo](#messagehrinfo) | human senders only; omitted when the users lookup missed |
+| `appInfo` | [MessageAppInfo](#messageappinfo) | bot senders only (`isSubscribed` never set here); omitted when the apps lookup missed |
 
 ##### MessageRoom
 
@@ -3961,7 +3965,25 @@ See [Error envelope](#6-error-envelope-reference).
 | `id` | string | roomId |
 | `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
 | `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
-| `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | present **only for `dm` rooms** |
+| `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
+| `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
+
+##### MessageHRInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | HR-directory account |
+| `chineseName` | string | omitted when empty |
+| `engName` | string | omitted when empty |
+
+##### MessageAppInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | app document id |
+| `name` | string | app display name |
+| `assistantName` | string | bot account (`assistant.name`) |
+| `isSubscribed` | boolean | `room.appInfo` only — the caller's subscription state for the bot (explicit `true`/`false`); absent on `sender.appInfo` |
 
 ##### Error response
 
