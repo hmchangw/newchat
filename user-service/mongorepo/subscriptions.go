@@ -83,6 +83,7 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 					"createdAt":         1,
 					"encKey.priv":       1,
 					"encKey.ver":        1,
+					"crossSite":         1,
 				}},
 			},
 			"as": "room",
@@ -102,6 +103,7 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 			"minUserLastSeenAt": "$room.minUserLastSeenAt",
 			"appCount":          "$room.appCount",
 			"roomName":          "$room.name",
+			"crossSite":         "$room.crossSite",
 			// Sort key: room activity (lastMsgAt), falling back to room.createdAt for
 			// rooms with no messages. Null for cross-site/missing rooms (they sort last).
 			"__sortKey": bson.M{"$ifNull": bson.A{"$room.lastMsgAt", "$room.createdAt"}},
@@ -148,6 +150,7 @@ func roomMatchStages() []bson.D {
 					"createdAt":         1,
 					"encKey.priv":       1,
 					"encKey.ver":        1,
+					"crossSite":         1,
 				}},
 			},
 			"as": matchedRoomField,
@@ -196,6 +199,7 @@ func subscriptionProjection(extra bson.M) bson.M {
 		"minUserLastSeenAt": 1,
 		"appCount":          1,
 		"roomName":          1,
+		"crossSite":         1,
 		"encKeyPriv":        1,
 		"encKeyVer":         1,
 	}
@@ -327,6 +331,7 @@ func (r *SubscriptionRepo) FindChannelsByMembers(ctx context.Context, account st
 			"minUserLastSeenAt": bson.M{"$first": "$" + matchedRoomField + ".minUserLastSeenAt"},
 			"appCount":          bson.M{"$first": "$" + matchedRoomField + ".appCount"},
 			"roomName":          bson.M{"$first": "$" + matchedRoomField + ".name"},
+			"crossSite":         bson.M{"$first": "$" + matchedRoomField + ".crossSite"},
 			// Room E2E key baseline (current slot) — folds the key read into this join.
 			"encKeyPriv": bson.M{"$first": "$" + matchedRoomField + ".encKey.priv"},
 			"encKeyVer":  bson.M{"$first": "$" + matchedRoomField + ".encKey.ver"},

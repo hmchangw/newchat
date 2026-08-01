@@ -117,7 +117,7 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	lastMentionAll := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Millisecond)
 	mustInsertRoom(t, db, &model.Room{
 		ID: "rproj", Name: "proj-room", Type: model.RoomTypeChannel, SiteID: "site-a",
-		UserCount: 7, AppCount: 3, Restricted: true, ExternalAccess: true,
+		UserCount: 7, AppCount: 3, Restricted: true, ExternalAccess: true, CrossSite: ptrBool(true),
 		LastMsgAt: &lastMsg, MinUserLastSeenAt: &minSeen, LastMsgID: "m123",
 		LastMentionAllAt: &lastMentionAll,
 	})
@@ -131,6 +131,8 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, 3, got.AppCount)
 	assert.True(t, got.Restricted)
 	assert.True(t, got.ExternalAccess)
+	require.NotNil(t, got.CrossSite, "crossSite must be in the projection (read-receipt fan-out routes on it via subject.RoomEventTargets)")
+	assert.True(t, *got.CrossSite)
 	require.NotNil(t, got.LastMsgAt)
 	assert.WithinDuration(t, lastMsg, *got.LastMsgAt, time.Second)
 	require.NotNil(t, got.MinUserLastSeenAt)
@@ -1393,7 +1395,7 @@ func TestAddMembers_SameSiteChannel_RoomMembersPath(t *testing.T) {
 		publishedData = data
 		return nil
 	}
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{
 		Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-a"}},
@@ -1453,7 +1455,7 @@ func TestAddMembers_SameSiteChannel_SubscriptionsFallback(t *testing.T) {
 		publishedData = data
 		return nil
 	}
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-a"}}}
 	resp, err := handler.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "target"}), req)
@@ -1489,7 +1491,7 @@ func TestAddMembers_RequesterNotSubscribed_Rejected(t *testing.T) {
 
 	// Same-site only: nil memberListClient is safe — request fails on the same-site
 	// GetSubscription check before reaching the cross-site branch.
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-a"}}}
 	_, err := handler.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "target"}), req)
@@ -1544,7 +1546,7 @@ func TestAddMembers_TwoSiteEndToEnd(t *testing.T) {
 	mustInsertSub(t, dbB, &model.Subscription{ID: "sb3", RoomID: "source", User: model.SubscriptionUser{ID: "req", Account: "alice"}})
 
 	// Site-B handler registers member.list endpoint (Register subscribes to MemberListWildcard).
-	handlerB := NewHandler(storeB, keyStore, nil, nil, "site-b", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handlerB := NewHandler(storeB, keyStore, nil, nil, "site-b", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	routerB := natsrouter.New(otelNCb, "room-service")
 	routerB.Use(natsrouter.RequireRequestID())
 	handlerB.Register(routerB)
@@ -1567,7 +1569,7 @@ func TestAddMembers_TwoSiteEndToEnd(t *testing.T) {
 		publishedData = data
 		return nil
 	}
-	handlerA := NewHandler(storeA, keyStore, memberListClient, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handlerA := NewHandler(storeA, keyStore, memberListClient, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	// Call add-members on site-A with a site-B source channel
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-b"}}}
@@ -1620,7 +1622,7 @@ func TestAddMembers_CrossSiteTimeout(t *testing.T) {
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
 	memberListClient := NewNATSMemberListClient(nc, 200*time.Millisecond)
-	handler := NewHandler(store, keyStore, memberListClient, nil, "site-a", 1000, 500, 200*time.Millisecond, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, memberListClient, nil, "site-a", 1000, 500, 200*time.Millisecond, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-b"}}}
 	_, err = handler.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "target"}), req)
@@ -1651,7 +1653,7 @@ func TestRoomsInfoBatchRPC_NoRequestID(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	router := natsrouter.New(otelNC, "room-service")
 	// Production-shaped base: mint, do not require.
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
@@ -1708,7 +1710,7 @@ func TestRoomsInfoBatchRPC(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	router := natsrouter.New(otelNC, "room-service")
 	router.Use(natsrouter.RequireRequestID())
 	handler.Register(router)
@@ -1867,7 +1869,7 @@ func newRoomServiceHandler(t *testing.T, store *MongoStore, keyStore RoomKeyStor
 		lastData = data
 		return nil
 	}
-	h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	return h, func() (string, []byte) { return lastSubj, lastData }
 }
 
@@ -3280,7 +3282,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
-			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0)
+			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3349,7 +3351,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
 			func(context.Context, string, []byte, string) error { return nil },
-			func(context.Context, string, []byte) error { return nil }, nil, 0)
+			func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3426,7 +3428,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
-			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0)
+			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3518,7 +3520,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
 			func(context.Context, string, []byte, string) error { return nil },
-			func(context.Context, string, []byte) error { return nil }, nil, 0)
+			func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)

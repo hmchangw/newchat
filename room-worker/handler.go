@@ -76,9 +76,11 @@ type Handler struct {
 	// publishUsers fans a new external user identity to every site
 	// (chat.hr.{siteID}.users.upsert). Nil in tests not exercising the reconcile.
 	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
+	// routeMode (ROOM_SUBJECT_MODE) gates same-site room .event namespaces; cross-site always global.
+	routeMode subject.RoomRouteMode
 }
 
-func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender) *Handler {
+func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender, routeMode subject.RoomRouteMode) *Handler {
 	return &Handler{
 		store:            store,
 		siteID:           siteID,
@@ -86,6 +88,7 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, key
 		keyStore:         keyStore,
 		keySender:        keySender,
 		keyFanoutWorkers: defaultKeyFanoutWorkers,
+		routeMode:        routeMode,
 	}
 }
 
@@ -174,6 +177,9 @@ func (h *Handler) publishAsyncJobResult(ctx context.Context, requesterAccount, o
 // alias for errcode.Permanent so call sites stay short — the marker type and
 // sentinel-Is shim now live in pkg/errcode (Task 20.15).
 func permanent(ec *errcode.Error) error { return errcode.Permanent(ec) }
+
+// boolPtr returns &b, to classify a new room's CrossSite definitively (never nil).
+func boolPtr(b bool) *bool { return &b }
 
 // fillAsyncError classifies jobErr once and populates the result's error
 // envelope fields. The Ack/Nak decision is INDEPENDENT of this — it stays keyed
@@ -849,6 +855,19 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		return permanent(errcode.BadRequest(fmt.Sprintf("add-member only valid on channel rooms, got %s", room.Type)))
 	}
 	candidates := inputs.candidates
+
+	// Retry-safe: classify from the full candidate set (their home sites), not
+	// needSub, which is empty on a redelivery after a prior crashed-before-marking
+	// delivery. Must run before the early return below. SetRoomCrossSite is idempotent.
+	for _, c := range candidates {
+		if c.SiteID != "" && c.SiteID != h.siteID {
+			if err := h.store.SetRoomCrossSite(ctx, req.RoomID); err != nil {
+				return fmt.Errorf("mark room cross-site: %w", err)
+			}
+			break
+		}
+	}
+
 	// Align the write-gate to member.list's read-source: write individual rows whenever room_members already holds any row, not only when orgs are present.
 	writeIndividuals := len(req.Orgs) > 0 || inputs.hasAnyRoomMembers
 
@@ -1236,6 +1255,22 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 		accountsBySite[siteID] = append(accountsBySite[siteID], acc)
 	}
+
+	// Remote-site bucket non-empty → mark global (sticky). room.CrossSite still
+	// holds the PRIOR state (SetRoomCrossSite doesn't mutate it), so gate the nudge
+	// on RoutesGlobal(): only a previously-confirmed same-site (&false) room flips.
+	if len(accountsBySite) > 0 {
+		if err := h.store.SetRoomCrossSite(ctx, req.RoomID); err != nil {
+			return fmt.Errorf("mark room cross-site: %w", err)
+		}
+		// Bust L2 AFTER the write: an earlier bust could be undone by a concurrent
+		// refill re-caching the pre-write crossSite=false, mis-routing local for the TTL.
+		h.bustRoomMeta(ctx, req.RoomID)
+		if !room.RoutesGlobal() {
+			h.nudgeLocalToGlobalTransition(ctx, req.RoomID, actualAccounts, now)
+		}
+	}
+
 	for destSiteID, siteAccounts := range accountsBySite {
 		siteEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
@@ -1258,6 +1293,32 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 
 	return nil
+}
+
+// nudgeLocalToGlobalTransition best-effort nudges existing members (subscribers minus
+// newAccounts) to re-fetch subscription.list and re-subscribe global after a flip, via
+// their per-user tree. Pure latency opt — crossSite is source of truth, so nudge failures
+// are swallowed and clients self-correct on reconnect.
+func (h *Handler) nudgeLocalToGlobalTransition(ctx context.Context, roomID string, newAccounts []string, now time.Time) {
+	allAccounts, err := h.store.GetSubscriptionAccounts(ctx, roomID)
+	if err != nil {
+		slog.WarnContext(ctx, "room-locality nudge: list subscription accounts failed", "error", err, "room_id", roomID)
+		return
+	}
+	justAdded := make(map[string]struct{}, len(newAccounts))
+	for _, acc := range newAccounts {
+		justAdded[acc] = struct{}{}
+	}
+	evt := model.RoomMetadataUpdateEvent{RoomID: roomID, Timestamp: now.UnixMilli()}
+	data, _ := json.Marshal(evt)
+	for _, acc := range allAccounts {
+		if _, ok := justAdded[acc]; ok {
+			continue
+		}
+		if err := h.publish(ctx, subject.UserRoomUpdate(acc), data, ""); err != nil {
+			slog.WarnContext(ctx, "room-locality nudge publish failed", "error", err, "account", acc, "room_id", roomID)
+		}
+	}
 }
 
 // buildAddedMembers assembles the member.list-shaped display entries (contract: model.MemberAddEvent.Members),
@@ -1361,6 +1422,8 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 		Accounts:  []string{requester.Account},
 		CreatedAt: acceptedAt,
 		UpdatedAt: acceptedAt,
+		// A self-DM's one participant is the requester (local) → definitively same-site.
+		CrossSite: boolPtr(false),
 	}
 	// Provision the room's at-rest DEK before persisting it (same as the 2-party DM
 	// path): self-DM messages are stored encrypted in Cassandra, so a Vault outage
@@ -1495,6 +1558,19 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 			return fmt.Errorf("generate room key: %w", err)
 		}
 	}
+
+	// Classify at birth — never leave CrossSite nil (nil is for pre-existing
+	// rooms). Born global if any resolved initial member is off-site. Definitive
+	// for a DM/botDM (full 2-member roster); provisional for a channel until
+	// finishCreateRoom marks it once the roster is known.
+	room.CrossSite = boolPtr(false)
+	for _, u := range []*model.User{requester, counterpart} {
+		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
+			room.CrossSite = boolPtr(true)
+			break
+		}
+	}
+
 	inserted, err := h.store.CreateRoom(ctx, room, newPair)
 	if err != nil {
 		return fmt.Errorf("create room: %w", err)
@@ -1745,6 +1821,18 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		}
 		remoteSiteAccounts[u.SiteID] = append(remoteSiteAccounts[u.SiteID], u.Account)
 	}
+
+	// Channel members resolve only after the CreateRoom write, so mark here once
+	// known. Sticky/idempotent, so a DM/botDM reaching this pays a harmless extra call.
+	if len(remoteSiteAccounts) > 0 {
+		if err := h.store.SetRoomCrossSite(ctx, room.ID); err != nil {
+			return fmt.Errorf("mark room cross-site: %w", err)
+		}
+		// Bust the L2 room-meta cache after the write so a stale pre-write
+		// crossSite=false can't linger and mis-route this now-global room local.
+		h.bustRoomMeta(ctx, room.ID)
+	}
+
 	for destSiteID, accounts := range remoteSiteAccounts {
 		memberEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
@@ -1939,6 +2027,12 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		Accounts:  accounts,
 		CreatedAt: roomCreatedAt,
 		UpdatedAt: roomCreatedAt,
+	}
+	// Classify at birth: the 2-member roster is fully known → definitive. Local
+	// requester + remote counterpart → global; otherwise confirmed same-site.
+	room.CrossSite = boolPtr(false)
+	if other.SiteID != "" && other.SiteID != h.siteID {
+		room.CrossSite = boolPtr(true)
 	}
 	// Provision the room's at-rest DEK before persisting the room so the first
 	// message write doesn't pay the create cost. Blocking and provisioned first
@@ -2234,12 +2328,34 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		ByAccount: req.Account,
 		RenamedAt: time.UnixMilli(req.Timestamp).UTC(),
 	}
-	if payload, mErr := json.Marshal(roomEvt); mErr != nil {
+	payload, mErr := json.Marshal(roomEvt)
+	if mErr != nil {
 		slog.Error("marshal room_renamed event failed", "error", mErr, "room_id", req.RoomID)
-	} else if pErr := h.publish(ctx, subject.RoomEvent(req.RoomID), payload, ""); pErr != nil {
-		slog.Error("publish room_renamed event failed", "error", pErr, "room_id", req.RoomID)
+		return nil
 	}
+	// Best-effort fan-out (must not fail the rename): default crossSite nil (→global)
+	// if unreadable. GetRoomMeta is cache-served and carries CrossSite (no extra fetch).
+	var crossSite *bool
+	var crossSiteAt *time.Time
+	if r, gErr := h.store.GetRoomMeta(ctx, req.RoomID); gErr != nil {
+		slog.Error("get room for room_renamed event routing failed", "error", gErr, "room_id", req.RoomID)
+	} else {
+		crossSite = r.CrossSite
+		crossSiteAt = r.CrossSiteAt
+	}
+	h.publishRoomEvent(ctx, req.RoomID, crossSite, crossSiteAt, payload, "room_renamed")
 	return nil
+}
+
+// publishRoomEvent fans a room .event out via subject.RoomEventTargets — the sanctioned
+// path; a .semgrep rule blocks inline room-subject publishes. Best-effort.
+func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) {
+	now := time.Now().UTC()
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.publish(ctx, subj, payload, ""); err != nil {
+			slog.Error("publish room event failed", "error", err, "op", op, "room_id", roomID, "subject", subj)
+		}
+	}
 }
 
 func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requester, other *model.User, joinedAt time.Time) error {

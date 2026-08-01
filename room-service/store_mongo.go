@@ -244,6 +244,7 @@ var roomReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "type", Value: 1}, {Key: "name", Value: 1},
 	{Key: "userCount", Value: 1}, {Key: "appCount", Value: 1},
 	{Key: "restricted", Value: 1}, {Key: "externalAccess", Value: 1},
+	{Key: "crossSite", Value: 1}, {Key: "crossSiteAt", Value: 1},
 	{Key: "lastMsgAt", Value: 1}, {Key: "minUserLastSeenAt", Value: 1},
 	{Key: "lastMentionAllAt", Value: 1},
 }

@@ -177,7 +177,13 @@ async function fetchAllPages(
  *  embeds the fields we actually need under `sub.room` (userCount,
  *  lastMsgAt, lastMsgId, appCount); fields the reducer's `toSummary`
  *  doesn't read default to neutral zero/empty values so the type
- *  contract is satisfied. */
+ *  contract is satisfied.
+ *
+ *  `crossSite` is tri-state on the wire: an explicit `true`/`false` is
+ *  authoritative (global/local); ABSENT means the room's locality is
+ *  unknown/unclassified (server hasn't backfilled it yet) and defaults to
+ *  `true` (global) here — a missing flag must never be read as "safe to
+ *  route local". */
 function subToRoom(sub: DMSubscription, fallbackSiteId: string): Room {
   return {
     id: sub.roomId,
@@ -190,5 +196,6 @@ function subToRoom(sub: DMSubscription, fallbackSiteId: string): Room {
     lastMsgAt: sub.room?.lastMsgAt ?? undefined,
     createdAt: '',
     updatedAt: '',
+    crossSite: sub.room?.crossSite ?? true,
   }
 }

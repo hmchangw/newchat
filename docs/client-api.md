@@ -161,7 +161,8 @@ Login is a three-step sequence: portal userInfo lookup (§2.3) resolves the user
 | Publish | `_INBOX.>` | Required for the standard NATS request/reply pattern (the auto-generated reply inbox). |
 | Publish | `chat.user.presence.*.query.batch` | Batch presence-state queries. Read-only for the state broadcast (`chat.user.presence.state.*`) — this subject is deliberately named `query` so it cannot match the state pub-rule. |
 | Subscribe | `chat.user.{account}.>` | Receives all responses, notifications, and per-user events. |
-| Subscribe | `chat.room.>` | Subscribes to per-room message streams and room events for any room the user belongs to. |
+| Subscribe | `chat.room.>` | Subscribes to per-room message streams and room events for cross-site rooms (`crossSite: true`) the user belongs to. |
+| Subscribe | `chat.local.room.>` | Subscribes to per-room message streams and room events for same-site rooms (`crossSite: false`) the user belongs to. |
 | Subscribe | `_INBOX.>` | Required to receive replies to client-issued requests. |
 | Subscribe | `chat.user.presence.state.*` | Read anyone's live presence state broadcast. |
 
@@ -170,7 +171,7 @@ Permissions and connection limits come from the auth-service account's scoped si
 **Recommended baseline subscriptions on connect:**
 
 - `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
-- `chat.room.{roomID}.event` for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel.
+- the room-event subject for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel. Pick the subject by the room's `crossSite` flag (from `subscription.list`): `chat.room.{roomID}.event` when `crossSite: true`, `chat.local.room.{roomID}.event` when `crossSite: false`. **Absent/unknown `crossSite` defaults to the global `chat.room.{roomID}.event`** (fail-safe — a global room misrouted to the local subject would silently miss cross-site delivery).
 
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
 
@@ -910,6 +911,7 @@ top-level `siteId`. All fields are optional (omitted when zero/unset).
 | Field | Type | Notes |
 |---|---|---|
 | `siteId` | string | The room's home site. |
+| `crossSite` | bool | Tri-state. `true` → the room's real-time events are on `chat.room.{roomId}.>` (cross-gateway); `false` → CONFIRMED same-site, on `chat.local.room.{roomId}.>` (site-local). Omitted when the room's locality is unknown/unclassified (a pre-existing room the server hasn't classified yet) — clients MUST treat a missing value as `true` (global), never as `false`. |
 | `name` | string | The room's canonical name (may differ from the subscription `name`). |
 | `userCount` | number | Member count — human members, including QA `p_` test accounts (ordinary users). |
 | `appCount` | number | App count — `.bot` bots plus the `p_admin` platform-admin pseudo-account. |

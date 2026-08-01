@@ -55,6 +55,7 @@ docker run --rm \
     nsc edit signing-key --account chatapp --sk generate --role scoped_user \
       --allow-sub "chat.user.{{tag(account)}}.>" \
       --allow-sub "chat.room.>" \
+      --allow-sub "chat.local.room.>" \
       --allow-sub "_INBOX.>" \
       --allow-sub "chat.user.presence.state.*" \
       --allow-pub "chat.user.{{tag(account)}}.>" \

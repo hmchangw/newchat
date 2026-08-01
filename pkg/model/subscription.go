@@ -93,6 +93,9 @@ type EnrichedSubscription struct {
 	MinUserLastSeenAt *time.Time `json:"-" bson:"minUserLastSeenAt,omitempty"`
 	AppCount          int        `json:"-" bson:"appCount,omitempty"`
 	RoomName          string     `json:"-" bson:"roomName,omitempty"` // room canonical name (distinct from the sub's display Name)
+	// CrossSite mirrors Room.CrossSite (tri-state: nil=unclassified, &true=cross-site,
+	// &false=confirmed same-site). See Room.CrossSite.
+	CrossSite *bool `json:"-" bson:"crossSite,omitempty"`
 	// Room E2E key baseline projected from the room's encKey sub-document by the rooms
 	// $lookup (current-slot priv/ver only); used to build sub.Room.PrivateKey/KeyVersion
 	// for LOCAL subs without a second key read. Cross-site subs carry zero values (the
@@ -108,6 +111,10 @@ type EnrichedSubscription struct {
 type SubscriptionRoom struct {
 	SiteID string `json:"siteId,omitempty" bson:"-"`
 	Name   string `json:"name,omitempty" bson:"-"`
+	// CrossSite tells the client which namespace to subscribe the room on: &false →
+	// local, &true → global. omitempty drops only nil, which the client's `?? true`
+	// fail-safe resolves to global; explicit false is never dropped. bson:"-": read-time.
+	CrossSite *bool `json:"crossSite,omitempty" bson:"-"`
 	// UserCount/AppCount/LastMsgID mirror the room-service room document (model.Room).
 	UserCount int `json:"userCount,omitempty" bson:"-"`
 	AppCount  int `json:"appCount,omitempty" bson:"-"`

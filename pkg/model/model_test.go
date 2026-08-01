@@ -1935,12 +1935,51 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 		assert.Equal(t, "2025-01-04T09:10:11Z", raw["minUserLastSeenAt"], "minUserLastSeenAt must be RFC3339, not epoch millis")
 	})
 
-	t.Run("zero value omits all fields", func(t *testing.T) {
+	t.Run("zero value omits all fields including crossSite", func(t *testing.T) {
 		// #nosec G117 -- test roundtrip on a model whose PrivateKey field is part of the wire schema
 		data, err := json.Marshal(&model.SubscriptionRoom{})
 		require.NoError(t, err)
+		// A nil CrossSite (unclassified/unbackfilled room) omits the field so the
+		// frontend's `?? true` default resolves it to global (fail-safe).
 		assert.JSONEq(t, `{}`, string(data))
 	})
+}
+
+func TestRoom_CrossSiteRoundTrip(t *testing.T) {
+	r := model.Room{ID: "r1", SiteID: "site-a", CrossSite: boolPtr(true),
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	var got model.Room
+	roundTrip(t, &r, &got)
+	require.NotNil(t, got.CrossSite)
+	assert.True(t, *got.CrossSite)
+
+	sr := model.SubscriptionRoom{SiteID: "site-a", CrossSite: boolPtr(true)}
+	var gotSR model.SubscriptionRoom
+	// SubscriptionRoom is json-only (bson:"-")
+	// #nosec G117 -- serialization test; PrivateKey field is part of the wire schema and unset here
+	data, err := json.Marshal(&sr)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &gotSR))
+	require.NotNil(t, gotSR.CrossSite)
+	assert.True(t, *gotSR.CrossSite)
+
+	// An explicit false must still serialize: the frontend routes a room to the
+	// local NATS namespace only on an explicit crossSite:false, defaulting to
+	// global when the field is absent (nil). omitempty on a *bool only omits nil,
+	// never an explicit false, so this must not be dropped.
+	// #nosec G117 -- serialization test; PrivateKey field is part of the wire schema and unset here
+	falseB, err := json.Marshal(model.SubscriptionRoom{SiteID: "site-a", CrossSite: boolPtr(false)})
+	require.NoError(t, err)
+	assert.Contains(t, string(falseB), `"crossSite":false`)
+
+	// A nil CrossSite (unclassified) must omit the field entirely — never
+	// serialize as false, which would look like a confirmed same-site room.
+	// #nosec G117 -- serialization test; PrivateKey field is part of the wire schema and unset here
+	nilB, err := json.Marshal(model.SubscriptionRoom{SiteID: "site-a"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(nilB), `"crossSite"`)
 }
 
 func TestRoomInfo_MinUserLastSeenAt(t *testing.T) {
@@ -2891,6 +2930,10 @@ func TestSearchOrgsJSON(t *testing.T) {
 		assert.Equal(t, "DIV1", org["divisionId"])
 	})
 }
+
+// boolPtr returns a pointer to b, for constructing tri-state *bool fields
+// (e.g. Room.CrossSite) in test literals.
+func boolPtr(b bool) *bool { return &b }
 
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.
 func roundTrip[T any](t *testing.T, src *T, dst *T) {

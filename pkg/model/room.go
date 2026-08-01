@@ -32,10 +32,25 @@ type Room struct {
 	// migration import. Server-side provenance (persisted, not client-facing);
 	// empty for natively-created rooms.
 	Origin string `json:"-" bson:"origin,omitempty"`
+	// CrossSite is tri-state, sticky: &true = ≥1 member off SiteID (route global),
+	// &false = confirmed same-site (route local), nil = unclassified → global
+	// (fail-safe). See pkg/subject.RoomEventTargets.
+	CrossSite *bool `json:"crossSite,omitempty" bson:"crossSite,omitempty"`
+	// CrossSiteAt is the flip time, set only when a confirmed same-site room
+	// (crossSite==false) first becomes cross-site. Server-side only: publishers
+	// keep a RoomLocalityGrace window after it (nil for rooms born cross-site).
+	CrossSiteAt *time.Time `json:"-" bson:"crossSiteAt,omitempty"`
 }
 
 // OriginTeams marks a room/subscription imported from the Teams migration.
 const OriginTeams = "teams"
+
+// RoutesGlobal reports whether r resolves to the global namespace (nil or true
+// CrossSite; only explicit false is local). Nil-safe mirror of the
+// pkg/subject.RoomEventTargets fail-safe; a nil room is not routed global.
+func (r *Room) RoutesGlobal() bool {
+	return r != nil && (r.CrossSite == nil || *r.CrossSite)
+}
 
 // RoomsInfoBatchRequest is the NATS request body for the batch room info RPC.
 type RoomsInfoBatchRequest struct {
@@ -56,7 +71,11 @@ type RoomInfo struct {
 	MinUserLastSeenAt *int64  `json:"minUserLastSeenAt,omitempty"`
 	PrivateKey        *string `json:"privateKey,omitempty"`
 	KeyVersion        *int    `json:"keyVersion,omitempty"`
-	Error             string  `json:"error,omitempty"`
+	// CrossSite mirrors Room.CrossSite — nil (absent) means unclassified and
+	// resolves to global on the client; only an explicit true/false is
+	// authoritative. See Room.CrossSite.
+	CrossSite *bool  `json:"crossSite,omitempty" bson:"crossSite,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // RoomsInfoBatchResponse contains one entry per requested roomID, in input order.

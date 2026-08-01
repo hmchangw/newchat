@@ -1057,3 +1057,34 @@ func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	require.NotNil(t, room)
 	assert.Nil(t, room.PreviewMessage, "degraded site leaves LastMessage nil")
 }
+
+func TestBuildLocalRoom_CrossSite(t *testing.T) {
+	sub := &model.EnrichedSubscription{}
+	sub.CrossSite = ptrBool(true)
+	sub.RoomName = "chan"
+	got := buildLocalRoom(sub)
+	require.NotNil(t, got)
+	require.NotNil(t, got.CrossSite)
+	assert.True(t, *got.CrossSite)
+}
+
+func TestApplyRoomInfo_CrossSite(t *testing.T) {
+	sub := &model.Subscription{}
+	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan", CrossSite: ptrBool(true)})
+	assert.False(t, drop)
+	require.NotNil(t, sub.Room)
+	require.NotNil(t, sub.Room.CrossSite)
+	assert.True(t, *sub.Room.CrossSite)
+}
+
+// TestApplyRoomInfo_CrossSite_Nil pins that an unclassified cross-site room
+// (RoomInfo.CrossSite nil) passes through as nil on the SubscriptionRoom —
+// never coerced to false — so the wire response omits the field and the
+// frontend's `?? true` default resolves it to global (fail-safe).
+func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
+	sub := &model.Subscription{}
+	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan"})
+	assert.False(t, drop)
+	require.NotNil(t, sub.Room)
+	assert.Nil(t, sub.Room.CrossSite)
+}
