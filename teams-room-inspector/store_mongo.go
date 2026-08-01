@@ -11,30 +11,23 @@ import (
 )
 
 // roomDoc is the projected room shape: identity plus the denormalized counter.
-//
-//nolint:unused // wired up once teams-room-inspector/main.go (task 5) constructs a mongoStore
 type roomDoc struct {
 	ID        string `bson:"_id"`
 	UserCount int    `bson:"userCount"`
 }
 
 // subCountDoc is one $group output row: a room id and its subscription count.
-//
-//nolint:unused // wired up once teams-room-inspector/main.go (task 5) constructs a mongoStore
 type subCountDoc struct {
 	RoomID string `bson:"_id"`
 	Count  int    `bson:"count"`
 }
 
 // mongoStore reads this site's rooms and subscriptions.
-//
-//nolint:unused // wired up once teams-room-inspector/main.go (task 5) constructs a mongoStore
 type mongoStore struct {
 	rooms *mongoutil.Collection[roomDoc]
 	subs  *mongoutil.Collection[subCountDoc]
 }
 
-//nolint:unused // called from teams-room-inspector/main.go (task 5); until then only the tag-gated integration test exercises it
 func newMongoStore(db *mongo.Database) *mongoStore {
 	return &mongoStore{
 		rooms: mongoutil.NewCollection[roomDoc](db.Collection("rooms")),
@@ -45,8 +38,6 @@ func newMongoStore(db *mongo.Database) *mongoStore {
 // RoomStates answers with two queries and no $lookup: a projected find over
 // rooms, and a $group over subscriptions that counts server-side instead of
 // shipping documents.
-//
-//nolint:unused // called through RoomStore once teams-room-inspector/handler.go (task 4) is wired up
 func (s *mongoStore) RoomStates(ctx context.Context, roomIDs []string) (map[string]RoomState, error) {
 	out := make(map[string]RoomState, len(roomIDs))
 	if len(roomIDs) == 0 {
