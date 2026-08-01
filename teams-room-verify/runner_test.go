@@ -144,6 +144,14 @@ func TestRunner_RoutesEachSiteToItsOwnInspector(t *testing.T) {
 	require.NoError(t, r.run(context.Background()))
 
 	assert.ElementsMatch(t, []string{"http://inspector-a", "http://inspector-b"}, rv.calls)
+
+	stA := r.stats["site-a"]
+	require.NotNil(t, stA, "site-a must have recorded stats")
+	assert.Equal(t, 1, stA.ok)
+
+	stB := r.stats["site-b"]
+	require.NotNil(t, stB, "site-b must have recorded stats")
+	assert.Equal(t, 1, stB.ok)
 }
 
 func TestRunner_UnknownSiteIsSkipped(t *testing.T) {
@@ -196,6 +204,11 @@ func TestRunner_MissingResultLeavesFlag(t *testing.T) {
 	require.NoError(t, r.run(context.Background()))
 	require.Len(t, marked, 1)
 	assert.Equal(t, "c-present", marked[0].ID)
+
+	st := r.stats["site-a"]
+	require.NotNil(t, st, "site-a must have recorded stats")
+	assert.Equal(t, 1, st.unanswered, "the omitted chat is counted as unanswered")
+	assert.Equal(t, 0, st.roomsMissing, "an unanswered chat must never be counted as a missing room")
 }
 
 func TestRunner_BatchesLargeSites(t *testing.T) {
