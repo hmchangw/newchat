@@ -143,42 +143,38 @@ Publishers default to global if the flag is absent/unknown (fail-safe).
 
   It subscribes each room to `chat.local.room.{id}.>` or `chat.room.{id}.>` accordingly.
 
-- **Transition (local → global):** when a room's flag flips, a nudge rides the
-  **per-user** room-update event (`chat.user.{account}.event.room…`), which every member
-  is always subscribed to regardless of the room's prefix — so it reaches members even
-  after the publisher stops emitting on the local prefix. On receipt the client
-  re-subscribes that room to the global prefix. The newly-added remote member reads
+- **Transition (local → global):** when a room's flag flips, the client learns the new
+  `crossSite=true` on its next `subscription.list` and re-subscribes that room to the
+  global prefix; the flag is authoritative. The newly-added remote member reads
   `crossSite=true` from its initial `subscription.list` and subscribes global directly.
+  The real-time gap for same-site members still on the local prefix is closed
+  server-side by the grace window below, so correctness never depends on a proactive
+  push. (An earlier design pushed a per-user nudge to prompt immediate re-subscribe;
+  it was dropped in review — mass-nudging every subscriber is heavy for large rooms and
+  the grace window already covers the gap.)
 
 - **Offline / dropped clients self-correct on bootstrap.** An offline client isn't
   subscribed to anything; on reconnect it re-reads `subscription.list`, sees
-  `crossSite=true`, and subscribes global from the first subscription — it never needed
-  the event. A client disconnected as a slow consumer likewise recovers via the
-  reconnect + fresh `subscription.list`.
+  `crossSite=true`, and subscribes global from the first subscription. A client
+  disconnected as a slow consumer likewise recovers via the reconnect + fresh
+  `subscription.list`.
 
 - **Transition grace window closes the flip gap server-side.** When a *previously
   confirmed same-site* room (`crossSite==false`) flips to cross-site, the flip time is
-  recorded as `Room.CrossSiteAt`, and for `RoomLocalityGrace` (15 min) afterward every
+  recorded as `Room.CrossSiteAt`, and for the locality grace window afterward every
   publisher emits the room's `.event` to **both** the local and global subjects (see
-  `pkg/subject.RoomEventTargets`). So a same-site member still subscribed to the local
-  subject keeps receiving in real time until it re-subscribes — the gap no longer depends
-  on the best-effort nudge being delivered or on client reconcile frequency. A client that
-  migrates within the window sees zero gap; the nudge is reduced to a pure latency
-  optimization. The double-publish is bounded (only rooms actively flipping, only for the
-  window) and site-local on the leaf-filtered subject, so the steady-state interest-map
-  savings are preserved. Rooms *born* cross-site get no `CrossSiteAt` and no grace (they
-  never had a local audience). Any residual gap past the window is still recovered by the
-  client's normal history/gap fetch.
-
-### Why the nudge is a single per-user publish (not two paths)
-
-Emitting the nudge on the room's local subject *in addition to* the per-user subject was
-considered and rejected: both are core-NATS server→client deliveries over the same TCP
-connection, so they share fate. A healthy connection already receives the per-user
-nudge; an unhealthy one drops both and the client reconnects (recovering via
-`subscription.list`). Core NATS has no single-message loss mode for a still-connected
-client, so a second server-side publish adds no meaningful reliability. Any extra
-insurance belongs client-side (periodic/foreground reconciliation), outside this design.
+  `pkg/subject.RoomEventTargets`). The window is `ROOM_LOCALITY_GRACE` (default 1 week,
+  `subject.DefaultRoomLocalityGrace`) — long enough that essentially every client
+  reconnects and re-subscribes the room within it, so it decays to zero double-publishing
+  once the local audience has drained; all publisher services MUST use the same value. So
+  a same-site member still subscribed to the local subject keeps receiving in real time
+  until it re-subscribes — the gap depends only on the client reconnecting/reconciling
+  within the window, not on any proactive push. The
+  double-publish is bounded (only rooms actively flipping, only for the window) and
+  site-local on the leaf-filtered subject, so the steady-state interest-map savings are
+  preserved. Rooms *born* cross-site get no `CrossSiteAt` and no grace (they never had a
+  local audience). Any residual gap past the window is still recovered by the client's
+  normal history/gap fetch.
 
 ## Auth / JWT Permission (platform-team touchpoint)
 
@@ -249,18 +245,18 @@ publishing all rooms on the global prefix only.
 **Per-room flip after rollout — bounded by the grace window.** A local→global room
 **flip** (a same-site room gains a cross-site member) re-routes an already-connected
 client only when it re-subscribes. The **transition grace window** (see Client Routing &
-Transition: publishers dual-publish a flipped room to both subjects for `RoomLocalityGrace`)
-makes this gapless server-side for any client that re-subscribes within the window —
-whether via the nudge or its normal reconnect / periodic `subscription.list` reconcile.
-The nudge is therefore a latency optimization, not a correctness dependency.
+Transition: publishers dual-publish a flipped room to both subjects for the locality
+grace window) makes this gapless server-side for any client that re-subscribes within the
+window via its normal reconnect / periodic `subscription.list` reconcile. With the default
+1-week window this covers essentially every client, since clients re-read
+`subscription.list` and re-subscribe on every reconnect (network change, deploy, app
+foreground).
 
-**Client contract for the flip (for the official client, not the internal
-chat-frontend test client):** to re-route *promptly* rather than at the next reconcile,
-subscribe to `chat.user.{account}.event.room.update` (the server's
-`subject.UserRoomUpdate` nudge — distinct from the general `event.room.metadata.update`)
-and, on receipt, refresh `subscription.list` and re-subscribe the room by its new
-`crossSite`. Correctness still rests on the persisted flag + history/gap fetch, so a
-client that only reconciles periodically is still correct as long as its reconcile
-interval is within the grace window. (The chat-frontend test client does not implement
-this yet; document the subject + event in `docs/client-api.md` before the official
-client is built.)
+**Client contract for the flip:** the client re-routes when it next reads
+`subscription.list` and re-subscribes the room by its `crossSite` value — on reconnect or
+periodic reconcile. Correctness rests on the persisted flag + history/gap fetch, so a
+client is correct as long as it reconnects/reconciles within the grace window; anything
+past it is recovered by the normal history fetch. (An earlier design added a per-user
+`event.room.update` push to trigger an immediate re-subscribe; it was dropped in review —
+mass-nudging every subscriber is heavy for large rooms and the grace window already covers
+the gap.)

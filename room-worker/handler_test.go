@@ -482,8 +482,8 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob", "charlie"}, "r1").
 		Return([]AddMemberCandidate{
-			{Account: "bob", HasSubscription: false, HasIndividualRoomMember: false},
-			{Account: "charlie", HasSubscription: false, HasIndividualRoomMember: false},
+			{Account: "bob", HasSubscription: false, HasIndividualRoomMember: false, SiteID: "site-a"},
+			{Account: "charlie", HasSubscription: false, HasIndividualRoomMember: false, SiteID: "site-b"},
 		}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "charlie"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑"},
@@ -511,10 +511,6 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 	store.EXPECT().ReconcileMemberCounts(gomock.Any(), "r1").Return(nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Local→global flip nudge: no pre-existing members here (bob/charlie are
-	// the only, newly-added, subscribers), so the diff against actualAccounts
-	// is empty and no nudge publish fires.
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"bob", "charlie"}, nil)
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", Users: []string{"bob", "charlie"},
@@ -615,7 +611,7 @@ func TestProcessAddMembers_SetsCrossSiteForRemoteMember(t *testing.T) {
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"x"}, "r1").
-		Return([]AddMemberCandidate{{Account: "x", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
+		Return([]AddMemberCandidate{{Account: "x", HasSubscription: false, HasIndividualRoomMember: false, SiteID: "site-b"}}, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"x"}).Return([]model.User{
 		{ID: "u2", Account: "x", SiteID: "site-b", EngName: "X"},
@@ -624,9 +620,6 @@ func TestProcessAddMembers_SetsCrossSiteForRemoteMember(t *testing.T) {
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
 	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Local→global flip nudge: "x" is the only (newly-added) subscriber, so no
-	// pre-existing member remains after subtracting actualAccounts.
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"x"}, nil)
 
 	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"x"}, RequesterAccount: "alice", Timestamp: 1}
 	reqData, _ := json.Marshal(req)
@@ -703,205 +696,6 @@ func TestProcessAddMembers_Redelivery_SameSite_NoCrossSiteWrite(t *testing.T) {
 	reqData, _ := json.Marshal(req)
 	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
 	require.NoError(t, h.processAddMembers(ctx, reqData))
-}
-
-// TestProcessAddMembers_NudgesExistingMembersOnFlip verifies that when a room
-// FLIPS from local (CrossSite=false) to global (a remote member is added),
-// every member who was already subscribed BEFORE this add receives a
-// best-effort nudge on subject.UserRoomUpdate(account) — the always-on
-// per-user tree that prompts a connected client to re-fetch
-// subscription.list and re-subscribe to the global namespace. The
-// newly-added remote member itself must NOT be nudged (it already gets a
-// fresh subscription.update + member_added event).
-func TestProcessAddMembers_NudgesExistingMembersOnFlip(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-
-	var published []publishedMsg
-	publish := func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
-
-	// Room previously local: CrossSite is unset (false).
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
-	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"newremote"}, "r1").
-		Return([]AddMemberCandidate{{Account: "newremote", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"newremote"}).Return([]model.User{
-		{ID: "u_new", Account: "newremote", SiteID: "site-b", EngName: "New"},
-	}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
-	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Post-write subscriber list: alice + bob were already members before this
-	// add; newremote just joined.
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"alice", "bob", "newremote"}, nil)
-
-	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"newremote"}, RequesterAccount: "alice", Timestamp: 1}
-	reqData, _ := json.Marshal(req)
-	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
-	require.NoError(t, h.processAddMembers(ctx, reqData))
-
-	nudged := map[string]bool{}
-	for _, p := range published {
-		if p.subj == subject.UserRoomUpdate("alice") || p.subj == subject.UserRoomUpdate("bob") || p.subj == subject.UserRoomUpdate("newremote") {
-			nudged[p.subj] = true
-		}
-	}
-	assert.True(t, nudged[subject.UserRoomUpdate("alice")], "pre-existing member alice must be nudged")
-	assert.True(t, nudged[subject.UserRoomUpdate("bob")], "pre-existing member bob must be nudged")
-	assert.False(t, nudged[subject.UserRoomUpdate("newremote")], "the newly-added member must not be nudged")
-}
-
-// TestProcessAddMembers_NoNudgeWhenAlreadyGlobal verifies that a room already
-// marked CrossSite=true (already global) never triggers the local→global
-// nudge, even though adding a remote member still calls SetRoomCrossSite
-// (sticky, idempotent).
-func TestProcessAddMembers_NoNudgeWhenAlreadyGlobal(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-
-	var published []publishedMsg
-	publish := func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
-
-	// Room already global.
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(true)}, nil)
-	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"newremote"}, "r1").
-		Return([]AddMemberCandidate{{Account: "newremote", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"newremote"}).Return([]model.User{
-		{ID: "u_new", Account: "newremote", SiteID: "site-b", EngName: "New"},
-	}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
-	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// No GetSubscriptionAccounts call: the mock is strict, so any unexpected
-	// call here fails the test — this is what proves the nudge did not fire.
-
-	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"newremote"}, RequesterAccount: "alice", Timestamp: 1}
-	reqData, _ := json.Marshal(req)
-	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
-	require.NoError(t, h.processAddMembers(ctx, reqData))
-
-	for _, p := range published {
-		assert.NotEqual(t, subject.UserRoomUpdate("alice"), p.subj, "no nudge expected when room is already global")
-	}
-}
-
-// TestProcessAddMembers_SameSiteOnly_NoNudge verifies that an add composed
-// entirely of same-site members never triggers the local→global nudge (there
-// is no flip: accountsBySite stays empty, so SetRoomCrossSite and the nudge
-// are both skipped).
-func TestProcessAddMembers_SameSiteOnly_NoNudge(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-
-	var published []publishedMsg
-	publish := func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
-
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
-	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"newlocal"}, "r1").
-		Return([]AddMemberCandidate{{Account: "newlocal", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"newlocal"}).Return([]model.User{
-		{ID: "u_new", Account: "newlocal", SiteID: "site-a", EngName: "New"},
-	}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
-	// No SetRoomCrossSite, no GetSubscriptionAccounts: strict mock proves neither fired.
-
-	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"newlocal"}, RequesterAccount: "alice", Timestamp: 1}
-	reqData, _ := json.Marshal(req)
-	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
-	require.NoError(t, h.processAddMembers(ctx, reqData))
-
-	for _, p := range published {
-		assert.NotEqual(t, subject.UserRoomUpdate("alice"), p.subj, "no nudge expected for a same-site-only add")
-	}
-}
-
-// TestProcessAddMembers_NudgePublishErrorDoesNotFailHandler verifies that a
-// publish failure on the best-effort nudge is logged and swallowed — it must
-// never fail the handler or block the other members' nudges.
-func TestProcessAddMembers_NudgePublishErrorDoesNotFailHandler(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-
-	var published []publishedMsg
-	publish := func(_ context.Context, subj string, data []byte, _ string) error {
-		if subj == subject.UserRoomUpdate("alice") {
-			return fmt.Errorf("nats publish failed")
-		}
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
-
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
-	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"newremote"}, "r1").
-		Return([]AddMemberCandidate{{Account: "newremote", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"newremote"}).Return([]model.User{
-		{ID: "u_new", Account: "newremote", SiteID: "site-b", EngName: "New"},
-	}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
-	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"alice", "bob", "newremote"}, nil)
-
-	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"newremote"}, RequesterAccount: "alice", Timestamp: 1}
-	reqData, _ := json.Marshal(req)
-	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
-	require.NoError(t, h.processAddMembers(ctx, reqData), "a nudge publish failure must not fail the handler")
-
-	var bobNudged bool
-	for _, p := range published {
-		if p.subj == subject.UserRoomUpdate("bob") {
-			bobNudged = true
-		}
-	}
-	assert.True(t, bobNudged, "bob's nudge must still publish even though alice's failed")
-}
-
-// TestProcessAddMembers_NudgeStoreErrorDoesNotFailHandler verifies that a
-// failure reading the room's subscriber list for the nudge (best-effort) is
-// logged and swallowed rather than failing the handler.
-func TestProcessAddMembers_NudgeStoreErrorDoesNotFailHandler(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-	h := NewHandler(store, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
-
-	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
-	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"newremote"}, "r1").
-		Return([]AddMemberCandidate{{Account: "newremote", HasSubscription: false, HasIndividualRoomMember: false}}, nil)
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"newremote"}).Return([]model.User{
-		{ID: "u_new", Account: "newremote", SiteID: "site-b", EngName: "New"},
-	}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
-	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return(nil, fmt.Errorf("mongo timeout"))
-
-	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"newremote"}, RequesterAccount: "alice", Timestamp: 1}
-	reqData, _ := json.Marshal(req)
-	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
-	require.NoError(t, h.processAddMembers(ctx, reqData), "a nudge store-read failure must not fail the handler")
 }
 
 // Repeat direct add in a tracked room: an already-tracked individual (sub + IRM row) must NOT be
@@ -1150,7 +944,7 @@ func TestHandler_ProcessAddMembers_RestrictedPropagatesPointer(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob", "charlie"}, "r1").
 		Return([]AddMemberCandidate{
-			{Account: "bob"}, {Account: "charlie"},
+			{Account: "bob", SiteID: "site-a"}, {Account: "charlie", SiteID: "site-b"},
 		}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "charlie"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑"},
@@ -1163,9 +957,6 @@ func TestHandler_ProcessAddMembers_RestrictedPropagatesPointer(t *testing.T) {
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Local→global flip nudge: bob/charlie are the only (newly-added)
-	// subscribers, so no pre-existing member remains after the diff.
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"bob", "charlie"}, nil)
 
 	const reqTS int64 = 1744300000000
 	req := model.AddMembersRequest{
@@ -1322,7 +1113,7 @@ func TestHandler_ProcessAddMembers_RoomEventCarriesEnrichedMembers(t *testing.T)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob", "carol"}, "r1").
-		Return([]AddMemberCandidate{{Account: "bob"}, {Account: "carol"}}, nil)
+		Return([]AddMemberCandidate{{Account: "bob", SiteID: "site-a"}, {Account: "carol", SiteID: "site-a"}}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "carol"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑", SectName: "Cardiology", EmployeeID: "E-1"},
 		{ID: "u3", Account: "carol", SiteID: "site-a", EngName: "Carol", ChineseName: "卡", SectName: "Radiology", EmployeeID: "E-2"},
@@ -1392,7 +1183,7 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
 	// bob is the direct add; carol joins via org expansion only (not in req.Users).
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string{"eng"}, []string{"bob"}, "r1").
-		Return([]AddMemberCandidate{{Account: "bob"}, {Account: "carol"}}, nil)
+		Return([]AddMemberCandidate{{Account: "bob", SiteID: "site-a"}, {Account: "carol", SiteID: "site-b"}}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "carol"}).Return([]model.User{
 		{ID: "u2", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑", SectName: "Engineering", EmployeeID: "E-1"},
 		{ID: "u3", Account: "carol", SiteID: "site-b", EngName: "Carol", ChineseName: "卡", SectName: "Engineering", EmployeeID: "E-2"},
@@ -1419,9 +1210,6 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	}, nil)
 	store.EXPECT().ExistingOrgMembers(gomock.Any(), gomock.Any(), gomock.Any()).Return(map[string]struct{}{}, nil)
 	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Local→global flip nudge: bob/carol are the only (newly-added)
-	// subscribers, so no pre-existing member remains after the diff.
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"bob", "carol"}, nil)
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", RequesterAccount: "alice",
@@ -1663,7 +1451,7 @@ func TestHandler_ProcessAddMembers_MultipleSiteInbox(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"alice", "bob", "charlie"}, "r1").
 		Return([]AddMemberCandidate{
-			{Account: "alice"}, {Account: "bob"}, {Account: "charlie"},
+			{Account: "alice", SiteID: "site-b"}, {Account: "bob", SiteID: "site-b"}, {Account: "charlie", SiteID: "site-c"},
 		}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice", "bob", "charlie"}).Return([]model.User{
 		{ID: "u1", Account: "alice", SiteID: "site-b", EngName: "Alice", ChineseName: "愛"},
@@ -1677,9 +1465,6 @@ func TestHandler_ProcessAddMembers_MultipleSiteInbox(t *testing.T) {
 	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	store.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Local→global flip nudge: alice/bob/charlie are the only (newly-added)
-	// subscribers, so no pre-existing member remains after the diff.
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"alice", "bob", "charlie"}, nil)
 
 	req := model.AddMembersRequest{
 		RoomID:           "r1",
@@ -2578,12 +2363,12 @@ func TestProcessAddMembers_InboxCarriesRoomName(t *testing.T) {
 	ctx := natsutil.WithRequestID(context.Background(), reqID)
 
 	// Cross-site member: bob lives on site-B. Room previously confirmed
-	// same-site (CrossSite: false), so this add flips it and fires the nudge.
+	// same-site (CrossSite: false), so this add flips it to global.
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-A", CrossSite: ptrBool(false),
 	}, nil)
 	mockStore.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").
-		Return([]AddMemberCandidate{{Account: "bob"}}, nil)
+		Return([]AddMemberCandidate{{Account: "bob", SiteID: "site-B"}}, nil)
 	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{
 		{ID: "u_bob", Account: "bob", SiteID: "site-B", EngName: "Bob", ChineseName: "鲍勃"},
 	}, nil)
@@ -2594,9 +2379,6 @@ func TestProcessAddMembers_InboxCarriesRoomName(t *testing.T) {
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
 	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	mockStore.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
-	// Local→global flip nudge: bob is the only (newly-added) subscriber, so no
-	// pre-existing member remains after the diff.
-	mockStore.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{"bob"}, nil)
 
 	body, err := json.Marshal(model.AddMembersRequest{
 		RoomID: "r1", Users: []string{"bob"},

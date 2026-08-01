@@ -864,6 +864,9 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			if err := h.store.SetRoomCrossSite(ctx, req.RoomID); err != nil {
 				return fmt.Errorf("mark room cross-site: %w", err)
 			}
+			// Bust L2 AFTER the write so a concurrent refill can't re-cache the
+			// pre-write crossSite=false and mis-route local for the TTL.
+			h.bustRoomMeta(ctx, req.RoomID)
 			break
 		}
 	}
@@ -1256,21 +1259,6 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		accountsBySite[siteID] = append(accountsBySite[siteID], acc)
 	}
 
-	// Remote-site bucket non-empty → mark global (sticky). room.CrossSite still
-	// holds the PRIOR state (SetRoomCrossSite doesn't mutate it), so gate the nudge
-	// on RoutesGlobal(): only a previously-confirmed same-site (&false) room flips.
-	if len(accountsBySite) > 0 {
-		if err := h.store.SetRoomCrossSite(ctx, req.RoomID); err != nil {
-			return fmt.Errorf("mark room cross-site: %w", err)
-		}
-		// Bust L2 AFTER the write: an earlier bust could be undone by a concurrent
-		// refill re-caching the pre-write crossSite=false, mis-routing local for the TTL.
-		h.bustRoomMeta(ctx, req.RoomID)
-		if !room.RoutesGlobal() {
-			h.nudgeLocalToGlobalTransition(ctx, req.RoomID, actualAccounts, now)
-		}
-	}
-
 	for destSiteID, siteAccounts := range accountsBySite {
 		siteEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
@@ -1293,32 +1281,6 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 
 	return nil
-}
-
-// nudgeLocalToGlobalTransition best-effort nudges existing members (subscribers minus
-// newAccounts) to re-fetch subscription.list and re-subscribe global after a flip, via
-// their per-user tree. Pure latency opt — crossSite is source of truth, so nudge failures
-// are swallowed and clients self-correct on reconnect.
-func (h *Handler) nudgeLocalToGlobalTransition(ctx context.Context, roomID string, newAccounts []string, now time.Time) {
-	allAccounts, err := h.store.GetSubscriptionAccounts(ctx, roomID)
-	if err != nil {
-		slog.WarnContext(ctx, "room-locality nudge: list subscription accounts failed", "error", err, "room_id", roomID)
-		return
-	}
-	justAdded := make(map[string]struct{}, len(newAccounts))
-	for _, acc := range newAccounts {
-		justAdded[acc] = struct{}{}
-	}
-	evt := model.RoomMetadataUpdateEvent{RoomID: roomID, Timestamp: now.UnixMilli()}
-	data, _ := json.Marshal(evt)
-	for _, acc := range allAccounts {
-		if _, ok := justAdded[acc]; ok {
-			continue
-		}
-		if err := h.publish(ctx, subject.UserRoomUpdate(acc), data, ""); err != nil {
-			slog.WarnContext(ctx, "room-locality nudge publish failed", "error", err, "account", acc, "room_id", roomID)
-		}
-	}
 }
 
 // buildAddedMembers assembles the member.list-shaped display entries (contract: model.MemberAddEvent.Members),

@@ -7,10 +7,26 @@ import (
 	"unicode"
 )
 
-// RoomLocalityGrace bounds the local→global flip gap server-side: for this long
-// after a flip, publishers also dual-publish to the local subject so members not
-// yet re-subscribed keep receiving (vs. trusting the best-effort nudge).
-const RoomLocalityGrace = 15 * time.Minute
+// DefaultRoomLocalityGrace is the default post-flip dual-publish window. For this
+// long after a room flips local→global, publishers also emit to the local subject
+// so members not yet re-subscribed keep receiving; then it closes so flipped rooms
+// stop double-publishing to the (drained) local subject. One week is long enough
+// that essentially every client reconnects and re-subscribes within it.
+const DefaultRoomLocalityGrace = 7 * 24 * time.Hour
+
+// roomLocalityGrace is the active window. Overridable once at startup via
+// SetRoomLocalityGrace (ROOM_LOCALITY_GRACE); read-only afterward. All publisher
+// services MUST configure the same value or a flipped room's dual-publish window
+// closes at different times per publisher.
+var roomLocalityGrace = DefaultRoomLocalityGrace
+
+// SetRoomLocalityGrace overrides the post-flip grace window. Call once at startup,
+// before any RoomEventTargets call; a non-positive d is ignored (keeps the default).
+func SetRoomLocalityGrace(d time.Duration) {
+	if d > 0 {
+		roomLocalityGrace = d
+	}
+}
 
 // EncodeAccount maps an account to its NATS subject-token form by replacing the
 // dot separators a dotted account (e.g. a ".bot" account) would otherwise spill
@@ -362,8 +378,8 @@ func (m RoomRouteMode) usesLocal() bool { return m != RouteGlobal }
 
 // RoomEventTargets returns the .event subject(s) to publish a room event to.
 // Fail-safe: only an explicit crossSite=false routes local (nil/true → global).
-// A room flipped within RoomLocalityGrace (crossSiteAt set) also gets a local copy
-// in local/dual mode so not-yet-resubscribed members keep receiving (order: local, global).
+// A room flipped within the locality grace window (crossSiteAt set) also gets a local
+// copy in local/dual mode so not-yet-resubscribed members keep receiving (order: local, global).
 func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
 	if crossSite != nil && !*crossSite { // confirmed same-site
 		switch mode {
@@ -376,7 +392,7 @@ func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mo
 		}
 	}
 	// nil or cross-site → global, plus a local copy during the post-flip grace window.
-	if mode.usesLocal() && crossSiteAt != nil && now.Before(crossSiteAt.Add(RoomLocalityGrace)) {
+	if mode.usesLocal() && crossSiteAt != nil && now.Before(crossSiteAt.Add(roomLocalityGrace)) {
 		return []string{RoomEvent(roomID, false), RoomEvent(roomID, true)}
 	}
 	return []string{RoomEvent(roomID, true)}
