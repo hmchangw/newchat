@@ -1608,25 +1608,8 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 
 	now := time.Now().UTC()
 
-	var newThreadUnread []string
-	var newAlert bool
-	wg, wctx := errgroup.WithContext(ctx)
-	wg.Go(func() error {
-		var err error
-		newThreadUnread, newAlert, err = h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, req.ThreadID)
-		if err != nil {
-			return fmt.Errorf("update subscription thread-read: %w", err)
-		}
-		return nil
-	})
-	wg.Go(func() error {
-		if err := h.store.UpdateThreadSubscriptionRead(wctx, tsub.ThreadRoomID, account, now); err != nil {
-			return fmt.Errorf("update thread subscription read: %w", err)
-		}
-		return nil
-	})
-	if err := wg.Wait(); err != nil {
-		return nil, err
+	if err := h.store.UpdateThreadSubscriptionRead(ctx, tsub.ThreadRoomID, account, now); err != nil {
+		return nil, fmt.Errorf("update thread subscription read: %w", err)
 	}
 
 	switch {
@@ -1638,8 +1621,6 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 			RoomID:          roomID,
 			ThreadRoomID:    tsub.ThreadRoomID,
 			ParentMessageID: req.ThreadID,
-			NewThreadUnread: newThreadUnread,
-			Alert:           newAlert,
 			LastSeenAt:      now.UnixMilli(),
 			Timestamp:       now.UnixMilli(),
 		}
@@ -1662,9 +1643,8 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	return &model.StatusReply{Status: "accepted"}, nil
 }
 
-// clearAllThreadRead clears every one of the account's thread-unread indicators on
-// this site: thread-subscription read state (lastSeenAt=now, hasMention=false) and
-// room-subscription thread-unread state (threadUnread removed, alert=false). It is
+// clearAllThreadRead clears the account's thread-subscription read state on this
+// site (lastSeenAt=now, hasMention=false). It is
 // the per-site leaf of the user-service clear-all-thread-unread aggregator. Unlike
 // the single-thread path it deliberately skips the thread-room read-floor recompute
 // and thread_message_read fan-out (a bulk dismiss must not advance sender receipts).
@@ -1681,17 +1661,13 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	now := time.Now().UTC()
 
 	var (
-		homeSite                  string
-		clearErr, subErr, siteErr error
+		homeSite         string
+		clearErr, siteErr error
 	)
 	var g errgroup.Group
 	g.Go(func() error {
 		clearErr = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
 		return clearErr
-	})
-	g.Go(func() error {
-		subErr = h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account)
-		return subErr
 	})
 	g.Go(func() error {
 		homeSite, siteErr = h.store.GetUserSiteID(ctx, account)
@@ -1701,8 +1677,6 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	switch {
 	case clearErr != nil:
 		return nil, fmt.Errorf("clear thread subscriptions: %w", clearErr)
-	case subErr != nil:
-		return nil, fmt.Errorf("clear subscription thread-unread: %w", subErr)
 	case siteErr != nil:
 		return nil, fmt.Errorf("get user siteId: %w", siteErr)
 	}

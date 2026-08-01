@@ -196,10 +196,6 @@ type RoomStore interface {
 	// filter rejects a threadId that belongs to a different room than the request subject.
 	GetThreadSubscriptionByParent(ctx context.Context, account, parentMessageID, roomID string) (*model.ThreadSubscription, error)
 
-	// UpdateSubscriptionThreadRead atomically removes threadID from threadUnread and returns
-	// the updated slice (nil when empty) and the updated alert flag.
-	UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) (newThreadUnread []string, newAlert bool, err error)
-
 	UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
 
 	// ClearThreadSubscriptionsForAccount marks every one of account's thread
@@ -208,12 +204,6 @@ type RoomStore interface {
 	// convergence rides one thread_read_all event, so no per-row snapshot is
 	// returned.
 	ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error
-
-	// ClearSubscriptionThreadUnreadForAccount clears thread-unread state on every
-	// one of account's subscriptions that currently has unread threads: removes
-	// threadUnread and sets alert=false. Subscriptions without unread threads are
-	// left untouched so a non-thread alert source is preserved.
-	ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error
 
 	// GetThreadRoomByID returns the thread room document for threadRoomID.
 	// Returns (nil, nil) when no document matches.
