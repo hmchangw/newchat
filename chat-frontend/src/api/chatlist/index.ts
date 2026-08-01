@@ -22,12 +22,21 @@ import {
   deleteSectionMock,
   reorderSectionsMock,
   setSectionSortModeMock,
+  seedChatlistMock,
+  type MockSeed,
 } from '../_transport/chatlistMock'
-import type { Nats, ChatlistState, ChatlistSortMode } from '../types'
+import type { Nats, ChatlistState, ChatlistSortMode, DMSubscription } from '../types'
 
 export function getChatlist({ user, request }: Nats): Promise<ChatlistState> {
   if (CHATLIST_MOCK) return Promise.resolve(getChatlistMock())
   return request<ChatlistState>(chatlistGet(user.account, user.siteId))
+}
+
+/** DEV-ONLY: seed the mock with a couple sample custom sections + memberships
+ *  from the just-loaded subscriptions, so the grouped sidebar has populated
+ *  sections to demo. No-op (returns null) when CHATLIST_MOCK is off. */
+export function seedChatlistDemo(subs: DMSubscription[]): MockSeed | null {
+  return CHATLIST_MOCK ? seedChatlistMock(subs) : null
 }
 
 export interface CreateSectionArgs {

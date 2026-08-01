@@ -1,13 +1,14 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import RoomList from './RoomList'
 
 vi.mock('@/context/RoomEventsContext', () => ({
   useRoomSummaries: vi.fn(),
   useSidebarSections: vi.fn(),
+  useChatlistActions: vi.fn(),
 }))
 
-import { useRoomSummaries, useSidebarSections } from '@/context/RoomEventsContext'
+import { useRoomSummaries, useSidebarSections, useChatlistActions } from '@/context/RoomEventsContext'
 
 function summary(id, overrides = {}) {
   return {
@@ -24,119 +25,57 @@ function summary(id, overrides = {}) {
   }
 }
 
-function setupSections({ favorite = [], apps = [], channelDm = [], error = null } = {}) {
-  useRoomSummaries.mockReturnValue({
-    summaries: [...favorite, ...apps, ...channelDm],
-    setActiveRoom: vi.fn(),
-    error,
-  })
-  useSidebarSections.mockReturnValue([
-    { key: 'favorite',  title: 'Favorite',         rooms: favorite },
-    { key: 'apps',      title: 'Apps',             rooms: apps },
-    { key: 'channelDm', title: 'Channels and DMs', rooms: channelDm },
-  ])
+function section(key, rooms, over = {}) {
+  return { key, title: over.title ?? key, builtIn: over.builtIn ?? true, sortMode: over.sortMode ?? 'mostRecent', rooms }
 }
 
-describe('RoomList: three-section render', () => {
-  it('renders all three section headers when each section has rooms', () => {
-    setupSections({
-      favorite:  [summary('f1', { name: 'fav' })],
-      apps:      [summary('a1', { name: 'app',  type: 'botDM' })],
-      channelDm: [summary('c1', { name: 'gen' })],
-    })
-    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
-    expect(screen.getByText('Favorite')).toBeInTheDocument()
-    expect(screen.getByText('Apps')).toBeInTheDocument()
-    expect(screen.getByText('Channels and DMs')).toBeInTheDocument()
-  })
+const actions = {
+  createSection: vi.fn(),
+  renameSection: vi.fn(),
+  deleteSection: vi.fn(),
+  setSortMode: vi.fn(),
+  moveChatTo: vi.fn(),
+}
 
-  it('renders sections in fixed order: Favorite, Apps, Channels and DMs', () => {
-    setupSections({
-      favorite:  [summary('f1')],
-      apps:      [summary('a1', { type: 'botDM' })],
-      channelDm: [summary('c1')],
-    })
-    const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
-    const headers = Array.from(container.querySelectorAll('.room-list-section-header')).map(
-      (el) => el.textContent.replace(/^▾/, '')
-    )
-    expect(headers).toEqual(['Favorite', 'Apps', 'Channels and DMs'])
-  })
+function setup(sections, { error = null } = {}) {
+  const all = sections.flatMap((s) => s.rooms)
+  useRoomSummaries.mockReturnValue({ summaries: all, setActiveRoom: vi.fn(), error })
+  useSidebarSections.mockReturnValue(sections)
+  useChatlistActions.mockReturnValue(actions)
+}
 
-  it('always renders all three section headers even when a section is empty', () => {
-    setupSections({ favorite: [], apps: [], channelDm: [summary('c1')] })
-    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
-    expect(screen.getByText('Favorite')).toBeInTheDocument()
-    expect(screen.getByText('Apps')).toBeInTheDocument()
-    expect(screen.getByText('Channels and DMs')).toBeInTheDocument()
-  })
+beforeEach(() => vi.clearAllMocks())
 
-  it('shows a "No rooms" placeholder under an empty (expanded) section', () => {
-    setupSections({ favorite: [], apps: [], channelDm: [summary('c1')] })
-    const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
-    const emptyPlaceholders = container.querySelectorAll('.room-list-section-empty')
-    // Favorite + Apps are empty; Channels and DMs has c1.
-    expect(emptyPlaceholders.length).toBe(2)
-    expect(emptyPlaceholders[0].textContent).toBe('No rooms')
-  })
-
-  it('renders a section `note` in place of room items / empty placeholder when present', () => {
-    useRoomSummaries.mockReturnValue({ summaries: [], setActiveRoom: vi.fn(), error: null })
-    useSidebarSections.mockReturnValue([
-      { key: 'favorite',  title: 'Favorite', rooms: [], note: 'Favorites are not yet supported' },
-      { key: 'apps',      title: 'Apps',     rooms: [] },
-      { key: 'channelDm', title: 'Channels and DMs', rooms: [summary('c1')] },
+describe('RoomList: v2 grouped render', () => {
+  it('renders each provided section header + rooms', () => {
+    setup([
+      section('favorites', [summary('f1', { name: 'fav' })], { title: 'Favorites' }),
+      section('work', [summary('w1', { name: 'proj' })], { title: 'Work', builtIn: false, sortMode: 'custom' }),
+      section('chats', [summary('c1', { name: 'gen' })], { title: 'Chats' }),
     ])
-    const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
-    // The note shows in the Favorite section…
-    expect(screen.getByText('Favorites are not yet supported')).toBeInTheDocument()
-    // …and the "No rooms" empty placeholder must NOT also render in that section
-    // (note overrides empty). Apps is still empty without a note → still shows "No rooms".
-    const notes = container.querySelectorAll('.room-list-section-note')
-    expect(notes).toHaveLength(1)
-    const empties = container.querySelectorAll('.room-list-section-empty')
-    expect(empties).toHaveLength(1)
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.getByText('Favorites')).toBeInTheDocument()
+    expect(screen.getByText('Work')).toBeInTheDocument()
+    expect(screen.getByText('Chats')).toBeInTheDocument()
+    expect(screen.getByText(/# gen/)).toBeInTheDocument()
   })
 
-  it('renders a chevron in every section header that rotates when the section is collapsed', () => {
-    setupSections({
-      favorite:  [summary('f1')],
-      apps:      [summary('a1', { type: 'botDM' })],
-      channelDm: [summary('c1')],
-    })
+  it('shows a "No rooms" placeholder under an empty section', () => {
+    setup([section('work', [], { title: 'Work', builtIn: false, sortMode: 'custom' }), section('chats', [summary('c1')])])
     const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
-    expect(container.querySelectorAll('.room-list-section-chevron').length).toBe(3)
-    // Headers start expanded — no collapsed class.
-    expect(container.querySelectorAll('.room-list-section-collapsed').length).toBe(0)
-    fireEvent.click(screen.getByText('Apps'))
-    // After click, Apps' section carries the collapsed class (rotates the chevron via CSS).
-    const collapsed = container.querySelectorAll('.room-list-section-collapsed')
-    expect(collapsed.length).toBe(1)
-    expect(collapsed[0].textContent).toContain('Apps')
+    expect(container.querySelectorAll('.room-list-section-empty').length).toBe(1)
   })
 
-  it('toggles section collapse on header click', () => {
-    setupSections({
-      favorite: [],
-      apps: [],
-      channelDm: [summary('c1', { name: 'general' })],
-    })
+  it('toggles collapse on the section title click', () => {
+    setup([section('chats', [summary('c1', { name: 'general' })])])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.getByText(/# general/)).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Channels and DMs'))
+    fireEvent.click(screen.getByText('chats'))
     expect(screen.queryByText(/# general/)).not.toBeInTheDocument()
-    fireEvent.click(screen.getByText('Channels and DMs'))
-    expect(screen.getByText(/# general/)).toBeInTheDocument()
   })
 
-  it('preserves room item rendering: prefix, mention badge, unread badge, userCount', () => {
-    setupSections({
-      favorite: [],
-      apps: [],
-      channelDm: [
-        summary('c1', { name: 'general', unreadCount: 3, hasMention: true }),
-      ],
-    })
+  it('renders room item chrome: prefix, mention badge, unread badge, userCount', () => {
+    setup([section('chats', [summary('c1', { name: 'general', unreadCount: 3, hasMention: true })])])
     const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.getByText(/# general/)).toBeInTheDocument()
     expect(container.querySelector('.room-badge-mention')).toBeInTheDocument()
@@ -144,17 +83,92 @@ describe('RoomList: three-section render', () => {
     expect(container.querySelector('.room-meta').textContent).toBe('2')
   })
 
-  it('calls onSelectRoom when a room item is clicked', () => {
+  it('calls onSelectRoom when a room is clicked', () => {
     const onSelectRoom = vi.fn()
-    setupSections({ favorite: [summary('f1', { name: 'fav' })], apps: [], channelDm: [] })
+    setup([section('chats', [summary('c1', { name: 'gen' })])])
     render(<RoomList selectedRoomId={null} onSelectRoom={onSelectRoom} />)
-    fireEvent.click(screen.getByText(/# fav/))
-    expect(onSelectRoom).toHaveBeenCalledWith(expect.objectContaining({ id: 'f1' }))
+    fireEvent.click(screen.getByText(/# gen/))
+    expect(onSelectRoom).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }))
   })
 
-  it('still surfaces the rooms-load error', () => {
-    setupSections({ error: 'oh no' })
+  it('surfaces the rooms-load error', () => {
+    setup([], { error: 'oh no' })
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.getByText('oh no')).toBeInTheDocument()
+  })
+})
+
+describe('RoomList: section controls', () => {
+  it('shows rename/delete controls only on custom sections', () => {
+    setup([
+      section('chats', [summary('c1')], { title: 'Chats' }),
+      section('work', [summary('w1')], { title: 'Work', builtIn: false, sortMode: 'custom' }),
+    ])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.getByLabelText('Rename Work')).toBeInTheDocument()
+    expect(screen.getByLabelText('Delete Work')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Rename Chats')).toBeNull()
+  })
+
+  it('delete calls deleteSection with the section id', () => {
+    setup([section('work', [summary('w1')], { title: 'Work', builtIn: false, sortMode: 'custom' })])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Delete Work'))
+    expect(actions.deleteSection).toHaveBeenCalledWith('work')
+  })
+
+  it('sort toggle flips custom↔mostRecent', () => {
+    setup([section('work', [summary('w1')], { title: 'Work', builtIn: false, sortMode: 'custom' })])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Sort Work'))
+    expect(actions.setSortMode).toHaveBeenCalledWith('work', 'mostRecent')
+  })
+
+  it('opens the create-section dialog from the header + button', async () => {
+    setup([section('chats', [summary('c1')])])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('New section'))
+    expect(await screen.findByRole('dialog', { name: 'New section' })).toBeInTheDocument()
+  })
+})
+
+describe('RoomList: drag to move', () => {
+  it('dragging a chat and dropping on a custom section moves it there', () => {
+    setup([
+      section('work', [], { title: 'Work', builtIn: false, sortMode: 'custom' }),
+      section('chats', [summary('c1', { name: 'gen', siteId: 'site-A' })]),
+    ])
+    const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    const dataTransfer = { setData: vi.fn(), getData: vi.fn(), effectAllowed: '' }
+    fireEvent.dragStart(screen.getByText(/# gen/).closest('.room-item'), { dataTransfer })
+    // The Work section is the first .room-list-section
+    const workSection = container.querySelectorAll('.room-list-section')[0]
+    fireEvent.drop(workSection)
+    expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', undefined)
+  })
+
+  it('dropping a chat on the Chats section removes it (sectionId null)', () => {
+    setup([
+      section('work', [summary('w1', { name: 'proj', siteId: 'site-A' })], { title: 'Work', builtIn: false, sortMode: 'custom' }),
+      section('chats', [summary('c1')]),
+    ])
+    const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    const dataTransfer = { setData: vi.fn(), getData: vi.fn(), effectAllowed: '' }
+    fireEvent.dragStart(screen.getByText(/# proj/).closest('.room-item'), { dataTransfer })
+    const chatsSection = container.querySelectorAll('.room-list-section')[1]
+    fireEvent.drop(chatsSection)
+    expect(actions.moveChatTo).toHaveBeenCalledWith('w1', 'site-A', null, undefined)
+  })
+
+  it('dropping onto a specific room passes it as afterRoomId', () => {
+    setup([
+      section('work', [summary('w1', { name: 'proj', siteId: 'site-A' })], { title: 'Work', builtIn: false, sortMode: 'custom' }),
+      section('chats', [summary('c1', { name: 'gen', siteId: 'site-A' })]),
+    ])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    const dataTransfer = { setData: vi.fn(), getData: vi.fn(), effectAllowed: '' }
+    fireEvent.dragStart(screen.getByText(/# gen/).closest('.room-item'), { dataTransfer })
+    fireEvent.drop(screen.getByText(/# proj/).closest('.room-item'))
+    expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', 'w1')
   })
 })

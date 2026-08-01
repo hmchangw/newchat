@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef } from 'react'
 import {
   fetchSidebarBuckets,
   keyEntryFor,
+  getChatlist,
+  seedChatlistDemo,
   markRoomRead,
   subToRoom,
+  subscribeToChatlistUpdates,
   subscribeToRoomEvents,
   subscribeToRoomMetadataUpdates,
   subscribeToSubscriptionUpdates,
@@ -451,6 +454,16 @@ export function useRoomSubscriptions(
         if (!roomId) return
         closeChannelSub(roomId)
         safeDispatch({ type: 'ROOM_REMOVED', roomId })
+      } else if (evt.action === 'section_moved' && evt.subscription?.roomId) {
+        // A chat's chatlist section membership/order changed. Set both fields
+        // explicitly (a remove clears them) — see reducer's
+        // SUBSCRIPTION_SECTION_MOVED for why this isn't a partial merge.
+        safeDispatch({
+          type: 'SUBSCRIPTION_SECTION_MOVED',
+          roomId: evt.subscription.roomId,
+          sectionId: evt.subscription.sectionId,
+          sectionOrder: evt.subscription.sectionOrder,
+        })
       } else if (evt.subscription?.roomId) {
         // Catch-all for any other action that carries a subscription
         // payload. Today the backend emits `role_updated` (room-worker
@@ -461,6 +474,13 @@ export function useRoomSubscriptions(
         // lastSeenAt / hasMention / alert from the prior record.
         safeDispatch({ type: 'SUBSCRIPTION_UPSERTED', subscription: evt.subscription })
       }
+    })
+
+    // Live chatlist section-definition sync (chatlist.update). Full-state
+    // replace, LWW — see reducer's CHATLIST_UPDATED.
+    const chatlistUpdate = subscribeToChatlistUpdates(liveNats, (evt) => {
+      if (cancelledRef.current) return
+      if (evt?.chatlist) safeDispatch({ type: 'CHATLIST_UPDATED', chatlist: evt.chatlist })
     })
 
     const metaUpdate = subscribeToRoomMetadataUpdates(liveNats, (evt) => {
@@ -484,7 +504,32 @@ export function useRoomSubscriptions(
         // Generation check, not just cancelledRef: a slow bootstrap from a
         // prior login must not seed keys or open subs into the new session.
         if (!isCurrent()) return
+        // Dev-only: seed sample sections + membership onto the loaded subs so
+        // the grouped sidebar has populated custom sections to demo. No-op in
+        // the live path (seedChatlistDemo returns null unless CHATLIST_MOCK).
+        const seed = seedChatlistDemo(Object.values(buckets.subscriptions ?? {}))
+        if (seed) {
+          for (const [roomId, m] of Object.entries(seed.membership)) {
+            if (buckets.subscriptions[roomId]) Object.assign(buckets.subscriptions[roomId], m)
+          }
+          for (const roomId of seed.favoriteRoomIds) {
+            if (buckets.subscriptions[roomId]) buckets.subscriptions[roomId].favorite = true
+          }
+        }
         safeDispatch({ type: 'BUCKETS_LOADED', ...buckets })
+        // Load the section-definition overlay (chatlist.get). In mock mode
+        // this returns the seeded sections; live, the backend's overlay.
+        // Wrapped in Promise.resolve so it never blocks the channel-sub setup
+        // below even if the RPC layer throws synchronously.
+        Promise.resolve()
+          .then(() => getChatlist(liveNats))
+          .then((chatlist) => {
+            if (!cancelledRef.current) safeDispatch({ type: 'CHATLIST_LOADED', chatlist })
+          })
+          .catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn('chatlist.get failed:', err?.message ?? err)
+          })
         // Seed room keys delivered inline on subscription.list so the first
         // message in each encrypted room decrypts immediately — no placeholder,
         // no on-demand key.get RPC. Rooms without a key (plaintext DMs, or no
@@ -507,6 +552,7 @@ export function useRoomSubscriptions(
       dmSub.unsubscribe()
       subUpdate.unsubscribe()
       metaUpdate.unsubscribe()
+      chatlistUpdate.unsubscribe()
       for (const entry of channelSubs.current.values()) entry.sub.unsubscribe()
       channelSubs.current.clear()
       dispatchChains.clear()

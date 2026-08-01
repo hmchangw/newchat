@@ -13,7 +13,16 @@ import { useRoomKeys } from '@/context/RoomKeysContext'
 import { BUFFER_MODE, initialState, roomEventsReducer } from './reducer'
 import { useRoomSubscriptions } from './useRoomSubscriptions'
 import { useUnreadCount as useUnreadCountQuery } from './useUnreadCount'
-import { fetchMessageHistory, fetchSurroundingMessages, markRoomRead } from '@/api'
+import {
+  fetchMessageHistory,
+  fetchSurroundingMessages,
+  markRoomRead,
+  createChatlistSection,
+  renameChatlistSection,
+  deleteChatlistSection,
+  setChatlistSectionSortMode,
+  moveChat,
+} from '@/api'
 import { deriveSidebarSections } from '@/lib/chatlist'
 import type {
   ChatlistState,
@@ -449,6 +458,35 @@ export function useSidebarSections(): SidebarSection[] {
     const sections = deriveSidebarSections(summaries, subscriptions, chatlist) as SidebarSection[]
     return sections.map((s) => ({ ...s, rooms: s.rooms.map(enrich) }))
   }, [summaries, subscriptions, chatlist])
+}
+
+/** Imperative chatlist-section actions for the sidebar UI. Each wraps its api
+ *  op and applies the returned overlay locally (CHATLIST_UPDATED) — the op's
+ *  own event fans to the user's OTHER devices, so the caller must apply its
+ *  own result. `moveChatTo` relies on the section_moved event to update state. */
+export function useChatlistActions() {
+  const nats = useNats()
+  const dispatch = useRoomDispatch()
+  return useMemo(() => {
+    const apply = (chatlist: ChatlistState) => dispatch({ type: 'CHATLIST_UPDATED', chatlist })
+    return {
+      createSection: async (name: string, sortMode?: ChatlistSortMode) =>
+        apply(await createChatlistSection(nats, { name, sortMode })),
+      renameSection: async (sectionId: string, name: string) =>
+        apply(await renameChatlistSection(nats, { sectionId, name })),
+      deleteSection: async (sectionId: string) => apply(await deleteChatlistSection(nats, sectionId)),
+      setSortMode: async (sectionId: string, sortMode: ChatlistSortMode) =>
+        apply(await setChatlistSectionSortMode(nats, { sectionId, sortMode })),
+      moveChatTo: async (
+        roomId: string,
+        siteId: string,
+        sectionId: string | null,
+        afterRoomId?: string,
+      ) => {
+        await moveChat(nats, { roomId, siteId, sectionId, afterRoomId })
+      },
+    }
+  }, [nats, dispatch])
 }
 
 /**

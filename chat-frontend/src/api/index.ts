@@ -14,6 +14,7 @@
 export { addMembers } from './addMembers'
 export {
   getChatlist,
+  seedChatlistDemo,
   createChatlistSection,
   renameChatlistSection,
   deleteChatlistSection,

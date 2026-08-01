@@ -8,12 +8,20 @@
 }
 
 .room-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: var(--space-md) var(--space-md) var(--space-sm);
   font-weight: var(--font-semibold);
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-muted);
+}
+
+.room-list-add-section {
+  font-size: var(--text-base);
+  line-height: 1;
 }
 
 .room-list-items {
@@ -46,6 +54,8 @@
 }
 
 .room-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -137,18 +147,26 @@
 .room-badge-mention { background: var(--mention); }
 .room-badge-mention-all { background: var(--mention-all); }
 
-/* ── Three-section sidebar buckets ─────────────────────────────────────
-   Favorite / Apps / Channels and DMs each render under a collapsible
-   header. The header inherits the design tokens so dark + light + the
-   black-and-white theme all pick up correct foregrounds without any
-   per-theme overrides here. */
+/* ── Chatlist v2 grouped sections ──────────────────────────────────────
+   Favorites / Apps / Teams / each custom section / Chats render under a
+   collapsible header with per-section controls. Custom sections + Chats are
+   drop targets for drag-to-move. Design tokens carry all theming. */
 .room-list-section {
   margin-bottom: var(--space-sm);
+  border-radius: var(--radius-md);
+  transition: background var(--motion-fast) var(--easing),
+              box-shadow var(--motion-fast) var(--easing);
+}
+
+.room-list-section-dragover {
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .room-list-section-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--space-xs);
   padding: var(--space-sm) var(--space-md);
   font-weight: var(--font-semibold);
@@ -156,13 +174,46 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-muted);
-  cursor: pointer;
   user-select: none;
+}
+
+.room-list-section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
   transition: color var(--motion-fast) var(--easing);
 }
 
-.room-list-section-header:hover {
+.room-list-section-title:hover {
   color: var(--text-secondary);
+}
+
+.room-list-section-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--easing);
+}
+
+.room-list-section-header:hover .room-list-section-controls {
+  opacity: 1;
+}
+
+.room-drag-handle {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: grab;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity var(--motion-fast) var(--easing);
+}
+
+.room-item:hover .room-drag-handle {
+  opacity: 0.6;
 }
 
 .room-list-section-collapsed .room-list-section-header {
@@ -187,10 +238,3 @@
   color: var(--text-muted);
 }
 
-.room-list-section-note {
-  padding: var(--space-xs) var(--space-md) var(--space-sm) calc(var(--space-md) + var(--space-md));
-  font-size: var(--text-xs);
-  font-style: italic;
-  color: var(--text-muted);
-  opacity: 0.8;
-}
