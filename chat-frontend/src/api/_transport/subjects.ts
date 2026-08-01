@@ -129,3 +129,44 @@ export function userSubscriptionList(account: string, siteId: string): string {
 export function userSubscriptionCount(account: string, siteId: string): string {
   return `chat.user.${account}.request.user.${siteId}.subscription.count`
 }
+
+// Chatlist custom-sections RPCs (user-service). The section DEFINITIONS live
+// in a small per-user overlay; a chat's section MEMBERSHIP rides its
+// subscription (see chatMove). Mirrors pkg/subject chatlist builders.
+export function chatlistGet(account: string, siteId: string): string {
+  return `chat.user.${account}.request.user.${siteId}.chatlist.get`
+}
+
+export function chatlistSectionCreate(account: string, siteId: string): string {
+  return `chat.user.${account}.request.user.${siteId}.chatlist.section.create`
+}
+
+export function chatlistSectionRename(account: string, siteId: string): string {
+  return `chat.user.${account}.request.user.${siteId}.chatlist.section.rename`
+}
+
+export function chatlistSectionDelete(account: string, siteId: string): string {
+  return `chat.user.${account}.request.user.${siteId}.chatlist.section.delete`
+}
+
+export function chatlistSectionReorder(account: string, siteId: string): string {
+  return `chat.user.${account}.request.user.${siteId}.chatlist.section.reorder`
+}
+
+export function chatlistSectionSetSortMode(account: string, siteId: string): string {
+  return `chat.user.${account}.request.user.${siteId}.chatlist.section.setsortmode`
+}
+
+// chatMove sets/clears a chat's section membership + manual order on its
+// subscription. `{siteID}` is the room's origin site, like the other
+// room-scoped RPCs. Emits subscription.update (action "section_moved").
+export function chatMove(account: string, roomId: string, siteId: string): string {
+  return `chat.user.${account}.request.room.${roomId}.${siteId}.chat.move`
+}
+
+// chatlistUpdate is the caller-fanned event carrying the full post-update
+// section definitions (ChatlistUpdateEvent). Replace-wholesale, LWW by
+// chatlist.lastUpdatedAt.
+export function chatlistUpdate(account: string): string {
+  return `chat.user.${account}.event.chatlist.update`
+}

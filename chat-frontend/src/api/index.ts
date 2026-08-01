@@ -77,4 +77,8 @@ export type {
   HistoryConfig,
   HistoryMode,
   RoomKeyEvent,
+  ChatlistSortMode,
+  ChatlistSection,
+  ChatlistState,
+  ChatlistUpdateEvent,
 } from './types'
