@@ -33,10 +33,12 @@ type UserRoomDoc struct {
 }
 
 // SubscriptionMeta is the caller's subscription projection used for enrichment:
-// the room type plus the join-key Name (DM counterpart account / botDM bot account).
+// the room type, the join-key Name (DM counterpart account / botDM bot
+// account), and the botDM IsSubscribed flag.
 type SubscriptionMeta struct {
-	RoomType model.RoomType
-	Name     string
+	RoomType     model.RoomType
+	Name         string
+	IsSubscribed bool
 }
 
 // HRUser is the users-collection projection used to render display / HR names.

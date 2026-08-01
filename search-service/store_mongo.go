@@ -69,22 +69,23 @@ func (s *mongoStore) SubscriptionsByRoomIDs(ctx context.Context, account string,
 		return out, nil
 	}
 	filter := bson.M{"u.account": account, "roomId": bson.M{"$in": roomIDs}}
-	proj := bson.M{"roomId": 1, "roomType": 1, "name": 1}
+	proj := bson.M{"roomId": 1, "roomType": 1, "name": 1, "isSubscribed": 1}
 	cur, err := s.subscriptions.Find(ctx, filter, options.Find().SetProjection(proj))
 	if err != nil {
 		return nil, fmt.Errorf("find subscriptions: %w", err)
 	}
 	defer cur.Close(ctx)
 	var rows []struct {
-		RoomID   string         `bson:"roomId"`
-		RoomType model.RoomType `bson:"roomType"`
-		Name     string         `bson:"name"`
+		RoomID       string         `bson:"roomId"`
+		RoomType     model.RoomType `bson:"roomType"`
+		Name         string         `bson:"name"`
+		IsSubscribed bool           `bson:"isSubscribed"`
 	}
 	if err := cur.All(ctx, &rows); err != nil {
 		return nil, fmt.Errorf("decode subscriptions: %w", err)
 	}
 	for _, r := range rows {
-		out[r.RoomID] = SubscriptionMeta{RoomType: r.RoomType, Name: r.Name}
+		out[r.RoomID] = SubscriptionMeta{RoomType: r.RoomType, Name: r.Name, IsSubscribed: r.IsSubscribed}
 	}
 	return out, nil
 }
@@ -117,15 +118,15 @@ func (s *mongoStore) UsersByAccounts(ctx context.Context, accounts []string) (ma
 }
 
 // AppsByAssistantNames returns apps keyed by their assistant.name (bot account).
-// Only name and assistant.name are projected — callers use the map for
-// display-name resolution only.
+// Only _id, name and assistant.name are projected — the map values back the
+// compact appInfo objects, nothing more.
 func (s *mongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error) {
 	out := map[string]model.App{}
 	if len(botAccounts) == 0 {
 		return out, nil
 	}
 	filter := bson.M{"assistant.name": bson.M{"$in": botAccounts}}
-	proj := bson.M{"name": 1, "assistant.name": 1}
+	proj := bson.M{"_id": 1, "name": 1, "assistant.name": 1}
 	cur, err := s.apps.Find(ctx, filter, options.Find().SetProjection(proj))
 	if err != nil {
 		return nil, fmt.Errorf("find apps by assistant: %w", err)
