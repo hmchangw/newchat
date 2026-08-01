@@ -444,8 +444,7 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 	return nil
 }
 
-func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
-	// Guarded thread-sub update first; same gate then protects the Subscription overwrite.
+func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
 	tsFilter := bson.M{
 		"threadRoomId": threadRoomID,
 		"userAccount":  account,
@@ -459,27 +458,9 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoo
 		"updatedAt":  lastSeenAt,
 		"hasMention": false,
 	}}
-	tsRes, err := s.threadSubCol.UpdateOne(ctx, tsFilter, tsUpdate)
-	if err != nil {
+	if _, err := s.threadSubCol.UpdateOne(ctx, tsFilter, tsUpdate); err != nil {
 		return fmt.Errorf("apply thread read on thread subscription for %q in thread room %q: %w",
 			account, threadRoomID, err)
-	}
-	if tsRes.MatchedCount == 0 {
-		return nil
-	}
-
-	subFilter := bson.M{"roomId": roomID, "u.account": account}
-	var subUpdate bson.M
-	if len(newThreadUnread) == 0 {
-		subUpdate = bson.M{
-			"$set":   bson.M{"alert": alert},
-			"$unset": bson.M{"threadUnread": ""},
-		}
-	} else {
-		subUpdate = bson.M{"$set": bson.M{"threadUnread": newThreadUnread, "alert": alert}}
-	}
-	if _, err := s.subCol.UpdateOne(ctx, subFilter, subUpdate); err != nil {
-		return fmt.Errorf("apply thread read on subscription for %q in room %q: %w", account, roomID, err)
 	}
 	return nil
 }
@@ -487,8 +468,7 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoo
 // ApplyThreadReadAll is the home-replica bulk clear for the federated
 // thread_read_all event. It advances every one of account's thread subscriptions
 // to lastSeenAt under a per-doc $lt guard (so a genuinely newer read is never
-// regressed) and clears threadUnread + alert on every subscription that still has
-// unread threads. Missing docs are a no-op (the mark-all dismiss is best-effort).
+// regressed). Missing docs are a no-op (the mark-all dismiss is best-effort).
 func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error {
 	tsFilter := bson.M{
 		"userAccount": account,
@@ -504,12 +484,6 @@ func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string
 	}}
 	if _, err := s.threadSubCol.UpdateMany(ctx, tsFilter, tsUpdate); err != nil {
 		return fmt.Errorf("apply thread read all on thread subscriptions for %q: %w", account, err)
-	}
-
-	subFilter := bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}}
-	subUpdate := bson.M{"$set": bson.M{"alert": false}, "$unset": bson.M{"threadUnread": ""}}
-	if _, err := s.subCol.UpdateMany(ctx, subFilter, subUpdate); err != nil {
-		return fmt.Errorf("apply thread read all on subscriptions for %q: %w", account, err)
 	}
 	return nil
 }

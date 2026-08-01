@@ -41,12 +41,12 @@ type InboxStore interface {
 	// A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
-	// ApplyThreadRead writes ThreadSubscription under a $lt lastSeenAt guard, then the Subscription only if the guard accepted.
-	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error
+	// ApplyThreadRead advances the home-replica ThreadSubscription read state
+	// (lastSeenAt, updatedAt, hasMention=false) under a $lt lastSeenAt guard.
+	ApplyThreadRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
 	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
 	// user's home replica: it advances every one of account's thread subscriptions
-	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and clears
-	// threadUnread + alert on every subscription that still has unread threads.
+	// to lastSeenAt under a per-doc $lt guard (clearing hasMention).
 	ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
@@ -343,9 +343,9 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("unmarshal thread_read payload: %w", err)
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
-	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.NewThreadUnread, e.Alert, lastSeenAt); err != nil {
-		return fmt.Errorf("apply thread read (room %q, thread %q, account %q): %w",
-			e.RoomID, e.ThreadRoomID, e.Account, err)
+	if err := h.store.ApplyThreadRead(ctx, e.ThreadRoomID, e.Account, lastSeenAt); err != nil {
+		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
+			e.ThreadRoomID, e.Account, err)
 	}
 	return nil
 }

@@ -69,12 +69,9 @@ type subRead struct {
 }
 
 type threadRead struct {
-	roomID          string
-	threadRoomID    string
-	account         string
-	newThreadUnread []string
-	alert           bool
-	lastSeenAt      time.Time
+	threadRoomID string
+	account      string
+	lastSeenAt   time.Time
 }
 
 type threadReadAll struct {
@@ -331,15 +328,14 @@ func (s *stubInboxStore) getSubReads() []subRead {
 	return cp
 }
 
-func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
+func (s *stubInboxStore) ApplyThreadRead(_ context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.applyThreadReadErr != nil {
 		return s.applyThreadReadErr
 	}
 	s.threadReads = append(s.threadReads, threadRead{
-		roomID: roomID, threadRoomID: threadRoomID, account: account,
-		newThreadUnread: newThreadUnread, alert: alert, lastSeenAt: lastSeenAt,
+		threadRoomID: threadRoomID, account: account, lastSeenAt: lastSeenAt,
 	})
 	return nil
 }
@@ -1587,8 +1583,6 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 		RoomID:          "r1",
 		ThreadRoomID:    "tr1",
 		ParentMessageID: "p1",
-		NewThreadUnread: []string{"p2"},
-		Alert:           true,
 		LastSeenAt:      1735689600000,
 		Timestamp:       1735689600001,
 	}
@@ -1607,11 +1601,8 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 	require.NoError(t, h.HandleEvent(context.Background(), data))
 	require.Len(t, store.threadReads, 1)
 	tr := store.threadReads[0]
-	assert.Equal(t, "r1", tr.roomID)
 	assert.Equal(t, "tr1", tr.threadRoomID)
 	assert.Equal(t, "alice", tr.account)
-	assert.Equal(t, []string{"p2"}, tr.newThreadUnread)
-	assert.True(t, tr.alert)
 	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), tr.lastSeenAt)
 }
 
