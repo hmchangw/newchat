@@ -48,6 +48,13 @@ type HRUser struct {
 	ChineseName string
 }
 
+// AppRef is the apps-collection projection used to render appInfo objects.
+type AppRef struct {
+	ID            string
+	Name          string
+	AssistantName string
+}
+
 // MongoStore is the Mongo-backed store interface for search-service.
 type MongoStore interface {
 	SearchAppsByName(
@@ -64,8 +71,8 @@ type MongoStore interface {
 	// UsersByAccounts returns HR/display projections keyed by account. Missing accounts are omitted.
 	UsersByAccounts(ctx context.Context, accounts []string) (map[string]HRUser, error)
 
-	// AppsByAssistantNames returns apps keyed by their assistant.name (bot account). Missing are omitted.
-	AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error)
+	// AppsByAssistantNames returns app projections keyed by their assistant.name (bot account). Missing are omitted.
+	AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]AppRef, error)
 }
 
 // RoomInfoClient fetches canonical room metadata from room-service on a given

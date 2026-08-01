@@ -235,7 +235,7 @@ type fakeMongo struct {
 	subsErr  error
 	users    map[string]HRUser
 	usersErr error
-	apps     map[string]model.App
+	apps     map[string]AppRef
 	appsErr  error
 
 	subsAccount string
@@ -283,7 +283,7 @@ func (f *fakeMongo) UsersByAccounts(_ context.Context, accounts []string) (map[s
 	return f.users, nil
 }
 
-func (f *fakeMongo) AppsByAssistantNames(_ context.Context, bots []string) (map[string]model.App, error) {
+func (f *fakeMongo) AppsByAssistantNames(_ context.Context, bots []string) (map[string]AppRef, error) {
 	f.appBots = bots
 	if f.appsErr != nil {
 		return nil, f.appsErr

@@ -72,7 +72,7 @@ func TestEnrichMessages_DM_UsersLookupMiss(t *testing.T) {
 func TestEnrichMessages_BotDM(t *testing.T) {
 	m := &fakeMongo{
 		subs: map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "helper.bot", IsSubscribed: true}},
-		apps: map[string]model.App{"helper.bot": {ID: "app1", Name: "Helper", Assistant: &model.AppAssistant{Name: "helper.bot"}}},
+		apps: map[string]AppRef{"helper.bot": {ID: "app1", Name: "Helper", AssistantName: "helper.bot"}},
 	}
 	h := enrichHandler(m, &fakeRoom{})
 	// sender is the bot itself
@@ -95,7 +95,7 @@ func TestEnrichMessages_BotDM(t *testing.T) {
 func TestEnrichMessages_BotDM_Unsubscribed(t *testing.T) {
 	m := &fakeMongo{
 		subs: map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "helper.bot", IsSubscribed: false}},
-		apps: map[string]model.App{"helper.bot": {ID: "app1", Name: "Helper"}},
+		apps: map[string]AppRef{"helper.bot": {ID: "app1", Name: "Helper", AssistantName: "helper.bot"}},
 	}
 	h := enrichHandler(m, &fakeRoom{})
 	out := h.enrichMessages(context.Background(), "alice", []messageSearchHit{hit("m1", "rBot", "site-a", "alice")})

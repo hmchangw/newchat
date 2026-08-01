@@ -58,12 +58,7 @@ func TestMongoStore_EnrichLookups(t *testing.T) {
 
 	apps, err := store.AppsByAssistantNames(ctx, []string{"helper.bot", "ghost.bot"})
 	require.NoError(t, err)
-	assert.Equal(t, "Helper", apps["helper.bot"].Name)
-	assert.Equal(t, "app-1", apps["helper.bot"].ID)
-	assert.Equal(t, "helper.bot", apps["helper.bot"].Assistant.Name)
-	// projection: only _id, name and assistant.name come back
-	assert.Empty(t, apps["helper.bot"].Description)
-	assert.Empty(t, apps["helper.bot"].Version)
+	assert.Equal(t, AppRef{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"}, apps["helper.bot"])
 	_, ok = apps["ghost.bot"]
 	assert.False(t, ok)
 

@@ -93,7 +93,7 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 			users = u
 		}
 	}
-	apps := map[string]model.App{}
+	apps := map[string]AppRef{}
 	if h.mongo != nil && len(botAccounts) > 0 {
 		a, err := h.mongo.AppsByAssistantNames(ctx, keysOf(botAccounts))
 		if err != nil {
@@ -105,24 +105,25 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 
 	roomNames := h.fetchRoomNames(ctx, channelRoomsBySite)
 
-	for i := range hits {
-		rid := hits[i].RoomID
-		out[i].Sender = buildSender(hits[i].UserAccount, users, apps)
+	// Room and sender objects are per-room / per-account, not per-hit: build
+	// each distinct one once and share the pointer across hits.
+	rooms := make(map[string]*model.MessageRoom, len(roomIDSet))
+	for rid := range roomIDSet {
 		room := &model.MessageRoom{ID: rid}
 		if meta, ok := subs[rid]; ok {
 			room.Type = meta.RoomType
 			switch meta.RoomType {
 			case model.RoomTypeDM:
 				if hr, ok := users[meta.Name]; ok {
-					room.HRInfo = &model.MessageHRInfo{Account: hr.Account, ChineseName: hr.ChineseName, EngName: hr.EngName}
+					room.HRInfo = hrInfoOf(hr)
 					room.Name = displayfmt.CombineWithFallback(hr.EngName, hr.ChineseName, meta.Name)
 				} else {
 					room.Name = meta.Name
 				}
 			case model.RoomTypeBotDM:
 				if app, ok := apps[meta.Name]; ok {
-					isSubscribed := meta.IsSubscribed
-					room.AppInfo = &model.MessageAppInfo{ID: app.ID, Name: app.Name, AssistantName: meta.Name, IsSubscribed: &isSubscribed}
+					room.AppInfo = appInfoOf(app)
+					room.AppInfo.IsSubscribed = &meta.IsSubscribed
 					room.Name = app.Name
 				} else {
 					room.Name = meta.Name
@@ -133,7 +134,18 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 		} else {
 			room.Name = roomNames[rid]
 		}
-		out[i].Room = room
+		rooms[rid] = room
+	}
+	senders := make(map[string]*model.MessageSender, len(senderSet)+1)
+	for i := range hits {
+		acct := hits[i].UserAccount
+		s, ok := senders[acct]
+		if !ok {
+			s = buildSender(acct, users, apps)
+			senders[acct] = s
+		}
+		out[i].Sender = s
+		out[i].Room = rooms[hits[i].RoomID]
 	}
 	return out
 }
@@ -177,16 +189,24 @@ func (h *handler) fetchRoomNames(ctx context.Context, bySite map[string][]string
 // buildSender assembles the sender object: hr for human senders, appInfo for
 // bot senders; either is omitted when its lookup missed — the client renders
 // the display name.
-func buildSender(account string, users map[string]HRUser, apps map[string]model.App) *model.MessageSender {
+func buildSender(account string, users map[string]HRUser, apps map[string]AppRef) *model.MessageSender {
 	s := &model.MessageSender{Account: account}
 	if model.IsBot(account) {
 		if app, ok := apps[account]; ok {
-			s.AppInfo = &model.MessageAppInfo{ID: app.ID, Name: app.Name, AssistantName: account}
+			s.AppInfo = appInfoOf(app)
 		}
 	} else if hr, ok := users[account]; ok {
-		s.HR = &model.MessageHRInfo{Account: hr.Account, ChineseName: hr.ChineseName, EngName: hr.EngName}
+		s.HR = hrInfoOf(hr)
 	}
 	return s
+}
+
+func hrInfoOf(hr HRUser) *model.MessageHRInfo {
+	return &model.MessageHRInfo{Account: hr.Account, ChineseName: hr.ChineseName, EngName: hr.EngName}
+}
+
+func appInfoOf(app AppRef) *model.MessageAppInfo {
+	return &model.MessageAppInfo{ID: app.ID, Name: app.Name, AssistantName: app.AssistantName}
 }
 
 func keysOf(m map[string]struct{}) []string {

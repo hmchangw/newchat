@@ -117,11 +117,9 @@ func (s *mongoStore) UsersByAccounts(ctx context.Context, accounts []string) (ma
 	return out, nil
 }
 
-// AppsByAssistantNames returns apps keyed by their assistant.name (bot account).
-// Only _id, name and assistant.name are projected — the map values back the
-// compact appInfo objects, nothing more.
-func (s *mongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error) {
-	out := map[string]model.App{}
+// AppsByAssistantNames returns app projections keyed by their assistant.name (bot account).
+func (s *mongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]AppRef, error) {
+	out := map[string]AppRef{}
 	if len(botAccounts) == 0 {
 		return out, nil
 	}
@@ -132,13 +130,19 @@ func (s *mongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []str
 		return nil, fmt.Errorf("find apps by assistant: %w", err)
 	}
 	defer cur.Close(ctx)
-	var apps []model.App
-	if err := cur.All(ctx, &apps); err != nil {
+	var rows []struct {
+		ID        string `bson:"_id"`
+		Name      string `bson:"name"`
+		Assistant struct {
+			Name string `bson:"name"`
+		} `bson:"assistant"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
 		return nil, fmt.Errorf("decode apps: %w", err)
 	}
-	for i := range apps {
-		if apps[i].Assistant != nil && apps[i].Assistant.Name != "" {
-			out[apps[i].Assistant.Name] = apps[i]
+	for _, r := range rows {
+		if r.Assistant.Name != "" {
+			out[r.Assistant.Name] = AppRef{ID: r.ID, Name: r.Name, AssistantName: r.Assistant.Name}
 		}
 	}
 	return out, nil
