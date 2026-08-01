@@ -5002,3 +5002,31 @@ func TestTeamsChatJSON_NeedVerify(t *testing.T) {
 		t.Errorf("needVerify missing from JSON: %s", data)
 	}
 }
+
+func TestTeamsRoomVerifyRequestJSON(t *testing.T) {
+	r := model.TeamsRoomVerifyRequest{ChatIDs: []string{"19:abc@thread.v2", "19:def@unq.gbl.spaces"}}
+	roundTrip(t, &r, &model.TeamsRoomVerifyRequest{})
+}
+
+func TestTeamsRoomVerifyResponseJSON(t *testing.T) {
+	r := model.TeamsRoomVerifyResponse{
+		SiteID:         "site-a",
+		RequestedCount: 2,
+		FoundCount:     1,
+		Chats: []model.TeamsRoomVerifyResult{
+			{ChatID: "19:abc@thread.v2", RoomID: "7bQ1kR2mN8xY4pL0v", RoomExists: true, SubscriptionCount: 5, RoomUserCount: 5},
+			{ChatID: "19:def@unq.gbl.spaces", RoomID: "9xV4jP7sD2fG6bT1m"},
+		},
+	}
+	roundTrip(t, &r, &model.TeamsRoomVerifyResponse{})
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"siteId"`, `"requestedCount"`, `"foundCount"`, `"chatId"`, `"roomExists"`, `"subscriptionCount"`, `"roomUserCount"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("key %s missing from JSON: %s", key, data)
+		}
+	}
+}
