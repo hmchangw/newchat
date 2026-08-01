@@ -107,17 +107,14 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 
 	for i := range hits {
 		rid := hits[i].RoomID
-		out[i].Sender = &model.MessageSender{
-			Account:     hits[i].UserAccount,
-			DisplayName: resolveSenderName(hits[i].UserAccount, users, apps),
-		}
+		out[i].Sender = &model.MessageSender{Account: hits[i].UserAccount}
 		room := &model.MessageRoom{ID: rid}
 		if meta, ok := subs[rid]; ok {
 			room.Type = meta.RoomType
 			switch meta.RoomType {
 			case model.RoomTypeDM:
 				if hr, ok := users[meta.Name]; ok {
-					room.HRInfo = &model.SubscriptionHRInfo{Account: hr.Account, Name: hr.ChineseName, EngName: hr.EngName}
+					room.HRInfo = &model.MessageHRInfo{Account: hr.Account, ChineseName: hr.ChineseName, EngName: hr.EngName}
 					room.Name = displayfmt.CombineWithFallback(hr.EngName, hr.ChineseName, meta.Name)
 				} else {
 					room.Name = meta.Name
@@ -173,24 +170,6 @@ func (h *handler) fetchRoomNames(ctx context.Context, bySite map[string][]string
 	}
 	wg.Wait()
 	return names
-}
-
-// resolveSenderName returns the sender's display name: the app name for a bot
-// account, else engName+chineseName (fallback account) from the users map.
-func resolveSenderName(account string, users map[string]HRUser, apps map[string]model.App) string {
-	if account == "" {
-		return ""
-	}
-	if model.IsBot(account) {
-		if app, ok := apps[account]; ok && app.Name != "" {
-			return app.Name
-		}
-		return account
-	}
-	if hr, ok := users[account]; ok {
-		return displayfmt.CombineWithFallback(hr.EngName, hr.ChineseName, account)
-	}
-	return account
 }
 
 func keysOf(m map[string]struct{}) []string {

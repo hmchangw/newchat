@@ -50,11 +50,10 @@ func TestEnrichMessages_DM(t *testing.T) {
 	assert.Equal(t, model.RoomTypeDM, out[0].Room.Type)
 	assert.Equal(t, "Bob Chan 陳", out[0].Room.Name)
 	require.NotNil(t, out[0].Room.HRInfo)
-	assert.Equal(t, "陳", out[0].Room.HRInfo.Name)
+	assert.Equal(t, "陳", out[0].Room.HRInfo.ChineseName)
 	assert.Equal(t, "Bob Chan", out[0].Room.HRInfo.EngName)
 	require.NotNil(t, out[0].Sender)
 	assert.Equal(t, "alice", out[0].Sender.Account)
-	assert.Equal(t, "Alice", out[0].Sender.DisplayName)
 }
 
 func TestEnrichMessages_BotDM(t *testing.T) {
@@ -73,8 +72,6 @@ func TestEnrichMessages_BotDM(t *testing.T) {
 	b, err := json.Marshal(out[0].Room)
 	require.NoError(t, err)
 	assert.NotContains(t, string(b), "appInfo")
-	// bot sender display name = app name
-	assert.Equal(t, "Helper", out[0].Sender.DisplayName)
 }
 
 func TestEnrichMessages_ChannelUsesRoomBatch(t *testing.T) {
@@ -113,7 +110,7 @@ func TestEnrichMessages_DegradesOnAllErrors(t *testing.T) {
 	// still returns the base message; room present with id, sender falls back to account
 	require.NotNil(t, out[0].Room)
 	assert.Equal(t, "rCh", out[0].Room.ID)
-	assert.Equal(t, "alice", out[0].Sender.DisplayName) // fallback to account
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }
 
 func TestEnrichMessages_Empty(t *testing.T) {
@@ -136,7 +133,7 @@ func TestEnrichMessages_NilMongoDegrades(t *testing.T) {
 	assert.Equal(t, "rCh", out[0].Room.ID)
 	assert.Equal(t, "General", out[0].Room.Name) // room-name RPC still works without mongo
 	require.NotNil(t, out[0].Sender)
-	assert.Equal(t, "alice", out[0].Sender.DisplayName) // sender falls back to account
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }
 
 // Neither dependency wired: base projections survive, no panic, no names.
@@ -147,5 +144,5 @@ func TestEnrichMessages_NilMongoAndRoomDegrades(t *testing.T) {
 	assert.Equal(t, "m1", out[0].MessageID)
 	require.NotNil(t, out[0].Room)
 	assert.Equal(t, "rCh", out[0].Room.ID)
-	assert.Equal(t, "alice", out[0].Sender.DisplayName)
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }

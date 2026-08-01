@@ -896,5 +896,5 @@ func TestSearchMessages_EnrichesResponse(t *testing.T) {
 	assert.Equal(t, model.RoomTypeDM, resp.Messages[0].Room.Type)
 	assert.Equal(t, "Bob Chan", resp.Messages[0].Room.Name)
 	require.NotNil(t, resp.Messages[0].Sender)
-	assert.Equal(t, "Alice", resp.Messages[0].Sender.DisplayName)
+	assert.Equal(t, "alice", resp.Messages[0].Sender.Account)
 }
