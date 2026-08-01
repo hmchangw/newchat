@@ -1661,7 +1661,7 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	now := time.Now().UTC()
 
 	var (
-		homeSite         string
+		homeSite          string
 		clearErr, siteErr error
 	)
 	var g errgroup.Group

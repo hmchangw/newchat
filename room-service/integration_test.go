@@ -169,10 +169,10 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 
 	lastSeen := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Millisecond)
 	mustInsertSub(t, db, &model.Subscription{
-		ID:           "sproj",
-		User:         model.SubscriptionUser{ID: "u9", Account: "carol", IsBot: true},
-		RoomID:       "rproj",
-		SiteID:       "site-a",
+		ID:         "sproj",
+		User:       model.SubscriptionUser{ID: "u9", Account: "carol", IsBot: true},
+		RoomID:     "rproj",
+		SiteID:     "site-a",
 		Roles:      []model.Role{model.RoleOwner, model.RoleMember},
 		Alert:      true,
 		LastSeenAt: &lastSeen,
