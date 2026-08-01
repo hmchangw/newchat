@@ -34,8 +34,10 @@ func newHTTPVerifier(timeout time.Duration) verifyFunc {
 		if resp.IsError() {
 			return nil, fmt.Errorf("inspector at %q returned status %d", baseURL, resp.StatusCode())
 		}
-		// A 200 whose body failed to decode leaves the result zero-valued; treat a
-		// reply with no chats as a failed call rather than "everything is missing".
+		// A syntactically valid 200 body that carries no results (e.g. a buggy or
+		// version-mismatched inspector replying `{}` or an empty chats array) is
+		// treated as a failed call rather than "every chat is missing its room" —
+		// the latter reading would leave every chat flagged forever.
 		if len(out.Chats) == 0 {
 			return nil, fmt.Errorf("inspector at %q returned no results for %d chat ids", baseURL, len(chatIDs))
 		}

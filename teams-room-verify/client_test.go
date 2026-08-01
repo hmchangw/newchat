@@ -52,9 +52,13 @@ func TestHTTPVerifier_Errors(t *testing.T) {
 		{"bad request", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 		}},
-		{"malformed body", func(w http.ResponseWriter, _ *http.Request) {
+		{"undecodable body", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"chats":`))
+		}},
+		{"empty results", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"siteId":"site-a","requestedCount":1,"foundCount":0,"chats":[]}`))
 		}},
 	}
 	for _, tt := range tests {
