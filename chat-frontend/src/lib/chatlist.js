@@ -44,6 +44,71 @@ export function defaultChatlistState() {
   }
 }
 
+function lastMsgTime(summary) {
+  return summary.lastMsgAt ? new Date(summary.lastMsgAt).getTime() : 0
+}
+
+function sortByLastMsgDesc(rooms) {
+  return [...rooms].sort((a, b) => lastMsgTime(b) - lastMsgTime(a))
+}
+
+/**
+ * Derive the grouped sidebar sections from the room summaries, the per-room
+ * subscriptions, and the section-definition overlay — the P3 read model.
+ *
+ * Each room lands in EXACTLY ONE section, by this precedence (mirrors the
+ * backend read model): favorite → Favorites; bot → Apps; sectionId=='teams'
+ * → Teams; sectionId==<known custom> → that section; otherwise (no sectionId,
+ * an orphaned sectionId, or a plain chat) → Chats.
+ *
+ * Within a section: `sortMode == 'custom'` orders by the members'
+ * `subscription.sectionOrder` (unordered members last); otherwise by last
+ * message, descending.
+ *
+ * Visibility: empty built-in sections (Favorites/Apps/Teams) are hidden;
+ * custom sections and Chats always render (so a custom section stays a visible
+ * drop target and Chats is the always-present home).
+ *
+ * @param {import('../context/RoomEventsContext/RoomEventsContext').RoomSummary[]} summaries
+ * @param {Record<string, import('../api/types').DMSubscription>} subscriptions
+ * @param {import('../api/types').ChatlistState} chatlist
+ */
+export function deriveSidebarSections(summaries, subscriptions, chatlist) {
+  const overlay = chatlist?.sections?.length ? chatlist : defaultChatlistState()
+  const byId = new Map(overlay.sections.map((s) => [s.id, s]))
+  const order = overlay.sectionOrder.filter((id) => byId.has(id))
+  const buckets = new Map(order.map((id) => [id, []]))
+  if (!buckets.has(BUILTIN_CHATS)) buckets.set(BUILTIN_CHATS, [])
+
+  for (const room of summaries) {
+    const sub = subscriptions[room.id]
+    const isBot = room.type === 'botDM' || !!sub?.u?.isBot
+    const sectionId = sub?.sectionId
+    let target
+    if (sub?.favorite) target = BUILTIN_FAVORITES
+    else if (isBot) target = BUILTIN_APPS
+    else if (sectionId && byId.has(sectionId)) target = sectionId
+    else target = BUILTIN_CHATS
+    if (!buckets.has(target)) target = BUILTIN_CHATS
+    buckets.get(target).push(room)
+  }
+
+  const orderOf = (room) => {
+    const o = subscriptions[room.id]?.sectionOrder
+    return typeof o === 'number' ? o : Infinity
+  }
+  const sections = order.map((id) => {
+    const def = byId.get(id)
+    const rooms = buckets.get(id) ?? []
+    const sorted =
+      def.sortMode === 'custom'
+        ? [...rooms].sort((a, b) => orderOf(a) - orderOf(b))
+        : sortByLastMsgDesc(rooms)
+    return { key: id, title: def.name, sortMode: def.sortMode, builtIn: def.builtIn, rooms: sorted }
+  })
+  return sections.filter((s) => s.rooms.length > 0 || !s.builtIn || s.key === BUILTIN_CHATS)
+}
+
 // Section name: 1–50 chars trimmed, no consecutive spaces, only
 // letters/digits (any script) / space / - _ . / ( ). Mirrors the backend
 // validator so the UI can pre-flight before the RPC round-trip.

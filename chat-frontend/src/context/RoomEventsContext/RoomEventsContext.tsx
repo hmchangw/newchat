@@ -14,7 +14,16 @@ import { BUFFER_MODE, initialState, roomEventsReducer } from './reducer'
 import { useRoomSubscriptions } from './useRoomSubscriptions'
 import { useUnreadCount as useUnreadCountQuery } from './useUnreadCount'
 import { fetchMessageHistory, fetchSurroundingMessages, markRoomRead } from '@/api'
-import type { DMSubscription, Message, Nats, Room, SubscriptionHRInfo } from '@/api/types'
+import { deriveSidebarSections } from '@/lib/chatlist'
+import type {
+  ChatlistState,
+  ChatlistSortMode,
+  DMSubscription,
+  Message,
+  Nats,
+  Room,
+  SubscriptionHRInfo,
+} from '@/api/types'
 
 /** Per-room buffer state — owned by the reducer's `roomState` map. */
 interface RoomBufferState {
@@ -77,6 +86,10 @@ interface RoomEventsState {
    *  so consumers reading the map for either channel or DM rooms see
    *  hrInfo as optional without narrowing. */
   subscriptions: Record<string, DMSubscription>
+  /** Chatlist section-definition overlay (names, order, sortMode). Seeded by
+   *  CHATLIST_LOADED, replaced by CHATLIST_UPDATED (LWW). Membership rides the
+   *  subscriptions; this is O(sections). */
+  chatlist: ChatlistState
 }
 
 /** Payload for the thread-reply hook ThreadEventsProvider registers. */
@@ -401,37 +414,28 @@ export function useRegisterThreadMessageMutationHandler(): RoomEventsContextValu
   return ctx.registerThreadMessageMutationHandler
 }
 
-/** Section descriptor returned by `useSidebarSections`. */
+/** Section descriptor returned by `useSidebarSections`. `key` is the section
+ *  id (a built-in id or a custom-section id — the collapse + React key). */
 export interface SidebarSection {
-  key: 'favorite' | 'apps' | 'channelDm'
+  key: string
   title: string
+  builtIn: boolean
+  sortMode: ChatlistSortMode
   rooms: RoomSummary[]
-  /** Disabled-section banner. Rendered in place of room items when the
-   *  section is expanded — used today for the Favorite section while the
-   *  end-to-end favorite path is unimplemented (`pkg/model.Subscription`
-   *  has no Favorite field yet). */
-  note?: string
 }
 
 /**
- * Partition the room summaries into the three sidebar buckets:
- * Favorite, Apps, Channels and DMs. Bucket membership comes from the
- * `BUCKETS_LOADED` dispatch (fetched by useRoomSubscriptions on login)
- * + the per-type ROOM_ADDED / ROOM_REMOVED maintenance the reducer
- * applies.
- *
- * Returns an ordered array of `{key, title, rooms}` sections so the
- * sidebar can render headers + rows without re-deriving the split.
- *
- * Per-room subscription metadata (subscription.name + hrInfo for DMs)
- * is merged onto each room here so `roomDisplayName` resolves the user's
- * preferred name for channels and the counterpart's hrInfo for DMs
- * (only present on DMSubscription records) without the underlying
- * summary structure carrying those fields directly.
+ * Derive the grouped sidebar (Custom Sections v2 read model): Favorites ·
+ * Apps · Teams · each custom section · Chats, all derived from the per-room
+ * subscription flags (favorite / bot / sectionId) joined with the section
+ * definitions overlay (`state.chatlist`). Orphan-tolerant (a sectionId
+ * pointing at a deleted section renders in Chats). The pure grouping + sort
+ * lives in `lib/chatlist.deriveSidebarSections`; here we only join state and
+ * enrich each room with its subscription's display name + hrInfo.
  */
 export function useSidebarSections(): SidebarSection[] {
   const { state } = useRoomEventsInternal()
-  const { summaries, favoriteIds, appIds, channelDmIds, subscriptions } = state
+  const { summaries, subscriptions, chatlist } = state
   return useMemo(() => {
     const enrich = (room: RoomSummary): RoomSummary => {
       const sub = subscriptions[room.id]
@@ -442,30 +446,9 @@ export function useSidebarSections(): SidebarSection[] {
         hrInfo: sub.hrInfo ?? room.hrInfo,
       }
     }
-    const favorite: RoomSummary[] = []
-    const apps: RoomSummary[] = []
-    const channelDm: RoomSummary[] = []
-    // Cold-start safety: if all three bucket Sets are empty, the
-    // subscription.list RPCs either failed or haven't landed yet.
-    // subscription.list is independent and may have populated `summaries`
-    // already; strict partitioning would drop every one of those
-    // rooms and render an empty sidebar. Fall back to a flat list
-    // under Channels and DMs so the user can still reach their rooms;
-    // the next BUCKETS_LOADED dispatch re-partitions normally.
-    const allBucketsEmpty =
-      favoriteIds.size === 0 && appIds.size === 0 && channelDmIds.size === 0
-    for (const room of summaries) {
-      if (favoriteIds.has(room.id)) favorite.push(enrich(room))
-      else if (appIds.has(room.id)) apps.push(enrich(room))
-      else if (channelDmIds.has(room.id)) channelDm.push(enrich(room))
-      else if (allBucketsEmpty) channelDm.push(enrich(room))
-    }
-    return [
-      { key: 'favorite',  title: 'Favorite',          rooms: favorite },
-      { key: 'apps',      title: 'Apps',              rooms: apps },
-      { key: 'channelDm', title: 'Channels and DMs',  rooms: channelDm },
-    ]
-  }, [summaries, favoriteIds, appIds, channelDmIds, subscriptions])
+    const sections = deriveSidebarSections(summaries, subscriptions, chatlist) as SidebarSection[]
+    return sections.map((s) => ({ ...s, rooms: s.rooms.map(enrich) }))
+  }, [summaries, subscriptions, chatlist])
 }
 
 /**
