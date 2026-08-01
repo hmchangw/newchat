@@ -30,6 +30,15 @@ export interface SubscriptionHRInfo {
 export interface SubscriptionRoom {
   siteId?: string
   name?: string
+  /** Mirrors model.Room.CrossSite — tri-state on the wire. `true` means the
+   *  room has ≥1 member whose home site differs from the room's own siteId;
+   *  `false` means the server has CONFIRMED the room is same-site; both are
+   *  authoritative. Selects the NATS namespace the client subscribes the
+   *  room's `.event` subject to (see `api/_transport/subjects.ts::roomEvent`).
+   *  ABSENT means unknown/unclassified (a pre-existing room the server
+   *  hasn't backfilled yet) — callers MUST default a missing value to `true`
+   *  (global) rather than `false`, matching the server's fail-safe. */
+  crossSite?: boolean
   userCount?: number
   appCount?: number
   lastMsgAt?: string | null
@@ -138,6 +147,10 @@ export interface Room {
   /** Set client-side on DM rooms so the sidebar has a friendly fallback
    *  while the canonical name lands via subscription.update. */
   subscriptionName?: string
+  /** Resolved (never missing) — see SubscriptionRoom.crossSite. Producers of
+   *  a `Room` MUST default a missing wire value to `true` (global) before
+   *  setting this field, so every consumer can read it directly. */
+  crossSite: boolean
 }
 
 /** Mirrors model.Participant — the embedded sender/reader on messages

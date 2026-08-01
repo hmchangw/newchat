@@ -71,9 +71,11 @@ type Handler struct {
 	teamsEmailDomain     string
 	roomMembersLimit     int
 	roomMembersCallLimit int
+	// routeMode gates the namespace(s) same-site room .event uses (ROOM_SUBJECT_MODE); cross-site is always global.
+	routeMode subject.RoomRouteMode
 }
 
-func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64) *Handler {
+func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64, routeMode subject.RoomRouteMode) *Handler {
 	return &Handler{
 		store:                    store,
 		keyStore:                 keyStore,
@@ -88,6 +90,7 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 		publishCore:              publishCore,
 		legacyRoomOrigins:        legacyRoomOrigins,
 		maxResponseBytes:         maxResponseBytes,
+		routeMode:                routeMode,
 	}
 }
 
@@ -1258,6 +1261,7 @@ func (h *Handler) aggregateRoomInfo(ids []string, rooms []model.Room, keys map[s
 		entry.LastMsgAt = timePtrToMillis(r.LastMsgAt)
 		entry.LastMentionAllAt = timePtrToMillis(r.LastMentionAllAt)
 		entry.MinUserLastSeenAt = timePtrToMillis(r.MinUserLastSeenAt)
+		entry.CrossSite = r.CrossSite
 		if kp, ok := keys[id]; ok && kp != nil {
 			enc := base64.StdEncoding.EncodeToString(kp.KeyPair.PrivateKey)
 			ver := kp.Version
@@ -1400,7 +1404,7 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		// above is the source of truth; a publish failure must not fail the RPC.
 		switch room.Type {
 		case model.RoomTypeChannel:
-			h.publishChannelEvent(ctx, roomID, minTime)
+			h.publishChannelEvent(ctx, roomID, room.CrossSite, room.CrossSiteAt, minTime)
 		case model.RoomTypeDM:
 			h.publishDMEvents(ctx, roomID, minTime)
 		default:
@@ -1423,18 +1427,27 @@ func (h *Handler) buildMessageReadEvent(roomID string, floor *time.Time) model.M
 	}
 }
 
-// publishChannelEvent fans a read-floor advance out once to the channel's shared
-// room event subject. Best-effort: a marshal or publish failure is logged, not
-// returned. Used for RoomTypeChannel.
-func (h *Handler) publishChannelEvent(ctx context.Context, roomID string, floor *time.Time) {
+// publishChannelEvent fans a read-floor advance out to the channel's room event
+// subject(s) via publishRoomEvent. Best-effort: failures are logged, not returned.
+func (h *Handler) publishChannelEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, floor *time.Time) {
 	evt := h.buildMessageReadEvent(roomID, floor)
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		slog.Error("marshal message_read channel event failed", "error", err, "roomId", roomID)
 		return
 	}
-	if err := h.publishCore(ctx, subject.RoomEvent(roomID), payload); err != nil {
-		slog.Error("publish message_read channel event failed", "error", err, "roomId", roomID)
+	h.publishRoomEvent(ctx, roomID, crossSite, crossSiteAt, payload, "message_read")
+}
+
+// publishRoomEvent fans a channel room's .event out via subject.RoomEventTargets — the
+// sanctioned path enforced by .semgrep room-subject-publish-must-route. Best-effort.
+func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string, logArgs ...any) {
+	now := time.Now().UTC()
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.publishCore(ctx, subj, payload); err != nil {
+			args := append([]any{"error", err, "op", op, "roomId", roomID, "subject", subj}, logArgs...)
+			slog.Error("publish room event failed", args...)
+		}
 	}
 }
 
@@ -1779,7 +1792,7 @@ func (h *Handler) publishThreadMessageReadEvent(ctx context.Context, tr *model.T
 	}
 	switch room.Type {
 	case model.RoomTypeChannel:
-		h.publishThreadChannelEvent(ctx, tr, floor)
+		h.publishThreadChannelEvent(ctx, tr, room.CrossSite, room.CrossSiteAt, floor)
 	case model.RoomTypeDM:
 		h.publishThreadDMEvents(ctx, tr, floor)
 	default:
@@ -1799,17 +1812,15 @@ func (h *Handler) buildThreadMessageReadEvent(tr *model.ThreadRoom, floor *time.
 	}
 }
 
-// publishThreadChannelEvent fans the advance out once to the parent channel's
-// room event subject. Used for a RoomTypeChannel parent.
-func (h *Handler) publishThreadChannelEvent(ctx context.Context, tr *model.ThreadRoom, floor *time.Time) {
+// publishThreadChannelEvent fans the advance out to the parent channel's room
+// event subject(s) via publishRoomEvent. Used for a RoomTypeChannel parent.
+func (h *Handler) publishThreadChannelEvent(ctx context.Context, tr *model.ThreadRoom, crossSite *bool, crossSiteAt *time.Time, floor *time.Time) {
 	payload, err := json.Marshal(h.buildThreadMessageReadEvent(tr, floor))
 	if err != nil {
 		slog.Error("marshal thread_message_read channel event failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
 		return
 	}
-	if err := h.publishCore(ctx, subject.RoomEvent(tr.RoomID), payload); err != nil {
-		slog.Error("publish thread_message_read channel event failed", "error", err, "roomId", tr.RoomID, "threadRoomId", tr.ID)
-	}
+	h.publishRoomEvent(ctx, tr.RoomID, crossSite, crossSiteAt, payload, "thread_message_read", "threadRoomId", tr.ID)
 }
 
 // publishThreadDMEvents fans the advance out to each DM member on their per-user

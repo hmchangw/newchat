@@ -443,6 +443,20 @@ func (mr *MockSubscriptionStoreMockRecorder) RemoveRole(ctx, account, roomID, ro
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoveRole", reflect.TypeOf((*MockSubscriptionStore)(nil).RemoveRole), ctx, account, roomID, role)
 }
 
+// SetRoomCrossSite mocks base method.
+func (m *MockSubscriptionStore) SetRoomCrossSite(ctx context.Context, roomID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetRoomCrossSite", ctx, roomID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetRoomCrossSite indicates an expected call of SetRoomCrossSite.
+func (mr *MockSubscriptionStoreMockRecorder) SetRoomCrossSite(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRoomCrossSite", reflect.TypeOf((*MockSubscriptionStore)(nil).SetRoomCrossSite), ctx, roomID)
+}
+
 // UpdateRoomName mocks base method.
 func (m *MockSubscriptionStore) UpdateRoomName(ctx context.Context, roomID, newName string) error {
 	m.ctrl.T.Helper()

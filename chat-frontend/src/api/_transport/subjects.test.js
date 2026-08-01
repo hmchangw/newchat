@@ -28,8 +28,16 @@ describe('subjects', () => {
     expect(userRoomEvent('alice')).toBe('chat.user.alice.event.room')
   })
 
-  it('roomEvent still builds the per-room subject', () => {
-    expect(roomEvent('r1')).toBe('chat.room.r1.event')
+  it('roomEvent builds the global per-room subject when crossSite is true', () => {
+    expect(roomEvent('r1', true)).toBe('chat.room.r1.event')
+  })
+
+  it('roomEvent builds the local per-room subject when crossSite is false', () => {
+    expect(roomEvent('r1', false)).toBe('chat.local.room.r1.event')
+  })
+
+  it('roomEvent defaults to the global per-room subject when crossSite is undefined', () => {
+    expect(roomEvent('r1', undefined)).toBe('chat.room.r1.event')
   })
 
   it('memberAdd builds the add-member request subject', () => {

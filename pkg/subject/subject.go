@@ -3,8 +3,14 @@ package subject
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
+
+// RoomLocalityGrace bounds the local→global flip gap server-side: for this long
+// after a flip, publishers also dual-publish to the local subject so members not
+// yet re-subscribed keep receiving (vs. trusting the best-effort nudge).
+const RoomLocalityGrace = 15 * time.Minute
 
 // EncodeAccount maps an account to its NATS subject-token form by replacing the
 // dot separators a dotted account (e.g. a ".bot" account) would otherwise spill
@@ -115,12 +121,21 @@ func UserResponse(account, requestID string) string {
 	return fmt.Sprintf("chat.user.%s.response.%s", account, requestID)
 }
 
-func RoomMetadataUpdate(roomID string) string {
-	return fmt.Sprintf("chat.room.%s.event.metadata.update", roomID)
+// roomBase returns the room-scoped subject root: global=true → chat.room.{id}
+// (gateway-propagated); global=false → chat.local.room.{id} (leaf-filtered, site-local).
+func roomBase(roomID string, global bool) string {
+	if global {
+		return "chat.room." + roomID
+	}
+	return "chat.local.room." + roomID
 }
 
-func RoomMsgStream(roomID string) string {
-	return fmt.Sprintf("chat.room.%s.stream.msg", roomID)
+func RoomMetadataUpdate(roomID string, global bool) string {
+	return roomBase(roomID, global) + ".event.metadata.update"
+}
+
+func RoomMsgStream(roomID string, global bool) string {
+	return roomBase(roomID, global) + ".stream.msg"
 }
 
 func UserRoomUpdate(account string) string {
@@ -312,8 +327,59 @@ func MsgCanonicalReacted(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.reacted", siteID)
 }
 
-func RoomEvent(roomID string) string {
-	return fmt.Sprintf("chat.room.%s.event", roomID)
+func RoomEvent(roomID string, global bool) string {
+	return roomBase(roomID, global) + ".event"
+}
+
+// RoomRouteMode selects which namespace(s) a same-site room's events publish to.
+// Cross-site rooms are always global regardless of mode. This gates a zero-gap
+// rollout: global (current) → dual (migration) → local (reduction achieved).
+type RoomRouteMode int
+
+const (
+	RouteGlobal RoomRouteMode = iota // same-site rooms → chat.room.> (default, no behavior change)
+	RouteDual                        // same-site rooms → chat.local.room.> AND chat.room.> (migration window)
+	RouteLocal                       // same-site rooms → chat.local.room.> only (final)
+)
+
+// ParseRoomRouteMode parses the ROOM_SUBJECT_MODE env value. Unknown → error (caller defaults to global).
+func ParseRoomRouteMode(s string) (RoomRouteMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "global":
+		return RouteGlobal, nil
+	case "dual":
+		return RouteDual, nil
+	case "local":
+		return RouteLocal, nil
+	default:
+		return RouteGlobal, fmt.Errorf("invalid room route mode %q (want global|dual|local)", s)
+	}
+}
+
+// usesLocal reports whether the route mode publishes to the local subject at
+// all (dual or local). Global mode never touches the local namespace.
+func (m RoomRouteMode) usesLocal() bool { return m != RouteGlobal }
+
+// RoomEventTargets returns the .event subject(s) to publish a room event to.
+// Fail-safe: only an explicit crossSite=false routes local (nil/true → global).
+// A room flipped within RoomLocalityGrace (crossSiteAt set) also gets a local copy
+// in local/dual mode so not-yet-resubscribed members keep receiving (order: local, global).
+func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+	if crossSite != nil && !*crossSite { // confirmed same-site
+		switch mode {
+		case RouteLocal:
+			return []string{RoomEvent(roomID, false)}
+		case RouteDual:
+			return []string{RoomEvent(roomID, false), RoomEvent(roomID, true)}
+		default:
+			return []string{RoomEvent(roomID, true)}
+		}
+	}
+	// nil or cross-site → global, plus a local copy during the post-flip grace window.
+	if mode.usesLocal() && crossSiteAt != nil && now.Before(crossSiteAt.Add(RoomLocalityGrace)) {
+		return []string{RoomEvent(roomID, false), RoomEvent(roomID, true)}
+	}
+	return []string{RoomEvent(roomID, true)}
 }
 
 func UserRoomEvent(account string) string {
