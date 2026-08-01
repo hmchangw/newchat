@@ -163,17 +163,16 @@ type SubscriptionReadEvent struct {
 	Timestamp  int64  `json:"timestamp"  bson:"timestamp"`
 }
 
-// ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The source site
-// ships the authoritative NewThreadUnread+Alert; the destination applies them as-is.
+// ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The
+// destination advances the home-replica ThreadSubscription read state
+// (lastSeenAt, hasMention) under a $lt order-safety guard.
 type ThreadReadEvent struct {
-	Account         string   `json:"account"`
-	RoomID          string   `json:"roomId"`
-	ThreadRoomID    string   `json:"threadRoomId"`
-	ParentMessageID string   `json:"parentMessageId"`
-	NewThreadUnread []string `json:"newThreadUnread"`
-	Alert           bool     `json:"alert"`
-	LastSeenAt      int64    `json:"lastSeenAt"`
-	Timestamp       int64    `json:"timestamp"`
+	Account         string `json:"account"`
+	RoomID          string `json:"roomId"`
+	ThreadRoomID    string `json:"threadRoomId"`
+	ParentMessageID string `json:"parentMessageId"`
+	LastSeenAt      int64  `json:"lastSeenAt"`
+	Timestamp       int64  `json:"timestamp"`
 }
 
 // ThreadReadAllEvent is InboxEvent.Payload for "thread_read_all": the destination inbox-worker

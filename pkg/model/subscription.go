@@ -36,7 +36,6 @@ type Subscription struct {
 	JoinedAt           time.Time        `json:"joinedAt" bson:"joinedAt"`
 	LastSeenAt         *time.Time       `json:"lastSeenAt,omitempty" bson:"lastSeenAt,omitempty"`
 	HasMention         bool             `json:"hasMention" bson:"hasMention"`
-	ThreadUnread       []string         `json:"threadUnread,omitempty" bson:"threadUnread,omitempty"`
 	Alert              bool             `json:"alert" bson:"alert"`
 	Muted              bool             `json:"muted" bson:"muted"`
 	Favorite           bool             `json:"favorite" bson:"favorite"`

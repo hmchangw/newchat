@@ -3159,7 +3159,7 @@ func TestHandler_MessageRead_HappyLocal_AlertClears(t *testing.T) {
 	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
-		Alert: true, ThreadUnread: nil,
+		Alert: true,
 	}, nil)
 	f.store.EXPECT().
 		UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).

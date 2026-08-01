@@ -669,7 +669,6 @@ func TestSubscriptionJSON(t *testing.T) {
 			JoinedAt:           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			LastSeenAt:         &lsa,
 			HasMention:         true,
-			ThreadUnread:       []string{"parent-1", "parent-2"},
 			Alert:              true,
 			Muted:              true,
 			Favorite:           true,
@@ -707,7 +706,7 @@ func TestIsRoomMember(t *testing.T) {
 	assert.True(t, model.IsRoomMember(&model.Subscription{RoomID: "r1"}), "populated sub is a member")
 }
 
-func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
+func TestSubscriptionJSON_AlertAlwaysPresent(t *testing.T) {
 	s := model.Subscription{
 		ID:       "s1",
 		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
@@ -723,9 +722,6 @@ func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
 
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
-
-	_, hasThreadUnread := raw["threadUnread"]
-	assert.False(t, hasThreadUnread, "nil/empty ThreadUnread must be omitted from JSON")
 
 	alertVal, hasAlert := raw["alert"]
 	assert.True(t, hasAlert, "alert must be present in JSON even when false")
@@ -745,7 +741,6 @@ func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
 
 	var dst model.Subscription
 	require.NoError(t, json.Unmarshal(data, &dst))
-	assert.Nil(t, dst.ThreadUnread, "absent threadUnread must unmarshal to nil")
 	assert.False(t, dst.Alert)
 	assert.False(t, dst.Favorite)
 }
@@ -3719,8 +3714,6 @@ func TestThreadReadEventJSON(t *testing.T) {
 		RoomID:          "r1",
 		ThreadRoomID:    "tr1",
 		ParentMessageID: "01970a4f8c2d7c9aQRST",
-		NewThreadUnread: []string{"t2", "t3"},
-		Alert:           true,
 		LastSeenAt:      1735689600000,
 		Timestamp:       1735689600001,
 	}
@@ -3730,8 +3723,7 @@ func TestThreadReadEventJSON(t *testing.T) {
 func TestInboxEventJSON_ThreadRead(t *testing.T) {
 	payload := model.ThreadReadEvent{
 		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
-		ParentMessageID: "p1", NewThreadUnread: []string{"t2"},
-		Alert: false, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+		ParentMessageID: "p1", LastSeenAt: 1735689600000, Timestamp: 1735689600001,
 	}
 	data, err := json.Marshal(&payload)
 	require.NoError(t, err)
