@@ -107,7 +107,7 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 
 	for i := range hits {
 		rid := hits[i].RoomID
-		out[i].Sender = &model.MessageSender{Account: hits[i].UserAccount}
+		out[i].Sender = buildSender(hits[i].UserAccount, users, apps)
 		room := &model.MessageRoom{ID: rid}
 		if meta, ok := subs[rid]; ok {
 			room.Type = meta.RoomType
@@ -121,6 +121,8 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 				}
 			case model.RoomTypeBotDM:
 				if app, ok := apps[meta.Name]; ok {
+					isSubscribed := meta.IsSubscribed
+					room.AppInfo = &model.MessageAppInfo{ID: app.ID, Name: app.Name, AssistantName: meta.Name, IsSubscribed: &isSubscribed}
 					room.Name = app.Name
 				} else {
 					room.Name = meta.Name
@@ -170,6 +172,21 @@ func (h *handler) fetchRoomNames(ctx context.Context, bySite map[string][]string
 	}
 	wg.Wait()
 	return names
+}
+
+// buildSender assembles the sender object: hr for human senders, appInfo for
+// bot senders; either is omitted when its lookup missed — the client renders
+// the display name.
+func buildSender(account string, users map[string]HRUser, apps map[string]model.App) *model.MessageSender {
+	s := &model.MessageSender{Account: account}
+	if model.IsBot(account) {
+		if app, ok := apps[account]; ok {
+			s.AppInfo = &model.MessageAppInfo{ID: app.ID, Name: app.Name, AssistantName: account}
+		}
+	} else if hr, ok := users[account]; ok {
+		s.HR = &model.MessageHRInfo{Account: hr.Account, ChineseName: hr.ChineseName, EngName: hr.EngName}
+	}
+	return s
 }
 
 func keysOf(m map[string]struct{}) []string {
