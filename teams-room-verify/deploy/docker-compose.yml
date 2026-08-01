@@ -1,0 +1,21 @@
+name: teams-room-verify
+
+services:
+  teams-room-verify:
+    build:
+      context: ../..
+      dockerfile: teams-room-verify/deploy/Dockerfile
+    environment:
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      # Quoted and NOT written as ${VAR:-default}: the JSON's closing brace would
+      # terminate a compose substitution early. Override by exporting the var.
+      - 'TEAMS_VERIFY_SITE_URLS={"site-local":"http://teams-room-inspector:8080"}'
+      - VERIFY_BATCH_SIZE=${VERIFY_BATCH_SIZE:-200}
+      - MAX_WORKERS=${MAX_WORKERS:-8}
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

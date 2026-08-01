@@ -14,14 +14,11 @@ import (
 // mongoStore implements TeamsChatStore over two databases: readChats (the
 // flagged-chat scan, typically a secondary-preferred read client) and
 // writeChats (the needVerify flag clear, a primary client).
-//
-//nolint:unused // wired up by Task 10's main.go, which constructs *mongoStore via newMongoStore
 type mongoStore struct {
 	readChats  *mongoutil.Collection[model.TeamsChat]
 	writeChats *mongoutil.Collection[model.TeamsChat]
 }
 
-//nolint:unused // called by Task 10's main.go to construct the store at startup
 func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 	return &mongoStore{
 		readChats:  mongoutil.NewCollection[model.TeamsChat](readDB.Collection("teams_chat")),
@@ -31,8 +28,6 @@ func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 
 // ListChatsNeedingVerify returns every teams_chat with needVerify=true,
 // projected to exactly the fields verification needs. Served by the read client.
-//
-//nolint:unused // called by Task 10's main.go through the TeamsChatStore wired into runner.go
 func (s *mongoStore) ListChatsNeedingVerify(ctx context.Context) ([]model.TeamsChat, error) {
 	// Stable _id sort so batch composition is deterministic across runs.
 	// updatedAt is carried as the compare-and-set token for MarkVerified.
@@ -47,8 +42,6 @@ func (s *mongoStore) ListChatsNeedingVerify(ctx context.Context) ([]model.TeamsC
 
 // MarkVerified clears needVerify for the given refs. Written by the primary
 // client. A nil/empty ref slice is a no-op.
-//
-//nolint:unused // called by Task 10's main.go through the TeamsChatStore wired into runner.go
 func (s *mongoStore) MarkVerified(ctx context.Context, refs []VerifiedRef) error {
 	if len(refs) == 0 {
 		return nil
