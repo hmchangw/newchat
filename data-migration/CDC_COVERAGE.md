@@ -115,7 +115,7 @@ Every apply-handler the inbox-worker exposes is either produced by the migration
 | `room_renamed` | ✅ | room `name`/`fname` change |
 | `room_restricted` | ✅ | room `restricted`/`externalAccess` change |
 | `user_status_updated` | ✅ | user `statusText` change (chat-owned; fanned to all sites) |
-| `thread_read` | ⚠️ not emitted | redundant — thread-sub `lastSeenAt` rides `thread_subscription_upserted`; `Subscription.ThreadUnread` is message-pipeline-owned |
+| `thread_read` | ⚠️ not emitted | redundant — thread-sub `lastSeenAt` rides `thread_subscription_upserted` (the only thread-read state; thread-unread is derived at read time) |
 
 ## Open confirmations (source engineers)
 

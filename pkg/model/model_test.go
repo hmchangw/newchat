@@ -3710,20 +3710,18 @@ func TestMessageThreadReadRequestJSON(t *testing.T) {
 
 func TestThreadReadEventJSON(t *testing.T) {
 	src := model.ThreadReadEvent{
-		Account:         "alice",
-		RoomID:          "r1",
-		ThreadRoomID:    "tr1",
-		ParentMessageID: "01970a4f8c2d7c9aQRST",
-		LastSeenAt:      1735689600000,
-		Timestamp:       1735689600001,
+		Account:      "alice",
+		ThreadRoomID: "tr1",
+		LastSeenAt:   1735689600000,
+		Timestamp:    1735689600001,
 	}
 	roundTrip(t, &src, &model.ThreadReadEvent{})
 }
 
 func TestInboxEventJSON_ThreadRead(t *testing.T) {
 	payload := model.ThreadReadEvent{
-		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
-		ParentMessageID: "p1", LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+		Account: "alice", ThreadRoomID: "tr1",
+		LastSeenAt: 1735689600000, Timestamp: 1735689600001,
 	}
 	data, err := json.Marshal(&payload)
 	require.NoError(t, err)

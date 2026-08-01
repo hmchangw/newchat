@@ -174,7 +174,6 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 		RoomID:     "rproj",
 		SiteID:     "site-a",
 		Roles:      []model.Role{model.RoleOwner, model.RoleMember},
-		Alert:      true,
 		LastSeenAt: &lastSeen,
 	})
 
@@ -185,7 +184,6 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, "rproj", got.RoomID)
 	assert.Equal(t, "site-a", got.SiteID)
 	assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, got.Roles)
-	assert.True(t, got.Alert)
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, lastSeen, *got.LastSeenAt, time.Second)
 }

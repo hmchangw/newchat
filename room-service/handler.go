@@ -1308,15 +1308,19 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 
 	now := time.Now().UTC()
 
-	if err := h.store.UpdateSubscriptionRead(ctx, roomID, account, now); err != nil {
-		return nil, fmt.Errorf("update subscription read: %w", err)
-	}
-
+	// The read-position write no longer depends on the fetched sub (alert is
+	// cleared unconditionally), so it runs concurrently with the two lookups.
 	var (
 		userSiteID string
 		room       *model.Room
 	)
 	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		if err := h.store.UpdateSubscriptionRead(gctx, roomID, account, now); err != nil {
+			return fmt.Errorf("update subscription read: %w", err)
+		}
+		return nil
+	})
 	g.Go(func() error {
 		s, err := h.store.GetUserSiteID(gctx, account)
 		if err != nil {
@@ -1345,10 +1349,8 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 			Account:    account,
 			RoomID:     roomID,
 			LastSeenAt: now.UnixMilli(),
-			// Reading the room always clears the alert; the field stays on the
-			// event because data-migration CDC ships real values through it.
-			Alert:     false,
-			Timestamp: now.UnixMilli(),
+			Alert:      false, // reading always clears; see SubscriptionReadEvent.Alert
+			Timestamp:  now.UnixMilli(),
 		}
 		payloadData, err := json.Marshal(payload)
 		if err != nil {
@@ -1617,12 +1619,10 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
 	case userSiteID != h.siteID:
 		payload := model.ThreadReadEvent{
-			Account:         account,
-			RoomID:          roomID,
-			ThreadRoomID:    tsub.ThreadRoomID,
-			ParentMessageID: req.ThreadID,
-			LastSeenAt:      now.UnixMilli(),
-			Timestamp:       now.UnixMilli(),
+			Account:      account,
+			ThreadRoomID: tsub.ThreadRoomID,
+			LastSeenAt:   now.UnixMilli(),
+			Timestamp:    now.UnixMilli(),
 		}
 		payloadData, err := json.Marshal(payload)
 		if err != nil {
@@ -1644,12 +1644,12 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 }
 
 // clearAllThreadRead clears the account's thread-subscription read state on this
-// site (lastSeenAt=now, hasMention=false). It is
-// the per-site leaf of the user-service clear-all-thread-unread aggregator. Unlike
-// the single-thread path it deliberately skips the thread-room read-floor recompute
-// and thread_message_read fan-out (a bulk dismiss must not advance sender receipts).
-// For a cross-site user the whole dismiss rides one thread_read_all event, which
-// inbox-worker applies as the same bulk clear on the user's home replica.
+// site (lastSeenAt=now, hasMention=false). It is the per-site leaf of the
+// user-service clear-all-thread-unread aggregator. It deliberately skips the
+// thread-room read-floor recompute and thread_message_read fan-out (a bulk
+// dismiss must not advance sender receipts). For a cross-site user the whole
+// dismiss rides one thread_read_all event, which inbox-worker applies as the
+// same bulk clear on the user's home replica.
 func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThreadReadAllRequest) (*model.RoomThreadReadAllResponse, error) {
 	var ctx context.Context = c
 	account := strings.TrimSpace(req.Account)
@@ -1660,25 +1660,24 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 
 	now := time.Now().UTC()
 
-	var (
-		homeSite          string
-		clearErr, siteErr error
-	)
+	var homeSite string
 	var g errgroup.Group
 	g.Go(func() error {
-		clearErr = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
-		return clearErr
+		if err := h.store.ClearThreadSubscriptionsForAccount(ctx, account, now); err != nil {
+			return fmt.Errorf("clear thread subscriptions: %w", err)
+		}
+		return nil
 	})
 	g.Go(func() error {
-		homeSite, siteErr = h.store.GetUserSiteID(ctx, account)
-		return siteErr
+		s, err := h.store.GetUserSiteID(ctx, account)
+		if err != nil {
+			return fmt.Errorf("get user siteId: %w", err)
+		}
+		homeSite = s
+		return nil
 	})
-	_ = g.Wait()
-	switch {
-	case clearErr != nil:
-		return nil, fmt.Errorf("clear thread subscriptions: %w", clearErr)
-	case siteErr != nil:
-		return nil, fmt.Errorf("get user siteId: %w", siteErr)
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	switch {

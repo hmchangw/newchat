@@ -444,23 +444,31 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 	return nil
 }
 
-func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
-	tsFilter := bson.M{
-		"threadRoomId": threadRoomID,
-		"userAccount":  account,
-		"$or": bson.A{
-			bson.M{"lastSeenAt": nil},
-			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
-		},
+// threadReadGuard adds the order-safety clause to a thread-subscription filter:
+// only docs whose lastSeenAt is unset or older than the event's may advance, so
+// out-of-order delivery can never regress a read position.
+func threadReadGuard(filter bson.M, lastSeenAt time.Time) bson.M {
+	filter["$or"] = bson.A{
+		bson.M{"lastSeenAt": nil},
+		bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
 	}
-	tsUpdate := bson.M{"$set": bson.M{
+	return filter
+}
+
+// threadReadUpdate is the read-advance write shared by the single and bulk
+// thread-read applies: advance the read position, clear the mention flag.
+func threadReadUpdate(lastSeenAt time.Time) bson.M {
+	return bson.M{"$set": bson.M{
 		"lastSeenAt": lastSeenAt,
 		"updatedAt":  lastSeenAt,
 		"hasMention": false,
 	}}
-	if _, err := s.threadSubCol.UpdateOne(ctx, tsFilter, tsUpdate); err != nil {
-		return fmt.Errorf("apply thread read on thread subscription for %q in thread room %q: %w",
-			account, threadRoomID, err)
+}
+
+func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
+	filter := threadReadGuard(bson.M{"threadRoomId": threadRoomID, "userAccount": account}, lastSeenAt)
+	if _, err := s.threadSubCol.UpdateOne(ctx, filter, threadReadUpdate(lastSeenAt)); err != nil {
+		return fmt.Errorf("apply thread read for %q in thread room %q: %w", account, threadRoomID, err)
 	}
 	return nil
 }
@@ -470,19 +478,8 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, threadRoomID, acc
 // to lastSeenAt under a per-doc $lt guard (so a genuinely newer read is never
 // regressed). Missing docs are a no-op (the mark-all dismiss is best-effort).
 func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error {
-	tsFilter := bson.M{
-		"userAccount": account,
-		"$or": bson.A{
-			bson.M{"lastSeenAt": nil},
-			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
-		},
-	}
-	tsUpdate := bson.M{"$set": bson.M{
-		"lastSeenAt": lastSeenAt,
-		"updatedAt":  lastSeenAt,
-		"hasMention": false,
-	}}
-	if _, err := s.threadSubCol.UpdateMany(ctx, tsFilter, tsUpdate); err != nil {
+	filter := threadReadGuard(bson.M{"userAccount": account}, lastSeenAt)
+	if _, err := s.threadSubCol.UpdateMany(ctx, filter, threadReadUpdate(lastSeenAt)); err != nil {
 		return fmt.Errorf("apply thread read all on thread subscriptions for %q: %w", account, err)
 	}
 	return nil

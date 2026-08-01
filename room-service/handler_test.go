@@ -3360,6 +3360,10 @@ func TestHandler_MessageRead_UpdateSubscriptionReadError(t *testing.T) {
 	}, nil)
 	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
 		Return(errors.New("mongo down"))
+	// The read-position write runs concurrently with these lookups; they may or
+	// may not fire before the errgroup observes the write failure.
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
+	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil).AnyTimes()
 
 	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.Error(t, err)
@@ -4172,9 +4176,7 @@ func TestHandler_MessageThreadRead_CrossSite_PublishesInbox(t *testing.T) {
 	var inner model.ThreadReadEvent
 	require.NoError(t, json.Unmarshal(outer.Payload, &inner))
 	assert.Equal(t, "alice", inner.Account)
-	assert.Equal(t, "r1", inner.RoomID)
 	assert.Equal(t, "tr1", inner.ThreadRoomID)
-	assert.Equal(t, "p1", inner.ParentMessageID)
 	assert.Greater(t, inner.LastSeenAt, int64(0))
 	assert.Greater(t, inner.Timestamp, int64(0))
 }

@@ -1579,12 +1579,10 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 	store := &stubInboxStore{}
 	h := NewHandler(store)
 	payload := model.ThreadReadEvent{
-		Account:         "alice",
-		RoomID:          "r1",
-		ThreadRoomID:    "tr1",
-		ParentMessageID: "p1",
-		LastSeenAt:      1735689600000,
-		Timestamp:       1735689600001,
+		Account:      "alice",
+		ThreadRoomID: "tr1",
+		LastSeenAt:   1735689600000,
+		Timestamp:    1735689600001,
 	}
 	inner, err := json.Marshal(&payload)
 	require.NoError(t, err)
@@ -1620,7 +1618,7 @@ func TestHandler_HandleEvent_ThreadRead_MalformedPayload(t *testing.T) {
 func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	store := &stubInboxStore{applyThreadReadErr: fmt.Errorf("boom")}
 	h := NewHandler(store)
-	payload := model.ThreadReadEvent{Account: "a", RoomID: "r", ThreadRoomID: "tr", ParentMessageID: "p"}
+	payload := model.ThreadReadEvent{Account: "a", ThreadRoomID: "tr"}
 	inner, _ := json.Marshal(&payload)
 	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
 	data, _ := json.Marshal(&outer)

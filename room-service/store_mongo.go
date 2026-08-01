@@ -261,7 +261,7 @@ var roomAppReadProjection = bson.D{
 // integration test guards drift.
 var subscriptionReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "u", Value: 1}, {Key: "roomId", Value: 1},
-	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1}, {Key: "alert", Value: 1},
+	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1},
 	{Key: "lastSeenAt", Value: 1},
 }
 

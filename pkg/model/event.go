@@ -159,24 +159,26 @@ type SubscriptionReadEvent struct {
 	Account    string `json:"account"    bson:"account"`
 	RoomID     string `json:"roomId"     bson:"roomId"`
 	LastSeenAt int64  `json:"lastSeenAt" bson:"lastSeenAt"`
-	Alert      bool   `json:"alert"      bson:"alert"`
-	Timestamp  int64  `json:"timestamp"  bson:"timestamp"`
+	// Alert carries real values only from data-migration CDC (which mirrors the
+	// legacy stack's alert flag); live room reads always send false, since
+	// reading a room clears the alert.
+	Alert     bool  `json:"alert"      bson:"alert"`
+	Timestamp int64 `json:"timestamp"  bson:"timestamp"`
 }
 
 // ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The
 // destination advances the home-replica ThreadSubscription read state
-// (lastSeenAt, hasMention) under a $lt order-safety guard.
+// (lastSeenAt, hasMention) under a $lt order-safety guard. The room context
+// rides the OutboxEvent envelope, not this payload.
 type ThreadReadEvent struct {
-	Account         string `json:"account"`
-	RoomID          string `json:"roomId"`
-	ThreadRoomID    string `json:"threadRoomId"`
-	ParentMessageID string `json:"parentMessageId"`
-	LastSeenAt      int64  `json:"lastSeenAt"`
-	Timestamp       int64  `json:"timestamp"`
+	Account      string `json:"account"`
+	ThreadRoomID string `json:"threadRoomId"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+	Timestamp    int64  `json:"timestamp"`
 }
 
 // ThreadReadAllEvent is InboxEvent.Payload for "thread_read_all": the destination inbox-worker
-// advances every thread subscription to LastSeenAt under a high-water-mark guard, clearing hasMention/threadUnread/alert.
+// advances every thread subscription to LastSeenAt under a high-water-mark guard, clearing hasMention.
 type ThreadReadAllEvent struct {
 	Account    string `json:"account"`
 	LastSeenAt int64  `json:"lastSeenAt"`

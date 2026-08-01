@@ -57,7 +57,10 @@ room-level `alert` flag (below).
 ### 1. `pkg/model`
 
 - `subscription.go`: delete the `ThreadUnread` field from `Subscription`.
-- `event.go`: `ThreadReadEvent` drops `NewThreadUnread` and `Alert`. Doc comment
+- `event.go`: `ThreadReadEvent` drops `NewThreadUnread` and `Alert` (and, per the
+  post-implementation simplify review, the write-only `RoomID` and
+  `ParentMessageID` — the destination reads only `ThreadRoomID`/`Account`/
+  `LastSeenAt`, and room context rides the OutboxEvent envelope). Doc comment
   updated: the event advances the home-replica `ThreadSubscription` read state
   (lastSeenAt, hasMention) only.
 - `model_test.go`: drop the "nil/empty ThreadUnread must be omitted" assertion and
