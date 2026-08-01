@@ -89,4 +89,9 @@ type TeamsChat struct {
 	UpdatedAt           time.Time         `json:"updatedAt" bson:"updatedAt"` // stamped now at build time; written on every upsert
 	NeedMemberSync      bool              `json:"needMemberSync" bson:"needMemberSync"`
 	NeedCreateRoom      bool              `json:"needCreateRoom" bson:"needCreateRoom"` // set true by teams-chat-sync (oneOnOne) or teams-chat-member-sync (group); consumed by room creation
+	// NeedVerify is set true by teams-room-creation in the same write that clears
+	// NeedCreateRoom, so it means "a creation event for this chat was durably
+	// published". teams-room-verify audits these chats against their site and
+	// clears the flag only for chats whose room and subscriptions converged.
+	NeedVerify bool `json:"needVerify" bson:"needVerify"`
 }

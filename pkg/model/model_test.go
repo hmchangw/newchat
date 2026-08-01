@@ -4989,3 +4989,16 @@ func TestSearchMessageEnrichmentJSON(t *testing.T) {
 	assert.NotContains(t, string(b), "\"sender\"")
 	assert.NotContains(t, string(b), "\"tshow\"")
 }
+
+func TestTeamsChatJSON_NeedVerify(t *testing.T) {
+	c := model.TeamsChat{ID: "19:abc@thread.v2", SiteID: "site-a", NeedVerify: true}
+	roundTrip(t, &c, &model.TeamsChat{})
+
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"needVerify":true`) {
+		t.Errorf("needVerify missing from JSON: %s", data)
+	}
+}
