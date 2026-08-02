@@ -15,9 +15,10 @@ make -C tools/loadgen/deploy run  PRESET=medium RATE=500 DURATION=60s
 
 `make up` brings up the shared `docker-local` stack (NATS, MongoDB,
 Cassandra, Valkey, Elasticsearch, every microservice) and then the
-load-test-only overlay (loadgen, Prometheus, Grafana). The overlay joins
-the `chat-local` network so it can reach the same services any developer
-sees with `make up` at the repo root.
+load-test-only overlay (loadgen, Prometheus, Grafana, cAdvisor and a
+prometheus-nats-exporter sidecar). The overlay joins the `chat-local`
+network so it can reach the same services any developer sees with
+`make up` at the repo root.
 
 For live dashboards:
 
@@ -25,6 +26,25 @@ For live dashboards:
 make -C tools/loadgen/deploy run-dashboards PRESET=medium
 # Grafana at http://localhost:3000 (anonymous admin)
 ```
+
+### What Prometheus scrapes
+
+Beyond loadgen's own series, the overlay's Prometheus collects the three
+sources needed to tell "the service is too slow" apart from "the harness is
+too slow":
+
+| Target | Port | Carries |
+|---|---|---|
+| `nats-exporter` | `:7777` | JetStream consumer backlog — `num_pending`, `num_ack_pending`, `num_redelivered` |
+| every `chat-local-services` container (Docker SD) | `:2112` | o11y SDK metrics — `http.server.request.duration`, `db.client.operation.duration` |
+| 7 services (static) | `:9090` | hand-rolled counters, incl. `search_service_requests_total{type,status}` |
+| `cadvisor` | `:8080` | per-container CPU/memory |
+
+Consumer backlog matters most: per `docs/specs/o11y/o11y-slo.md` §0.1 and §7 it
+is the *primary* enforcement signal for every async SLO, because the event
+ratios behind those SLOs are approximate until the outcome ledger lands. A run
+where latency looks fine but `num_pending` climbs monotonically is a run that
+found a bottleneck.
 
 Tear down:
 
