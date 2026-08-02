@@ -3851,6 +3851,15 @@ func TestHandleSyncCreateDM_SelfDM(t *testing.T) {
 	// One subscription.update; no inbox (same-site by definition).
 	require.Len(t, capture.captured, 1)
 	assert.Equal(t, subject.SubscriptionUpdate("alice"), capture.captured[0].subject)
+
+	// The added event embeds the room view; a self-DM is keyless and
+	// definitively same-site.
+	evt := decodeSubUpdate(t, capture.captured, "alice")
+	require.NotNil(t, evt.Subscription.Room, "self-DM added event must embed subscription.room")
+	assert.Equal(t, 1, evt.Subscription.Room.UserCount)
+	assert.Nil(t, evt.Subscription.Room.PrivateKey, "self-DM rooms are keyless — no key fields")
+	require.NotNil(t, evt.Subscription.Room.CrossSite)
+	assert.False(t, *evt.Subscription.Room.CrossSite)
 }
 
 func TestHandleSyncCreateDM_SelfDM_StoreErrors(t *testing.T) {
@@ -6920,6 +6929,15 @@ func TestServerCreateDM_DM_SetsCounterpartRoomName(t *testing.T) {
 
 	assert.Equal(t, "Bob", decodeSubUpdate(t, capture.captured, "alice").RoomName)
 	assert.Equal(t, "Alice", decodeSubUpdate(t, capture.captured, "bob").RoomName)
+
+	// Both "added" events embed the room view; DM rooms are keyless.
+	for _, account := range []string{"alice", "bob"} {
+		evt := decodeSubUpdate(t, capture.captured, account)
+		require.NotNil(t, evt.Subscription.Room, "%s: DM added event must embed subscription.room", account)
+		assert.Equal(t, 2, evt.Subscription.Room.UserCount)
+		assert.Nil(t, evt.Subscription.Room.PrivateKey, "DM rooms are keyless — no key fields")
+		require.NotNil(t, evt.Subscription.Room.CrossSite)
+	}
 }
 
 func TestServerCreateDM_BotDM_SetsAppNameForHuman(t *testing.T) {

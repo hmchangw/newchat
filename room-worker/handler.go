@@ -1415,7 +1415,7 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 	if err != nil {
 		return nil, fmt.Errorf("re-read self-DM sub after write: %w", err)
 	}
-	h.publishSubscriptionUpdates(ctx, []*model.Subscription{sub}, []*model.User{requester}, requestID)
+	h.publishSubscriptionUpdates(ctx, room, []*model.Subscription{sub}, []*model.User{requester}, requestID)
 	return sub, nil
 }
 
@@ -2087,7 +2087,7 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		return nil, fmt.Errorf("re-read DM subs after write: %w", err)
 	}
 
-	h.publishSubscriptionUpdates(ctx, []*model.Subscription{requesterSub, otherSub}, []*model.User{requester, other}, requestID)
+	h.publishSubscriptionUpdates(ctx, room, []*model.Subscription{requesterSub, otherSub}, []*model.User{requester, other}, requestID)
 
 	// Inbox failure means the remote site won't learn about the room; fail the request.
 	if err := h.publishSyncDMInbox(ctx, room, requester, other, requesterSub.JoinedAt); err != nil {
@@ -2157,15 +2157,20 @@ func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subsc
 	}
 }
 
-func (h *Handler) publishSubscriptionUpdates(ctx context.Context, subs []*model.Subscription, users []*model.User, requestID string) {
+func (h *Handler) publishSubscriptionUpdates(ctx context.Context, room *model.Room, subs []*model.Subscription, users []*model.User, requestID string) {
 	userByAccount := make(map[string]*model.User, len(users))
 	for _, u := range users {
 		userByAccount[u.Account] = u
 	}
+	// DM/botDM/self-DM rooms are keyless by design → nil pair, no key fields.
+	// The in-memory room already carries correct counts/CrossSite (set at build).
+	subRoom := subscriptionRoomFor(room, nil)
 	for _, sub := range subs {
+		subCopy := *sub
+		subCopy.Room = subRoom
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
-			Subscription: *sub,
+			Subscription: subCopy,
 			Action:       "added",
 			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
 			Timestamp:    time.Now().UTC().UnixMilli(),
