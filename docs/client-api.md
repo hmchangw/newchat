@@ -890,6 +890,7 @@ user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
 | `isSubscribed` | boolean | Optional. Whether the user is actively subscribed. |
 | `historySharedSince` | RFC3339 timestamp | Optional. Boundary before which prior history is shared. |
 | `lastSeenAt` | RFC3339 timestamp | Optional. The user's last-seen time in the room. |
+| `threadUnread` | string[] | Optional. Parent message IDs of threads with unread replies. |
 | `restricted` | boolean | Optional. Denormalized room restricted flag. |
 | `externalAccess` | boolean | Optional. Denormalized room external-access flag. |
 | `room` | [SubscriptionRoom](#subscriptionroom) | Optional. Room-derived view (read-time enrichment; user-service endpoints only). |
