@@ -116,7 +116,13 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			continue
 		}
 		memberSite[member.Account] = user.SiteID
-		sub := newSub(idgen.GenerateUUIDv7(), user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
+		// Human members get owner+member so they can admin the migrated room; bot
+		// and platform-admin accounts stay member-only.
+		roles := []model.Role{model.RoleOwner, model.RoleMember}
+		if model.IsBot(member.Account) || model.IsPlatformAdminAccount(member.Account) {
+			roles = []model.Role{model.RoleMember}
+		}
+		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Name, false, acceptedAt)
 		sub.Origin = model.OriginTeams
 		if !member.VisibleHistoryStartDateTime.IsZero() {
 			t := member.VisibleHistoryStartDateTime.UTC()
