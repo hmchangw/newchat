@@ -512,6 +512,22 @@ func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string
 	return nil
 }
 
+// AddThreadUnread marks parentMessageID unread for accounts' subscriptions in
+// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
+// redelivery; accounts not subscribed simply match nothing.
+func (s *mongoInboxStore) AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	if _, err := s.subCol.UpdateMany(ctx,
+		bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}},
+		bson.M{"$addToSet": bson.M{"threadUnread": parentMessageID}},
+	); err != nil {
+		return fmt.Errorf("add thread unread %q in room %q: %w", parentMessageID, roomID, err)
+	}
+	return nil
+}
+
 // laneMsg pairs a consumed JetStream message with the per-message context
 // carrying its consumer span. The o11y/nats facade delivers (ctx, jetstream.Msg)
 // separately rather than an o11y-owned message type, so the two-lane dispatch

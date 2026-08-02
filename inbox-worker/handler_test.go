@@ -81,6 +81,12 @@ type threadReadAll struct {
 	lastSeenAt time.Time
 }
 
+type threadUnreadAdded struct {
+	roomID          string
+	parentMessageID string
+	accounts        []string
+}
+
 type stubInboxStore struct {
 	mu                    sync.Mutex
 	subscriptions         []model.Subscription
@@ -100,6 +106,8 @@ type stubInboxStore struct {
 	applyThreadReadErr    error
 	threadReadAlls        []threadReadAll
 	applyThreadReadAllErr error
+	threadUnreadAdded     []threadUnreadAdded
+	addThreadUnreadErr    error
 	userStatusUpdates     []userStatusUpdate
 	userStatusErr         error
 	settingsUpdates       []userSettingsUpdate
@@ -350,6 +358,18 @@ func (s *stubInboxStore) ApplyThreadReadAll(_ context.Context, account string, l
 		return s.applyThreadReadAllErr
 	}
 	s.threadReadAlls = append(s.threadReadAlls, threadReadAll{account: account, lastSeenAt: lastSeenAt})
+	return nil
+}
+
+func (s *stubInboxStore) AddThreadUnread(_ context.Context, roomID, parentMessageID string, accounts []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.addThreadUnreadErr != nil {
+		return s.addThreadUnreadErr
+	}
+	s.threadUnreadAdded = append(s.threadUnreadAdded, threadUnreadAdded{
+		roomID: roomID, parentMessageID: parentMessageID, accounts: accounts,
+	})
 	return nil
 }
 
@@ -1628,6 +1648,57 @@ func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	payload := model.ThreadReadEvent{Account: "a", ThreadRoomID: "tr"}
 	inner, _ := json.Marshal(&payload)
 	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, _ := json.Marshal(&outer)
+	err := h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+}
+
+func TestHandler_HandleEvent_ThreadUnreadAdded_Happy(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	payload := model.ThreadUnreadAddedEvent{
+		RoomID:          "r1",
+		ParentMessageID: "p1",
+		Accounts:        []string{"alice", "bob"},
+		Timestamp:       1735689600001,
+	}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{
+		Type:       model.InboxThreadUnreadAdded,
+		SiteID:     "site-a",
+		DestSiteID: "site-b",
+		Payload:    inner,
+		Timestamp:  1735689600002,
+	}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+	require.Len(t, store.threadUnreadAdded, 1)
+	tu := store.threadUnreadAdded[0]
+	assert.Equal(t, "r1", tu.roomID)
+	assert.Equal(t, "p1", tu.parentMessageID)
+	assert.Equal(t, []string{"alice", "bob"}, tu.accounts)
+}
+
+func TestHandler_HandleEvent_ThreadUnreadAdded_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	outer := model.InboxEvent{Type: model.InboxThreadUnreadAdded, Payload: []byte("{")}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+	err = h.HandleEvent(context.Background(), data)
+	require.Error(t, err)
+	assert.Len(t, store.threadUnreadAdded, 0)
+}
+
+func TestHandler_HandleEvent_ThreadUnreadAdded_StoreError(t *testing.T) {
+	store := &stubInboxStore{addThreadUnreadErr: fmt.Errorf("boom")}
+	h := NewHandler(store)
+	payload := model.ThreadUnreadAddedEvent{RoomID: "r1", ParentMessageID: "p1", Accounts: []string{"alice"}}
+	inner, _ := json.Marshal(&payload)
+	outer := model.InboxEvent{Type: model.InboxThreadUnreadAdded, Payload: inner}
 	data, _ := json.Marshal(&outer)
 	err := h.HandleEvent(context.Background(), data)
 	require.Error(t, err)

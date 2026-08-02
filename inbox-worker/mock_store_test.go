@@ -42,6 +42,20 @@ func (m *MockInboxStore) EXPECT() *MockInboxStoreMockRecorder {
 	return m.recorder
 }
 
+// AddThreadUnread mocks base method.
+func (m *MockInboxStore) AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddThreadUnread", ctx, roomID, parentMessageID, accounts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddThreadUnread indicates an expected call of AddThreadUnread.
+func (mr *MockInboxStoreMockRecorder) AddThreadUnread(ctx, roomID, parentMessageID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddThreadUnread", reflect.TypeOf((*MockInboxStore)(nil).AddThreadUnread), ctx, roomID, parentMessageID, accounts)
+}
+
 // ApplySubscriptionRestriction mocks base method.
 func (m *MockInboxStore) ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()

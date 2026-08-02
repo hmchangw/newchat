@@ -872,6 +872,38 @@ func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
 	assert.Equal(t, []string{"p9"}, subB.ThreadUnread)
 }
 
+func TestInboxStore_AddThreadUnread_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	ctx := context.Background()
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		&model.Subscription{ID: "sA", RoomID: "r1", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+		&model.Subscription{ID: "sB", RoomID: "r1", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p1"}},
+		&model.Subscription{ID: "sC", RoomID: "r2", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", []string{"alice", "bob"}))
+	// Idempotent under redelivery:
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", []string{"alice", "bob"}))
+
+	var a, b, c model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA"}).Decode(&a))
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB"}).Decode(&b))
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sC"}).Decode(&c))
+	assert.Equal(t, []string{"p1"}, a.ThreadUnread)
+	assert.Equal(t, []string{"p1"}, b.ThreadUnread, "$addToSet must not duplicate")
+	assert.Nil(t, c.ThreadUnread, "other rooms untouched")
+}
+
+func TestInboxStore_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	ctx := context.Background()
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", nil))
+}
+
 // Stale event: thread-sub guard rejects, same gate skips the Subscription.
 func TestInboxStore_ApplyThreadRead_OutOfOrderThreadSub(t *testing.T) {
 	db := setupMongo(t)

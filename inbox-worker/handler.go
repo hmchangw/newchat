@@ -52,6 +52,10 @@ type InboxStore interface {
 	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and $unsets
 	// threadUnread on every subscription that currently has unread threads.
 	ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error
+	// AddThreadUnread marks parentMessageID unread for accounts' subscriptions in
+	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
+	// redelivery; accounts not subscribed simply match nothing.
+	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
 	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
@@ -126,6 +130,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleThreadRead(ctx, &evt)
 	case model.InboxThreadReadAll:
 		return h.handleThreadReadAll(ctx, &evt)
+	case model.InboxThreadUnreadAdded:
+		return h.handleThreadUnreadAdded(ctx, &evt)
 	case model.InboxRoomRenamed:
 		return h.handleRoomRenamed(ctx, &evt)
 	case model.InboxRoomRestricted:
@@ -362,6 +368,19 @@ func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read all (account %q): %w", e.Account, err)
+	}
+	return nil
+}
+
+// handleThreadUnreadAdded $addToSet-merges parentMessageID into the
+// home-replica Subscription.threadUnread for each account in the event.
+func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.ThreadUnreadAddedEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal thread_unread_added payload: %w", err)
+	}
+	if err := h.store.AddThreadUnread(ctx, e.RoomID, e.ParentMessageID, e.Accounts); err != nil {
+		return fmt.Errorf("add thread unread %q in room %q: %w", e.ParentMessageID, e.RoomID, err)
 	}
 	return nil
 }
