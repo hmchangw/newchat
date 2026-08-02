@@ -1861,10 +1861,14 @@ func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenNewThreadUnreadEmpty:
-// an empty NewThreadUnread on the event clears the room from the badge cache.
-func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenNewThreadUnreadEmpty(t *testing.T) {
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenPostStateEmpty: the
+// live post-apply subscription state (not the event's NewThreadUnread field)
+// has no threadUnread left -> ClearRoom fires.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenPostStateEmpty(t *testing.T) {
 	store := &stubInboxStore{}
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+	})
 	h := NewHandler(store)
 	badge := &fakeBadgeCache{}
 	h.badge = badge
@@ -1881,17 +1885,71 @@ func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenNewThreadUnreadEmpt
 	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, badge.getClearRooms()[0])
 }
 
-// TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenNewThreadUnreadNonEmpty:
-// a non-empty NewThreadUnread must not clear the room.
-func TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenNewThreadUnreadNonEmpty(t *testing.T) {
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenPostStateNonEmpty:
+// the live post-apply subscription still carries unread threads (e.g. a
+// racing thread_unread_added re-added one after this event was published,
+// or ApplyThreadRead's own write left some) -> no ClearRoom, regardless of
+// what the event's NewThreadUnread said.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenPostStateNonEmpty(t *testing.T) {
 	store := &stubInboxStore{}
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p3"},
+	})
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+	// Event itself claims NewThreadUnread is empty, but the store's live
+	// post-state (seeded above) says otherwise — post-state must win.
+	payload := model.ThreadReadEvent{Account: "alice", RoomID: "r1", ThreadRoomID: "tr1", LastSeenAt: 1735689600000}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.Empty(t, badge.getClearRooms())
+}
+
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_StaleRedeliveredEvent_NoClear:
+// ApplyThreadRead's $lt guard rejected a stale/redelivered event (the store
+// left the subscription's threadUnread untouched, non-empty) -> no ClearRoom,
+// even though the stale event's own NewThreadUnread is empty.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_StaleRedeliveredEvent_NoClear(t *testing.T) {
+	store := &stubInboxStore{}
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p9"}, // untouched by the rejected stale apply
+	})
 	h := NewHandler(store)
 	badge := &fakeBadgeCache{}
 	h.badge = badge
 	payload := model.ThreadReadEvent{
 		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
-		NewThreadUnread: []string{"p2"}, LastSeenAt: 1735689600000,
+		NewThreadUnread: nil, LastSeenAt: 1735689600000, // stale event claims empty
 	}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.Empty(t, badge.getClearRooms())
+}
+
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_SkipsOnPostStateLookupError: a
+// SubscriptionHasThreadUnread error after the apply must skip ClearRoom
+// without failing the already-applied thread read.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_SkipsOnPostStateLookupError(t *testing.T) {
+	store := &stubInboxStore{hasThreadUnreadErr: fmt.Errorf("mongo down")}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+	payload := model.ThreadReadEvent{Account: "alice", RoomID: "r1", ThreadRoomID: "tr1", LastSeenAt: 1735689600000}
 	inner, err := json.Marshal(&payload)
 	require.NoError(t, err)
 	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}

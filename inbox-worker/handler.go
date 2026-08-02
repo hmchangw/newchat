@@ -396,10 +396,18 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
 			e.ThreadRoomID, e.Account, err)
 	}
-	// Best-effort badge cache clear: the source site's messageThreadRead only
-	// carries NewThreadUnread empty when its own $pull left nothing unread.
-	if h.badge != nil && len(e.NewThreadUnread) == 0 {
-		h.badge.ClearRoom(ctx, e.Account, e.RoomID)
+	// Best-effort badge cache clear: gate on live post-apply state, not the
+	// event's NewThreadUnread — ApplyThreadRead's $lt guard may have rejected
+	// a stale/redelivered event (leaving the subscription untouched), or a
+	// racing thread_unread_added may have re-added unread state since this
+	// event was published. Mirrors handleSubscriptionRead's post-state check.
+	if h.badge != nil {
+		hasUnread, err := h.store.SubscriptionHasThreadUnread(ctx, e.RoomID, e.Account)
+		if err != nil {
+			slog.WarnContext(ctx, "check thread unread for badge clear failed", "error", err, "account", e.Account, "room_id", e.RoomID)
+		} else if !hasUnread {
+			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
+		}
 	}
 	return nil
 }
