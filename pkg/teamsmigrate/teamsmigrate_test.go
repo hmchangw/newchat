@@ -41,6 +41,18 @@ func TestEmployeeIDFromGraphID_Deterministic(t *testing.T) {
 	assert.Len(t, a, 17, "17-char base62 (native-user id shape)")
 }
 
+func TestRoomIDFromChatID_Deterministic(t *testing.T) {
+	group := RoomIDFromChatID("19:abc@thread.v2")
+	assert.Equal(t, group, RoomIDFromChatID("19:abc@thread.v2"), "same chat id → same room id on every redelivery")
+	assert.NotEqual(t, group, RoomIDFromChatID("19:def@thread.v2"))
+	assert.Len(t, group, 17, "17-char base62 (room id shape)")
+	assert.NotContains(t, group, "@", "a room id must survive NATS subject tokenisation")
+	assert.NotContains(t, group, ".")
+
+	dm := RoomIDFromChatID("19:abc@unq.gbl.spaces")
+	assert.NotEqual(t, group, dm, "a 1:1 chat and a group chat never collide")
+}
+
 func TestDeterministicMessageID_Stable(t *testing.T) {
 	a := DeterministicMessageID("r1", "tm-1")
 	assert.Equal(t, a, DeterministicMessageID("r1", "tm-1"), "same room+teams id → same message id")

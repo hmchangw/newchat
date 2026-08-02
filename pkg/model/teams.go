@@ -101,6 +101,14 @@ type TeamsChat struct {
 // for a batch of Teams chat ids. Service-to-service HTTP — not a client-facing
 // RPC — so these are absent from docs/client-api.md by design.
 
+// TeamsRoomVerifyMaxChatIDs bounds one verify request. It lives beside the wire
+// contract because both ends depend on it: the inspector rejects a larger batch,
+// and teams-room-verify's config validation refuses a VERIFY_BATCH_SIZE above it.
+// Without the shared constant, raising that env var past the cap would make every
+// batch 400 and leave the chats flagged forever, which reads exactly like a
+// healthy no-op run.
+const TeamsRoomVerifyMaxChatIDs = 500
+
 // TeamsRoomVerifyRequest is the body of POST /internal/teams/rooms/verify.
 // Chat ids are Graph ids (…@thread.v2 / …@unq.gbl.spaces); the inspector maps
 // each to its room id itself, so caller and callee speak one vocabulary.

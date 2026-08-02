@@ -30,15 +30,19 @@ type runner struct {
 	stats map[string]*siteStats
 }
 
-// siteStats accumulates one site's outcome across its batches, so the summary
-// is per site rather than per batch.
+// siteStats accumulates one site's outcome across its batches, so the summary is
+// per site rather than per batch. The three outcome counters partition the
+// answered chats, so the checked total is their sum rather than a fourth counter
+// that could drift out of step with them.
 type siteStats struct {
-	checked      int
 	roomsMissing int
 	subsMismatch int
 	ok           int
 	unanswered   int
 }
+
+// checked is the number of chats the inspector answered about.
+func (s *siteStats) checked() int { return s.roomsMissing + s.subsMismatch + s.ok }
 
 func newRunner(store TeamsChatStore, verify verifyFunc, cfg runConfig) *runner {
 	return &runner{store: store, verify: verify, cfg: cfg, stats: make(map[string]*siteStats)}
@@ -118,7 +122,6 @@ func (r *runner) verifyBatch(ctx context.Context, b batch) {
 				"chat_id", c.ID, "site_id", b.siteID)
 			continue
 		}
-		st.checked++
 		expected := len(c.Members)
 		switch {
 		case !res.RoomExists:
@@ -164,7 +167,6 @@ func (r *runner) addStats(siteID string, st *siteStats) {
 		agg = &siteStats{}
 		r.stats[siteID] = agg
 	}
-	agg.checked += st.checked
 	agg.roomsMissing += st.roomsMissing
 	agg.subsMismatch += st.subsMismatch
 	agg.ok += st.ok
@@ -178,7 +180,7 @@ func (r *runner) logSummary(ctx context.Context) {
 	for siteID, st := range r.stats {
 		slog.InfoContext(ctx, "teams room verification summary",
 			"site_id", siteID,
-			"chats_checked", st.checked,
+			"chats_checked", st.checked(),
 			"rooms_missing", st.roomsMissing,
 			"subs_mismatched", st.subsMismatch,
 			"chats_ok", st.ok,

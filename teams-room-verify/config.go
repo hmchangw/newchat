@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // Config is the job's environment configuration. Mongo is the global database
@@ -55,6 +57,13 @@ func parseSiteURLs(raw string) (map[string]string, error) {
 func validateConfig(cfg Config) error {
 	if cfg.BatchSize <= 0 {
 		return fmt.Errorf("invalid config: VERIFY_BATCH_SIZE must be positive")
+	}
+	// Above the inspector's per-request cap every batch would 400, and the chats
+	// would stay flagged forever — a failure that reads just like a healthy run.
+	// Fail at startup instead.
+	if cfg.BatchSize > model.TeamsRoomVerifyMaxChatIDs {
+		return fmt.Errorf("invalid config: VERIFY_BATCH_SIZE must not exceed %d, the inspector's per-request cap",
+			model.TeamsRoomVerifyMaxChatIDs)
 	}
 	if cfg.MaxWorkers <= 0 {
 		return fmt.Errorf("invalid config: MAX_WORKERS must be positive")

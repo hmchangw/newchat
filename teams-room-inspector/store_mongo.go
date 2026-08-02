@@ -50,7 +50,7 @@ func (s *mongoStore) RoomStates(ctx context.Context, roomIDs []string) (map[stri
 		return nil, fmt.Errorf("find rooms: %w", err)
 	}
 	for _, r := range rooms {
-		out[r.ID] = RoomState{RoomID: r.ID, Exists: true, UserCount: r.UserCount}
+		out[r.ID] = RoomState{Exists: true, UserCount: r.UserCount}
 	}
 
 	counts, err := s.subs.Aggregate(ctx, bson.A{
@@ -62,7 +62,6 @@ func (s *mongoStore) RoomStates(ctx context.Context, roomIDs []string) (map[stri
 	}
 	for _, c := range counts {
 		st := out[c.RoomID]
-		st.RoomID = c.RoomID
 		st.SubscriptionCount = c.Count
 		out[c.RoomID] = st
 	}

@@ -9,7 +9,6 @@ import "context"
 // count of subscription documents pointing at it, and UserCount the room's
 // denormalized counter (reported so drift between the two is visible).
 type RoomState struct {
-	RoomID            string
 	Exists            bool
 	UserCount         int
 	SubscriptionCount int

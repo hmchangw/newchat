@@ -66,6 +66,20 @@ func EmployeeIDFromGraphID(graphID string) string {
 	return idgen.DeterministicID([]byte(graphID))
 }
 
+// RoomIDFromChatID derives a migrated room's id from its Teams chat id. A Graph
+// chat id (…@thread.v2 / …@unq.gbl.spaces) can't be a room id — its dots and @
+// break NATS subject tokenisation — so the room id is a deterministic base62
+// digest of it, stable across redeliveries.
+//
+// This lives here, not inline at the call sites, because the writer
+// (room-worker, creating the room) and the readers (teams-room-inspector,
+// looking one up) must agree forever. Inlining the primitive in both would make
+// a future change to the derivation silently mismatch instead of failing to
+// compile.
+func RoomIDFromChatID(chatID string) string {
+	return idgen.DeterministicID([]byte(chatID))
+}
+
 // DeterministicMessageID is a stable, valid message id derived from the room scope +
 // the Teams message id. Teams ids are unique only per conversation, so scoping by room
 // keeps a batch re-run idempotent AND prevents cross-room id collisions.

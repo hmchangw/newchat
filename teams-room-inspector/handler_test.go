@@ -49,8 +49,8 @@ func TestHandler_HandleVerify_ReportsPerChatState(t *testing.T) {
 
 	store.EXPECT().RoomStates(gomock.Any(), []string{roomFull, roomShort, roomMissing}).
 		Return(map[string]RoomState{
-			roomFull:  {RoomID: roomFull, Exists: true, UserCount: 4, SubscriptionCount: 4},
-			roomShort: {RoomID: roomShort, Exists: true, UserCount: 3, SubscriptionCount: 2},
+			roomFull:  {Exists: true, UserCount: 4, SubscriptionCount: 4},
+			roomShort: {Exists: true, UserCount: 3, SubscriptionCount: 2},
 		}, nil)
 
 	w := postVerify(t, newTestServer(t, store),
@@ -82,7 +82,7 @@ func TestHandler_HandleVerify_RoomWithNoSubscriptions(t *testing.T) {
 	roomID := idgen.DeterministicID([]byte(chatID))
 
 	store.EXPECT().RoomStates(gomock.Any(), []string{roomID}).
-		Return(map[string]RoomState{roomID: {RoomID: roomID, Exists: true}}, nil)
+		Return(map[string]RoomState{roomID: {Exists: true}}, nil)
 
 	w := postVerify(t, newTestServer(t, store), `{"chatIds":["`+chatID+`"]}`)
 	require.Equal(t, http.StatusOK, w.Code)

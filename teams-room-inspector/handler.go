@@ -8,13 +8,13 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
-	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
-// maxChatIDsPerRequest bounds one verify call. The caller batches at 200 by
-// default; the cap leaves headroom while keeping the $in lists sane.
-const maxChatIDsPerRequest = 500
+// maxChatIDsPerRequest bounds one verify call. Shared with the caller, whose
+// config validation refuses a batch size above it.
+const maxChatIDsPerRequest = model.TeamsRoomVerifyMaxChatIDs
 
 // Handler serves the read-only verification endpoint for this site.
 type Handler struct {
@@ -32,8 +32,8 @@ func (h *Handler) HandleHealth(c *gin.Context) {
 }
 
 // HandleVerify reports, per requested Teams chat id, whether this site holds
-// the room and how many subscriptions point at it. Room ids are derived with
-// the same idgen.DeterministicID room-worker used to create them, so the caller
+// the room and how many subscriptions point at it. Room ids come from the same
+// teamsmigrate.RoomIDFromChatID room-worker used to create them, so the caller
 // never has to know the mapping.
 func (h *Handler) HandleVerify(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -55,7 +55,7 @@ func (h *Handler) HandleVerify(c *gin.Context) {
 
 	roomIDs := make([]string, 0, len(req.ChatIDs))
 	for _, chatID := range req.ChatIDs {
-		roomIDs = append(roomIDs, idgen.DeterministicID([]byte(chatID)))
+		roomIDs = append(roomIDs, teamsmigrate.RoomIDFromChatID(chatID))
 	}
 
 	states, err := h.store.RoomStates(ctx, roomIDs)

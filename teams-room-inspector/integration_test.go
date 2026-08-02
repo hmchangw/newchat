@@ -35,10 +35,10 @@ func TestMongoStore_RoomStates(t *testing.T) {
 	got, err := store.RoomStates(ctx, []string{"roomA", "roomB", "roomMissing", "roomC"})
 	require.NoError(t, err)
 
-	assert.Equal(t, RoomState{RoomID: "roomA", Exists: true, UserCount: 3, SubscriptionCount: 2}, got["roomA"])
-	assert.Equal(t, RoomState{RoomID: "roomB", Exists: true, UserCount: 0, SubscriptionCount: 0}, got["roomB"])
+	assert.Equal(t, RoomState{Exists: true, UserCount: 3, SubscriptionCount: 2}, got["roomA"])
+	assert.Equal(t, RoomState{Exists: true, UserCount: 0, SubscriptionCount: 0}, got["roomB"])
 	assert.NotContains(t, got, "roomMissing", "a room with neither doc nor subs has no entry")
-	assert.Equal(t, RoomState{RoomID: "roomC", Exists: false, SubscriptionCount: 1}, got["roomC"],
+	assert.Equal(t, RoomState{Exists: false, SubscriptionCount: 1}, got["roomC"],
 		"orphan subscriptions are reported with Exists=false")
 }
 
