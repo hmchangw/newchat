@@ -111,6 +111,9 @@ type stubInboxStore struct {
 	userStatusUpdates     []userStatusUpdate
 	userStatusErr         error
 	settingsUpdates       []userSettingsUpdate
+	// hasThreadUnreadErr, when set, makes SubscriptionHasThreadUnread fail —
+	// used to exercise handleSubscriptionRead's skip-on-error badge-cache path.
+	hasThreadUnreadErr error
 }
 
 type userSettingsUpdate struct {
@@ -338,6 +341,23 @@ func (s *stubInboxStore) getSubReads() []subRead {
 	return cp
 }
 
+// SubscriptionHasThreadUnread scans the seeded subscriptions for (roomID,
+// account) and reports whether its ThreadUnread is non-empty; a missing
+// subscription reports false, nil (mirrors the Mongo impl's FindOne miss).
+func (s *stubInboxStore) SubscriptionHasThreadUnread(_ context.Context, roomID, account string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasThreadUnreadErr != nil {
+		return false, s.hasThreadUnreadErr
+	}
+	for i := range s.subscriptions {
+		if s.subscriptions[i].RoomID == roomID && s.subscriptions[i].User.Account == account {
+			return len(s.subscriptions[i].ThreadUnread) > 0, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -455,6 +475,51 @@ func (s *stubInboxStore) UpdateUserSettings(_ context.Context, account string, s
 	defer s.mu.Unlock()
 	s.settingsUpdates = append(s.settingsUpdates, userSettingsUpdate{account: account, settings: settings, updatedAt: updatedAt})
 	return nil
+}
+
+// --- fake badgeCache double ---
+
+// clearRoomCall records one fakeBadgeCache.ClearRoom invocation.
+type clearRoomCall struct {
+	account string
+	roomID  string
+}
+
+// fakeBadgeCache is a test double for badgeCache: it just records calls, no
+// Valkey involved. Locked because inbox-worker's fan-out lane runs handlers
+// concurrently.
+type fakeBadgeCache struct {
+	mu         sync.Mutex
+	clearRooms []clearRoomCall
+	clearAlls  []string
+}
+
+func (f *fakeBadgeCache) ClearRoom(_ context.Context, account, roomID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clearRooms = append(f.clearRooms, clearRoomCall{account: account, roomID: roomID})
+}
+
+func (f *fakeBadgeCache) ClearAll(_ context.Context, account string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clearAlls = append(f.clearAlls, account)
+}
+
+func (f *fakeBadgeCache) getClearRooms() []clearRoomCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]clearRoomCall, len(f.clearRooms))
+	copy(cp, f.clearRooms)
+	return cp
+}
+
+func (f *fakeBadgeCache) getClearAlls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]string, len(f.clearAlls))
+	copy(cp, f.clearAlls)
+	return cp
 }
 
 func (s *stubInboxStore) getSettingsUpdates() []userSettingsUpdate {
@@ -1183,6 +1248,63 @@ func TestHandleEvent_MemberRemoved_DeleteError(t *testing.T) {
 	assert.Contains(t, err.Error(), "delete subscriptions")
 }
 
+// TestHandleEvent_MemberRemoved_BadgeCache_ClearsEachAccount: every removed
+// account's badge entry for the room is cleared, one ClearRoom call per account.
+func TestHandleEvent_MemberRemoved_BadgeCache_ClearsEachAccount(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1"},
+	)
+	store.mu.Unlock()
+
+	memberEvt := model.MemberRemoveEvent{RoomID: "r1", Accounts: []string{"alice", "bob"}}
+	payload, _ := json.Marshal(memberEvt)
+	inboxPayload, _ := json.Marshal(model.InboxEvent{
+		Type: "member_removed", SiteID: "a", DestSiteID: "b", Payload: payload,
+	})
+	require.NoError(t, h.HandleEvent(context.Background(), inboxPayload))
+
+	assert.ElementsMatch(t, []clearRoomCall{{account: "alice", roomID: "r1"}, {account: "bob", roomID: "r1"}}, badge.getClearRooms())
+}
+
+// TestHandleEvent_MemberRemoved_BadgeCache_EmptyAccountsNoOp: the early-return
+// no-op path (no accounts) must not call ClearRoom.
+func TestHandleEvent_MemberRemoved_BadgeCache_EmptyAccountsNoOp(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	memberEvt := model.MemberRemoveEvent{RoomID: "r1", Accounts: []string{}}
+	payload, _ := json.Marshal(memberEvt)
+	inboxPayload, _ := json.Marshal(model.InboxEvent{
+		Type: "member_removed", SiteID: "a", DestSiteID: "b", Payload: payload,
+	})
+	require.NoError(t, h.HandleEvent(context.Background(), inboxPayload))
+
+	assert.Empty(t, badge.getClearRooms())
+}
+
+// TestHandleEvent_MemberRemoved_BadgeCache_NilBadgeNoPanic: a disabled cache
+// (nil badge field, VALKEY_ADDRS unset in production) must not panic.
+func TestHandleEvent_MemberRemoved_BadgeCache_NilBadgeNoPanic(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store) // h.badge left nil
+
+	memberEvt := model.MemberRemoveEvent{RoomID: "r1", Accounts: []string{"alice"}}
+	payload, _ := json.Marshal(memberEvt)
+	inboxPayload, _ := json.Marshal(model.InboxEvent{
+		Type: "member_removed", SiteID: "a", DestSiteID: "b", Payload: payload,
+	})
+	require.NoError(t, h.HandleEvent(context.Background(), inboxPayload))
+}
+
 func TestHandler_HandleEvent_SubscriptionRead_HappyPath(t *testing.T) {
 	store := &stubInboxStore{}
 	h := NewHandler(store)
@@ -1222,6 +1344,92 @@ func TestHandler_HandleEvent_SubscriptionRead_MalformedPayload(t *testing.T) {
 	evt := model.InboxEvent{Type: model.InboxSubscriptionRead, Payload: []byte("not-json")}
 	data, _ := json.Marshal(evt)
 	require.Error(t, h.HandleEvent(context.Background(), data))
+}
+
+// subscriptionReadInboxPayload builds a well-formed subscription_read InboxEvent.
+func subscriptionReadInboxPayload(t *testing.T, account, roomID string) []byte {
+	t.Helper()
+	inner := model.SubscriptionReadEvent{
+		Account: account, RoomID: roomID,
+		LastSeenAt: time.Now().UTC().UnixMilli(), Timestamp: time.Now().UTC().UnixMilli(),
+	}
+	innerData, err := json.Marshal(inner)
+	require.NoError(t, err)
+	evt := model.InboxEvent{Type: model.InboxSubscriptionRead, SiteID: "site-a", DestSiteID: "site-b", Payload: innerData}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+	return data
+}
+
+// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsWhenNoThreadUnread:
+// the post-apply subscription has no threadUnread left -> ClearRoom fires.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsWhenNoThreadUnread(t *testing.T) {
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
+	require.Len(t, badge.getClearRooms(), 1)
+	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, badge.getClearRooms()[0])
+}
+
+// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NoClearWhenThreadUnreadRemains:
+// the post-apply subscription still carries unread threads -> no ClearRoom.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NoClearWhenThreadUnreadRemains(t *testing.T) {
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p1"},
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
+	assert.Empty(t, badge.getClearRooms())
+}
+
+// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_SkipsOnLookupError: a
+// SubscriptionHasThreadUnread error must skip ClearRoom without failing the
+// already-applied read.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_SkipsOnLookupError(t *testing.T) {
+	store := &stubInboxStore{hasThreadUnreadErr: fmt.Errorf("mongo down")}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
+	assert.Empty(t, badge.getClearRooms())
+}
+
+// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NilBadgeNoPanic: a
+// disabled cache (nil badge field) must not panic.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NilBadgeNoPanic(t *testing.T) {
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+	})
+	store.mu.Unlock()
+	h := NewHandler(store) // h.badge left nil
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
 }
 
 func TestHandleEvent_ThreadSubscriptionUpserted_Insert(t *testing.T) {
@@ -1653,6 +1861,63 @@ func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenNewThreadUnreadEmpty:
+// an empty NewThreadUnread on the event clears the room from the badge cache.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenNewThreadUnreadEmpty(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+	payload := model.ThreadReadEvent{Account: "alice", RoomID: "r1", ThreadRoomID: "tr1", LastSeenAt: 1735689600000}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	require.Len(t, badge.getClearRooms(), 1)
+	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, badge.getClearRooms()[0])
+}
+
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenNewThreadUnreadNonEmpty:
+// a non-empty NewThreadUnread must not clear the room.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenNewThreadUnreadNonEmpty(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+	payload := model.ThreadReadEvent{
+		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
+		NewThreadUnread: []string{"p2"}, LastSeenAt: 1735689600000,
+	}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.Empty(t, badge.getClearRooms())
+}
+
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_NilBadgeNoPanic: a disabled
+// cache (nil badge field) must not panic.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_NilBadgeNoPanic(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store) // h.badge left nil
+	payload := model.ThreadReadEvent{Account: "alice", RoomID: "r1", ThreadRoomID: "tr1", LastSeenAt: 1735689600000}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+}
+
 func TestHandler_HandleEvent_ThreadUnreadAdded_Happy(t *testing.T) {
 	store := &stubInboxStore{}
 	h := NewHandler(store)
@@ -1740,6 +2005,40 @@ func TestHandler_HandleEvent_ThreadReadAll_StoreError(t *testing.T) {
 	data, _ := json.Marshal(&outer)
 	err := h.HandleEvent(context.Background(), data)
 	require.Error(t, err)
+}
+
+// TestHandler_HandleEvent_ThreadReadAll_BadgeCache_ClearsAll: the bulk dismiss
+// always clears the account's whole badge set.
+func TestHandler_HandleEvent_ThreadReadAll_BadgeCache_ClearsAll(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+	payload := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1735689600000}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.Equal(t, []string{"alice"}, badge.getClearAlls())
+}
+
+// TestHandler_HandleEvent_ThreadReadAll_BadgeCache_NilBadgeNoPanic: a disabled
+// cache (nil badge field) must not panic.
+func TestHandler_HandleEvent_ThreadReadAll_BadgeCache_NilBadgeNoPanic(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store) // h.badge left nil
+	payload := model.ThreadReadAllEvent{Account: "alice", LastSeenAt: 1735689600000}
+	inner, err := json.Marshal(&payload)
+	require.NoError(t, err)
+	outer := model.InboxEvent{Type: model.InboxThreadReadAll, Payload: inner}
+	data, err := json.Marshal(&outer)
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
 }
 
 func TestHandler_SubscriptionMuteToggled(t *testing.T) {

@@ -395,6 +395,47 @@ func TestInbox_UpdateSubscriptionOpen_MissingSubscriptionErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "subscription not found")
 }
 
+func TestInboxStore_SubscriptionHasThreadUnread_True(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	_, err := store.subCol.InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", ThreadUnread: []string{"p1", "p2"},
+	})
+	require.NoError(t, err)
+
+	got, err := store.SubscriptionHasThreadUnread(ctx, "r1", "alice")
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+func TestInboxStore_SubscriptionHasThreadUnread_FalseWhenEmpty(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	_, err := store.subCol.InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+	})
+	require.NoError(t, err)
+
+	got, err := store.SubscriptionHasThreadUnread(ctx, "r1", "alice")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+func TestInboxStore_SubscriptionHasThreadUnread_FalseWhenMissingSubscription(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	got, err := store.SubscriptionHasThreadUnread(ctx, "no-such-room", "ghost")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
 func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()

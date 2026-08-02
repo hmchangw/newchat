@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
@@ -42,7 +45,17 @@ type config struct {
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
+	// accelerator (pkg/badgecache); empty disables it (the federated read-path
+	// clear hooks become no-ops — Phase A deploys need no Valkey).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
 }
+
+// badgeCacheTTL bounds how long an account's badge unread-room set survives
+// without a Bump/Seed/Reseed refresh (pkg/badgecache.New's ttl param) — see
+// user-service's identical constant, the accelerator's other writer.
+const badgeCacheTTL = 24 * time.Hour
 
 // mongoInboxStore implements InboxStore using MongoDB.
 type mongoInboxStore struct {
@@ -320,6 +333,25 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 		return s.naksIfSubscriptionMissing(ctx, account, roomID)
 	}
 	return nil
+}
+
+// SubscriptionHasThreadUnread reports whether the home-replica subscription
+// (roomID, account) currently has any threadUnread entries. Used by
+// handleSubscriptionRead, after UpdateSubscriptionRead applies, to decide
+// whether the badge cache's ClearRoom is safe to fire. A missing subscription
+// is not an error here — the caller's read already succeeded — and reports false.
+func (s *mongoInboxStore) SubscriptionHasThreadUnread(ctx context.Context, roomID, account string) (bool, error) {
+	err := s.subCol.FindOne(ctx,
+		bson.M{"roomId": roomID, "u.account": account, "threadUnread.0": bson.M{"$exists": true}},
+		options.FindOne().SetProjection(bson.M{"_id": 1}),
+	).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check subscription thread-unread for %q in room %q: %w", account, roomID, err)
+	}
+	return true, nil
 }
 
 // ensureIndexes creates the unique index on (threadRoomId, userAccount) used by
@@ -600,7 +632,38 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Empty VALKEY_ADDRS disables the badge cache: the federated read-path
+	// clear hooks become no-ops (nil-checked in handler.go), matching
+	// room-service's identical optional-dependency wiring (dev-safe default).
+	var badge badgeCache
+	var valkeyClient *redis.ClusterClient
+	if len(cfg.ValkeyAddrs) > 0 {
+		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:    cfg.ValkeyAddrs,
+			Password: cfg.ValkeyPassword,
+		})
+		// o11yredis.Wrap mutates valkeyClient in place to add tracing+metrics —
+		// mirrors pkg/valkeyutil's instrumentCluster so the badge cache's Valkey
+		// calls are observable like every other instrumented client in the repo.
+		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
+			slog.Error("instrument valkey client failed", "error", err)
+			os.Exit(1)
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := valkeyClient.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			slog.Error("valkey connect failed", "error", err)
+			os.Exit(1)
+		}
+		badge = badgecache.New(valkeyClient, badgeCacheTTL)
+		slog.Info("badge cache enabled", "ttl", badgeCacheTTL)
+	} else {
+		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
 	handler := NewHandler(store)
+	handler.badge = badge
 
 	// Two-lane pull pattern over the single INBOX external consumer:
 	//
@@ -719,6 +782,12 @@ func main() {
 		},
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error {
+			if valkeyClient == nil {
+				return nil
+			}
+			return valkeyClient.Close()
+		},
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)

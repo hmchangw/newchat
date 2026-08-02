@@ -33,6 +33,16 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+// badgeCache is the consumer-defined interface for the thread-unread badge's
+// Valkey accelerator (pkg/badgecache.Cache satisfies it). Nil when Valkey is
+// not configured (VALKEY_ADDRS empty) — every call site guards with a nil
+// check, matching the dekProvisioner/graphClient optional-dependency pattern,
+// so a disabled cache is a silent no-op.
+type badgeCache interface {
+	ClearRoom(ctx context.Context, account, roomID string)
+	ClearAll(ctx context.Context, account string)
+}
+
 type Handler struct {
 	store RoomStore
 	// keyStore reads/writes room keys in the rooms collection (always wired in
@@ -42,7 +52,11 @@ type Handler struct {
 	// at-rest DEK creation at room-create time (message-worker's lazy create
 	// still covers remote sites and pre-rollout rooms). Injected as a field
 	// rather than a constructor arg to avoid churning every NewHandler caller.
-	dekProvisioner           DEKProvisioner
+	dekProvisioner DEKProvisioner
+	// badge is the thread-unread badge cache accelerator; nil disables the
+	// best-effort ClearRoom/ClearAll hooks on the read paths (VALKEY_ADDRS
+	// unset). Injected as a field post-construction, mirroring dekProvisioner.
+	badge                    badgeCache
 	memberListClient         MemberListClient
 	msgReader                MessageReader
 	siteID                   string
@@ -1345,6 +1359,14 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, err
 	}
 
+	// Best-effort badge cache clear: only when the reader has no thread-unread
+	// left on this subscription (fetched before the read applied) and is
+	// home-local — a cross-site reader's home replica is cleared by
+	// inbox-worker once the federated subscription_read event lands.
+	if len(sub.ThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
+		h.badge.ClearRoom(ctx, account, roomID)
+	}
+
 	switch {
 	case userSiteID == "":
 		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
@@ -1643,6 +1665,14 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		return nil, err
 	}
 
+	// Best-effort badge cache clear: only when the $pull left no threadUnread
+	// entries on this subscription and the reader is home-local — a cross-site
+	// reader's home replica is cleared by inbox-worker once the federated
+	// thread_read event lands.
+	if len(newThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
+		h.badge.ClearRoom(ctx, account, roomID)
+	}
+
 	switch {
 	case userSiteID == "":
 		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
@@ -1715,6 +1745,13 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	})
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	// Best-effort badge cache clear: only for the home-local account — a
+	// cross-site account's home replica is cleared by inbox-worker once the
+	// federated thread_read_all event lands.
+	if homeSite == h.siteID && h.badge != nil {
+		h.badge.ClearAll(ctx, account)
 	}
 
 	switch {

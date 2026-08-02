@@ -40,6 +40,13 @@ type InboxStore interface {
 	// earlier than the supplied value. Older or duplicate events are silent no-ops.
 	// A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
+	// SubscriptionHasThreadUnread reports whether the home-replica subscription
+	// (roomID, account) currently has any threadUnread entries. Called AFTER
+	// UpdateSubscriptionRead applies, so handleSubscriptionRead can gate its
+	// best-effort badge ClearRoom on the post-apply state. A missing
+	// subscription is not an error here — the read already succeeded — and
+	// reports false.
+	SubscriptionHasThreadUnread(ctx context.Context, roomID, account string) (bool, error)
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead advances the home-replica ThreadSubscription read state
 	// (lastSeenAt, updatedAt, hasMention=false) under a $lt lastSeenAt guard, and
@@ -90,9 +97,23 @@ type InboxStore interface {
 	UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error
 }
 
+// badgeCache is the consumer-defined interface for the thread-unread badge's
+// Valkey accelerator (pkg/badgecache.Cache satisfies it). Nil when Valkey is
+// not configured (VALKEY_ADDRS empty) — every call site guards with a nil
+// check, so a disabled cache is a silent no-op.
+type badgeCache interface {
+	ClearRoom(ctx context.Context, account, roomID string)
+	ClearAll(ctx context.Context, account string)
+}
+
 // Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
 type Handler struct {
 	store InboxStore
+	// badge is the thread-unread badge cache accelerator; nil disables the
+	// best-effort ClearRoom/ClearAll hooks on the federated read paths
+	// (VALKEY_ADDRS unset). Injected as a field post-construction so the many
+	// existing NewHandler(store) call sites are unaffected.
+	badge badgeCache
 }
 
 // NewHandler creates a Handler with the given store.
@@ -240,6 +261,13 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete thread subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
+	// Best-effort badge cache clear: a removed member can no longer see the
+	// room, so its badge entry (if any) is stale.
+	if h.badge != nil {
+		for _, account := range memberEvt.Accounts {
+			h.badge.ClearRoom(ctx, account, memberEvt.RoomID)
+		}
+	}
 	return nil
 }
 
@@ -291,6 +319,17 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEv
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	if err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert); err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", e.Account, e.RoomID, err)
+	}
+	// Best-effort badge cache clear: read the post-apply threadUnread state
+	// (UpdateSubscriptionRead itself doesn't report it) and skip on any
+	// unread threads left or a lookup error — never fail the already-applied read.
+	if h.badge != nil {
+		hasUnread, err := h.store.SubscriptionHasThreadUnread(ctx, e.RoomID, e.Account)
+		if err != nil {
+			slog.WarnContext(ctx, "check thread unread for badge clear failed", "error", err, "account", e.Account, "room_id", e.RoomID)
+		} else if !hasUnread {
+			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
+		}
 	}
 	return nil
 }
@@ -357,6 +396,11 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
 			e.ThreadRoomID, e.Account, err)
 	}
+	// Best-effort badge cache clear: the source site's messageThreadRead only
+	// carries NewThreadUnread empty when its own $pull left nothing unread.
+	if h.badge != nil && len(e.NewThreadUnread) == 0 {
+		h.badge.ClearRoom(ctx, e.Account, e.RoomID)
+	}
 	return nil
 }
 
@@ -368,6 +412,11 @@ func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read all (account %q): %w", e.Account, err)
+	}
+	// Best-effort badge cache clear: this is the home replica's bulk dismiss,
+	// so ClearAll always applies (no per-room/per-site guard needed here).
+	if h.badge != nil {
+		h.badge.ClearAll(ctx, e.Account)
 	}
 	return nil
 }
