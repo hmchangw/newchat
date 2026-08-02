@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   useRoomSummaries,
   useSidebarSections,
@@ -6,10 +6,8 @@ import {
 } from '@/context/RoomEventsContext'
 import { roomPrefix, roomDisplayName } from '@/lib/roomFormat'
 import { BUILTIN_CHATS, isBuiltinSectionId } from '@/lib/chatlist'
-import LazyFallback from '@/components/shared/LazyFallback'
+import ChatlistSectionDialog from '../ChatlistSectionDialog/ChatlistSectionDialog'
 import './style.css'
-
-const ChatlistSectionDialog = lazy(() => import('../ChatlistSectionDialog/ChatlistSectionDialog'))
 
 function mentionBadge(summary) {
   if (summary.mentionAll) return <span className="room-badge-mention-all">!</span>
@@ -172,16 +170,14 @@ export default function RoomList({ selectedRoomId, onSelectRoom }) {
         })}
       </div>
       {dialog && (
-        <Suspense fallback={<LazyFallback variant="dialog" />}>
-          <ChatlistSectionDialog
-            mode={dialog.mode}
-            initialName={dialog.initialName ?? ''}
-            onSubmit={(name) =>
-              dialog.mode === 'rename' ? renameSection(dialog.sectionId, name) : createSection(name)
-            }
-            onClose={() => setDialog(null)}
-          />
-        </Suspense>
+        <ChatlistSectionDialog
+          mode={dialog.mode}
+          initialName={dialog.initialName ?? ''}
+          onSubmit={(name) =>
+            dialog.mode === 'rename' ? renameSection(dialog.sectionId, name) : createSection(name)
+          }
+          onClose={() => setDialog(null)}
+        />
       )}
     </div>
   )

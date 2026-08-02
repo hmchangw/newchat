@@ -14,6 +14,25 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, 'src'),
     },
+    dedupe: ['react', 'react-dom'],
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // Force React/ReactDOM/scheduler into ONE shared chunk so the entry AND every
+        // async (React.lazy) chunk reference the SAME React module instance. Without
+        // this, Rollup's code-split produced two React instances: react-dom bound its
+        // dispatcher to one, while the lazy dialog chunks imported the other (null
+        // dispatcher) → "Invalid hook call" (#321) the moment any lazy dialog mounts
+        // (New Section, Create Room, Manage Members, …). Prod-build-only — vitest uses
+        // a single module graph, so unit tests never surfaced it. resolve.dedupe alone
+        // did not fix it (bare `react` already resolved to one copy); the dup was a
+        // chunk-boundary artifact, which a manual vendor chunk collapses.
+        manualChunks(id) {
+          if (/node_modules\/(react|react-dom|scheduler)\//.test(id)) return 'react-vendor'
+        },
+      },
+    },
   },
   server: {
     port: 3000,
