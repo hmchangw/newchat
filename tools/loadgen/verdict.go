@@ -37,8 +37,15 @@ type rpsStepInputs struct {
 	FailedOps    int
 	Saturation   int // in-flight pool full when an event was due (raise MaxInFlight)
 	EmitUnderrun int // events the pacer could not release on schedule (load box CPU/scheduler limited)
-	Latencies    []seriesSamples
-	Pending      []consumerPendingDelta // empty for history
+	// MissingReplies/MissingBroadcasts count publishes that were never answered
+	// by the drain deadline. Kept apart from FailedOps (and from each other)
+	// because one send has two independent deliverables — o11y-slo.md §2 scores
+	// persistence and publication as separate ratios for the same reason, and
+	// summing them into one counter would count a fully dropped message twice.
+	MissingReplies    int
+	MissingBroadcasts int
+	Latencies         []seriesSamples
+	Pending           []consumerPendingDelta // empty for history
 	// Inconclusive is set by the adapter when measurement itself failed (e.g. a
 	// pending snapshot errored), independent of the system under test.
 	Inconclusive       bool
@@ -79,11 +86,18 @@ type rpsStepResult struct {
 	Saturation   int
 	EmitUnderrun int
 	ErrorRate    float64
-	Latencies    []seriesPercentile
-	WorstDurable string
-	WorstDelta   int64
-	Kind         verdictKind
-	Reasons      []string
+	// Missing counts and their rates over AttemptedOps. A run that drops
+	// deliveries shows up here; it used to show up nowhere, and the surviving
+	// (faster) samples made the percentiles look better as more was dropped.
+	MissingReplies       int
+	MissingBroadcasts    int
+	MissingReplyRate     float64
+	MissingBroadcastRate float64
+	Latencies            []seriesPercentile
+	WorstDurable         string
+	WorstDelta           int64
+	Kind                 verdictKind
+	Reasons              []string
 	// Pending carries every durable's backlog delta for the step (not just the
 	// worst), so the bottleneck engine can map a delta to a pipeline stage.
 	Pending []consumerPendingDelta
@@ -103,11 +117,13 @@ type rpsStepResult struct {
 //  4. PASS.
 func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	res := rpsStepResult{
-		TargetRPS:    in.TargetRPS,
-		AttemptedOps: in.AttemptedOps,
-		FailedOps:    in.FailedOps,
-		Saturation:   in.Saturation,
-		EmitUnderrun: in.EmitUnderrun,
+		TargetRPS:         in.TargetRPS,
+		AttemptedOps:      in.AttemptedOps,
+		FailedOps:         in.FailedOps,
+		Saturation:        in.Saturation,
+		EmitUnderrun:      in.EmitUnderrun,
+		MissingReplies:    in.MissingReplies,
+		MissingBroadcasts: in.MissingBroadcasts,
 	}
 	res.Pending = in.Pending
 	if in.Hold > 0 {
@@ -115,6 +131,8 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	}
 	if in.AttemptedOps > 0 {
 		res.ErrorRate = float64(in.FailedOps) / float64(in.AttemptedOps)
+		res.MissingReplyRate = float64(in.MissingReplies) / float64(in.AttemptedOps)
+		res.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.AttemptedOps)
 	}
 
 	// Compute percentiles for every series (always, so the report has data).
@@ -148,6 +166,18 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	}
 	if res.ErrorRate > th.ErrorRate {
 		reasons = append(reasons, fmt.Sprintf("error rate %.3f%% > %.3f%%", res.ErrorRate*100, th.ErrorRate*100))
+	}
+	// Undelivered sends are gated at the same rate as hard errors: from the
+	// sender's side a reply that never lands is indistinguishable from an error
+	// reply. The drain window before Finalize is what keeps ordinary stragglers
+	// out of these counts.
+	if res.MissingReplyRate > th.ErrorRate {
+		reasons = append(reasons, fmt.Sprintf("missing reply rate %.3f%% > %.3f%%",
+			res.MissingReplyRate*100, th.ErrorRate*100))
+	}
+	if res.MissingBroadcastRate > th.ErrorRate {
+		reasons = append(reasons, fmt.Sprintf("missing broadcast rate %.3f%% > %.3f%%",
+			res.MissingBroadcastRate*100, th.ErrorRate*100))
 	}
 	for _, p := range in.Pending {
 		if d := p.Delta(); d > int64(th.PendingGrowth) {

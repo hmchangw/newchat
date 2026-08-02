@@ -25,6 +25,13 @@ type msgCounters struct {
 
 var msgErrorReasons = []string{"publish", "marshal", "gatekeeper", "bad_reply", "saturated", "underrun"}
 
+// drainWindow is how long a step waits after the generator stops before it
+// decides a publish went unanswered. It doubles the 1 s bound SLO-2 sets for
+// channel broadcast publication (docs/specs/o11y/o11y-slo.md §1), so an
+// in-flight straggler has room to land and only genuinely dropped deliveries
+// remain in the correlation maps.
+const drainWindow = 2 * time.Second
+
 // diffCounters returns end-start for published and each tracked reason.
 func diffCounters(start, end msgCounters) msgCounters {
 	d := msgCounters{published: end.published - start.published, err: map[string]float64{}}
@@ -34,27 +41,39 @@ func diffCounters(start, end msgCounters) msgCounters {
 	return d
 }
 
+// missCounts holds the publishes left unanswered at the end of a step, as
+// reported by Collector.Finalize after the drain window.
+type missCounts struct {
+	Replies    int
+	Broadcasts int
+}
+
 // buildMessagesInputs assembles the normalized step inputs from a counter delta,
-// the hold-window latency tapes, and the pending snapshots.
+// the hold-window latency tapes, the pending snapshots, and the unanswered
+// publishes left over after the drain.
 //
-// Error accounting (see spec §5): FailedOps counts hard publish/gatekeeper errors
-// only; missing replies/broadcasts are NOT counted (late stragglers would create
-// false trips) — slow/dropped delivery is caught by latency and pending-growth.
+// Error accounting: FailedOps counts hard publish/gatekeeper errors. Publishes
+// that were never answered are carried separately in MissingReplies /
+// MissingBroadcasts rather than folded in here, because one send has two
+// independent deliverables and a fully dropped message would otherwise be
+// counted twice against a denominator that counted it once.
 func buildMessagesInputs(
 	targetRPS int, hold time.Duration, delta msgCounters,
 	e1, e2 []time.Duration,
 	startPending, endPending map[string]uint64,
-	durables []string, pendingOK bool,
+	durables []string, pendingOK bool, miss missCounts,
 ) rpsStepInputs {
 	attempted := int(delta.published + delta.err["publish"] + delta.err["marshal"])
 	failed := int(delta.err["publish"] + delta.err["marshal"] + delta.err["gatekeeper"] + delta.err["bad_reply"])
 	in := rpsStepInputs{
-		TargetRPS:    targetRPS,
-		Hold:         hold,
-		AttemptedOps: attempted,
-		FailedOps:    failed,
-		Saturation:   int(delta.err["saturated"]),
-		EmitUnderrun: int(delta.err["underrun"]),
+		TargetRPS:         targetRPS,
+		Hold:              hold,
+		AttemptedOps:      attempted,
+		FailedOps:         failed,
+		Saturation:        int(delta.err["saturated"]),
+		EmitUnderrun:      int(delta.err["underrun"]),
+		MissingReplies:    miss.Replies,
+		MissingBroadcasts: miss.Broadcasts,
 		Latencies: []seriesSamples{
 			{Name: "E1", Samples: e1},
 			{Name: "E2", Samples: e2},
@@ -126,6 +145,9 @@ func newMessagesWorkload(ctx context.Context, cfg *config, preset *Preset, injec
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			metrics.PublishErrors.WithLabelValues(preset.Name, "bad_reply").Inc()
+			// Consume the correlation entry: this send is already counted under
+			// bad_reply, so leaving it pending would count it again as missing.
+			collector.DiscardReply(reqID)
 			return
 		}
 		if payload.Error != "" {
@@ -236,20 +258,25 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 
 	holdErr := waitOrCancel(ctx, hold)
 
-	// Counters are snapshotted at hold-end, before the drain: gatekeeper/bad_reply
-	// errors whose reply lands during the drain are deliberately excluded (see the
-	// straggler-exclusion rationale on buildMessagesInputs). The drain only lets
-	// trailing E1/E2 latency samples settle for the percentile signals.
+	// Counters are snapshotted at hold-end, before the drain, so a gatekeeper or
+	// bad_reply error whose reply lands during the drain is not attributed to
+	// this step's error counters. The drain then lets trailing E1/E2 samples
+	// settle before percentiles and the unanswered-publish counts are taken.
 	endCounts := w.snapshotCounters()
 	endPending, perr2 := w.snapshotPending(ctx)
 	cancel()
 	wg.Wait()
-	time.Sleep(2 * time.Second) // drain trailing replies/broadcasts
+	time.Sleep(drainWindow) // let in-flight replies/broadcasts land
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {
 		return rpsStepInputs{}, holdErr
 	}
+
+	// Taken after the drain and after the generator has stopped, so what remains
+	// unmatched was published during the hold and never answered — a dropped
+	// delivery, not a straggler still in flight.
+	missingReplies, missingBroadcasts := w.collector.Finalize()
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil
@@ -258,5 +285,6 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	}
 	return buildMessagesInputs(targetRPS, hold, delta,
 		w.collector.E1Samples(), w.collector.E2Samples(),
-		startPending, endPending, w.durables, pendingOK), nil
+		startPending, endPending, w.durables, pendingOK,
+		missCounts{Replies: missingReplies, Broadcasts: missingBroadcasts}), nil
 }

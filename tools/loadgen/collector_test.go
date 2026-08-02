@@ -169,6 +169,29 @@ func TestCollector_RecordPublishBroadcastOnly_FinalizeNoMissingReplies(t *testin
 	assert.Equal(t, 1, missingBroadcasts)
 }
 
+// A malformed reply is already counted under the bad_reply error reason. If it
+// also left its correlation entry behind, the same message would be counted a
+// second time as a missing reply once Finalize feeds the verdict.
+func TestCollector_DiscardReply_ConsumesWithoutSample(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	now := time.Unix(0, 0)
+	c.RecordPublish("req-1", "msg-1", now)
+
+	c.DiscardReply("req-1")
+
+	assert.Equal(t, 0, c.E1Count(), "a discarded reply is not a latency sample")
+	missingReplies, _ := c.Finalize()
+	assert.Equal(t, 0, missingReplies, "a discarded reply must not also count as missing")
+}
+
+func TestCollector_DiscardReply_UnknownRequestIDIsNoop(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	c.DiscardReply("never-published")
+	missingReplies, missingBroadcasts := c.Finalize()
+	assert.Equal(t, 0, missingReplies)
+	assert.Equal(t, 0, missingBroadcasts)
+}
+
 func TestCollector_Reset(t *testing.T) {
 	c := NewCollector(NewMetrics(), "test")
 	now := time.Now()

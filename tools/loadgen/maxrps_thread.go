@@ -72,6 +72,9 @@ func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixture
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			metrics.PublishErrors.WithLabelValues(preset.Name, "bad_reply").Inc()
+			// Consume the correlation entry: this send is already counted under
+			// bad_reply, so leaving it pending would count it again as missing.
+			collector.DiscardReply(reqID)
 			return
 		}
 		if payload.Error != "" {
@@ -185,20 +188,22 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 
 	holdErr := waitOrCancel(ctx, hold)
 
-	// Counters are snapshotted at hold-end, before the drain: gatekeeper/bad_reply
-	// errors whose reply lands during the drain are deliberately excluded (see the
-	// straggler-exclusion rationale on buildMessagesInputs). The drain only lets
-	// trailing E1/E2 latency samples settle for the percentile signals.
+	// Counters are snapshotted at hold-end, before the drain, so a gatekeeper or
+	// bad_reply error whose reply lands during the drain is not attributed to
+	// this step's error counters. The drain then lets trailing E1/E2 samples
+	// settle before percentiles and the unanswered-publish counts are taken.
 	endCounts := w.snapshotCounters()
 	endPending, perr2 := w.snapshotPending(ctx)
 	cancel()
 	wg.Wait()
-	time.Sleep(2 * time.Second) // drain trailing replies/broadcasts
+	time.Sleep(drainWindow) // let in-flight replies/broadcasts land
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {
 		return rpsStepInputs{}, holdErr
 	}
+
+	missingReplies, missingBroadcasts := w.collector.Finalize()
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil
@@ -207,5 +212,6 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	}
 	return buildMessagesInputs(targetRPS, hold, delta,
 		w.collector.E1Samples(), w.collector.E2Samples(),
-		startPending, endPending, w.durables, pendingOK), nil
+		startPending, endPending, w.durables, pendingOK,
+		missCounts{Replies: missingReplies, Broadcasts: missingBroadcasts}), nil
 }
