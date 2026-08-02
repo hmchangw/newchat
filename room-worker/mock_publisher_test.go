@@ -24,6 +24,18 @@ func (p *mockPublisher) Publish(subj string, data []byte) error {
 	return nil
 }
 
+// published snapshots the capture as []publishedMsg for the shared
+// subject-filter helpers (subscriptionUpdates, messagesCanonical).
+func (p *mockPublisher) published() []publishedMsg {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]publishedMsg, 0, len(p.subjects))
+	for i, s := range p.subjects {
+		out = append(out, publishedMsg{subj: s, data: p.payloads[i]})
+	}
+	return out
+}
+
 func (p *mockPublisher) publishCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()

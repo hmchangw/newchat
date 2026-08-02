@@ -159,6 +159,11 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	h.bustRoomMeta(ctx, room.ID)
 
 	// Fan the room key out to newly-added members so their clients can decrypt.
+	// This bulk-migration path intentionally keeps the standalone room.key
+	// event (interactive create/add deliver the key inline on the "added"
+	// subscription.update instead): migrated members get no live added event —
+	// their sidebar rows arrive on the next subscription.list — but need the
+	// key before any of the migrated history can decrypt.
 	if len(addedUsers) > 0 {
 		if err := h.buildAndFanOutRoomKey(ctx, room.ID, pair, addedUsers); err != nil {
 			return fmt.Errorf("fan out room key: %w", err)

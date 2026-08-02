@@ -1774,22 +1774,29 @@ describe('added subscription.update room enrichment', () => {
     )
   }
 
-  it('seeds the inline room key and applies room metadata from an added event', async () => {
+  /** Shared scaffold: seedKeys spy swapped into the RoomKeys mock, an empty
+   *  subscription.list bootstrap, and a handler-capturing subscribe. Callers
+   *  drive the returned handlers map and MUST invoke restore() when done. */
+  function setupSeedKeysHarness() {
     const seedKeys = vi.fn()
     const prevMock = currentRoomKeysMock
     currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
-    try {
-      const request = vi.fn().mockImplementation((subject) => {
-        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
-        throw new Error('unexpected request: ' + subject)
-      })
-      const handlers = new Map()
-      const subscribe = vi.fn().mockImplementation((subject, cb) => {
-        handlers.set(subject, cb)
-        return { unsubscribe: vi.fn() }
-      })
-      const nats = mockNats({ request, subscribe })
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+    return { seedKeys, handlers, subscribe, nats, restore: () => { currentRoomKeysMock = prevMock } }
+  }
 
+  it('seeds the inline room key and applies room metadata from an added event', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
       render(wrap(<AddedProbe roomId="enr1" />, nats))
       await waitFor(() => expect(subscribe).toHaveBeenCalled())
 
@@ -1824,26 +1831,13 @@ describe('added subscription.update room enrichment', () => {
       // crossSite: false → the local subject, not the global fail-safe.
       expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.local.room.enr1.event')
     } finally {
-      currentRoomKeysMock = prevMock
+      restore()
     }
   })
 
   it('does not seed keys when the added event carries no room key (keyless DM)', async () => {
-    const seedKeys = vi.fn()
-    const prevMock = currentRoomKeysMock
-    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
     try {
-      const request = vi.fn().mockImplementation((subject) => {
-        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
-        throw new Error('unexpected request: ' + subject)
-      })
-      const handlers = new Map()
-      const subscribe = vi.fn().mockImplementation((subject, cb) => {
-        handlers.set(subject, cb)
-        return { unsubscribe: vi.fn() }
-      })
-      const nats = mockNats({ request, subscribe })
-
       render(wrap(<SummariesProbe />, nats))
       await waitFor(() => expect(subscribe).toHaveBeenCalled())
 
@@ -1863,7 +1857,7 @@ describe('added subscription.update room enrichment', () => {
       await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
       expect(seedKeys).not.toHaveBeenCalled()
     } finally {
-      currentRoomKeysMock = prevMock
+      restore()
     }
   })
 })
