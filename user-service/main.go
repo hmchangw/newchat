@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
@@ -147,6 +148,13 @@ func main() {
 			Addrs:    cfg.ValkeyAddrs,
 			Password: cfg.ValkeyPassword,
 		})
+		// o11yredis.Wrap mutates valkeyClient in place to add tracing+metrics —
+		// mirrors pkg/valkeyutil's instrumentCluster so the badge cache's Valkey
+		// calls are observable like every other instrumented client in the repo.
+		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
+			slog.Error("instrument valkey client failed", "error", err)
+			os.Exit(1)
+		}
 		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := valkeyClient.Ping(pingCtx).Err()
 		cancel()

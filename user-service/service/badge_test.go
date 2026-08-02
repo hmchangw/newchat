@@ -26,6 +26,9 @@ type fakeBadgeCache struct {
 	bumpCalls   []string
 	seedCalls   []string
 	reseedCalls []string
+	// reseedRoomIDs holds the roomIDs argument passed to each Reseed call, in
+	// call order and parallel-indexed with reseedCalls.
+	reseedRoomIDs [][]string
 }
 
 func (f *fakeBadgeCache) Bump(_ context.Context, account, roomID string) (int, bool) {
@@ -46,6 +49,7 @@ func (f *fakeBadgeCache) Seed(_ context.Context, account string, roomIDs []strin
 
 func (f *fakeBadgeCache) Reseed(_ context.Context, account string, roomIDs []string) {
 	f.reseedCalls = append(f.reseedCalls, account)
+	f.reseedRoomIDs = append(f.reseedRoomIDs, roomIDs)
 	if f.reseed != nil {
 		f.reseed(account, roomIDs)
 	}

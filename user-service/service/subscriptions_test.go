@@ -644,6 +644,10 @@ func TestCountUnread_Happy(t *testing.T) {
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
 	assert.Equal(t, 1, resp.Count)
+	badge := svc.badge.(*fakeBadgeCache)
+	require.Equal(t, []string{"alice"}, badge.reseedCalls, "count must best-effort reconcile the badge cache exactly once")
+	require.Len(t, badge.reseedRoomIDs, 1)
+	assert.Equal(t, []string{"r1"}, badge.reseedRoomIDs[0], "reseed must carry the exact unread room-ID set the count returned")
 }
 
 func TestCountUnread_FailedSiteSkipped(t *testing.T) {
@@ -731,6 +735,12 @@ func TestCountUnread_AllRead(t *testing.T) {
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
 	assert.Equal(t, 0, resp.Count)
+	// All-read still reconciles the cache — Reseed with an empty slice clears
+	// any stale entries left over from a prior unread state (cache repair).
+	badge := svc.badge.(*fakeBadgeCache)
+	require.Equal(t, []string{"alice"}, badge.reseedCalls)
+	require.Len(t, badge.reseedRoomIDs, 1)
+	assert.Empty(t, badge.reseedRoomIDs[0], "an all-read account must reseed with an empty room-ID set")
 }
 
 func TestCountUnread_EmptyActive(t *testing.T) {
