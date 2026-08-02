@@ -702,6 +702,24 @@ This is the largest step at which **all** SLO signals passed; the
 `Next limit:` line names why the first failing step tripped. If no step
 passed, the output is `ANSWER: no step passed (workload=…, preset=…)`.
 
+**Missing deliveries** get their own `miss% (r/b)` column: the share of
+publishes whose reply (`r`) or broadcast (`b`) never arrived, measured after
+a drain window that gives in-flight stragglers time to land. Both are gated
+at the same threshold as `err%` (`--slo-error-rate`), because from the
+sender's side a reply that never comes is no better than an error reply.
+
+They are counted and gated separately rather than summed, mirroring the way
+`docs/specs/o11y/o11y-slo.md` §2 scores persistence (SLO-1a) and publication
+(SLO-1b) as independent ratios: one send has two deliverables, so a fully
+dropped message would otherwise be counted twice against a denominator that
+counted it once. The CSV carries `missing_replies`, `missing_broadcasts`,
+`missing_reply_rate` and `missing_broadcast_rate`.
+
+> A rising `miss%` alongside flat or *improving* percentiles is the signature
+> of a saturated pipeline: the dropped messages are the slow ones, so the
+> surviving samples get faster as the system gets worse. Read `miss%` before
+> the percentiles.
+
 **INCONCLUSIVE rows** appear when the achieved throughput fell more than
 `--rate-tolerance` below the target while the SLO signals still looked
 healthy — i.e. the load generator itself, not the service under test, was

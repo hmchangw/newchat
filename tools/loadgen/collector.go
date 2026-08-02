@@ -147,6 +147,17 @@ func (c *Collector) RecordPublishFailed(requestID, messageID string) {
 	ms.mu.Unlock()
 }
 
+// DiscardReply consumes one pending publish keyed by requestID without
+// recording a latency sample. Use when a reply arrived but was unusable (e.g.
+// a malformed body already counted under the bad_reply error reason), so the
+// same message is not counted a second time as a missing reply by Finalize.
+func (c *Collector) DiscardReply(requestID string) {
+	rs := c.reqShards[shardIdx(requestID)]
+	rs.mu.Lock()
+	delete(rs.byReqID, requestID)
+	rs.mu.Unlock()
+}
+
 // RecordBroadcast consumes one pending publish keyed by messageID.
 func (c *Collector) RecordBroadcast(messageID string, at time.Time) {
 	ms := c.msgShards[shardIdx(messageID)]
