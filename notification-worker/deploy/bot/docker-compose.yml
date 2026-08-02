@@ -26,6 +26,7 @@ services:
       - ROOM_META_CACHE_SIZE=10000
       - ROOM_META_CACHE_TTL=2m
       - PRESENCE_RPC_ENABLED=false
+      - BADGE_COUNT_RPC_ENABLED=false
       # Must match the broker's max_payload. Emitter rejects batches larger
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.

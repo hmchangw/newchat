@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
@@ -41,6 +43,7 @@ type HandlerDeps struct {
 	Hook               Vetoer
 	Emitter            Emitter
 	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
+	BadgeClient        badgeClient    // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
 	LargeRoomThreshold int
 	RecipientBatchSize int // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
 }
@@ -146,6 +149,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 
 	candidates := make([]roomsubcache.Member, 0, len(members))
 	accounts := make([]string, 0, len(members))
+	siteByAccount := make(map[string]string, len(members))
 	for i := range members {
 		m := members[i]
 		if m.ID == msg.UserID {
@@ -189,6 +193,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 
 		candidates = append(candidates, m)
 		accounts = append(accounts, m.Account)
+		siteByAccount[m.Account] = m.SiteID
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -208,6 +213,10 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return nil
 	}
 	sort.Strings(survivors)
+
+	// Badge phase: one concurrent RPC per survivor home site, merged into one map.
+	// Nil BadgeClient (env-disabled or not wired) skips this entirely — Phase A compat.
+	unreadCounts := h.fetchUnreadCounts(ctx, msg.RoomID, survivors, siteByAccount)
 
 	now := time.Now().UTC()
 	// Template carries fields shared across every batch — only ID and Accounts change per batch.
@@ -242,6 +251,9 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		evt := pushEvt
 		evt.ID = fmt.Sprintf("%s-b%d", msg.ID, batchIdx)
 		evt.Accounts = batchAccounts
+		if counts := filterUnreadCounts(unreadCounts, batchAccounts); len(counts) > 0 {
+			evt.UnreadCounts = counts
+		}
 		if err := h.deps.Emitter.Emit(ctx, evt); err != nil {
 			slog.Error("emit push batch failed", "error", err, "batch", batchIdx,
 				"recipients", len(batchAccounts), "messageId", msg.ID,
@@ -253,6 +265,71 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
 	}
 	return nil
+}
+
+// fetchUnreadCounts groups survivors by home site (siteByAccount) and issues one
+// badge.count.batch RPC per site concurrently, merging the results into a single
+// account → count map. A nil BadgeClient (env-disabled or not wired) is a no-op
+// (Phase A compat). A survivor with an unknown home site (empty SiteID — e.g. a
+// stale pre-upgrade cache entry) is skipped: it degrades to no badge count rather
+// than blocking or misrouting the RPC. A per-site RPC failure is logged and that
+// site's accounts are simply absent from the result — it must never fail the push.
+func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, survivors []string, siteByAccount map[string]string) map[string]int {
+	if h.deps.BadgeClient == nil {
+		return nil
+	}
+
+	bySite := make(map[string][]string)
+	for _, account := range survivors {
+		siteID := siteByAccount[account]
+		if siteID == "" {
+			continue
+		}
+		bySite[siteID] = append(bySite[siteID], account)
+	}
+	if len(bySite) == 0 {
+		return nil
+	}
+
+	var (
+		mu     sync.Mutex
+		merged = make(map[string]int, len(survivors))
+		g      errgroup.Group
+	)
+	for siteID, siteAccounts := range bySite {
+		g.Go(func() error {
+			counts, err := h.deps.BadgeClient.Counts(ctx, siteID, roomID, siteAccounts)
+			if err != nil {
+				slog.Warn("badge count batch RPC failed, accounts publish without counts",
+					"error", err, "siteId", siteID, "roomId", roomID, "accounts", len(siteAccounts),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+				return nil // never fail the push on a badge-count failure
+			}
+			mu.Lock()
+			for account, n := range counts {
+				merged[account] = n
+			}
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait() // every g.Go above always returns nil — errors are logged and absorbed per-site
+	return merged
+}
+
+// filterUnreadCounts returns the subset of unreadCounts whose keys are in batchAccounts,
+// so each outgoing batch only carries counts for the accounts it actually addresses.
+func filterUnreadCounts(unreadCounts map[string]int, batchAccounts []string) map[string]int {
+	if len(unreadCounts) == 0 {
+		return nil
+	}
+	filtered := make(map[string]int, len(batchAccounts))
+	for _, account := range batchAccounts {
+		if n, ok := unreadCounts[account]; ok {
+			filtered[account] = n
+		}
+	}
+	return filtered
 }
 
 // mentionedSet returns mentioned accounts as a set for O(1) per-recipient lookup.

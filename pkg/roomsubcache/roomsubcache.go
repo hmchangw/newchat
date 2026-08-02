@@ -42,6 +42,12 @@ type Member struct {
 	IsBot              bool           `json:"isBot,omitempty"`
 	Muted              bool           `json:"muted,omitempty"`
 	HistorySharedSince *int64         `json:"historySharedSince,omitempty"`
+	// SiteID is the member's home site (model.Subscription.SiteID), used by
+	// notification-worker to group survivors for the per-site badge-count
+	// RPC. Empty for members loaded before this field existed — those degrade
+	// (no badge count), which is why cacheKeySchemaVersion was bumped so
+	// pre-upgrade cache entries miss instead of serving an empty SiteID forever.
+	SiteID string `json:"siteId,omitempty"`
 }
 
 // Cache stores and retrieves a room's member list.
@@ -90,8 +96,16 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 	return c
 }
 
+// cacheKeySchemaVersion namespaces cache keys by the Member wire shape.
+// Bump whenever a Member field is added/changed such that an old cached
+// entry would silently decode with a zero-valued new field forever (Valkey
+// has no schema check) — the version segment makes such entries miss so
+// they get repopulated from Mongo with the current shape. Bumped to v2 when
+// SiteID was added (see Member.SiteID).
+const cacheKeySchemaVersion = "v2"
+
 func cacheKey(roomID string) string {
-	return "room:" + roomID + ":subs"
+	return "room:" + cacheKeySchemaVersion + ":" + roomID + ":subs"
 }
 
 // Get returns the cached member list for roomID. On absence it returns

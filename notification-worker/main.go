@@ -52,6 +52,7 @@ type config struct {
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"false"`  // false → nil badgeClient (no UnreadCounts stamped); set true once user-service's badge.count.batch is reachable from every home site
 	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
 	Mode                   stream.Pipeline         `env:"MODE,required"`                                 // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -72,6 +73,7 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 		"roomType":           1,
 		"muted":              1,
 		"historySharedSince": 1,
+		"siteId":             1,
 	}
 	cur, err := m.col.Find(ctx, bson.M{"roomId": roomID}, options.Find().SetProjection(projection))
 	if err != nil {
@@ -90,6 +92,7 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 			RoomType           model.RoomType `bson:"roomType"`
 			Muted              bool           `bson:"muted"`
 			HistorySharedSince *time.Time     `bson:"historySharedSince"`
+			SiteID             string         `bson:"siteId"`
 		}
 		if err := cur.Decode(&doc); err != nil {
 			return nil, fmt.Errorf("decode subscription: %w", err)
@@ -106,6 +109,7 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 			IsBot:              doc.User.IsBot,
 			Muted:              doc.Muted,
 			HistorySharedSince: hssMs,
+			SiteID:             doc.SiteID,
 		})
 	}
 	if err := cur.Err(); err != nil {
@@ -207,6 +211,11 @@ func main() {
 		)
 	}
 
+	var badge badgeClient
+	if cfg.BadgeCountEnabled {
+		badge = newNatsBadgeClient(nc)
+	}
+
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
@@ -215,6 +224,7 @@ func main() {
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
+		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 	})
@@ -328,6 +338,7 @@ func main() {
 		"push_recipient_batch_size", cfg.PushRecipientBatchSize,
 		"valkey_addrs", cfg.ValkeyAddrs,
 		"presence_enabled", cfg.PresenceEnabled,
+		"badge_count_enabled", cfg.BadgeCountEnabled,
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
