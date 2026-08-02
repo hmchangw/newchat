@@ -183,19 +183,21 @@ server never injects defaults).
 | Field | Type | Notes |
 |---|---|---|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | Full post-update settings; all seven fields optional. |
+| `settings` | UserSettings | Full post-update settings; all nine fields optional. |
 
 UserSettings — every field optional, present only when explicitly set:
 
 | Field | Type |
 |---|---|
 | `fullWidth` | boolean |
+| `themePreference` | string (`system`\|`light`\|`dark`) |
 | `translateMessageInto` | string |
-| `showMessagePreviewInSidebarList` | boolean |
+| `messagePreviewEnabled` | boolean |
 | `muteAllNotifications` | boolean |
-| `showMessagesAndPreviewsInNotifications` | boolean |
-| `showNotificationsDuringCallsAndMeetings` | boolean |
-| `scrollToBottomInChat` | boolean |
+| `alwaysAllowPriorityNotifications` | boolean |
+| `showPreviewsInNotifications` | boolean |
+| `showNotificationsInCall` | boolean |
+| `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 
 ```json
 {

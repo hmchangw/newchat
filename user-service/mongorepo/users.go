@@ -111,23 +111,29 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	if set.FullWidth != nil {
 		fields["settings.fullWidth"] = *set.FullWidth
 	}
+	if set.ThemePreference != nil {
+		fields["settings.themePreference"] = *set.ThemePreference
+	}
 	if set.TranslateMessageInto != nil {
 		fields["settings.translateMessageInto"] = *set.TranslateMessageInto
 	}
-	if set.ShowMessagePreviewInSidebarList != nil {
-		fields["settings.showMessagePreviewInSidebarList"] = *set.ShowMessagePreviewInSidebarList
+	if set.MessagePreviewEnabled != nil {
+		fields["settings.messagePreviewEnabled"] = *set.MessagePreviewEnabled
 	}
 	if set.MuteAllNotifications != nil {
 		fields["settings.muteAllNotifications"] = *set.MuteAllNotifications
 	}
-	if set.ShowMessagesAndPreviewsInNotifications != nil {
-		fields["settings.showMessagesAndPreviewsInNotifications"] = *set.ShowMessagesAndPreviewsInNotifications
+	if set.AlwaysAllowPriorityNotifications != nil {
+		fields["settings.alwaysAllowPriorityNotifications"] = *set.AlwaysAllowPriorityNotifications
 	}
-	if set.ShowNotificationsDuringCallsAndMeetings != nil {
-		fields["settings.showNotificationsDuringCallsAndMeetings"] = *set.ShowNotificationsDuringCallsAndMeetings
+	if set.ShowPreviewsInNotifications != nil {
+		fields["settings.showPreviewsInNotifications"] = *set.ShowPreviewsInNotifications
 	}
-	if set.ScrollToBottomInChat != nil {
-		fields["settings.scrollToBottomInChat"] = *set.ScrollToBottomInChat
+	if set.ShowNotificationsInCall != nil {
+		fields["settings.showNotificationsInCall"] = *set.ShowNotificationsInCall
+	}
+	if set.InitialChatScrollPosition != nil {
+		fields["settings.initialChatScrollPosition"] = *set.InitialChatScrollPosition
 	}
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After).
