@@ -428,24 +428,31 @@ export function useRoomSubscriptions(
         // hasMention / alert state. The full payload is what room-worker
         // emits on `subscription.update`.
         safeDispatch({ type: 'SUBSCRIPTION_UPSERTED', subscription: evt.subscription })
-        // Build the sidebar room straight from the subscription record — it
-        // carries roomId, roomType, siteId, and the per-user friendly name.
-        // Room-level metadata (userCount, lastMsgAt) is absent here and lands
-        // via subsequent ROOM_METADATA_UPDATED / MESSAGE_RECEIVED events.
+        // The "added" event embeds the room view under sub.room
+        // (subscription.list parity): metadata renders immediately and the
+        // E2E key seeds inline — no separate room.key event is sent for
+        // adds anymore (rotation only).
         const sub = evt.subscription
+        const roomInfo = sub.room
         const room = {
           id: sub.roomId,
           type: sub.roomType,
           siteId: sub.siteId,
           name: sub.name,
           subscriptionName: sub.name,
+          userCount: roomInfo?.userCount,
+          lastMsgAt: roomInfo?.lastMsgAt,
+          crossSite: roomInfo?.crossSite,
         }
         safeDispatch({ type: 'ROOM_ADDED', room })
-        // crossSite is absent on this event's embedded room today (the
-        // live "added" payload carries the stored Subscription, not the
-        // read-time enrichment) — default to true (global), the server's
+        if (roomInfo?.privateKey && typeof roomInfo.keyVersion === 'number') {
+          seedKeysRef.current([
+            { roomId: sub.roomId, version: roomInfo.keyVersion, privateKey: roomInfo.privateKey },
+          ])
+        }
+        // Missing crossSite defaults to true (global), the server's
         // fail-safe, rather than assume same-site.
-        if (sub.roomType === 'channel') openChannelSub(sub.roomId, sub.room?.crossSite ?? true)
+        if (sub.roomType === 'channel') openChannelSub(sub.roomId, roomInfo?.crossSite ?? true)
       } else if (evt.action === 'removed') {
         const roomId = evt.subscription?.roomId
         if (!roomId) return
