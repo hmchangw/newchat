@@ -857,11 +857,11 @@ func TestHandler_ProcessAddMembers_KeyStoreGetFailureFailsBeforePublish(t *testi
 		Return([]AddMemberCandidate{{Account: "bob"}}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{{ID: "u2", Account: "bob", SiteID: "site-a"}}, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	// The key is checked before the room re-read, so GetRoom may not run at all.
-	expectGetRoom(store, "r1", "eng")
+	// The key read now runs BEFORE BulkCreateSubscriptions: no gomock
+	// expectations for BulkCreateSubscriptions / ApplyMemberCountDelta /
+	// GetRoom, so any such call fails the test — a key failure must leave no
+	// partial state for a redelivery to skip past.
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", RequesterAccount: "alice", Users: []string{"bob"},
@@ -873,6 +873,52 @@ func TestHandler_ProcessAddMembers_KeyStoreGetFailureFailsBeforePublish(t *testi
 		assert.NotEqual(t, subject.SubscriptionUpdate("bob"), s,
 			"no subscription.update may be published when the key read failed")
 	}
+}
+
+// TestHandler_ProcessAddMembers_GetRoomFailureDegradesToMetaView: once the subs
+// are committed, a redelivery recomputes needSub as empty and would never
+// publish the "added" events — so a post-commit GetRoom failure must NOT fail
+// the handler. The fan-out degrades to the pre-add GetRoomMeta view (key still
+// inline) instead of silently losing the events.
+func TestHandler_ProcessAddMembers_GetRoomFailureDegradesToMetaView(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		return pub.Publish(subj, data)
+	}
+	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub), subject.RouteGlobal)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "meta-name", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 3}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"bob"}, "r1").
+		Return([]AddMemberCandidate{{Account: "bob"}}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{{ID: "u2", Account: "bob", SiteID: "site-a"}}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, errors.New("transient mongo error"))
+
+	req := model.AddMembersRequest{
+		RoomID: "r1", RequesterAccount: "alice", Users: []string{"bob"},
+		History: model.HistoryConfig{Mode: model.HistoryModeNone}, Timestamp: 1,
+	}
+	reqData, _ := json.Marshal(req)
+	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), reqData))
+
+	var evt model.SubscriptionUpdateEvent
+	found := false
+	for i, s := range pub.subjects {
+		if s == subject.SubscriptionUpdate("bob") {
+			require.NoError(t, json.Unmarshal(pub.payloads[i], &evt))
+			found = true
+		}
+	}
+	require.True(t, found, "the added event must still be published when the re-read degrades")
+	require.NotNil(t, evt.Subscription.Room)
+	assert.Equal(t, "meta-name", evt.Subscription.Room.Name, "degraded view comes from the pre-add meta room")
+	assert.Equal(t, 3, evt.Subscription.Room.UserCount)
+	require.NotNil(t, evt.Subscription.Room.PrivateKey, "key still rides the degraded event")
 }
 
 // TestHandler_ProcessAddMembers_BotGetsKeyAndSubUpdate: a bot (FE-login capable) gets the added
@@ -4874,10 +4920,7 @@ func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
 	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
-	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	expectGetRoom(mockStore, "r1", "eng")
-	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil) // key missing
 
 	h := NewHandler(mockStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore, roomkeysender.NewSender(&mockPublisher{}), subject.RouteGlobal)
@@ -4911,10 +4954,7 @@ func TestProcessAddMembers_TransientErrorWhenValkeyFails(t *testing.T) {
 	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
-	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	expectGetRoom(mockStore, "r1", "eng")
-	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, fmt.Errorf("valkey timeout"))
 
 	h := NewHandler(mockStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore, roomkeysender.NewSender(&mockPublisher{}), subject.RouteGlobal)

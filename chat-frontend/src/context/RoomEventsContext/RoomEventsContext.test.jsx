@@ -1861,3 +1861,54 @@ describe('added subscription.update room enrichment', () => {
     }
   })
 })
+
+describe('stale-session guards (generation counter)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('drops a bootstrap that resolves after a re-login — no stale key seeding or subs', async () => {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    try {
+      let resolveFirstRooms
+      let roomsCalls = 0
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+          roomsCalls++
+          if (roomsCalls === 1) return new Promise((res) => { resolveFirstRooms = res })
+          return Promise.resolve({ subscriptions: [] })
+        }
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+        throw new Error('unexpected subject: ' + subject)
+      })
+      const subscribe = vi.fn().mockReturnValue({ unsubscribe: vi.fn() })
+
+      const nats1 = mockNats({ request, subscribe, user: { account: 'alice', siteId: 'site-A' } })
+      const { rerender } = render(wrap(<SummariesProbe />, nats1))
+      await waitFor(() => expect(roomsCalls).toBe(1))
+
+      // Re-login as a different user while alice's rooms fetch is still in flight.
+      const nats2 = mockNats({ request, subscribe, user: { account: 'carol', siteId: 'site-A' } })
+      rerender(wrap(<SummariesProbe />, nats2))
+      await waitFor(() => expect(roomsCalls).toBe(2))
+
+      // Alice's stale bootstrap resolves now, carrying a keyed channel room.
+      await act(async () => {
+        resolveFirstRooms({
+          subscriptions: [
+            {
+              roomId: 'stale1', roomType: 'channel', name: 'stale', siteId: 'site-A',
+              room: { crossSite: false, privateKey: 'AQIDBA==', keyVersion: 1 },
+            },
+          ],
+        })
+      })
+
+      expect(seedKeys).not.toHaveBeenCalled()
+      expect(subscribe.mock.calls.map((c) => c[0])).not.toContain('chat.local.room.stale1.event')
+      expect(screen.getByTestId('count').textContent).toBe('0')
+    } finally {
+      currentRoomKeysMock = prevMock
+    }
+  })
+})

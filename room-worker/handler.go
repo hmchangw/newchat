@@ -977,6 +977,26 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		actualAccounts = append(actualAccounts, user.Account)
 	}
 
+	// Fetch and validate the room key BEFORE committing subscriptions: once
+	// subs persist, a redelivery recomputes needSub as empty, so any failure
+	// after the commit would silently drop the "added" events (and their
+	// inline key) forever. Failing here leaves no partial state — a clean
+	// redelivery replays the whole sequence. Keys never rotate on add, so the
+	// pair cannot go stale between here and the fan-out below.
+	var pair *roomkeystore.VersionedKeyPair
+	if len(subs) > 0 {
+		var err error
+		pair, err = h.keyStore.Get(ctx, req.RoomID)
+		if err != nil {
+			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+			return fmt.Errorf("get room key for subscription fan-out: %w", err)
+		}
+		// A keyless "added" event would leave the new member unable to decrypt with no retry.
+		if err := requireKeyPair(ctx, pair); err != nil {
+			return err
+		}
+	}
+
 	if len(subs) > 0 {
 		if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
 			return fmt.Errorf("bulk create subscriptions: %w", err)
@@ -1102,24 +1122,22 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Added events carry the room view + key inline (no separate room.key on add);
-	// reads run pre-publish (failure redelivers). needIRM accounts already hold a sub + key.
+	// Added events carry the room view + key inline (no separate room.key on
+	// add); needIRM accounts already hold a sub + key. The key was validated
+	// pre-commit; the room re-read runs AFTER the member-count writes so
+	// userCount includes the members just added. The re-read is best-effort:
+	// subs are already committed, so failing here would let a redelivery
+	// (which recomputes needSub as empty) silently drop the events — degrade
+	// to the pre-add meta view instead and let subscription.list reconcile.
 	if len(subs) > 0 {
-		pair, err := h.keyStore.Get(ctx, req.RoomID)
-		if err != nil {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
-			return fmt.Errorf("get room key for subscription fan-out: %w", err)
+		evtRoom := room
+		if freshRoom, err := h.store.GetRoom(ctx, req.RoomID); err == nil {
+			evtRoom = freshRoom
+		} else {
+			slog.WarnContext(ctx, "re-read room for subscription fan-out failed; using pre-add meta view",
+				"error", err, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(ctx))
 		}
-		// A keyless "added" event would leave the new member unable to decrypt with no retry.
-		if err := requireKeyPair(ctx, pair); err != nil {
-			return err
-		}
-		// Re-read AFTER the member-count writes so userCount includes the members just added.
-		freshRoom, err := h.store.GetRoom(ctx, req.RoomID)
-		if err != nil {
-			return fmt.Errorf("re-read room for subscription fan-out: %w", err)
-		}
-		h.publishSubscriptionAdded(ctx, subs, nil, subscriptionRoomFor(freshRoom, pair), now.UnixMilli(), natsutil.RequestIDFromContext(ctx))
+		h.publishSubscriptionAdded(ctx, subs, nil, subscriptionRoomFor(evtRoom, pair), now.UnixMilli(), natsutil.RequestIDFromContext(ctx))
 	}
 
 	// 8. Publish MemberAddEvent. Fire whenever member.list composition changes:
@@ -2122,6 +2140,7 @@ func (h *Handler) publishSubscriptionUpdates(ctx context.Context, room *model.Ro
 	if room.Type == model.RoomTypeChannel {
 		slog.ErrorContext(ctx, "publishSubscriptionUpdates called for a channel room; added events would lack the room key",
 			"room_id", room.ID, "request_id", requestID)
+		return
 	}
 	userByAccount := make(map[string]*model.User, len(users))
 	for _, u := range users {

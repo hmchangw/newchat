@@ -423,7 +423,10 @@ export function useRoomSubscriptions(
     }
 
     const subUpdate = subscribeToSubscriptionUpdates(liveNats, (evt) => {
-      if (cancelledRef.current) return
+      // Generation check, not just cancelledRef: a re-login resets
+      // cancelledRef to false, so a callback still in flight from the prior
+      // session would otherwise seed stale keys / open stale channel subs.
+      if (!isCurrent()) return
       if (evt.action === 'added' && evt.subscription?.roomId) {
         // Store the full subscription record FIRST so any consumer that
         // wakes up on the ROOM_ADDED dispatch already sees fresh roles /
@@ -478,7 +481,9 @@ export function useRoomSubscriptions(
     // a total failure leaves the sidebar empty.
     fetchSidebarBuckets(liveNats)
       .then((buckets) => {
-        if (cancelledRef.current) return
+        // Generation check, not just cancelledRef: a slow bootstrap from a
+        // prior login must not seed keys or open subs into the new session.
+        if (!isCurrent()) return
         safeDispatch({ type: 'BUCKETS_LOADED', ...buckets })
         // Seed room keys delivered inline on subscription.list so the first
         // message in each encrypted room decrypts immediately — no placeholder,

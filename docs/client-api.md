@@ -896,7 +896,7 @@ it is absent on every other action.
 | `threadUnread` | string[] | Optional. Thread room IDs with unread replies. |
 | `restricted` | boolean | Optional. Denormalized room restricted flag. |
 | `externalAccess` | boolean | Optional. Denormalized room external-access flag. |
-| `room` | [SubscriptionRoom](#subscriptionroom) | Optional. Room-derived view (read-time enrichment; user-service endpoints only). |
+| `room` | [SubscriptionRoom](#subscriptionroom) | Optional. Room-derived view. Populated at read time by the user-service endpoints, and at publish time by room-worker on `added` `subscription.update` events (no user-service read needed); absent on every other event action. |
 | `favoriteUpdatedAt` | RFC3339 timestamp | Optional. Last time the user toggled favorite on the room (also bumped on un-favorite). |
 | `muteUpdatedAt` | RFC3339 timestamp | Optional. Last time the subscription's mute state changed. |
 | `rolesUpdatedAt` | RFC3339 timestamp | Optional. Last time the subscription's roles changed. |
@@ -1219,11 +1219,11 @@ Shared by Add Members, Remove Member, and Update Member Role.
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path (only `subscription.u.account` is set there). |
 | `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
-| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"opened"`. |
+| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
-On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled` / `opened`). On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
+On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is `omitempty`: set on `added` / `role_updated`, omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
 
 ```json
 {
@@ -1252,7 +1252,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
   },
   "action": "added",
   "roomName": "engineering-announcements",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -1357,7 +1357,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
     "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "bob", "isBot": false }
   },
   "action": "removed",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -1457,7 +1457,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
   },
   "action": "role_updated",
   "roomName": "engineering-announcements",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -1541,7 +1541,7 @@ The event uses a **dedicated flat struct** (`type: "room_renamed"`) — mirrorin
   "type": "room_renamed",
   "roomId": "01970a4f8c2d7c9aQ",
   "siteId": "siteA",
-  "timestamp": 1746518483000,
+  "timestamp": 1778054483000,
   "newName": "engineering-general",
   "byAccount": "alice",
   "renamedAt": "2026-05-06T08:01:23Z"

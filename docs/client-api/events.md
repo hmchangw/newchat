@@ -135,7 +135,7 @@ Two shapes exist — discriminated by `action`:
   },
   "action": "added",
   "roomName": "engineering-announcements",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -168,7 +168,7 @@ fields are sent.
     "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "bob", "isBot": false }
   },
   "action": "removed",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -707,7 +707,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
   "type": "room_renamed",
   "roomId": "01970a4f8c2d7c9aQ",
   "siteId": "siteA",
-  "timestamp": 1746518483000,
+  "timestamp": 1778054483000,
   "newName": "engineering-general",
   "byAccount": "alice",
   "renamedAt": "2026-05-06T08:01:23Z"
