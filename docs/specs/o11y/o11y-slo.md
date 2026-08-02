@@ -54,7 +54,8 @@ section: **SLI specification** (user-language intent, good/valid ratio) →
   per attempt — deduped at the emit site (never a message-ID label). Two distinct
   terminal **failures** exist and must be counted separately: an explicit
   **permanent poison drop** (`errcode.Permanent` → Ack-and-drop, no retry) and
-  **`MaxDeliver` exhaustion** (Nak-retried until the delivery cap, then parked/dropped).
+  **`MaxDeliver` exhaustion** (Nak-retried until the delivery cap; delivery then
+  stops and a max-delivery advisory fires — the message is not deleted, see below).
 - **v1 accounting is approximate where the code can't yet emit that contract.**
   Today the pipeline lacks the hooks for exact one-outcome accounting: gatekeeper
   ignores `PubAck.Duplicate`, Cassandra's idempotent inserts don't flag the first
@@ -67,7 +68,11 @@ section: **SLI specification** (user-language intent, good/valid ratio) →
 - **Rounding**: shares ≥ 0.1% precision; latency bounds up to nearest 50 ms.
 - **Scope: per site**; federation (J5) isolated by `{origin, dest}` site.
 - **Error-budget eligibility** — a *failed valid event* is judged by whether the
-  request was legitimate and *expected to succeed*, not by wire category alone:
+  request was legitimate and *expected to succeed*, not by wire category alone.
+  (`MaxDeliver` exhaustion does **not** delete the message — JetStream stops
+  redelivering it to that consumer, emits a max-delivery advisory, and the
+  message stays in the stream; exact terminal-failure accounting therefore needs
+  an **advisory consumer**, §8 P7, not just a `jsretry` hook.)
 
   | `errcode` / HTTP | Burns budget? | Why |
   |---|---|---|
@@ -107,8 +112,8 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 | # | Journey | SLI = good / valid | Target | Today |
 |---|---|---|---|---|
 | SLO-1a | J1 | canonical message persisted to Cassandra / **canonical messages published** | 99.9% | 🔧 P2 · approximate (lag-enforced) |
-| SLO-1b | J1 | **channel** room-subject broadcast published ok (single publish) / **canonical channel messages published** (`room_type=channel`) | 99.9% | 🔧 P2 · approximate · core-NATS boundary |
-| SLO-2 | J1 | channel broadcast published **within 1 s** of canonical acceptance (late = bad) / canonical channel messages published (`room_type=channel`) | 99% | 🔧 P2 · approximate |
+| SLO-1b | J1 | **channel** room-subject broadcast published ok (single publish) / **canonical messages routed to the room-subject path** (`broadcast_path=room_subject`) | 99.9% | 🔧 P2 · approximate · core-NATS boundary |
+| SLO-2 | J1 | room-subject broadcast published **within 1 s** of canonical acceptance (late = bad) / canonical messages on the room-subject path (`broadcast_path=room_subject`) | 99% | 🔧 P2 · approximate |
 | SLO-3 | J2 | successful login **within 1 s** / eligible login attempts | 99% | ✅ (auth leg — proxy) |
 | SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 |
 | SLO-5 | J2 | thread open succeeds **within 300 ms** / eligible thread opens | 99% | 🔧 P1 |
@@ -159,12 +164,21 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
 
 ### Denominator & outcome contract
 
-- **Denominators, `room_type`-scoped:** `messages_canonical_published_total{room_type}`,
+- **Denominators, `broadcast_path`-scoped:** `messages_canonical_published_total{broadcast_path}`,
   emitted by **message-gatekeeper** at the canonical publish site — upstream of
-  both workers, so a dead worker drops the ratio instead of vanishing.
-  - **SLO-1a** uses the **all-`room_type` total** (persistence covers every message).
-  - **SLO-1b/2** use the **`room_type="channel"` slice only** — v1 excludes
-    DM/thread (see below), so an unfiltered denominator would understate the ratio.
+  both workers, so a dead worker drops the ratio instead of vanishing. The label
+  is the **fan-out route**, not the room type — `room_subject` | `thread` | `dm`,
+  classified to mirror broadcast-worker's dispatch exactly: `shouldUseThreadFanOut`
+  (`ThreadParentMessageID != "" && !TShow`) → `thread` **first**, else channel →
+  `room_subject`, else DM/BotDM → `dm`. This matters because a **channel thread
+  reply** (`TShow=false`) is a channel room yet routes to per-account thread
+  fan-out, **not** `publishChannelEvent` — a `room_type="channel"` denominator
+  would count it while no `broadcast_channel_publish_total` fires, wrongly
+  depressing SLO-1b/2. (gatekeeper resolves room type at the emit site to set the
+  label; `thread`/`dm` slices are v1-unscored.)
+  - **SLO-1a** uses the **all-`broadcast_path` total** (persistence covers every message).
+  - **SLO-1b/2** use the **`broadcast_path="room_subject"` slice only** — v1
+    excludes the `thread`/`dm` routes (see below).
 - **Numerators**, one outcome per logical message (approximate — see §0.1):
   - `messages_persisted_total{outcome}` (message-worker) → SLO-1a.
   - `broadcast_channel_publish_total{outcome=ok|failed}` (broadcast-worker) →
@@ -185,9 +199,11 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
     in valid, not counted good). `evt.Timestamp` is the canonical event's
     server-set timestamp (`gatekeeper handler.go`, `now.UnixMilli()`) →
     "canonical acceptance → channel published".
-- **v1 scope: channel messages only.** DM/thread per-recipient partial-failure
-  semantics are deferred; SLO-1b/2 count only `room_type="channel"` canonical
-  messages in v1.
+- **v1 scope: the room-subject path only.** DM/thread per-recipient
+  partial-failure semantics are deferred; SLO-1b/2 count only
+  `broadcast_path="room_subject"` canonical messages in v1 (channel non-thread
+  sends), so channel thread replies routed to thread fan-out are excluded from
+  both numerator and denominator.
 - **Backstop (the real enforcement):** message-worker / broadcast-worker consumer
   lag (§8 P3). Because the counters are core-NATS/approximate, lag is the
   primary stalled-worker signal; the ratios are secondary.
@@ -295,11 +311,13 @@ user was notified. No latency SLO in v1.
   improve the number.
 
 **Measurement.** ✅ SLO-7 for **partial/elevated failures**
-(`search_service_requests_total{type,status}` — the ratio catches error responses
-while traffic flows). 🔧 **SLO-8 is not measurable yet**:
-`search_service_request_duration_seconds` has no status/outcome label, so
-successful requests can't be isolated — add that label (§8 P4) before enforcing
-SLO-8. `…es_duration_seconds` stays diagnostic.
+(`search_service_requests_total{kind,status}` — note the endpoint label is
+`kind`, not `type`; the ratio catches error responses while traffic flows).
+🔧 **SLO-8 is not measurable yet**: the duration histogram
+(`search_service_request_duration_seconds`) currently carries only `{kind}`, **no
+`status`**, so successful requests can't be isolated — add `status` (giving
+`{kind,status}`, §8 P4) before enforcing SLO-8. The unlabelled duration stays
+diagnostic.
 
 **Caveats.**
 - **Full-outage blind spot.** The denominator is search-service-local, so a total
@@ -340,15 +358,21 @@ the numerator → counted as a failure, not a missing sample.
   `MaxDeliver=-1` (retry forever — there is no exhaustion terminal event), and
   exact one-time forwarded accounting needs explicit dedup/Ack semantics not yet
   in place. So the ratio is deadline-based and approximate.
-- **Primary peer-down signal: consumer backlog growth.** The standard JetStream
-  Prometheus exporter exposes `num_pending` / `num_ack_pending` and sequence
-  positions (ack-floor, delivered) — **not** a wall-clock age of the oldest
-  pending message. So v1 enforces peer-down on **pending / ack-pending growth**
-  from consumer state (observable even when outbox-worker is down, since it's
+- **Primary peer-down signal: a *stalled* backlog, not a growing one.** The
+  standard JetStream Prometheus exporter exposes `num_pending` / `num_ack_pending`
+  and sequence positions (ack-floor, delivered) — **not** a wall-clock age of the
+  oldest pending message. Growth alone is insufficient: a peer that goes down with
+  a **single** parked event shows `num_ack_pending=1` and then no further growth,
+  yet the event is stuck forever. So v1 enforces on **sustained non-zero
+  `num_pending + num_ack_pending` while the ack-floor does not advance** over the
+  same window (observable even when outbox-worker is down, since it's
   server-side). A true **oldest-pending-age** gauge requires a **custom monitor**
-  that resolves the timestamp of the earliest un-acked stream message (§8 P3) —
-  roadmap, not "free from the exporter". Either way the backlog signal is the
-  enforced peer-down indicator; the forwarded-within-bound ratio is secondary.
+  that resolves the timestamp of the earliest un-acked stream message (§8 P3) and,
+  once it lands, becomes the primary signal — roadmap, not "free from the
+  exporter". Either way this backlog/age signal is the enforced peer-down
+  indicator; the forwarded-within-bound ratio is secondary — and note the ratio
+  only holds a never-forwarded event as a failure **while it is inside the 28-day
+  window**; past that it rolls off, so the backlog/age signal is what stays.
 
 **Caveats.**
 - **Budget isolated per `{origin_site, dest_site}`** — a dead peer burns only its
@@ -367,10 +391,10 @@ After calibration, alert on error-budget burn rate (multi-window, SRE Workbook
 ch.5) — well-defined because every SLO is an event ratio: **page** at 14.4× over
 1 h (+5 m), **page** at 6× over 6 h (+30 m), **ticket** at 1× over 3 d. Minimum
 sample size gates *alert confidence* only (don't page on a 1/2-event window), never
-budget inclusion. **NATS/JetStream consumer backlog growth**
-(`num_pending`/`num_ack_pending`, §8 P3) — and, once the custom monitor lands,
-**oldest-pending age** (§6) — are the leading / outage-backstop indicators for
-the async SLOs (1a/1b/2/6/9).
+budget inclusion. A **stalled JetStream backlog** (sustained non-zero
+`num_pending`/`num_ack_pending` with a non-advancing ack-floor, §8 P3) — and,
+once the custom monitor lands, **oldest-pending age** (§6) — are the leading /
+outage-backstop indicators for the async SLOs (1a/1b/2/6/9).
 
 ---
 
@@ -383,12 +407,12 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 |---|---|---|
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
 | P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker publications + publication-age; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
-| P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` growth; **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it) | outage backstop for 1a/1b/2/6/9 |
-| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** · outbox producer-side published + forwarded-within-bound (matching label sets) | SLO-6/8/9 |
+| P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it) | outage backstop for 1a/1b/2/6/9 |
+| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) | SLO-6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
 | P6 | **loadgen NATS-subscribe prober** (protocol receipt) + SLO assertion mode (§10) · login→connect→initial-data; sparse-journey floor; SLO-aware load asserts. **Render is out of scope here** — proves protocol receipt, not decrypt/render | protocol-receive last-mile SLI |
 | P6b | **browser synthetic / RUM** prober — decrypt/render/state-apply | render-level declared last mile |
-| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion — makes 1a/1b/6/9 exact instead of approximate) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
+| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/6/9 exact instead of approximate) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
 
 ---
 
@@ -417,7 +441,7 @@ framework is reusable but does not yet assert against these SLOs:
 | SLO-4 / 5 | **near-ready** | per-endpoint `good within bound / eligible attempts` accounting |
 | SLO-3 (auth) | **missing** — auth is a stub | HTTP login driver |
 | SLO-7 / 8 (search) | **missing** | search workload |
-| SLO-6 (push) | **missing** | provider/push workload |
+| SLO-6 (push) | **missing** | `PUSH_NOTIFICATION` observer + recipient-level correlation/accounting (provider workload is push-service v2, not this boundary) |
 | SLO-9 (federation) | **missing** — single-site only | multi-site + peer-down/recovery |
 
 Today loadgen's message max-RPS mode **excludes missing replies/broadcasts from
@@ -428,10 +452,23 @@ service recording rules or a NATS exporter.
 **Required before "validates":** an **SLO assertion mode** that counts
 `eligible`, `good`, and `missing-after-deadline` events (so a dropped
 reply/broadcast is a failure, not an excluded sample) and reads SLIs from the
-**same production recording rules**, not loadgen-local metrics. Rules: assert at
-~50–70% of the prod bound (lab margin); thresholds track this document (drift =
-bug); run with `O11Y_ENABLED=true`; once per release, run master-switch on vs off
-to re-verify overhead.
+**same production recording rules**, not loadgen-local metrics.
+
+Two distinct thresholds, not one (the "50–70%" and "track this document" rules
+were in tension):
+
+- **Hard gate** — the run fails if it can't meet the **actual SLO predicate and
+  target** from this document (e.g. SLO-4 = 95% within 500 ms). This is what
+  "thresholds track this document" means, and it applies to **latency and
+  availability** targets alike.
+- **Engineering headroom** — a separately-named, *stricter* guardrail (e.g.
+  assert the latency bound at ~50–70% of the prod value) to catch regression
+  before it reaches the SLO. A headroom miss warns; only a hard-gate miss fails
+  the release. Headroom is a lab-margin device for **latency bounds**, not a
+  loosening of availability targets.
+
+Run with `O11Y_ENABLED=true`; once per release, run master-switch on vs off to
+re-verify overhead.
 
 Known gaps: federation is single-site only (per-peer FIFO isolation never
 load-verified); loadgen bypasses the WebSocket/browser leg (P6 prober should
