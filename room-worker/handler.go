@@ -1102,40 +1102,44 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Publish subscription.update BEFORE room.key so clients have a sub entry to
-	// store the key under. Applies to bots too: a bot can log into the chat
-	// frontend, so it needs the sub entry as well before the key arrives.
-	// publishSubscriptionUpdate encodes the per-user subject so a dotted ".bot"
-	// account lands on the token its NATS JWT is scoped to.
-	for _, sub := range subs {
-		subEvt := model.SubscriptionUpdateEvent{
-			UserID:       sub.User.ID,
-			Subscription: *sub,
-			Action:       "added",
-			RoomName:     room.Name,
-			Timestamp:    now.UnixMilli(),
+	// Enrich the "added" fan-out with the room view + key so the FE can render
+	// the row (and decrypt) from this single event — no separate room.key is
+	// published on this path anymore. The room is re-read AFTER the member-count
+	// writes so userCount includes the members just added; both reads happen
+	// before any publish so a failure redelivers with nothing half-sent.
+	// Accounts in needIRM already had a subscription (and its key), so only new
+	// subs are fanned out. publishSubscriptionUpdate encodes the per-user subject
+	// so a dotted ".bot" account lands on the token its NATS JWT is scoped to.
+	if len(subs) > 0 {
+		freshRoom, err := h.store.GetRoom(ctx, req.RoomID)
+		if err != nil {
+			return fmt.Errorf("re-read room for subscription fan-out: %w", err)
 		}
-		subEvtData, _ := json.Marshal(subEvt)
-		h.publishSubscriptionUpdate(ctx, sub.User.Account, subEvtData)
-	}
-
-	// Fan out the room key only to newly-subscribed accounts. Accounts in
-	// needIRM already had a subscription (and thus already received the key
-	// on their original add), so they don't need a fresh delivery here.
-	// Get is intentionally post-Mongo: the key was created at room-create
-	// time and is not re-rotated for adds, so we just fetch the current pair.
-	newSubUsers := make([]model.User, 0, len(needSub))
-	for _, c := range needSub {
-		newSubUsers = append(newSubUsers, userMap[c.Account])
-	}
-	if len(newSubUsers) > 0 {
 		pair, err := h.keyStore.Get(ctx, req.RoomID)
 		if err != nil {
 			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
-			return fmt.Errorf("get room key for fan-out: %w", err)
+			return fmt.Errorf("get room key for subscription fan-out: %w", err)
 		}
-		if err := h.buildAndFanOutRoomKey(ctx, req.RoomID, pair, newSubUsers); err != nil {
-			return fmt.Errorf("fan out room key: %w", err)
+		// A channel room must have a key; publishing a keyless "added" event
+		// would leave the new member unable to decrypt with no retry. Same
+		// permanent-vs-transient split buildAndFanOutRoomKey enforced.
+		if pair == nil {
+			roomkeymetrics.KeyAbsentErrors.Add(ctx, 1)
+			return permanent(errcode.Internal("room key absent", errcode.WithCause(errRoomKeyAbsent)))
+		}
+		subRoom := subscriptionRoomFor(freshRoom, pair)
+		for _, sub := range subs {
+			subCopy := *sub
+			subCopy.Room = subRoom
+			subEvt := model.SubscriptionUpdateEvent{
+				UserID:       sub.User.ID,
+				Subscription: subCopy,
+				Action:       "added",
+				RoomName:     room.Name,
+				Timestamp:    now.UnixMilli(),
+			}
+			subEvtData, _ := json.Marshal(subEvt)
+			h.publishSubscriptionUpdate(ctx, sub.User.Account, subEvtData)
 		}
 	}
 
