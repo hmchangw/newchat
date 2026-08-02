@@ -1753,10 +1753,26 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	for i := range allUsers {
 		userByAccount[allUsers[i].Account] = &allUsers[i]
 	}
+	// Event room view: the in-memory room's counts are zero (ReconcileMemberCounts
+	// writes only to Mongo), but at creation the roster IS subs — derive the
+	// counts from it instead of re-reading. The key rides the event; no separate
+	// room.key fan-out on create anymore.
+	evtRoom := *room
+	evtRoom.UserCount, evtRoom.AppCount = 0, 0
 	for _, sub := range subs {
+		if sub.User.IsBot {
+			evtRoom.AppCount++
+		} else {
+			evtRoom.UserCount++
+		}
+	}
+	subRoom := subscriptionRoomFor(&evtRoom, pair)
+	for _, sub := range subs {
+		subCopy := *sub
+		subCopy.Room = subRoom
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
-			Subscription: *sub,
+			Subscription: subCopy,
 			Action:       "added",
 			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
 			Timestamp:    now.UnixMilli(),
@@ -1844,17 +1860,6 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		memberSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
 		if err := h.federate(ctx, room.ID, destSiteID, model.InboxMemberAdded, memberData, natsutil.InboxDedupID(ctx, destSiteID, memberSeed), now.UnixMilli()); err != nil {
 			return err
-		}
-	}
-
-	// Fan out the current key to every local-site member. Only encrypted (channel)
-	// rooms have a key; DM/botDM rooms pass pair=nil and skip fan-out entirely.
-	// If this fails the room and subscriptions are durable but no member received
-	// the initial key event; NAK so JetStream retries the whole handler rather
-	// than persisting silent missing-key state.
-	if pair != nil {
-		if err := h.buildAndFanOutRoomKey(ctx, room.ID, pair, allUsers); err != nil {
-			return fmt.Errorf("room key fan-out (room %s): %w", room.ID, err)
 		}
 	}
 

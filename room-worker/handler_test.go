@@ -2692,6 +2692,9 @@ func makeCreateRoomBody(t *testing.T, req *model.CreateRoomRequest) []byte {
 
 // channelKeyTestHandler builds a Handler with an explicit MockRoomKeyStore and a
 // fan-out-capturing publisher, for the channel key-path tests below.
+// channelKeyTestHandler wires the regular publish callback AND the keySender to
+// one capture, so both the subscription.update events (which now carry the key
+// inline) and any stray room.key publish land in the same timeline.
 func channelKeyTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, *MockRoomKeyStore, *mockPublisher) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
@@ -2700,12 +2703,27 @@ func channelKeyTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, *Moc
 	pub := &mockPublisher{}
 	h := &Handler{
 		store:     mockStore,
-		publish:   func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		publish:   func(_ context.Context, subj string, data []byte, _ string) error { return pub.Publish(subj, data) },
 		siteID:    "site-A",
 		keyStore:  mockKeys,
 		keySender: roomkeysender.NewSender(pub),
 	}
 	return h, mockStore, mockKeys, pub
+}
+
+// inlineKeysFromSubUpdates decodes every captured subscription.update and
+// returns the base64 room keys they carry, one per event.
+func inlineKeysFromSubUpdates(t *testing.T, pub *mockPublisher) []string {
+	t.Helper()
+	var keys []string
+	for _, p := range subscriptionUpdates(pubToPublished(pub)) {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal(p.data, &evt))
+		require.NotNil(t, evt.Subscription.Room, "%s: added event must embed subscription.room", p.subj)
+		require.NotNil(t, evt.Subscription.Room.PrivateKey, "%s: key must ride the added event", p.subj)
+		keys = append(keys, *evt.Subscription.Room.PrivateKey)
+	}
+	return keys
 }
 
 // channelKeyBody is a minimal lite-mode (no-orgs) channel create request used by
@@ -2750,7 +2768,14 @@ func TestProcessCreateRoom_WritesKeyInlineOnInsert(t *testing.T) {
 	require.NoError(t, h.processCreateRoom(ctx, channelKeyBody(t)))
 	require.NotNil(t, gotKey, "a channel room must be created with an inline key")
 	require.Len(t, gotKey.PrivateKey, 32, "a freshly generated 32-byte key is written with the room")
-	require.GreaterOrEqual(t, pub.publishCount(), 1, "generated room key must be fanned out to members")
+	keys := inlineKeysFromSubUpdates(t, pub)
+	require.NotEmpty(t, keys, "generated room key must ride the subscription.update events")
+	for _, k := range keys {
+		assert.Equal(t, base64.StdEncoding.EncodeToString(gotKey.PrivateKey), k)
+	}
+	for _, s := range pub.subjects {
+		assert.NotContains(t, s, ".event.room.key", "no separate room.key on create")
+	}
 }
 
 // TestProcessCreateRoom_UsesExistingKey verifies that on a JetStream redelivery
@@ -2801,7 +2826,12 @@ func TestProcessCreateRoom_RedeliveryProvisionsKeyWhenAbsent(t *testing.T) {
 
 	// Existing room has no key → worker provisions a fresh one at version 0.
 	mockKeys.EXPECT().Get(gomock.Any(), "room-ch-key").Return(nil, nil)
-	mockKeys.EXPECT().Set(gomock.Any(), "room-ch-key", gomock.Any()).Return(0, nil)
+	var provisioned roomkeystore.RoomKeyPair
+	mockKeys.EXPECT().Set(gomock.Any(), "room-ch-key", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, key roomkeystore.RoomKeyPair) (int, error) {
+			provisioned = key
+			return 0, nil
+		})
 
 	mockStore.EXPECT().ListNewMembersForNewRoom(gomock.Any(), gomock.Nil(), []string{"bob"}, "alice").
 		Return([]string{"bob"}, nil)
@@ -2810,7 +2840,11 @@ func TestProcessCreateRoom_RedeliveryProvisionsKeyWhenAbsent(t *testing.T) {
 	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-ch-key").Return(nil)
 
 	require.NoError(t, h.processCreateRoom(ctx, channelKeyBody(t)))
-	require.GreaterOrEqual(t, pub.publishCount(), 1, "provisioned room key must be fanned out")
+	keys := inlineKeysFromSubUpdates(t, pub)
+	require.NotEmpty(t, keys, "provisioned room key must ride the subscription.update events")
+	for _, k := range keys {
+		assert.Equal(t, base64.StdEncoding.EncodeToString(provisioned.PrivateKey), k)
+	}
 }
 
 func TestProcessCreateRoom_DM_BuildsTwoSubs(t *testing.T) {
@@ -2863,6 +2897,20 @@ func TestProcessCreateRoom_DM_BuildsTwoSubs(t *testing.T) {
 
 	// No sys messages for DM
 	assert.Empty(t, messagesCanonical(getPublished(), "site-A"))
+
+	// Both "added" events embed the room view; DM rooms are keyless, so the
+	// key fields stay absent while the roster-derived counts are present.
+	updates := subscriptionUpdates(getPublished())
+	require.Len(t, updates, 2)
+	for _, u := range updates {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal(u.data, &evt))
+		room := evt.Subscription.Room
+		require.NotNil(t, room, "%s: DM added event must embed subscription.room", u.subj)
+		assert.Equal(t, 2, room.UserCount)
+		assert.Nil(t, room.PrivateKey, "DM rooms are keyless — no key fields")
+		assert.Nil(t, room.KeyVersion)
+	}
 }
 
 // TestProcessCreateRoom_CrossSiteAtBirth verifies that a room created with an
@@ -3307,6 +3355,72 @@ func TestProcessCreateRoom_Channel_FiresSubscriptionUpdateForEverySub(t *testing
 	}
 	assert.Contains(t, subjects, subject.SubscriptionUpdate("alice"))
 	assert.Contains(t, subjects, subject.SubscriptionUpdate("bob"))
+
+	// Every "added" event embeds the room view with counts derived from the
+	// initial roster, and the key rides inline (no separate room.key event).
+	for _, u := range updates {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal(u.data, &evt))
+		room := evt.Subscription.Room
+		require.NotNil(t, room, "%s: create-room added event must embed subscription.room", u.subj)
+		assert.Equal(t, "Test Channel", room.Name)
+		assert.Equal(t, 2, room.UserCount, "userCount derived from the initial roster")
+		assert.Equal(t, 0, room.AppCount)
+		require.NotNil(t, room.PrivateKey, "channel create delivers the key inline")
+		rawKey, err := base64.StdEncoding.DecodeString(*room.PrivateKey)
+		require.NoError(t, err)
+		assert.Len(t, rawKey, 32, "inline key is the base64 32-byte room secret")
+		require.NotNil(t, room.KeyVersion)
+		assert.Nil(t, room.PreviewMessage)
+	}
+}
+
+// TestProcessCreateRoom_Channel_NoRoomKeyEvent locks in the removal of the
+// initial-key fan-out: with the publish callback AND the keySender wired to
+// one capture, a channel create must emit subscription.update events (carrying
+// the key inline) and zero room.key events.
+func TestProcessCreateRoom_Channel_NoRoomKeyEvent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockStore := NewMockSubscriptionStore(ctrl)
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		return pub.Publish(subj, data)
+	}
+	h := &Handler{store: mockStore, publish: publish, siteID: "site-A", keyStore: testKeyStore, keySender: roomkeysender.NewSender(pub)}
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	requester := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice A", SiteID: "site-A"}
+	invited := []model.User{{ID: "u_bob", Account: "bob", EngName: "Bob B", SiteID: "site-A"}}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(requester, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	mockStore.EXPECT().ListNewMembersForNewRoom(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"bob"}, nil)
+	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(invited, nil)
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-ch-nokey").Return(nil)
+
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID: "room-ch-nokey", Name: "No Key Fanout", RequesterAccount: "alice",
+		Users: []string{"bob"}, Orgs: []string{"org1"},
+		ResolvedUsers: []string{"bob"}, ResolvedOrgs: []string{"org1"},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	assert.NotEmpty(t, subscriptionUpdates(pubToPublished(pub)))
+	for _, s := range pub.subjects {
+		assert.NotContains(t, s, ".event.room.key", "no separate room.key on create — the key rides subscription.update")
+	}
+}
+
+// pubToPublished adapts a mockPublisher capture to the []publishedMsg helpers.
+func pubToPublished(pub *mockPublisher) []publishedMsg {
+	out := make([]publishedMsg, 0, len(pub.subjects))
+	for i, s := range pub.subjects {
+		out = append(out, publishedMsg{subj: s, data: pub.payloads[i]})
+	}
+	return out
 }
 
 // ---- Task 36: sys-messages ----
