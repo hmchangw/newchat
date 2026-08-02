@@ -1670,15 +1670,8 @@ func startEmbeddedNATS(t *testing.T) *nats.Conn {
 	return nc
 }
 
-// TestIntegration_CreateRoom_DeliversRoomKeyInlineOnSubscriptionUpdate verifies
-// that processCreateRoom provisions the room key (in the room document) and
-// delivers it to every local-site member INSIDE the "added" subscription.update
-// event — no separate room.key event is published on create.
-//
-// Setup: seed users and the canonical CreateRoomRequest, then drive
-// processCreateRoom and assert that each member's subscription.update carries
-// subscription.room with the persisted key, while the room.key subjects stay
-// silent.
+// TestIntegration_CreateRoom_DeliversRoomKeyInlineOnSubscriptionUpdate: create provisions the room
+// key and delivers it INSIDE each member's "added" event; the room.key subjects stay silent.
 func TestIntegration_CreateRoom_DeliversRoomKeyInlineOnSubscriptionUpdate(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -1725,9 +1718,7 @@ func TestIntegration_CreateRoom_DeliversRoomKeyInlineOnSubscriptionUpdate(t *tes
 	}
 	require.NoError(t, nc.Flush())
 
-	// Wire up the handler with real keyStore and keySender backed by embedded
-	// NATS; the regular publish callback rides the same connection so the
-	// subscription.update events are observable.
+	// Publish rides the same embedded-NATS connection so the added events are observable.
 	keySender := roomkeysender.NewSender(nc)
 	natsPublish := func(_ context.Context, subj string, data []byte, _ string) error { return nc.Publish(subj, data) }
 	h := NewHandler(store, "site-A", natsPublish, keyStore, keySender, subject.RouteGlobal)

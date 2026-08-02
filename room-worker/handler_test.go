@@ -764,16 +764,13 @@ func TestHandler_ProcessAddMembers_DirectAdd_ExistingIndividualNotReinserted(t *
 	assert.Equal(t, model.RoomMemberIndividual, evt.Members[0].Type)
 }
 
-// TestHandler_ProcessAddMembers_AddedEventCarriesRoomInfoAndKey locks in the
-// enriched "added" contract: the event embeds a subscription.room built from a
-// fresh post-add GetRoom read plus the current key pair, and NO separate
-// room.key event is published (the key rides the subscription.update).
+// TestHandler_ProcessAddMembers_AddedEventCarriesRoomInfoAndKey locks in the enriched "added"
+// contract: subscription.room from a fresh post-add GetRoom read + key pair, no separate room.key.
 func TestHandler_ProcessAddMembers_AddedEventCarriesRoomInfoAndKey(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 
-	// Wire both the regular publish callback and the keySender to a single
-	// mockPublisher so a stray room.key publish would land in the same capture.
+	// One capture for publish + keySender so a stray room.key would land in it too.
 	pub := &mockPublisher{}
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
 		return pub.Publish(subj, data)
@@ -842,9 +839,8 @@ func TestHandler_ProcessAddMembers_AddedEventCarriesRoomInfoAndKey(t *testing.T)
 	}
 }
 
-// TestHandler_ProcessAddMembers_KeyStoreGetFailureFailsBeforePublish: a key-store
-// failure must fail the handler BEFORE any subscription.update is published —
-// JetStream then redelivers with nothing half-sent.
+// TestHandler_ProcessAddMembers_KeyStoreGetFailureFailsBeforePublish: a key-store failure must
+// fail the handler BEFORE any subscription.update publish, so JetStream redelivers nothing half-sent.
 func TestHandler_ProcessAddMembers_KeyStoreGetFailureFailsBeforePublish(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -879,12 +875,8 @@ func TestHandler_ProcessAddMembers_KeyStoreGetFailureFailsBeforePublish(t *testi
 	}
 }
 
-// TestHandler_ProcessAddMembers_BotGetsKeyAndSubUpdate locks in the delivery
-// model: a bot member receives subscription.update — with the room key riding
-// inside it — on its encoded per-user subject (subject.SubscriptionUpdate
-// encodes weather.bot → weather_bot, the token its NATS JWT is scoped to),
-// because a bot can log into the chat frontend and needs its sidebar cache. A
-// human added in the same batch gets the same event on its plain subject.
+// TestHandler_ProcessAddMembers_BotGetsKeyAndSubUpdate: a bot (FE-login capable) gets the added
+// event — key inline — on its ENCODED subject (weather.bot → weather_bot, its NATS JWT token).
 func TestHandler_ProcessAddMembers_BotGetsKeyAndSubUpdate(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -2687,11 +2679,8 @@ func makeCreateRoomBody(t *testing.T, req *model.CreateRoomRequest) []byte {
 
 // ---- Task 33: DM branch tests ----
 
-// channelKeyTestHandler builds a Handler for the channel key-path tests below,
-// with an explicit MockRoomKeyStore and the regular publish callback AND the
-// keySender wired to one capture — so both the subscription.update events
-// (which carry the key inline) and any stray room.key publish land in the same
-// timeline.
+// channelKeyTestHandler builds a Handler with an explicit MockRoomKeyStore and publish +
+// keySender on one capture, so added events (key inline) and any stray room.key share a timeline.
 func channelKeyTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, *MockRoomKeyStore, *mockPublisher) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
@@ -2708,8 +2697,7 @@ func channelKeyTestHandler(t *testing.T) (*Handler, *MockSubscriptionStore, *Moc
 	return h, mockStore, mockKeys, pub
 }
 
-// inlineKeysFromSubUpdates decodes every captured subscription.update and
-// returns the base64 room keys they carry, one per event.
+// inlineKeysFromSubUpdates returns the base64 room key carried by each captured added event.
 func inlineKeysFromSubUpdates(t *testing.T, pub *mockPublisher) []string {
 	t.Helper()
 	var keys []string
@@ -2893,8 +2881,7 @@ func TestProcessCreateRoom_DM_BuildsTwoSubs(t *testing.T) {
 	// No sys messages for DM
 	assert.Empty(t, messagesCanonical(getPublished(), "site-A"))
 
-	// Both "added" events embed the room view; DM rooms are keyless, so the
-	// key fields stay absent while the roster-derived counts are present.
+	// Both added events embed the room view; DM rooms are keyless (no key fields).
 	updates := subscriptionUpdates(getPublished())
 	require.Len(t, updates, 2)
 	for _, u := range updates {
@@ -3351,8 +3338,7 @@ func TestProcessCreateRoom_Channel_FiresSubscriptionUpdateForEverySub(t *testing
 	assert.Contains(t, subjects, subject.SubscriptionUpdate("alice"))
 	assert.Contains(t, subjects, subject.SubscriptionUpdate("bob"))
 
-	// Every "added" event embeds the room view with counts derived from the
-	// initial roster, and the key rides inline (no separate room.key event).
+	// Every added event embeds the room view (roster-derived counts) with the key inline.
 	for _, u := range updates {
 		var evt model.SubscriptionUpdateEvent
 		require.NoError(t, json.Unmarshal(u.data, &evt))
@@ -3370,10 +3356,8 @@ func TestProcessCreateRoom_Channel_FiresSubscriptionUpdateForEverySub(t *testing
 	}
 }
 
-// TestProcessCreateRoom_Channel_NoRoomKeyEvent locks in the removal of the
-// initial-key fan-out: with the publish callback AND the keySender wired to
-// one capture, a channel create must emit subscription.update events (carrying
-// the key inline) and zero room.key events.
+// TestProcessCreateRoom_Channel_NoRoomKeyEvent: with publish AND keySender on one capture,
+// a channel create emits added events (key inline) and zero room.key events.
 func TestProcessCreateRoom_Channel_NoRoomKeyEvent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
@@ -3414,8 +3398,7 @@ func expectGetRoom(s *MockSubscriptionStore, roomID, name string) {
 		Return(&model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil).AnyTimes()
 }
 
-// assertNoRoomKeyPublished pins the "no separate room.key on create/add"
-// invariant against the accounts' canonical key subjects.
+// assertNoRoomKeyPublished pins the no-separate-room.key invariant on the accounts' key subjects.
 func assertNoRoomKeyPublished(t *testing.T, pub *mockPublisher, accounts ...string) {
 	t.Helper()
 	for _, account := range accounts {
@@ -3568,10 +3551,8 @@ func TestProcessCreateRoom_Channel_InboxPerRemoteSite(t *testing.T) {
 	assert.Equal(t, []string{"bob"}, payload.Accounts)
 	assert.Equal(t, "alice", payload.RequesterAccount)
 
-	// The cross-site marking must land BEFORE the added fan-out: the events'
-	// room view carries the authoritative crossSite=true, not the channel's
-	// provisional birth value (false), which would route the members' FE to
-	// the local namespace and miss events.
+	// Cross-site marking lands BEFORE the fan-out: events carry the authoritative
+	// crossSite=true, not the channel's provisional birth false (would route FE local).
 	updates := subscriptionUpdates(getPublished())
 	require.NotEmpty(t, updates)
 	for _, u := range updates {
@@ -3869,8 +3850,7 @@ func TestHandleSyncCreateDM_SelfDM(t *testing.T) {
 	require.Len(t, capture.captured, 1)
 	assert.Equal(t, subject.SubscriptionUpdate("alice"), capture.captured[0].subject)
 
-	// The added event embeds the room view; a self-DM is keyless and
-	// definitively same-site.
+	// The added event embeds the room view; a self-DM is keyless and definitively same-site.
 	evt := decodeSubUpdate(t, capture.captured, "alice")
 	require.NotNil(t, evt.Subscription.Room, "self-DM added event must embed subscription.room")
 	assert.Equal(t, 1, evt.Subscription.Room.UserCount)
@@ -4874,8 +4854,7 @@ func TestProcessAddMembers_NoRoomKeyEventOnAdd(t *testing.T) {
 	ctx := natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-0193abcd0011")
 	require.NoError(t, h.processAddMembers(ctx, data))
 
-	// The key rides inside the subscription.update event now — the keySender
-	// (wired to its own capture here) must publish NO room.key event on add.
+	// The key rides the subscription.update now; the keySender must publish NO room.key on add.
 	assert.Equal(t, 0, pub.publishCount())
 }
 

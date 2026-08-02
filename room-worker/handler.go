@@ -1102,25 +1102,19 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Enrich the "added" fan-out with the room view + key so the FE can render
-	// the row (and decrypt) from this single event — no separate room.key is
-	// published on this path anymore. The key is checked first (a permanent
-	// error skips the room re-read), then the room is re-read AFTER the
-	// member-count writes so userCount includes the members just added; both
-	// reads happen before any publish so a failure redelivers with nothing
-	// half-sent. Accounts in needIRM already had a subscription (and its key),
-	// so only new subs are fanned out.
+	// Added events carry the room view + key inline (no separate room.key on add);
+	// reads run pre-publish (failure redelivers). needIRM accounts already hold a sub + key.
 	if len(subs) > 0 {
 		pair, err := h.keyStore.Get(ctx, req.RoomID)
 		if err != nil {
 			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
 			return fmt.Errorf("get room key for subscription fan-out: %w", err)
 		}
-		// A channel room must have a key; publishing a keyless "added" event
-		// would leave the new member unable to decrypt with no retry.
+		// A keyless "added" event would leave the new member unable to decrypt with no retry.
 		if err := requireKeyPair(ctx, pair); err != nil {
 			return err
 		}
+		// Re-read AFTER the member-count writes so userCount includes the members just added.
 		freshRoom, err := h.store.GetRoom(ctx, req.RoomID)
 		if err != nil {
 			return fmt.Errorf("re-read room for subscription fan-out: %w", err)
@@ -1404,13 +1398,10 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 	return sub, nil
 }
 
-// subscriptionRoomFor builds the read-model room view carried on an "added"
-// subscription.update so the FE can render the row like a subscription.list
-// item without a follow-up RPC. nil pair (DM/botDM/self-DM — keyless by
-// design) omits the key fields. PreviewMessage is intentionally never set:
-// it isn't on the room doc, and a member added without shared history must
-// not see the prior last message.
+// subscriptionRoomFor builds the room view carried on an "added" subscription.update
+// (a subscription.list-shaped row); nil pair (keyless DM/botDM/self-DM) omits the key fields.
 func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) *model.SubscriptionRoom {
+	// PreviewMessage stays nil: a member added without shared history must not see the prior last message.
 	sr := &model.SubscriptionRoom{
 		SiteID:            room.SiteID,
 		Name:              room.Name,
@@ -1733,11 +1724,8 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	}
 	h.bustRoomMeta(ctx, room.ID)
 
-	// Group resolved members per remote site up front: the federate loop below
-	// consumes it, and the cross-site marking must land BEFORE the added fan-out
-	// so the events carry the authoritative crossSite (a channel is born with a
-	// provisional false until the full roster is known here; fanning that out
-	// would route the new members' FE to the local namespace and miss events).
+	// Cross-site marking must land BEFORE the added fan-out: a channel is born
+	// provisionally false, and fanning that out would route the members' FE local.
 	remoteSiteAccounts := map[string][]string{}
 	for i := range allUsers {
 		u := &allUsers[i]
@@ -1763,10 +1751,8 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	for i := range allUsers {
 		userByAccount[allUsers[i].Account] = &allUsers[i]
 	}
-	// Event room view: the in-memory room's counts are zero (ReconcileMemberCounts
-	// writes only to Mongo), but at creation the roster IS subs — derive the
-	// counts from it instead of re-reading. The key rides the event; no separate
-	// room.key fan-out on create anymore.
+	// The in-memory room's counts are zero (ReconcileMemberCounts writes only
+	// Mongo); at creation the roster IS subs, so derive the counts from it.
 	subRoom := subscriptionRoomFor(room, pair)
 	subRoom.UserCount, subRoom.AppCount = 0, 0
 	for _, sub := range subs {
@@ -2130,11 +2116,8 @@ func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subsc
 	}
 }
 
-// publishSubscriptionUpdates is the DM/botDM/self-DM entry to the "added"
-// fan-out. Those rooms are keyless by design → nil pair, no key fields; the
-// in-memory room already carries correct counts/CrossSite (set at build).
-// Never pass a channel room here — its added events would lack the room key
-// (channel paths fetch the pair and call publishSubscriptionAdded directly).
+// publishSubscriptionUpdates is the DM/botDM/self-DM "added" fan-out entry (keyless rooms → nil pair).
+// Never pass a channel room — channel paths fetch the key pair and call publishSubscriptionAdded directly.
 func (h *Handler) publishSubscriptionUpdates(ctx context.Context, room *model.Room, subs []*model.Subscription, users []*model.User, requestID string) {
 	if room.Type == model.RoomTypeChannel {
 		slog.ErrorContext(ctx, "publishSubscriptionUpdates called for a channel room; added events would lack the room key",
@@ -2147,11 +2130,8 @@ func (h *Handler) publishSubscriptionUpdates(ctx context.Context, room *model.Ro
 	h.publishSubscriptionAdded(ctx, subs, userByAccount, subscriptionRoomFor(room, nil), time.Now().UTC().UnixMilli(), requestID)
 }
 
-// publishSubscriptionAdded fans out one "added" subscription.update per sub,
-// attaching subRoom (shared across events — it is recipient-independent) to
-// each event copy. Best-effort per recipient: marshal/publish failures log and
-// continue. userByAccount feeds the per-subscriber display label; nil is fine
-// for channel-only paths (the resolver falls back to sub.Name).
+// publishSubscriptionAdded fans out one best-effort "added" subscription.update per sub, attaching
+// subRoom (recipient-independent, shared) to each copy. nil userByAccount is fine for channel paths.
 func (h *Handler) publishSubscriptionAdded(ctx context.Context, subs []*model.Subscription, userByAccount map[string]*model.User, subRoom *model.SubscriptionRoom, tsMillis int64, requestID string) {
 	for _, sub := range subs {
 		subCopy := *sub
@@ -2395,9 +2375,8 @@ func (h *Handler) fanOutRoomKeyToSurvivors(ctx context.Context, roomID string, p
 	h.fanOutKey(ctx, roomID, survivorAccounts, &evt)
 }
 
-// requireKeyPair guards the "channel room must have a key" invariant: a nil
-// pair counts the absence and returns a permanent error (Ack-poison, never
-// retried) so no keyless event or fan-out is ever published.
+// requireKeyPair guards "a channel room must have a key": nil pair counts the
+// absence and returns a permanent error so nothing keyless is ever published.
 func requireKeyPair(ctx context.Context, pair *roomkeystore.VersionedKeyPair) error {
 	if pair == nil {
 		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1)
