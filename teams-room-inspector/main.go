@@ -59,9 +59,11 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	// Reads only — but the site's primary is the authoritative view of what was
-	// just created, and a secondary lag would report false missing rooms.
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+	// Reads only, so the scan rides a secondary-preferred client and keeps the
+	// primary free. Replication lag can make a just-created room look missing;
+	// that chat simply keeps its needVerify flag and is re-checked on the next
+	// run, so a lagged read costs a repeat rather than a wrong write.
+	mongoClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
 		mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
