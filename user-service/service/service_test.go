@@ -35,7 +35,7 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	// The same mock backs both publishers (federation + client fanout) —
 	// expectations are subject-scoped, so tests stay unambiguous.
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, ssoTokens, validator, refresher, cfg), subs, users, apps, rooms, history, pub
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, ssoTokens, validator, refresher, cfg), subs, users, apps, rooms, history, pub
 }
 
 // ctx builds a handler context. siteID is retained for readability but unused

@@ -70,6 +70,16 @@ type PresenceClient interface {
 	QueryPresence(ctx context.Context, siteID string, accounts []string) ([]model.PresenceState, error)
 }
 
+// badgeCache is the consumer-defined interface for the thread-unread badge's
+// Valkey accelerator (pkg/badgecache.Cache satisfies it; a disabled/no-op
+// implementation is wired when Valkey is not configured). Only Bump/Seed/Reseed
+// are consumed here — ClearRoom/ClearAll belong to other event handlers.
+type badgeCache interface {
+	Bump(ctx context.Context, account, roomID string) (int, bool)
+	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
+	Reseed(ctx context.Context, account string, roomIDs []string)
+}
+
 // EventPublisher is the consumer-defined interface for fire-and-forget
 // federation publishing — a JetStream publish directly into the destination
 // site's INBOX stream. Status is last-write-wins and idempotent, so no
@@ -107,6 +117,7 @@ type UserService struct {
 	// clientPub fans out ephemeral client-facing events (settings.update) over
 	// core NATS — same delivery pattern as room-worker's subscription.update.
 	clientPub        EventPublisher
+	badge            badgeCache
 	ssoTokens        SSOTokenRepository
 	tokenValidator   TokenValidator
 	tokenRefresher   TokenRefresher
@@ -121,7 +132,7 @@ type UserService struct {
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, badge badgeCache, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
 	return &UserService{
 		subs:             subs,
 		users:            users,
@@ -132,6 +143,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		presence:         presence,
 		pub:              pub,
 		clientPub:        clientPub,
+		badge:            badge,
 		ssoTokens:        ssoTokens,
 		tokenValidator:   tokenValidator,
 		tokenRefresher:   tokenRefresher,
@@ -168,4 +180,5 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.UserAppsCategoriesPattern(s.siteID), s.ListAppCategories)
 	natsrouter.Register(r, subject.UserSSOSetPattern(s.siteID), s.SSOSet)
 	natsrouter.RegisterOptionalBody(r, subject.UserSSORefreshPattern(s.siteID), s.SSORefresh)
+	natsrouter.Register(r, subject.BadgeCountBatchPattern(s.siteID), s.BadgeCountBatch)
 }

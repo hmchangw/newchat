@@ -6,6 +6,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
+	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -22,6 +25,10 @@ import (
 	"github.com/hmchangw/chat/user-service/service"
 )
 
+// badgeCacheTTL bounds how long an account's badge unread-room set survives
+// without a Bump/Seed/Reseed refresh (pkg/badgecache.New's ttl param).
+const badgeCacheTTL = 24 * time.Hour
+
 // Compile-time interface assertions — fail the build if implementations drift.
 var (
 	_ service.SubscriptionRepository       = (*mongorepo.SubscriptionRepo)(nil)
@@ -37,6 +44,28 @@ var (
 	_ service.TokenValidator               = (*pkgoidc.Validator)(nil)
 	_ service.TokenRefresher               = (*pkgoidc.Validator)(nil)
 )
+
+// badgeCache mirrors service.badgeCache (unexported in that package, so it
+// can't be named here) — Go interfaces are satisfied structurally, so this
+// local copy lets main hold either a *badgecache.Cache or a noopBadgeCache
+// before passing it into service.New.
+type badgeCache interface {
+	Bump(ctx context.Context, account, roomID string) (int, bool)
+	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
+	Reseed(ctx context.Context, account string, roomIDs []string)
+}
+
+// noopBadgeCache is the badge cache used when VALKEY_ADDRS is empty: Bump/Seed
+// always miss (ok=false), Reseed is a no-op. BadgeCountBatch's cappedUnion
+// fallback still returns a correct (just uncached) count, and CountSubscriptions'
+// Reseed call becomes a harmless no-op — so Phase A deploys need no Valkey.
+type noopBadgeCache struct{}
+
+func (noopBadgeCache) Bump(context.Context, string, string) (int, bool) { return 0, false }
+func (noopBadgeCache) Seed(context.Context, string, []string, string) (int, bool) {
+	return 0, false
+}
+func (noopBadgeCache) Reseed(context.Context, string, []string) {}
 
 func main() {
 	cfg, err := config.Load()
@@ -109,7 +138,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
+	// Empty VALKEY_ADDRS disables the badge cache: badge.count.batch and
+	// subscription.count still work, just uncached (dev-safe Phase A default).
+	var badge badgeCache = noopBadgeCache{}
+	var valkeyClient *redis.ClusterClient
+	if len(cfg.ValkeyAddrs) > 0 {
+		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:    cfg.ValkeyAddrs,
+			Password: cfg.ValkeyPassword,
+		})
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := valkeyClient.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			slog.Error("valkey connect failed", "error", err)
+			os.Exit(1)
+		}
+		badge = badgecache.New(valkeyClient, badgeCacheTTL)
+		slog.Info("badge cache enabled", "ttl", badgeCacheTTL)
+	} else {
+		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
 	router := natsrouter.New(nc, "user-service")
 	router.Use(natsrouter.Recovery())
@@ -129,6 +180,12 @@ func main() {
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error {
+			if valkeyClient == nil {
+				return nil
+			}
+			return valkeyClient.Close()
+		},
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

@@ -1362,6 +1362,20 @@ func UserSubscriptionGetByRoomIDPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.subscription.getByRoomID", siteID)
 }
 
+// BadgeCountBatch is the server-to-server request subject for the badge
+// unread-room count batch RPC: notification-worker asks the accounts' home
+// site's user-service for each account's badge unread-room count. No
+// account token — this is server-to-server, not client-facing.
+func BadgeCountBatch(siteID string) string {
+	return fmt.Sprintf("chat.server.request.user.%s.badge.count.batch", siteID)
+}
+
+// BadgeCountBatchPattern is user-service's registration subject — the same
+// concrete subject, mirroring the RoomThreadReadAll/RoomThreadReadAllSubscribe pair.
+func BadgeCountBatchPattern(siteID string) string {
+	return fmt.Sprintf("chat.server.request.user.%s.badge.count.batch", siteID)
+}
+
 // ParseUserSubject parses any 8-token subject of the form
 //
 //	chat.user.{account}.request.user.{siteID}.{area}.{action}

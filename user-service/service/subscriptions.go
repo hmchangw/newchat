@@ -551,6 +551,10 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 	if err != nil {
 		return nil, err
 	}
+	// Best-effort reconciliation: refresh the badge accelerator from the Mongo
+	// source of truth. Fail-open (badgeCache.Reseed never errors) and does not
+	// block the reply — same goroutine, after the count is already computed.
+	s.badge.Reseed(c, account, ids)
 	return &models.CountResponse{Count: len(ids)}, nil
 }
 

@@ -172,6 +172,25 @@ func TestLoad_SSOEnabledRequiresAudiencesAndClientID(t *testing.T) {
 	require.Equal(t, []string{"nats-chat"}, cfg.OIDCAudiences)
 }
 
+func TestLoad_ValkeyDisabledByDefault(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+}
+
+func TestLoad_ValkeyAddrsParsed(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+}
+
 func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")

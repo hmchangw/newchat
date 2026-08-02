@@ -37,6 +37,7 @@ func newThreadSvc(t *testing.T) (*UserService, *mocks.MockHistoryClient, *mocks.
 		mocks.NewMockPresenceClient(ctrl),
 		mocks.NewMockEventPublisher(ctrl),
 		mocks.NewMockEventPublisher(ctrl),
+		&fakeBadgeCache{},
 		nil, nil, nil,
 		cfg,
 	)
