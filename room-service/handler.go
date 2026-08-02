@@ -1623,8 +1623,24 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 
 	now := time.Now().UTC()
 
-	if err := h.store.UpdateThreadSubscriptionRead(ctx, tsub.ThreadRoomID, account, now); err != nil {
-		return nil, fmt.Errorf("update thread subscription read: %w", err)
+	var newThreadUnread []string
+	wg, wctx := errgroup.WithContext(ctx)
+	wg.Go(func() error {
+		nu, err := h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, req.ThreadID)
+		if err != nil {
+			return fmt.Errorf("update subscription thread-read: %w", err)
+		}
+		newThreadUnread = nu
+		return nil
+	})
+	wg.Go(func() error {
+		if err := h.store.UpdateThreadSubscriptionRead(wctx, tsub.ThreadRoomID, account, now); err != nil {
+			return fmt.Errorf("update thread subscription read: %w", err)
+		}
+		return nil
+	})
+	if err := wg.Wait(); err != nil {
+		return nil, err
 	}
 
 	switch {
@@ -1632,10 +1648,12 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
 	case userSiteID != h.siteID:
 		payload := model.ThreadReadEvent{
-			Account:      account,
-			ThreadRoomID: tsub.ThreadRoomID,
-			LastSeenAt:   now.UnixMilli(),
-			Timestamp:    now.UnixMilli(),
+			Account:         account,
+			RoomID:          roomID,
+			ThreadRoomID:    tsub.ThreadRoomID,
+			NewThreadUnread: newThreadUnread,
+			LastSeenAt:      now.UnixMilli(),
+			Timestamp:       now.UnixMilli(),
 		}
 		payloadData, err := json.Marshal(payload)
 		if err != nil {
@@ -1678,6 +1696,12 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 	g.Go(func() error {
 		if err := h.store.ClearThreadSubscriptionsForAccount(ctx, account, now); err != nil {
 			return fmt.Errorf("clear thread subscriptions: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		if err := h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account); err != nil {
+			return fmt.Errorf("clear subscription thread-unread: %w", err)
 		}
 		return nil
 	})

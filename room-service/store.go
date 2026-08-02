@@ -198,6 +198,19 @@ type RoomStore interface {
 
 	UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
 
+	// UpdateSubscriptionThreadRead removes threadID from the subscription's
+	// threadUnread array via $pull and returns the resulting array (nil when
+	// empty — the field is $unset rather than stored as an empty array).
+	// Returns model.ErrSubscriptionNotFound (wrapped) when no subscription
+	// matches (roomID, account).
+	UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error)
+
+	// ClearSubscriptionThreadUnreadForAccount removes threadUnread from every
+	// one of account's subscriptions that currently has unread threads
+	// (threadUnread.0 exists). Subscriptions with no unread threads are not
+	// matched.
+	ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error
+
 	// ClearThreadSubscriptionsForAccount marks every one of account's thread
 	// subscriptions on this site as read (lastSeenAt=now, updatedAt=now,
 	// hasMention=false) in a single account-scoped bulk update. The cross-site

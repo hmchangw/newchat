@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"time"
 
@@ -1614,6 +1615,42 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 	if res.MatchedCount == 0 {
 		return fmt.Errorf("update thread subscription read for %q in thread room %q: %w",
 			account, threadRoomID, model.ErrThreadSubscriptionNotFound)
+	}
+	return nil
+}
+
+// UpdateSubscriptionThreadRead removes threadID from threadUnread via $pull
+// and returns the resulting array (nil when empty; the field is $unset so an
+// empty array is never stored). Missing subscription → ErrSubscriptionNotFound.
+func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error) {
+	filter := bson.M{"roomId": roomID, "u.account": account}
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var updated model.Subscription
+	err := s.subscriptions.FindOneAndUpdate(ctx, filter,
+		bson.M{"$pull": bson.M{"threadUnread": threadID}}, opts).Decode(&updated)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, err)
+	}
+	if len(updated.ThreadUnread) == 0 {
+		if _, err := s.subscriptions.UpdateOne(ctx, filter, bson.M{"$unset": bson.M{"threadUnread": ""}}); err != nil {
+			slog.WarnContext(ctx, "unset empty threadUnread", "error", err, "account", account, "roomID", roomID)
+		}
+		return nil, nil
+	}
+	return updated.ThreadUnread, nil
+}
+
+// ClearSubscriptionThreadUnreadForAccount removes threadUnread from every one
+// of account's subscriptions that has unread threads.
+func (s *MongoStore) ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error {
+	if _, err := s.subscriptions.UpdateMany(ctx,
+		bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}},
+		bson.M{"$unset": bson.M{"threadUnread": ""}},
+	); err != nil {
+		return fmt.Errorf("clear subscription thread-unread for %q: %w", account, err)
 	}
 	return nil
 }

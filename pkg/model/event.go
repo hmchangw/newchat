@@ -169,10 +169,13 @@ type SubscriptionReadEvent struct {
 
 // ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The
 // destination advances the home-replica ThreadSubscription read state
-// (lastSeenAt, hasMention) under a $lt order-safety guard. The room context
-// rides the OutboxEvent envelope, not this payload.
+// (lastSeenAt, hasMention) under a $lt order-safety guard, and — gated on that
+// same guard matching — mirrors NewThreadUnread onto the home-replica
+// Subscription. RoomID rides here (not the OutboxEvent envelope) because the
+// destination InboxEvent carries no room context of its own.
 type ThreadReadEvent struct {
 	Account      string `json:"account"`
+	RoomID       string `json:"roomId"`
 	ThreadRoomID string `json:"threadRoomId"`
 	LastSeenAt   int64  `json:"lastSeenAt"`
 	// NewThreadUnread is the result of a $pull array operation removing the

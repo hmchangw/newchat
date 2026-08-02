@@ -69,9 +69,11 @@ type subRead struct {
 }
 
 type threadRead struct {
-	threadRoomID string
-	account      string
-	lastSeenAt   time.Time
+	roomID          string
+	threadRoomID    string
+	account         string
+	newThreadUnread []string
+	lastSeenAt      time.Time
 }
 
 type threadReadAll struct {
@@ -328,14 +330,15 @@ func (s *stubInboxStore) getSubReads() []subRead {
 	return cp
 }
 
-func (s *stubInboxStore) ApplyThreadRead(_ context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
+func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.applyThreadReadErr != nil {
 		return s.applyThreadReadErr
 	}
 	s.threadReads = append(s.threadReads, threadRead{
-		threadRoomID: threadRoomID, account: account, lastSeenAt: lastSeenAt,
+		roomID: roomID, threadRoomID: threadRoomID, account: account,
+		newThreadUnread: newThreadUnread, lastSeenAt: lastSeenAt,
 	})
 	return nil
 }
@@ -1579,10 +1582,12 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 	store := &stubInboxStore{}
 	h := NewHandler(store)
 	payload := model.ThreadReadEvent{
-		Account:      "alice",
-		ThreadRoomID: "tr1",
-		LastSeenAt:   1735689600000,
-		Timestamp:    1735689600001,
+		Account:         "alice",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		NewThreadUnread: []string{"p2"},
+		LastSeenAt:      1735689600000,
+		Timestamp:       1735689600001,
 	}
 	inner, err := json.Marshal(&payload)
 	require.NoError(t, err)
@@ -1599,8 +1604,10 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 	require.NoError(t, h.HandleEvent(context.Background(), data))
 	require.Len(t, store.threadReads, 1)
 	tr := store.threadReads[0]
+	assert.Equal(t, "r1", tr.roomID)
 	assert.Equal(t, "tr1", tr.threadRoomID)
 	assert.Equal(t, "alice", tr.account)
+	assert.Equal(t, []string{"p2"}, tr.newThreadUnread)
 	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), tr.lastSeenAt)
 }
 

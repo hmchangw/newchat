@@ -71,6 +71,20 @@ func (mr *MockRoomStoreMockRecorder) CheckMembership(ctx, account, roomID any) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CheckMembership", reflect.TypeOf((*MockRoomStore)(nil).CheckMembership), ctx, account, roomID)
 }
 
+// ClearSubscriptionThreadUnreadForAccount mocks base method.
+func (m *MockRoomStore) ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearSubscriptionThreadUnreadForAccount", ctx, account)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ClearSubscriptionThreadUnreadForAccount indicates an expected call of ClearSubscriptionThreadUnreadForAccount.
+func (mr *MockRoomStoreMockRecorder) ClearSubscriptionThreadUnreadForAccount(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearSubscriptionThreadUnreadForAccount", reflect.TypeOf((*MockRoomStore)(nil).ClearSubscriptionThreadUnreadForAccount), ctx, account)
+}
+
 // ClearThreadSubscriptionsForAccount mocks base method.
 func (m *MockRoomStore) ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error {
 	m.ctrl.T.Helper()
@@ -635,6 +649,21 @@ func (m *MockRoomStore) UpdateSubscriptionRead(ctx context.Context, roomID, acco
 func (mr *MockRoomStoreMockRecorder) UpdateSubscriptionRead(ctx, roomID, account, lastSeenAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRead", reflect.TypeOf((*MockRoomStore)(nil).UpdateSubscriptionRead), ctx, roomID, account, lastSeenAt)
+}
+
+// UpdateSubscriptionThreadRead mocks base method.
+func (m *MockRoomStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateSubscriptionThreadRead", ctx, roomID, account, threadID)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UpdateSubscriptionThreadRead indicates an expected call of UpdateSubscriptionThreadRead.
+func (mr *MockRoomStoreMockRecorder) UpdateSubscriptionThreadRead(ctx, roomID, account, threadID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionThreadRead", reflect.TypeOf((*MockRoomStore)(nil).UpdateSubscriptionThreadRead), ctx, roomID, account, threadID)
 }
 
 // UpdateThreadRoomMinUserLastSeenAt mocks base method.

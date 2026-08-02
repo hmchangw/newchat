@@ -42,11 +42,15 @@ type InboxStore interface {
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead advances the home-replica ThreadSubscription read state
-	// (lastSeenAt, updatedAt, hasMention=false) under a $lt lastSeenAt guard.
-	ApplyThreadRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
+	// (lastSeenAt, updatedAt, hasMention=false) under a $lt lastSeenAt guard, and
+	// — gated on that same guard matching — mirrors newThreadUnread onto the
+	// home-replica Subscription (roomID, account): $set when non-empty, $unset
+	// when empty/nil.
+	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error
 	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
 	// user's home replica: it advances every one of account's thread subscriptions
-	// to lastSeenAt under a per-doc $lt guard (clearing hasMention).
+	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and $unsets
+	// threadUnread on every subscription that currently has unread threads.
 	ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
@@ -343,7 +347,7 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("unmarshal thread_read payload: %w", err)
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
-	if err := h.store.ApplyThreadRead(ctx, e.ThreadRoomID, e.Account, lastSeenAt); err != nil {
+	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.NewThreadUnread, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
 			e.ThreadRoomID, e.Account, err)
 	}

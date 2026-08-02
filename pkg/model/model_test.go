@@ -3754,6 +3754,7 @@ func TestMessageThreadReadRequestJSON(t *testing.T) {
 func TestThreadReadEventJSON(t *testing.T) {
 	src := model.ThreadReadEvent{
 		Account:      "alice",
+		RoomID:       "r1",
 		ThreadRoomID: "tr1",
 		LastSeenAt:   1735689600000,
 		Timestamp:    1735689600001,
@@ -5051,7 +5052,7 @@ func TestThreadUnreadAddedEventJSON(t *testing.T) {
 
 func TestThreadReadEventJSON_NewThreadUnread(t *testing.T) {
 	src := model.ThreadReadEvent{
-		Account: "alice", ThreadRoomID: "tr1",
+		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
 		NewThreadUnread: []string{"p2"}, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
 	}
 	roundTrip(t, &src, &model.ThreadReadEvent{})

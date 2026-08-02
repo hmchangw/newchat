@@ -57,17 +57,17 @@ func (mr *MockInboxStoreMockRecorder) ApplySubscriptionRestriction(ctx, roomID, 
 }
 
 // ApplyThreadRead mocks base method.
-func (m *MockInboxStore) ApplyThreadRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error {
+func (m *MockInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ApplyThreadRead", ctx, threadRoomID, account, lastSeenAt)
+	ret := m.ctrl.Call(m, "ApplyThreadRead", ctx, roomID, threadRoomID, account, newThreadUnread, lastSeenAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ApplyThreadRead indicates an expected call of ApplyThreadRead.
-func (mr *MockInboxStoreMockRecorder) ApplyThreadRead(ctx, threadRoomID, account, lastSeenAt any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) ApplyThreadRead(ctx, roomID, threadRoomID, account, newThreadUnread, lastSeenAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyThreadRead", reflect.TypeOf((*MockInboxStore)(nil).ApplyThreadRead), ctx, threadRoomID, account, lastSeenAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyThreadRead", reflect.TypeOf((*MockInboxStore)(nil).ApplyThreadRead), ctx, roomID, threadRoomID, account, newThreadUnread, lastSeenAt)
 }
 
 // ApplyThreadReadAll mocks base method.
