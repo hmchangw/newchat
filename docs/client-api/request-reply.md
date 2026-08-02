@@ -312,7 +312,7 @@ DM/self-DM already exists: `{ "status": "exists", "roomId": "<existing room id>"
 - `user "<account>": user not found` / `org "<orgId>": invalid org`
 - `"exceeds maximum capacity (N): would create M members"`
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.create"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per enrolled member), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — one per enrolled local member), `new_message` system messages (`room_created`, `members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.create"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per enrolled member, embedding the room object incl. the room key for channels; no separate `room.key` event), `new_message` system messages (`room_created`, `members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -328,7 +328,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional echo; server derives from subject. |
-| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get both `subscription.update` and `room.key` on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
+| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get `subscription.update` (with the room key inline under `subscription.room`) on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
@@ -346,7 +346,7 @@ available (no app record / disabled assistant), user/org not found.
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
 ```
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — every new member, bots included, on the encoded per-user subject), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject, embedding the room object incl. the room key for channels; no separate `room.key` event), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 

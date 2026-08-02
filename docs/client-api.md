@@ -867,8 +867,11 @@ display name for botDMs. It is never overwritten by the room's canonical name.
 
 All room-derived properties live under the nested `room` object
 ([SubscriptionRoom](#subscriptionroom)), populated at read time by the
-user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
-**not** present on subscriptions embedded in `subscription.update` events.
+user-service endpoints via room-service's `GetRoomsInfo` enrichment. On
+`subscription.update` events, `room` is populated **only** on `action:
+"added"` (built by room-worker at publish time, `previewMessage` always
+omitted, `privateKey`/`keyVersion` present only for encrypted channel rooms);
+it is absent on every other action.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -903,11 +906,14 @@ user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
 #### SubscriptionRoom
 
 The room-derived view nested on an enriched [Subscription](#subscription).
-**Local** rooms are populated from the Mongo `$lookup` baseline (room metadata
-plus the E2E key) with no RPC. **Cross-site** rooms are populated from
-room-service's `GetRoomsInfo` RPC; if that RPC fails or the room isn't found, the
-`room` object is **omitted entirely** — the subscription still carries its own
-top-level `siteId`. All fields are optional (omitted when zero/unset).
+On the list endpoints, **local** rooms are populated from the Mongo `$lookup`
+baseline (room metadata plus the E2E key) with no RPC and **cross-site** rooms
+from room-service's `GetRoomsInfo` RPC; if that RPC fails or the room isn't
+found, the `room` object is **omitted entirely** — the subscription still
+carries its own top-level `siteId`. On `added` `subscription.update` events the
+same view is built by room-worker at publish time from the room's home-site
+document (`previewMessage` always omitted there). All fields are optional
+(omitted when zero/unset).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1123,9 +1129,7 @@ The creator (from the subject) plus any members supplied via `users` / `orgs` / 
 
 **1. `chat.user.{account}.response.{requestID}`** — an `AsyncJobResult` to the requester when the job finishes (requires the `X-Request-ID` header). See the [AsyncJobResult schema](#asyncjobresult). `operation` is `"room.create"`.
 
-**2. `chat.user.{account}.event.subscription.update`** — one per enrolled member (including the owner), `action: "added"`. See the [subscription.update schema](#subscriptionupdate-event) under Add Members.
-
-**3. `chat.user.{account}.event.room.key`** — **channel rooms only:** one `RoomKeyEvent` per enrolled local member. DM/botDM rooms are not encrypted and emit no key event. See [§5 Room Encryption](#5-room-encryption).
+**2. `chat.user.{account}.event.subscription.update`** — one per enrolled member (including the owner), `action: "added"`. See the [subscription.update schema](#subscriptionupdate-event) under Add Members. The embedded `subscription.room` carries the room view — for **channel** rooms including the E2E key (`room.privateKey` / `room.keyVersion`); DM/botDM rooms are not encrypted and carry no key fields. No separate `room.key` event fires on create — see [§5 Room Encryption](#5-room-encryption).
 
 For **channel** rooms, the first messages (`type: "room_created"`, then `type: "members_added"` when initial members were enrolled) flow through the normal message pipeline and arrive as `new_message` room events (see [§4](#4-message-send)).
 
@@ -1151,7 +1155,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional; the server derives the room ID from the subject and ignores any non-matching value. |
-| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant**, else the request is rejected (see Error response); a bot whose home site differs from the room's is allowed (cross-site bot membership). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive both the `subscription.update` and the `room.key` event on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_admin` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
+| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant**, else the request is rejected (see Error response); a bot whose home site differs from the room's is allowed (cross-site bot membership). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive the `subscription.update` event (with the room key inline under `subscription.room`) on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_admin` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
@@ -1214,12 +1218,12 @@ Shared by Add Members, Remove Member, and Update Member Role.
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path (only `subscription.u.account` is set there). |
-| `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
+| `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
 | `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"opened"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
-On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled` / `opened`). `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
+On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled` / `opened`). On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
 
 ```json
 {
@@ -1231,7 +1235,20 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
     "roomType": "channel",
     "siteId": "siteA",
     "roles": ["member"],
-    "joinedAt": "2026-05-06T08:01:23Z"
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": {
+      "siteId": "siteA",
+      "name": "engineering-announcements",
+      "crossSite": false,
+      "userCount": 12,
+      "appCount": 1,
+      "lastMsgAt": "2026-05-06T07:59:01Z",
+      "lastMsgId": "01970a4f8c2d7c9aM123",
+      "lastMentionAllAt": "2026-05-05T11:00:00Z",
+      "minUserLastSeenAt": "2026-05-04T09:30:00Z",
+      "privateKey": "<base64-encoded 32-byte room secret>",
+      "keyVersion": 0
+    }
   },
   "action": "added",
   "roomName": "engineering-announcements",
@@ -1239,7 +1256,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 }
 ```
 
-**3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed member (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
+**3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
@@ -1259,7 +1276,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
 > [!NOTE]
-> **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
+> **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
 
 ##### Triggered events — error path
 
@@ -5994,7 +6011,7 @@ Apply `newTcount` directly to the parent message's badge — do not compute a de
 
 ## 5. Room Encryption
 
-Channel messages can be end-to-end encrypted. The key material reaches clients as `RoomKeyEvent`s, which are triggered by the Create Room / Add Members / Remove Member RPCs (see their "Triggered events" sections). This section describes the event payload and how a client uses it to decrypt.
+Channel messages can be end-to-end encrypted. The key material reaches clients two ways: **inline** on the `added` `subscription.update` event (`subscription.room.privateKey` / `keyVersion` — Create Room and Add Members) and on `subscription.list`, and as live `RoomKeyEvent`s **on key rotation** (Remove Member — see its "Triggered events" section). This section describes the rotation event payload and how a client uses the key to decrypt.
 
 Each **channel** room has a 32-byte secret generated server-side at create time (`crypto/rand`). The secret is distributed to channel members and used directly as an AES-256-GCM key — no key derivation step. DM and botDM rooms are **not** encrypted: their messages fan out to per-user subjects that only the recipient can subscribe to, so they carry no room key, emit no `RoomKeyEvent`, and always broadcast plaintext `message` (no `encryptedMessage`).
 
@@ -6028,7 +6045,7 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 
 #### Client behavior
 
-1. On every `RoomKeyEvent`, store the key under `(roomId, version) → privateKey`.
+1. Store every key under `(roomId, version) → privateKey`, whatever the delivery path: `subscription.room.privateKey`/`keyVersion` on an `added` `subscription.update` or a `subscription.list` row, or a live `RoomKeyEvent` (rotation).
 2. To decrypt an incoming `encryptedMessage` payload:
    - Look up `privateKey` for `(roomId, encryptedMessage.version)`.
    - Use the 32-byte `privateKey` directly as the AES-256-GCM key (no key derivation step).
@@ -6040,14 +6057,13 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 
 #### When clients receive `RoomKeyEvent`s
 
-- **Room creation (channels only):** sent to every initial member. DM/botDM rooms carry no key, so creation fires no `RoomKeyEvent`.
-- **Add member (channels only):** sent to each newly-added member; existing members do not receive a duplicate event.
 - **Remove member (channels only):** the server rotates the room key. Surviving members receive a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving events for the room.
-- **Bot members** are key-holders: they receive the `RoomKeyEvent` like any member, addressed to the bot's **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend), delivered **before** the `room.key` so the client has a sub entry to store the key under.
+- **Room creation / Add member no longer fire `RoomKeyEvent`s.** The initial key reaches each newly-subscribed member inline on their `added` `subscription.update` (`subscription.room.privateKey` / `keyVersion`). DM/botDM rooms carry no key at all.
+- **Bot members** are key-holders like any member. A bot's events land on its **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to): the `added` `subscription.update` carrying the initial key, and rotation `RoomKeyEvent`s afterwards (a bot can log into the chat frontend).
 
 Removed members keep prior keys for decrypting historical messages but cannot decrypt anything published after the rotation.
 
-**Initial key bootstrap on (re)connect:** live `RoomKeyEvent`s fire only when keys change. The initial set of keys for rooms the client is already subscribed to is delivered by the user-service subscription endpoints as `room.privateKey` / `room.keyVersion` on each enriched subscription (see §3.4 and [SubscriptionRoom](#subscriptionroom)). Live events keep the client current after bootstrap.
+**Initial key bootstrap on (re)connect:** live `RoomKeyEvent`s fire only on rotation. The initial set of keys for rooms the client is already subscribed to is delivered by the user-service subscription endpoints as `room.privateKey` / `room.keyVersion` on each enriched subscription (see §3.4 and [SubscriptionRoom](#subscriptionroom)); a room joined mid-session delivers its key the same way on the `added` `subscription.update`. Live rotation events keep the client current after bootstrap.
 
 ### Requesting a missing key
 
@@ -6106,9 +6122,10 @@ reply through the same caching path it uses for live events.
 
 #### Use as complement to live events
 
-This RPC complements — it does not replace — live `RoomKeyEvent`s on
-`chat.user.{account}.event.room.key`. Live events remain the primary
-delivery channel at room create / add-member / rotation. Clients
+This RPC complements — it does not replace — the primary delivery
+channels: the key inline on the `added` `subscription.update` /
+`subscription.list` (create, add, bootstrap) and live `RoomKeyEvent`s on
+`chat.user.{account}.event.room.key` (rotation). Clients
 should call `key.get` only when a received message cannot be decrypted
 with the keys they already hold, and back off after a failure so a
 chatty channel does not stampede the server for a key that is
