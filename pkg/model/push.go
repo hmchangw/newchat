@@ -14,7 +14,7 @@ type PushNotificationEvent struct {
 	// UnreadCounts maps account → badge unread-room count capped at 10,
 	// stamped per recipient at notify time. Accounts whose home-site badge
 	// RPC failed are absent — clients refresh the true count on open.
-	UnreadCounts map[string]int `json:"unreadCounts,omitempty"`
+	UnreadCounts map[string]int `json:"unreadCounts,omitempty" bson:"unreadCounts,omitempty"`
 }
 
 // PushNotificationData is the push payload; short legacy tag names (rid/tmid/prid) are spelled
