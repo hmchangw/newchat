@@ -2578,14 +2578,26 @@ func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
 
 	sub := model.Subscription{
 		ID: "sub-1", RoomID: "r1", SiteID: "site-a",
-		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
-		JoinedAt:     time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
-		ThreadUnread: []string{"t1", "t2"},
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+		JoinedAt: time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
 	}
 	_, err := db.Collection("subscriptions").InsertOne(ctx, &sub)
 	require.NoError(t, err)
 
+	// seedThreadUnread resets sub-1's threadUnread to the exact starting state
+	// a subtest needs. Called at the start of every subtest that depends on
+	// threadUnread's value, so each subtest is self-contained and passes in
+	// isolation (e.g. `-run .../last_element_removed`) regardless of whether a
+	// sibling subtest ran first — CLAUDE.md forbids relying on execution order.
+	seedThreadUnread := func(t *testing.T, threadUnread []string) {
+		t.Helper()
+		_, err := db.Collection("subscriptions").UpdateOne(ctx, bson.M{"_id": "sub-1"},
+			bson.M{"$set": bson.M{"threadUnread": threadUnread}})
+		require.NoError(t, err)
+	}
+
 	t.Run("removes specified threadID and returns remaining", func(t *testing.T) {
+		seedThreadUnread(t, []string{"t1", "t2"})
 		newUnread, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t1")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"t2"}, newUnread)
@@ -2595,6 +2607,7 @@ func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
 	})
 
 	t.Run("last element removed unsets threadUnread field", func(t *testing.T) {
+		seedThreadUnread(t, []string{"t2"})
 		newUnread, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t2")
 		require.NoError(t, err)
 		assert.Nil(t, newUnread)
@@ -2610,10 +2623,7 @@ func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
 	})
 
 	t.Run("concurrent removals do not lose updates", func(t *testing.T) {
-		// Reset subscription to ["c1", "c2"]
-		_, err := db.Collection("subscriptions").UpdateOne(ctx, bson.M{"_id": "sub-1"},
-			bson.M{"$set": bson.M{"threadUnread": []string{"c1", "c2"}}})
-		require.NoError(t, err)
+		seedThreadUnread(t, []string{"c1", "c2"})
 
 		// Two concurrent calls each remove a different threadID
 		done := make(chan error, 2)
