@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1412,6 +1413,33 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 	}
 	h.publishSubscriptionUpdates(ctx, []*model.Subscription{sub}, []*model.User{requester}, requestID)
 	return sub, nil
+}
+
+// subscriptionRoomFor builds the read-model room view carried on an "added"
+// subscription.update so the FE can render the row like a subscription.list
+// item without a follow-up RPC. nil pair (DM/botDM/self-DM — keyless by
+// design) omits the key fields. PreviewMessage is intentionally never set:
+// it isn't on the room doc, and a member added without shared history must
+// not see the prior last message.
+func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) *model.SubscriptionRoom {
+	sr := &model.SubscriptionRoom{
+		SiteID:            room.SiteID,
+		Name:              room.Name,
+		CrossSite:         room.CrossSite,
+		UserCount:         room.UserCount,
+		AppCount:          room.AppCount,
+		LastMsgAt:         room.LastMsgAt,
+		LastMsgID:         room.LastMsgID,
+		LastMentionAllAt:  room.LastMentionAllAt,
+		MinUserLastSeenAt: room.MinUserLastSeenAt,
+	}
+	if pair != nil {
+		enc := base64.StdEncoding.EncodeToString(pair.KeyPair.PrivateKey)
+		ver := pair.Version
+		sr.PrivateKey = &enc
+		sr.KeyVersion = &ver
+	}
+	return sr
 }
 
 // newSub constructs a Subscription from its constituent parts.

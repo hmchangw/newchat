@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -6716,4 +6717,55 @@ func TestServerCreateDM_BotDM_SetsAppNameForHuman(t *testing.T) {
 
 	assert.Equal(t, "Helper Bot", decodeSubUpdate(t, capture.captured, "alice").RoomName)
 	assert.Equal(t, "Alice", decodeSubUpdate(t, capture.captured, "helper.bot").RoomName)
+}
+
+func TestSubscriptionRoomFor(t *testing.T) {
+	lastMsg := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	mention := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	floor := time.Date(2026, 6, 30, 8, 0, 0, 0, time.UTC)
+	room := &model.Room{
+		ID: "r1", Name: "eng", Type: model.RoomTypeChannel, SiteID: "site-a",
+		UserCount: 3, AppCount: 1, LastMsgAt: &lastMsg, LastMsgID: "m123",
+		LastMentionAllAt: &mention, MinUserLastSeenAt: &floor, CrossSite: ptrBool(false),
+	}
+
+	t.Run("channel with key pair carries every field incl. base64 key", func(t *testing.T) {
+		pair := &roomkeystore.VersionedKeyPair{
+			Version: 2,
+			KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x05}, 32)},
+		}
+		got := subscriptionRoomFor(room, pair)
+		assert.Equal(t, "site-a", got.SiteID)
+		assert.Equal(t, "eng", got.Name)
+		require.NotNil(t, got.CrossSite)
+		assert.False(t, *got.CrossSite)
+		assert.Equal(t, 3, got.UserCount)
+		assert.Equal(t, 1, got.AppCount)
+		assert.Equal(t, &lastMsg, got.LastMsgAt)
+		assert.Equal(t, "m123", got.LastMsgID)
+		assert.Equal(t, &mention, got.LastMentionAllAt)
+		assert.Equal(t, &floor, got.MinUserLastSeenAt)
+		require.NotNil(t, got.PrivateKey)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x05}, 32)), *got.PrivateKey)
+		require.NotNil(t, got.KeyVersion)
+		assert.Equal(t, 2, *got.KeyVersion)
+		assert.Nil(t, got.PreviewMessage, "previewMessage is never set on events")
+	})
+
+	t.Run("nil pair (DM/botDM/self-DM) omits the key fields", func(t *testing.T) {
+		got := subscriptionRoomFor(room, nil)
+		assert.Nil(t, got.PrivateKey)
+		assert.Nil(t, got.KeyVersion)
+		assert.Equal(t, "eng", got.Name)
+	})
+
+	t.Run("nil time fields and nil CrossSite pass through", func(t *testing.T) {
+		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2}
+		got := subscriptionRoomFor(bare, nil)
+		assert.Nil(t, got.CrossSite)
+		assert.Nil(t, got.LastMsgAt)
+		assert.Nil(t, got.LastMentionAllAt)
+		assert.Nil(t, got.MinUserLastSeenAt)
+		assert.Empty(t, got.LastMsgID)
+	})
 }
