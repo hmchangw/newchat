@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -159,7 +157,7 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 			recipients := make([]string, 0, len(followers)+len(mentionedAccounts))
 			recipients = append(recipients, followers...)
 			recipients = append(recipients, mentionedAccounts...)
-			if err := h.fanOutThreadUnread(ctx, evt.Message.RoomID, evt.Message.ThreadParentMessageID, evt.Message.UserAccount, recipients); err != nil {
+			if err := h.fanOutThreadUnread(ctx, evt.Message.RoomID, evt.Message.ThreadParentMessageID, evt.Message.ID, evt.Message.UserAccount, recipients); err != nil {
 				return fmt.Errorf("fan out thread unread: %w", err)
 			}
 		}
@@ -594,15 +592,15 @@ func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, th
 // duplicates (the caller concatenates two independently-deduped lists); both
 // are stripped here before any write.
 //
-// Adaptation from the plan's snippet: the dedup ID folds in the destination
-// site's sorted account set (instead of the source message ID, which this
-// helper's signature — set by the plan's Interfaces section — doesn't carry).
-// Two different replies to the same thread with the same remote follower set
-// are genuinely redundant (the badge is a boolean "unread" marker, not a
-// counter) so collapsing them under NATS's Nats-Msg-Id dedup is correct;
-// crucially, a later reply that reaches a *new* remote follower always gets a
-// distinct dedup ID and is never dropped.
-func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageID, sender string, recipients []string) error {
+// msgID is this reply's own message ID and MUST be part of the outbox dedup
+// key (mirrors publishThreadSubInboxIfRemote's dedup seed in this file):
+// threadUnread is cleared by reads, so two distinct replies to the same
+// thread with the same remote audience are NOT redundant — a read between
+// them means the second reply is a genuinely new unread event. Keying only
+// on (parentMessageID, site, accounts) would let JetStream's Nats-Msg-Id
+// dedup window silently swallow that second reply's publish whenever it
+// lands within the window, permanently losing the recipient's badge.
+func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageID, msgID, sender string, recipients []string) error {
 	accounts := make([]string, 0, len(recipients))
 	seen := map[string]struct{}{sender: {}}
 	for _, a := range recipients {
@@ -642,9 +640,7 @@ func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageI
 		if err != nil {
 			return fmt.Errorf("marshal thread_unread_added: %w", err)
 		}
-		sortedAccs := append([]string(nil), accs...)
-		sort.Strings(sortedAccs)
-		dedupID := fmt.Sprintf("thread-unread:%s:%s:%s", parentMessageID, site, strings.Join(sortedAccs, ","))
+		dedupID := fmt.Sprintf("thread-unread:%s:%s:%s", parentMessageID, msgID, site)
 		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, site, model.InboxThreadUnreadAdded, payload, dedupID, now); err != nil {
 			return fmt.Errorf("federate thread_unread_added to %s: %w", site, err)
 		}

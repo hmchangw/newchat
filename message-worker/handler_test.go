@@ -2034,7 +2034,7 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 					return nil
 				})
 
-			err := h.fanOutThreadUnread(context.Background(), "r1", "p1", tt.sender, tt.recipients)
+			err := h.fanOutThreadUnread(context.Background(), "r1", "p1", "msg-1", tt.sender, tt.recipients)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -2060,6 +2060,51 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 			assert.Equal(t, tt.wantPublish, gotByDest)
 		})
 	}
+}
+
+// TestHandler_FanOutThreadUnread_DedupID verifies the outbox dedup ID (the
+// publish's Nats-Msg-Id) is derived from the replying message's own ID:
+// stable across redelivery of the same reply, but distinct for a different
+// reply to the same thread with an otherwise identical (parent, site,
+// accounts) — because a read can clear threadUnread at the destination
+// between two such replies, so they are NOT redundant events and must not
+// collapse under JetStream's Nats-Msg-Id dedup window (see fanOutThreadUnread's
+// doc comment; regression coverage for the msg.ID-less dedup key this
+// replaced).
+func TestHandler_FanOutThreadUnread_DedupID(t *testing.T) {
+	newHandler := func(t *testing.T, capture *string) *Handler {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		ts := NewMockThreadStore(ctrl)
+		us := NewMockUserStore(ctrl)
+		ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
+		us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-b"}, nil)
+		return NewHandler(NewMockStore(ctrl), us, ts, "site-a",
+			func(_ context.Context, _ string, _ []byte, msgID string) error {
+				*capture = msgID
+				return nil
+			})
+	}
+
+	var first string
+	h1 := newHandler(t, &first)
+	require.NoError(t, h1.fanOutThreadUnread(context.Background(), "r1", "p1", "msg-1", "alice", []string{"bob"}))
+	assert.NotEmpty(t, first, "dedup ID must be set")
+
+	t.Run("same message ID — same dedup ID (redelivery-stable)", func(t *testing.T) {
+		var second string
+		h2 := newHandler(t, &second)
+		require.NoError(t, h2.fanOutThreadUnread(context.Background(), "r1", "p1", "msg-1", "alice", []string{"bob"}))
+		assert.Equal(t, first, second)
+	})
+
+	t.Run("different message ID, identical (parent, site, accounts) — different dedup ID", func(t *testing.T) {
+		var third string
+		h3 := newHandler(t, &third)
+		require.NoError(t, h3.fanOutThreadUnread(context.Background(), "r1", "p1", "msg-2", "alice", []string{"bob"}))
+		assert.NotEqual(t, first, third,
+			"a later reply with the same audience must not collapse under outbox dedup — a read could have cleared the marker in between")
+	})
 }
 
 // TestHandler_ProcessMessage_MigratedThreadReply_NoThreadUnreadFanout verifies a
