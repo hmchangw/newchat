@@ -482,8 +482,9 @@ export function useChatlistActions() {
         siteId: string,
         sectionId: string | null,
         afterRoomId?: string,
+        beforeRoomId?: string,
       ) => {
-        await moveChat(nats, { roomId, siteId, sectionId, afterRoomId })
+        await moveChat(nats, { roomId, siteId, sectionId, afterRoomId, beforeRoomId })
       },
     }
   }, [nats, dispatch])

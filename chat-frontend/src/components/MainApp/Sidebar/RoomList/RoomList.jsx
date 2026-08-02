@@ -59,13 +59,15 @@ export default function RoomList({ selectedRoomId, onSelectRoom }) {
   // built-ins (Favorites/Apps/Teams) are derived, not user-assignable.
   const isDropTarget = (section) => !isBuiltinSectionId(section.key) || section.key === BUILTIN_CHATS
 
-  const dropInto = (section, afterRoomId) => {
+  // anchor: {} = append; {after: roomId} = place after; {before: roomId} = place
+  // before it (move-to-top when before = the section's current first room).
+  const dropInto = (section, anchor = {}) => {
     const dragged = dragRoomRef.current
     dragRoomRef.current = null
     setDragOverKey(null)
     if (!dragged || !isDropTarget(section)) return
     const targetSectionId = section.key === BUILTIN_CHATS ? null : section.key
-    moveChatTo(dragged.id, dragged.siteId, targetSectionId, afterRoomId)
+    moveChatTo(dragged.id, dragged.siteId, targetSectionId, anchor.after, anchor.before)
   }
 
   const onDragStartRoom = (e, room) => {
@@ -106,9 +108,20 @@ export default function RoomList({ selectedRoomId, onSelectRoom }) {
                 setDragOverKey(section.key)
               }}
               onDragLeave={() => setDragOverKey((k) => (k === section.key ? null : k))}
-              onDrop={() => dropInto(section, undefined)}
+              onDrop={() => dropInto(section, {})}
             >
-              <div className="room-list-section-header">
+              <div
+                className="room-list-section-header"
+                onDragOver={(e) => {
+                  if (isDropTarget(section)) e.preventDefault()
+                }}
+                onDrop={(e) => {
+                  // Drop on the header = move to the TOP of the section (before its
+                  // current first room). Empty section -> before is undefined -> append.
+                  e.stopPropagation()
+                  dropInto(section, { before: section.rooms[0]?.id })
+                }}
+              >
                 <span className="room-list-section-title" onClick={() => toggle(section.key)}>
                   <span className="room-list-section-chevron" aria-hidden="true">▾</span>
                   {section.title}
@@ -162,7 +175,7 @@ export default function RoomList({ selectedRoomId, onSelectRoom }) {
                     isSelected={room.id === selectedRoomId}
                     onSelectRoom={onSelectRoom}
                     onDragStartRoom={onDragStartRoom}
-                    onDropOnRoom={(target) => dropInto(section, target.id)}
+                    onDropOnRoom={(target) => dropInto(section, { after: target.id })}
                   />
                 ))}
             </div>

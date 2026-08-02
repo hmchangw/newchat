@@ -74,11 +74,24 @@ function sortByLastMsgDesc(rooms) {
  * @param {import('../api/types').ChatlistState} chatlist
  */
 export function deriveSidebarSections(summaries, subscriptions, chatlist) {
-  const overlay = chatlist?.sections?.length ? chatlist : defaultChatlistState()
-  const byId = new Map(overlay.sections.map((s) => [s.id, s]))
-  const order = overlay.sectionOrder.filter((id) => byId.has(id))
+  // Built-in section defs (Favorites/Apps/Teams/Chats) are ALWAYS available as
+  // derivation targets — they're derived client-side, not carried in the backend
+  // overlay (which holds only custom section defs). Merge the built-in defaults
+  // UNDER any custom overlay so favorite/bot/sectionId=='teams' rooms always have
+  // a home; without this the built-in buckets vanished the moment a custom section
+  // existed, and those rooms wrongly fell back to Chats. Order: built-ins top,
+  // custom sections (overlay order) in the middle, Chats last. Empty built-ins
+  // (Favorites/Apps/Teams) are hidden by the visibility filter below.
+  const base = defaultChatlistState()
+  const custom = chatlist?.sections?.length ? chatlist : { sectionOrder: [], sections: [] }
+  const byId = new Map()
+  for (const s of base.sections) byId.set(s.id, s)
+  for (const s of custom.sections) byId.set(s.id, s)
+  const customIds = custom.sectionOrder.filter((id) => byId.has(id) && !isBuiltinSectionId(id))
+  const order = [BUILTIN_FAVORITES, BUILTIN_APPS, BUILTIN_TEAMS, ...customIds, BUILTIN_CHATS].filter(
+    (id, i, a) => a.indexOf(id) === i,
+  )
   const buckets = new Map(order.map((id) => [id, []]))
-  if (!buckets.has(BUILTIN_CHATS)) buckets.set(BUILTIN_CHATS, [])
 
   for (const room of summaries) {
     const sub = subscriptions[room.id]

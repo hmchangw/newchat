@@ -18,6 +18,9 @@ export interface MoveChatArgs {
   sectionId: string | null
   /** Optional: place just after this room in the section; omit to append. */
   afterRoomId?: string
+  /** Optional: place just before this room (e.g. move-to-top). Mutually
+   *  exclusive with afterRoomId; server orders by whichever is set. */
+  beforeRoomId?: string
 }
 
 /** Mirrors the chat.move reply. `sectionId`/`sectionOrder` omitted on remove. */
@@ -29,8 +32,12 @@ export interface MoveChatResponse {
 
 export function moveChat(
   { user, request }: Nats,
-  { roomId, siteId, sectionId, afterRoomId }: MoveChatArgs,
+  { roomId, siteId, sectionId, afterRoomId, beforeRoomId }: MoveChatArgs,
 ): Promise<MoveChatResponse> {
   if (CHATLIST_MOCK) return Promise.resolve(moveChatMock(roomId, sectionId, afterRoomId))
-  return request<MoveChatResponse>(chatMove(user.account, roomId, siteId), { sectionId, afterRoomId })
+  return request<MoveChatResponse>(chatMove(user.account, roomId, siteId), {
+    sectionId,
+    afterRoomId,
+    beforeRoomId,
+  })
 }
