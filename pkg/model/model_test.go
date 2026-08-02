@@ -5022,3 +5022,41 @@ func TestSearchMessageEnrichmentJSON(t *testing.T) {
 	assert.NotContains(t, string(b), "\"sender\"")
 	assert.NotContains(t, string(b), "\"tshow\"")
 }
+
+func TestSubscriptionJSON_ThreadUnreadRoundTrip(t *testing.T) {
+	s := model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", RoomType: model.RoomTypeChannel, SiteID: "site-a",
+		Roles: []model.Role{model.RoleMember}, JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		ThreadUnread: []string{"p1", "p2"},
+	}
+	roundTrip(t, &s, &model.Subscription{})
+
+	s.ThreadUnread = nil
+	data, err := json.Marshal(&s)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, present := raw["threadUnread"]
+	assert.False(t, present, "nil ThreadUnread must be omitted")
+}
+
+func TestThreadUnreadAddedEventJSON(t *testing.T) {
+	src := model.ThreadUnreadAddedEvent{
+		RoomID: "r1", ParentMessageID: "p1",
+		Accounts: []string{"alice", "bob"}, Timestamp: 1735689600000,
+	}
+	roundTrip(t, &src, &model.ThreadUnreadAddedEvent{})
+}
+
+func TestThreadReadEventJSON_NewThreadUnread(t *testing.T) {
+	src := model.ThreadReadEvent{
+		Account: "alice", ThreadRoomID: "tr1",
+		NewThreadUnread: []string{"p2"}, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+	}
+	roundTrip(t, &src, &model.ThreadReadEvent{})
+	// Wire-compat: a payload without the field decodes to nil (old producers).
+	var dst model.ThreadReadEvent
+	require.NoError(t, json.Unmarshal([]byte(`{"account":"a","threadRoomId":"tr","lastSeenAt":1,"timestamp":2}`), &dst))
+	assert.Nil(t, dst.NewThreadUnread)
+}

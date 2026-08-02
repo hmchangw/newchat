@@ -139,6 +139,7 @@ const (
 	InboxThreadSubscriptionUpserted  InboxEventType = "thread_subscription_upserted"
 	InboxThreadRead                  InboxEventType = "thread_read"
 	InboxThreadReadAll               InboxEventType = "thread_read_all"
+	InboxThreadUnreadAdded           InboxEventType = "thread_unread_added"
 	InboxRoomRenamed                 InboxEventType = "room_renamed"
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
@@ -174,7 +175,11 @@ type ThreadReadEvent struct {
 	Account      string `json:"account"`
 	ThreadRoomID string `json:"threadRoomId"`
 	LastSeenAt   int64  `json:"lastSeenAt"`
-	Timestamp    int64  `json:"timestamp"`
+	// NewThreadUnread is the result of a $pull array operation removing the
+	// thread's parent from subscription.threadUnread. post-$pull array; nil/absent
+	// means cleared.
+	NewThreadUnread []string `json:"newThreadUnread,omitempty"`
+	Timestamp       int64    `json:"timestamp"`
 }
 
 // ThreadReadAllEvent is InboxEvent.Payload for "thread_read_all": the destination inbox-worker
@@ -183,6 +188,18 @@ type ThreadReadAllEvent struct {
 	Account    string `json:"account"`
 	LastSeenAt int64  `json:"lastSeenAt"`
 	Timestamp  int64  `json:"timestamp"`
+}
+
+// ThreadUnreadAddedEvent is InboxEvent.Payload for "thread_unread_added":
+// one event per destination site per thread reply, Accounts scoped to that
+// site's followers. The destination $addToSet-merges ParentMessageID into
+// each account's subscription.threadUnread for RoomID (idempotent, so the
+// event rides the concurrent outbox lane).
+type ThreadUnreadAddedEvent struct {
+	RoomID          string   `json:"roomId"`
+	ParentMessageID string   `json:"parentMessageId"`
+	Accounts        []string `json:"accounts"`
+	Timestamp       int64    `json:"timestamp"`
 }
 
 type InboxEvent struct {
