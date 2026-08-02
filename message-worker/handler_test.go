@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -345,6 +346,14 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						assert.Nil(t, sub.LastSeenAt)
 						return nil
 					})
+				// fanOutThreadUnread: [parentAuthor] + mentionees, both local — one
+				// AddThreadUnread call, no outbox publish. Re-resolves each recipient's
+				// home site (the parent-author lookup above was for cross-site
+				// thread-sub routing, a separate concern).
+				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(bobUser, nil)
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user", "bob"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
 		},
@@ -365,6 +374,11 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
 				// MarkThreadSubscriptionMention must NOT be called — sender excluded.
+				// fanOutThreadUnread: recipients = [parentAuthor] (self-mention yields no
+				// mentionees) — one local AddThreadUnread call, no outbox publish.
+				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
 		},
@@ -383,6 +397,11 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
 				// MarkThreadSubscriptionMention must NOT be called — @all is thread-ignored.
+				// fanOutThreadUnread: recipients = [parentAuthor] (@all yields no mentionees)
+				// — one local AddThreadUnread call, no outbox publish.
+				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
 		},
@@ -407,6 +426,12 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						assert.True(t, sub.HasMention)
 						return nil
 					})
+				// fanOutThreadUnread: [parentAuthor] + bob (@all contributes nothing) —
+				// one local AddThreadUnread call, no outbox publish.
+				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(bobUser, nil)
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user", "bob"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
 		},
@@ -1288,7 +1313,7 @@ func TestHandler_HandleThreadRoomAndSubscriptions(t *testing.T) {
 				return nil
 			})
 			replier := &model.User{ID: tt.msg.UserID, Account: tt.msg.UserAccount, SiteID: "site-a"}
-			_, err := h.handleThreadRoomAndSubscriptions(context.Background(), tt.msg, tt.siteID, replier, false)
+			_, _, err := h.handleThreadRoomAndSubscriptions(context.Background(), tt.msg, tt.siteID, replier, false)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -1508,7 +1533,7 @@ func TestHandler_FirstReply_InboxPublishes(t *testing.T) {
 				ThreadParentMessageID: "msg-parent",
 			}
 
-			err := h.handleFirstThreadReply(context.Background(), msg, "site-a", "tr-1", replier, now, false)
+			_, err := h.handleFirstThreadReply(context.Background(), msg, "site-a", "tr-1", replier, now, false)
 			require.NoError(t, err)
 
 			gotByDest := map[string]int{}
@@ -1546,7 +1571,7 @@ func TestHandler_FirstReply_InboxPublishError_NAKs(t *testing.T) {
 		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
 		CreatedAt: now, ThreadParentMessageID: "msg-parent",
 	}
-	err := h.handleFirstThreadReply(context.Background(), msg, "site-a",
+	_, err := h.handleFirstThreadReply(context.Background(), msg, "site-a",
 		"tr-1", &model.User{ID: "u-replier", SiteID: "site-b"}, now, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, boom)
@@ -1578,7 +1603,7 @@ func TestHandler_FirstReply_ReplierInboxPublishError_NAKs(t *testing.T) {
 		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
 		CreatedAt: now, ThreadParentMessageID: "msg-parent",
 	}
-	err := h.handleFirstThreadReply(context.Background(), msg, "site-a",
+	_, err := h.handleFirstThreadReply(context.Background(), msg, "site-a",
 		"tr-1", &model.User{ID: "u-replier", Account: "replier", SiteID: "site-b"}, now, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, boom)
@@ -1662,7 +1687,7 @@ func TestHandler_SubsequentReply_InboxPublishes(t *testing.T) {
 				ThreadParentMessageID: "msg-parent",
 			}
 
-			roomID, err := h.handleSubsequentThreadReply(context.Background(), msg, "site-a", replier, now, false)
+			roomID, _, err := h.handleSubsequentThreadReply(context.Background(), msg, "site-a", replier, now, false)
 			require.NoError(t, err)
 			assert.Equal(t, "tr-existing", roomID)
 
@@ -1700,7 +1725,7 @@ func TestHandler_SubsequentReply_InboxPublishError_NAKs(t *testing.T) {
 		ID: "msg-reply", RoomID: "r1", UserID: "u-replier", UserAccount: "replier",
 		CreatedAt: now, ThreadParentMessageID: "msg-parent",
 	}
-	_, err := h.handleSubsequentThreadReply(context.Background(), msg, "site-a",
+	_, _, err := h.handleSubsequentThreadReply(context.Background(), msg, "site-a",
 		&model.User{ID: "u-replier", SiteID: "site-b"}, now, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, boom)
@@ -1794,7 +1819,7 @@ func TestHandler_MarkThreadMentions_InboxPublishes(t *testing.T) {
 				ThreadParentMessageID: "msg-parent",
 				Mentions:              tt.mentionees,
 			}
-			err := h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false)
+			_, err := h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false)
 			require.NoError(t, err)
 
 			gotByDest := map[string]int{}
@@ -1823,7 +1848,7 @@ func TestHandler_MarkThreadMentions_InboxPublishError_NAKs(t *testing.T) {
 		CreatedAt: now, ThreadParentMessageID: "msg-parent",
 		Mentions: []model.Participant{{UserID: "u-bob", Account: "bob", SiteID: "site-b"}},
 	}
-	err := h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false)
+	_, err := h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, boom)
 }
@@ -1848,7 +1873,8 @@ func TestHandler_MarkThreadMentions_HasMentionInPayload(t *testing.T) {
 		CreatedAt: now, ThreadParentMessageID: "msg-parent",
 		Mentions: []model.Participant{{UserID: "u-bob", Account: "bob", SiteID: "site-b"}},
 	}
-	require.NoError(t, h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false))
+	_, err := h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false)
+	require.NoError(t, err)
 
 	_, outer := unwrapOutbox(t, captured)
 	var sub model.ThreadSubscription
@@ -1902,7 +1928,187 @@ func TestHandler_MarkThreadMentions_SkipsRestrictedAndNonMembers(t *testing.T) {
 			{UserID: "u-ca", Account: "carol", SiteID: "site-a"},
 		},
 	}
-	require.NoError(t, h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false))
+	_, err := h.markThreadMentions(context.Background(), msg, "tr-1", "site-a", false)
+	require.NoError(t, err)
+}
+
+// TestHandler_FanOutThreadUnread exercises fanOutThreadUnread directly: local vs
+// remote recipients, same-site grouping into a single outbox event, sender
+// exclusion, and store-error propagation (the NAK path).
+func TestHandler_FanOutThreadUnread(t *testing.T) {
+	tests := []struct {
+		name        string
+		sender      string
+		recipients  []string
+		setupMocks  func(ts *MockThreadStore, us *MockUserStore)
+		wantErr     bool
+		wantPublish map[string][]string // destSiteID -> accounts (order-independent)
+	}{
+		{
+			name:       "local-only recipients — one AddThreadUnread call, no outbox publish",
+			sender:     "alice",
+			recipients: []string{"bob", "carol"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob", "carol"}).Return(nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "carol").Return(&model.User{Account: "carol", SiteID: "site-a"}, nil)
+			},
+			wantPublish: map[string][]string{},
+		},
+		{
+			name:       "one remote-home recipient — one thread_unread_added publish to that site",
+			sender:     "alice",
+			recipients: []string{"bob"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-b"}, nil)
+			},
+			wantPublish: map[string][]string{"site-b": {"bob"}},
+		},
+		{
+			name:       "two remote recipients on the same site — one event for that site",
+			sender:     "alice",
+			recipients: []string{"bob", "carol"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob", "carol"}).Return(nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-b"}, nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "carol").Return(&model.User{Account: "carol", SiteID: "site-b"}, nil)
+			},
+			wantPublish: map[string][]string{"site-b": {"bob", "carol"}},
+		},
+		{
+			name:       "sender excluded even when present in recipients",
+			sender:     "alice",
+			recipients: []string{"alice", "bob"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-a"}, nil)
+			},
+			wantPublish: map[string][]string{},
+		},
+		{
+			name:        "only the sender in recipients — no store call, no publish",
+			sender:      "alice",
+			recipients:  []string{"alice", "alice"},
+			setupMocks:  func(ts *MockThreadStore, us *MockUserStore) {},
+			wantPublish: map[string][]string{},
+		},
+		{
+			name:       "store error — propagated for the NAK path",
+			sender:     "alice",
+			recipients: []string{"bob"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).
+					Return(errors.New("mongo: write timeout"))
+			},
+			wantErr: true,
+		},
+		{
+			name:       "owner-site lookup error — propagated for the NAK path",
+			sender:     "alice",
+			recipients: []string{"bob"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
+				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").
+					Return(nil, errors.New("mongo: connection refused"))
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			ts := NewMockThreadStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			tt.setupMocks(ts, us)
+
+			type capturedCall struct {
+				subj string
+				data []byte
+			}
+			var calls []capturedCall
+			h := NewHandler(NewMockStore(ctrl), us, ts, "site-a",
+				func(_ context.Context, subj string, data []byte, _ string) error {
+					calls = append(calls, capturedCall{subj: subj, data: data})
+					return nil
+				})
+
+			err := h.fanOutThreadUnread(context.Background(), "r1", "p1", tt.sender, tt.recipients)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			gotByDest := map[string][]string{}
+			for _, c := range calls {
+				_, outer := unwrapOutbox(t, c.data)
+				assert.Equal(t, model.InboxThreadUnreadAdded, outer.Type)
+				assert.Equal(t, "site-a", outer.SiteID)
+				var payload model.ThreadUnreadAddedEvent
+				require.NoError(t, json.Unmarshal(outer.Payload, &payload))
+				assert.Equal(t, "r1", payload.RoomID)
+				assert.Equal(t, "p1", payload.ParentMessageID)
+				assert.Greater(t, payload.Timestamp, int64(0))
+				sort.Strings(payload.Accounts)
+				gotByDest[outer.DestSiteID] = payload.Accounts
+			}
+			for site := range tt.wantPublish {
+				sort.Strings(tt.wantPublish[site])
+			}
+			assert.Equal(t, tt.wantPublish, gotByDest)
+		})
+	}
+}
+
+// TestHandler_ProcessMessage_MigratedThreadReply_NoThreadUnreadFanout verifies a
+// migrated thread reply neither writes AddThreadUnread nor publishes
+// thread_unread_added — even though the thread has pre-existing followers —
+// mirroring how migration suppresses the thread-subscription writes.
+func TestHandler_ProcessMessage_MigratedThreadReply_NoThreadUnreadFanout(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	parentCreatedAt := now.Add(-time.Hour)
+	user := &model.User{ID: "u-1", Account: "alice", SiteID: "site-a"}
+	threadMsg := model.Message{
+		ID:                           "msg-reply",
+		RoomID:                       "r1",
+		UserID:                       "u-1",
+		UserAccount:                  "alice",
+		Content:                      "reply",
+		CreatedAt:                    now,
+		ThreadParentMessageID:        "msg-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+	}
+	data, _ := json.Marshal(model.MessageEvent{Message: threadMsg, SiteID: "site-a", Timestamp: now.UnixMilli()})
+
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	ts := NewMockThreadStore(ctrl)
+
+	us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+	ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(errThreadRoomExists)
+	// Non-empty pre-existing ReplyAccounts on the existing room proves the
+	// followers list was available to fanOutThreadUnread and still suppressed.
+	ts.EXPECT().GetThreadRoomByParentMessageID(gomock.Any(), "msg-parent").
+		Return(&model.ThreadRoom{ID: "tr-99", ReplyAccounts: []string{"parent-user", "someone-else"}}, nil)
+	store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
+		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
+	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
+	ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
+	ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-99", "alice", now).Return(nil)
+	store.EXPECT().SaveThreadMessage(gomock.Any(), &threadMsg, gomock.Any(), "site-a", "tr-99").
+		Return((*int)(nil), nil)
+	// Deliberately no AddThreadUnread / FindUserByAccount("parent-user" or
+	// "someone-else") expectations — a strict mock fails the test if
+	// fanOutThreadUnread runs despite isMigration=true.
+
+	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
+		t.Fatal("publish must not be called for a migrated thread reply")
+		return nil
+	})
+	require.NoError(t, h.processMessage(context.Background(), data, true))
 }
 
 // fakeJSMsg is a minimal jetstream.Msg test double that records whether Ack or
