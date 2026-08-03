@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	readcache "github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
@@ -86,10 +87,33 @@ var roomCreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // Mirror the production caps (house pattern — see maxGetByIDsBatchSize in messages_test).
 const roomsGetMaxBatch = 100
 
+// stubRoomTimes arranges the single unhinted-batch read RoomsGet issues for ids (no Hints
+// in the request), returning last/created for every id — the common happy-path room times
+// most fixtures below share. gomock.Any() on the ids arg since most tests don't care about
+// exactly which ids were batched (TestHistoryService_RoomsGet_NoHints_BatchesAllIDs asserts
+// that explicitly).
+func stubRoomTimes(rooms *mocks.MockRoomRepository, ids []string, last, created time.Time) {
+	stubRoomTimesN(rooms, ids, last, created, 1)
+}
+
+// stubRoomTimesN is stubRoomTimes with an explicit call count, for tests (e.g. the preview-cache
+// ones) that invoke RoomsGet more than once for the same unhinted room set.
+func stubRoomTimesN(rooms *mocks.MockRoomRepository, ids []string, last, created time.Time, times int) {
+	out := make(map[string]mongorepo.RoomTimes, len(ids))
+	for _, id := range ids {
+		out[id] = mongorepo.RoomTimes{LastMsgAt: last, CreatedAt: created}
+	}
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).Return(out, nil).Times(times)
+}
+
 func TestHistoryService_RoomsGet_PreviewCacheHitSkipsRead(t *testing.T) {
 	svc, msgs, rooms := newRoomsServiceWithPreviewCache(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
+	// The unhinted-batch Mongo read runs once per RoomsGet call regardless of the preview
+	// cache (it's resolved up front, before the per-room cache check) — Times(3) over the 3
+	// calls below. The expensive Cassandra preview walk is what the cache actually guards,
+	// so GetMessagesBefore staying at Times(1) is what proves the 2nd/3rd calls were cache hits.
+	stubRoomTimesN(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt, 3)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}},
@@ -100,13 +124,12 @@ func TestHistoryService_RoomsGet_PreviewCacheHitSkipsRead(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "m1", resp.Rooms["r1"].MessageID)
 	}
-	// Times(1) on both reads asserts the 2nd and 3rd calls were cache hits.
 }
 
 func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hello", CreatedAt: roomLastMsgAt, Sender: models.Participant{ID: "u1", Account: "alice"}}}, false), nil)
 
@@ -124,7 +147,7 @@ func TestHistoryService_RoomsGet_EligibleNewest_SingleQuery(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
 	var sizes []int
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
 			sizes = append(sizes, pr.PageSize)
@@ -144,7 +167,7 @@ func TestHistoryService_RoomsGet_EscalatesPastIneligibleTail(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
 	var sizes []int
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
 			sizes = append(sizes, pr.PageSize)
@@ -177,7 +200,7 @@ func TestHistoryService_RoomsGet_ScanBudgetExhausted_NoEligibleMessage(t *testin
 	svc, msgs, rooms := newRoomsService(t)
 
 	var sizes []int
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
 			sizes = append(sizes, pr.PageSize)
@@ -200,6 +223,10 @@ func TestHistoryService_RoomsGet_ScanBudgetExhausted_NoEligibleMessage(t *testin
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
+	// The batched read returns a zero lastMsgAt (room never messaged); sanitizeLastMsgAt
+	// rejects the zero value the same way it would reject any implausible hint, so
+	// resolveRoomTimes falls back to the per-room GetRoomTimes read for this one room.
+	stubRoomTimes(rooms, []string{"r1"}, time.Time{}, roomCreatedAt)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(time.Time{}, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage(nil, false), nil)
@@ -213,12 +240,11 @@ func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
 func TestHistoryService_RoomsGet_PerRoomDegradeKeepsSiblings(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	// r1 history read errors → omitted; r2 succeeds → returned.
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	// r1 history read errors → omitted; r2 succeeds → returned. Both are unhinted, so
+	// they share the one batched GetRoomTimesByIDs([r1, r2]) call.
+	stubRoomTimes(rooms, []string{"r1", "r2"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage(nil, false), errors.New("cassandra timeout"))
-
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r2").Return(roomLastMsgAt, roomCreatedAt, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r2", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r2", Msg: "ok", CreatedAt: roomLastMsgAt}}, false), nil)
 
@@ -232,7 +258,7 @@ func TestHistoryService_RoomsGet_PerRoomDegradeKeepsSiblings(t *testing.T) {
 func TestHistoryService_RoomsGet_SkipsDeletedTail(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m3", RoomID: "r1", Msg: "", Deleted: true, CreatedAt: roomLastMsgAt},
@@ -251,7 +277,7 @@ func TestHistoryService_RoomsGet_SkipsDeletedTail(t *testing.T) {
 func TestHistoryService_RoomsGet_AllDeletedOmitted(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	// A short all-deleted page (below the walk page size) means no older messages
 	// remain, so a single read is enough to conclude "no last message".
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
@@ -269,7 +295,7 @@ func TestHistoryService_RoomsGet_DedupsRoomIDs(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
 	// A duplicate roomId resolves once (Times(1) on each per-room read).
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "x", CreatedAt: roomLastMsgAt}}, false), nil).Times(1)
 
@@ -283,7 +309,7 @@ func TestHistoryService_RoomsGet_FullContent(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	long := strings.Repeat("世", 1000)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: long, CreatedAt: roomLastMsgAt}}, false), nil)
 
@@ -297,7 +323,7 @@ func TestHistoryService_RoomsGet_FullContent(t *testing.T) {
 func TestHistoryService_RoomsGet_SkipsSystemTail(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m2", RoomID: "r1", Type: model.MessageTypeRoomRenamed, CreatedAt: roomLastMsgAt},
@@ -319,7 +345,7 @@ func TestHistoryService_RoomsGet_SkipsEachSystemTypeButKeepsImportant(t *testing
 		model.MessageTypeTeamsMeetStarted,
 	} {
 		svc, msgs, rooms := newRoomsService(t)
-		rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+		stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 		msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(makePage([]models.Message{
 				{MessageID: "m2", RoomID: "r1", Type: st, CreatedAt: roomLastMsgAt},
@@ -334,7 +360,7 @@ func TestHistoryService_RoomsGet_SkipsEachSystemTypeButKeepsImportant(t *testing
 
 func TestHistoryService_RoomsGet_KeepsImportantMessage(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m2", RoomID: "r1", Msg: "urgent", Type: model.MessageTypeImportant, CreatedAt: roomLastMsgAt},
@@ -349,7 +375,7 @@ func TestHistoryService_RoomsGet_KeepsImportantMessage(t *testing.T) {
 func TestHistoryService_RoomsGet_QuotedReplyEligible(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m2", RoomID: "r1", Msg: "re: x", QuotedParentMessage: &models.QuotedParentMessage{MessageID: "m0"}, CreatedAt: roomLastMsgAt},
@@ -367,7 +393,7 @@ func TestHistoryService_RoomsGet_QuotedReplyEligible(t *testing.T) {
 func TestHistoryService_RoomsGet_MixedTailSkipsIneligible(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m4", RoomID: "r1", Type: model.MessageTypeMembersAdded, CreatedAt: roomLastMsgAt},
@@ -386,7 +412,7 @@ func TestHistoryService_RoomsGet_MixedTailSkipsIneligible(t *testing.T) {
 func TestHistoryService_RoomsGet_NormalMessageUnaffected(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
 
@@ -419,7 +445,7 @@ func TestHistoryService_RoomsGet_EnrichesPreview(t *testing.T) {
 	svc, msgs, rooms, apps := newRoomsServiceWithApps(t)
 	apps.EXPECT().AppNameByAccount(gomock.Any(), gomock.Any()).Times(0) // no bot → no lookup
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{
 			MessageID:   "m1",
@@ -452,7 +478,7 @@ func TestHistoryService_RoomsGet_BotSenderAppName(t *testing.T) {
 	svc, msgs, rooms, apps := newRoomsServiceWithApps(t)
 	apps.EXPECT().AppNameByAccount(gomock.Any(), "acme.bot").Return("Acme Assistant", nil)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{
 			MessageID: "m1", RoomID: "r1", Msg: "beep", CreatedAt: roomLastMsgAt,
@@ -469,7 +495,7 @@ func TestHistoryService_RoomsGet_BotSenderAppName(t *testing.T) {
 func TestHistoryService_RoomsGet_EmptyCollectionsOmitted(t *testing.T) {
 	svc, msgs, rooms, _ := newRoomsServiceWithApps(t)
 
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}}}, false), nil)
 
@@ -484,4 +510,128 @@ func TestHistoryService_RoomsGet_EmptyCollectionsOmitted(t *testing.T) {
 	assert.NotContains(t, string(data), "attachments")
 	assert.NotContains(t, string(data), "mentions")
 	assert.NotContains(t, string(data), "visibleTo")
+}
+
+// msPtr converts a time to the UTC-millis pointer RoomTimeHint/RoomMeta wire fields use.
+func msPtr(t time.Time) *int64 {
+	ms := t.UnixMilli()
+	return &ms
+}
+
+// (a) Every room carries a usable lastMsgAt hint: resolveRoomTimes never needs Mongo at
+// all, so neither the per-room GetRoomTimes nor the batched GetRoomTimesByIDs is called.
+func TestHistoryService_RoomsGet_AllHinted_NoStoreReads(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).Times(0)
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r2", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r2", Msg: "hey", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	req := models.RoomsGetRequest{
+		RoomIDs: []string{"r1", "r2"},
+		Hints: map[string]model.RoomTimeHint{
+			"r1": {LastMsgAt: msPtr(roomLastMsgAt)},                                  // lastMsgAt-only hint, still sufficient
+			"r2": {LastMsgAt: msPtr(roomLastMsgAt), CreatedAt: msPtr(roomCreatedAt)}, // both fields hinted
+		},
+	}
+	resp, err := svc.RoomsGet(roomsCtx(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, "m2", resp.Rooms["r2"].MessageID)
+}
+
+// (b) No hints at all: the whole id set is unhinted, batched into exactly one
+// GetRoomTimesByIDs call carrying every id; the per-room GetRoomTimes is never used.
+func TestHistoryService_RoomsGet_NoHints_BatchesAllIDs(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), gomock.InAnyOrder([]string{"r1", "r2"})).
+		Return(map[string]mongorepo.RoomTimes{
+			"r1": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt},
+			"r2": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt},
+		}, nil).
+		Times(1)
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r2", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r2", Msg: "hey", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1", "r2"}})
+	require.NoError(t, err)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, "m2", resp.Rooms["r2"].MessageID)
+}
+
+// (c) Mixed hinted/unhinted: only r2 (unhinted) is in the batch call; r1's hint means it
+// never reaches Mongo at all.
+func TestHistoryService_RoomsGet_MixedHints_BatchesOnlyUnhinted(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), []string{"r2"}).
+		Return(map[string]mongorepo.RoomTimes{"r2": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt}}, nil).
+		Times(1)
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r2", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r2", Msg: "hey", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	req := models.RoomsGetRequest{
+		RoomIDs: []string{"r1", "r2"},
+		Hints: map[string]model.RoomTimeHint{
+			"r1": {LastMsgAt: msPtr(roomLastMsgAt)},
+			// r2 has no entry in Hints at all → unhinted.
+		},
+	}
+	resp, err := svc.RoomsGet(roomsCtx(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, "m2", resp.Rooms["r2"].MessageID)
+}
+
+// (d) The batch read errors: RoomsGet still succeeds. The unhinted room falls back through
+// resolveRoomTimes' existing per-room GetRoomTimes path — the batch failure never fails the RPC.
+func TestHistoryService_RoomsGet_BatchReadError_DegradesToPerRoomFallback(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), []string{"r1"}).
+		Return(nil, errors.New("mongo down")).
+		Times(1)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// (e) An implausible hint lastMsgAt (pre-2020 epoch) is rejected by the same
+// sanitizeLastMsgAt every per-room resolve uses, so the room is treated as unhinted and
+// goes into the batch set instead of being trusted at face value.
+func TestHistoryService_RoomsGet_ImplausibleHint_TreatedAsUnhinted(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	bogus := int64(0) // epoch 0 (1970) — before minPlausibleEpoch
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), []string{"r1"}).
+		Return(map[string]mongorepo.RoomTimes{"r1": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt}}, nil).
+		Times(1)
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	req := models.RoomsGetRequest{
+		RoomIDs: []string{"r1"},
+		Hints:   map[string]model.RoomTimeHint{"r1": {LastMsgAt: &bogus}},
+	}
+	resp, err := svc.RoomsGet(roomsCtx(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
 }
