@@ -23,12 +23,12 @@ const (
 	// to fill a 50-row page whose extra rows are unused. Grow geometrically only
 	// to skip a run of ineligible (deleted/system) messages; lastMsgWalkMaxScan
 	// preserves the previous 50×5 = 250 ineligible-skip budget before giving up.
-	// lastMsgWalkMaxPage caps the escalation at the codebase-wide page-size cap
-	// (cassrepo.maxPageSize) so the ×8 growth never over-requests a single query.
+	// lastMsgWalkMaxPage caps the escalation at cassrepo.MaxPageSize, the
+	// codebase-wide per-query row cap, so the ×8 growth never over-requests.
 	lastMsgWalkFirstPage = 1
 	lastMsgWalkGrowth    = 8
 	lastMsgWalkMaxScan   = 250
-	lastMsgWalkMaxPage   = 100
+	lastMsgWalkMaxPage   = cassrepo.MaxPageSize
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -113,12 +113,10 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 	pageSize := lastMsgWalkFirstPage
 	scanned := 0
 	for scanned < lastMsgWalkMaxScan {
-		if pageSize > lastMsgWalkMaxPage {
-			pageSize = lastMsgWalkMaxPage
-		}
-		if remaining := lastMsgWalkMaxScan - scanned; pageSize > remaining {
-			pageSize = remaining
-		}
+		// Clamp to the per-query cap and the remaining scan budget (both bounds are
+		// positive here, so order doesn't matter). The next iteration's ×8 growth
+		// starts from this clamped value.
+		pageSize = min(pageSize, lastMsgWalkMaxPage, lastMsgWalkMaxScan-scanned)
 		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, cassrepo.PageRequest{PageSize: pageSize})
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
@@ -145,8 +143,6 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			return models.PreviewMessage{}, false
 		}
 		before = page.Data[len(page.Data)-1].CreatedAt
-		// Grows from this iteration's (possibly clamped) pageSize, not the original
-		// unclamped value — so growth is not always a clean ×8 of the prior request.
 		pageSize *= lastMsgWalkGrowth
 	}
 	return models.PreviewMessage{}, false // ineligible tail longer than the scan budget
