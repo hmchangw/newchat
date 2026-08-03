@@ -36,9 +36,14 @@ func TestResolveRoomTimes(t *testing.T) {
 		{name: "no meta → mongo fallback", meta: nil, mongoCalls: 1, wantLast: last, wantCreated: created},
 		{name: "both meta valid → no mongo", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(created)}, mongoCalls: 0, wantLast: last, wantCreated: created},
 		{name: "lastMsgAt missing → mongo fallback for both", meta: &models.RoomMeta{CreatedAt: tsPtr(created)}, mongoCalls: 1, wantLast: last, wantCreated: created},
-		{name: "createdAt missing → mongo fallback for both", meta: &models.RoomMeta{LastMsgAt: tsPtr(last)}, mongoCalls: 1, wantLast: last, wantCreated: created},
+		// Relaxation: a usable lastMsgAt hint alone is sufficient — createdAt only feeds
+		// walkBounds' floor (clamped to now-historyFloor), so this must NOT read Mongo;
+		// createdAt comes back zero rather than Mongo's value.
+		{name: "createdAt missing → lastMsgAt hint alone skips mongo", meta: &models.RoomMeta{LastMsgAt: tsPtr(last)}, mongoCalls: 0, wantLast: last, wantCreated: time.Time{}},
 		{name: "lastMsgAt too far in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(future), CreatedAt: tsPtr(created)}, mongoCalls: 1, wantLast: last, wantCreated: created},
-		{name: "createdAt in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(future)}, mongoCalls: 1, wantLast: last, wantCreated: created},
+		// Same relaxation as above: lastMsgAt alone is valid, so an out-of-range createdAt
+		// hint is simply dropped (zero), not fetched from Mongo.
+		{name: "createdAt in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(future)}, mongoCalls: 0, wantLast: last, wantCreated: time.Time{}},
 		{name: "implausibly old values (pre-2020) → ignored", meta: &models.RoomMeta{LastMsgAt: msPtr(0), CreatedAt: msPtr(0)}, mongoCalls: 1, wantLast: last, wantCreated: created},
 		// Hint pair is internally inconsistent (createdAt > lastMsgAt). Both meta are
 		// individually sane, so they pass sanitization; the consistency-refetch path
