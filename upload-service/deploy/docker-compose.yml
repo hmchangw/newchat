@@ -35,6 +35,10 @@ services:
       - DRIVE_URL=${DRIVE_URL:-http://drive-mock:9000}
       - DRIVE_API_TOKEN=${DRIVE_API_TOKEN:-dev-token}
       - DRIVE_BASE_URL_CONFIG_PATH=/etc/config/baseurls.json
+      # Legacy Drive backend for the /api/v3 download; distinct baseurls.json from the primary Drive above.
+      - LEGACY_DRIVE_URL=${LEGACY_DRIVE_URL:-http://legacy-drive-mock:9000}
+      - LEGACY_DRIVE_API_TOKEN=${LEGACY_DRIVE_API_TOKEN:-dev-legacy-token}
+      - LEGACY_DRIVE_BASE_URL_CONFIG_PATH=/etc/config/legacy-baseurls.json
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
