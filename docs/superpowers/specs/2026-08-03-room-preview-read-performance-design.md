@@ -124,6 +124,17 @@ computes the post-mutation preview via `previewAfterMutation` and ships it on th
 canonical edit/delete events (`messages.go:647`). So the write is wiring, not new
 computation.
 
+**Phase 2 extraction point:** the `PreviewMessage` construction logic
+(`toPreviewMessage` + `botAwareDisplayName`, currently in history-service
+`rooms.go`/`reactions.go`) is the one piece of logic Phase 1 and Phase 2 share.
+Phase 2 extracts it to a shared package (e.g. `pkg/preview`) so broadcast-worker
+builds byte-identical previews on the create path. Phase 1 deliberately does NOT
+pre-extract it (YAGNI — Phase 2 is metrics-gated and may not land). Otherwise the
+phases are one-directional: Phase 2 *calls* Phase 1's `roomLastPreviewMessage`
+(warm-back + delete-path) but does not edit it, and the Phase 1b cache coexists
+without invalidation because user-service selects the denormalized field vs
+`rooms.get` per room.
+
 Add to `pkg/model/room.go` `Room`:
 ```go
 PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
