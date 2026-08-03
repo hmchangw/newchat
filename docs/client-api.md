@@ -2652,7 +2652,7 @@ The paginated read RPCs (Load History, Load Next, Load Surrounding, Get Thread M
 - `meta.lastMsgAt` — the room's most-recent-message time, as the client knows it from the room summary (the same `lastMsgAt` carried on `RoomEvent`s / the sidebar). **A valid `lastMsgAt` alone is sufficient to skip the lookup.** Use the room's last-activity timestamp; for an empty room use its `createdAt`.
 - `meta.createdAt` — the room's creation time from the room summary. Optional refinement: when present it floors the scan at the room's creation time instead of the server's default history window; when omitted the server still skips the lookup and simply uses that default floor.
 
-Both are **hints, not authority**: the server sanitizes them (ignores values that are negative, in the future, or mutually inconsistent) and falls back to a MongoDB fetch only when `lastMsgAt` is missing or fails sanitization. A client that does not have `lastMsgAt` should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
+Both are **hints, not authority**: the server sanitizes each (values that are negative or in the future are ignored) and falls back to a MongoDB fetch when `lastMsgAt` is missing or fails sanitization — or when both are supplied but mutually inconsistent (a `createdAt` later than `lastMsgAt`), which triggers a re-fetch to resolve the inconsistency. A client that does not have `lastMsgAt` should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
 
 Common error envelopes across these RPCs (see §6 for the full shape):
 
