@@ -214,3 +214,47 @@ func (c *RoomCache) GetMinUserLastSeenAt(ctx context.Context, roomID string) (*t
 func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
 	return c.inner.GetRoomUserCount(ctx, roomID)
 }
+
+// previewEntry is the cached resolved room preview. found=false is never stored
+// (positives-only), so an empty room / read miss re-resolves each time — cheap
+// after the single-query preview walk, and it keeps stale "no preview" out of
+// the cache.
+type previewEntry struct {
+	preview pkgmodel.PreviewMessage
+	found   bool
+}
+
+// PreviewCache caches the resolved last-eligible preview message per room.
+// lastMsgAt advances on every message, so the configured TTL bounds how stale a
+// preview can be; the room list also carries lastMsgAt and clients update open
+// rooms from real-time delivery. Positives-only, singleflight-deduped.
+type PreviewCache struct {
+	cache *ttlCache[previewEntry]
+}
+
+// NewPreviewCache builds a preview cache of size entries with the given TTL.
+// size and ttl must be positive.
+func NewPreviewCache(size int, ttl time.Duration) (*PreviewCache, error) {
+	c, err := newTTLCache[previewEntry](size, ttl, cachemetrics.For("history_room_preview", "l1"))
+	if err != nil {
+		return nil, err
+	}
+	return &PreviewCache{cache: c}, nil
+}
+
+// Get returns the cached preview for roomID or invokes load on miss. Only a
+// found preview is cached; a not-found result (empty room) and errors are
+// returned to the caller but not stored.
+func (c *PreviewCache) Get(ctx context.Context, roomID string, load func(context.Context) (pkgmodel.PreviewMessage, bool, error)) (pkgmodel.PreviewMessage, bool, error) {
+	entry, err := c.cache.getOrLoad(ctx, roomID, func(ctx context.Context) (previewEntry, bool, error) {
+		p, found, err := load(ctx)
+		if err != nil {
+			return previewEntry{}, false, err
+		}
+		return previewEntry{preview: p, found: found}, found, nil
+	})
+	if err != nil {
+		return pkgmodel.PreviewMessage{}, false, err
+	}
+	return entry.preview, entry.found, nil
+}
