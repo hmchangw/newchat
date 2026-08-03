@@ -13,10 +13,12 @@ import (
 // validate() doesn't touch them.
 func baseValid() Config {
 	return Config{
-		SubCacheSize:  100000,
-		SubCacheTTL:   2 * time.Minute,
-		RoomCacheSize: 50000,
-		RoomCacheTTL:  10 * time.Second,
+		SubCacheSize:     100000,
+		SubCacheTTL:      2 * time.Minute,
+		RoomCacheSize:    50000,
+		RoomCacheTTL:     10 * time.Second,
+		PreviewCacheSize: 50000,
+		PreviewCacheTTL:  10 * time.Second,
 	}
 }
 
@@ -31,6 +33,8 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.SubCacheTTL = 0
 	cfg.RoomCacheSize = 0
 	cfg.RoomCacheTTL = 0
+	cfg.PreviewCacheSize = 0
+	cfg.PreviewCacheTTL = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -64,4 +68,20 @@ func TestValidate_RejectsNegativeRoomCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_ROOM_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativePreviewCacheSize(t *testing.T) {
+	cfg := baseValid()
+	cfg.PreviewCacheSize = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_SIZE")
+}
+
+func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.PreviewCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
 }

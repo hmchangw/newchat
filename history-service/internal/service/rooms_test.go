@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -11,8 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	readcache "github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
 	"github.com/hmchangw/chat/pkg/model"
@@ -54,6 +57,25 @@ func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.Mock
 	return svc, msgs, rooms, apps
 }
 
+// newRoomsServiceWithPreviewCache installs a real PreviewCache so RoomsGet routes
+// through it (cache-hit behavior on the second/third read of the same room).
+func newRoomsServiceWithPreviewCache(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
+	ctrl := gomock.NewController(t)
+	msgs := mocks.NewMockMessageRepository(ctrl)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomRepository(ctrl)
+	pub := mocks.NewMockEventPublisher(ctrl)
+	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	users := mocks.NewMockUserStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
+	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	pc, err := readcache.NewPreviewCache(100, time.Minute)
+	require.NoError(t, err)
+	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, service.WithPreviewCache(pc))
+	return svc, msgs, rooms
+}
+
 func roomsCtx() *natsrouter.Context {
 	return natsrouter.NewContext(map[string]string{"account": "alice"})
 }
@@ -63,6 +85,23 @@ var roomCreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Mirror the production caps (house pattern — see maxGetByIDsBatchSize in messages_test).
 const roomsGetMaxBatch = 100
+
+func TestHistoryService_RoomsGet_PreviewCacheHitSkipsRead(t *testing.T) {
+	svc, msgs, rooms := newRoomsServiceWithPreviewCache(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}},
+		}, false), nil).Times(1)
+
+	for i := 0; i < 3; i++ {
+		resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+		require.NoError(t, err)
+		require.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	}
+	// Times(1) on both reads asserts the 2nd and 3rd calls were cache hits.
+}
 
 func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
@@ -79,6 +118,83 @@ func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	assert.Equal(t, "hello", lm.Content)
 	assert.Equal(t, "alice", lm.Sender.Account)
 	assert.Equal(t, roomLastMsgAt.UTC(), lm.CreatedAt)
+}
+
+func TestHistoryService_RoomsGet_EligibleNewest_SingleQuery(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	var sizes []int
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			sizes = append(sizes, pr.PageSize)
+			return makePage([]models.Message{
+				{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}},
+			}, false), nil
+		}).Times(1)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, []int{1}, sizes, "first (and only) walk page must be size 1")
+}
+
+func TestHistoryService_RoomsGet_EscalatesPastIneligibleTail(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	var sizes []int
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			sizes = append(sizes, pr.PageSize)
+			if pr.PageSize == 1 {
+				// Newest is deleted; more remains (HasNext=true) → escalate.
+				return makePage([]models.Message{
+					{MessageID: "d1", RoomID: "r1", Deleted: true, CreatedAt: roomLastMsgAt},
+				}, true), nil
+			}
+			// Next (larger) page reaches the eligible survivor.
+			return makePage([]models.Message{
+				{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute), Sender: models.Participant{Account: "alice"}},
+			}, false), nil
+		}).Times(2)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, []int{1, 8}, sizes, "page size grows 1 → 8 on an ineligible first page")
+}
+
+// The scan budget (250) is exhausted by an unbroken run of deleted messages,
+// each returned page full (len == PageSize) with HasNext=true, so the walk
+// never sees a terminal signal from the store — it must stop on the budget
+// itself, not loop forever. Also verifies the 100-row escalation clamp: the
+// 4th page is capped at 100 (not 512), and the 5th page is the remaining 77
+// to close out the 250 budget.
+func TestHistoryService_RoomsGet_ScanBudgetExhausted_NoEligibleMessage(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	var sizes []int
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			sizes = append(sizes, pr.PageSize)
+			deleted := make([]models.Message, pr.PageSize)
+			for i := range deleted {
+				deleted[i] = models.Message{
+					MessageID: "d", RoomID: "r1", Deleted: true,
+					CreatedAt: roomLastMsgAt.Add(-time.Duration(i) * time.Second),
+				}
+			}
+			return makePage(deleted, true), nil
+		}).Times(5)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.NotContains(t, resp.Rooms, "r1")
+	assert.Equal(t, []int{1, 8, 64, 100, 77}, sizes, "escalation clamps at 100 then the remaining budget, terminating at the 250-row scan cap")
 }
 
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {

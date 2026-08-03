@@ -270,6 +270,82 @@ func TestSubscriptionCache_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
 	assert.Equal(t, int32(1), src.calls.Load(), "shared load should have populated the cache")
 }
 
+func TestPreviewCache_CachesPositiveNotNegative(t *testing.T) {
+	pc, err := NewPreviewCache(100, time.Minute)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	// Positive: loader runs once, second Get is a hit.
+	posCalls := 0
+	load := func(context.Context) (pkgmodel.PreviewMessage, bool, error) {
+		posCalls++
+		return pkgmodel.PreviewMessage{MessageID: "m1"}, true, nil
+	}
+	p, ok, err := pc.Get(ctx, "r1", load)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "m1", p.MessageID)
+	_, _, _ = pc.Get(ctx, "r1", load)
+	assert.Equal(t, 1, posCalls, "positive result is cached")
+
+	// Negative (found=false): never cached, loader runs every time.
+	negCalls := 0
+	negLoad := func(context.Context) (pkgmodel.PreviewMessage, bool, error) {
+		negCalls++
+		return pkgmodel.PreviewMessage{}, false, nil
+	}
+	_, ok, _ = pc.Get(ctx, "r2", negLoad)
+	require.False(t, ok)
+	_, _, _ = pc.Get(ctx, "r2", negLoad)
+	assert.Equal(t, 2, negCalls, "negative result is not cached")
+}
+
+func TestPreviewCache_ErrorNotCachedAndPropagated(t *testing.T) {
+	pc, err := NewPreviewCache(100, time.Minute)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	wantErr := errors.New("cassandra down")
+	calls := 0
+	load := func(context.Context) (pkgmodel.PreviewMessage, bool, error) {
+		calls++
+		return pkgmodel.PreviewMessage{}, false, wantErr
+	}
+	_, _, err = pc.Get(ctx, "r1", load)
+	require.ErrorIs(t, err, wantErr)
+	_, _, _ = pc.Get(ctx, "r1", load)
+	assert.Equal(t, 2, calls, "errors are not cached")
+}
+
+func TestPreviewCache_SingleflightDedupsConcurrentMisses(t *testing.T) {
+	pc, err := NewPreviewCache(100, time.Minute)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	var calls int32
+	started := make(chan struct{}, 1) // the leader loader signals it has entered
+	start := make(chan struct{})      // then blocks here until released
+	load := func(context.Context) (pkgmodel.PreviewMessage, bool, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			started <- struct{}{}
+		}
+		<-start // hold the leader inside the loader so followers coalesce onto its flight
+		return pkgmodel.PreviewMessage{MessageID: "m1"}, true, nil
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() { defer wg.Done(); _, _, _ = pc.Get(ctx, "r1", load) }()
+	}
+	<-started    // first loader has entered the flight
+	close(start) // release it
+	wg.Wait()
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "concurrent misses for the same key should load once")
+}
+
 func TestSubscriptionCache_CallerCancelReturnsCtxErr(t *testing.T) {
 	ts := time.Now().UTC()
 	src := &fakeSubSource{
