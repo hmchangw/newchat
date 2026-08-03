@@ -130,6 +130,36 @@ func TestHistoryService_RoomsGet_EscalatesPastIneligibleTail(t *testing.T) {
 	assert.Equal(t, []int{1, 8}, sizes, "page size grows 1 → 8 on an ineligible first page")
 }
 
+// The scan budget (250) is exhausted by an unbroken run of deleted messages,
+// each returned page full (len == PageSize) with HasNext=true, so the walk
+// never sees a terminal signal from the store — it must stop on the budget
+// itself, not loop forever. Also verifies the 100-row escalation clamp: the
+// 4th page is capped at 100 (not 512), and the 5th page is the remaining 77
+// to close out the 250 budget.
+func TestHistoryService_RoomsGet_ScanBudgetExhausted_NoEligibleMessage(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	var sizes []int
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			sizes = append(sizes, pr.PageSize)
+			deleted := make([]models.Message, pr.PageSize)
+			for i := range deleted {
+				deleted[i] = models.Message{
+					MessageID: "d", RoomID: "r1", Deleted: true,
+					CreatedAt: roomLastMsgAt.Add(-time.Duration(i) * time.Second),
+				}
+			}
+			return makePage(deleted, true), nil
+		}).Times(5)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.NotContains(t, resp.Rooms, "r1")
+	assert.Equal(t, []int{1, 8, 64, 100, 77}, sizes, "escalation clamps at 100 then the remaining budget, terminating at the 250-row scan cap")
+}
+
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
