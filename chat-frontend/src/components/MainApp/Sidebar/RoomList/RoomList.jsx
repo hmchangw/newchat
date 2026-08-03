@@ -3,6 +3,7 @@ import {
   useRoomSummaries,
   useSidebarSections,
   useChatlistActions,
+  useChatlistSectionOrder,
 } from '@/context/RoomEventsContext'
 import { roomPrefix, roomDisplayName } from '@/lib/roomFormat'
 import { BUILTIN_CHATS, isBuiltinSectionId } from '@/lib/chatlist'
@@ -46,11 +47,14 @@ function RoomItem({ room, isSelected, onSelectRoom, onDragStartRoom, onDropOnRoo
 export default function RoomList({ selectedRoomId, onSelectRoom }) {
   const { error } = useRoomSummaries()
   const sections = useSidebarSections()
-  const { createSection, renameSection, deleteSection, setSortMode, moveChatTo } = useChatlistActions()
+  const rawSectionOrder = useChatlistSectionOrder()
+  const { createSection, renameSection, deleteSection, reorderSections, setSortMode, moveChatTo } =
+    useChatlistActions()
   const [collapsed, setCollapsed] = useState({})
   const [dialog, setDialog] = useState(null) // {mode:'create'|'rename', sectionId?, initialName?}
   const [dragOverKey, setDragOverKey] = useState(null)
   const dragRoomRef = useRef(null)
+  const dragSectionRef = useRef(null) // key of a custom section being reordered
 
   const toggle = (key) => setCollapsed((c) => ({ ...c, [key]: !c[key] }))
 
@@ -74,6 +78,28 @@ export default function RoomList({ selectedRoomId, onSelectRoom }) {
     dragRoomRef.current = { id: room.id, siteId: room.siteId }
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', room.id)
+  }
+
+  const onDragStartSection = (e, sectionKey) => {
+    dragSectionRef.current = sectionKey
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', sectionKey)
+  }
+
+  // Reorder custom sections: drop the dragged section header onto another custom
+  // section -> the dragged one takes that slot. The reorder RPC requires its
+  // argument to be a PERMUTATION of the current full sectionOrder (built-ins +
+  // every custom, each exactly once — else chatlist_invalid_order). So move the
+  // dragged section within the RAW stored order rather than reconstructing one.
+  const reorderSectionTo = (targetKey) => {
+    const dragged = dragSectionRef.current
+    dragSectionRef.current = null
+    setDragOverKey(null)
+    if (!dragged || dragged === targetKey) return
+    if (!rawSectionOrder.includes(dragged) || !rawSectionOrder.includes(targetKey)) return
+    const next = rawSectionOrder.filter((k) => k !== dragged)
+    next.splice(next.indexOf(targetKey), 0, dragged) // dragged goes just before the target
+    reorderSections(next)
   }
 
   return (
@@ -112,14 +138,23 @@ export default function RoomList({ selectedRoomId, onSelectRoom }) {
             >
               <div
                 className="room-list-section-header"
+                draggable={custom}
+                onDragStart={(e) => custom && onDragStartSection(e, section.key)}
                 onDragOver={(e) => {
-                  if (isDropTarget(section)) e.preventDefault()
+                  // Allow drop for a section reorder (a section is being dragged) OR
+                  // a chat move-to-top (a room is being dragged onto a droppable section).
+                  if (dragSectionRef.current || isDropTarget(section)) e.preventDefault()
                 }}
                 onDrop={(e) => {
-                  // Drop on the header = move to the TOP of the section (before its
-                  // current first room). Empty section -> before is undefined -> append.
                   e.stopPropagation()
-                  dropInto(section, { before: section.rooms[0]?.id })
+                  if (dragSectionRef.current) {
+                    // Section dropped on this header -> reorder it into this slot.
+                    reorderSectionTo(section.key)
+                  } else {
+                    // Room dropped on the header -> move to the TOP of the section
+                    // (before its current first room). Empty section -> append.
+                    dropInto(section, { before: section.rooms[0]?.id })
+                  }
                 }}
               >
                 <span className="room-list-section-title" onClick={() => toggle(section.key)}>

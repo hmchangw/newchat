@@ -20,6 +20,7 @@ import {
   createChatlistSection,
   renameChatlistSection,
   deleteChatlistSection,
+  reorderChatlistSections,
   setChatlistSectionSortMode,
   moveChat,
 } from '@/api'
@@ -460,6 +461,15 @@ export function useSidebarSections(): SidebarSection[] {
   }, [summaries, subscriptions, chatlist])
 }
 
+/** Raw overlay section order (the full list the backend stores — built-ins +
+ *  customs). The reorder RPC requires its argument to be a PERMUTATION of this
+ *  full list, so the reorder UI moves a section within it rather than
+ *  reconstructing an order from the derived (built-in-normalised) sections. */
+export function useChatlistSectionOrder(): string[] {
+  const { state } = useRoomEventsInternal()
+  return state.chatlist?.sectionOrder ?? []
+}
+
 /** Imperative chatlist-section actions for the sidebar UI. Each wraps its api
  *  op and applies the returned overlay locally (CHATLIST_UPDATED) — the op's
  *  own event fans to the user's OTHER devices, so the caller must apply its
@@ -475,6 +485,8 @@ export function useChatlistActions() {
       renameSection: async (sectionId: string, name: string) =>
         apply(await renameChatlistSection(nats, { sectionId, name })),
       deleteSection: async (sectionId: string) => apply(await deleteChatlistSection(nats, sectionId)),
+      reorderSections: async (sectionOrder: string[]) =>
+        apply(await reorderChatlistSections(nats, sectionOrder)),
       setSortMode: async (sectionId: string, sortMode: ChatlistSortMode) =>
         apply(await setChatlistSectionSortMode(nats, { sectionId, sortMode })),
       moveChatTo: async (
