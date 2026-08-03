@@ -21,7 +21,7 @@ a MongoDB test and no acceptance criterion covers it:
 
 | Path | Operation | Cached? | Sustained pressure |
 |---|---|---|---|
-| Seed / teardown | Bulk insert/delete of run-owned rooms, subscriptions, ownership ledger, manifest, room keys | — | One-off burst; at production scale (10k rooms × 100 members) this is ~1M subscription documents |
+| Seed / teardown | Bulk insert/delete of run-owned rooms, subscriptions, ownership ledger, manifest, room keys | — | One-off burst; at the planned scale (10k rooms at `CHANNEL_RATIO=0.30` — 3k channels × 100 members plus 7k DMs × 2) this is ~314k subscription documents |
 | Send (gatekeeper) | `GetSubscription` read | Yes — LRU+TTL (`GATEKEEPER_SUB_CACHE_TTL`) | Low; the fixed room set gives a high hit rate |
 | Read (history-service) | `GetHistorySharedSince` access check, room times | Yes — `readcache` LRU+TTL with singleflight | Low, for the same reason |
 | **Thread reply (message-worker)** | `thread_rooms` insert, `thread_subscriptions` upsert | **No** | **The only sustained write path** — at `THREAD_SHARE=0.10` and 100 sends/s this is ~10 writes/s plus per-participant upserts |
