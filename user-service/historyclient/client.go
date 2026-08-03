@@ -51,9 +51,12 @@ func (c *Client) GetThreadList(ctx context.Context, siteID string, req model.Thr
 // RoomsGet issues the per-site rooms.get batch RPC to history-service, returning
 // the resolvable last message for each requested room; rooms with no message, or
 // that degraded, are simply absent from the map (mirrors the server's own
-// per-room best-effort degrade).
-func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string) (map[string]model.PreviewMessage, error) {
-	body, err := json.Marshal(model.RoomsGetRequest{RoomIDs: roomIDs})
+// per-room best-effort degrade). hints carries caller-known walk-bounds (e.g. the
+// room's LastMsgAt already resolved locally) so history-service can skip its own
+// room-times read for those rooms; a nil/empty map is wire-compatible with older
+// callers that only send roomIds.
+func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string, hints map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+	body, err := json.Marshal(model.RoomsGetRequest{RoomIDs: roomIDs, Hints: hints})
 	if err != nil {
 		return nil, fmt.Errorf("marshal rooms-get request: %w", err)
 	}
