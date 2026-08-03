@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/service"
@@ -79,6 +81,53 @@ func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	assert.Equal(t, "hello", lm.Content)
 	assert.Equal(t, "alice", lm.Sender.Account)
 	assert.Equal(t, roomLastMsgAt.UTC(), lm.CreatedAt)
+}
+
+func TestHistoryService_RoomsGet_EligibleNewest_SingleQuery(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	var sizes []int
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			sizes = append(sizes, pr.PageSize)
+			return makePage([]models.Message{
+				{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}},
+			}, false), nil
+		}).Times(1)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, []int{1}, sizes, "first (and only) walk page must be size 1")
+}
+
+func TestHistoryService_RoomsGet_EscalatesPastIneligibleTail(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	var sizes []int
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			sizes = append(sizes, pr.PageSize)
+			if pr.PageSize == 1 {
+				// Newest is deleted; more remains (HasNext=true) → escalate.
+				return makePage([]models.Message{
+					{MessageID: "d1", RoomID: "r1", Deleted: true, CreatedAt: roomLastMsgAt},
+				}, true), nil
+			}
+			// Next (larger) page reaches the eligible survivor.
+			return makePage([]models.Message{
+				{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute), Sender: models.Participant{Account: "alice"}},
+			}, false), nil
+		}).Times(2)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.Equal(t, []int{1, 8}, sizes, "page size grows 1 → 8 on an ineligible first page")
 }
 
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {

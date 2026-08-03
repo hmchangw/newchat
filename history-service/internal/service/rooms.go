@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
@@ -16,8 +17,15 @@ import (
 const (
 	maxRoomsGetBatch       = 100 // mirrors maxGetByIDsBatchSize
 	maxRoomsGetConcurrency = 16  // mirrors cassrepo.maxConcurrentIDReads
-	lastMsgWalkPageSize    = 50  // messages scanned per walk-back page
-	lastMsgWalkMaxPages    = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
+
+	// Preview walk: fetch a tiny first page so the common case (newest message
+	// eligible) costs one Cassandra query instead of over-walking older buckets
+	// to fill a 50-row page whose extra rows are unused. Grow geometrically only
+	// to skip a run of ineligible (deleted/system) messages; lastMsgWalkMaxScan
+	// preserves the previous 50×5 = 250 ineligible-skip budget before giving up.
+	lastMsgWalkFirstPage = 1
+	lastMsgWalkGrowth    = 8
+	lastMsgWalkMaxScan   = 250
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -76,15 +84,16 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		return models.PreviewMessage{}, false
 	}
 
-	pageReq, err := parsePageRequest("", lastMsgWalkPageSize)
-	if err != nil {
-		return models.PreviewMessage{}, false
-	}
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
 	before := ceiling.Add(time.Millisecond)
 
-	for range lastMsgWalkMaxPages {
-		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, pageReq)
+	pageSize := lastMsgWalkFirstPage
+	scanned := 0
+	for scanned < lastMsgWalkMaxScan {
+		if remaining := lastMsgWalkMaxScan - scanned; pageSize > remaining {
+			pageSize = remaining
+		}
+		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, cassrepo.PageRequest{PageSize: pageSize})
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
@@ -102,15 +111,17 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			}
 			return s.toPreviewMessage(ctx, &m), true
 		}
-		// Whole page ineligible (deleted/system). A short page means the walk
-		// is exhausted (no older messages) — stop. Otherwise page again strictly
+		// Whole page ineligible. HasNext=false means the walk reached a terminal
+		// state (floor/empty) — stop. Otherwise grow the page and continue strictly
 		// before the oldest one seen.
-		if len(page.Data) < lastMsgWalkPageSize {
+		scanned += len(page.Data)
+		if !page.HasNext {
 			return models.PreviewMessage{}, false
 		}
 		before = page.Data[len(page.Data)-1].CreatedAt
+		pageSize *= lastMsgWalkGrowth
 	}
-	return models.PreviewMessage{}, false // ineligible tail longer than the walk cap
+	return models.PreviewMessage{}, false // ineligible tail longer than the scan budget
 }
 
 // toPreviewMessage enriches an eligible message into the room-list preview: sender and
