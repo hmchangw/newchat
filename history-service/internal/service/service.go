@@ -114,6 +114,8 @@ type HistoryService struct {
 	apps               AppStore
 	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
 	largeRoomThreshold int
+	previewFirstPage   int // PREVIEW_FIRST_PAGE_SIZE: small first walk-back read
+	previewWalkPage    int // PREVIEW_WALK_PAGE_SIZE: full walk-back page past an ineligible tail
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 }
@@ -141,6 +143,8 @@ func New(
 		apps:               apps,
 		historyFloor:       time.Duration(cfg.MessageHistoryFloorDays) * 24 * time.Hour,
 		largeRoomThreshold: cfg.LargeRoomThreshold,
+		previewFirstPage:   cfg.PreviewFirstPageSize,
+		previewWalkPage:    cfg.PreviewWalkPageSize,
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
 	}

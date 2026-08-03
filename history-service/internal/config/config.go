@@ -47,6 +47,8 @@ type Config struct {
 	MessageReadMaxBuckets   int             `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
 	MessageHistoryFloorDays int             `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"365"`
 	LargeRoomThreshold      int             `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
+	PreviewFirstPageSize    int             `env:"PREVIEW_FIRST_PAGE_SIZE"     envDefault:"3"`
+	PreviewWalkPageSize     int             `env:"PREVIEW_WALK_PAGE_SIZE"      envDefault:"50"`
 	MaxPinnedPerRoom        int             `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
 	PinEnabled              bool            `env:"PIN_ENABLED"                 envDefault:"true"`
 

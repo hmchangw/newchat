@@ -16,8 +16,7 @@ import (
 const (
 	maxRoomsGetBatch       = 100 // mirrors maxGetByIDsBatchSize
 	maxRoomsGetConcurrency = 16  // mirrors cassrepo.maxConcurrentIDReads
-	lastMsgWalkPageSize    = 50  // messages scanned per walk-back page
-	lastMsgWalkMaxPages    = 5   // ponytail: cap the ineligible-tail walk; a room with >250 trailing ineligible messages just shows no last message
+	lastMsgWalkMaxPages    = 6   // ineligible-tail walk cap: small first page + 5 full = ~253 msgs, preserving the prior 250-message coverage
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -76,14 +75,16 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		return models.PreviewMessage{}, false
 	}
 
-	pageReq, err := parsePageRequest("", lastMsgWalkPageSize)
-	if err != nil {
-		return models.PreviewMessage{}, false
-	}
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
 	before := ceiling.Add(time.Millisecond)
 
+	// Small first read; escalate to a full page only past a system/deleted tail.
+	pageSize := s.previewFirstPage
 	for range lastMsgWalkMaxPages {
+		pageReq, err := parsePageRequest("", pageSize)
+		if err != nil {
+			return models.PreviewMessage{}, false
+		}
 		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, pageReq)
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
@@ -105,10 +106,11 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		// Whole page ineligible (deleted/system). A short page means the walk
 		// is exhausted (no older messages) — stop. Otherwise page again strictly
 		// before the oldest one seen.
-		if len(page.Data) < lastMsgWalkPageSize {
+		if len(page.Data) < pageSize {
 			return models.PreviewMessage{}, false
 		}
 		before = page.Data[len(page.Data)-1].CreatedAt
+		pageSize = s.previewWalkPage // head was all-ineligible: read a full page next
 	}
 	return models.PreviewMessage{}, false // ineligible tail longer than the walk cap
 }

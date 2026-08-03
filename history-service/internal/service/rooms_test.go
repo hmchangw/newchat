@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/service"
@@ -32,7 +34,7 @@ func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageR
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
-	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, PreviewFirstPageSize: 3, PreviewWalkPageSize: 50, MaxPinnedPerRoom: 10, PinEnabled: true}
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms
 }
@@ -49,7 +51,7 @@ func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.Mock
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
-	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, PreviewFirstPageSize: 3, PreviewWalkPageSize: 50, MaxPinnedPerRoom: 10, PinEnabled: true}
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms, apps
 }
@@ -187,6 +189,43 @@ func TestHistoryService_RoomsGet_SkipsSystemTail(t *testing.T) {
 			{MessageID: "m2", RoomID: "r1", Type: model.MessageTypeRoomRenamed, CreatedAt: roomLastMsgAt},
 			{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-time.Minute)},
 		}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// A system/deleted head that fills the small first page forces one escalation to a
+// full walk-back page, which surfaces the eligible message.
+func TestHistoryService_RoomsGet_EscalatesPastSmallFirstPage(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	firstPage := []models.Message{
+		{MessageID: "s3", RoomID: "r1", Type: model.MessageTypeRoomRenamed, CreatedAt: roomLastMsgAt},
+		{MessageID: "s2", RoomID: "r1", Deleted: true, CreatedAt: roomLastMsgAt.Add(-time.Minute)},
+		{MessageID: "s1", RoomID: "r1", Type: model.MessageTypeMembersAdded, CreatedAt: roomLastMsgAt.Add(-2 * time.Minute)},
+	}
+	oldest := firstPage[len(firstPage)-1].CreatedAt
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil)
+	gomock.InOrder(
+		// First read: the small page (size 3), all ineligible → escalate.
+		msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, _, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+				assert.Equal(t, 3, pr.PageSize)
+				return makePage(firstPage, false), nil
+			}),
+		// Escalated read: full page (size 50), cursor advanced past the oldest first-page message.
+		msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", oldest, gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, before, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+				assert.Equal(t, 50, pr.PageSize)
+				assert.Equal(t, oldest, before)
+				return makePage([]models.Message{
+					{MessageID: "m1", RoomID: "r1", Msg: "alive", CreatedAt: roomLastMsgAt.Add(-3 * time.Minute), Sender: models.Participant{Account: "alice"}},
+				}, false), nil
+			}),
+	)
 
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
