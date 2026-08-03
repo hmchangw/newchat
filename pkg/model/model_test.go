@@ -575,6 +575,36 @@ func TestSendMessageRequestJSON(t *testing.T) {
 
 }
 
+func TestRoomsGetRequestJSON(t *testing.T) {
+	t.Run("with hints round-trip", func(t *testing.T) {
+		lastMsgAt := int64(1735689600000)
+		createdAt := int64(1735600000000)
+		src := model.RoomsGetRequest{
+			RoomIDs: []string{"r1", "r2"},
+			Hints: map[string]model.RoomTimeHint{
+				"r1": {LastMsgAt: &lastMsgAt, CreatedAt: &createdAt},
+				"r2": {LastMsgAt: &lastMsgAt},
+			},
+		}
+		roundTrip(t, &src, &model.RoomsGetRequest{})
+	})
+
+	t.Run("nil hints omitted", func(t *testing.T) {
+		src := model.RoomsGetRequest{RoomIDs: []string{"r1"}}
+		data, err := json.Marshal(&src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["hints"]
+		assert.False(t, present, "hints should be omitted when nil")
+
+		var dst model.RoomsGetRequest
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Nil(t, dst.Hints, "absent JSON field must unmarshal to nil map")
+	})
+}
+
 func TestMessageEventJSON(t *testing.T) {
 	e := model.MessageEvent{
 		Message: model.Message{
