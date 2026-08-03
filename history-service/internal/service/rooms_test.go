@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -632,6 +633,40 @@ func TestHistoryService_RoomsGet_ImplausibleHint_TreatedAsUnhinted(t *testing.T)
 		Hints:   map[string]model.RoomTimeHint{"r1": {LastMsgAt: &bogus}},
 	}
 	resp, err := svc.RoomsGet(roomsCtx(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+}
+
+// An oversized Hints map is malformed (hints are only consulted for the capped
+// RoomIDs) and is rejected symmetrically with the RoomIDs cap, before any store read.
+func TestHistoryService_RoomsGet_TooManyHints_BadRequest(t *testing.T) {
+	svc, _, _ := newRoomsService(t)
+	hints := make(map[string]model.RoomTimeHint, roomsGetMaxBatch+1)
+	for i := 0; i <= roomsGetMaxBatch; i++ {
+		hints["r"+strconv.Itoa(i)] = model.RoomTimeHint{LastMsgAt: msPtr(roomLastMsgAt)}
+	}
+	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}, Hints: hints})
+	assertBadRequestErr(t, err, "too many hints")
+}
+
+// A requested unhinted room that GetRoomTimesByIDs does not return (e.g. deleted
+// between the caller's list read and this resolve, so it's absent from the batch
+// result map) keeps a nil meta and falls through to the per-room GetRoomTimes path —
+// it must not be silently dropped by the batch step.
+func TestHistoryService_RoomsGet_UnhintedRoomAbsentFromBatch_FallsBackPerRoom(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	// Batch returns an empty map: r1 is unhinted but absent from the result.
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), []string{"r1"}).
+		Return(map[string]mongorepo.RoomTimes{}, nil).
+		Times(1)
+	// Absent from the batch → the per-room fallback fires exactly once.
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
 }
