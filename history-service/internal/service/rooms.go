@@ -41,6 +41,11 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	if len(req.RoomIDs) > maxRoomsGetBatch {
 		return nil, errcode.BadRequest("too many roomIds")
 	}
+	// Hints are only ever consulted for the (capped) requested room IDs, so a larger
+	// map is malformed; reject it symmetrically rather than unmarshal/allocate it.
+	if len(req.Hints) > maxRoomsGetBatch {
+		return nil, errcode.BadRequest("too many hints")
+	}
 
 	ids := dedupRoomIDs(req.RoomIDs)
 	roomsGetBatchSize.Record(c, int64(len(ids)))
