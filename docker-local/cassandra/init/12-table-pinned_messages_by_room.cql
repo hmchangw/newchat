@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS chat.pinned_messages_by_room (
   card                  FROZEN<"Card">,
   card_action           FROZEN<"CardAction">,
   quoted_parent_message FROZEN<"QuotedParentMessage">,
+  forwarded_message     FROZEN<"ForwardedMessage">,
   visible_to            TEXT,
   -- No reactions column: the pinned panel does not render reactions, so the
   -- v3 reactions feature does not mirror them here. Reads of the pinned

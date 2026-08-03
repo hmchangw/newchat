@@ -240,3 +240,52 @@ func TestEncMeta_JSON(t *testing.T) {
 	in := EncMeta{Nonce: []byte{1, 2, 3}}
 	roundTrip(t, in)
 }
+
+func TestForwardedMessage_JSON(t *testing.T) {
+	threadParent := time.Date(2026, 2, 1, 9, 0, 0, 0, time.UTC)
+	f := ForwardedMessage{
+		MessageID:             "01970a4f8c2d7c9aQRST",
+		RoomID:                "r-src",
+		Sender:                Participant{ID: "u1", Account: "alice"},
+		CreatedAt:             time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC),
+		Msg:                   "the forwarded body",
+		Mentions:              []Participant{{ID: "u2", Account: "bob"}},
+		MessageLink:           "https://chat.example.com/r-src/01970a4f8c2d7c9aQRST",
+		ThreadParentID:        "01970a4f8c2d7c9aTHRD",
+		ThreadParentCreatedAt: &threadParent,
+	}
+	got := roundTrip(t, f)
+	assert.Equal(t, "01970a4f8c2d7c9aTHRD", got.ThreadParentID)
+	require.NotNil(t, got.ThreadParentCreatedAt)
+}
+
+func TestForwardedMessage_JSON_Minimal(t *testing.T) {
+	f := ForwardedMessage{
+		MessageID: "m1", RoomID: "r1",
+		Sender: Participant{ID: "u1"}, CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	got := roundTrip(t, f)
+	assert.Empty(t, got.Msg)
+	assert.Nil(t, got.Mentions)
+	assert.Empty(t, got.MessageLink)
+	assert.Empty(t, got.ThreadParentID)
+	assert.Nil(t, got.ThreadParentCreatedAt)
+}
+
+func TestMessage_ForwardedMessage_JSON(t *testing.T) {
+	msg := Message{
+		RoomID: "r-dst", CreatedAt: time.Date(2026, 2, 3, 0, 0, 0, 0, time.UTC),
+		MessageID: "m-fwd", Sender: Participant{ID: "u1", Account: "alice"}, Msg: "my comment",
+		ForwardedMessage: &ForwardedMessage{
+			MessageID: "m-src", RoomID: "r-src",
+			Sender:    Participant{ID: "u5", Account: "eve"},
+			CreatedAt: time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC), Msg: "original",
+		},
+	}
+	got := roundTrip(t, msg)
+	require.NotNil(t, got.ForwardedMessage)
+	assert.Equal(t, "m-src", got.ForwardedMessage.MessageID)
+	// Absent field stays nil (omitempty):
+	minimal := roundTrip(t, Message{RoomID: "r1", MessageID: "m1", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Sender: Participant{ID: "u1"}, Msg: "hi"})
+	assert.Nil(t, minimal.ForwardedMessage)
+}

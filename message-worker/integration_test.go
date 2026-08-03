@@ -90,6 +90,17 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			thread_parent_id         TEXT,
 			thread_parent_created_at TIMESTAMP
 		)`, keyspace),
+		fmt.Sprintf(`CREATE TYPE IF NOT EXISTS %s."ForwardedMessage" (
+			message_id               TEXT,
+			room_id                  TEXT,
+			sender                   FROZEN<"Participant">,
+			created_at               TIMESTAMP,
+			msg                      TEXT,
+			mentions                 SET<FROZEN<"Participant">>,
+			message_link             TEXT,
+			thread_parent_id         TEXT,
+			thread_parent_created_at TIMESTAMP
+		)`, keyspace),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.messages_by_room (
 			room_id               TEXT,
 			bucket                BIGINT,
@@ -113,6 +124,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			forwarded_message     FROZEN<"ForwardedMessage">,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
@@ -139,6 +151,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                     TEXT,
 			sys_msg_data             BLOB,
 			quoted_parent_message    FROZEN<"QuotedParentMessage">,
+			forwarded_message        FROZEN<"ForwardedMessage">,
 			enc_payload              BLOB,
 			enc_meta                 FROZEN<"EncMeta">,
 			PRIMARY KEY (message_id)
