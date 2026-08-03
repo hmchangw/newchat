@@ -112,7 +112,7 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 | # | Journey | SLI = good / valid | Target | Today |
 |---|---|---|---|---|
 | SLO-1a | J1 | canonical message persisted to Cassandra / **canonical messages published** | 99.9% | 🔧 P2 · approximate (lag-enforced) |
-| SLO-1b | J1 | **channel** room-subject broadcast published ok (single publish) / **canonical messages routed to the room-subject path** (`broadcast_path=room_subject`) | 99.9% | 🔧 P2 · approximate · core-NATS boundary |
+| SLO-1b | J1 | **channel** room-subject broadcast **enqueue-accepted** (local core-NATS, single publish) / **canonical messages routed to the room-subject path** (`broadcast_path=room_subject`) | 99.9% | 🔧 P2 · approximate · enqueue-only (see §2) |
 | SLO-2 | J1 | room-subject broadcast published **within 1 s** of canonical acceptance (late = bad) / canonical messages on the room-subject path (`broadcast_path=room_subject`) | 99% | 🔧 P2 · approximate |
 | SLO-3 | J2 | successful login **within 1 s** / eligible login attempts | 99% | ✅ (auth leg — proxy) |
 | SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 |
@@ -152,7 +152,7 @@ bound` (never implying an ordering the architecture lacks).
 | Layer | Meaning | Status |
 |---|---|---|
 | **North-star / declared** | recipient received & **rendered** within bound | observational |
-| **Enforced v1** | SLO-1a persistence + SLO-1b/SLO-2 channel broadcast publication | this doc |
+| **Enforced v1** | SLO-1a persistence + SLO-1b/SLO-2 channel broadcast **enqueue-acceptance** (local core-NATS, not server-confirmed) | this doc |
 | **Observational v1.5** | frontend receive-span telemetry | §8 P5 |
 | **Protocol-receive prober v2** | loadgen NATS-subscribe prober — proves **protocol receipt**, not render | §8 P6 |
 | **Render prober v2** | browser synthetic / RUM — proves decrypt/render/state-apply | §8 P6/P7 |
@@ -188,8 +188,17 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
     downstream (the code comment: *"one room-stream publish… reports the room
     audience, not per-recipient deliveries"*). So the only channel outcome is
     **`ok`/`failed` of that one publish** — there is **no `all/partial/failed`**.
-    **Core-NATS boundary:** `nc.PublishMsg` is fire-and-forget — a nil return
-    means *enqueued locally*, **not** server-acknowledged. Per-recipient
+    **Core-NATS boundary — v1 measures *enqueue acceptance*, not publication.**
+    `nc.PublishMsg` is fire-and-forget: a nil return means the message was
+    *accepted into the local client's send/reconnect buffer*, **not**
+    server-confirmed (core NATS has no PubAck). During a disconnect the reconnect
+    buffer can silently drop a publish while the call still returns nil — the SLI
+    reads green and, because this outbound hop is **not** a JetStream consumer,
+    **no consumer-lag signal fires either**. So v1 names this outcome
+    `enqueue-accepted`, and its real safety net is **connection-health /
+    async-error backstops** (see below), *not* the ratio. Promoting it to true
+    "publication" needs a **server-confirmed boundary** — a flush checkpoint
+    (`FlushWithContext`) or a durable-PubAck path — tracked in §8 P7. Per-recipient
     `all/partial/failed` exists only on the **DM/thread** paths (`publishDMEvents`
     loops accounts with a `failed` count), which v1 does not score; those and the
     true per-recipient *delivery* outcome are the **observational last mile**
@@ -204,9 +213,19 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
   `broadcast_path="room_subject"` canonical messages in v1 (channel non-thread
   sends), so channel thread replies routed to thread fan-out are excluded from
   both numerator and denominator.
-- **Backstop (the real enforcement):** message-worker / broadcast-worker consumer
-  lag (§8 P3). Because the counters are core-NATS/approximate, lag is the
-  primary stalled-worker signal; the ratios are secondary.
+- **Backstops (the real enforcement) — two distinct signals:**
+  - **Inbound stall** (worker falling behind `MESSAGES_CANONICAL`): message-worker
+    / broadcast-worker **consumer lag** (§8 P3). This is a JetStream consumer, so
+    lag is observable.
+  - **Outbound enqueue loss** (SLO-1b's core-NATS hop, where lag is blind):
+    **connection-health / async-error counters** on the NATS client —
+    disconnect/reconnect events, closed-connection, `ErrorHandler` fires
+    (slow-consumer, reconnect-buffer overflow). `natsutil.Connect` already wires
+    `DisconnectErrHandler`/`ReconnectHandler`/`ClosedHandler`/`ErrorHandler`
+    (`MaxReconnects=-1`); v1 turns those log-only handlers into counters so a
+    reconnect-buffer drop surfaces even though the ratio can't see it.
+  Because the counters are core-NATS/approximate, these backstops are primary;
+  the ratios are secondary.
 
 ### Measurement
 
@@ -407,12 +426,12 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 |---|---|---|
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
 | P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker publications + publication-age; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
-| P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it) | outage backstop for 1a/1b/2/6/9 |
-| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) | SLO-6/8/9 |
+| P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `is_consumer_leader=true`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
+| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-health / async-error counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b enqueue-loss backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
 | P6 | **loadgen NATS-subscribe prober** (protocol receipt) + SLO assertion mode (§10) · login→connect→initial-data; sparse-journey floor; SLO-aware load asserts. **Render is out of scope here** — proves protocol receipt, not decrypt/render | protocol-receive last-mile SLI |
 | P6b | **browser synthetic / RUM** prober — decrypt/render/state-apply | render-level declared last mile |
-| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/6/9 exact instead of approximate) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
+| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/6/9 exact instead of approximate) · **SLO-1b server-confirmed publication boundary** (flush checkpoint / durable-PubAck path, replacing v1 enqueue-acceptance) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
 
 ---
 
@@ -460,7 +479,11 @@ were in tension):
 - **Hard gate** — the run fails if it can't meet the **actual SLO predicate and
   target** from this document (e.g. SLO-4 = 95% within 500 ms). This is what
   "thresholds track this document" means, and it applies to **latency and
-  availability** targets alike.
+  availability** targets alike. **Evaluate over isolated run-window counter
+  deltas** (`increase()` across the test window), **never** the 28-day production
+  aggregate — reading the rolling aggregate would let historical/background
+  traffic mask the failures produced *in this run*. Reuse the prod predicates and
+  targets; window the counters to the run.
 - **Engineering headroom** — a separately-named, *stricter* guardrail (e.g.
   assert the latency bound at ~50–70% of the prod value) to catch regression
   before it reaches the SLO. A headroom miss warns; only a hard-gate miss fails
