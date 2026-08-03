@@ -1759,3 +1759,156 @@ describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () =>
     expect(historyCalls).toBe(0)
   })
 })
+
+describe('added subscription.update room enrichment', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function AddedProbe({ roomId }) {
+    const { summaries } = useRoomSummaries()
+    const s = summaries.find((r) => r.id === roomId)
+    return (
+      <div>
+        <div data-testid="userCount">{String(s?.userCount)}</div>
+        <div data-testid="lastMsgAt">{String(s?.lastMsgAt)}</div>
+      </div>
+    )
+  }
+
+  /** Shared scaffold: seedKeys spy swapped into the RoomKeys mock, an empty
+   *  subscription.list bootstrap, and a handler-capturing subscribe. Callers
+   *  drive the returned handlers map and MUST invoke restore() when done. */
+  function setupSeedKeysHarness() {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+    return { seedKeys, handlers, subscribe, nats, restore: () => { currentRoomKeysMock = prevMock } }
+  }
+
+  it('seeds the inline room key and applies room metadata from an added event', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
+      render(wrap(<AddedProbe roomId="enr1" />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+      act(() => {
+        handlers.get('chat.user.alice.event.subscription.update')({
+          action: 'added',
+          subscription: {
+            roomId: 'enr1',
+            roomType: 'channel',
+            siteId: 'site-A',
+            name: 'enriched-room',
+            room: {
+              name: 'enriched-room',
+              crossSite: false,
+              userCount: 7,
+              lastMsgAt: '2026-07-01T10:00:00Z',
+              privateKey: 'AQIDBA==',
+              keyVersion: 3,
+            },
+          },
+        })
+      })
+
+      // The inline key is seeded exactly like a subscription.list key.
+      await waitFor(() => expect(seedKeys).toHaveBeenCalled())
+      expect(seedKeys).toHaveBeenCalledWith([
+        { roomId: 'enr1', version: 3, privateKey: 'AQIDBA==' },
+      ])
+      // Room metadata renders without waiting for a metadata/message event.
+      expect(screen.getByTestId('userCount').textContent).toBe('7')
+      expect(screen.getByTestId('lastMsgAt').textContent).toBe('2026-07-01T10:00:00Z')
+      // crossSite: false → the local subject, not the global fail-safe.
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.local.room.enr1.event')
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not seed keys when the added event carries no room key (keyless DM)', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
+      render(wrap(<SummariesProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+      act(() => {
+        handlers.get('chat.user.alice.event.subscription.update')({
+          action: 'added',
+          subscription: {
+            roomId: 'dm1',
+            roomType: 'dm',
+            siteId: 'site-A',
+            name: 'bob',
+            room: { name: '', crossSite: false, userCount: 2 },
+          },
+        })
+      })
+
+      await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+      expect(seedKeys).not.toHaveBeenCalled()
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('stale-session guards (generation counter)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('drops a bootstrap that resolves after a re-login — no stale key seeding or subs', async () => {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    try {
+      let resolveFirstRooms
+      let roomsCalls = 0
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+          roomsCalls++
+          if (roomsCalls === 1) return new Promise((res) => { resolveFirstRooms = res })
+          return Promise.resolve({ subscriptions: [] })
+        }
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+        throw new Error('unexpected subject: ' + subject)
+      })
+      const subscribe = vi.fn().mockReturnValue({ unsubscribe: vi.fn() })
+
+      const nats1 = mockNats({ request, subscribe, user: { account: 'alice', siteId: 'site-A' } })
+      const { rerender } = render(wrap(<SummariesProbe />, nats1))
+      await waitFor(() => expect(roomsCalls).toBe(1))
+
+      // Re-login as a different user while alice's rooms fetch is still in flight.
+      const nats2 = mockNats({ request, subscribe, user: { account: 'carol', siteId: 'site-A' } })
+      rerender(wrap(<SummariesProbe />, nats2))
+      await waitFor(() => expect(roomsCalls).toBe(2))
+
+      // Alice's stale bootstrap resolves now, carrying a keyed channel room.
+      await act(async () => {
+        resolveFirstRooms({
+          subscriptions: [
+            {
+              roomId: 'stale1', roomType: 'channel', name: 'stale', siteId: 'site-A',
+              room: { crossSite: false, privateKey: 'AQIDBA==', keyVersion: 1 },
+            },
+          ],
+        })
+      })
+
+      expect(seedKeys).not.toHaveBeenCalled()
+      expect(subscribe.mock.calls.map((c) => c[0])).not.toContain('chat.local.room.stale1.event')
+      expect(screen.getByTestId('count').textContent).toBe('0')
+    } finally {
+      currentRoomKeysMock = prevMock
+    }
+  })
+})

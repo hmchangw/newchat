@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef } from 'react'
 import {
   fetchSidebarBuckets,
+  keyEntryFor,
   markRoomRead,
+  subToRoom,
   subscribeToRoomEvents,
   subscribeToRoomMetadataUpdates,
   subscribeToSubscriptionUpdates,
@@ -421,31 +423,29 @@ export function useRoomSubscriptions(
     }
 
     const subUpdate = subscribeToSubscriptionUpdates(liveNats, (evt) => {
-      if (cancelledRef.current) return
+      // Generation check, not just cancelledRef: a re-login resets
+      // cancelledRef to false, so a callback still in flight from the prior
+      // session would otherwise seed stale keys / open stale channel subs.
+      if (!isCurrent()) return
       if (evt.action === 'added' && evt.subscription?.roomId) {
         // Store the full subscription record FIRST so any consumer that
         // wakes up on the ROOM_ADDED dispatch already sees fresh roles /
         // hasMention / alert state. The full payload is what room-worker
         // emits on `subscription.update`.
         safeDispatch({ type: 'SUBSCRIPTION_UPSERTED', subscription: evt.subscription })
-        // Build the sidebar room straight from the subscription record — it
-        // carries roomId, roomType, siteId, and the per-user friendly name.
-        // Room-level metadata (userCount, lastMsgAt) is absent here and lands
-        // via subsequent ROOM_METADATA_UPDATED / MESSAGE_RECEIVED events.
+        // The "added" event embeds the room view under sub.room
+        // (subscription.list parity, mapped by the same subToRoom): metadata
+        // renders immediately and the E2E key seeds inline — no separate
+        // room.key event is sent for interactive adds anymore (room.key now
+        // carries rotations only).
         const sub = evt.subscription
-        const room = {
-          id: sub.roomId,
-          type: sub.roomType,
-          siteId: sub.siteId,
-          name: sub.name,
-          subscriptionName: sub.name,
-        }
+        const room = { ...subToRoom(sub, user.siteId), subscriptionName: sub.name }
         safeDispatch({ type: 'ROOM_ADDED', room })
-        // crossSite is absent on this event's embedded room today (the
-        // live "added" payload carries the stored Subscription, not the
-        // read-time enrichment) — default to true (global), the server's
-        // fail-safe, rather than assume same-site.
-        if (sub.roomType === 'channel') openChannelSub(sub.roomId, sub.room?.crossSite ?? true)
+        const keyEntry = keyEntryFor(sub)
+        if (keyEntry) seedKeysRef.current([keyEntry])
+        // subToRoom resolved the tri-state crossSite (missing → true, the
+        // global fail-safe — never assume same-site).
+        if (sub.roomType === 'channel') openChannelSub(sub.roomId, room.crossSite)
       } else if (evt.action === 'removed') {
         const roomId = evt.subscription?.roomId
         if (!roomId) return
@@ -481,19 +481,17 @@ export function useRoomSubscriptions(
     // a total failure leaves the sidebar empty.
     fetchSidebarBuckets(liveNats)
       .then((buckets) => {
-        if (cancelledRef.current) return
+        // Generation check, not just cancelledRef: a slow bootstrap from a
+        // prior login must not seed keys or open subs into the new session.
+        if (!isCurrent()) return
         safeDispatch({ type: 'BUCKETS_LOADED', ...buckets })
         // Seed room keys delivered inline on subscription.list so the first
         // message in each encrypted room decrypts immediately — no placeholder,
         // no on-demand key.get RPC. Rooms without a key (plaintext DMs, or no
         // key provisioned) simply aren't seeded.
-        const keyEntries = []
-        for (const sub of Object.values(buckets.subscriptions ?? {})) {
-          const room = sub?.room
-          if (room?.privateKey && typeof room.keyVersion === 'number') {
-            keyEntries.push({ roomId: sub.roomId, version: room.keyVersion, privateKey: room.privateKey })
-          }
-        }
+        const keyEntries = Object.values(buckets.subscriptions ?? {})
+          .map(keyEntryFor)
+          .filter(Boolean)
         if (keyEntries.length > 0) seedKeysRef.current(keyEntries)
         for (const r of buckets.rooms) {
           if (r.type === 'channel') openChannelSub(r.id, r.crossSite)
