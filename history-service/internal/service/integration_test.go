@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
@@ -149,6 +150,10 @@ func (stubRoomRepo) GetMinUserLastSeenAt(_ context.Context, _ string) (*time.Tim
 func (stubRoomRepo) GetRoomTimes(_ context.Context, _ string) (lastMsgAt, createdAt time.Time, err error) {
 	now := time.Now().UTC()
 	return now, now.AddDate(-1, 0, 0), nil
+}
+
+func (stubRoomRepo) GetRoomTimesByIDs(_ context.Context, _ []string) (map[string]mongorepo.RoomTimes, error) {
+	return map[string]mongorepo.RoomTimes{}, nil
 }
 
 func (stubRoomRepo) GetRoomUserCount(_ context.Context, _ string) (int, error) {

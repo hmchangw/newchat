@@ -64,6 +64,79 @@ func TestRoomRepo_GetRoomTimes_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, mongo.ErrNoDocuments)
 }
 
+func TestRoomRepo_GetRoomTimesByIDs(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db)
+
+	createdAt1 := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	lastMsgAt1 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	createdAt2 := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+	lastMsgAt2 := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+
+	rooms := []model.Room{
+		{
+			ID:        "batch-room-1",
+			SiteID:    "site-A",
+			Type:      model.RoomTypeChannel,
+			CreatedAt: createdAt1,
+			LastMsgAt: &lastMsgAt1,
+		},
+		{
+			ID:        "batch-room-2",
+			SiteID:    "site-A",
+			Type:      model.RoomTypeChannel,
+			CreatedAt: createdAt2,
+			LastMsgAt: &lastMsgAt2,
+		},
+	}
+	for _, room := range rooms {
+		_, err := db.Collection("rooms").InsertOne(context.Background(), room)
+		require.NoError(t, err)
+	}
+
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{"batch-room-1", "batch-room-2", "missing-room"})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	assert.Equal(t, lastMsgAt1.UTC(), got["batch-room-1"].LastMsgAt.UTC())
+	assert.Equal(t, createdAt1.UTC(), got["batch-room-1"].CreatedAt.UTC())
+	assert.Equal(t, lastMsgAt2.UTC(), got["batch-room-2"].LastMsgAt.UTC())
+	assert.Equal(t, createdAt2.UTC(), got["batch-room-2"].CreatedAt.UTC())
+
+	_, missingPresent := got["missing-room"]
+	assert.False(t, missingPresent, "missing room should be omitted, not an error")
+}
+
+func TestRoomRepo_GetRoomTimesByIDs_NoLastMsg(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db)
+
+	createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	_, err := db.Collection("rooms").InsertOne(context.Background(), bson.M{
+		"_id":       "batch-room-no-lastmsg",
+		"siteId":    "site-A",
+		"type":      "channel",
+		"createdAt": createdAt,
+	})
+	require.NoError(t, err)
+
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{"batch-room-no-lastmsg"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.True(t, got["batch-room-no-lastmsg"].LastMsgAt.IsZero(), "lastMsgAt absent -> zero time")
+	assert.Equal(t, createdAt.UTC(), got["batch-room-no-lastmsg"].CreatedAt.UTC())
+}
+
+func TestRoomRepo_GetRoomTimesByIDs_Empty(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db)
+
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{})
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
 func TestRoomRepo_GetMinUserLastSeenAt_Set(t *testing.T) {
 	db := setupMongo(t)
 	repo := NewRoomRepo(db)
