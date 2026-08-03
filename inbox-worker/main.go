@@ -214,6 +214,23 @@ func (s *mongoInboxStore) UpdateUserSettings(ctx context.Context, account string
 	return nil
 }
 
+// UpdateUserChatlist replaces the local users doc's chatlist sub-document with the origin
+// site's full post-update state — whole-object, so a removed section is removed here too.
+// A missing user (no doc on this site) is a silent no-op.
+func (s *mongoInboxStore) UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt time.Time) error {
+	// Guard on the chatlistUpdatedAt high-water mark so an out-of-order or duplicate event
+	// (chatlist fans to all sites) can't regress to older state.
+	filter := bson.M{"account": account, "$or": bson.A{
+		bson.M{"chatlistUpdatedAt": bson.M{"$exists": false}},
+		bson.M{"chatlistUpdatedAt": bson.M{"$lt": updatedAt}},
+	}}
+	set := bson.M{"chatlist": chatlist, "chatlistUpdatedAt": updatedAt}
+	if _, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set}); err != nil {
+		return fmt.Errorf("update user chatlist for %q: %w", account, err)
+	}
+	return nil
+}
+
 // BulkCreateSubscriptions inserts the supplied subs idempotently. Each is
 // keyed by (roomId, u.account) and written via $setOnInsert so an existing
 // sub (from a previous delivery, or with read-state already accumulated) is
@@ -277,6 +294,38 @@ func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID
 	res, err := s.subCol.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("update subscription favorite for %q in room %q: %w", account, roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return s.naksIfSubscriptionMissing(ctx, account, roomID)
+	}
+	return nil
+}
+
+// UpdateSubscriptionSection sets sectionId+sectionOrder (or clears both when
+// sectionID==nil, a remove) by (roomID, account) under a sectionUpdatedAt guard so
+// an out-of-order or duplicate move cannot regress. A guard-rejected event is a
+// silent no-op; a missing sub NAKs so it retries after the sub replicates.
+func (s *mongoInboxStore) UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error {
+	filter := bson.M{
+		"roomId":    roomID,
+		"u.account": account,
+		"$or": bson.A{
+			bson.M{"sectionUpdatedAt": bson.M{"$exists": false}},
+			bson.M{"sectionUpdatedAt": bson.M{"$lt": updatedAt}},
+		},
+	}
+	var update bson.M
+	if sectionID == nil {
+		update = bson.M{
+			"$set":   bson.M{"sectionUpdatedAt": updatedAt},
+			"$unset": bson.M{"sectionId": "", "sectionOrder": ""},
+		}
+	} else {
+		update = bson.M{"$set": bson.M{"sectionId": *sectionID, "sectionOrder": order, "sectionUpdatedAt": updatedAt}}
+	}
+	res, err := s.subCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("update subscription section for %q in room %q: %w", account, roomID, err)
 	}
 	if res.MatchedCount == 0 {
 		return s.naksIfSubscriptionMissing(ctx, account, roomID)

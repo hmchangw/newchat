@@ -152,6 +152,40 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	return &u, nil
 }
 
+// GetUserChatlist returns the user's stored chatlist sub-document (Chatlist is nil
+// when never customized); (nil, nil) when no active user matched.
+func (r *UserRepo) GetUserChatlist(ctx context.Context, account string) (*model.User, error) {
+	return r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "chatlist": 1}),
+	)
+}
+
+// UpdateUserChatlist $sets the whole chatlist sub-document (validated + applied in
+// the service layer, so the origin write is a whole-object replace) and returns the
+// updated user (Chatlist projected) in one round-trip; (nil, nil) when no active
+// user matched.
+func (r *UserRepo) UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error) {
+	opts := options.FindOneAndUpdate().
+		SetReturnDocument(options.After).
+		SetProjection(bson.M{"_id": 0, "chatlist": 1})
+	// Stamp the top-level chatlistUpdatedAt (= state.LastUpdatedAt, the one the
+	// service shares with both fanouts) so the cross-site high-water guard sees a
+	// local edit; without it an older inbound event could regress local state.
+	res := r.users.Raw().FindOneAndUpdate(ctx, activeUserFilter(account),
+		bson.M{"$set": bson.M{"chatlist": state, "chatlistUpdatedAt": state.LastUpdatedAt}}, opts)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("update user chatlist: %w", err)
+	}
+	var u model.User
+	if err := res.Decode(&u); err != nil {
+		return nil, fmt.Errorf("decode updated user chatlist: %w", err)
+	}
+	return &u, nil
+}
+
 // SetUserStatus updates status fields (isShow only written when non-nil) and
 // returns the updated user in one round-trip via FindOneAndUpdate(After),
 // projected to the UserStatusView fields; returns (nil, nil) when no active user matched.

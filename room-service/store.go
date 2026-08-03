@@ -136,6 +136,20 @@ type RoomStore interface {
 	// federated event publishes (inbox-worker guards remote applies against it).
 	// Returns the post-flip subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
 	ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error)
+	// MoveSubscriptionSection sets sectionId+sectionOrder (or clears both when
+	// sectionID==nil, a remove) on (roomID, account), stamping sectionUpdatedAt as
+	// the high-water mark the federated event carries. Returns the post-write
+	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
+	MoveSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, sectionUpdatedAt time.Time) (*model.Subscription, error)
+	// ComputeSectionOrder returns the fractional sectionOrder for placing (account's)
+	// chat within sectionID: just after afterRoomID, just before beforeRoomID (for
+	// top-insertion), or appended (max+1) when both are empty. after/before are
+	// mutually exclusive (the caller rejects both set).
+	// needRebalance flags float-precision exhaustion so the caller re-spaces first.
+	ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (order float64, needRebalance bool, err error)
+	// RebalanceSection re-spaces every (account) sub in sectionID to 1,2,3,… by
+	// current sectionOrder, restoring gap room. Bounded to one section; rare.
+	RebalanceSection(ctx context.Context, account, sectionID string) error
 	// OpenSubscription atomically sets open=true for (roomID, account) via a single
 	// FindOneAndUpdate and returns the post-update subscription, or
 	// model.ErrSubscriptionNotFound (wrapped) when no match.

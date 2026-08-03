@@ -25,6 +25,7 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	model.InboxThreadReadAll,
 	model.InboxSubscriptionMuteToggled,
 	model.InboxSubscriptionFavoriteToggled,
+	model.InboxSubscriptionSectionMoved,
 	model.InboxSubscriptionOpened,
 	model.InboxRoomRestricted,
 	// message-worker: thread-subscription federation. Order-insensitive —

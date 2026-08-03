@@ -70,6 +70,8 @@ type User struct {
 	Services Services `json:"-" bson:"services,omitempty"`
 	// Settings is the per-user client-preferences sub-document; nil = never set.
 	Settings *UserSettings `json:"settings,omitempty" bson:"settings,omitempty"`
+	// Chatlist is the per-user section-definition overlay; nil = never customized.
+	Chatlist *ChatlistState `json:"chatlist,omitempty" bson:"chatlist,omitempty"`
 }
 
 // String formats a User for log lines, deliberately omitting the bcrypt hash

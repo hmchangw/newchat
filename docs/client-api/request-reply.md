@@ -271,6 +271,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read` | [Mark Thread as Read](#mark-thread-as-read) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle` | [Toggle Mute](#toggle-mute) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.favorite.toggle` | [Toggle Favorite](#toggle-favorite) |
+| `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move` | [Move Chat to Section](#move-chat-to-section) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.open` | [Open Room](#open-room) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt` | [Read Message Receipts](#read-message-receipts) |
 | `chat.user.{account}.request.orgs.{orgID}.{siteID}.members` | [List Org Members](#list-org-members) |
@@ -632,6 +633,35 @@ clients must debounce. No request body required.
 `"only room members can list members"`, `"invalid favorite-toggle subject: …"`.
 
 **Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "favorite_toggled"` — to the requester for other sessions) → [events.md](events.md)
+
+---
+
+### Move Chat to Section
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move`
+**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Synchronous RPC. Sets the subscription's `sectionId` + fractional `sectionOrder`, or
+removes it from its section (`sectionId: null`). Membership lives on the subscription,
+mirroring favorite. Full detail + read model: [Chatlist Sections](../client-api.md#chatlist-sections).
+
+#### Request body
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectionId` | string \| null | Custom section to move into; `null` removes. A built-in id is rejected. |
+| `afterRoomId` | string | Optional. Place just after this room; omit to append. Mutually exclusive with `beforeRoomId`. |
+| `beforeRoomId` | string | Optional. Place just before this room (top-insertion at the section head). Mutually exclusive with `afterRoomId`. |
+
+#### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `sectionId` | string | Omitted on remove. |
+| `sectionOrder` | number | Omitted on remove. |
+
+**Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "section_moved"`) → [events.md](events.md)
 
 ---
 
@@ -1423,6 +1453,12 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.get` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.delete` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.reorder` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.setsortmode` | [Chatlist Sections](../client-api.md#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [subscription.list](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [subscription.getChannels](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [subscription.getDM](#subscriptiongetdm) |

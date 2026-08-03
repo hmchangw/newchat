@@ -99,6 +99,22 @@ func (mr *MockRoomStoreMockRecorder) ClearThreadSubscriptionsForAccount(ctx, acc
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearThreadSubscriptionsForAccount", reflect.TypeOf((*MockRoomStore)(nil).ClearThreadSubscriptionsForAccount), ctx, account, now)
 }
 
+// ComputeSectionOrder mocks base method.
+func (m *MockRoomStore) ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (float64, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ComputeSectionOrder", ctx, account, sectionID, afterRoomID, beforeRoomID)
+	ret0, _ := ret[0].(float64)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// ComputeSectionOrder indicates an expected call of ComputeSectionOrder.
+func (mr *MockRoomStoreMockRecorder) ComputeSectionOrder(ctx, account, sectionID, afterRoomID, beforeRoomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ComputeSectionOrder", reflect.TypeOf((*MockRoomStore)(nil).ComputeSectionOrder), ctx, account, sectionID, afterRoomID, beforeRoomID)
+}
+
 // CountMembersAndOwners mocks base method.
 func (m *MockRoomStore) CountMembersAndOwners(ctx context.Context, roomID string) (*RoomCounts, error) {
 	m.ctrl.T.Helper()
@@ -549,6 +565,21 @@ func (mr *MockRoomStoreMockRecorder) MinThreadSubscriptionLastSeenByThreadRoomID
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MinThreadSubscriptionLastSeenByThreadRoomID", reflect.TypeOf((*MockRoomStore)(nil).MinThreadSubscriptionLastSeenByThreadRoomID), ctx, threadRoomID)
 }
 
+// MoveSubscriptionSection mocks base method.
+func (m *MockRoomStore) MoveSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, sectionUpdatedAt time.Time) (*model.Subscription, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MoveSubscriptionSection", ctx, roomID, account, sectionID, order, sectionUpdatedAt)
+	ret0, _ := ret[0].(*model.Subscription)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// MoveSubscriptionSection indicates an expected call of MoveSubscriptionSection.
+func (mr *MockRoomStoreMockRecorder) MoveSubscriptionSection(ctx, roomID, account, sectionID, order, sectionUpdatedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MoveSubscriptionSection", reflect.TypeOf((*MockRoomStore)(nil).MoveSubscriptionSection), ctx, roomID, account, sectionID, order, sectionUpdatedAt)
+}
+
 // OpenSubscription mocks base method.
 func (m *MockRoomStore) OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error) {
 	m.ctrl.T.Helper()
@@ -562,6 +593,20 @@ func (m *MockRoomStore) OpenSubscription(ctx context.Context, roomID, account st
 func (mr *MockRoomStoreMockRecorder) OpenSubscription(ctx, roomID, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OpenSubscription", reflect.TypeOf((*MockRoomStore)(nil).OpenSubscription), ctx, roomID, account)
+}
+
+// RebalanceSection mocks base method.
+func (m *MockRoomStore) RebalanceSection(ctx context.Context, account, sectionID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RebalanceSection", ctx, account, sectionID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RebalanceSection indicates an expected call of RebalanceSection.
+func (mr *MockRoomStoreMockRecorder) RebalanceSection(ctx, account, sectionID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RebalanceSection", reflect.TypeOf((*MockRoomStore)(nil).RebalanceSection), ctx, account, sectionID)
 }
 
 // SetOwnerRole mocks base method.

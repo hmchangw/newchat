@@ -1094,6 +1094,161 @@ func (s *MongoStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, acc
 	})
 }
 
+// MoveSubscriptionSection sets sectionId+sectionOrder (sectionID != nil) or clears
+// both (sectionID == nil, a remove) on one subscription, stamping sectionUpdatedAt
+// as the high-water mark. Classic update (not the $set pipeline) so a remove can
+// $unset. Returns the post-write sub or model.ErrSubscriptionNotFound (wrapped).
+func (s *MongoStore) MoveSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, sectionUpdatedAt time.Time) (*model.Subscription, error) {
+	var update bson.M
+	if sectionID == nil {
+		update = bson.M{
+			"$set":   bson.M{"sectionUpdatedAt": sectionUpdatedAt},
+			"$unset": bson.M{"sectionId": "", "sectionOrder": ""},
+		}
+	} else {
+		update = bson.M{"$set": bson.M{
+			"sectionId":        *sectionID,
+			"sectionOrder":     order,
+			"sectionUpdatedAt": sectionUpdatedAt,
+		}}
+	}
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var result model.Subscription
+	err := s.subscriptions.FindOneAndUpdate(ctx, bson.M{"roomId": roomID, "u.account": account}, update, opts).Decode(&result)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("move section for %q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
+		}
+		return nil, fmt.Errorf("move section for %q in room %q: %w", account, roomID, err)
+	}
+	return &result, nil
+}
+
+// ComputeSectionOrder midpoints a new position within (account, sectionID). Two
+// small indexed reads in the placed case (the afterRoomID sub, then the next
+// higher order); one in the append case (the section max).
+func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (float64, bool, error) {
+	secFilter := bson.M{"u.account": account, "sectionId": sectionID}
+	if beforeRoomID != "" {
+		// Place just before beforeRoomID (top-insertion) — mirror of the after
+		// case. Next = beforeRoomID's order; Prev = the largest order strictly
+		// less than it. Stale ref → append; no prev (it's the head) → next-1.
+		var before model.Subscription
+		err := s.subscriptions.FindOne(ctx, bson.M{"roomId": beforeRoomID, "u.account": account, "sectionId": sectionID}).Decode(&before)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			max, mErr := s.sectionOrderExtreme(ctx, secFilter, -1)
+			if mErr != nil {
+				return 0, false, mErr
+			}
+			return max + 1, false, nil
+		}
+		if err != nil {
+			return 0, false, fmt.Errorf("lookup beforeRoomID order: %w", err)
+		}
+		next := before.SectionOrder
+		prevFilter := bson.M{"u.account": account, "sectionId": sectionID, "sectionOrder": bson.M{"$lt": next}}
+		var prev model.Subscription
+		err = s.subscriptions.FindOne(ctx, prevFilter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: -1}})).Decode(&prev)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return next - 1, false, nil // head
+		}
+		if err != nil {
+			return 0, false, fmt.Errorf("lookup prev order: %w", err)
+		}
+		mid, exhausted := sectionMidpoint(prev.SectionOrder, next)
+		return mid, exhausted, nil
+	}
+	if afterRoomID == "" {
+		max, err := s.sectionOrderExtreme(ctx, secFilter, -1)
+		if err != nil {
+			return 0, false, err
+		}
+		return max + 1, false, nil
+	}
+	// Prev = afterRoomID's own order. If it isn't in this section (stale client),
+	// fall back to append rather than midpoint against nothing.
+	var after model.Subscription
+	err := s.subscriptions.FindOne(ctx, bson.M{"roomId": afterRoomID, "u.account": account, "sectionId": sectionID}).Decode(&after)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		max, mErr := s.sectionOrderExtreme(ctx, secFilter, -1)
+		if mErr != nil {
+			return 0, false, mErr
+		}
+		return max + 1, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("lookup afterRoomID order: %w", err)
+	}
+	prev := after.SectionOrder
+	// Next = the smallest order strictly greater than prev in the section.
+	nextFilter := bson.M{"u.account": account, "sectionId": sectionID, "sectionOrder": bson.M{"$gt": prev}}
+	var next model.Subscription
+	err = s.subscriptions.FindOne(ctx, nextFilter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: 1}})).Decode(&next)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return prev + 1, false, nil // tail
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("lookup next order: %w", err)
+	}
+	mid, exhausted := sectionMidpoint(prev, next.SectionOrder)
+	return mid, exhausted, nil
+}
+
+// sectionMidpoint returns the value strictly between prev and next, flagging
+// exhausted when float precision has collapsed the gap (mid landed on a neighbor)
+// so the caller rebalances first. Pure — the unit-tested core of the order math.
+func sectionMidpoint(prev, next float64) (float64, bool) {
+	mid := (prev + next) / 2
+	return mid, mid <= prev || mid >= next
+}
+
+// sectionOrderExtreme returns the min (dir=1) or max (dir=-1) sectionOrder in the
+// filtered section, or 0 when the section is empty.
+func (s *MongoStore) sectionOrderExtreme(ctx context.Context, filter bson.M, dir int) (float64, error) {
+	var sub model.Subscription
+	err := s.subscriptions.FindOne(ctx, filter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: dir}})).Decode(&sub)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("section order extreme: %w", err)
+	}
+	return sub.SectionOrder, nil
+}
+
+// RebalanceSection re-spaces every (account) sub in sectionID to 1,2,3,… by
+// current order. Bounded to one section, run only when a gap exhausts float
+// precision. O(section-size) load + bulk write; a section rarely gets
+// large enough to matter, and it happens only on the precision edge.
+func (s *MongoStore) RebalanceSection(ctx context.Context, account, sectionID string) error {
+	cur, err := s.subscriptions.Find(ctx,
+		bson.M{"u.account": account, "sectionId": sectionID},
+		options.Find().SetSort(bson.D{{Key: "sectionOrder", Value: 1}}).SetProjection(bson.M{"roomId": 1}),
+	)
+	if err != nil {
+		return fmt.Errorf("rebalance load section: %w", err)
+	}
+	var subs []struct {
+		RoomID string `bson:"roomId"`
+	}
+	if err := cur.All(ctx, &subs); err != nil {
+		return fmt.Errorf("rebalance decode section: %w", err)
+	}
+	if len(subs) == 0 {
+		return nil
+	}
+	models := make([]mongo.WriteModel, 0, len(subs))
+	for i, sub := range subs {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"roomId": sub.RoomID, "u.account": account}).
+			SetUpdate(bson.M{"$set": bson.M{"sectionOrder": float64(i + 1)}}))
+	}
+	if _, err := s.subscriptions.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("rebalance bulk write: %w", err)
+	}
+	return nil
+}
+
 // OpenSubscription sets open=true. Set-not-toggle: no ordering guard is needed
 // because applying true repeatedly or out of order always converges to true.
 func (s *MongoStore) OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error) {
