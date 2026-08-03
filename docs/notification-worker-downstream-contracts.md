@@ -96,6 +96,13 @@ without a separate round trip.
   one `badge.count.batch` RPC per site concurrently, merging replies into one
   map before per-batch filtering (`notification-worker/handler.go`,
   `fetchUnreadCounts`).
+- **Home-site resolution:** a member's home site is read from the **users**
+  collection (`users.siteId`) by the member-cache loader at cache-fill time —
+  one batch `$in` query per room per `ROOMSUBCACHE_TTL`, cached on
+  `roomsubcache.Member.HomeSiteID`. `Subscription.siteId` is deliberately not
+  used: it is the **room's** home site, identical for every member at the
+  room's own site, and would route every RPC locally. A member missing from
+  the users collection degrades (no RPC on its behalf, push still delivered).
 
 #### `badge.count.batch` RPC (user-service)
 
@@ -347,7 +354,12 @@ Required before a production rollout:
 
    `message-gatekeeper` owns the sender display-name resolution; configure its
    `USER_CACHE_SIZE` / `USER_CACHE_TTL` (defaults 10000 / 5m) there.
-   `notification-worker` does **no** users-collection lookups under this design.
+   `notification-worker`'s only users-collection read is the member-cache
+   loader's batched home-site lookup (one `$in` query per room per
+   `ROOMSUBCACHE_TTL` — see §1 Badge counts, Home-site resolution); it never
+   reads users per event or per recipient. This consciously revises the
+   original "no users-collection lookups" contract: badge RPCs must route to
+   each recipient's home site, and only the users collection knows it.
    - `INDEX_ENSURE_TIMEOUT` (default `2m`)
    - `PRESENCE_RPC_ENABLED` (default `false`), `PRESENCE_BATCH_SIZE` (`512`), `PRESENCE_RPC_TIMEOUT` (`2s`)
    - `BADGE_COUNT_RPC_ENABLED` (default `false`) — gates the `badge.count.batch` RPC to each recipient's home-site `user-service`; set `true` once `badge.count.batch` is reachable from every home site (see §1 Badge counts)

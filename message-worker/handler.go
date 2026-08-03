@@ -384,9 +384,12 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 // on redelivery), then bumps the room's last-message pointer. Returns the
 // existing thread room ID so the caller can pass it to SaveThreadMessage, plus
 // the thread's followers as they stood *before* this reply (existingRoom's
-// ReplyAccounts, captured up front) — the pre-existing audience
-// fanOutThreadUnread should mark unread; the sender is filtered out there
-// regardless of whether they were already a follower.
+// ReplyAccounts, captured up front) with the parent author appended when
+// resolvable — legacy thread_rooms predating the parent-author seed lack the
+// author in ReplyAccounts, and without the explicit append they would miss
+// this reply's unread mark. That combined list is the audience
+// fanOutThreadUnread should mark unread; it dedups, and the sender is
+// filtered out there regardless of whether they were already a follower.
 func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
 	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
 	if err != nil {
@@ -452,6 +455,16 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	}
 	if err := h.threadStore.UpdateThreadRoomLastMessage(ctx, existingRoom.ID, msg.ID, replyAccounts, now); err != nil {
 		return "", nil, fmt.Errorf("update thread room last message: %w", err)
+	}
+
+	// The parent author is always part of this reply's unread audience, even on
+	// legacy thread_rooms created before the parent-author seed (whose
+	// replyAccounts lacks them — the merge above repairs the document only for
+	// FUTURE replies, after `followers` was captured). fanOutThreadUnread dedups
+	// and strips the sender, so this is a no-op when the author already follows
+	// or is the replier.
+	if parentFound {
+		followers = append(followers, parentSender.Account)
 	}
 
 	// Re-stamp handles redelivery: first attempt may have created the thread room

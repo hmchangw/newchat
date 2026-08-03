@@ -42,12 +42,17 @@ type Member struct {
 	IsBot              bool           `json:"isBot,omitempty"`
 	Muted              bool           `json:"muted,omitempty"`
 	HistorySharedSince *int64         `json:"historySharedSince,omitempty"`
-	// SiteID is the member's home site (model.Subscription.SiteID), used by
-	// notification-worker to group survivors for the per-site badge-count
-	// RPC. Empty for members loaded before this field existed — those degrade
-	// (no badge count), which is why cacheKeySchemaVersion was bumped so
-	// pre-upgrade cache entries miss instead of serving an empty SiteID forever.
-	SiteID string `json:"siteId,omitempty"`
+	// HomeSiteID is the member's HOME site, resolved from the users collection
+	// (users.siteId) by the loader at cache-fill time. It is deliberately NOT
+	// model.Subscription.SiteID — that field is the ROOM's home site (see
+	// docs/client-api.md, Subscription schema), which at the room's own site is
+	// identical for every member and useless for routing. notification-worker
+	// groups survivors by HomeSiteID for the per-site badge-count RPC. Empty
+	// when the account is missing from the users collection — such members
+	// degrade (no badge count); cacheKeySchemaVersion was bumped to v3 so
+	// pre-fix entries (whose siteId carried the room's site) miss instead of
+	// misrouting the RPC forever.
+	HomeSiteID string `json:"homeSiteId,omitempty"`
 }
 
 // Cache stores and retrieves a room's member list.
@@ -101,8 +106,10 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 // entry would silently decode with a zero-valued new field forever (Valkey
 // has no schema check) — the version segment makes such entries miss so
 // they get repopulated from Mongo with the current shape. Bumped to v2 when
-// SiteID was added (see Member.SiteID).
-const cacheKeySchemaVersion = "v2"
+// SiteID was added; bumped to v3 when SiteID (the room's home site — a bug)
+// was replaced by HomeSiteID (the member's home site, see Member.HomeSiteID)
+// so pre-fix entries miss instead of decoding with the wrong semantics.
+const cacheKeySchemaVersion = "v3"
 
 func cacheKey(roomID string) string {
 	return "room:" + cacheKeySchemaVersion + ":" + roomID + ":subs"

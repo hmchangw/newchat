@@ -193,7 +193,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 
 		candidates = append(candidates, m)
 		accounts = append(accounts, m.Account)
-		siteByAccount[m.Account] = m.SiteID
+		siteByAccount[m.Account] = m.HomeSiteID
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -267,13 +267,16 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	return nil
 }
 
-// fetchUnreadCounts groups survivors by home site (siteByAccount) and issues one
-// badge.count.batch RPC per site concurrently, merging the results into a single
-// account → count map. A nil BadgeClient (env-disabled or not wired) is a no-op
-// (Phase A compat). A survivor with an unknown home site (empty SiteID — e.g. a
-// stale pre-upgrade cache entry) is skipped: it degrades to no badge count rather
-// than blocking or misrouting the RPC. A per-site RPC failure is logged and that
-// site's accounts are simply absent from the result — it must never fail the push.
+// fetchUnreadCounts groups survivors by home site (siteByAccount, fed from
+// Member.HomeSiteID — the member's home site per the users collection, NOT the
+// room's site) and issues one badge.count.batch RPC per site concurrently,
+// merging the results into a single account → count map. A nil BadgeClient
+// (env-disabled or not wired) is a no-op (Phase A compat). A survivor with an
+// unknown home site (empty HomeSiteID — the account is missing from the users
+// collection, or a stale pre-upgrade cache entry) is skipped: it degrades to no
+// badge count rather than blocking or misrouting the RPC. A per-site RPC failure
+// is logged and that site's accounts are simply absent from the result — it must
+// never fail the push.
 func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, survivors []string, siteByAccount map[string]string) map[string]int {
 	if h.deps.BadgeClient == nil {
 		return nil

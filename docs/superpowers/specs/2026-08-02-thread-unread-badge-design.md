@@ -1,7 +1,7 @@
 # Thread-Unread Tracking + Per-Recipient Push Badge Counts
 
 **Date:** 2026-08-02
-**Status:** Approved
+**Status:** Implemented
 
 ## Background
 

@@ -99,8 +99,8 @@ func TestValkeyCache_Set_UsesExpectedKey(t *testing.T) {
 
 	require.NoError(t, cache.Set(ctx, "roomABC", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 
-	_, ok := client.store["room:v2:roomABC:subs"]
-	assert.True(t, ok, "expected cache key room:v2:roomABC:subs to be set; got keys: %v", keysOf(client.store))
+	_, ok := client.store["room:v3:roomABC:subs"]
+	assert.True(t, ok, "expected cache key room:v3:roomABC:subs to be set; got keys: %v", keysOf(client.store))
 }
 
 func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
@@ -109,21 +109,26 @@ func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "r1", nil, 90*time.Second))
-	assert.Equal(t, 90*time.Second, client.ttls["room:v2:r1:subs"])
+	assert.Equal(t, 90*time.Second, client.ttls["room:v3:r1:subs"])
 }
 
 // A pre-upgrade cache entry (written under the unversioned key by an older
 // binary, or under a stale schema version) must be a miss, not a hit that
 // silently deserializes into a Member with zero-valued new fields (e.g.
-// SiteID == "").
+// HomeSiteID == ""), or — worse — with a stale field carrying the wrong
+// semantics (v2's siteId was populated from Subscription.SiteID, the ROOM's
+// home site, not the member's).
 func TestValkeyCache_Get_PreUpgradeKey_IsMiss(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeClient()
 	client.store["room:roomABC:subs"] = `[{"id":"u1","account":"a"}]` // legacy unversioned key
+	// v2 entry: siteId held the room's home site (the bug fixed by the v3 bump) —
+	// it must never be served as a member's home site.
+	client.store["room:v2:roomABC:subs"] = `[{"id":"u1","account":"a","siteId":"room-site"}]`
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "roomABC")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "unversioned legacy key must not be read by the versioned cache")
+	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "unversioned and stale-versioned keys must not be read by the v3 cache")
 }
 
 func TestValkeyCache_Get_Miss_ReturnsErrCacheMiss(t *testing.T) {
@@ -151,7 +156,7 @@ func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 func TestValkeyCache_Get_MalformedJSON_IsNotMiss(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeClient()
-	client.store["room:v2:bad:subs"] = "{not json"
+	client.store["room:v3:bad:subs"] = "{not json"
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "bad")
@@ -191,7 +196,7 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	require.NoError(t, cache.Invalidate(ctx, "r1"))
 
 	require.Len(t, client.delCalls, 1)
-	assert.Equal(t, []string{"room:v2:r1:subs"}, client.delCalls[0])
+	assert.Equal(t, []string{"room:v3:r1:subs"}, client.delCalls[0])
 
 	_, err := cache.Get(ctx, "r1")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
@@ -236,7 +241,7 @@ func TestValkeyCache_Get_OversizedBlob_ReturnsError(t *testing.T) {
 
 	// Stash a value larger than the cap directly through the fake — simulates
 	// a compromised or misbehaving Valkey writer.
-	client.store["room:v2:big:subs"] = strings.Repeat("x", 101)
+	client.store["room:v3:big:subs"] = strings.Repeat("x", 101)
 
 	_, err := cache.Get(ctx, "big")
 	require.Error(t, err)
@@ -274,7 +279,7 @@ func TestMember_JSONRoundTrip_NewFields(t *testing.T) {
 		IsBot:              true,
 		Muted:              true,
 		HistorySharedSince: &hss,
-		SiteID:             "site-a",
+		HomeSiteID:         "site-a",
 	}
 	data, err := json.Marshal(in)
 	require.NoError(t, err)
@@ -284,17 +289,24 @@ func TestMember_JSONRoundTrip_NewFields(t *testing.T) {
 	assert.Equal(t, in, out)
 }
 
-// SiteID feeds notification-worker's per-recipient badge-count grouping (Task
-// 10) and must round-trip through the cache codec like any other field.
-func TestMember_SiteID_RoundTrip(t *testing.T) {
-	in := roomsubcache.Member{ID: "u1", Account: "alice", SiteID: "site-b"}
+// HomeSiteID feeds notification-worker's per-recipient badge-count grouping
+// and must round-trip through the cache codec like any other field. The wire
+// tag is homeSiteId — distinct from v2's siteId, which carried the room's home
+// site and must never decode into this field.
+func TestMember_HomeSiteID_RoundTrip(t *testing.T) {
+	in := roomsubcache.Member{ID: "u1", Account: "alice", HomeSiteID: "site-b"}
 	data, err := json.Marshal(in)
 	require.NoError(t, err)
-	require.Contains(t, string(data), `"siteId":"site-b"`)
+	require.Contains(t, string(data), `"homeSiteId":"site-b"`)
 
 	var out roomsubcache.Member
 	require.NoError(t, json.Unmarshal(data, &out))
-	assert.Equal(t, "site-b", out.SiteID)
+	assert.Equal(t, "site-b", out.HomeSiteID)
+
+	// A v2-shaped blob (room-site siteId) must not populate HomeSiteID.
+	var fromV2 roomsubcache.Member
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"u1","account":"alice","siteId":"room-site"}`), &fromV2))
+	assert.Empty(t, fromV2.HomeSiteID, "legacy siteId must not decode into HomeSiteID")
 }
 
 func TestMember_RoomType_RoundTrip(t *testing.T) {

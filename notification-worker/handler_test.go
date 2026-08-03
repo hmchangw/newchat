@@ -1110,14 +1110,19 @@ func (f *fakeBadgeClient) callsFor(siteID string) []badgeCall {
 
 // Survivors on two distinct home sites must trigger exactly one RPC per
 // site, each carrying only that site's accounts, merged into one map
-// stamped on the outgoing batch.
+// stamped on the outgoing batch. HomeSiteID is the member's home site as
+// resolved from the users collection at cache-fill time (mixed values within
+// one room are the normal cross-site shape — the room's own subscription
+// siteId would be identical for everyone and must not be used); the fill
+// path itself is covered by TestMongoMemberLoader_Load_HomeSiteFromUsers and
+// TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite (integration).
 func TestHandle_BadgeCounts_TwoHomeSites_MergesPerSiteRPCs(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
-			{ID: "alice", Account: "alice", SiteID: "site-a"},
-			{ID: "bob", Account: "bob", SiteID: "site-a"},
-			{ID: "carol", Account: "carol", SiteID: "site-b"},
-			{ID: "dave", Account: "dave", SiteID: "site-b"},
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-b"},
+			{ID: "dave", Account: "dave", HomeSiteID: "site-b"},
 		},
 	}}
 	badge := &fakeBadgeClient{resp: map[string]map[string]int{
@@ -1152,9 +1157,9 @@ func TestHandle_BadgeCounts_TwoHomeSites_MergesPerSiteRPCs(t *testing.T) {
 func TestHandle_BadgeCounts_OneSiteErrors_AccountsAbsent(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
-			{ID: "alice", Account: "alice", SiteID: "site-a"},
-			{ID: "bob", Account: "bob", SiteID: "site-a"},
-			{ID: "carol", Account: "carol", SiteID: "site-b"},
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-b"},
 		},
 	}}
 	badge := &fakeBadgeClient{
@@ -1181,8 +1186,8 @@ func TestHandle_BadgeCounts_OneSiteErrors_AccountsAbsent(t *testing.T) {
 func TestHandle_BadgeCounts_NilClient_NoRPCNoMap(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
-			{ID: "alice", Account: "alice", SiteID: "site-a"},
-			{ID: "bob", Account: "bob", SiteID: "site-a"},
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
 		},
 	}}
 	emit := &recordingEmitter{}
@@ -1196,15 +1201,16 @@ func TestHandle_BadgeCounts_NilClient_NoRPCNoMap(t *testing.T) {
 	assert.Empty(t, emit.emitted[0].UnreadCounts, "nil badge client must produce no UnreadCounts")
 }
 
-// A survivor with no known home site (empty SiteID — e.g. a stale pre-upgrade
-// cache entry) degrades: no RPC is issued on its behalf and it is simply
-// absent from UnreadCounts, but it still receives the push.
-func TestHandle_BadgeCounts_EmptySiteIDMember_Skipped(t *testing.T) {
+// A survivor with no known home site (empty HomeSiteID — the account is
+// missing from the users collection, or a stale pre-upgrade cache entry)
+// degrades: no RPC is issued on its behalf and it is simply absent from
+// UnreadCounts, but it still receives the push.
+func TestHandle_BadgeCounts_EmptyHomeSiteIDMember_Skipped(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
-			{ID: "alice", Account: "alice", SiteID: "site-a"},
-			{ID: "bob", Account: "bob", SiteID: "site-a"},
-			{ID: "carol", Account: "carol", SiteID: ""},
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: ""},
 		},
 	}}
 	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 4}}}
@@ -1227,11 +1233,11 @@ func TestHandle_BadgeCounts_EmptySiteIDMember_Skipped(t *testing.T) {
 // UnreadCounts is filtered per batch: an account must only see counts data
 // relevant to accounts actually present in that outgoing batch.
 func TestHandle_BadgeCounts_StampedPerBatch_FilteredToBatchAccounts(t *testing.T) {
-	roomMembers := []roomsubcache.Member{{ID: "alice", Account: "alice", SiteID: "site-a"}}
+	roomMembers := []roomsubcache.Member{{ID: "alice", Account: "alice", HomeSiteID: "site-a"}}
 	resp := map[string]int{}
 	for i := 0; i < 150; i++ {
 		account := fmt.Sprintf("u%03d", i)
-		roomMembers = append(roomMembers, roomsubcache.Member{ID: account, Account: account, SiteID: "site-a"})
+		roomMembers = append(roomMembers, roomsubcache.Member{ID: account, Account: account, HomeSiteID: "site-a"})
 		resp[account] = i % 10
 	}
 	members := &stubMembers{out: map[string][]roomsubcache.Member{"r1": roomMembers}}
