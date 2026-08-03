@@ -115,8 +115,8 @@ listed keeps its flag and is re-verified next run.
 For each chat in the response:
 
 - `roomExists == false` → **missing room**.
-- `roomExists && subscriptionCount != len(chat.Members)` → **subscription
-  mismatch**, in either direction (shortfall or extra).
+- `roomExists && subscriptionCount != accountsPresent(chat.Members)` →
+  **subscription mismatch**, in either direction (shortfall or extra).
 - otherwise → match; the chat's ref is cleared.
 
 Expected count is `accountsPresent(chat.Members)` — distinct, non-empty
@@ -140,12 +140,21 @@ Per mismatch (WARN):
 `subscription_mismatch`).
 
 Per site (INFO):
-`site_id`, `chats_checked`, `rooms_missing`, `subs_mismatched`, `chats_ok`.
+`site_id`, `chats_checked`, `rooms_missing`, `subs_mismatched`, `chats_ok`,
+`chats_unanswered`, `failed_batches`.
+
+`chats_checked` is the number of chats the inspector answered about — the sum
+of `rooms_missing`, `subs_mismatched` and `chats_ok`. `failed_batches` counts
+batches it never answered about at all, so a site whose every batch failed
+still emits a summary line instead of silently vanishing from the run.
 
 ### Failure handling
 
 - Site with no `TEAMS_VERIFY_SITE_URLS` entry → WARN, skip the site, flags stay.
 - Inspector call fails or returns non-2xx → WARN, skip the batch, flags stay.
+- Inspector answers with a `siteId` other than the one addressed (a transposed
+  registry entry) → WARN naming both sites, skip the batch, flags stay. Without
+  this guard a misroute reports every chat as a missing room.
 - `MarkVerified` fails → WARN; the chats re-verify next run (verification is
   read-only, so a repeat is harmless).
 - Only the initial list failure aborts the run with an error.
