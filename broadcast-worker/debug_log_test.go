@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type recordingHandler struct {
@@ -99,7 +100,7 @@ func TestHandler_DMFanout_DebugBreadcrumbs(t *testing.T) {
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil).AnyTimes()
 
-	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false)
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
 	rec := installRecorder(t)
 
 	t.Run("flow rung: fan-out outcome with recipient count, no debug/trace", func(t *testing.T) {
@@ -154,7 +155,7 @@ func TestHandler_DMFanout_NoContentLeak(t *testing.T) {
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil).AnyTimes()
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil).AnyTimes()
-	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false)
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
 
 	rec := installRecorder(t)
 	require.NoError(t, h.HandleMessage(admitRung("trace"), data)) // most verbose path

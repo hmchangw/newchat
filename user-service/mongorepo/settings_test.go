@@ -76,7 +76,7 @@ func TestUpdateUserSettings_PartialSet_Integration(t *testing.T) {
 	assert.Equal(t, ptrBool(false), u.Settings.FullWidth, "sent field updated")
 	assert.Equal(t, ptrStr("ja"), u.Settings.TranslateMessageInto, "sent field created")
 	assert.Equal(t, ptrBool(true), u.Settings.MuteAllNotifications, "unsent field keeps stored value")
-	assert.Nil(t, u.Settings.ScrollToBottomInChat, "unsent absent field stays absent")
+	assert.Nil(t, u.Settings.InitialChatScrollPosition, "unsent absent field stays absent")
 }
 
 func TestUpdateUserSettings_FirstSetCreatesSubDocument_Integration(t *testing.T) {
@@ -84,11 +84,11 @@ func TestUpdateUserSettings_FirstSetCreatesSubDocument_Integration(t *testing.T)
 	ctx := context.Background()
 	seed(t, db, "users", bson.M{"_id": "u-alice", "account": "alice", "active": true})
 
-	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{ScrollToBottomInChat: ptrBool(true)})
+	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)})
 	require.NoError(t, err)
 	require.NotNil(t, u)
 	require.NotNil(t, u.Settings)
-	assert.Equal(t, ptrBool(true), u.Settings.ScrollToBottomInChat)
+	assert.Equal(t, ptrStr(model.InitialChatScrollNewest), u.Settings.InitialChatScrollPosition)
 	assert.Nil(t, u.Settings.FullWidth)
 }
 

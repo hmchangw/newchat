@@ -13,4 +13,9 @@ func registerRoutes(r *gin.Engine, h *Handler, v TokenValidator, devMode bool) {
 	api.POST("/file/rooms/:roomId/upload/file", h.HandleUploadFile)
 	api.GET("/file/rooms/:roomId/file/:fileId", h.HandleDownloadFile)
 	api.GET("/file-upload/:fileId/:fileName", h.HandleDownloadMinioS3File)
+
+	// v3 serves the backward-compatible protected-image download for legacy message data from a separate (legacy) Drive backend.
+	apiV3 := r.Group("/api/v3")
+	apiV3.Use(authMiddleware(v, devMode))
+	apiV3.GET("/rooms/:roomId/protected-image/:fileId", h.HandleDownloadProtectedImageV3)
 }

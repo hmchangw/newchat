@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -746,15 +747,15 @@ func TestMongoStore_ListAddMemberCandidates_Integration(t *testing.T) {
 	t.Run("org expansion excludes bots", func(t *testing.T) {
 		byAccount := collect(t, []string{"org-eng"}, nil)
 		require.Len(t, byAccount, 3, "org-covered bot dave.bot must be excluded")
-		assert.Equal(t, AddMemberCandidate{Account: "alice", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["alice"])
-		assert.Equal(t, AddMemberCandidate{Account: "bob", HasSubscription: true, HasIndividualRoomMember: false}, byAccount["bob"], "bug scenario: sub exists, IRM does not")
-		assert.Equal(t, AddMemberCandidate{Account: "carol", HasSubscription: true, HasIndividualRoomMember: true}, byAccount["carol"])
+		assert.Equal(t, AddMemberCandidate{Account: "alice", HasSubscription: false, HasIndividualRoomMember: false, SiteID: "site-a"}, byAccount["alice"])
+		assert.Equal(t, AddMemberCandidate{Account: "bob", HasSubscription: true, HasIndividualRoomMember: false, SiteID: "site-a"}, byAccount["bob"], "bug scenario: sub exists, IRM does not")
+		assert.Equal(t, AddMemberCandidate{Account: "carol", HasSubscription: true, HasIndividualRoomMember: true, SiteID: "site-a"}, byAccount["carol"])
 	})
 
 	t.Run("explicitly listed bot resolves via the direct-only path", func(t *testing.T) {
 		byAccount := collect(t, nil, []string{"dave.bot"})
 		require.Len(t, byAccount, 1)
-		assert.Equal(t, AddMemberCandidate{Account: "dave.bot", HasSubscription: false, HasIndividualRoomMember: false}, byAccount["dave.bot"])
+		assert.Equal(t, AddMemberCandidate{Account: "dave.bot", HasSubscription: false, HasIndividualRoomMember: false, SiteID: "site-a"}, byAccount["dave.bot"])
 	})
 
 	t.Run("explicitly listed bot resolves alongside org expansion", func(t *testing.T) {
@@ -768,7 +769,7 @@ func TestMongoStore_ListAddMemberCandidates_Integration(t *testing.T) {
 func newIntegrationHandler(t *testing.T, store *MongoStore, siteID string) *Handler {
 	t.Helper()
 	noopPublish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
-	return NewHandler(store, siteID, noopPublish, testKeyStore, testKeySender)
+	return NewHandler(store, siteID, noopPublish, testKeyStore, testKeySender, subject.RouteGlobal)
 }
 
 func TestProcessCreateRoomChannelPersistsAllState(t *testing.T) {
@@ -871,7 +872,7 @@ func TestProcessCreateRoomChannel_InboxPerRemoteSite(t *testing.T) {
 		EngName: "Ian", ChineseName: "伊恩"})
 
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	const reqID = "0193abcd-0193-7abc-89ab-0193abcd0193"
 	ctx = natsutil.WithRequestID(ctx, reqID)
 
@@ -945,7 +946,7 @@ func TestProcessCreateRoomDM_InboxToCounterpartSite(t *testing.T) {
 		EngName: "Bob", ChineseName: "鲍勃"})
 
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	const reqID = "0193abcd-0193-7abc-89ab-0193abcd0193"
 	ctx = natsutil.WithRequestID(ctx, reqID)
 
@@ -1034,7 +1035,7 @@ func TestProcessAddMembers_InboxPerRemoteSite(t *testing.T) {
 	require.NoError(t, err)
 
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	const reqID = "0193abcd-0193-7abc-89ab-0193abcd0193"
 	ctx = natsutil.WithRequestID(ctx, reqID)
 
@@ -1141,7 +1142,7 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 	})
 
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	const reqID = "0193abcd-0193-7abc-89ab-aaaa00000001"
 	ctx = natsutil.WithRequestID(ctx, reqID)
 
@@ -1254,7 +1255,7 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	})
 
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	ctx = natsutil.WithRequestID(ctx, "0193abcd-0193-7abc-89ab-aaaa00000002")
 
 	acceptedMs := time.Now().UTC().UnixMilli()
@@ -1332,7 +1333,7 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	// Re-adding the already-present org is a no-op: no member_added event fires
 	// (nothing changed), and the idempotent upsert inserts no duplicate org row.
 	cap2 := &publishCapture{}
-	h2 := NewHandler(store, "site-A", cap2.fn(), testKeyStore, testKeySender)
+	h2 := NewHandler(store, "site-A", cap2.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	body2, err := json.Marshal(model.AddMembersRequest{
 		RoomID:           roomID,
 		Orgs:             []string{"eng"},
@@ -1380,7 +1381,7 @@ func TestProcessRemoveIndividual_PublishesLocalInbox_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-A", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	const reqID = "0193abcd-0193-7abc-89ab-aaaa00000002"
 	ctx = natsutil.WithRequestID(ctx, reqID)
 
@@ -1442,7 +1443,7 @@ func TestSyncCreateDM_DM_PersistsRoomAndSubs(t *testing.T) {
 	mustInsertUser(t, db, &model.User{ID: "u-bob", Account: "bob", SiteID: siteID, EngName: "Bob", ChineseName: "鮑勃"})
 
 	cap := &publishCapture{}
-	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender)
+	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeDM, RequesterAccount: "alice", OtherAccount: "bob"}
 	got, err := handler.serverCreateDM(ctx, req)
@@ -1532,7 +1533,7 @@ func TestSyncCreateDM_BotDM_CrossSiteInbox(t *testing.T) {
 	mustInsertUser(t, db, &model.User{ID: "u-bot", Account: "helper.bot", SiteID: "site-B", EngName: "Helper", ChineseName: "助手"})
 
 	cap := &publishCapture{}
-	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender)
+	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeBotDM, RequesterAccount: "alice", OtherAccount: "helper.bot"}
 	_, err := handler.serverCreateDM(newIntegSyncDMCtx(), req)
@@ -1552,7 +1553,7 @@ func TestSyncCreateDM_RetryIdempotent(t *testing.T) {
 	mustInsertUser(t, db, &model.User{ID: "u-bob", Account: "bob", SiteID: siteID, EngName: "Bob", ChineseName: "鮑勃"})
 
 	cap := &publishCapture{}
-	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender)
+	handler := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeDM, RequesterAccount: "alice", OtherAccount: "bob"}
 
@@ -1589,7 +1590,7 @@ func TestSyncCreateDM_CrossSite_InboxPayloadConverges(t *testing.T) {
 	mustInsertUser(t, db, &model.User{ID: "u-bob", Account: "bob", SiteID: "site-B", EngName: "Bob", ChineseName: "鮑勃"})
 
 	cap1 := &publishCapture{}
-	handler := NewHandler(store, siteID, cap1.fn(), testKeyStore, testKeySender)
+	handler := NewHandler(store, siteID, cap1.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeDM, RequesterAccount: "alice", OtherAccount: "bob"}
 	_, err := handler.serverCreateDM(newIntegSyncDMCtx(), req)
@@ -1619,7 +1620,7 @@ func TestSyncCreateDM_CrossSite_InboxPayloadConverges(t *testing.T) {
 	//    from the (stable) payload seed — room id + requester account + createdAt +
 	//    dest — not the request ID. JetStream INBOX dedup rejects the second emit.
 	cap2 := &publishCapture{}
-	handler2 := NewHandler(store, siteID, cap2.fn(), testKeyStore, testKeySender)
+	handler2 := NewHandler(store, siteID, cap2.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	_, err = handler2.serverCreateDM(newIntegSyncDMCtx(), req)
 	require.NoError(t, err)
 	pubs2 := cap2.publishesOnPrefix(subject.Outbox(siteID, "site-B", model.InboxMemberAdded))
@@ -1669,14 +1670,9 @@ func startEmbeddedNATS(t *testing.T) *nats.Conn {
 	return nc
 }
 
-// TestIntegration_CreateRoom_FansOutRoomKeyEvent verifies that processCreateRoom
-// provisions the room key (in the room document) and fans it out via NATS to
-// every local-site member after a successful create.
-//
-// Setup: seed users and the canonical CreateRoomRequest, then drive
-// processCreateRoom and assert that RoomKeyEvent publishes arrive on
-// chat.user.{account}.event.room.key for each local-site member.
-func TestIntegration_CreateRoom_FansOutRoomKeyEvent(t *testing.T) {
+// TestIntegration_CreateRoom_DeliversRoomKeyInlineOnSubscriptionUpdate: create provisions the room
+// key and delivers it INSIDE each member's "added" event; the room.key subjects stay silent.
+func TestIntegration_CreateRoom_DeliversRoomKeyInlineOnSubscriptionUpdate(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -1704,22 +1700,28 @@ func TestIntegration_CreateRoom_FansOutRoomKeyEvent(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var keyMsgs []received
+	var subMsgs []received
 
 	for _, account := range []string{"alice", "bob"} {
-		subj := subject.RoomKeyUpdate(account)
-		_, err := nc.Subscribe(subj, func(m *nats.Msg) {
+		_, err := nc.Subscribe(subject.RoomKeyUpdate(account), func(m *nats.Msg) {
 			mu.Lock()
 			keyMsgs = append(keyMsgs, received{subject: m.Subject, data: append([]byte(nil), m.Data...)})
+			mu.Unlock()
+		})
+		require.NoError(t, err)
+		_, err = nc.Subscribe(subject.SubscriptionUpdate(account), func(m *nats.Msg) {
+			mu.Lock()
+			subMsgs = append(subMsgs, received{subject: m.Subject, data: append([]byte(nil), m.Data...)})
 			mu.Unlock()
 		})
 		require.NoError(t, err)
 	}
 	require.NoError(t, nc.Flush())
 
-	// Wire up the handler with real keyStore and keySender backed by embedded NATS.
+	// Publish rides the same embedded-NATS connection so the added events are observable.
 	keySender := roomkeysender.NewSender(nc)
-	noopPublish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
-	h := NewHandler(store, "site-A", noopPublish, keyStore, keySender)
+	natsPublish := func(_ context.Context, subj string, data []byte, _ string) error { return nc.Publish(subj, data) }
+	h := NewHandler(store, "site-A", natsPublish, keyStore, keySender, subject.RouteGlobal)
 
 	const reqID = "0193abcd-0193-7abc-89ab-0193abcd0001"
 	ctx = natsutil.WithRequestID(ctx, reqID)
@@ -1743,29 +1745,35 @@ func TestIntegration_CreateRoom_FansOutRoomKeyEvent(t *testing.T) {
 	require.NotNil(t, persisted, "room key must be persisted in the room document on create")
 	require.Len(t, persisted.KeyPair.PrivateKey, 32)
 
-	// Allow a brief window for async NATS delivery.
+	// Allow a brief window for async NATS delivery of the subscription.updates.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(keyMsgs) >= 2
-	}, 2*time.Second, 20*time.Millisecond, "expected RoomKeyEvent on both member subjects")
+		return len(subMsgs) >= 2
+	}, 2*time.Second, 20*time.Millisecond, "expected subscription.update on both member subjects")
 
 	mu.Lock()
 	defer mu.Unlock()
-	gotSubjects := make([]string, 0, len(keyMsgs))
-	for _, m := range keyMsgs {
+	wantKey := base64.StdEncoding.EncodeToString(persisted.KeyPair.PrivateKey)
+	gotSubjects := make([]string, 0, len(subMsgs))
+	for _, m := range subMsgs {
 		gotSubjects = append(gotSubjects, m.subject)
-		var evt model.RoomKeyEvent
+		var evt model.SubscriptionUpdateEvent
 		require.NoError(t, json.Unmarshal(m.data, &evt))
-		assert.Equal(t, roomID, evt.RoomID, "RoomKeyEvent must carry the correct roomID")
-		assert.NotEmpty(t, evt.PrivateKey, "PrivateKey must be populated in the client wire payload")
-		assert.NotEmpty(t, evt.PrivateKey, "PrivateKey must be populated")
+		assert.Equal(t, "added", evt.Action)
+		room := evt.Subscription.Room
+		require.NotNil(t, room, "%s: added event must embed subscription.room", m.subject)
+		require.NotNil(t, room.PrivateKey, "%s: key must ride the added event", m.subject)
+		assert.Equal(t, wantKey, *room.PrivateKey, "inline key must match the persisted room key")
+		assert.Equal(t, "crypto room", room.Name)
+		assert.Equal(t, 2, room.UserCount)
 	}
 	assert.ElementsMatch(t,
-		[]string{subject.RoomKeyUpdate("alice"), subject.RoomKeyUpdate("bob")},
+		[]string{subject.SubscriptionUpdate("alice"), subject.SubscriptionUpdate("bob")},
 		gotSubjects,
-		"key fan-out must reach every local-site member",
+		"inline key delivery must reach every local-site member",
 	)
+	assert.Empty(t, keyMsgs, "no separate room.key event on create — the key rides subscription.update")
 }
 
 // TestProcessCreateRoom_BotDM_DoesNotUpsert_Integration locks in that
@@ -1931,7 +1939,7 @@ func TestHandler_ProcessAddMembers_OrgToIndividualUpgrade_Integration(t *testing
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-a", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 
 	const roomID = "room-1"
 	mustInsertRoom(t, db, &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a", Name: "Room 1"})
@@ -2072,7 +2080,7 @@ func TestHandler_ProcessCreateRoom_DMConcurrentByCounterpart_Integration(t *test
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	cap := &publishCapture{}
-	h := NewHandler(store, "site-a", cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 
 	mustInsertUser(t, db, &model.User{ID: "u_alice", Account: "alice", EngName: "Alice", ChineseName: "爱", SiteID: "site-a"})
 	mustInsertUser(t, db, &model.User{ID: "u_bob", Account: "bob", EngName: "Bob", ChineseName: "鲍", SiteID: "site-a"})
@@ -2266,7 +2274,7 @@ func TestIntegration_ProcessRoomRename(t *testing.T) {
 	mustInsertUser(t, db, &model.User{ID: "u3", Account: "carol", SiteID: remoteSite})
 
 	cap := &publishCapture{}
-	h := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender)
+	h := NewHandler(store, siteID, cap.fn(), testKeyStore, testKeySender, subject.RouteGlobal)
 	const reqID = "01970a4f-8c2d-7c9a-abcd-e0123456789a"
 	ctx = natsutil.WithRequestID(ctx, reqID)
 
@@ -2393,4 +2401,27 @@ func TestMongoStore_GetApp_Integration(t *testing.T) {
 
 	_, err = store.GetApp(ctx, "missing.bot")
 	assert.ErrorIs(t, err, ErrAppNotFound)
+}
+
+// TestSetRoomCrossSite_Sticky covers the idempotent $set crossSite=true write:
+// a fresh room without the field gets it set on first call, and a second call
+// is a no-op that leaves it true (sticky — never set back to false).
+func TestSetRoomCrossSite_Sticky(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r1", "siteId": "site-a"})
+	require.NoError(t, err)
+	require.NoError(t, store.SetRoomCrossSite(ctx, "r1"))
+	var got model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r1"}).Decode(&got))
+	require.NotNil(t, got.CrossSite)
+	assert.True(t, *got.CrossSite)
+
+	// Idempotent second call.
+	require.NoError(t, store.SetRoomCrossSite(ctx, "r1"))
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r1"}).Decode(&got))
+	require.NotNil(t, got.CrossSite)
+	assert.True(t, *got.CrossSite)
 }

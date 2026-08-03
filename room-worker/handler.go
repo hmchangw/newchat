@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,9 +77,11 @@ type Handler struct {
 	// publishUsers fans a new external user identity to every site
 	// (chat.hr.{siteID}.users.upsert). Nil in tests not exercising the reconcile.
 	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
+	// routeMode (ROOM_SUBJECT_MODE) gates same-site room .event namespaces; cross-site always global.
+	routeMode subject.RoomRouteMode
 }
 
-func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender) *Handler {
+func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender, routeMode subject.RoomRouteMode) *Handler {
 	return &Handler{
 		store:            store,
 		siteID:           siteID,
@@ -86,6 +89,7 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, key
 		keyStore:         keyStore,
 		keySender:        keySender,
 		keyFanoutWorkers: defaultKeyFanoutWorkers,
+		routeMode:        routeMode,
 	}
 }
 
@@ -174,6 +178,9 @@ func (h *Handler) publishAsyncJobResult(ctx context.Context, requesterAccount, o
 // alias for errcode.Permanent so call sites stay short — the marker type and
 // sentinel-Is shim now live in pkg/errcode (Task 20.15).
 func permanent(ec *errcode.Error) error { return errcode.Permanent(ec) }
+
+// boolPtr returns &b, to classify a new room's CrossSite definitively (never nil).
+func boolPtr(b bool) *bool { return &b }
 
 // fillAsyncError classifies jobErr once and populates the result's error
 // envelope fields. The Ack/Nak decision is INDEPENDENT of this — it stays keyed
@@ -849,6 +856,22 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		return permanent(errcode.BadRequest(fmt.Sprintf("add-member only valid on channel rooms, got %s", room.Type)))
 	}
 	candidates := inputs.candidates
+
+	// Retry-safe: classify from the full candidate set (their home sites), not
+	// needSub, which is empty on a redelivery after a prior crashed-before-marking
+	// delivery. Must run before the early return below. SetRoomCrossSite is idempotent.
+	for _, c := range candidates {
+		if c.SiteID != "" && c.SiteID != h.siteID {
+			if err := h.store.SetRoomCrossSite(ctx, req.RoomID); err != nil {
+				return fmt.Errorf("mark room cross-site: %w", err)
+			}
+			// Bust L2 AFTER the write so a concurrent refill can't re-cache the
+			// pre-write crossSite=false and mis-route local for the TTL.
+			h.bustRoomMeta(ctx, req.RoomID)
+			break
+		}
+	}
+
 	// Align the write-gate to member.list's read-source: write individual rows whenever room_members already holds any row, not only when orgs are present.
 	writeIndividuals := len(req.Orgs) > 0 || inputs.hasAnyRoomMembers
 
@@ -952,6 +975,26 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 		subs = append(subs, sub)
 		actualAccounts = append(actualAccounts, user.Account)
+	}
+
+	// Fetch and validate the room key BEFORE committing subscriptions: once
+	// subs persist, a redelivery recomputes needSub as empty, so any failure
+	// after the commit would silently drop the "added" events (and their
+	// inline key) forever. Failing here leaves no partial state — a clean
+	// redelivery replays the whole sequence. Keys never rotate on add, so the
+	// pair cannot go stale between here and the fan-out below.
+	var pair *roomkeystore.VersionedKeyPair
+	if len(subs) > 0 {
+		var err error
+		pair, err = h.keyStore.Get(ctx, req.RoomID)
+		if err != nil {
+			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+			return fmt.Errorf("get room key for subscription fan-out: %w", err)
+		}
+		// A keyless "added" event would leave the new member unable to decrypt with no retry.
+		if err := requireKeyPair(ctx, pair); err != nil {
+			return err
+		}
 	}
 
 	if len(subs) > 0 {
@@ -1079,41 +1122,22 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Publish subscription.update BEFORE room.key so clients have a sub entry to
-	// store the key under. Applies to bots too: a bot can log into the chat
-	// frontend, so it needs the sub entry as well before the key arrives.
-	// publishSubscriptionUpdate encodes the per-user subject so a dotted ".bot"
-	// account lands on the token its NATS JWT is scoped to.
-	for _, sub := range subs {
-		subEvt := model.SubscriptionUpdateEvent{
-			UserID:       sub.User.ID,
-			Subscription: *sub,
-			Action:       "added",
-			RoomName:     room.Name,
-			Timestamp:    now.UnixMilli(),
+	// Added events carry the room view + key inline (no separate room.key on
+	// add); needIRM accounts already hold a sub + key. The key was validated
+	// pre-commit; the room re-read runs AFTER the member-count writes so
+	// userCount includes the members just added. The re-read is best-effort:
+	// subs are already committed, so failing here would let a redelivery
+	// (which recomputes needSub as empty) silently drop the events — degrade
+	// to the pre-add meta view instead and let subscription.list reconcile.
+	if len(subs) > 0 {
+		evtRoom := room
+		if freshRoom, err := h.store.GetRoom(ctx, req.RoomID); err == nil {
+			evtRoom = freshRoom
+		} else {
+			slog.WarnContext(ctx, "re-read room for subscription fan-out failed; using pre-add meta view",
+				"error", err, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(ctx))
 		}
-		subEvtData, _ := json.Marshal(subEvt)
-		h.publishSubscriptionUpdate(ctx, sub.User.Account, subEvtData)
-	}
-
-	// Fan out the room key only to newly-subscribed accounts. Accounts in
-	// needIRM already had a subscription (and thus already received the key
-	// on their original add), so they don't need a fresh delivery here.
-	// Get is intentionally post-Mongo: the key was created at room-create
-	// time and is not re-rotated for adds, so we just fetch the current pair.
-	newSubUsers := make([]model.User, 0, len(needSub))
-	for _, c := range needSub {
-		newSubUsers = append(newSubUsers, userMap[c.Account])
-	}
-	if len(newSubUsers) > 0 {
-		pair, err := h.keyStore.Get(ctx, req.RoomID)
-		if err != nil {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
-			return fmt.Errorf("get room key for fan-out: %w", err)
-		}
-		if err := h.buildAndFanOutRoomKey(ctx, req.RoomID, pair, newSubUsers); err != nil {
-			return fmt.Errorf("fan out room key: %w", err)
-		}
+		h.publishSubscriptionAdded(ctx, subs, nil, subscriptionRoomFor(evtRoom, pair), now.UnixMilli(), natsutil.RequestIDFromContext(ctx))
 	}
 
 	// 8. Publish MemberAddEvent. Fire whenever member.list composition changes:
@@ -1236,6 +1260,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 		accountsBySite[siteID] = append(accountsBySite[siteID], acc)
 	}
+
 	for destSiteID, siteAccounts := range accountsBySite {
 		siteEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
@@ -1361,6 +1386,8 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 		Accounts:  []string{requester.Account},
 		CreatedAt: acceptedAt,
 		UpdatedAt: acceptedAt,
+		// A self-DM's one participant is the requester (local) → definitively same-site.
+		CrossSite: boolPtr(false),
 	}
 	// Provision the room's at-rest DEK before persisting it (same as the 2-party DM
 	// path): self-DM messages are stored encrypted in Cassandra, so a Vault outage
@@ -1385,8 +1412,32 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 	if err != nil {
 		return nil, fmt.Errorf("re-read self-DM sub after write: %w", err)
 	}
-	h.publishSubscriptionUpdates(ctx, []*model.Subscription{sub}, []*model.User{requester}, requestID)
+	h.publishSubscriptionUpdates(ctx, room, []*model.Subscription{sub}, []*model.User{requester}, requestID)
 	return sub, nil
+}
+
+// subscriptionRoomFor builds the room view carried on an "added" subscription.update
+// (a subscription.list-shaped row); nil pair (keyless DM/botDM/self-DM) omits the key fields.
+func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) *model.SubscriptionRoom {
+	// PreviewMessage stays nil: a member added without shared history must not see the prior last message.
+	sr := &model.SubscriptionRoom{
+		SiteID:            room.SiteID,
+		Name:              room.Name,
+		CrossSite:         room.CrossSite,
+		UserCount:         room.UserCount,
+		AppCount:          room.AppCount,
+		LastMsgAt:         room.LastMsgAt,
+		LastMsgID:         room.LastMsgID,
+		LastMentionAllAt:  room.LastMentionAllAt,
+		MinUserLastSeenAt: room.MinUserLastSeenAt,
+	}
+	if pair != nil {
+		enc := base64.StdEncoding.EncodeToString(pair.KeyPair.PrivateKey)
+		ver := pair.Version
+		sr.PrivateKey = &enc
+		sr.KeyVersion = &ver
+	}
+	return sr
 }
 
 // newSub constructs a Subscription from its constituent parts.
@@ -1495,6 +1546,19 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 			return fmt.Errorf("generate room key: %w", err)
 		}
 	}
+
+	// Classify at birth — never leave CrossSite nil (nil is for pre-existing
+	// rooms). Born global if any resolved initial member is off-site. Definitive
+	// for a DM/botDM (full 2-member roster); provisional for a channel until
+	// finishCreateRoom marks it once the roster is known.
+	room.CrossSite = boolPtr(false)
+	for _, u := range []*model.User{requester, counterpart} {
+		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
+			room.CrossSite = boolPtr(true)
+			break
+		}
+	}
+
 	inserted, err := h.store.CreateRoom(ctx, room, newPair)
 	if err != nil {
 		return fmt.Errorf("create room: %w", err)
@@ -1678,26 +1742,45 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	}
 	h.bustRoomMeta(ctx, room.ID)
 
+	// Cross-site marking must land BEFORE the added fan-out: a channel is born
+	// provisionally false, and fanning that out would route the members' FE local.
+	remoteSiteAccounts := map[string][]string{}
+	for i := range allUsers {
+		u := &allUsers[i]
+		if u.SiteID == h.siteID || u.SiteID == "" {
+			continue
+		}
+		remoteSiteAccounts[u.SiteID] = append(remoteSiteAccounts[u.SiteID], u.Account)
+	}
+	// Sticky/idempotent, so a DM/botDM reaching this pays a harmless extra call.
+	if len(remoteSiteAccounts) > 0 {
+		if err := h.store.SetRoomCrossSite(ctx, room.ID); err != nil {
+			return fmt.Errorf("mark room cross-site: %w", err)
+		}
+		// Bust the L2 room-meta cache after the write so a stale pre-write
+		// crossSite=false can't linger and mis-route this now-global room local.
+		h.bustRoomMeta(ctx, room.ID)
+		// Mirror the write in memory — the event room view reads it next.
+		room.CrossSite = boolPtr(true)
+	}
+
 	// Task 35: subscription.update fan-out per sub
 	userByAccount := make(map[string]*model.User, len(allUsers))
 	for i := range allUsers {
 		userByAccount[allUsers[i].Account] = &allUsers[i]
 	}
+	// The in-memory room's counts are zero (ReconcileMemberCounts writes only
+	// Mongo); at creation the roster IS subs, so derive the counts from it.
+	subRoom := subscriptionRoomFor(room, pair)
+	subRoom.UserCount, subRoom.AppCount = 0, 0
 	for _, sub := range subs {
-		evt := model.SubscriptionUpdateEvent{
-			UserID:       sub.User.ID,
-			Subscription: *sub,
-			Action:       "added",
-			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
-			Timestamp:    now.UnixMilli(),
+		if sub.User.IsBot {
+			subRoom.AppCount++
+		} else {
+			subRoom.UserCount++
 		}
-		data, err := json.Marshal(evt)
-		if err != nil {
-			slog.ErrorContext(ctx, "marshal subscription.update failed", "error", err, "account", sub.User.Account)
-			continue
-		}
-		h.publishSubscriptionUpdate(ctx, sub.User.Account, data)
 	}
+	h.publishSubscriptionAdded(ctx, subs, userByAccount, subRoom, now.UnixMilli(), requestID)
 
 	// Task 36: channel-only sys-messages
 	if room.Type == model.RoomTypeChannel {
@@ -1737,14 +1820,6 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	}
 
 	// Task 37: inbox per remote site
-	remoteSiteAccounts := map[string][]string{}
-	for i := range allUsers {
-		u := &allUsers[i]
-		if u.SiteID == h.siteID || u.SiteID == "" {
-			continue
-		}
-		remoteSiteAccounts[u.SiteID] = append(remoteSiteAccounts[u.SiteID], u.Account)
-	}
 	for destSiteID, accounts := range remoteSiteAccounts {
 		memberEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
@@ -1762,17 +1837,6 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		memberSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
 		if err := h.federate(ctx, room.ID, destSiteID, model.InboxMemberAdded, memberData, natsutil.InboxDedupID(ctx, destSiteID, memberSeed), now.UnixMilli()); err != nil {
 			return err
-		}
-	}
-
-	// Fan out the current key to every local-site member. Only encrypted (channel)
-	// rooms have a key; DM/botDM rooms pass pair=nil and skip fan-out entirely.
-	// If this fails the room and subscriptions are durable but no member received
-	// the initial key event; NAK so JetStream retries the whole handler rather
-	// than persisting silent missing-key state.
-	if pair != nil {
-		if err := h.buildAndFanOutRoomKey(ctx, room.ID, pair, allUsers); err != nil {
-			return fmt.Errorf("room key fan-out (room %s): %w", room.ID, err)
 		}
 	}
 
@@ -1940,6 +2004,12 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		CreatedAt: roomCreatedAt,
 		UpdatedAt: roomCreatedAt,
 	}
+	// Classify at birth: the 2-member roster is fully known → definitive. Local
+	// requester + remote counterpart → global; otherwise confirmed same-site.
+	room.CrossSite = boolPtr(false)
+	if other.SiteID != "" && other.SiteID != h.siteID {
+		room.CrossSite = boolPtr(true)
+	}
 	// Provision the room's at-rest DEK before persisting the room so the first
 	// message write doesn't pay the create cost. Blocking and provisioned first
 	// so a Vault outage fails DM creation rather than persisting a room whose
@@ -1994,7 +2064,7 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 		return nil, fmt.Errorf("re-read DM subs after write: %w", err)
 	}
 
-	h.publishSubscriptionUpdates(ctx, []*model.Subscription{requesterSub, otherSub}, []*model.User{requester, other}, requestID)
+	h.publishSubscriptionUpdates(ctx, room, []*model.Subscription{requesterSub, otherSub}, []*model.User{requester, other}, requestID)
 
 	// Inbox failure means the remote site won't learn about the room; fail the request.
 	if err := h.publishSyncDMInbox(ctx, room, requester, other, requesterSub.JoinedAt); err != nil {
@@ -2064,22 +2134,37 @@ func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subsc
 	}
 }
 
-func (h *Handler) publishSubscriptionUpdates(ctx context.Context, subs []*model.Subscription, users []*model.User, requestID string) {
+// publishSubscriptionUpdates is the DM/botDM/self-DM "added" fan-out entry (keyless rooms → nil pair).
+// Never pass a channel room — channel paths fetch the key pair and call publishSubscriptionAdded directly.
+func (h *Handler) publishSubscriptionUpdates(ctx context.Context, room *model.Room, subs []*model.Subscription, users []*model.User, requestID string) {
+	if room.Type == model.RoomTypeChannel {
+		slog.ErrorContext(ctx, "publishSubscriptionUpdates called for a channel room; added events would lack the room key",
+			"room_id", room.ID, "request_id", requestID)
+		return
+	}
 	userByAccount := make(map[string]*model.User, len(users))
 	for _, u := range users {
 		userByAccount[u.Account] = u
 	}
+	h.publishSubscriptionAdded(ctx, subs, userByAccount, subscriptionRoomFor(room, nil), time.Now().UTC().UnixMilli(), requestID)
+}
+
+// publishSubscriptionAdded fans out one best-effort "added" subscription.update per sub, attaching
+// subRoom (recipient-independent, shared) to each copy. nil userByAccount is fine for channel paths.
+func (h *Handler) publishSubscriptionAdded(ctx context.Context, subs []*model.Subscription, userByAccount map[string]*model.User, subRoom *model.SubscriptionRoom, tsMillis int64, requestID string) {
 	for _, sub := range subs {
+		subCopy := *sub
+		subCopy.Room = subRoom
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
-			Subscription: *sub,
+			Subscription: subCopy,
 			Action:       "added",
 			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
-			Timestamp:    time.Now().UTC().UnixMilli(),
+			Timestamp:    tsMillis,
 		}
 		data, err := json.Marshal(evt)
 		if err != nil {
-			slog.ErrorContext(ctx, "sync DM: marshal subscription.update failed",
+			slog.ErrorContext(ctx, "marshal subscription.update failed",
 				"error", err, "account", sub.User.Account, "request_id", requestID)
 			continue
 		}
@@ -2234,12 +2319,34 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		ByAccount: req.Account,
 		RenamedAt: time.UnixMilli(req.Timestamp).UTC(),
 	}
-	if payload, mErr := json.Marshal(roomEvt); mErr != nil {
+	payload, mErr := json.Marshal(roomEvt)
+	if mErr != nil {
 		slog.Error("marshal room_renamed event failed", "error", mErr, "room_id", req.RoomID)
-	} else if pErr := h.publish(ctx, subject.RoomEvent(req.RoomID), payload, ""); pErr != nil {
-		slog.Error("publish room_renamed event failed", "error", pErr, "room_id", req.RoomID)
+		return nil
 	}
+	// Best-effort fan-out (must not fail the rename): default crossSite nil (→global)
+	// if unreadable. GetRoomMeta is cache-served and carries CrossSite (no extra fetch).
+	var crossSite *bool
+	var crossSiteAt *time.Time
+	if r, gErr := h.store.GetRoomMeta(ctx, req.RoomID); gErr != nil {
+		slog.Error("get room for room_renamed event routing failed", "error", gErr, "room_id", req.RoomID)
+	} else {
+		crossSite = r.CrossSite
+		crossSiteAt = r.CrossSiteAt
+	}
+	h.publishRoomEvent(ctx, req.RoomID, crossSite, crossSiteAt, payload, "room_renamed")
 	return nil
+}
+
+// publishRoomEvent fans a room .event out via subject.RoomEventTargets — the sanctioned
+// path; a .semgrep rule blocks inline room-subject publishes. Best-effort.
+func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) {
+	now := time.Now().UTC()
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.publish(ctx, subj, payload, ""); err != nil {
+			slog.Error("publish room event failed", "error", err, "op", op, "room_id", roomID, "subject", subj)
+		}
+	}
 }
 
 func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requester, other *model.User, joinedAt time.Time) error {
@@ -2287,12 +2394,21 @@ func (h *Handler) fanOutRoomKeyToSurvivors(ctx context.Context, roomID string, p
 	h.fanOutKey(ctx, roomID, survivorAccounts, &evt)
 }
 
-// buildAndFanOutRoomKey publishes pair as a RoomKeyEvent to every account in users.
-// Caller owns the Get; nil pair returns a permanent error as a defensive guard.
-func (h *Handler) buildAndFanOutRoomKey(ctx context.Context, roomID string, pair *roomkeystore.VersionedKeyPair, users []model.User) error {
+// requireKeyPair guards "a channel room must have a key": nil pair counts the
+// absence and returns a permanent error so nothing keyless is ever published.
+func requireKeyPair(ctx context.Context, pair *roomkeystore.VersionedKeyPair) error {
 	if pair == nil {
 		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1)
 		return permanent(errcode.Internal("room key absent", errcode.WithCause(errRoomKeyAbsent)))
+	}
+	return nil
+}
+
+// buildAndFanOutRoomKey publishes pair as a RoomKeyEvent to every account in users.
+// Caller owns the Get; nil pair returns a permanent error as a defensive guard.
+func (h *Handler) buildAndFanOutRoomKey(ctx context.Context, roomID string, pair *roomkeystore.VersionedKeyPair, users []model.User) error {
+	if err := requireKeyPair(ctx, pair); err != nil {
+		return err
 	}
 	// PublicKey omitted: server-side only, read from the room store by broadcast-worker.
 	evt := model.RoomKeyEvent{

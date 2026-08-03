@@ -44,6 +44,10 @@ func newDirectPool(natsURL, credsFile string, c *Collector) *directPool {
 // Channel-room broadcasts arrive on subject.RoomEvent(roomID); DM and BotDM
 // broadcasts arrive on subject.UserRoomEvent(account) — both are needed for
 // realistic IM coverage since daily presets are DM-heavy.
+//
+// Each room is subscribed on BOTH the global and local lanes so a run stays
+// mode-agnostic: under ROOM_SUBJECT_MODE=local, hard-coding the global lane would
+// silently receive nothing and report degraded latency instead of failing loudly.
 func (p *directPool) Add(u *userState) error {
 	nc, err := connectWithCreds(p.url, "loadgen-daily-"+u.ID, p.credsFile)
 	if err != nil {
@@ -51,14 +55,16 @@ func (p *directPool) Add(u *userState) error {
 	}
 	du := &directUser{id: u.ID, nc: nc}
 	for _, roomID := range u.Rooms {
-		sub, err := nc.Subscribe(subject.RoomEvent(roomID), func(m *nats.Msg) {
-			p.onBroadcast(m)
-		})
-		if err != nil {
-			_ = nc.Drain()
-			return fmt.Errorf("subscribe room %s/%s: %w", u.ID, roomID, err)
+		for _, global := range []bool{true, false} {
+			sub, err := nc.Subscribe(subject.RoomEvent(roomID, global), func(m *nats.Msg) {
+				p.onBroadcast(m)
+			})
+			if err != nil {
+				_ = nc.Drain()
+				return fmt.Errorf("subscribe room %s/%s: %w", u.ID, roomID, err)
+			}
+			du.subs = append(du.subs, sub)
 		}
-		du.subs = append(du.subs, sub)
 	}
 	// User-scoped subscription for DM broadcasts.
 	userSub, err := nc.Subscribe(subject.UserRoomEvent(u.Account), func(m *nats.Msg) {
@@ -178,8 +184,11 @@ func (p *multiplexPool) Add(u *userState) error {
 		}
 		nc := p.conns[p.nextConn%len(p.conns)]
 		p.nextConn++
-		if _, err := nc.Subscribe(subject.RoomEvent(roomID), p.route); err != nil {
-			return fmt.Errorf("multiplex subscribe %s: %w", roomID, err)
+		// Subscribe both lanes (see directPool.Add) — mode-agnostic against ROOM_SUBJECT_MODE.
+		for _, global := range []bool{true, false} {
+			if _, err := nc.Subscribe(subject.RoomEvent(roomID, global), p.route); err != nil {
+				return fmt.Errorf("multiplex subscribe %s: %w", roomID, err)
+			}
 		}
 		// Mark provisionally with refcount 0 — the second pass below will
 		// increment it. We don't increment here so a subsequent Subscribe

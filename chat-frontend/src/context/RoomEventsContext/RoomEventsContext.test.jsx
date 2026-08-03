@@ -44,6 +44,7 @@ function roomToSub(room) {
       userCount: room.userCount,
       lastMsgAt: room.lastMsgAt ?? null,
       lastMsgId: room.lastMsgId,
+      crossSite: room.crossSite,
     },
   }
 }
@@ -1012,6 +1013,119 @@ describe('RoomEventsProvider message.read wiring', () => {
   })
 })
 
+describe('RoomEventsProvider room subject routing by crossSite', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('subscribes a same-site room (crossSite:false) to the local namespace and a cross-site room (crossSite:true) to the global namespace', async () => {
+    const rooms = [
+      { id: 'L1', name: 'local-channel', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null, crossSite: false },
+      { id: 'G1', name: 'global-channel', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null, crossSite: true },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const subjects = []
+    const subscribe = vi.fn().mockImplementation((subject) => {
+      subjects.push(subject)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+
+    render(wrap(<SummariesProbe />, nats))
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('2'))
+
+    expect(subjects).toContain('chat.local.room.L1.event')
+    expect(subjects).not.toContain('chat.room.L1.event')
+    expect(subjects).toContain('chat.room.G1.event')
+    expect(subjects).not.toContain('chat.local.room.G1.event')
+  })
+
+  it('defaults to the global namespace when crossSite is absent on the room (server fail-safe)', async () => {
+    const rooms = [
+      { id: 'M1', name: 'missing-flag-channel', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const subjects = []
+    const subscribe = vi.fn().mockImplementation((subject) => {
+      subjects.push(subject)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+
+    render(wrap(<SummariesProbe />, nats))
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+
+    expect(subjects).toContain('chat.room.M1.event')
+    expect(subjects).not.toContain('chat.local.room.M1.event')
+  })
+
+  it('drops the local subscription and opens the global one when a room flips crossSite false→true', async () => {
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const handlers = new Map()
+    const unsubs = {}
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      const sub = { unsubscribe: vi.fn() }
+      unsubs[subject] = sub
+      return sub
+    })
+    const nats = mockNats({ request, subscribe })
+
+    render(wrap(<SummariesProbe />, nats))
+    await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+    // First "added": the room is same-site — local subject.
+    act(() => {
+      handlers.get('chat.user.alice.event.subscription.update')({
+        action: 'added',
+        subscription: {
+          roomId: 'flip1',
+          roomType: 'channel',
+          siteId: 'site-A',
+          name: 'flip-room',
+          room: { crossSite: false },
+        },
+      })
+    })
+    await waitFor(() =>
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.local.room.flip1.event')
+    )
+    expect(unsubs['chat.local.room.flip1.event'].unsubscribe).not.toHaveBeenCalled()
+
+    // Server later reports the room is now cross-site — a second "added"
+    // nudge carries the updated flag. The old local sub must be dropped
+    // and the global one opened.
+    act(() => {
+      handlers.get('chat.user.alice.event.subscription.update')({
+        action: 'added',
+        subscription: {
+          roomId: 'flip1',
+          roomType: 'channel',
+          siteId: 'site-A',
+          name: 'flip-room',
+          room: { crossSite: true },
+        },
+      })
+    })
+    await waitFor(() =>
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.room.flip1.event')
+    )
+    expect(unsubs['chat.local.room.flip1.event'].unsubscribe).toHaveBeenCalled()
+    expect(unsubs['chat.room.flip1.event'].unsubscribe).not.toHaveBeenCalled()
+  })
+})
+
 describe('RoomEventsProvider sidebar buckets bootstrap', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -1481,6 +1595,70 @@ describe('RoomEventsProvider missing-key path', () => {
     expect(ensureKey).not.toHaveBeenCalled()
     expect(decrypt).toHaveBeenCalledTimes(1)
   })
+
+  it('drops a channel message whose decryption resolves after a user switch (stale-generation guard)', async () => {
+    // The real bug: alice's encrypted message is mid-decryption when the user
+    // switches to bob. The teardown sets cancelledRef=true and bob's new effect
+    // resets it to false, so the cancelledRef gate alone would let alice's late
+    // decrypt dispatch into bob's session. The generation guard must drop it.
+    let resolveDecrypt
+    const decrypt = vi.fn().mockImplementation(
+      () => new Promise((res) => { resolveDecrypt = res })
+    )
+    currentRoomKeysMock = { decrypt, hasKey: () => true, ensureKey: async () => false }
+
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const aliceRequest = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+        return Promise.resolve({
+          subscriptions: [
+            roomToSub({ id: 'r1', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgId: null, crossSite: true }),
+          ],
+        })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const bobRequest = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+
+    const aliceNats = mockNats({ request: aliceRequest, subscribe, user: { account: 'alice', siteId: 'site-A' } })
+    const bobNats = mockNats({ request: bobRequest, subscribe, user: { account: 'bob', siteId: 'site-A' } })
+
+    let probeMessages
+    function Probe() {
+      const { messages } = useRoomEvents('r1')
+      probeMessages = messages
+      return <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
+    }
+
+    const { rerender } = render(wrap(<Probe />, aliceNats))
+    await waitFor(() => expect(handlers.has('chat.room.r1.event')).toBe(true))
+
+    // Alice's message arrives; decryption starts but is left pending.
+    act(() => { handlers.get('chat.room.r1.event')(encEvent) })
+    await waitFor(() => expect(decrypt).toHaveBeenCalledTimes(1))
+
+    // Switch to bob: cleanup (cancelledRef=true) then a fresh effect
+    // (cancelledRef=false, generationRef bumped).
+    rerender(wrap(<Probe />, bobNats))
+    await waitFor(() => expect(bobRequest).toHaveBeenCalled())
+
+    // Alice's decrypt resolves late — the guard must drop the whole continuation.
+    await act(async () => {
+      resolveDecrypt(decryptedPayload)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(probeMessages.some((m) => m.id === 'm1')).toBe(false)
+  })
 })
 
 describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () => {
@@ -1579,5 +1757,158 @@ describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () =>
     await act(async () => { screen.getByText('older').click() })
     const historyCalls = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
     expect(historyCalls).toBe(0)
+  })
+})
+
+describe('added subscription.update room enrichment', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function AddedProbe({ roomId }) {
+    const { summaries } = useRoomSummaries()
+    const s = summaries.find((r) => r.id === roomId)
+    return (
+      <div>
+        <div data-testid="userCount">{String(s?.userCount)}</div>
+        <div data-testid="lastMsgAt">{String(s?.lastMsgAt)}</div>
+      </div>
+    )
+  }
+
+  /** Shared scaffold: seedKeys spy swapped into the RoomKeys mock, an empty
+   *  subscription.list bootstrap, and a handler-capturing subscribe. Callers
+   *  drive the returned handlers map and MUST invoke restore() when done. */
+  function setupSeedKeysHarness() {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+    return { seedKeys, handlers, subscribe, nats, restore: () => { currentRoomKeysMock = prevMock } }
+  }
+
+  it('seeds the inline room key and applies room metadata from an added event', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
+      render(wrap(<AddedProbe roomId="enr1" />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+      act(() => {
+        handlers.get('chat.user.alice.event.subscription.update')({
+          action: 'added',
+          subscription: {
+            roomId: 'enr1',
+            roomType: 'channel',
+            siteId: 'site-A',
+            name: 'enriched-room',
+            room: {
+              name: 'enriched-room',
+              crossSite: false,
+              userCount: 7,
+              lastMsgAt: '2026-07-01T10:00:00Z',
+              privateKey: 'AQIDBA==',
+              keyVersion: 3,
+            },
+          },
+        })
+      })
+
+      // The inline key is seeded exactly like a subscription.list key.
+      await waitFor(() => expect(seedKeys).toHaveBeenCalled())
+      expect(seedKeys).toHaveBeenCalledWith([
+        { roomId: 'enr1', version: 3, privateKey: 'AQIDBA==' },
+      ])
+      // Room metadata renders without waiting for a metadata/message event.
+      expect(screen.getByTestId('userCount').textContent).toBe('7')
+      expect(screen.getByTestId('lastMsgAt').textContent).toBe('2026-07-01T10:00:00Z')
+      // crossSite: false → the local subject, not the global fail-safe.
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.local.room.enr1.event')
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not seed keys when the added event carries no room key (keyless DM)', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
+      render(wrap(<SummariesProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+      act(() => {
+        handlers.get('chat.user.alice.event.subscription.update')({
+          action: 'added',
+          subscription: {
+            roomId: 'dm1',
+            roomType: 'dm',
+            siteId: 'site-A',
+            name: 'bob',
+            room: { name: '', crossSite: false, userCount: 2 },
+          },
+        })
+      })
+
+      await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+      expect(seedKeys).not.toHaveBeenCalled()
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('stale-session guards (generation counter)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('drops a bootstrap that resolves after a re-login — no stale key seeding or subs', async () => {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    try {
+      let resolveFirstRooms
+      let roomsCalls = 0
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+          roomsCalls++
+          if (roomsCalls === 1) return new Promise((res) => { resolveFirstRooms = res })
+          return Promise.resolve({ subscriptions: [] })
+        }
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+        throw new Error('unexpected subject: ' + subject)
+      })
+      const subscribe = vi.fn().mockReturnValue({ unsubscribe: vi.fn() })
+
+      const nats1 = mockNats({ request, subscribe, user: { account: 'alice', siteId: 'site-A' } })
+      const { rerender } = render(wrap(<SummariesProbe />, nats1))
+      await waitFor(() => expect(roomsCalls).toBe(1))
+
+      // Re-login as a different user while alice's rooms fetch is still in flight.
+      const nats2 = mockNats({ request, subscribe, user: { account: 'carol', siteId: 'site-A' } })
+      rerender(wrap(<SummariesProbe />, nats2))
+      await waitFor(() => expect(roomsCalls).toBe(2))
+
+      // Alice's stale bootstrap resolves now, carrying a keyed channel room.
+      await act(async () => {
+        resolveFirstRooms({
+          subscriptions: [
+            {
+              roomId: 'stale1', roomType: 'channel', name: 'stale', siteId: 'site-A',
+              room: { crossSite: false, privateKey: 'AQIDBA==', keyVersion: 1 },
+            },
+          ],
+        })
+      })
+
+      expect(seedKeys).not.toHaveBeenCalled()
+      expect(subscribe.mock.calls.map((c) => c[0])).not.toContain('chat.local.room.stale1.event')
+      expect(screen.getByTestId('count').textContent).toBe('0')
+    } finally {
+      currentRoomKeysMock = prevMock
+    }
   })
 })

@@ -26,7 +26,7 @@ func newTeamsTestHandler(t *testing.T, store *MockSubscriptionStore) (*Handler, 
 		published = append(published, publishedMsg{subj: subj, data: data})
 		return nil
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 	return h, &published
 }
 
@@ -89,7 +89,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 			for _, s := range subs {
 				assert.Equal(t, idgen.DeterministicID([]byte("chat1")), s.RoomID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
-				assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+				assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, s.Roles)
 				assert.Equal(t, model.OriginTeams, s.Origin)
 			}
 			return nil
@@ -120,6 +120,33 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 	assert.Empty(t, membershipEvents(t, *published, "member_removed"), "add-only batch emits no removals")
 }
 
+// TestProcessTeamsRoomCreate_BotMemberStaysMemberOnly: a bot account (".bot"
+// suffix) must not get the owner role a human member receives.
+func TestProcessTeamsRoomCreate_BotMemberStaysMemberOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(&model.User{ID: "u1", Account: "helper.bot", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, subs []*model.Subscription) error {
+			require.Len(t, subs, 1)
+			assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles)
+			return nil
+		})
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:      "chat1",
+		Name:    "Project Sync",
+		Members: []model.TeamsRoomCreateMember{{ID: "aad1", Account: "helper.bot"}},
+	}
+	err := h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat))
+	require.NoError(t, err)
+}
+
 // TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers: a migrated channel
 // room stays live, so it gets an encryption key fanned out to each added member
 // like a native channel — clients need it to decrypt ongoing chat.
@@ -130,7 +157,7 @@ func TestProcessTeamsRoomCreate_FansOutRoomKeyToAddedMembers(t *testing.T) {
 	publish := func(_ context.Context, subj string, data []byte, _ string) error {
 		return pub.Publish(subj, data)
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub))
+	h := NewHandler(store, "site-a", publish, testKeyStore, roomkeysender.NewSender(pub), subject.RouteGlobal)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
@@ -400,7 +427,7 @@ func TestFederateTeamsMembership_MigrationHeaderStamped(t *testing.T) {
 		gotHeader = natsutil.HeaderForContext(ctx).Get(natsutil.HeaderMigration) == natsutil.MigrationLive
 		return nil
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
 	ctx := natsutil.WithMigrationLiveContext(context.Background())
 	room := &model.Room{ID: "chat1", Name: "n", Type: model.RoomTypeChannel, SiteID: "site-a"}
@@ -423,7 +450,7 @@ func TestProcessTeamsRoomCreate_StampsMigrationHeader(t *testing.T) {
 		}
 		return nil
 	}
-	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender)
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
 	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)

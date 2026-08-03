@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef } from 'react'
 import {
   fetchSidebarBuckets,
+  keyEntryFor,
   markRoomRead,
+  subToRoom,
   subscribeToRoomEvents,
   subscribeToRoomMetadataUpdates,
   subscribeToSubscriptionUpdates,
@@ -119,13 +121,24 @@ export function useRoomSubscriptions(
     cancelledRef.current = false
     generationRef.current += 1
 
+    // Snapshot this effect run's generation. A logout→login (or nats reconnect)
+    // tears this effect down and starts a fresh one, which flips cancelledRef
+    // back to false and bumps the generation. A subscription callback still in
+    // flight from the PRIOR run — e.g. a channel/DM message whose decryption
+    // resolves after the teardown — would otherwise pass the cancelledRef gate
+    // (now reset) and leak a stale-session event into the new session. Gate
+    // every dispatch and every post-decryption continuation on this value so
+    // work started under one login never lands under the next.
+    const effectGeneration = generationRef.current
+    const isCurrent = () => !cancelledRef.current && generationRef.current === effectGeneration
+
     // Capture the nats value at effect-run time for the one-shot
     // listRooms() below. Long-lived callbacks read natsRef.current
     // directly so they pick up a fresh nc after a reconnect.
     const liveNats = natsRef.current
 
     const safeDispatch = (action) => {
-      if (cancelledRef.current) return
+      if (!isCurrent()) return
       dispatch(action)
     }
 
@@ -335,6 +348,11 @@ export function useRoomSubscriptions(
         // eslint-disable-next-line no-console
         console.warn('decryptAndDispatch failed; forwarding original event', err)
       }
+      // The await(s) above span the effect-teardown window: if a logout→login
+      // cycled the effect while decryption was in flight, drop the whole
+      // continuation (dispatch + thread fan-out + mark-read) so a prior
+      // session's message can't surface in the new one.
+      if (!isCurrent()) return
       finalize(decoded)
     }
 
@@ -354,9 +372,22 @@ export function useRoomSubscriptions(
       })
     })
 
-    const openChannelSub = (roomId) => {
-      if (channelSubs.current.has(roomId)) return
-      const sub = subscribeToRoomEvents(natsRef.current, { roomId }, (evt) => {
+    // `crossSite` selects the subject namespace (see subscribeToRoomEvents /
+    // roomEvent) — global `chat.room.…` when true, local `chat.local.room.…`
+    // when false. Bookkeeping is keyed on that resolved value alongside the
+    // roomId: a repeat call with the SAME crossSite is a no-op, but a call
+    // that carries a DIFFERENT crossSite (the room's cross-site status
+    // flipped between the sub that opened it and this one) tears down the
+    // stale subject's subscription and opens the new one, so a room is
+    // never double-subscribed or left on a stale namespace.
+    const openChannelSub = (roomId, crossSite) => {
+      const existing = channelSubs.current.get(roomId)
+      if (existing) {
+        if (existing.crossSite === crossSite) return
+        existing.sub.unsubscribe()
+        channelSubs.current.delete(roomId)
+      }
+      const sub = subscribeToRoomEvents(natsRef.current, { roomId, crossSite }, (evt) => {
         enqueueByRoom(evt?.roomId ?? roomId, () => {
           if (evt?.type === 'new_message') {
             return decryptAndDispatch(evt, (decoded) => {
@@ -380,39 +411,41 @@ export function useRoomSubscriptions(
           handleMutationEvent(evt)
         })
       })
-      channelSubs.current.set(roomId, sub)
+      channelSubs.current.set(roomId, { sub, crossSite })
     }
 
     const closeChannelSub = (roomId) => {
-      const sub = channelSubs.current.get(roomId)
-      if (sub) {
-        sub.unsubscribe()
+      const entry = channelSubs.current.get(roomId)
+      if (entry) {
+        entry.sub.unsubscribe()
         channelSubs.current.delete(roomId)
       }
     }
 
     const subUpdate = subscribeToSubscriptionUpdates(liveNats, (evt) => {
-      if (cancelledRef.current) return
+      // Generation check, not just cancelledRef: a re-login resets
+      // cancelledRef to false, so a callback still in flight from the prior
+      // session would otherwise seed stale keys / open stale channel subs.
+      if (!isCurrent()) return
       if (evt.action === 'added' && evt.subscription?.roomId) {
         // Store the full subscription record FIRST so any consumer that
         // wakes up on the ROOM_ADDED dispatch already sees fresh roles /
         // hasMention / alert state. The full payload is what room-worker
         // emits on `subscription.update`.
         safeDispatch({ type: 'SUBSCRIPTION_UPSERTED', subscription: evt.subscription })
-        // Build the sidebar room straight from the subscription record — it
-        // carries roomId, roomType, siteId, and the per-user friendly name.
-        // Room-level metadata (userCount, lastMsgAt) is absent here and lands
-        // via subsequent ROOM_METADATA_UPDATED / MESSAGE_RECEIVED events.
+        // The "added" event embeds the room view under sub.room
+        // (subscription.list parity, mapped by the same subToRoom): metadata
+        // renders immediately and the E2E key seeds inline — no separate
+        // room.key event is sent for interactive adds anymore (room.key now
+        // carries rotations only).
         const sub = evt.subscription
-        const room = {
-          id: sub.roomId,
-          type: sub.roomType,
-          siteId: sub.siteId,
-          name: sub.name,
-          subscriptionName: sub.name,
-        }
+        const room = { ...subToRoom(sub, user.siteId), subscriptionName: sub.name }
         safeDispatch({ type: 'ROOM_ADDED', room })
-        if (sub.roomType === 'channel') openChannelSub(sub.roomId)
+        const keyEntry = keyEntryFor(sub)
+        if (keyEntry) seedKeysRef.current([keyEntry])
+        // subToRoom resolved the tri-state crossSite (missing → true, the
+        // global fail-safe — never assume same-site).
+        if (sub.roomType === 'channel') openChannelSub(sub.roomId, room.crossSite)
       } else if (evt.action === 'removed') {
         const roomId = evt.subscription?.roomId
         if (!roomId) return
@@ -448,22 +481,20 @@ export function useRoomSubscriptions(
     // a total failure leaves the sidebar empty.
     fetchSidebarBuckets(liveNats)
       .then((buckets) => {
-        if (cancelledRef.current) return
+        // Generation check, not just cancelledRef: a slow bootstrap from a
+        // prior login must not seed keys or open subs into the new session.
+        if (!isCurrent()) return
         safeDispatch({ type: 'BUCKETS_LOADED', ...buckets })
         // Seed room keys delivered inline on subscription.list so the first
         // message in each encrypted room decrypts immediately — no placeholder,
         // no on-demand key.get RPC. Rooms without a key (plaintext DMs, or no
         // key provisioned) simply aren't seeded.
-        const keyEntries = []
-        for (const sub of Object.values(buckets.subscriptions ?? {})) {
-          const room = sub?.room
-          if (room?.privateKey && typeof room.keyVersion === 'number') {
-            keyEntries.push({ roomId: sub.roomId, version: room.keyVersion, privateKey: room.privateKey })
-          }
-        }
+        const keyEntries = Object.values(buckets.subscriptions ?? {})
+          .map(keyEntryFor)
+          .filter(Boolean)
         if (keyEntries.length > 0) seedKeysRef.current(keyEntries)
         for (const r of buckets.rooms) {
-          if (r.type === 'channel') openChannelSub(r.id)
+          if (r.type === 'channel') openChannelSub(r.id, r.crossSite)
         }
       })
       .catch((err) => {
@@ -476,7 +507,7 @@ export function useRoomSubscriptions(
       dmSub.unsubscribe()
       subUpdate.unsubscribe()
       metaUpdate.unsubscribe()
-      for (const sub of channelSubs.current.values()) sub.unsubscribe()
+      for (const entry of channelSubs.current.values()) entry.sub.unsubscribe()
       channelSubs.current.clear()
       dispatchChains.clear()
       // Cancel any in-flight mark-read trailing timer so it doesn't

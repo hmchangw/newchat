@@ -21,7 +21,7 @@ func TestMongoStore_EnrichLookups(t *testing.T) {
 
 	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
 		bson.M{"_id": "s1", "u": bson.M{"account": "alice"}, "roomId": "rDM", "roomType": "dm", "name": "bob"},
-		bson.M{"_id": "s2", "u": bson.M{"account": "alice"}, "roomId": "rBot", "roomType": "botDM", "name": "helper.bot"},
+		bson.M{"_id": "s2", "u": bson.M{"account": "alice"}, "roomId": "rBot", "roomType": "botDM", "name": "helper.bot", "isSubscribed": true},
 		bson.M{"_id": "s3", "u": bson.M{"account": "alice"}, "roomId": "rCh", "roomType": "channel", "name": "General"},
 		bson.M{"_id": "s4", "u": bson.M{"account": "carol"}, "roomId": "rDM", "roomType": "dm", "name": "alice"},
 	})
@@ -41,6 +41,8 @@ func TestMongoStore_EnrichLookups(t *testing.T) {
 	assert.Equal(t, "bob", subs["rDM"].Name)
 	assert.Equal(t, model.RoomTypeBotDM, subs["rBot"].RoomType)
 	assert.Equal(t, "helper.bot", subs["rBot"].Name)
+	assert.True(t, subs["rBot"].IsSubscribed)
+	assert.False(t, subs["rDM"].IsSubscribed) // absent in fixture → zero value
 	assert.Equal(t, model.RoomTypeChannel, subs["rCh"].RoomType)
 	_, missing := subs["rMissing"]
 	assert.False(t, missing)
@@ -56,10 +58,7 @@ func TestMongoStore_EnrichLookups(t *testing.T) {
 
 	apps, err := store.AppsByAssistantNames(ctx, []string{"helper.bot", "ghost.bot"})
 	require.NoError(t, err)
-	assert.Equal(t, "Helper", apps["helper.bot"].Name)
-	// projection: only name and assistant.name come back
-	assert.Empty(t, apps["helper.bot"].Description)
-	assert.Empty(t, apps["helper.bot"].Version)
+	assert.Equal(t, AppRef{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"}, apps["helper.bot"])
 	_, ok = apps["ghost.bot"]
 	assert.False(t, ok)
 

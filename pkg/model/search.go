@@ -53,22 +53,41 @@ type SearchMessage struct {
 
 // MessageRoom is the enriched room object attached to a SearchMessage.
 // Type is the room type from the caller's subscription. HRInfo is set only
-// for dm rooms. Name is the app name (botDM), the counterpart's display
-// name (dm), or the canonical room name (channel/discussion, from the
-// RoomsInfoBatch RPC).
+// for dm rooms; AppInfo only for botDM rooms. Name is the app name (botDM),
+// the counterpart's display name (dm), or the canonical room name (channel/
+// discussion, from the RoomsInfoBatch RPC).
 type MessageRoom struct {
-	ID     string              `json:"id"`
-	Name   string              `json:"name,omitempty"`
-	Type   RoomType            `json:"type,omitempty"`
-	HRInfo *SubscriptionHRInfo `json:"hrInfo,omitempty"`
+	ID      string          `json:"id"`
+	Name    string          `json:"name,omitempty"`
+	Type    RoomType        `json:"type,omitempty"`
+	HRInfo  *MessageHRInfo  `json:"hrInfo,omitempty"`
+	AppInfo *MessageAppInfo `json:"appInfo,omitempty"`
 }
 
 // MessageSender is the enriched author object attached to a SearchMessage.
-// DisplayName is the human display name (engName+chineseName, fallback account)
-// or, for a bot sender, the app's display name.
+// HR is set for human senders, AppInfo for bot senders; both are omitted
+// when the lookup missed — the client renders the display name.
 type MessageSender struct {
+	Account string          `json:"account"`
+	HR      *MessageHRInfo  `json:"hr,omitempty"`
+	AppInfo *MessageAppInfo `json:"appInfo,omitempty"`
+}
+
+// MessageHRInfo is the compact HR record on search sender/room objects.
+type MessageHRInfo struct {
 	Account     string `json:"account"`
-	DisplayName string `json:"displayName,omitempty"`
+	ChineseName string `json:"chineseName,omitempty"`
+	EngName     string `json:"engName,omitempty"`
+}
+
+// MessageAppInfo is the compact app record on search sender/room objects.
+// IsSubscribed is set only on room.appInfo (botDM) — explicit true/false from
+// the caller's subscription row — and stays nil (absent) on sender.appInfo.
+type MessageAppInfo struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	AssistantName string `json:"assistantName"`
+	IsSubscribed  *bool  `json:"isSubscribed,omitempty"`
 }
 
 // SearchRoomsRequest is the NATS payload for

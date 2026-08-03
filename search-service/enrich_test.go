@@ -41,7 +41,7 @@ func hit(id, room, site, sender string) messageSearchHit {
 func TestEnrichMessages_DM(t *testing.T) {
 	m := &fakeMongo{
 		subs:  map[string]SubscriptionMeta{"rDM": {RoomType: model.RoomTypeDM, Name: "bob"}},
-		users: map[string]HRUser{"bob": {Account: "bob", EngName: "Bob Chan", ChineseName: "陳"}, "alice": {Account: "alice", EngName: "Alice", ChineseName: ""}},
+		users: map[string]HRUser{"bob": {Account: "bob", EngName: "Bob Chan", ChineseName: "陳"}, "alice": {Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}},
 	}
 	h := enrichHandler(m, &fakeRoom{})
 	out := h.enrichMessages(context.Background(), "alice", []messageSearchHit{hit("m1", "rDM", "site-a", "alice")})
@@ -49,18 +49,30 @@ func TestEnrichMessages_DM(t *testing.T) {
 	require.NotNil(t, out[0].Room)
 	assert.Equal(t, model.RoomTypeDM, out[0].Room.Type)
 	assert.Equal(t, "Bob Chan 陳", out[0].Room.Name)
-	require.NotNil(t, out[0].Room.HRInfo)
-	assert.Equal(t, "陳", out[0].Room.HRInfo.Name)
-	assert.Equal(t, "Bob Chan", out[0].Room.HRInfo.EngName)
+	assert.Equal(t, &model.MessageHRInfo{Account: "bob", ChineseName: "陳", EngName: "Bob Chan"}, out[0].Room.HRInfo)
+	assert.Nil(t, out[0].Room.AppInfo)
+	// human sender: account + hr, no appInfo
 	require.NotNil(t, out[0].Sender)
 	assert.Equal(t, "alice", out[0].Sender.Account)
-	assert.Equal(t, "Alice", out[0].Sender.DisplayName)
+	assert.Equal(t, &model.MessageHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice"}, out[0].Sender.HR)
+	assert.Nil(t, out[0].Sender.AppInfo)
+}
+
+func TestEnrichMessages_DM_UsersLookupMiss(t *testing.T) {
+	m := &fakeMongo{subs: map[string]SubscriptionMeta{"rDM": {RoomType: model.RoomTypeDM, Name: "bob"}}}
+	h := enrichHandler(m, &fakeRoom{})
+	out := h.enrichMessages(context.Background(), "alice", []messageSearchHit{hit("m1", "rDM", "site-a", "alice")})
+	// no user doc → name falls back to the counterpart account, no hrInfo/hr
+	assert.Equal(t, "bob", out[0].Room.Name)
+	assert.Nil(t, out[0].Room.HRInfo)
+	assert.Nil(t, out[0].Sender.HR)
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }
 
 func TestEnrichMessages_BotDM(t *testing.T) {
 	m := &fakeMongo{
-		subs: map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "helper.bot"}},
-		apps: map[string]model.App{"helper.bot": {ID: "app1", Name: "Helper", Assistant: &model.AppAssistant{Name: "helper.bot"}}},
+		subs: map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "helper.bot", IsSubscribed: true}},
+		apps: map[string]AppRef{"helper.bot": {ID: "app1", Name: "Helper", AssistantName: "helper.bot"}},
 	}
 	h := enrichHandler(m, &fakeRoom{})
 	// sender is the bot itself
@@ -69,12 +81,44 @@ func TestEnrichMessages_BotDM(t *testing.T) {
 	assert.Equal(t, model.RoomTypeBotDM, out[0].Room.Type)
 	assert.Equal(t, "Helper", out[0].Room.Name)
 	assert.Nil(t, out[0].Room.HRInfo)
-	// the room carries only the app's name — no appInfo enrichment
+	require.NotNil(t, out[0].Room.AppInfo)
+	assert.Equal(t, "app1", out[0].Room.AppInfo.ID)
+	assert.Equal(t, "Helper", out[0].Room.AppInfo.Name)
+	assert.Equal(t, "helper.bot", out[0].Room.AppInfo.AssistantName)
+	require.NotNil(t, out[0].Room.AppInfo.IsSubscribed)
+	assert.True(t, *out[0].Room.AppInfo.IsSubscribed)
+	// bot sender: account + appInfo (no isSubscribed), no hr
+	assert.Equal(t, &model.MessageAppInfo{ID: "app1", Name: "Helper", AssistantName: "helper.bot"}, out[0].Sender.AppInfo)
+	assert.Nil(t, out[0].Sender.HR)
+}
+
+func TestEnrichMessages_BotDM_Unsubscribed(t *testing.T) {
+	m := &fakeMongo{
+		subs: map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "helper.bot", IsSubscribed: false}},
+		apps: map[string]AppRef{"helper.bot": {ID: "app1", Name: "Helper", AssistantName: "helper.bot"}},
+	}
+	h := enrichHandler(m, &fakeRoom{})
+	out := h.enrichMessages(context.Background(), "alice", []messageSearchHit{hit("m1", "rBot", "site-a", "alice")})
+	require.NotNil(t, out[0].Room.AppInfo)
+	require.NotNil(t, out[0].Room.AppInfo.IsSubscribed)
+	assert.False(t, *out[0].Room.AppInfo.IsSubscribed)
+	// explicit false serializes on the room object
 	b, err := json.Marshal(out[0].Room)
 	require.NoError(t, err)
-	assert.NotContains(t, string(b), "appInfo")
-	// bot sender display name = app name
-	assert.Equal(t, "Helper", out[0].Sender.DisplayName)
+	assert.Contains(t, string(b), `"isSubscribed":false`)
+}
+
+func TestEnrichMessages_BotDM_AppLookupMiss(t *testing.T) {
+	m := &fakeMongo{
+		subs: map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "helper.bot", IsSubscribed: true}},
+	}
+	h := enrichHandler(m, &fakeRoom{})
+	out := h.enrichMessages(context.Background(), "alice", []messageSearchHit{hit("m1", "rBot", "site-a", "helper.bot")})
+	// no app doc → name falls back to the subscription name, no half-empty appInfo
+	assert.Equal(t, "helper.bot", out[0].Room.Name)
+	assert.Nil(t, out[0].Room.AppInfo)
+	assert.Nil(t, out[0].Sender.AppInfo)
+	assert.Equal(t, "helper.bot", out[0].Sender.Account)
 }
 
 func TestEnrichMessages_ChannelUsesRoomBatch(t *testing.T) {
@@ -90,6 +134,7 @@ func TestEnrichMessages_ChannelUsesRoomBatch(t *testing.T) {
 	assert.Equal(t, model.RoomTypeChannel, out[0].Room.Type)
 	assert.Equal(t, "General", out[0].Room.Name)
 	assert.Nil(t, out[0].Room.HRInfo)
+	assert.Nil(t, out[0].Room.AppInfo)
 	assert.Equal(t, 1, r.calls)
 }
 
@@ -113,7 +158,7 @@ func TestEnrichMessages_DegradesOnAllErrors(t *testing.T) {
 	// still returns the base message; room present with id, sender falls back to account
 	require.NotNil(t, out[0].Room)
 	assert.Equal(t, "rCh", out[0].Room.ID)
-	assert.Equal(t, "alice", out[0].Sender.DisplayName) // fallback to account
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }
 
 func TestEnrichMessages_Empty(t *testing.T) {
@@ -136,7 +181,7 @@ func TestEnrichMessages_NilMongoDegrades(t *testing.T) {
 	assert.Equal(t, "rCh", out[0].Room.ID)
 	assert.Equal(t, "General", out[0].Room.Name) // room-name RPC still works without mongo
 	require.NotNil(t, out[0].Sender)
-	assert.Equal(t, "alice", out[0].Sender.DisplayName) // sender falls back to account
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }
 
 // Neither dependency wired: base projections survive, no panic, no names.
@@ -147,5 +192,5 @@ func TestEnrichMessages_NilMongoAndRoomDegrades(t *testing.T) {
 	assert.Equal(t, "m1", out[0].MessageID)
 	require.NotNil(t, out[0].Room)
 	assert.Equal(t, "rCh", out[0].Room.ID)
-	assert.Equal(t, "alice", out[0].Sender.DisplayName)
+	assert.Equal(t, "alice", out[0].Sender.Account)
 }

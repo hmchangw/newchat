@@ -66,8 +66,8 @@ func (s *UserService) SetSettings(c *natsrouter.Context, req models.SettingsSetR
 	return settings, nil
 }
 
-// validateSettings rejects an empty request (nothing to write) and a
-// malformed translateMessageInto.
+// validateSettings rejects an empty request (nothing to write), a malformed
+// translateMessageInto, and an out-of-enum themePreference / initialChatScrollPosition.
 func validateSettings(set *model.UserSettings) error {
 	if set.IsEmpty() {
 		return errcode.BadRequest("no settings provided")
@@ -76,6 +76,17 @@ func validateSettings(set *model.UserSettings) error {
 	// back to the client default, erasing the user's choice).
 	if set.TranslateMessageInto != nil && *set.TranslateMessageInto != "" && !translateTagRe.MatchString(*set.TranslateMessageInto) {
 		return errcode.BadRequest("invalid translateMessageInto language tag")
+	}
+	if set.ThemePreference != nil &&
+		*set.ThemePreference != model.ThemePreferenceSystem &&
+		*set.ThemePreference != model.ThemePreferenceLight &&
+		*set.ThemePreference != model.ThemePreferenceDark {
+		return errcode.BadRequest("invalid themePreference")
+	}
+	if set.InitialChatScrollPosition != nil &&
+		*set.InitialChatScrollPosition != model.InitialChatScrollLastRead &&
+		*set.InitialChatScrollPosition != model.InitialChatScrollNewest {
+		return errcode.BadRequest("invalid initialChatScrollPosition")
 	}
 	return nil
 }

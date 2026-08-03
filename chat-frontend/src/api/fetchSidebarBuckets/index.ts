@@ -173,12 +173,20 @@ async function fetchAllPages(
   return all
 }
 
-/** Derive a `Room` from a subscription record. The real user-service
- *  embeds the fields we actually need under `sub.room` (userCount,
- *  lastMsgAt, lastMsgId, appCount); fields the reducer's `toSummary`
- *  doesn't read default to neutral zero/empty values so the type
- *  contract is satisfied. */
-function subToRoom(sub: DMSubscription, fallbackSiteId: string): Room {
+/** Derive a `Room` from a subscription record — the ONE wire→Room mapper
+ *  for the `Subscription`+`room` shape, shared by the sidebar bootstrap
+ *  and the live `added` subscription.update path (both carry the same
+ *  shape by design). The real user-service embeds the fields we actually
+ *  need under `sub.room` (userCount, lastMsgAt, lastMsgId, appCount);
+ *  fields the reducer's `toSummary` doesn't read default to neutral
+ *  zero/empty values so the type contract is satisfied.
+ *
+ *  `crossSite` is tri-state on the wire: an explicit `true`/`false` is
+ *  authoritative (global/local); ABSENT means the room's locality is
+ *  unknown/unclassified (server hasn't backfilled it yet) and defaults to
+ *  `true` (global) here — a missing flag must never be read as "safe to
+ *  route local". */
+export function subToRoom(sub: DMSubscription, fallbackSiteId: string): Room {
   return {
     id: sub.roomId,
     name: sub.name ?? '',
@@ -190,5 +198,19 @@ function subToRoom(sub: DMSubscription, fallbackSiteId: string): Room {
     lastMsgAt: sub.room?.lastMsgAt ?? undefined,
     createdAt: '',
     updatedAt: '',
+    crossSite: sub.room?.crossSite ?? true,
   }
+}
+
+/** Extract the RoomKeysContext seed entry from a subscription's embedded
+ *  room key, or null when the room carries none (plaintext DM / key not
+ *  provisioned). The ONE place that knows the wire key contract — shared
+ *  by the sidebar bootstrap and the live `added` subscription.update path. */
+export function keyEntryFor(
+  sub: Pick<DMSubscription, 'roomId' | 'room'> | undefined,
+): { roomId: string; version: number; privateKey: string } | null {
+  if (!sub) return null
+  const room = sub.room
+  if (!room?.privateKey || typeof room.keyVersion !== 'number') return null
+  return { roomId: sub.roomId, version: room.keyVersion, privateKey: room.privateKey }
 }

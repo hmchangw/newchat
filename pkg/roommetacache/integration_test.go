@@ -67,6 +67,36 @@ func TestReadThrough_NilClientReadsMongo(t *testing.T) {
 	assert.Equal(t, "ops", got.Name)
 }
 
+func TestFetchFromMongo_CrossSite(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "roommetacache")
+	rooms := db.Collection("rooms")
+
+	_, err := rooms.InsertOne(ctx, bson.M{"_id": "rG", "siteId": "site-a", "crossSite": true})
+	require.NoError(t, err)
+	meta, err := FetchFromMongo(ctx, rooms, "rG")
+	require.NoError(t, err)
+	require.NotNil(t, meta.CrossSite)
+	assert.True(t, *meta.CrossSite)
+
+	_, err = rooms.InsertOne(ctx, bson.M{"_id": "rI", "siteId": "site-a", "crossSite": false})
+	require.NoError(t, err)
+	meta, err = FetchFromMongo(ctx, rooms, "rI")
+	require.NoError(t, err)
+	require.NotNil(t, meta.CrossSite)
+	assert.False(t, *meta.CrossSite)
+
+	// A room with no crossSite field at all (unclassified/unbackfilled) must
+	// decode as nil, never false — the fail-safe treats nil as global, so
+	// coercing it to false here would silently misroute a genuinely cross-site
+	// room that just hasn't been backfilled yet.
+	_, err = rooms.InsertOne(ctx, bson.M{"_id": "rH", "siteId": "site-a"})
+	require.NoError(t, err)
+	meta, err = FetchFromMongo(ctx, rooms, "rH")
+	require.NoError(t, err)
+	assert.Nil(t, meta.CrossSite)
+}
+
 func TestBustMeta_RemovesL2Entry(t *testing.T) {
 	ctx := context.Background()
 	client := setupValkey(t)

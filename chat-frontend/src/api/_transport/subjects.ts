@@ -25,8 +25,13 @@ export function msgDelete(account: string, roomId: string, siteId: string): stri
   return `chat.user.${account}.request.room.${roomId}.${siteId}.msg.delete`
 }
 
-export function roomEvent(roomId: string): string {
-  return `chat.room.${roomId}.event`
+// roomEvent builds the per-room channel-event subject. Cross-site rooms
+// stay on the global namespace (unchanged); same-site rooms route to the
+// local namespace so a down remote peer can't affect same-site delivery.
+// Fail-safe: only an explicit `false` routes to the site-local (leaf-filtered)
+// namespace; true/undefined/missing → global, matching the server-side default.
+export function roomEvent(roomId: string, crossSite: boolean): string {
+  return crossSite === false ? `chat.local.room.${roomId}.event` : `chat.room.${roomId}.event`
 }
 
 // roomCreate is the room-service create subject. The site segment is the

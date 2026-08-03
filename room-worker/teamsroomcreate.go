@@ -117,7 +117,13 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			continue
 		}
 		memberSite[member.Account] = user.SiteID
-		sub := newSub(idgen.GenerateUUIDv7(), user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
+		// Human members get owner+member so they can admin the migrated room; bot
+		// and platform-admin accounts stay member-only.
+		roles := []model.Role{model.RoleOwner, model.RoleMember}
+		if model.IsBot(member.Account) || model.IsPlatformAdminAccount(member.Account) {
+			roles = []model.Role{model.RoleMember}
+		}
+		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Name, false, acceptedAt)
 		sub.Origin = model.OriginTeams
 		if !member.VisibleHistoryStartDateTime.IsZero() {
 			t := member.VisibleHistoryStartDateTime.UTC()
@@ -159,7 +165,8 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	}
 	h.bustRoomMeta(ctx, room.ID)
 
-	// Fan the room key out to newly-added members so their clients can decrypt.
+	// Bulk migration keeps the standalone room.key event (interactive paths deliver it inline on
+	// "added"): no live added event fires here, but the key must land before migrated history decrypts.
 	if len(addedUsers) > 0 {
 		if err := h.buildAndFanOutRoomKey(ctx, room.ID, pair, addedUsers); err != nil {
 			return fmt.Errorf("fan out room key: %w", err)

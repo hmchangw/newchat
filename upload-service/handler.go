@@ -57,6 +57,7 @@ type objectStore interface {
 type Handler struct {
 	store          Store
 	drive          driveClient
+	legacyDrive    driveClient
 	s3             objectStore
 	maxImages      int
 	maxAttachments int
@@ -73,11 +74,12 @@ type Handler struct {
 // NewHandler wires the handler dependencies. maxImages/maxImageSize gate the image
 // endpoint; maxAttachments/maxFileSize/mimeFilter/preview gate the file endpoint; s3
 // backs the MinIO/S3 download endpoint; cacheMaxAge is its Cache-Control max-age in
-// seconds; setCookiePartitioned gates the Partitioned attribute on HandleSetCookie.
+// seconds; setCookiePartitioned gates the Partitioned attribute on HandleSetCookie;
+// legacyDrive serves the /api/v3 download from a separate (legacy) Drive backend.
 func NewHandler(store Store, dc driveClient, s3 objectStore, maxImages, maxAttachments int, maxImageSize, maxFileSize int64,
-	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int, setCookiePartitioned bool) *Handler {
+	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
 	return &Handler{
-		store: store, drive: dc, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
+		store: store, drive: dc, legacyDrive: legacyDrive, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
 		maxImageSize: maxImageSize, maxFileSize: maxFileSize, mimeFilter: mimeFilter,
 		preview: preview, cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
 		nowMilli: func() int64 { return time.Now().UTC().UnixMilli() },
@@ -323,6 +325,16 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 // HandleDownloadFile proxies a protected file: it resolves a signed URL from
 // Drive, fetches the bytes, and streams them straight to the client.
 func (h *Handler) HandleDownloadFile(c *gin.Context) {
+	h.downloadFrom(c, h.drive)
+}
+
+// HandleDownloadProtectedImageV3 serves the backward-compatible /api/v3 download for inline images in legacy message data, proxied from the legacy Drive backend (its own URL/api-token).
+func (h *Handler) HandleDownloadProtectedImageV3(c *gin.Context) {
+	h.downloadFrom(c, h.legacyDrive)
+}
+
+// downloadFrom streams a protected file from the given Drive client; the v1 and v3 download endpoints share it, differing only in which backend serves the request.
+func (h *Handler) downloadFrom(c *gin.Context, dc driveClient) {
 	ctx := logCtx(c)
 
 	roomID := c.Param("roomId")
@@ -351,7 +363,7 @@ func (h *Handler) HandleDownloadFile(c *gin.Context) {
 		return
 	}
 
-	img, err := h.drive.GetGroupImage(driveHost, roomID, fileID)
+	img, err := dc.GetGroupImage(driveHost, roomID, fileID)
 	if err != nil {
 		errhttp.Write(ctx, c, errcode.Unavailable("failed to retrieve file", errcode.WithCause(err)))
 		return

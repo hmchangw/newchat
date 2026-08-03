@@ -3,6 +3,7 @@ package subject_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,9 +21,9 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.user.alice.room.r1.site-a.msg.send"},
 		{"UserResponse", subject.UserResponse("alice", "req-1"),
 			"chat.user.alice.response.req-1"},
-		{"RoomMetadataUpdate", subject.RoomMetadataUpdate("r1"),
+		{"RoomMetadataUpdate", subject.RoomMetadataUpdate("r1", true),
 			"chat.room.r1.event.metadata.update"},
-		{"RoomMsgStream", subject.RoomMsgStream("r1"),
+		{"RoomMsgStream", subject.RoomMsgStream("r1", true),
 			"chat.room.r1.stream.msg"},
 		{"UserRoomUpdate", subject.UserRoomUpdate("alice"),
 			"chat.user.alice.event.room.update"},
@@ -66,7 +67,7 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.msg.canonical.site-a.deleted"},
 		{"RoomsInfoBatch", subject.RoomsInfoBatch("site-a"),
 			"chat.server.request.room.site-a.info.batch"},
-		{"RoomEvent", subject.RoomEvent("r1"), "chat.room.r1.event"},
+		{"RoomEvent", subject.RoomEvent("r1", true), "chat.room.r1.event"},
 		{"UserRoomEvent", subject.UserRoomEvent("alice"), "chat.user.alice.event.room"},
 		{"RoomKeyUpdate", subject.RoomKeyUpdate("alice"),
 			"chat.user.alice.event.room.key"},
@@ -1146,6 +1147,92 @@ func TestOpenRoom_ParseUserRoomSubject(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "alice", account)
 	assert.Equal(t, "r1", roomID)
+}
+
+func TestRoomSubjectLocality(t *testing.T) {
+	assert.Equal(t, "chat.room.r1.event", subject.RoomEvent("r1", true))
+	assert.Equal(t, "chat.local.room.r1.event", subject.RoomEvent("r1", false))
+	assert.Equal(t, "chat.room.r1.stream.msg", subject.RoomMsgStream("r1", true))
+	assert.Equal(t, "chat.local.room.r1.stream.msg", subject.RoomMsgStream("r1", false))
+	assert.Equal(t, "chat.room.r1.event.metadata.update", subject.RoomMetadataUpdate("r1", true))
+	assert.Equal(t, "chat.local.room.r1.event.metadata.update", subject.RoomMetadataUpdate("r1", false))
+}
+
+func TestRoomEventTargets(t *testing.T) {
+	g := "chat.room.r1.event"
+	l := "chat.local.room.r1.event"
+	trueP, falseP := true, false
+	now := time.Unix(1_700_000_000, 0).UTC()
+	// cross-site rooms with no flip time (born cross-site) are ALWAYS global.
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, nil, subject.RouteLocal, now))
+	// same-site rooms vary by mode
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &falseP, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &falseP, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{l}, subject.RoomEventTargets("r1", &falseP, nil, subject.RouteLocal, now))
+	// nil (unclassified/unbackfilled) is ALWAYS global, in every mode — the
+	// fail-safe: unknown locality must never be treated as confirmed same-site.
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", nil, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", nil, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", nil, nil, subject.RouteLocal, now))
+}
+
+// TestRoomEventTargets_TransitionGrace covers the post-flip grace window: a room
+// that just flipped same-site→cross-site (crossSite=&true with crossSiteAt set)
+// keeps a LOCAL copy for the grace window when the mode uses local subjects, so
+// same-site members still on the local subject don't go dark until they
+// re-subscribe.
+func TestRoomEventTargets_TransitionGrace(t *testing.T) {
+	g := "chat.room.r1.event"
+	l := "chat.local.room.r1.event"
+	trueP := true
+	flip := time.Unix(1_700_000_000, 0).UTC()
+	within := flip.Add(subject.DefaultRoomLocalityGrace - time.Minute)
+	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
+
+	// Within grace: local + global in local/dual modes.
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, within))
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteDual, within))
+	// Within grace but global mode: no local audience → global only.
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteGlobal, within))
+	// After grace: global only, in every mode.
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, after))
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteDual, after))
+	// Exactly at the boundary is already expired (now.Before is strict).
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(subject.DefaultRoomLocalityGrace)))
+}
+
+// TestSetRoomLocalityGrace verifies the startup override widens/narrows the
+// window, and that a non-positive value is ignored (keeps the default).
+func TestSetRoomLocalityGrace(t *testing.T) {
+	t.Cleanup(func() { subject.SetRoomLocalityGrace(subject.DefaultRoomLocalityGrace) })
+	g := "chat.room.r1.event"
+	l := "chat.local.room.r1.event"
+	trueP := true
+	flip := time.Unix(1_700_000_000, 0).UTC()
+
+	subject.SetRoomLocalityGrace(time.Hour)
+	// A point past the 1h override but well within the default is now expired.
+	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(2*time.Hour)))
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(30*time.Minute)))
+
+	// Non-positive is ignored: window stays at 1h, not reset to zero.
+	subject.SetRoomLocalityGrace(0)
+	assert.Equal(t, []string{l, g}, subject.RoomEventTargets("r1", &trueP, &flip, subject.RouteLocal, flip.Add(30*time.Minute)))
+}
+
+func TestParseRoomRouteMode(t *testing.T) {
+	for in, want := range map[string]subject.RoomRouteMode{
+		"global": subject.RouteGlobal, "dual": subject.RouteDual, "local": subject.RouteLocal,
+		"GLOBAL": subject.RouteGlobal,
+	} {
+		got, err := subject.ParseRoomRouteMode(in)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	}
+	_, err := subject.ParseRoomRouteMode("bogus")
+	require.Error(t, err)
 }
 
 func TestTranslateSubjects(t *testing.T) {
