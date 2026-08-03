@@ -33,12 +33,16 @@ type runner struct {
 // siteStats accumulates one site's outcome across its batches, so the summary is
 // per site rather than per batch. The three outcome counters partition the
 // answered chats, so the checked total is their sum rather than a fourth counter
-// that could drift out of step with them.
+// that could drift out of step with them. failedBatches is separate: it counts
+// batches the inspector never actually answered about (no URL, call error,
+// misrouted reply), so a site whose every batch fails still gets a summary
+// line instead of vanishing silently.
 type siteStats struct {
-	roomsMissing int
-	subsMismatch int
-	ok           int
-	unanswered   int
+	roomsMissing  int
+	subsMismatch  int
+	ok            int
+	unanswered    int
+	failedBatches int
 }
 
 // checked is the number of chats the inspector answered about.
@@ -86,12 +90,15 @@ func (r *runner) run(ctx context.Context) error {
 }
 
 // verifyBatch asks one site about one batch and clears the flag for the chats
-// that converged. Every failure path leaves the batch's chats flagged.
+// that converged. Every failure path leaves the batch's chats flagged and is
+// still counted via addStats so a wholly-failing site keeps appearing in the
+// summary instead of dropping out of it.
 func (r *runner) verifyBatch(ctx context.Context, b batch) {
 	baseURL, ok := r.cfg.SiteURLs[b.siteID]
 	if !ok {
 		slog.WarnContext(ctx, "no inspector URL for site; skipping batch",
 			"site_id", b.siteID, "chats", len(b.chats))
+		r.addStats(b.siteID, &siteStats{failedBatches: 1})
 		return
 	}
 
@@ -103,6 +110,18 @@ func (r *runner) verifyBatch(ctx context.Context, b batch) {
 	if err != nil {
 		slog.WarnContext(ctx, "inspector call failed; chats stay flagged for the next run",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
+		r.addStats(b.siteID, &siteStats{failedBatches: 1})
+		return
+	}
+	// resp.SiteID is echoed by the inspector precisely so a misrouted call (e.g.
+	// a transposed TEAMS_VERIFY_SITE_URLS entry) is obvious here rather than
+	// surfacing as a flood of missing_room mismatches with no hint of the cause.
+	// Older inspectors that predate the echo send an empty SiteID, which this
+	// deliberately does not flag.
+	if resp.SiteID != "" && resp.SiteID != b.siteID {
+		slog.WarnContext(ctx, "inspector responded for a different site than expected; leaving batch flagged",
+			"expected_site_id", b.siteID, "returned_site_id", resp.SiteID, "chats", len(ids))
+		r.addStats(b.siteID, &siteStats{failedBatches: 1})
 		return
 	}
 
@@ -122,14 +141,21 @@ func (r *runner) verifyBatch(ctx context.Context, b batch) {
 				"chat_id", c.ID, "site_id", b.siteID)
 			continue
 		}
-		expected := len(c.Members)
+		// expectedMembers is the raw roster count, reported only for operator
+		// visibility (see logMismatch). The comparison itself uses
+		// accountsPresent: room-worker subscribes only distinct, non-empty
+		// accounts, so comparing against the raw count would mismatch forever on
+		// any chat with a guest/external member (empty account) or a duplicate
+		// account — MarkVerified is the only writer that clears the flag, so that
+		// mismatch would never converge and the flagged set would grow unbounded.
+		expectedMembers := len(c.Members)
 		switch {
 		case !res.RoomExists:
 			st.roomsMissing++
-			r.logMismatch(ctx, c, &res, b.siteID, expected, "missing_room")
-		case res.SubscriptionCount != expected:
+			r.logMismatch(ctx, c, &res, b.siteID, expectedMembers, "missing_room")
+		case res.SubscriptionCount != accountsPresent(c.Members):
 			st.subsMismatch++
-			r.logMismatch(ctx, c, &res, b.siteID, expected, "subscription_mismatch")
+			r.logMismatch(ctx, c, &res, b.siteID, expectedMembers, "subscription_mismatch")
 		default:
 			st.ok++
 			refs = append(refs, VerifiedRef{ID: c.ID, UpdatedAt: c.UpdatedAt})
@@ -143,9 +169,11 @@ func (r *runner) verifyBatch(ctx context.Context, b batch) {
 	}
 }
 
-// logMismatch reports one chat that did not converge. accounts_present is the
-// diagnostic that separates a genuine gap from a member room-worker legitimately
-// skipped (a guest with no account).
+// logMismatch reports one chat that did not converge. accounts_present is what
+// the comparison is actually checked against (distinct, non-empty accounts —
+// what room-worker subscribes); expected_members is the raw roster count,
+// carried only so an operator can see how a guest/external member or a
+// duplicate account explains the gap.
 func (r *runner) logMismatch(ctx context.Context, c *model.TeamsChat, res *model.TeamsRoomVerifyResult, siteID string, expected int, reason string) {
 	slog.WarnContext(ctx, "teams room verification mismatch",
 		"chat_id", c.ID,
@@ -171,9 +199,11 @@ func (r *runner) addStats(siteID string, st *siteStats) {
 	agg.subsMismatch += st.subsMismatch
 	agg.ok += st.ok
 	agg.unanswered += st.unanswered
+	agg.failedBatches += st.failedBatches
 }
 
-// logSummary emits one line per site that answered.
+// logSummary emits one line per site with recorded stats, including a site
+// whose every batch failed (failedBatches is nonzero, all other counters 0).
 func (r *runner) logSummary(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -184,7 +214,8 @@ func (r *runner) logSummary(ctx context.Context) {
 			"rooms_missing", st.roomsMissing,
 			"subs_mismatched", st.subsMismatch,
 			"chats_ok", st.ok,
-			"chats_unanswered", st.unanswered)
+			"chats_unanswered", st.unanswered,
+			"failed_batches", st.failedBatches)
 	}
 }
 

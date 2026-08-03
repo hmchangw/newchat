@@ -16,6 +16,14 @@ import (
 // config validation refuses a batch size above it.
 const maxChatIDsPerRequest = model.TeamsRoomVerifyMaxChatIDs
 
+// verifyRequestBodyMaxBytes caps the request body read by ShouldBindJSON,
+// which otherwise buffers the whole body before the maxChatIDsPerRequest
+// check runs. The endpoint is unauthenticated (cluster-internal by design),
+// so this is the only guard against an unbounded body. Sized generously for
+// maxChatIDsPerRequest Graph chat ids (each well under 256 bytes as a quoted
+// JSON string) plus envelope overhead.
+const verifyRequestBodyMaxBytes = maxChatIDsPerRequest*256 + 4*1024
+
 // Handler serves the read-only verification endpoint for this site.
 type Handler struct {
 	store  RoomStore
@@ -38,6 +46,7 @@ func (h *Handler) HandleHealth(c *gin.Context) {
 func (h *Handler) HandleVerify(c *gin.Context) {
 	ctx := c.Request.Context()
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, verifyRequestBodyMaxBytes)
 	var req model.TeamsRoomVerifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errhttp.Write(ctx, c, errcode.BadRequest("decode verify request"))

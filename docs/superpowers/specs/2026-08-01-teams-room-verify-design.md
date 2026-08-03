@@ -119,10 +119,18 @@ For each chat in the response:
   mismatch**, in either direction (shortfall or extra).
 - otherwise → match; the chat's ref is cleared.
 
-Expected count is the raw `len(chat.Members)`. `room-worker` skips members with
-an empty `account` (guests and externals absent from `teams_user`), so a chat
-containing one reports as mismatched on every run. To keep that
-distinguishable from a genuine gap, every mismatch log carries both numbers.
+Expected count is `accountsPresent(chat.Members)` — distinct, non-empty
+`account` values — not the raw `len(chat.Members)`. `room-worker` subscribes
+exactly that set: it skips members with an empty `account` (guests and
+externals absent from `teams_user`) and collapses duplicate accounts to one
+subscription. Comparing against the raw member count would mismatch forever
+for any chat containing a guest or a duplicate account — `MarkVerified` is the
+only writer that clears `needVerify`, so a permanent mismatch means the flag
+never clears and the flagged set grows without bound, burying genuine
+`missing_room` alarms under noise. The raw member count is still carried in
+every mismatch log (`expected_members`) alongside `accounts_present`, so an
+operator can see the full roster even though only the latter drives the
+pass/fail decision.
 
 ### Logging
 

@@ -30,22 +30,33 @@ func chat(id, site string, accounts ...string) model.TeamsChat {
 }
 
 // recordingVerifier returns a verifyFunc that answers from results (keyed by
-// chat id) and records the base URLs it was called with.
+// chat id) and records the base URLs it was called with. err fails every
+// call; siteErrs fails only calls for the named site (checked first, so a
+// per-site error takes priority over the blanket err on the same call).
+// respSiteID, when set, overrides the echoed SiteID in every response — used
+// to simulate a misrouted inspector reply.
 type recordingVerifier struct {
-	mu      sync.Mutex
-	calls   []string
-	results map[string]model.TeamsRoomVerifyResult
-	err     error
+	mu         sync.Mutex
+	calls      []string
+	results    map[string]model.TeamsRoomVerifyResult
+	err        error
+	siteErrs   map[string]error
+	respSiteID string
 }
 
 func (rv *recordingVerifier) fn(_ context.Context, baseURL string, chatIDs []string) (*model.TeamsRoomVerifyResponse, error) {
 	rv.mu.Lock()
 	rv.calls = append(rv.calls, baseURL)
 	rv.mu.Unlock()
+	if rv.siteErrs != nil {
+		if err, ok := rv.siteErrs[baseURL]; ok {
+			return nil, err
+		}
+	}
 	if rv.err != nil {
 		return nil, rv.err
 	}
-	resp := &model.TeamsRoomVerifyResponse{RequestedCount: len(chatIDs)}
+	resp := &model.TeamsRoomVerifyResponse{RequestedCount: len(chatIDs), SiteID: rv.respSiteID}
 	for _, id := range chatIDs {
 		res, ok := rv.results[id]
 		if !ok {
@@ -106,13 +117,16 @@ func TestRunner_ClearsOnlyConvergedChats(t *testing.T) {
 	assert.Equal(t, chats[0].UpdatedAt, marked[0].UpdatedAt, "the CAS token is the listed updatedAt")
 }
 
-func TestRunner_MembersWithoutAccountsStillCountAsExpected(t *testing.T) {
+func TestRunner_GuestMemberChatConverges(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockTeamsChatStore(ctrl)
 
-	// A guest with no account: room-worker skips it, so the site holds 1
-	// subscription while the raw member count is 2. Per spec, expected is the
-	// raw member count, so this reports as a mismatch and keeps its flag.
+	// A guest with no account: room-worker skips it (it subscribes only
+	// distinct, non-empty accounts), so the site legitimately holds 1
+	// subscription while the raw member count is 2. The comparison uses
+	// accountsPresent (also 1 here), so this converges and clears its flag —
+	// comparing against the raw member count would mismatch forever and the
+	// chat would never verify.
 	guestChat := chat("c-guest", "site-a", "alice")
 	guestChat.Members = append(guestChat.Members, model.TeamsChatMember{ID: "g-x", Account: ""})
 	store.EXPECT().ListChatsNeedingVerify(gomock.Any()).Return([]model.TeamsChat{guestChat}, nil)
@@ -120,10 +134,50 @@ func TestRunner_MembersWithoutAccountsStillCountAsExpected(t *testing.T) {
 	rv := &recordingVerifier{results: map[string]model.TeamsRoomVerifyResult{
 		"c-guest": result("c-guest", true, 1),
 	}}
-	store.EXPECT().MarkVerified(gomock.Any(), gomock.Len(0)).Return(nil).AnyTimes()
+	var marked []VerifiedRef
+	store.EXPECT().MarkVerified(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, refs []VerifiedRef) error {
+			marked = append(marked, refs...)
+			return nil
+		})
 
 	r := newRunner(store, rv.fn, testRunConfig())
 	require.NoError(t, r.run(context.Background()))
+
+	require.Len(t, marked, 1, "the guest chat converges and its flag is cleared")
+	assert.Equal(t, "c-guest", marked[0].ID)
+
+	st := r.stats["site-a"]
+	require.NotNil(t, st)
+	assert.Equal(t, 1, st.ok)
+	assert.Equal(t, 0, st.subsMismatch)
+}
+
+func TestRunner_DuplicateAccountChatConverges(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockTeamsChatStore(ctrl)
+
+	// Two member rows, same account: room-worker also collapses duplicates to
+	// one subscription, so the site holds 1 subscription against a raw member
+	// count of 2. accountsPresent also collapses to 1, so this converges.
+	dupChat := chat("c-dup", "site-a", "alice", "alice")
+	store.EXPECT().ListChatsNeedingVerify(gomock.Any()).Return([]model.TeamsChat{dupChat}, nil)
+
+	rv := &recordingVerifier{results: map[string]model.TeamsRoomVerifyResult{
+		"c-dup": result("c-dup", true, 1),
+	}}
+	var marked []VerifiedRef
+	store.EXPECT().MarkVerified(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, refs []VerifiedRef) error {
+			marked = append(marked, refs...)
+			return nil
+		})
+
+	r := newRunner(store, rv.fn, testRunConfig())
+	require.NoError(t, r.run(context.Background()))
+
+	require.Len(t, marked, 1, "the duplicate-account chat converges and its flag is cleared")
+	assert.Equal(t, "c-dup", marked[0].ID)
 }
 
 func TestRunner_RoutesEachSiteToItsOwnInspector(t *testing.T) {
@@ -166,6 +220,11 @@ func TestRunner_UnknownSiteIsSkipped(t *testing.T) {
 	r := newRunner(store, rv.fn, testRunConfig())
 	require.NoError(t, r.run(context.Background()))
 	assert.Empty(t, rv.calls)
+
+	st := r.stats["site-unknown"]
+	require.NotNil(t, st, "an unknown site must still appear in the summary")
+	assert.Equal(t, 1, st.failedBatches)
+	assert.Equal(t, 0, st.checked())
 }
 
 func TestRunner_InspectorFailureLeavesFlags(t *testing.T) {
@@ -178,6 +237,76 @@ func TestRunner_InspectorFailureLeavesFlags(t *testing.T) {
 	rv := &recordingVerifier{err: errors.New("connection refused")}
 	r := newRunner(store, rv.fn, testRunConfig())
 	require.NoError(t, r.run(context.Background()), "a site failure must not fail the whole run")
+
+	st := r.stats["site-a"]
+	require.NotNil(t, st, "a wholly-failed site must still appear in the summary")
+	assert.Equal(t, 1, st.failedBatches)
+	assert.Equal(t, 0, st.checked())
+}
+
+func TestRunner_OneSiteFailureDoesNotAffectAnotherSite(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockTeamsChatStore(ctrl)
+	store.EXPECT().ListChatsNeedingVerify(gomock.Any()).Return([]model.TeamsChat{
+		chat("c-a", "site-a", "alice"),
+		chat("c-b", "site-b", "bob"),
+	}, nil)
+
+	rv := &recordingVerifier{
+		results: map[string]model.TeamsRoomVerifyResult{
+			"c-a": result("c-a", true, 1),
+			"c-b": result("c-b", true, 1),
+		},
+		siteErrs: map[string]error{"http://inspector-a": errors.New("connection refused")},
+	}
+	var marked []VerifiedRef
+	store.EXPECT().MarkVerified(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, refs []VerifiedRef) error {
+			marked = append(marked, refs...)
+			return nil
+		}).AnyTimes()
+
+	r := newRunner(store, rv.fn, testRunConfig())
+	require.NoError(t, r.run(context.Background()))
+
+	require.Len(t, marked, 1, "only the healthy site's converged chat is cleared")
+	assert.Equal(t, "c-b", marked[0].ID)
+
+	stA := r.stats["site-a"]
+	require.NotNil(t, stA, "the failing site must still appear in stats")
+	assert.Equal(t, 1, stA.failedBatches)
+	assert.Equal(t, 0, stA.ok, "the failing site contributes zero refs")
+	assert.Equal(t, 0, stA.checked())
+
+	stB := r.stats["site-b"]
+	require.NotNil(t, stB, "the healthy site must appear in stats")
+	assert.Equal(t, 1, stB.ok)
+	assert.Equal(t, 0, stB.failedBatches)
+}
+
+func TestRunner_MisroutedResponseLeavesBatchFlagged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockTeamsChatStore(ctrl)
+	store.EXPECT().ListChatsNeedingVerify(gomock.Any()).Return([]model.TeamsChat{
+		chat("c-a", "site-a", "alice"),
+	}, nil)
+
+	// The inspector at inspector-a answers, but echoes a different site id — a
+	// transposed TEAMS_VERIFY_SITE_URLS entry. No MarkVerified call: the chat
+	// stays flagged.
+	rv := &recordingVerifier{
+		results:    map[string]model.TeamsRoomVerifyResult{"c-a": result("c-a", true, 1)},
+		respSiteID: "site-b",
+	}
+
+	r := newRunner(store, rv.fn, testRunConfig())
+	require.NoError(t, r.run(context.Background()))
+
+	st := r.stats["site-a"]
+	require.NotNil(t, st)
+	assert.Equal(t, 1, st.failedBatches, "a misrouted reply counts as a failed batch")
+	assert.Equal(t, 0, st.ok)
+	assert.Equal(t, 0, st.checked())
 }
 
 func TestRunner_MissingResultLeavesFlag(t *testing.T) {

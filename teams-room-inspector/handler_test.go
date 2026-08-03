@@ -102,6 +102,12 @@ func TestHandler_HandleVerify_InvalidInput(t *testing.T) {
 	tooManyJSON, err := json.Marshal(model.TeamsRoomVerifyRequest{ChatIDs: tooMany})
 	require.NoError(t, err)
 
+	// A body over verifyRequestBodyMaxBytes must 400 during the read, not after
+	// a full unbounded decode — the endpoint is unauthenticated and
+	// cluster-internal, so this is the only guard against an oversized body.
+	oversizedChatID := `"` + strings.Repeat("x", verifyRequestBodyMaxBytes) + `"`
+	oversizedJSON := `{"chatIds":[` + oversizedChatID + `]}`
+
 	tests := []struct {
 		name string
 		body string
@@ -111,6 +117,7 @@ func TestHandler_HandleVerify_InvalidInput(t *testing.T) {
 		{"empty array", `{"chatIds":[]}`},
 		{"missing field", `{}`},
 		{"over the limit", string(tooManyJSON)},
+		{"body too large", oversizedJSON},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

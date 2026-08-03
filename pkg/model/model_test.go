@@ -5030,3 +5030,68 @@ func TestTeamsRoomVerifyResponseJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestTeamsChatBSON_NeedVerify checks the raw BSON key for NeedVerify — a
+// typo'd tag here would silently break teams-room-verify's flag-clear filter
+// (ListChatsNeedingVerify / MarkVerified both filter on this exact key), and a
+// JSON-only round-trip cannot catch that.
+func TestTeamsChatBSON_NeedVerify(t *testing.T) {
+	c := model.TeamsChat{ID: "19:abc@thread.v2", SiteID: "site-a", NeedVerify: true}
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	require.Contains(t, rawDoc, "needVerify", "BSON doc must have needVerify key")
+	assert.Equal(t, true, rawDoc["needVerify"])
+}
+
+// TestTeamsRoomVerifyRequestBSON checks the raw BSON key for
+// TeamsRoomVerifyRequest.ChatIDs. This type isn't persisted, but
+// teams-room-verify's client and pkg/model share this struct, so a tag typo
+// here is worth catching the same way as the persisted types.
+func TestTeamsRoomVerifyRequestBSON(t *testing.T) {
+	r := model.TeamsRoomVerifyRequest{ChatIDs: []string{"19:abc@thread.v2"}}
+	data, err := bson.Marshal(&r)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "chatIds", "BSON doc must have chatIds key")
+}
+
+// TestTeamsRoomVerifyResultBSON checks the raw BSON keys for
+// TeamsRoomVerifyResult, one element of TeamsRoomVerifyResponse.Chats.
+func TestTeamsRoomVerifyResultBSON(t *testing.T) {
+	res := model.TeamsRoomVerifyResult{
+		ChatID: "19:abc@thread.v2", RoomID: "7bQ1kR2mN8xY4pL0v",
+		RoomExists: true, SubscriptionCount: 5, RoomUserCount: 5,
+	}
+	data, err := bson.Marshal(&res)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	for _, key := range []string{"chatId", "roomId", "roomExists", "subscriptionCount", "roomUserCount"} {
+		assert.Contains(t, rawDoc, key, "BSON doc must have %q key", key)
+	}
+	assert.Equal(t, true, rawDoc["roomExists"])
+}
+
+// TestTeamsRoomVerifyResponseBSON checks the raw BSON keys for
+// TeamsRoomVerifyResponse, including the misroute-guard field SiteID.
+func TestTeamsRoomVerifyResponseBSON(t *testing.T) {
+	resp := model.TeamsRoomVerifyResponse{
+		SiteID: "site-a", RequestedCount: 2, FoundCount: 1,
+		Chats: []model.TeamsRoomVerifyResult{{ChatID: "19:abc@thread.v2"}},
+	}
+	data, err := bson.Marshal(&resp)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	for _, key := range []string{"siteId", "requestedCount", "foundCount", "chats"} {
+		assert.Contains(t, rawDoc, key, "BSON doc must have %q key", key)
+	}
+	assert.Equal(t, "site-a", rawDoc["siteId"])
+}

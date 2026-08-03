@@ -117,9 +117,11 @@ type TeamsRoomVerifyRequest struct {
 }
 
 // TeamsRoomVerifyResult is one chat's state at the answering site.
-// SubscriptionCount is the live count of subscription documents for the room;
-// RoomUserCount is the room's denormalized counter, reported so drift between
-// the two is visible. Both are zero when RoomExists is false.
+// SubscriptionCount is the live count of subscription documents for the room
+// and is what teams-room-verify's pass/fail comparison uses. RoomUserCount is
+// the room's denormalized counter; it plays no part in that comparison and is
+// carried purely as extra context in the mismatch log, for diagnosing why a
+// chat didn't converge. Both are zero when RoomExists is false.
 type TeamsRoomVerifyResult struct {
 	ChatID            string `json:"chatId" bson:"chatId"`
 	RoomID            string `json:"roomId" bson:"roomId"`
