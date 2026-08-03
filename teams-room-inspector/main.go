@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/flywindy/o11y"
 	o11ygin "github.com/flywindy/o11y/gin"
 	"github.com/gin-gonic/gin"
 
@@ -44,6 +45,25 @@ func main() {
 	}
 }
 
+// newServer builds the fully-wired HTTP server: middleware chain, routes and
+// timeouts. It neither listens nor dials anything, so it is unit-testable.
+func newServer(cfg Config, sdk *o11y.SDK, h *Handler) *http.Server { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(o11ygin.Middleware("teams-room-inspector", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
+	r.Use(gin.Recovery())
+	r.Use(ginutil.RequestID())
+	r.Use(ginutil.AccessLog())
+	registerRoutes(r, h)
+
+	return &http.Server{
+		Addr:         fmt.Sprintf(":%s", cfg.Port),
+		Handler:      r,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+}
+
 // run wires dependencies and serves until shutdown. It returns an error rather
 // than calling os.Exit so deferred cleanup always runs.
 func run() error {
@@ -70,26 +90,11 @@ func run() error {
 	}
 
 	handler := NewHandler(newMongoStore(mongoClient.Database(cfg.MongoDB)), cfg.SiteID)
-
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(o11ygin.Middleware("teams-room-inspector", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
-	r.Use(gin.Recovery())
-	r.Use(ginutil.RequestID())
-	r.Use(ginutil.AccessLog())
-	registerRoutes(r, handler)
-
-	addr := fmt.Sprintf(":%s", cfg.Port)
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-	}
+	srv := newServer(cfg, sdk, handler)
 
 	srvErr := make(chan error, 1)
 	go func() {
-		slog.Info("teams-room-inspector starting", "addr", addr, "site_id", cfg.SiteID)
+		slog.Info("teams-room-inspector starting", "addr", srv.Addr, "site_id", cfg.SiteID)
 		srvErr <- srv.ListenAndServe()
 	}()
 
