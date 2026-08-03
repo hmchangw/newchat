@@ -344,10 +344,13 @@ func TestPreviewCache_SingleflightDedupsConcurrentMisses(t *testing.T) {
 	ctx := context.Background()
 
 	var calls int32
-	start := make(chan struct{})
+	started := make(chan struct{}, 1) // the leader loader signals it has entered
+	start := make(chan struct{})      // then blocks here until released
 	load := func(context.Context) (pkgmodel.PreviewMessage, bool, error) {
-		atomic.AddInt32(&calls, 1)
-		<-start // hold all callers inside the loader until released
+		if atomic.AddInt32(&calls, 1) == 1 {
+			started <- struct{}{}
+		}
+		<-start // hold the leader inside the loader so followers coalesce onto its flight
 		return pkgmodel.PreviewMessage{MessageID: "m1"}, true, nil
 	}
 
@@ -357,16 +360,15 @@ func TestPreviewCache_SingleflightDedupsConcurrentMisses(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() { defer wg.Done(); _, _, _ = pc.Get(ctx, "r1", load) }()
 	}
-	// Give goroutines time to coalesce on the same key, then release.
-	time.Sleep(20 * time.Millisecond)
-	close(start)
+	<-started    // first loader has entered the flight
+	close(start) // release it
 	wg.Wait()
 
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "concurrent misses coalesce to one load")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "concurrent misses for the same key should load once")
 }
 ```
 
-Add imports `"sync"` and `"sync/atomic"` to the test file. (The `time.Sleep` here is a test-only coordination aid for exercising concurrency, not production goroutine synchronization.)
+Add imports `"sync"` and `"sync/atomic"` to the test file. This mirrors the existing `TestSubscriptionCache_SingleflightDedupesConcurrentMisses`: a loader-entry channel deterministically releases the leader once it is in-flight — no `time.Sleep`, per the coding guideline against timing-based goroutine synchronization.
 
 - [ ] **Step 6: Run tests — confirm pass**
 
