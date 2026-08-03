@@ -237,7 +237,7 @@ type PreviewCache struct {
 func NewPreviewCache(size int, ttl time.Duration) (*PreviewCache, error) {
 	c, err := newTTLCache[previewEntry](size, ttl, cachemetrics.For("history_room_preview", "l1"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create preview cache: %w", err)
 	}
 	return &PreviewCache{cache: c}, nil
 }

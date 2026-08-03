@@ -96,10 +96,13 @@ concurrent misses for the same room.
 
 ### 1c. Instrument (prerequisite for deciding on Phase 2)
 
-The service emits no DB-level signal today (noted in the 2026-05-28 perf spec). Add:
-- `rooms.get` per-room latency + Cassandra queries-per-preview (buckets walked),
-- preview cache hit/miss,
-- `rooms.get` batch size (N) distribution.
+The service emits no DB-level signal today (noted in the 2026-05-28 perf spec).
+Phase 1 adds:
+- preview cache hit/miss/error (via `cachemetrics`),
+- `rooms.get` batch size (N) distribution (`history_rooms_get_batch_size`).
+
+Deferred — add only if the two above prove insufficient for the Phase-2 decision:
+- `rooms.get` per-room latency + Cassandra queries-per-preview (buckets walked).
 
 This turns the Phase-2 decision into an evidence-based one and quantifies whether the
 assumed write concern is even relevant.
