@@ -43,6 +43,7 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	}
 
 	ids := dedupRoomIDs(req.RoomIDs)
+	roomsGetBatchSize.Record(c, int64(len(ids)))
 	now := time.Now().UTC()
 
 	out := make(map[string]models.PreviewMessage, len(ids))
