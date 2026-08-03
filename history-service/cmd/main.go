@@ -169,8 +169,19 @@ func main() {
 		slog.Info("room cache enabled", "size", cfg.RoomCacheSize, "ttl", cfg.RoomCacheTTL)
 	}
 
+	var opts []service.Option
+	if cfg.PreviewCacheSize > 0 && cfg.PreviewCacheTTL > 0 {
+		pc, err := readcache.NewPreviewCache(cfg.PreviewCacheSize, cfg.PreviewCacheTTL)
+		if err != nil {
+			slog.Error("init preview cache failed", "error", err)
+			os.Exit(1)
+		}
+		opts = append(opts, service.WithPreviewCache(pc))
+		slog.Info("preview cache enabled", "size", cfg.PreviewCacheSize, "ttl", cfg.PreviewCacheTTL)
+	}
+
 	pub := publisher.New(js)
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg)
+	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
 	router := natsrouter.New(nc, "history-service")
 	router.Use(natsrouter.Recovery())
 	// RequestID must precede any handler that reads request_id from ctx —

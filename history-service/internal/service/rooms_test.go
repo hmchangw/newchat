@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	readcache "github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
 	"github.com/hmchangw/chat/pkg/model"
@@ -56,6 +57,25 @@ func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.Mock
 	return svc, msgs, rooms, apps
 }
 
+// newRoomsServiceWithPreviewCache installs a real PreviewCache so RoomsGet routes
+// through it (cache-hit behavior on the second/third read of the same room).
+func newRoomsServiceWithPreviewCache(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
+	ctrl := gomock.NewController(t)
+	msgs := mocks.NewMockMessageRepository(ctrl)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomRepository(ctrl)
+	pub := mocks.NewMockEventPublisher(ctrl)
+	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	users := mocks.NewMockUserStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
+	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	pc, err := readcache.NewPreviewCache(100, time.Minute)
+	require.NoError(t, err)
+	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, service.WithPreviewCache(pc))
+	return svc, msgs, rooms
+}
+
 func roomsCtx() *natsrouter.Context {
 	return natsrouter.NewContext(map[string]string{"account": "alice"})
 }
@@ -65,6 +85,23 @@ var roomCreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Mirror the production caps (house pattern — see maxGetByIDsBatchSize in messages_test).
 const roomsGetMaxBatch = 100
+
+func TestHistoryService_RoomsGet_PreviewCacheHitSkipsRead(t *testing.T) {
+	svc, msgs, rooms := newRoomsServiceWithPreviewCache(t)
+
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}},
+		}, false), nil).Times(1)
+
+	for i := 0; i < 3; i++ {
+		resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+		require.NoError(t, err)
+		require.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	}
+	// Times(1) on both reads asserts the 2nd and 3rd calls were cache hits.
+}
 
 func TestHistoryService_RoomsGet_LatestMessage(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)

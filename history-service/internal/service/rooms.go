@@ -62,7 +62,7 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			lm, ok := s.roomLastPreviewMessage(c, roomID, now)
+			lm, ok := s.resolvePreview(c, roomID, now)
 			if !ok {
 				return
 			}
@@ -74,6 +74,25 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	wg.Wait()
 
 	return &models.RoomsGetResponse{Rooms: out}, nil
+}
+
+// resolvePreview resolves one room's preview, serving it from the preview cache
+// when installed. The cache is positives-only, so empty rooms and read failures
+// fall through to a fresh resolve. previewAfterMutation (edit/delete) keeps
+// calling roomLastPreviewMessage directly so mutations always see fresh state.
+func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, now time.Time) (models.PreviewMessage, bool) {
+	if s.previewCache == nil {
+		return s.roomLastPreviewMessage(ctx, roomID, now)
+	}
+	preview, ok, err := s.previewCache.Get(ctx, roomID, func(ctx context.Context) (models.PreviewMessage, bool, error) {
+		p, found := s.roomLastPreviewMessage(ctx, roomID, now)
+		return p, found, nil
+	})
+	if err != nil {
+		// ctx cancelled while waiting on a shared load — degrade like a read miss.
+		return models.PreviewMessage{}, false
+	}
+	return preview, ok
 }
 
 // roomLastPreviewMessage resolves one room's latest eligible preview message at read time.
