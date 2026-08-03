@@ -15,7 +15,6 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
-	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
 // processTeamsRoomCreate reconciles each chat in a Teams room-creation batch
@@ -48,16 +47,18 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		return errors.New("chat has no id")
 	}
 
-	// RoomIDFromChatID turns the Teams chat id into a room id (a Graph id's dots
-	// and @ break NATS subject tokenisation); teams-room-inspector calls the same
-	// function to look the room back up. Name falls back to the members when the
-	// chat has no topic (a DM or an unnamed group).
+	// A Teams chat id (…@thread.v2 / …@unq.gbl.spaces) can't be a room id — its
+	// dots/@ break NATS subject tokenisation — so derive a base62 id from it
+	// deterministically (same id on every redelivery). teams-room-inspector
+	// repeats this exact derivation to look the room back up, so the two must be
+	// changed together. Name falls back to the members when the chat has no topic
+	// (a DM or an unnamed group).
 	name := chat.Name
 	if name == "" {
 		name = composeMigratedRoomName(chat.Members)
 	}
 	room := &model.Room{
-		ID:        teamsmigrate.RoomIDFromChatID(chat.ID),
+		ID:        idgen.DeterministicID([]byte(chat.ID)),
 		Name:      name,
 		Type:      roomTypeFromTeamsChatID(chat.ID),
 		SiteID:    h.siteID,
