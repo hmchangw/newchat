@@ -78,9 +78,16 @@ type config struct {
 	// JetStream consumer pending counts. Defaults to the docker-compose
 	// service name. Override (e.g. `http://127.0.0.1:8222/jsz` on the host,
 	// or a custom monitoring port) when running against non-default infra.
-	NatsMonitoringURL string           `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
-	Bottleneck        bottleneckConfig `envPrefix:"BOTTLENECK_"`
-	Soak              soakConfig       `envPrefix:"SOAK_"`
+	NatsMonitoringURL string `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
+
+	// auth-service base URL for the `login` max-rps workload. Every other
+	// workload reaches NATS with a pre-provisioned creds file and never touches
+	// the HTTP auth leg, so this stays optional and the workload fail-fasts
+	// when it is empty.
+	AuthURL string `env:"AUTH_URL" envDefault:""`
+
+	Bottleneck bottleneckConfig `envPrefix:"BOTTLENECK_"`
+	Soak       soakConfig       `envPrefix:"SOAK_"`
 }
 
 func main() {
