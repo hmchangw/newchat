@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status: implemented and superseded.** This is the historical task-by-task
+> plan. Review during implementation changed two rules it specifies — the
+> comparison now uses `accountsPresent`, not the raw member count, and a
+> misrouted inspector reply is rejected — and the snippets below have been
+> corrected to match. For current behavior read the code and
+> `docs/superpowers/specs/2026-08-01-teams-room-verify-design.md`, not this file.
+
 **Goal:** Flag every Teams chat whose room-creation event was published, then audit each site to confirm the room and its subscriptions actually exist there.
 
 **Architecture:** `teams-room-creation` sets `needVerify=true` in the same write that clears `needCreateRoom`. A new global CronJob `teams-room-verify` reads those flagged chats from the global Mongo, groups them by `siteId`, and asks each site's new `teams-room-inspector` (a read-only Gin service reading that site's own Mongo) how many rooms and subscriptions exist for a batch of Teams chat ids. The verifier compares against the chat's member count and clears the flag only for chats that converged.
@@ -1949,6 +1956,16 @@ func (r *runner) verifyBatch(ctx context.Context, b batch) {
 	if err != nil {
 		slog.WarnContext(ctx, "inspector call failed; chats stay flagged for the next run",
 			"site_id", b.siteID, "chats", len(ids), "error", err)
+		r.addStats(b.siteID, &siteStats{failedBatches: 1})
+		return
+	}
+
+	// A transposed SiteURLs entry would otherwise report every chat as a missing
+	// room. Reject the batch instead, leaving every chat flagged.
+	if resp.SiteID != "" && resp.SiteID != b.siteID {
+		slog.WarnContext(ctx, "inspector answered for a different site; skipping batch",
+			"expected_site_id", b.siteID, "returned_site_id", resp.SiteID, "chats", len(ids))
+		r.addStats(b.siteID, &siteStats{failedBatches: 1})
 		return
 	}
 
@@ -1968,15 +1985,19 @@ func (r *runner) verifyBatch(ctx context.Context, b batch) {
 				"chat_id", c.ID, "site_id", b.siteID)
 			continue
 		}
-		st.checked++
-		expected := len(c.Members)
+		// expectedMembers is the raw roster count, logged for operator visibility
+		// only. The comparison uses accountsPresent: room-worker subscribes only
+		// distinct, non-empty accounts, so comparing against the raw count would
+		// mismatch forever on any chat with a guest or a duplicate account, and
+		// such a chat could never clear its flag.
+		expectedMembers := len(c.Members)
 		switch {
 		case !res.RoomExists:
 			st.roomsMissing++
-			r.logMismatch(ctx, c, &res, b.siteID, expected, "missing_room")
-		case res.SubscriptionCount != expected:
+			r.logMismatch(ctx, c, &res, b.siteID, expectedMembers, "missing_room")
+		case res.SubscriptionCount != accountsPresent(c.Members):
 			st.subsMismatch++
-			r.logMismatch(ctx, c, &res, b.siteID, expected, "subscription_mismatch")
+			r.logMismatch(ctx, c, &res, b.siteID, expectedMembers, "subscription_mismatch")
 		default:
 			st.ok++
 			refs = append(refs, VerifiedRef{ID: c.ID, UpdatedAt: c.UpdatedAt})

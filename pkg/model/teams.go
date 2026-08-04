@@ -121,7 +121,12 @@ type TeamsRoomVerifyRequest struct {
 // and is what teams-room-verify's pass/fail comparison uses. RoomUserCount is
 // the room's denormalized counter; it plays no part in that comparison and is
 // carried purely as extra context in the mismatch log, for diagnosing why a
-// chat didn't converge. Both are zero when RoomExists is false.
+// chat didn't converge.
+//
+// RoomUserCount is always zero when RoomExists is false — it is read off the
+// room document. SubscriptionCount is NOT: subscriptions can outlive their room
+// (or precede it), so a missing room may still report a non-zero count, which is
+// itself a useful signal that the room was deleted out from under its members.
 type TeamsRoomVerifyResult struct {
 	ChatID            string `json:"chatId" bson:"chatId"`
 	RoomID            string `json:"roomId" bson:"roomId"`

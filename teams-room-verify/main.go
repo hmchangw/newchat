@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
@@ -32,6 +33,21 @@ func main() {
 		slog.Error("teams-room-verify failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// disconnectTimeout bounds each Mongo disconnect at exit. Without a deadline an
+// unresponsive node would block the deferred cleanup and hold the pod past its
+// termination grace period until the kubelet kills it.
+const disconnectTimeout = 10 * time.Second
+
+// disconnect closes a Mongo client under a fresh, independently-bounded context.
+// Not the run context: that one is the shutdown-signal context and is already
+// canceled by the time this runs after a SIGTERM, which would make the driver
+// abort the handshake instead of draining pooled connections cleanly.
+func disconnect(client *mongo.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), disconnectTimeout)
+	defer cancel()
+	mongoutil.Disconnect(ctx, client)
 }
 
 // run wires dependencies and performs one pass. It returns an error rather than
@@ -59,13 +75,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("mongo read connect: %w", err)
 	}
-	defer mongoutil.Disconnect(context.Background(), readClient)
+	defer disconnect(readClient)
 
 	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
 	if err != nil {
 		return fmt.Errorf("mongo write connect: %w", err)
 	}
-	defer mongoutil.Disconnect(context.Background(), writeClient)
+	defer disconnect(writeClient)
 
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
 	r := newRunner(store, newHTTPVerifier(inspectorTimeout), runConfig{
