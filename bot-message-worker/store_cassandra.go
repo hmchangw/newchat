@@ -65,7 +65,7 @@ func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atres
 
 // SaveMessage inserts into messages_by_room + messages_by_id via one UnloggedBatch.
 func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, siteID string) error {
-	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveMessage", msg.RoomID)
+	ctx, span := s.startSpan(ctx, "cassandra.SaveMessage", msg.RoomID, msg.ID)
 	defer span.End()
 
 	if s.cipher != nil {
@@ -146,7 +146,7 @@ func (s *CassandraStore) saveEncrypted(ctx context.Context, msg *model.Message, 
 // SaveThreadMessage inserts into messages_by_id + thread_messages_by_thread, mirroring to
 // messages_by_room when TShow is true, then blind-SETs tcount/tlm from a bounded partition COUNT.
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, siteID, threadRoomID string) error {
-	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveThreadMessage", msg.RoomID)
+	ctx, span := s.startSpan(ctx, "cassandra.SaveThreadMessage", msg.RoomID, msg.ID)
 	defer span.End()
 
 	if s.cipher != nil {

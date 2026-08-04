@@ -235,7 +235,7 @@ func (r *Repository) UpdateMessageContent(ctx context.Context, msg *models.Messa
 	if msg.ThreadParentID != "" && msg.ThreadRoomID == "" {
 		return fmt.Errorf("edit thread message %s: ThreadParentID %q is set but ThreadRoomID is empty", msg.MessageID, msg.ThreadParentID)
 	}
-	ctx, span := r.startRoomSpan(ctx, "cassrepo.UpdateMessageContent", msg.RoomID)
+	ctx, span := r.startSpan(ctx, "cassrepo.UpdateMessageContent", msg.RoomID, msg.MessageID)
 	defer span.End()
 
 	// The service layer's findMessage already gates existence and the
@@ -293,7 +293,7 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 	if msg.ThreadParentID != "" && msg.ThreadRoomID == "" {
 		return time.Time{}, false, nil, nil, fmt.Errorf("delete thread message %s: ThreadParentID %q is set but ThreadRoomID is empty", msg.MessageID, msg.ThreadParentID)
 	}
-	ctx, span := r.startRoomSpan(ctx, "cassrepo.SoftDeleteMessage", msg.RoomID)
+	ctx, span := r.startSpan(ctx, "cassrepo.SoftDeleteMessage", msg.RoomID, msg.MessageID)
 	defer span.End()
 
 	isThreadParent := msg.TCount != nil && *msg.TCount > 0

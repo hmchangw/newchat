@@ -39,10 +39,10 @@ func TestNewRepository_SetsTracer(t *testing.T) {
 	assert.NotNil(t, r.tracer, "NewRepository must default the tracer so production spans record")
 }
 
-func TestRepository_startRoomSpan_TagsRoomID(t *testing.T) {
+func TestRepository_startSpan_TagsRoomAndMessageID(t *testing.T) {
 	r, recorder := recordingRepo(t)
 
-	ctx, span := r.startRoomSpan(context.Background(), "cassrepo.GetMessagesBefore", "room-42")
+	ctx, span := r.startSpan(context.Background(), "cassrepo.PinMessage", "room-42", "msg-1")
 	span.End()
 
 	// The returned context carries the span so nested query spans parent to it.
@@ -54,17 +54,37 @@ func TestRepository_startRoomSpan_TagsRoomID(t *testing.T) {
 
 	ended := recorder.Ended()
 	require.Len(t, ended, 1)
-	assert.Equal(t, "cassrepo.GetMessagesBefore", ended[0].Name())
+	assert.Equal(t, "cassrepo.PinMessage", ended[0].Name())
 	roomID, ok := attrValue(ended[0], "room_id")
 	require.True(t, ok, "span must carry a room_id attribute")
 	assert.Equal(t, "room-42", roomID)
+	messageID, ok := attrValue(ended[0], "message_id")
+	require.True(t, ok, "span must carry a message_id attribute")
+	assert.Equal(t, "msg-1", messageID)
 }
 
-func TestRepository_startRoomSpan_NestsUnderParent(t *testing.T) {
+func TestRepository_startSpan_OmitsEmptyMessageID(t *testing.T) {
+	r, recorder := recordingRepo(t)
+
+	// Room-range reads (bucket walks) serve no single message, so message_id
+	// is empty and must be omitted rather than written blank.
+	_, span := r.startSpan(context.Background(), "cassrepo.GetMessagesBefore", "room-42", "")
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	roomID, ok := attrValue(ended[0], "room_id")
+	require.True(t, ok)
+	assert.Equal(t, "room-42", roomID)
+	_, ok = attrValue(ended[0], "message_id")
+	assert.False(t, ok, "an empty message id must be omitted, not written as an empty attribute")
+}
+
+func TestRepository_startSpan_NestsUnderParent(t *testing.T) {
 	r, recorder := recordingRepo(t)
 
 	parentCtx, parent := r.tracer.Start(context.Background(), "handler")
-	_, child := r.startRoomSpan(parentCtx, "cassrepo.PinMessage", "room-7")
+	_, child := r.startSpan(parentCtx, "cassrepo.PinMessage", "room-7", "msg-2")
 	child.End()
 	parent.End()
 

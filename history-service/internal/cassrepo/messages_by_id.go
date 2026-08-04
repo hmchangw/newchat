@@ -17,6 +17,9 @@ const maxConcurrentIDReads = 16
 const messageByIDQuery = "SELECT " + baseColumns + ", pinned_at, pinned_by FROM messages_by_id"
 
 func (r *Repository) GetMessageByID(ctx context.Context, messageID string) (*models.Message, error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessageByID", "", messageID)
+	defer span.End()
+
 	iter := r.session.Query(
 		messageByIDQuery+` WHERE message_id = ? LIMIT 1`,
 		messageID,

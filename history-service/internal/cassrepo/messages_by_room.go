@@ -75,7 +75,7 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 }
 
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
-	ctx, span := r.startRoomSpan(ctx, "cassrepo.GetMessagesBefore", roomID)
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessagesBefore", roomID, "")
 	defer span.End()
 
 	floorBucket := r.bucket.Of(floor)
@@ -108,7 +108,7 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 }
 
 func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest) (Page[models.Message], error) {
-	ctx, span := r.startRoomSpan(ctx, "cassrepo.GetMessagesBetweenDesc", roomID)
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessagesBetweenDesc", roomID, "")
 	defer span.End()
 
 	floorBucket := r.bucket.Of(since)
@@ -158,7 +158,7 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 }
 
 func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after time.Time, ceiling time.Time, pageReq PageRequest) (Page[models.Message], error) {
-	ctx, span := r.startRoomSpan(ctx, "cassrepo.GetMessagesAfter", roomID)
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessagesAfter", roomID, "")
 	defer span.End()
 
 	ceilingBucket := r.bucket.Of(ceiling)
@@ -191,7 +191,7 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 }
 
 func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor time.Time, ceiling time.Time, pageReq PageRequest) (Page[models.Message], error) {
-	ctx, span := r.startRoomSpan(ctx, "cassrepo.GetAllMessagesAsc", roomID)
+	ctx, span := r.startSpan(ctx, "cassrepo.GetAllMessagesAsc", roomID, "")
 	defer span.End()
 
 	ceilingBucket := r.bucket.Of(ceiling)
