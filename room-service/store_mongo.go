@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"regexp"
 	"time"
 
@@ -1619,9 +1618,11 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 	return nil
 }
 
-// UpdateSubscriptionThreadRead removes threadID from threadUnread via $pull
-// and returns the resulting array (nil when empty; the field is $unset so an
-// empty array is never stored). Missing subscription → ErrSubscriptionNotFound.
+// UpdateSubscriptionThreadRead removes threadID from threadUnread via a single
+// $pull and returns the resulting array (nil when empty). A drained array stays
+// stored as [] — omitempty keeps it off the wire and every reader checks
+// len > 0, so a second $unset round-trip buys nothing. Missing subscription →
+// ErrSubscriptionNotFound.
 func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error) {
 	filter := bson.M{"roomId": roomID, "u.account": account}
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
@@ -1635,9 +1636,6 @@ func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, a
 		return nil, fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, err)
 	}
 	if len(updated.ThreadUnread) == 0 {
-		if _, err := s.subscriptions.UpdateOne(ctx, filter, bson.M{"$unset": bson.M{"threadUnread": ""}}); err != nil {
-			slog.WarnContext(ctx, "unset empty threadUnread", "error", err, "account", account, "roomID", roomID)
-		}
 		return nil, nil
 	}
 	return updated.ThreadUnread, nil

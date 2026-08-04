@@ -89,7 +89,7 @@ without a separate round trip.
   phase is disabled) — the push is still delivered. Clients should not treat
   absence as "zero unread"; fall back to the locally-cached badge value and
   let it refresh on next app open.
-- **Gate:** populated only when notification-worker's `BADGE_COUNT_RPC_ENABLED=true`
+- **Gate:** populated by default (notification-worker's `BADGE_COUNT_RPC_ENABLED`, default `true`); set `false` to disable
   (default `false`, see §3). When disabled, `BadgeClient` is nil and the badge
   phase is skipped entirely — `unreadCounts` never appears on the wire.
 - **Fetch path:** per push, the worker groups survivors by home site and issues
@@ -362,7 +362,7 @@ Required before a production rollout:
    each recipient's home site, and only the users collection knows it.
    - `INDEX_ENSURE_TIMEOUT` (default `2m`)
    - `PRESENCE_RPC_ENABLED` (default `false`), `PRESENCE_BATCH_SIZE` (`512`), `PRESENCE_RPC_TIMEOUT` (`2s`)
-   - `BADGE_COUNT_RPC_ENABLED` (default `false`) — gates the `badge.count.batch` RPC to each recipient's home-site `user-service`; set `true` once `badge.count.batch` is reachable from every home site (see §1 Badge counts)
+   - `BADGE_COUNT_RPC_ENABLED` (default `true`) — gates the `badge.count.batch` RPC to each recipient's home-site `user-service`; set `false` to disable badge stamping (see §1 Badge counts)
 
 ---
 

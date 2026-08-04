@@ -2608,15 +2608,20 @@ func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
 		assert.Equal(t, []string{"t2"}, got.ThreadUnread)
 	})
 
-	t.Run("last element removed unsets threadUnread field", func(t *testing.T) {
+	t.Run("last element removed leaves empty array, no second write", func(t *testing.T) {
 		seedThreadUnread(t, []string{"t2"})
 		newUnread, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t2")
 		require.NoError(t, err)
 		assert.Nil(t, newUnread)
+		// The stored empty array stays — a second $unset round-trip is not worth
+		// it (omitempty keeps it off the wire; all readers check len > 0).
 		var raw bson.M
 		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
-		_, present := raw["threadUnread"]
-		assert.False(t, present, "threadUnread must be $unset, not stored as empty array")
+		val, present := raw["threadUnread"]
+		require.True(t, present, "empty threadUnread array stays stored")
+		arr, ok := val.(bson.A)
+		require.True(t, ok)
+		assert.Empty(t, arr)
 	})
 
 	t.Run("missing subscription returns sentinel", func(t *testing.T) {
@@ -2640,11 +2645,10 @@ func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
 		require.NoError(t, <-done)
 		require.NoError(t, <-done)
 
-		// Both removals must have applied — threadUnread should be absent (empty)
-		var raw bson.M
-		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
-		_, present := raw["threadUnread"]
-		assert.False(t, present, "both concurrent removals must apply — no lost updates")
+		// Both removals must have applied — the stored array is empty.
+		var got model.Subscription
+		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&got))
+		assert.Empty(t, got.ThreadUnread, "both concurrent removals must apply — no lost updates")
 	})
 }
 
