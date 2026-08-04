@@ -2736,6 +2736,53 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 			wantNoPublish: true,
 		},
 		{
+			name:       "bot source → snapshot sender carries isBot and the app identity",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Sender = cassandra.Participant{
+					ID: "app-1", Account: "deploybot", IsBot: true,
+					AppID: "A123", AppName: "Deploy Bot",
+				}
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.True(t, msg.ForwardedMessage.Sender.IsBot, "bot flag must survive into the snapshot")
+				assert.Equal(t, "A123", msg.ForwardedMessage.Sender.AppID)
+				assert.Equal(t, "Deploy Bot", msg.ForwardedMessage.Sender.AppName)
+				assert.Contains(t, string(data), `"isBot":true`, "isBot must be on the wire, not just the struct")
+
+				require.Len(t, published, 1)
+				var evt model.MessageEvent
+				require.NoError(t, json.Unmarshal(published[0].data, &evt))
+				require.NotNil(t, evt.Message.ForwardedMessage)
+				assert.True(t, evt.Message.ForwardedMessage.Sender.IsBot, "bot flag must survive into the canonical event")
+			},
+		},
+		{
+			name:       "human source → isBot omitted from the wire (omitempty on false)",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.False(t, msg.ForwardedMessage.Sender.IsBot)
+				assert.NotContains(t, string(data), `"isBot"`, "false is omitempty — absent, never isBot:false")
+			},
+		},
+		{
 			name:       `"important" source is forwardable`,
 			buildData:  func() []byte { return fwdReq("check this") },
 			setupStore: subscribed,

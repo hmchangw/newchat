@@ -1794,7 +1794,7 @@ func TestEditMessage_Encrypted_PreservesForwardedMessageMetadata(t *testing.T) {
 	forwarded := &cassmodel.ForwardedMessage{
 		MessageID: "m-src",
 		RoomID:    "r-src",
-		Sender:    cassmodel.Participant{ID: "u-src", Account: "carol"},
+		Sender:    cassmodel.Participant{ID: "u-src", Account: "carol", IsBot: true, AppID: "A1", AppName: "Deploy Bot"},
 		CreatedAt: sourceCreatedAt,
 		Msg:       "original body",
 	}
@@ -1837,6 +1837,11 @@ func TestEditMessage_Encrypted_PreservesForwardedMessageMetadata(t *testing.T) {
 	require.NotNil(t, got.ForwardedMessage, "forwarded message must survive the encrypted edit")
 	assert.Equal(t, "m-src", got.ForwardedMessage.MessageID)
 	assert.Equal(t, "carol", got.ForwardedMessage.Sender.Account)
+	// The nested frozen Participant keeps every field, not just account —
+	// is_bot/app_id/app_name drive bot rendering on the forwarded snapshot.
+	assert.True(t, got.ForwardedMessage.Sender.IsBot, "forwarded sender is_bot must survive the UDT round-trip")
+	assert.Equal(t, "A1", got.ForwardedMessage.Sender.AppID)
+	assert.Equal(t, "Deploy Bot", got.ForwardedMessage.Sender.AppName)
 	assert.True(t, got.ForwardedMessage.CreatedAt.Equal(sourceCreatedAt))
 	assert.Equal(t, "original body", got.ForwardedMessage.Msg, "forwarded body restored from enc_payload")
 	assert.Equal(t, "edited wrapper text", got.Msg)
