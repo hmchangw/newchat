@@ -20,39 +20,6 @@ import (
 // the HTTP leg entirely — auth was the one already-measurable SLO that no
 // workload could exercise.
 
-// loginOutcome is the eligibility class of one login attempt, following the
-// error-budget table in o11y-slo.md §0.1.
-type loginOutcome int
-
-const (
-	// loginGood is a successful login: counted in both numerator and denominator.
-	loginGood loginOutcome = iota
-	// loginFailed is our fault — 5xx, 429, or a transport/timeout error. It
-	// stays in the denominator and burns budget.
-	loginFailed
-	// loginExcluded is a legitimate client outcome (4xx other than 429). It is
-	// removed from valid events entirely: never good, never a failure.
-	loginExcluded
-)
-
-// classifyLogin maps an HTTP status (or a transport failure) onto an
-// eligibility class. transportErr takes precedence — status is meaningless
-// when the request never completed.
-func classifyLogin(status int, transportErr bool) loginOutcome {
-	switch {
-	case transportErr:
-		return loginFailed
-	case status >= 200 && status < 300:
-		return loginGood
-	case status == http.StatusTooManyRequests:
-		return loginFailed
-	case status >= 400 && status < 500:
-		return loginExcluded
-	default:
-		return loginFailed
-	}
-}
-
 // loginCollector accumulates one step's outcomes. Only successful logins
 // contribute latency samples: SLO-3 gates on "succeeded *and* within the
 // bound", so timing a failure would let it move the percentile in whichever
@@ -68,16 +35,16 @@ type loginCollector struct {
 
 func newLoginCollector() *loginCollector { return &loginCollector{} }
 
-func (c *loginCollector) Record(o loginOutcome, d time.Duration) {
+func (c *loginCollector) Record(o sloOutcome, d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch o {
-	case loginGood:
+	case outcomeGood:
 		c.good++
 		c.samples = append(c.samples, d)
-	case loginFailed:
+	case outcomeFailed:
 		c.failed++
-	case loginExcluded:
+	case outcomeExcluded:
 		c.excluded++
 	}
 }
@@ -173,14 +140,14 @@ func newLoginRequester(baseURL string, timeout time.Duration) *loginRequester {
 // the wall-clock duration. The tokenless branch is deliberate: it exercises the
 // real handler, nkey validation and JWT minting without standing up an OIDC
 // provider, which is what SLO-3's auth leg measures.
-func (r *loginRequester) login(ctx context.Context, account, natsPublicKey string) (loginOutcome, time.Duration) {
+func (r *loginRequester) login(ctx context.Context, account, natsPublicKey string) (sloOutcome, time.Duration) {
 	body, err := json.Marshal(map[string]string{"account": account, "natsPublicKey": natsPublicKey})
 	if err != nil {
-		return loginFailed, 0
+		return outcomeFailed, 0
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.url, bytes.NewReader(body))
 	if err != nil {
-		return loginFailed, 0
+		return outcomeFailed, 0
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -188,13 +155,13 @@ func (r *loginRequester) login(ctx context.Context, account, natsPublicKey strin
 	resp, err := r.client.Do(req)
 	elapsed := time.Since(start)
 	if err != nil {
-		return classifyLogin(0, true), elapsed
+		return classifyHTTPStatus(0, true), elapsed
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Drain so the connection returns to the keep-alive pool; a fresh TCP+TLS
 	// handshake per request would measure the load box, not auth-service.
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return classifyLogin(resp.StatusCode, false), elapsed
+	return classifyHTTPStatus(resp.StatusCode, false), elapsed
 }
 
 // loginWorkload drives auth-service logins at a given RPS.
