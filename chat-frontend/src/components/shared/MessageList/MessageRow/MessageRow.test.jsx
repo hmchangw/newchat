@@ -40,6 +40,18 @@ describe('MessageRow', () => {
     expect(screen.getByText(/\d\d:\d\d/)).toBeInTheDocument()
   })
 
+  it('renders the timestamp with both date and time', () => {
+    const { container } = render(
+      <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />
+    )
+    // createdAt is 2026-05-13T10:42:00Z — regardless of the test runner's
+    // timezone this stays within 2026, so asserting the year proves the date
+    // is rendered alongside the HH:MM time.
+    const timeEl = container.querySelector('.message-time')
+    expect(timeEl.textContent).toMatch(/2026/)
+    expect(timeEl.textContent).toMatch(/\d{1,2}:\d{2}/)
+  })
+
   it('renders the row with tabindex 0 and data-message-id', () => {
     const { container } = render(
       <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />

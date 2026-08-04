@@ -9,9 +9,15 @@ import { useSubscription } from '@/context/RoomEventsContext'
 import { redactInaccessibleQuoteSnapshot } from '@/lib/redactQuote'
 import './style.css'
 
-function formatTime(dateStr) {
+function formatDateTime(dateStr) {
   const d = new Date(dateStr)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleString([], {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function senderName(msg) {
@@ -89,7 +95,7 @@ export default function MessageRow({
       <div className="message-row-body">
         <div className="message-header">
           <span className="message-sender">{senderName(message)}</span>
-          <span className="message-time">{formatTime(message.createdAt)}</span>
+          <span className="message-time">{formatDateTime(message.createdAt)}</span>
           {message.editedAt && <span className="message-edited"> (edited)</span>}
           {message.pinnedAt && (
             <span
