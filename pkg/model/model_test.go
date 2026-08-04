@@ -2619,11 +2619,13 @@ func TestSendMessageRequest_ForwardFields_JSON(t *testing.T) {
 		RequestID:          "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		ForwardedMessageID: "01970a4f8c2d7c9aSRCM",
 		ForwardedRoomID:    "r-src",
+		ForwardedContent:   "the excerpt the client wants shown",
 	}
 	data, err := json.Marshal(req)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"forwardedMessageId":"01970a4f8c2d7c9aSRCM"`)
 	assert.Contains(t, string(data), `"forwardedRoomId":"r-src"`)
+	assert.Contains(t, string(data), `"forwardedContent":"the excerpt the client wants shown"`)
 	var got model.SendMessageRequest
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, req, got)
@@ -2633,6 +2635,15 @@ func TestSendMessageRequest_ForwardFields_JSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(plain), "forwardedMessageId")
 	assert.NotContains(t, string(plain), "forwardedRoomId")
+	assert.NotContains(t, string(plain), "forwardedContent")
+
+	// omitempty: absent on a forward that does not override the body
+	noOverride, err := json.Marshal(model.SendMessageRequest{
+		ID: "x", Content: "y", RequestID: "z",
+		ForwardedMessageID: "01970a4f8c2d7c9aSRCM", ForwardedRoomID: "r-src",
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(noOverride), "forwardedContent")
 }
 
 func TestMessage_ForwardedMessage_JSON(t *testing.T) {

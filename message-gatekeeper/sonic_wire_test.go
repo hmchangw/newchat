@@ -24,6 +24,7 @@ func TestSonic_DecodesClientRequest(t *testing.T) {
 		TShow:                 true,
 		ForwardedMessageID:    "01970a4f8c2d7c9aSRCM",
 		ForwardedRoomID:       "r-src",
+		ForwardedContent:      `excerpt with <b>markup</b> & "quotes"`,
 	}
 	wire, err := stdjson.Marshal(orig)
 	require.NoError(t, err)

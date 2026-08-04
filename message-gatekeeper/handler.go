@@ -276,6 +276,14 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		if len(req.Attachments) > 0 {
 			return nil, errcode.BadRequest("a forward cannot carry attachments")
 		}
+		if len(req.ForwardedContent) > maxContentBytes {
+			return nil, errcode.BadRequest(
+				fmt.Sprintf("forwardedContent exceeds maximum size of %d bytes", maxContentBytes),
+				errcode.WithMetadata("maxContentBytes", strconv.Itoa(maxContentBytes), "attempted", strconv.Itoa(len(req.ForwardedContent))),
+			)
+		}
+	} else if req.ForwardedContent != "" {
+		return nil, errcode.BadRequest("forwardedContent requires forwardedMessageId")
 	}
 
 	// A message with attachments may carry empty content; so may a forward
@@ -568,12 +576,20 @@ func (h *Handler) resolveForwardSnapshot(ctx context.Context, account, siteID st
 	if len(src.ForwardedMessage) > 0 && src.Msg == "" {
 		return nil, errcode.BadRequest("source forward has no forwardable content")
 	}
+	// An explicit ForwardedContent replaces the body only — every other snapshot
+	// field stays server-derived, and the rejects above still ran against the
+	// fetched source. Deliberately evaluated after them so the override can
+	// substitute a real body but never manufacture one for a source that had none.
+	msg := src.Msg
+	if req.ForwardedContent != "" {
+		msg = req.ForwardedContent
+	}
 	return &cassandra.ForwardedMessage{
 		MessageID:             req.ForwardedMessageID,
 		RoomID:                src.RoomID,
 		Sender:                src.Sender,
 		CreatedAt:             src.CreatedAt,
-		Msg:                   src.Msg,
+		Msg:                   msg,
 		Mentions:              src.Mentions,
 		MessageLink:           src.MessageLink,
 		ThreadParentID:        src.ThreadParentID,

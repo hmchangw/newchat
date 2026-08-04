@@ -2827,7 +2827,7 @@ Immutable snapshot of the forwarded source message, built server-side at forward
 | `roomId` | string | The source room. |
 | `sender` | [MessageParticipant](#messageparticipant) | The source message's author. |
 | `createdAt` | string | RFC 3339. The source message's send time. |
-| `msg` | string | Optional. Body snapshot (the source's text). |
+| `msg` | string | Optional. Body snapshot — the source's text, or the sender's `forwardedContent` when that override was supplied at forward time (the two are not distinguishable here). |
 | `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
 | `messageLink` | string | Optional. Deep link to the source message. |
 | `threadParentId` | string | Optional. Set when the source is a thread reply. |
@@ -5801,6 +5801,7 @@ The same subject and request body cover three send variants: plain message, thre
 | `quotedParentMessageId` | string | no | Set when posting a quoted message. The gatekeeper fetches the authoritative parent snapshot from message history and embeds it in the persisted message. If that fetch fails *transiently* (history briefly unavailable), the message is not dropped: the gatekeeper inserts a placeholder snapshot for live delivery (body `"Content temporarily unavailable"`), and `message-worker` re-projects the authoritative snapshot (or drops the quote) from history before the durable write, so the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
 | `forwardedMessageId` | string | no | Set together with `forwardedRoomId` to forward a message. Must be a valid 17/20-char base62 message ID. The gatekeeper fetches the source from the **source room** (the sender must be subscribed there and inside its access window) and embeds an immutable text-only snapshot. Any fetch failure **rejects the send** — there is no placeholder. Mutually exclusive with `threadParentMessageId`, `quotedParentMessageId`, and `attachments`. `content` (the forward comment) becomes optional. To forward into several rooms, send one `msg.send` per destination room. |
 | `forwardedRoomId` | string | no | The source message's room ID. Required with `forwardedMessageId`. |
+| `forwardedContent` | string | no | Optional body override for the embedded snapshot, ≤ 20 KiB — for forwarding a selected excerpt instead of the whole message. Requires `forwardedMessageId`. The source is still fetched and every authorization and forwardability rule still runs against it; only `forwardedMessage.msg` is substituted, and all other snapshot fields (`sender`, `createdAt`, `roomId`, `mentions`, `messageLink`, thread identity) stay server-derived. Empty is treated as absent. **The stored snapshot does not record that the body was client-supplied** — it is shown under the source author's identity and is indistinguishable from the real body. |
 | `type` | string | no | Optional client-settable message type. The only accepted value is `"important"` (an important message — previews and notifies like a normal message). Any other value, including a system type (`room_created`, etc.), is rejected with `bad_request`. Omitted = a normal message. |
 
 ##### Plain message
@@ -5848,6 +5849,21 @@ The client sends `quotedParentMessageId`; the server fetches and embeds the auth
   "forwardedRoomId": "01970a4f8c2d7c9aR"
 }
 ```
+
+##### Forwarded message with a body override
+
+```json
+{
+  "id": "01970a4f8c2d7c9aQFWE",
+  "content": "just the second half is relevant",
+  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789e",
+  "forwardedMessageId": "01970a4f8c2d7c9aQRST",
+  "forwardedRoomId": "01970a4f8c2d7c9aR",
+  "forwardedContent": "…ship it Thursday, not Tuesday."
+}
+```
+
+The reply's `forwardedMessage.msg` carries `forwardedContent` verbatim; every other snapshot field still comes from the fetched source.
 
 `content` is the optional forward comment — it may be empty. The server builds the `forwardedMessage` snapshot from the source at forward time; the snapshot is immutable (later edits/deletes of the source do not touch it) and is never access-window-redacted for readers. Forwarding a message that is itself a forward captures only that message's own comment (chain depth stays 1). Not forwardable: messages with attachments, card messages, system messages, deleted messages, and forwards whose own comment is empty.
 
@@ -5916,6 +5932,8 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `quoted parent {id} thread context mismatch: …` | `bad_request` | — | A quoted message must be in the same thread context (main-room or the same thread) as the new message — except a `tshow: true` thread reply, which may also be quoted from its parent channel room. |
 | `forwardedMessageId and forwardedRoomId must be set together` | `bad_request` | — | One forward field without the other. |
 | `invalid forwarded message ID "…": …` | `bad_request` | — | `forwardedMessageId` is not a valid message ID. |
+| `forwardedContent requires forwardedMessageId` | `bad_request` | — | `forwardedContent` set on a non-forward send. |
+| `forwardedContent exceeds maximum size of 20480 bytes` | `bad_request` | — | `forwardedContent` > 20 KiB. |
 | `a forward cannot also quote a message` / `a forward cannot target a thread` / `a forward cannot carry attachments` | `bad_request` | — | Forward combined with `quotedParentMessageId`, `threadParentMessageId`, or `attachments`. |
 | `message not found` | `not_found` | — | Forward source missing, or `forwardedRoomId` doesn't match the source's room. |
 | `not subscribed to room` | `forbidden` | `not_subscribed` | Sender is not a member of the **source** room. |

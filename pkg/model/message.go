@@ -93,6 +93,15 @@ type SendMessageRequest struct {
 	// and Attachments; Content becomes optional on a forward.
 	ForwardedMessageID string `json:"forwardedMessageId,omitempty"`
 	ForwardedRoomID    string `json:"forwardedRoomId,omitempty"`
+	// ForwardedContent optionally replaces the snapshot body the gatekeeper
+	// would otherwise copy from the fetched source — for clients that forward a
+	// selected excerpt rather than the whole message. The source is still
+	// fetched and every authorization and forwardability rule still runs
+	// against it; only ForwardedMessage.Msg is substituted. Requires
+	// ForwardedMessageID. Note this is caller-supplied text stored under the
+	// source author's identity, and the stored snapshot does not distinguish it
+	// from the real body.
+	ForwardedContent string `json:"forwardedContent,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's

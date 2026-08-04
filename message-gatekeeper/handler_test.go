@@ -2294,6 +2294,14 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 		})
 		return data
 	}
+	fwdReqOverride := func(content, forwardedContent string) []byte {
+		data, _ := json.Marshal(model.SendMessageRequest{
+			ID: validID, Content: content, RequestID: validRequestID,
+			ForwardedMessageID: fwdID, ForwardedRoomID: srcRoomID,
+			ForwardedContent: forwardedContent,
+		})
+		return data
+	}
 
 	tests := []struct {
 		name          string
@@ -2568,6 +2576,153 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 		{
 			name:       "forward-of-forward with empty comment → bad_request",
 			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Msg = ""
+				src.ForwardedMessage = json.RawMessage(`{"messageId":"m-deeper"}`)
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "forwardedContent overrides the fetched body, every other snapshot field still from the source",
+			buildData:  func() []byte { return fwdReqOverride("check this", "just the part I meant") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Equal(t, "just the part I meant", msg.ForwardedMessage.Msg)
+				assert.NotContains(t, string(data), "original body", "the fetched body must not survive the override")
+				// Server-derived identity is untouched by the override.
+				assert.Equal(t, fwdID, msg.ForwardedMessage.MessageID)
+				assert.Equal(t, srcRoomID, msg.ForwardedMessage.RoomID)
+				assert.Equal(t, "eve", msg.ForwardedMessage.Sender.Account)
+				assert.Equal(t, srcCreatedAt, msg.ForwardedMessage.CreatedAt)
+				assert.NotEmpty(t, msg.ForwardedMessage.MessageLink)
+				assert.Len(t, msg.ForwardedMessage.Mentions, 1)
+				assert.Equal(t, "check this", msg.Content)
+
+				require.Len(t, published, 1)
+				var evt model.MessageEvent
+				require.NoError(t, json.Unmarshal(published[0].data, &evt))
+				require.NotNil(t, evt.Message.ForwardedMessage)
+				assert.Equal(t, msg.ForwardedMessage, evt.Message.ForwardedMessage)
+			},
+		},
+		{
+			name:       "empty forwardedContent is treated as absent — body comes from the source",
+			buildData:  func() []byte { return fwdReqOverride("check this", "") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Equal(t, "original body", msg.ForwardedMessage.Msg)
+			},
+		},
+		{
+			name: "forwardedContent without forward fields → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "hello", RequestID: validRequestID,
+					ForwardedContent: "orphan override",
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name: "oversized forwardedContent → bad_request",
+			buildData: func() []byte {
+				return fwdReqOverride("check this", strings.Repeat("a", maxContentBytes+1))
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "forwardedContent does not skip the fetch — source not found still rejects",
+			buildData:  func() []byte { return fwdReqOverride("check this", "I already have the text") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(nil, errcode.NotFound("message not found"))
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeNotFound, ee.Code)
+			},
+		},
+		{
+			name:       "forwardedContent does not skip authorization — forbidden source still rejects",
+			buildData:  func() []byte { return fwdReqOverride("check this", "I already have the text") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(nil, errcode.Forbidden("message is outside access window"))
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeForbidden, ee.Code)
+			},
+		},
+		{
+			name:       "forwardedContent does not bypass the source reject rules — deleted source still rejects",
+			buildData:  func() []byte { return fwdReqOverride("check this", "looks fine to me") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Deleted = true
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "forwardedContent does not bypass the source reject rules — card source still rejects",
+			buildData:  func() []byte { return fwdReqOverride("check this", "looks fine to me") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Card = json.RawMessage(`{"template":"x"}`)
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "forward-of-forward with empty comment → bad_request even with forwardedContent",
+			buildData:  func() []byte { return fwdReqOverride("check this", "a body the source never had") },
 			setupStore: subscribed,
 			setupFetcher: func(f *MockParentMessageFetcher) {
 				src := okSource()

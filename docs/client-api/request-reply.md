@@ -2031,6 +2031,7 @@ and quoted message; variant determined by optional fields.
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
 | `forwardedMessageId` | string | no | Forward: the source message's ID. Set with `forwardedRoomId`. The server fetches the source from the source room (subscription + access window enforced there) and embeds an immutable text-only snapshot; any fetch failure rejects the send (hard-fail, no placeholder). Mutually exclusive with `threadParentMessageId` / `quotedParentMessageId` / `attachments`; `content` becomes optional. One `msg.send` per destination room. |
 | `forwardedRoomId` | string | no | The source message's room ID. Required with `forwardedMessageId`. |
+| `forwardedContent` | string | no | Optional body override for the embedded snapshot, ≤ 20 KiB (forwarding a selected excerpt). Requires `forwardedMessageId`. The source is still fetched and all authorization/forwardability rules still run against it; only `forwardedMessage.msg` is substituted — every other snapshot field stays server-derived. Empty = absent. The stored snapshot does not record that the body was client-supplied. |
 
 #### Async success response
 
