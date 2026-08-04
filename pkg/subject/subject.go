@@ -305,11 +305,18 @@ func MsgCanonicalCreated(siteID string) string {
 	return fmt.Sprintf("chat.msg.canonical.%s.created", siteID)
 }
 
-// MsgCanonicalTeamsBatch is the server-only publish/consume subject for Teams
-// message-history batch migration (server-produced; message-worker consumes it off
-// the canonical stream). Lock to server identities in NATS permissions — no client access.
-func MsgCanonicalTeamsBatch(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.teams.batch", siteID)
+// MsgTeamsCanonicalBatch is the server-only publish/consume subject for Teams
+// message-history batch migration, on its own MESSAGES-TEAMS stream (server-produced;
+// message-worker in teams mode consumes it). Lock to server identities in NATS
+// permissions — no client access.
+func MsgTeamsCanonicalBatch(siteID string) string {
+	return fmt.Sprintf("chat.teams.msg.canonical.%s.batch", siteID)
+}
+
+// MsgTeamsCanonicalWildcard matches every subject on the MESSAGES-TEAMS stream for
+// a site: chat.teams.msg.canonical.{siteID}.>.
+func MsgTeamsCanonicalWildcard(siteID string) string {
+	return fmt.Sprintf("chat.teams.msg.canonical.%s.>", siteID)
 }
 
 func MsgCanonicalUpdated(siteID string) string {

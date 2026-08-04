@@ -26,6 +26,16 @@ func MessagesCanonical(siteID string) Config {
 	}
 }
 
+// MessagesTeams returns MESSAGES-TEAMS-{siteID}: the Teams-migration message-batch
+// stream, separate from MESSAGES-CANONICAL so message-worker's teams mode and the
+// live default mode each bind their own stream.
+func MessagesTeams(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("MESSAGES-TEAMS-%s", siteID),
+		Subjects: []string{subject.MsgTeamsCanonicalWildcard(siteID)},
+	}
+}
+
 func Rooms(siteID string) Config {
 	return Config{
 		Name:     fmt.Sprintf("ROOMS-%s", siteID),
