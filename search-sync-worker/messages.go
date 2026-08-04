@@ -37,35 +37,36 @@ type teamsUserResolver interface {
 }
 
 // messageCollection implements Collection for message search sync; streamCfg + consumerName are
-// parameterized so one type consumes user or bot canonical streams. syncFrom is the legacy-replay cutoff (zero disables it).
+// parameterized so one type consumes user, bot, or Teams-migration canonical streams. syncFrom is
+// the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
 	indexPrefix string
 	siteID      string // for .teams.batch index docs (the normal path reads evt.SiteID per message)
 	syncFrom    time.Time
 	devMode     bool
-	// includeTeamsBatch adds the .teams.batch subject so this consumer also indexes
-	// migrated Teams history (message-worker persists it with no .created event). Only
-	// the user stream carries it; the bot stream does not.
-	includeTeamsBatch bool
-	streamCfg         func(siteID string) jetstream.StreamConfig
-	consumerName      string
-	parentResolver    parentCreatedAtResolver
-	// teamsUsers resolves migrated senders' account + user _id; nil on the bot collection
-	// (no .teams.batch) and in tests that don't exercise the teams path.
+	// teamsOnly switches this collection to the Teams-migration-only wiring: it binds
+	// MESSAGES-TEAMS instead of a canonical stream, filters to only the teams batch
+	// subject, and skips the template/mapping pushes the primary (user) collection
+	// already owns for the same indexPrefix.
+	teamsOnly      bool
+	streamCfg      func(siteID string) jetstream.StreamConfig
+	consumerName   string
+	parentResolver parentCreatedAtResolver
+	// teamsUsers resolves migrated senders' account + user _id; nil on collections that
+	// don't index Teams batches (bot) and in tests that don't exercise the teams path.
 	teamsUsers teamsUserResolver
 }
 
-// newMessageCollection binds to the user MESSAGES-CANONICAL stream and also indexes
-// migrated Teams history off .teams.batch (one consumer covers both).
+// newMessageCollection binds to the user MESSAGES-CANONICAL stream (live messages only —
+// migrated Teams history now indexes off its own consumer, see newTeamsMessageCollection).
 func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMode bool) *messageCollection {
 	return &messageCollection{
-		indexPrefix:       indexPrefix,
-		siteID:            siteID,
-		syncFrom:          syncFrom,
-		devMode:           devMode,
-		includeTeamsBatch: true,
-		streamCfg:         userMessagesStreamCfg,
-		consumerName:      "message-sync",
+		indexPrefix:  indexPrefix,
+		siteID:       siteID,
+		syncFrom:     syncFrom,
+		devMode:      devMode,
+		streamCfg:    userMessagesStreamCfg,
+		consumerName: "message-sync",
 	}
 }
 
@@ -79,6 +80,22 @@ func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollectio
 	}
 }
 
+// newTeamsMessageCollection binds to MESSAGES-TEAMS (message-worker's teams mode
+// persists the batch with no .created event on the canonical stream, so this is a
+// separate consumer, not a filter on the user collection). Reuses messageCollection's
+// BuildAction — it already detects + indexes the teams batch shape — and skips the
+// template/mapping pushes the user collection already performs for the same indexPrefix.
+func newTeamsMessageCollection(indexPrefix, siteID string, devMode bool) *messageCollection {
+	return &messageCollection{
+		indexPrefix:  indexPrefix,
+		siteID:       siteID,
+		devMode:      devMode,
+		teamsOnly:    true,
+		streamCfg:    teamsMessagesStreamCfg,
+		consumerName: "message-sync-teams",
+	}
+}
+
 func userMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 	cfg := stream.MessagesCanonical(siteID)
 	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
@@ -86,6 +103,11 @@ func userMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 
 func botMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 	cfg := stream.BotMessagesCanonical(siteID)
+	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
+}
+
+func teamsMessagesStreamCfg(siteID string) jetstream.StreamConfig {
+	cfg := stream.MessagesTeams(siteID)
 	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
 }
 
@@ -98,21 +120,27 @@ func (c *messageCollection) ConsumerName() string {
 }
 
 func (c *messageCollection) FilterSubjects(siteID string) []string {
-	// Single-token message events (created/updated/deleted/...). The user collection
-	// also binds the two-token `.teams.batch` migration envelope so one consumer
-	// indexes both live messages and migrated Teams history.
-	subs := []string{subject.MsgCanonicalMessageWildcard(siteID)}
-	if c.includeTeamsBatch {
-		subs = append(subs, subject.MsgCanonicalTeamsBatch(siteID))
+	if c.teamsOnly {
+		// Own stream (MESSAGES-TEAMS), own subject — no message wildcard here.
+		return []string{subject.MsgTeamsCanonicalBatch(siteID)}
 	}
-	return subs
+	// Single-token message events (created/updated/deleted/...); the teams batch
+	// subject now lives on a separate stream (see newTeamsMessageCollection).
+	return []string{subject.MsgCanonicalMessageWildcard(siteID)}
 }
 
 func (c *messageCollection) TemplateName() string {
+	if c.teamsOnly {
+		// The user collection already owns/pushes the template for this indexPrefix.
+		return ""
+	}
 	return searchindex.MessageTemplateName(c.indexPrefix)
 }
 
 func (c *messageCollection) TemplateBody() json.RawMessage {
+	if c.teamsOnly {
+		return nil
+	}
 	return searchindex.MessageTemplateBody(c.indexPrefix, c.devMode)
 }
 
@@ -122,8 +150,12 @@ func (c *messageCollection) StoredScripts() map[string]json.RawMessage {
 }
 
 // MappingUpdate pushes the full (idempotent) property set onto existing
-// monthly indices; the same pattern the template targets.
+// monthly indices; the same pattern the template targets. Skipped for the teams-only
+// collection — the user collection already pushes it for the same indexPrefix.
 func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
+	if c.teamsOnly {
+		return "", nil
+	}
 	// Error discarded: input is a static map of literals, marshal cannot fail.
 	body, _ := json.Marshal(map[string]any{"properties": searchindex.EsPropertiesFromStruct[searchindex.MessageDoc]()})
 	return searchindex.IndexPattern(c.indexPrefix), body

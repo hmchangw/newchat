@@ -168,6 +168,18 @@ The single source of truth for downstream consumers (broadcast-worker, notificat
 
 Stream wildcard: `chat.msg.canonical.{siteID}.>`
 
+### MESSAGES-TEAMS Stream (`MESSAGES-TEAMS-{siteID}`)
+
+Server-only backend stream for the Teams-migration message-batch feed. Separate from
+MESSAGES-CANONICAL so message-worker's teams mode (`MODE=teams`) and default mode each
+bind their own stream/durable.
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.teams.msg.canonical.{siteID}.batch` | External Teams migration process | message-worker (teams mode), search-sync-worker | Teams-migration message batch |
+
+Stream wildcard: `chat.teams.msg.canonical.{siteID}.>`
+
 ### FANOUT Stream (`FANOUT-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
