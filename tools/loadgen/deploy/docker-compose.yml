@@ -34,6 +34,9 @@ services:
       # profiling.
       # - PPROF_ADDR=:6060
       - BOTTLENECK_PROM_URL=http://prometheus:9090
+      # auth-service base URL for `max-rps --workload=login`. Unused by every
+      # other workload, which connects to NATS with the creds file above.
+      - AUTH_URL=${AUTH_URL:-http://auth-service:8080}
       # Cassandra Run A. SOAK_RUN_ID must be supplied when bringing up the
       # overlay; all remaining values use the conservative binary defaults
       # unless overridden here.

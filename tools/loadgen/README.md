@@ -644,7 +644,7 @@ list of steps, holds at each step for a measurement window, evaluates SLO
 signals, and reports the largest step at which every signal passed.
 
 ```bash
-loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read --preset=<name> [flags]
+loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read|login --preset=<name> [flags]
 ```
 
 ### Quick start
@@ -659,6 +659,9 @@ loadgen max-rps --workload=history --preset=history-medium --steps=200,500,1k,2k
 # read-receipt: seed reader state first, then ramp
 loadgen seed --workload=read-receipt --preset=history-medium --read-ratio=0.7
 loadgen max-rps --workload=read-receipt --preset=history-medium --steps=200,500,1k,2k
+
+# login: drive auth-service's HTTP leg (no seeding needed)
+loadgen max-rps --workload=login --preset=medium --slo-p95=1s
 ```
 
 Via the deploy Makefile:
@@ -672,10 +675,12 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, or `thread-read` |
-| `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets) |
-| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` | explicit ordered RPS list; `k` suffix = ×1000 |
-| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read**: per-request reply timeout |
+| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, `thread-read`, or `login` |
+| `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets; `login` reuses the message presets for its account set) |
+| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` / login `50,100,200,500,1k` | explicit ordered RPS list; `k` suffix = ×1000 |
+| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / login**: per-request reply timeout |
+| `--auth-url` | `$AUTH_URL` | **login only**: auth-service base URL |
+| `--login-key-pool` | `256` | **login only**: pre-generated NKey pool size |
 | `--warmup` | `10s` | per-step warmup (samples discarded) |
 | `--hold` | `30s` | per-step measurement window |
 | `--cooldown` | `5s` | per-step settle gap before next step |
@@ -786,6 +791,45 @@ everything (dropping `subscriptions` removes the stamped `lastSeenAt` too):
 ```bash
 loadgen teardown --workload=history --preset=history-medium
 ```
+
+### Login workload (`--workload=login`)
+
+Drives `POST /api/v1/auth` on auth-service so **SLO-3** — *successful login
+within 1 s / eligible login attempts* (`docs/specs/o11y/o11y-slo.md` §3) — can
+be measured under load. Every other workload connects to NATS with a
+pre-provisioned creds file (`NATS_CREDS_FILE`) and never touches the HTTP auth
+leg, which is why auth was the one already-measurable SLO no workload could
+exercise.
+
+```bash
+loadgen max-rps --workload=login --preset=medium --slo-p95=1s
+```
+
+No seeding step: accounts come from the chosen message preset's fixtures, and
+NKey user keys are pre-generated into a pool (`--login-key-pool`) so ed25519
+key minting stays off the request path — generating one per request puts the
+load box's CPU, not auth-service, on the critical path.
+
+It posts the **tokenless (dev-mode) body** — `{account, natsPublicKey}` — which
+exercises the real handler, nkey validation and JWT signing without standing up
+an OIDC provider or botplatform-service. auth-service must be running with dev
+mode enabled.
+
+**Outcome eligibility** follows the error-budget table in `o11y-slo.md` §0.1
+rather than the usual "2xx good, everything else bad":
+
+| Response | Counted as | Why |
+|---|---|---|
+| 2xx | good (and timed) | the journey succeeded |
+| 4xx except 429 | **excluded from valid entirely** | a legitimate client outcome — not our fault, so it neither burns budget nor counts as success |
+| 429, 5xx, timeout, transport error | failed | ours: overload, bug, or capacity |
+
+So `attempted = good + failed`, with excluded attempts dropped from the
+denominator. That matters in a lab: a preset whose accounts auth-service
+rejects yields a small sample and an honest INCONCLUSIVE, instead of a 100%
+error rate that looks like a service failure. Only successful logins are
+timed — SLO-3 gates on *succeeded **and** within the bound*, so timing a
+failure would let it drag the percentile in whichever direction it landed.
 
 ### Bottleneck attribution
 

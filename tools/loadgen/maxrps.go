@@ -13,6 +13,11 @@ func defaultSteps(workload string) string {
 	switch workload {
 	case "history", "read-receipt", "room-read", "thread-read":
 		return "200,500,1000,2000,5000"
+	case "login":
+		// Login is a low-rate journey — one per session, not per message — and
+		// each attempt costs auth-service a JWT sign. Ramping into the
+		// thousands would measure signing throughput nobody will ever need.
+		return "50,100,200,500,1000"
 	default:
 		return "500,1000,2000,5000,10000"
 	}
@@ -26,7 +31,7 @@ func buildThresholds(p95, p99 time.Duration, errRate float64, pendingGrowth uint
 // the report. Returns the process exit code.
 func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("max-rps", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read")
+	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read|login")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	stepsFlag := fs.String("steps", "", "ascending RPS list, e.g. 500,1k,2k,5k,10k (default depends on workload)")
@@ -47,7 +52,10 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	beforeModeFlag := fs.String("before-mode", "open:70,scrollback:30", "history only: before-cursor mix")
 	scrollbackPages := fs.Int("scrollback-pages", 5, "history only: pages per scrollback chain")
 	pageLimit := fs.Int("page-limit", 20, "history only: page limit")
-	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read: per-request timeout")
+	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read/login: per-request timeout")
+	// login-only tunables:
+	authURL := fs.String("auth-url", "", "login only: auth-service base URL (default AUTH_URL)")
+	loginKeyPool := fs.Int("login-key-pool", 256, "login only: pre-generated NKey pool size")
 	csvPath := fs.String("csv", "", "optional CSV output path")
 	_ = fs.Parse(args)
 
@@ -106,6 +114,26 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			return 1
 		}
 		w, cleanup, presetID = tw, clean, p.Name
+	case "login":
+		p, ok := BuiltinPreset(*preset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown preset: %s\n", *preset)
+			return 2
+		}
+		url := *authURL
+		if url == "" {
+			url = cfg.AuthURL
+		}
+		if *requestTimeout <= 0 {
+			fmt.Fprintln(os.Stderr, "--request-timeout must be > 0")
+			return 2
+		}
+		lw, clean, err := newLoginWorkload(cfg, &p, *seed, url, *requestTimeout, *loginKeyPool)
+		if err != nil {
+			slog.Error("init login workload", "error", err)
+			return 1
+		}
+		w, cleanup, presetID = lw, clean, p.Name
 	case "history":
 		p, ok := BuiltinHistoryPreset(*preset)
 		if !ok {
