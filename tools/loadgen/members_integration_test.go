@@ -88,7 +88,9 @@ func TestMembersSustained_EndToEnd(t *testing.T) {
 			Timestamp: time.Now().UnixMilli(),
 		}
 		data, _ := json.Marshal(evt)
-		_ = nc.Publish(subject.RoomMemberEvent(req.RoomID), data)
+		// Publish on the local lane so the test exercises the local wildcard
+		// subscription + collector path added for same-site rooms.
+		_ = nc.Publish(subject.RoomMemberEvent(req.RoomID, false), data)
 		_ = msg.Ack()
 	})
 	require.NoError(t, err)
