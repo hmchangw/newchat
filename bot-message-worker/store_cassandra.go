@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/gocql/gocql"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
@@ -54,14 +56,18 @@ type CassandraStore struct {
 	sess   *gocql.Session
 	bucket msgbucket.Sizer
 	cipher atrest.Cipher
+	tracer trace.Tracer
 }
 
 func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{sess: sess, bucket: bucket, cipher: cipher}
+	return &CassandraStore{sess: sess, bucket: bucket, cipher: cipher, tracer: otel.Tracer(tracerName)}
 }
 
 // SaveMessage inserts into messages_by_room + messages_by_id via one UnloggedBatch.
 func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, siteID string) error {
+	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveMessage", msg.RoomID)
+	defer span.End()
+
 	if s.cipher != nil {
 		return s.saveEncrypted(ctx, msg, siteID)
 	}
@@ -140,6 +146,9 @@ func (s *CassandraStore) saveEncrypted(ctx context.Context, msg *model.Message, 
 // SaveThreadMessage inserts into messages_by_id + thread_messages_by_thread, mirroring to
 // messages_by_room when TShow is true, then blind-SETs tcount/tlm from a bounded partition COUNT.
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, siteID, threadRoomID string) error {
+	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveThreadMessage", msg.RoomID)
+	defer span.End()
+
 	if s.cipher != nil {
 		return s.saveThreadEncrypted(ctx, msg, siteID, threadRoomID)
 	}

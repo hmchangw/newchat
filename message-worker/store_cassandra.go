@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
@@ -60,10 +62,11 @@ type CassandraStore struct {
 	cassSession *gocql.Session
 	bucket      msgbucket.Sizer
 	cipher      atrest.Cipher // nil when ATREST_ENABLED=false
+	tracer      trace.Tracer
 }
 
 func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{cassSession: session, bucket: bucket, cipher: cipher}
+	return &CassandraStore{cassSession: session, bucket: bucket, cipher: cipher, tracer: otel.Tracer(tracerName)}
 }
 
 // SaveMessage inserts msg into both messages_by_room and messages_by_id via a
@@ -77,6 +80,9 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 // the legacy plaintext columns are left null. When s.cipher is nil the
 // legacy plaintext batch runs unchanged.
 func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, sender *cassParticipant, siteID string) error {
+	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveMessage", msg.RoomID)
+	defer span.End()
+
 	if s.cipher != nil {
 		return s.saveMessageEncrypted(ctx, msg, sender, siteID)
 	}
@@ -168,6 +174,9 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 // countAndSetParentTcount derives tcount from a COUNT query and blind-SETs it,
 // which is idempotent on redelivery without any CAS.
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, sender *cassParticipant, siteID string, threadRoomID string) (*int, error) {
+	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveThreadMessage", msg.RoomID)
+	defer span.End()
+
 	if s.cipher != nil {
 		return s.saveThreadMessageEncrypted(ctx, msg, sender, siteID, threadRoomID)
 	}
@@ -377,6 +386,9 @@ func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model
 // IF EXISTS prevents phantom rows on missing parents; misses log at ERROR
 // because a silent miss permanently breaks thread reads for that parent.
 func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error {
+	ctx, span := s.startRoomSpan(ctx, "cassandra.UpdateParentMessageThreadRoomID", roomID)
+	defer span.End()
+
 	parentBucket := s.bucket.Of(parentCreatedAt)
 
 	applied, err := s.cassSession.Query(
