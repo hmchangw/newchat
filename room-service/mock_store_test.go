@@ -596,17 +596,18 @@ func (mr *MockRoomStoreMockRecorder) OpenSubscription(ctx, roomID, account any) 
 }
 
 // RebalanceSection mocks base method.
-func (m *MockRoomStore) RebalanceSection(ctx context.Context, account, sectionID string) error {
+func (m *MockRoomStore) RebalanceSection(ctx context.Context, account, sectionID string, now time.Time) ([]model.Subscription, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RebalanceSection", ctx, account, sectionID)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "RebalanceSection", ctx, account, sectionID, now)
+	ret0, _ := ret[0].([]model.Subscription)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // RebalanceSection indicates an expected call of RebalanceSection.
-func (mr *MockRoomStoreMockRecorder) RebalanceSection(ctx, account, sectionID any) *gomock.Call {
+func (mr *MockRoomStoreMockRecorder) RebalanceSection(ctx, account, sectionID, now any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RebalanceSection", reflect.TypeOf((*MockRoomStore)(nil).RebalanceSection), ctx, account, sectionID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RebalanceSection", reflect.TypeOf((*MockRoomStore)(nil).RebalanceSection), ctx, account, sectionID, now)
 }
 
 // SetOwnerRole mocks base method.

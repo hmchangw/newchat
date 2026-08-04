@@ -60,6 +60,7 @@ paths.
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
+     - [Chatlist Sections](#chatlist-sections)
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
@@ -2155,7 +2156,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 | Field | Type | Notes |
 |---|---|---|
-| `sectionId` | string \| null | The custom section to move the chat into. `null` (or JSON `null`) removes it from its section (falls back to a derived built-in). A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
+| `sectionId` | string \| null | The custom section to move the chat into. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in) — the two are indistinguishable at the wire layer and handled identically. A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
 | `afterRoomId` | string | Optional. Place the chat just after this room within the section. Omit to append at the end. Mutually exclusive with `beforeRoomId`. |
 | `beforeRoomId` | string | Optional. Place the chat just before this room within the section (top-insertion when it is the section head). Mutually exclusive with `afterRoomId`. |
 

@@ -111,7 +111,7 @@ type stubInboxStore struct {
 type userChatlistUpdate struct {
 	account   string
 	chatlist  *model.ChatlistState
-	updatedAt time.Time
+	updatedAt int64
 }
 
 type sectionMove struct {
@@ -454,7 +454,7 @@ func (s *stubInboxStore) UpdateUserSettings(_ context.Context, account string, s
 	return nil
 }
 
-func (s *stubInboxStore) UpdateUserChatlist(_ context.Context, account string, chatlist *model.ChatlistState, updatedAt time.Time) error {
+func (s *stubInboxStore) UpdateUserChatlist(_ context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatlistUpdates = append(s.chatlistUpdates, userChatlistUpdate{account: account, chatlist: chatlist, updatedAt: updatedAt})

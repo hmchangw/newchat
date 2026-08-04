@@ -1134,7 +1134,8 @@ func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID
 		// case. Next = beforeRoomID's order; Prev = the largest order strictly
 		// less than it. Stale ref → append; no prev (it's the head) → next-1.
 		var before model.Subscription
-		err := s.subscriptions.FindOne(ctx, bson.M{"roomId": beforeRoomID, "u.account": account, "sectionId": sectionID}).Decode(&before)
+		err := s.subscriptions.FindOne(ctx, bson.M{"roomId": beforeRoomID, "u.account": account, "sectionId": sectionID},
+			options.FindOne().SetProjection(bson.M{"roomId": 1, "sectionOrder": 1})).Decode(&before)
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			max, mErr := s.sectionOrderExtreme(ctx, secFilter, -1)
 			if mErr != nil {
@@ -1148,7 +1149,7 @@ func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID
 		next := before.SectionOrder
 		prevFilter := bson.M{"u.account": account, "sectionId": sectionID, "sectionOrder": bson.M{"$lt": next}}
 		var prev model.Subscription
-		err = s.subscriptions.FindOne(ctx, prevFilter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: -1}})).Decode(&prev)
+		err = s.subscriptions.FindOne(ctx, prevFilter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: -1}}).SetProjection(bson.M{"sectionOrder": 1})).Decode(&prev)
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return next - 1, false, nil // head
 		}
@@ -1168,7 +1169,8 @@ func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID
 	// Prev = afterRoomID's own order. If it isn't in this section (stale client),
 	// fall back to append rather than midpoint against nothing.
 	var after model.Subscription
-	err := s.subscriptions.FindOne(ctx, bson.M{"roomId": afterRoomID, "u.account": account, "sectionId": sectionID}).Decode(&after)
+	err := s.subscriptions.FindOne(ctx, bson.M{"roomId": afterRoomID, "u.account": account, "sectionId": sectionID},
+		options.FindOne().SetProjection(bson.M{"roomId": 1, "sectionOrder": 1})).Decode(&after)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		max, mErr := s.sectionOrderExtreme(ctx, secFilter, -1)
 		if mErr != nil {
@@ -1183,7 +1185,7 @@ func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID
 	// Next = the smallest order strictly greater than prev in the section.
 	nextFilter := bson.M{"u.account": account, "sectionId": sectionID, "sectionOrder": bson.M{"$gt": prev}}
 	var next model.Subscription
-	err = s.subscriptions.FindOne(ctx, nextFilter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: 1}})).Decode(&next)
+	err = s.subscriptions.FindOne(ctx, nextFilter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: 1}}).SetProjection(bson.M{"sectionOrder": 1})).Decode(&next)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return prev + 1, false, nil // tail
 	}
@@ -1206,7 +1208,7 @@ func sectionMidpoint(prev, next float64) (float64, bool) {
 // filtered section, or 0 when the section is empty.
 func (s *MongoStore) sectionOrderExtreme(ctx context.Context, filter bson.M, dir int) (float64, error) {
 	var sub model.Subscription
-	err := s.subscriptions.FindOne(ctx, filter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: dir}})).Decode(&sub)
+	err := s.subscriptions.FindOne(ctx, filter, options.FindOne().SetSort(bson.D{{Key: "sectionOrder", Value: dir}}).SetProjection(bson.M{"sectionOrder": 1})).Decode(&sub)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return 0, nil
 	}
@@ -1220,33 +1222,36 @@ func (s *MongoStore) sectionOrderExtreme(ctx context.Context, filter bson.M, dir
 // current order. Bounded to one section, run only when a gap exhausts float
 // precision. O(section-size) load + bulk write; a section rarely gets
 // large enough to matter, and it happens only on the precision edge.
-func (s *MongoStore) RebalanceSection(ctx context.Context, account, sectionID string) error {
+// Returns the full post-rebalance doc for every rewritten row (sectionUpdatedAt
+// stamped to now) so the caller can fan those out — every sibling's order
+// changed, not just the one being moved.
+func (s *MongoStore) RebalanceSection(ctx context.Context, account, sectionID string, now time.Time) ([]model.Subscription, error) {
 	cur, err := s.subscriptions.Find(ctx,
 		bson.M{"u.account": account, "sectionId": sectionID},
-		options.Find().SetSort(bson.D{{Key: "sectionOrder", Value: 1}}).SetProjection(bson.M{"roomId": 1}),
+		options.Find().SetSort(bson.D{{Key: "sectionOrder", Value: 1}}),
 	)
 	if err != nil {
-		return fmt.Errorf("rebalance load section: %w", err)
+		return nil, fmt.Errorf("rebalance load section: %w", err)
 	}
-	var subs []struct {
-		RoomID string `bson:"roomId"`
-	}
+	var subs []model.Subscription
 	if err := cur.All(ctx, &subs); err != nil {
-		return fmt.Errorf("rebalance decode section: %w", err)
+		return nil, fmt.Errorf("rebalance decode section: %w", err)
 	}
 	if len(subs) == 0 {
-		return nil
+		return nil, nil
 	}
 	models := make([]mongo.WriteModel, 0, len(subs))
-	for i, sub := range subs {
+	for i := range subs {
+		subs[i].SectionOrder = float64(i + 1)
+		subs[i].SectionUpdatedAt = &now
 		models = append(models, mongo.NewUpdateOneModel().
-			SetFilter(bson.M{"roomId": sub.RoomID, "u.account": account}).
-			SetUpdate(bson.M{"$set": bson.M{"sectionOrder": float64(i + 1)}}))
+			SetFilter(bson.M{"roomId": subs[i].RoomID, "u.account": account}).
+			SetUpdate(bson.M{"$set": bson.M{"sectionOrder": subs[i].SectionOrder, "sectionUpdatedAt": now}}))
 	}
 	if _, err := s.subscriptions.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
-		return fmt.Errorf("rebalance bulk write: %w", err)
+		return nil, fmt.Errorf("rebalance bulk write: %w", err)
 	}
-	return nil
+	return subs, nil
 }
 
 // OpenSubscription sets open=true. Set-not-toggle: no ordering guard is needed

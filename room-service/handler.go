@@ -2250,6 +2250,7 @@ func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*m
 	now := time.Now().UTC()
 
 	var order float64
+	var rebalanced []model.Subscription
 	if req.SectionID != nil {
 		var needRebalance bool
 		var err error
@@ -2258,7 +2259,7 @@ func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*m
 			return nil, fmt.Errorf("compute section order: %w", err)
 		}
 		if needRebalance {
-			if err := h.store.RebalanceSection(ctx, account, *req.SectionID); err != nil {
+			if rebalanced, err = h.store.RebalanceSection(ctx, account, *req.SectionID, now); err != nil {
 				return nil, fmt.Errorf("rebalance section: %w", err)
 			}
 			if order, _, err = h.store.ComputeSectionOrder(ctx, account, *req.SectionID, req.AfterRoomID, req.BeforeRoomID); err != nil {
@@ -2275,28 +2276,73 @@ func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*m
 		return nil, fmt.Errorf("move subscription section: %w", err)
 	}
 
-	if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", sub, "", now); err != nil {
-		return nil, err
-	}
-
 	userSiteID, err := h.store.GetUserSiteID(ctx, account)
 	if err != nil {
 		return nil, fmt.Errorf("get user siteId: %w", err)
 	}
-	if userSiteID != "" && userSiteID != h.siteID {
-		payload := model.SubscriptionSectionMovedEvent{
-			Account:      account,
-			RoomID:       roomID,
-			SectionID:    sub.SectionId,
-			SectionOrder: sub.SectionOrder,
-			Timestamp:    now.UnixMilli(),
+
+	if len(rebalanced) > 0 {
+		// RebalanceSection ran before the final MoveSubscriptionSection write, so
+		// the moved room's entry in rebalanced (if present — it's only a member of
+		// the rebalanced section pre-move when moving within the same section)
+		// still carries its intermediate integer order. Overwrite it with sub, the
+		// authoritative post-move row; if it's not present (moved in from a
+		// different section), append it so the move itself still gets published.
+		moved := false
+		for i := range rebalanced {
+			if rebalanced[i].RoomID == roomID {
+				rebalanced[i] = *sub
+				moved = true
+				break
+			}
 		}
-		payloadData, err := json.Marshal(payload)
-		if err != nil {
-			return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+		if !moved {
+			rebalanced = append(rebalanced, *sub)
 		}
-		if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
-			return nil, fmt.Errorf("federate section-moved: %w", err)
+		// A rebalance renumbered every sibling in the section, not just the moved
+		// chat — fan out one section_moved event per rewritten row (the moved row
+		// is already in this set) instead of the single-row publish below.
+		for i := range rebalanced {
+			row := &rebalanced[i]
+			if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", row, "", now); err != nil {
+				return nil, err
+			}
+			if userSiteID != "" && userSiteID != h.siteID {
+				payload := model.SubscriptionSectionMovedEvent{
+					Account:      account,
+					RoomID:       row.RoomID,
+					SectionID:    row.SectionId,
+					SectionOrder: row.SectionOrder,
+					Timestamp:    now.UnixMilli(),
+				}
+				payloadData, err := json.Marshal(payload)
+				if err != nil {
+					return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+				}
+				if err := h.federateOne(ctx, row.RoomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, row.RoomID+":"+account, now.UnixMilli()); err != nil {
+					return nil, fmt.Errorf("federate section-moved: %w", err)
+				}
+			}
+		}
+	} else {
+		if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", sub, "", now); err != nil {
+			return nil, err
+		}
+		if userSiteID != "" && userSiteID != h.siteID {
+			payload := model.SubscriptionSectionMovedEvent{
+				Account:      account,
+				RoomID:       roomID,
+				SectionID:    sub.SectionId,
+				SectionOrder: sub.SectionOrder,
+				Timestamp:    now.UnixMilli(),
+			}
+			payloadData, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+			}
+			if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+				return nil, fmt.Errorf("federate section-moved: %w", err)
+			}
 		}
 	}
 

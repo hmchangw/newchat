@@ -83,7 +83,10 @@ type InboxStore interface {
 	// UpdateUserChatlist replaces the local users doc's chatlist sub-document with the
 	// full post-update state from the origin site, guarded by chatlistUpdatedAt so an
 	// out-of-order or duplicate delivery can't regress. A missing user is a logged no-op.
-	UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt time.Time) error
+	// updatedAt is unix-millis (int64) — matches how user-service writes
+	// chatlistUpdatedAt (mongorepo/users.go), unlike the other Update* methods here
+	// which take time.Time.
+	UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error
 	// UpdateSubscriptionSection sets sectionId+sectionOrder (or clears both when
 	// sectionID==nil) on (roomID, account), guarded by sectionUpdatedAt so an
 	// out-of-order or duplicate move can't regress. A missing sub NAKs for retry.
@@ -429,7 +432,7 @@ func (h *Handler) handleUserChatlistUpdated(ctx context.Context, evt *model.Inbo
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return fmt.Errorf("unmarshal user_chatlist_updated payload: %w", err)
 	}
-	if err := h.store.UpdateUserChatlist(ctx, e.Account, &e.Chatlist, time.UnixMilli(e.Timestamp).UTC()); err != nil {
+	if err := h.store.UpdateUserChatlist(ctx, e.Account, &e.Chatlist, e.Timestamp); err != nil {
 		return fmt.Errorf("update user chatlist for %q: %w", e.Account, err)
 	}
 	return nil

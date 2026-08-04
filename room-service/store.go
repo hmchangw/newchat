@@ -149,7 +149,10 @@ type RoomStore interface {
 	ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (order float64, needRebalance bool, err error)
 	// RebalanceSection re-spaces every (account) sub in sectionID to 1,2,3,… by
 	// current sectionOrder, restoring gap room. Bounded to one section; rare.
-	RebalanceSection(ctx context.Context, account, sectionID string) error
+	// Returns every rewritten subscription (full post-rebalance doc, sectionUpdatedAt
+	// stamped to now) so the caller can fan out one event per row — a rebalance
+	// silently renumbers siblings the client and remote sites must also learn about.
+	RebalanceSection(ctx context.Context, account, sectionID string, now time.Time) ([]model.Subscription, error)
 	// OpenSubscription atomically sets open=true for (roomID, account) via a single
 	// FindOneAndUpdate and returns the post-update subscription, or
 	// model.ErrSubscriptionNotFound (wrapped) when no match.

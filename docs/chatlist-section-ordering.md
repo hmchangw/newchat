@@ -35,7 +35,7 @@ approaches the limit.
 
 `sectionMidpoint(prev, next)` is the pure core:
 
-```
+```go
 mid := (prev + next) / 2
 return mid, mid <= prev || mid >= next   // second value = exhausted
 ```

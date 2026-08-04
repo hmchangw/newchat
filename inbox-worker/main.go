@@ -216,8 +216,10 @@ func (s *mongoInboxStore) UpdateUserSettings(ctx context.Context, account string
 
 // UpdateUserChatlist replaces the local users doc's chatlist sub-document with the origin
 // site's full post-update state — whole-object, so a removed section is removed here too.
-// A missing user (no doc on this site) is a silent no-op.
-func (s *mongoInboxStore) UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt time.Time) error {
+// A missing user (no doc on this site) is a silent no-op. updatedAt is unix-millis
+// (int64), matching how user-service stamps chatlistUpdatedAt — keeps the field's
+// representation consistent instead of round-tripping through time.Time.
+func (s *mongoInboxStore) UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error {
 	// Guard on the chatlistUpdatedAt high-water mark so an out-of-order or duplicate event
 	// (chatlist fans to all sites) can't regress to older state.
 	filter := bson.M{"account": account, "$or": bson.A{

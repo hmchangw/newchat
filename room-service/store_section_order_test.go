@@ -1,8 +1,13 @@
 package main
 
-import "testing"
+import (
+	"testing"
 
-func TestSectionMidpoint(t *testing.T) {
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestStoreSectionOrder_SectionMidpoint(t *testing.T) {
 	cases := []struct {
 		name          string
 		prev, next    float64
@@ -17,11 +22,10 @@ func TestSectionMidpoint(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mid, exhausted := sectionMidpoint(tc.prev, tc.next)
-			if exhausted != tc.wantExhausted {
-				t.Fatalf("exhausted = %v, want %v (mid=%v)", exhausted, tc.wantExhausted, mid)
-			}
-			if !exhausted && (mid <= tc.prev || mid >= tc.next) {
-				t.Fatalf("mid %v not strictly between %v and %v", mid, tc.prev, tc.next)
+			require.Equal(t, tc.wantExhausted, exhausted, "mid=%v", mid)
+			if !exhausted {
+				assert.Greater(t, mid, tc.prev)
+				assert.Less(t, mid, tc.next)
 			}
 		})
 	}
