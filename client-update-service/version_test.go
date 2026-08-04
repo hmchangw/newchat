@@ -193,6 +193,50 @@ func TestHandleDownload_StoreError_500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
+func TestHandleDownload_TooLarge_StreamOpenNotFound_404(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	gomock.InOrder(
+		// loader Open: oversized (7 > cap 3) -> non-cacheable
+		store.EXPECT().Open(gomock.Any(), objectKey("big.exe")).
+			Return(rc("BIGDATA"), blobInfo{Size: 7, ContentType: "application/octet-stream"}, nil),
+		// stream Open: object vanished between the size probe and the stream
+		store.EXPECT().Open(gomock.Any(), objectKey("big.exe")).
+			Return(nil, blobInfo{}, fmt.Errorf("stat object: %w", ErrObjectNotFound)),
+	)
+	h := NewHandler(store, testCache(3))
+	c, w := downloadCtx(t, "big.exe")
+	h.HandleDownload(c)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestHandleDownload_TooLarge_StreamOpenError_500(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	gomock.InOrder(
+		store.EXPECT().Open(gomock.Any(), objectKey("big.exe")).
+			Return(rc("BIGDATA"), blobInfo{Size: 7, ContentType: "application/octet-stream"}, nil),
+		store.EXPECT().Open(gomock.Any(), objectKey("big.exe")).
+			Return(nil, blobInfo{}, errors.New("minio down")),
+	)
+	h := NewHandler(store, testCache(3))
+	c, w := downloadCtx(t, "big.exe")
+	h.HandleDownload(c)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestHandleDownload_CacheableReadError_500(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	// Size claims 5 bytes but the reader yields fewer -> io.ReadFull errors.
+	store.EXPECT().Open(gomock.Any(), objectKey("short.yaml")).
+		Return(rc("hi"), blobInfo{Size: 5, ContentType: "application/x-yaml"}, nil)
+	h := NewHandler(store, testCache(1024))
+	c, w := downloadCtx(t, "short.yaml")
+	h.HandleDownload(c)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
 func TestHandleDownload_InvalidName_400(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))

@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/assert"
@@ -52,6 +55,55 @@ func TestEnsureBucket_ExistsCheckError(t *testing.T) {
 func TestEnsureBucket_MakeError(t *testing.T) {
 	f := &fakeBucketClient{exists: false, makeErr: minio.ErrorResponse{Code: "AccessDenied"}}
 	assert.Error(t, ensureBucket(context.Background(), f, "b"))
+}
+
+// fakeObjectStore is a minimal minioutil.ObjectStore for unit-testing Put.
+type fakeObjectStore struct {
+	putBucket  string
+	putKey     string
+	putSize    int64
+	putCT      string
+	putErr     error
+}
+
+func (f *fakeObjectStore) BucketExists(context.Context, string) (bool, error) { return true, nil }
+
+func (f *fakeObjectStore) PutObject(_ context.Context, bucket, key string, _ io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+	f.putBucket, f.putKey, f.putSize, f.putCT = bucket, key, size, opts.ContentType
+	return minio.UploadInfo{}, f.putErr
+}
+
+func (f *fakeObjectStore) GetObject(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error) {
+	return nil, nil
+}
+
+func (f *fakeObjectStore) ListObjects(context.Context, string, minio.ListObjectsOptions) <-chan minio.ObjectInfo {
+	ch := make(chan minio.ObjectInfo)
+	close(ch)
+	return ch
+}
+
+func (f *fakeObjectStore) RemoveObject(context.Context, string, string, minio.RemoveObjectOptions) error {
+	return nil
+}
+
+func TestMinioVersionStore_Put(t *testing.T) {
+	f := &fakeObjectStore{}
+	s := newMinioVersionStore(f, "bkt", time.Second)
+	err := s.Put(context.Background(), "chat.go/chat-versions/app.yaml", strings.NewReader("cfg"), 3, "application/x-yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "bkt", f.putBucket)
+	assert.Equal(t, "chat.go/chat-versions/app.yaml", f.putKey)
+	assert.Equal(t, int64(3), f.putSize)
+	assert.Equal(t, "application/x-yaml", f.putCT)
+}
+
+func TestMinioVersionStore_Put_WrapsError(t *testing.T) {
+	f := &fakeObjectStore{putErr: errors.New("net")}
+	s := newMinioVersionStore(f, "bkt", time.Second)
+	err := s.Put(context.Background(), "k", strings.NewReader("x"), 1, "application/octet-stream")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "put object bkt/k")
 }
 
 func TestIsNotFound(t *testing.T) {
