@@ -997,7 +997,7 @@ A step's verdict is one of `PASS`, `TRIP`, or `INCONCLUSIVE`.
 - `p99_latency_ms` > 1000 — same source
 - `error_rate` > 0.001 (0.1%) — failed publishes, request timeouts, gatekeeper 4xx/5xx; counted by the action emitter
 - any JetStream consumer's `num_pending` grew by more than 1000 over the hold — polled via `/jsz?consumers=true` at hold start and end. The `notification-worker` durable is exempt: push-notification delivery delay is tolerated by design, so its backlog never fails the run (still shown in `worst-pending-delta` for observability)
-- any service's `slog_errors_total` counter increased over the hold — currently a no-op since backend services don't expose `/metrics` HTTP endpoints; see known limitations
+- any service's `slog_errors_total` counter increased over the hold — currently a no-op because no service emits that counter; see known limitations
 - any durable that existed at hold-start was *missing* at hold-end (consumer crashed or was deleted) — applies to `notification-worker` too, since a vanished consumer is an availability failure, not a tolerated delay
 
 **INCONCLUSIVE** (overrides PASS/TRIP — means "verdict signals can't be trusted") when:
@@ -1071,7 +1071,22 @@ run:
 
 - **Large-band rooms are gatekeeper-blocked.** Daily fixtures have ~3 large rooms per user with `UserCount` in [500, 2000]; the gatekeeper rejects non-thread sends from member-role users to these. Roughly 3/56 = 5% of `sendMessage` calls land on a large room and fail. Workarounds: raise `LARGE_ROOM_THRESHOLD` (operator side) or change fixtures to seed users as RoleAdmin in large rooms (loadgen side, requires re-seed).
 - **Auth-service JWT minting is a no-op stub.** `mintJWT` exists in `prodEnvFactory.Build` but doesn't call auth-service. All loadgen connections use the shared `backend.creds`. To exercise per-user auth, implement `mintJWT` and have `directPool.Add` open the user's conn with the minted JWT.
-- **Service-error signal is dormant.** The verdict's `service_errors > 0 → trip` arm is wired but the URL map is empty because backend services don't expose `/metrics`. To enable: add a Prometheus endpoint per service and populate `svcURLs` in `prodEnvFactory.Build`.
+- **Service-error signal is dormant — and populating `svcURLs` alone will not
+  fix it.** The verdict's `service_errors > 0 → trip` arm is wired and the URL
+  map is empty, but the blocker is the *metric*, not the endpoints: services do
+  expose `/metrics` (`:9090` hand-rolled counters, `:2112` o11y SDK), and
+  nothing in this repo emits `slog_errors_total`. Wiring URLs today would
+  scrape real endpoints, find no such family, and report a permanent zero that
+  reads as "no service errors".
+
+  Enabling it needs a uniform per-service error counter first. The intended
+  source is the natsrouter middleware in `docs/specs/o11y/o11y-slo.md` §8 P1
+  (`rpc_server_duration_seconds{subject_pattern, errcode_category}`); once it
+  ships, point `serviceErrorCounterName` at it and fill `svcURLs` in
+  `prodEnvFactory.Build`. A scrape that cannot find the family now fails with
+  `errCounterFamilyAbsent`, logs a warning, and lands in
+  `serviceScraper.Unavailable()` — so a half-done wiring is visible rather than
+  silently green.
 - **CPU% in self-metrics is disabled.** The earlier goroutine-count-as-CPU proxy made the tool unusable at scale (every step INCONCLUSIVE above ~4000 users). Real CPU measurement (gopsutil) is a follow-up. The GC pause p99 signal still fires the loadgen-saturation INCONCLUSIVE branch.
 - **Reconnect / presence storms are out of scope.** That's a separate scenario PR.
 - **Cross-site federation (INBOX) is out of scope.** Single-site only.
