@@ -262,3 +262,40 @@ func TestRepository_GetMessageByID_ReactionsRoundTrip(t *testing.T) {
 		assert.Equal(t, want.ReactedAt.UTC(), got.ReactedAt.UTC())
 	}
 }
+
+// TestRepository_GetMessageByID_ForwardedMessage verifies that the
+// forwarded_message UDT column (Task 7's baseColumns addition) round-trips
+// through GetMessageByID's struct-scan read path.
+func TestRepository_GetMessageByID_ForwardedMessage(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	forwardedSender := models.Participant{ID: "u-src", Account: "carol"}
+	ts := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+	sourceCreatedAt := ts.Add(-time.Hour)
+	forwarded := models.ForwardedMessage{
+		MessageID: "m-src",
+		RoomID:    "r-src",
+		Sender:    forwardedSender,
+		CreatedAt: sourceCreatedAt,
+		Msg:       "original body",
+	}
+
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, forwarded_message) VALUES (?, ?, ?, ?, ?, ?)`,
+		"m-fwd", "r1", ts, sender, "fwd", forwarded,
+	).Exec())
+
+	msg, err := repo.GetMessageByID(ctx, "m-fwd")
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	assert.Equal(t, "m-fwd", msg.MessageID)
+
+	require.NotNil(t, msg.ForwardedMessage, "forwarded_message must round-trip")
+	assert.Equal(t, "m-src", msg.ForwardedMessage.MessageID)
+	assert.Equal(t, "carol", msg.ForwardedMessage.Sender.Account)
+	assert.Equal(t, "original body", msg.ForwardedMessage.Msg)
+	assert.True(t, msg.ForwardedMessage.CreatedAt.Equal(sourceCreatedAt))
+}

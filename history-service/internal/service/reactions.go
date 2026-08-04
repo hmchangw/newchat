@@ -156,6 +156,7 @@ func toWireMessage(msg *cassandra.Message, updatedAt *time.Time) pkgmodel.Messag
 		Type:                         msg.Type,
 		SysMsgData:                   msg.SysMsgData,
 		QuotedParentMessage:          msg.QuotedParentMessage,
+		ForwardedMessage:             msg.ForwardedMessage,
 		PinnedAt:                     msg.PinnedAt,
 		PinnedBy:                     pinnedBy,
 	}
