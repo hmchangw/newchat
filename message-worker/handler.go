@@ -134,7 +134,7 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 
 		// Resolve (or create) the thread room first so we have the threadRoomID
 		// before persisting the message to Cassandra.
-		threadRoomID, err := h.handleThreadRoomAndSubscriptions(ctx, &evt.Message, evt.SiteID, user, isMigration)
+		threadRoomID, followers, err := h.handleThreadRoomAndSubscriptions(ctx, &evt.Message, evt.SiteID, user, isMigration)
 		if err != nil {
 			return fmt.Errorf("handle thread room and subscriptions: %w", err)
 		}
@@ -146,8 +146,20 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 				"error", err, "thread_room_id", threadRoomID, "account", evt.Message.UserAccount,
 				"request_id", natsutil.RequestIDFromContext(ctx))
 		}
-		if err := h.markThreadMentions(ctx, &evt.Message, threadRoomID, evt.SiteID, isMigration); err != nil {
+		mentionedAccounts, err := h.markThreadMentions(ctx, &evt.Message, threadRoomID, evt.SiteID, isMigration)
+		if err != nil {
 			return fmt.Errorf("mark thread mentions: %w", err)
+		}
+		// Suppressed for migrated replies like the thread-sub writes above: the
+		// source already carries threadUnread state, and re-deriving it here
+		// would re-mark threads the migration already resolved.
+		if !isMigration {
+			recipients := make([]string, 0, len(followers)+len(mentionedAccounts))
+			recipients = append(recipients, followers...)
+			recipients = append(recipients, mentionedAccounts...)
+			if err := h.fanOutThreadUnread(ctx, evt.Message.RoomID, evt.Message.ThreadParentMessageID, evt.Message.ID, evt.Message.UserAccount, recipients); err != nil {
+				return fmt.Errorf("fan out thread unread: %w", err)
+			}
 		}
 		newTcount, err := h.store.SaveThreadMessage(ctx, &evt.Message, sender, evt.SiteID, threadRoomID)
 		if err != nil {
@@ -252,11 +264,14 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 // handleThreadRoomAndSubscriptions creates the ThreadRoom on first reply and
 // inserts ThreadSubscriptions for the parent author and replier. On subsequent
 // replies it upserts both subscriptions and bumps the room's last-message pointer.
-// It returns the threadRoomID so the caller can pass it to SaveThreadMessage.
+// It returns the threadRoomID so the caller can pass it to SaveThreadMessage,
+// plus the thread's pre-existing followers (the accounts fanOutThreadUnread
+// should mark unread — the parent author alone on a first reply, or the room's
+// established ReplyAccounts on a subsequent one).
 //
 // `replier` may be nil for system messages with no real user (rare in thread
 // paths); subscriptions for the replier are skipped in that case.
-func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, error) {
+func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, []string, error) {
 	now := msg.CreatedAt
 
 	var parentCreatedAt time.Time
@@ -279,11 +294,12 @@ func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *mod
 	err := h.threadStore.CreateThreadRoom(ctx, &threadRoom)
 	switch {
 	case err == nil:
-		return threadRoom.ID, h.handleFirstThreadReply(ctx, msg, eventSiteID, threadRoom.ID, replier, now, isMigration)
+		followers, ferr := h.handleFirstThreadReply(ctx, msg, eventSiteID, threadRoom.ID, replier, now, isMigration)
+		return threadRoom.ID, followers, ferr
 	case errors.Is(err, errThreadRoomExists):
 		return h.handleSubsequentThreadReply(ctx, msg, eventSiteID, replier, now, isMigration)
 	default:
-		return "", fmt.Errorf("create thread room: %w", err)
+		return "", nil, fmt.Errorf("create thread room: %w", err)
 	}
 }
 
@@ -291,7 +307,10 @@ func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *mod
 // It inserts subscriptions for the parent author and (if distinct) the replier.
 // Subscription.SiteID is the room's site (eventSiteID); the owner's home site
 // is resolved separately and used only to decide cross-site inbox routing.
-func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message, eventSiteID, threadRoomID string, replier *model.User, now time.Time, isMigration bool) error {
+// Returns the parent author's account as the thread's sole pre-existing
+// follower (nil when the parent message can't be resolved), for the caller to
+// fold into fanOutThreadUnread's recipient set.
+func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message, eventSiteID, threadRoomID string, replier *model.User, now time.Time, isMigration bool) ([]string, error) {
 	parentSender, err := h.store.GetMessageSender(ctx, msg.ThreadParentMessageID)
 	if err != nil {
 		if errors.Is(err, errMessageNotFound) {
@@ -299,16 +318,16 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 				"parentMessageID", msg.ThreadParentMessageID,
 				"replyID", msg.ID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("get parent message sender: %w", err)
+		return nil, fmt.Errorf("get parent message sender: %w", err)
 	}
 
 	// Parent author joins the thread's replyAccounts set so they appear as a
 	// follower in notification-worker and history-service's "following" feed,
 	// even before they reply themselves. $addToSet dedups against the replier seed.
 	if err := h.threadStore.AddReplyAccounts(ctx, threadRoomID, []string{parentSender.Account}); err != nil {
-		return fmt.Errorf("add parent author to thread room replyAccounts: %w", err)
+		return nil, fmt.Errorf("add parent author to thread room replyAccounts: %w", err)
 	}
 
 	// Skip thread_subscription writes + cross-site inbox for migrated replies: the collections migration
@@ -316,28 +335,28 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	if !isMigration {
 		parentOwnerSite, err := h.lookupOwnerSiteID(ctx, parentSender.Account, "first-reply parent")
 		if err != nil {
-			return fmt.Errorf("lookup parent owner site: %w", err)
+			return nil, fmt.Errorf("lookup parent owner site: %w", err)
 		}
 		parentSub := h.buildThreadSubscription(msg, threadRoomID, parentSender.ID, parentSender.Account, eventSiteID, now)
 		if err := h.threadStore.InsertThreadSubscription(ctx, parentSub); err != nil {
-			return fmt.Errorf("insert parent author thread subscription: %w", err)
+			return nil, fmt.Errorf("insert parent author thread subscription: %w", err)
 		}
 		// Inbox publish is gated on parentOwnerSite — if the parent user is missing
 		// from userStore, we can't route the cross-site copy, but the local Insert
 		// above is independent of that and still happens.
 		if parentOwnerSite != "" {
 			if err := h.publishThreadSubInboxIfRemote(ctx, parentSub, parentOwnerSite, msg.ID); err != nil {
-				return fmt.Errorf("publish parent thread subscription inbox: %w", err)
+				return nil, fmt.Errorf("publish parent thread subscription inbox: %w", err)
 			}
 		}
 
 		if replier != nil && msg.UserID != parentSender.ID {
 			replierSub := h.buildThreadSubscription(msg, threadRoomID, msg.UserID, msg.UserAccount, eventSiteID, now)
 			if err := h.threadStore.InsertThreadSubscription(ctx, replierSub); err != nil {
-				return fmt.Errorf("insert replier thread subscription: %w", err)
+				return nil, fmt.Errorf("insert replier thread subscription: %w", err)
 			}
 			if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-				return fmt.Errorf("publish replier thread subscription inbox: %w", err)
+				return nil, fmt.Errorf("publish replier thread subscription inbox: %w", err)
 			}
 		}
 	}
@@ -345,7 +364,7 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	// Requires ThreadParentMessageCreatedAt; missing → permanent silent thread-fetch failure.
 	if msg.ThreadParentMessageCreatedAt != nil {
 		if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, threadRoomID); err != nil {
-			return fmt.Errorf("stamp thread_room_id on parent message: %w", err)
+			return nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 		}
 	} else {
 		slog.ErrorContext(ctx, "first thread reply: ThreadParentMessageCreatedAt is nil, parent thread_room_id stamp skipped",
@@ -357,20 +376,26 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 		)
 	}
 
-	return nil
+	return []string{parentSender.Account}, nil
 }
 
 // handleSubsequentThreadReply runs when CreateThreadRoom reported an existing room.
 // Upserts subscriptions for both the parent author and the replier (idempotent
 // on redelivery), then bumps the room's last-message pointer. Returns the
-// existing thread room ID so the caller can pass it to SaveThreadMessage.
-// Subscription.SiteID is the room's site (eventSiteID); owner-site routing
-// for the cross-site publish happens via separate lookups.
-func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, error) {
+// existing thread room ID so the caller can pass it to SaveThreadMessage, plus
+// the thread's followers as they stood *before* this reply (existingRoom's
+// ReplyAccounts, captured up front) with the parent author appended when
+// resolvable — legacy thread_rooms predating the parent-author seed lack the
+// author in ReplyAccounts, and without the explicit append they would miss
+// this reply's unread mark. That combined list is the audience
+// fanOutThreadUnread should mark unread; it dedups, and the sender is
+// filtered out there regardless of whether they were already a follower.
+func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, now time.Time, isMigration bool) (string, []string, error) {
 	existingRoom, err := h.threadStore.GetThreadRoomByParentMessageID(ctx, msg.ThreadParentMessageID)
 	if err != nil {
-		return "", fmt.Errorf("get existing thread room: %w", err)
+		return "", nil, fmt.Errorf("get existing thread room: %w", err)
 	}
+	followers := existingRoom.ReplyAccounts
 
 	// Migrated replies: resolve the parent for replyAccounts, but skip all thread_subscription writes (collections owns them).
 	parentFound := true
@@ -380,24 +405,24 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		if !isMigration {
 			parentOwnerSite, lookupErr := h.lookupOwnerSiteID(ctx, parentSender.Account, "subsequent-reply parent")
 			if lookupErr != nil {
-				return "", fmt.Errorf("lookup parent owner site: %w", lookupErr)
+				return "", nil, fmt.Errorf("lookup parent owner site: %w", lookupErr)
 			}
 			parentSub := h.buildThreadSubscription(msg, existingRoom.ID, parentSender.ID, parentSender.Account, eventSiteID, now)
 			if err := h.threadStore.UpsertThreadSubscription(ctx, parentSub); err != nil {
-				return "", fmt.Errorf("upsert parent author thread subscription: %w", err)
+				return "", nil, fmt.Errorf("upsert parent author thread subscription: %w", err)
 			}
 			if parentOwnerSite != "" {
 				if err := h.publishThreadSubInboxIfRemote(ctx, parentSub, parentOwnerSite, msg.ID); err != nil {
-					return "", fmt.Errorf("publish parent thread subscription inbox: %w", err)
+					return "", nil, fmt.Errorf("publish parent thread subscription inbox: %w", err)
 				}
 			}
 			if replier != nil && msg.UserID != parentSender.ID {
 				replierSub := h.buildThreadSubscription(msg, existingRoom.ID, msg.UserID, msg.UserAccount, eventSiteID, now)
 				if err := h.threadStore.UpsertThreadSubscription(ctx, replierSub); err != nil {
-					return "", fmt.Errorf("upsert replier thread subscription: %w", err)
+					return "", nil, fmt.Errorf("upsert replier thread subscription: %w", err)
 				}
 				if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-					return "", fmt.Errorf("publish replier thread subscription inbox: %w", err)
+					return "", nil, fmt.Errorf("publish replier thread subscription inbox: %w", err)
 				}
 			}
 		}
@@ -410,14 +435,14 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		if !isMigration && replier != nil {
 			replierSub := h.buildThreadSubscription(msg, existingRoom.ID, msg.UserID, msg.UserAccount, eventSiteID, now)
 			if err := h.threadStore.UpsertThreadSubscription(ctx, replierSub); err != nil {
-				return "", fmt.Errorf("upsert replier thread subscription: %w", err)
+				return "", nil, fmt.Errorf("upsert replier thread subscription: %w", err)
 			}
 			if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-				return "", fmt.Errorf("publish replier thread subscription inbox: %w", err)
+				return "", nil, fmt.Errorf("publish replier thread subscription inbox: %w", err)
 			}
 		}
 	default:
-		return "", fmt.Errorf("get parent message sender: %w", err)
+		return "", nil, fmt.Errorf("get parent message sender: %w", err)
 	}
 
 	// Update lastMsg pointer AND merge replier + parent author into replyAccounts in one write.
@@ -429,7 +454,17 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		replyAccounts = append(replyAccounts, parentSender.Account)
 	}
 	if err := h.threadStore.UpdateThreadRoomLastMessage(ctx, existingRoom.ID, msg.ID, replyAccounts, now); err != nil {
-		return "", fmt.Errorf("update thread room last message: %w", err)
+		return "", nil, fmt.Errorf("update thread room last message: %w", err)
+	}
+
+	// The parent author is always part of this reply's unread audience, even on
+	// legacy thread_rooms created before the parent-author seed (whose
+	// replyAccounts lacks them — the merge above repairs the document only for
+	// FUTURE replies, after `followers` was captured). fanOutThreadUnread dedups
+	// and strips the sender, so this is a no-op when the author already follows
+	// or is the replier.
+	if parentFound {
+		followers = append(followers, parentSender.Account)
 	}
 
 	// Re-stamp handles redelivery: first attempt may have created the thread room
@@ -437,7 +472,7 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	switch {
 	case parentFound && msg.ThreadParentMessageCreatedAt != nil:
 		if err := h.store.UpdateParentMessageThreadRoomID(ctx, msg.ThreadParentMessageID, msg.RoomID, *msg.ThreadParentMessageCreatedAt, existingRoom.ID); err != nil {
-			return "", fmt.Errorf("stamp thread_room_id on parent message: %w", err)
+			return "", nil, fmt.Errorf("stamp thread_room_id on parent message: %w", err)
 		}
 	case !parentFound:
 		slog.ErrorContext(ctx, "subsequent thread reply: parent not found in messages_by_id, thread_room_id stamp skipped",
@@ -457,7 +492,7 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 		)
 	}
 
-	return existingRoom.ID, nil
+	return existingRoom.ID, followers, nil
 }
 
 // lookupOwnerSiteID resolves a user's home site by account.
@@ -505,8 +540,10 @@ func (h *Handler) buildThreadSubscription(msg *model.Message, threadRoomID, user
 // for notification fan-out and the "following threads" feed. The sender is
 // excluded and @all is ignored at the thread level. Subscription.SiteID is the
 // room's site (eventSiteID); the mentionee's home site (Participant.SiteID) is
-// used only for the cross-site inbox routing.
-func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, threadRoomID, eventSiteID string, isMigration bool) error {
+// used only for the cross-site inbox routing. Returns the mentioned accounts
+// (nil if none) so the caller can fold them into fanOutThreadUnread's
+// recipient set alongside the thread's existing followers.
+func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, threadRoomID, eventSiteID string, isMigration bool) ([]string, error) {
 	// Collect mention candidates (excluding @all and the sender) and their accounts
 	// in one pass; candidates hold pointers into msg.Mentions to avoid struct copies.
 	candidates := make([]*model.Participant, 0, len(msg.Mentions))
@@ -523,12 +560,12 @@ func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, th
 		accounts = append(accounts, p.Account)
 	}
 	if len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	windows, err := h.threadStore.GetHistorySharedSince(ctx, msg.RoomID, accounts)
 	if err != nil {
-		return fmt.Errorf("get history windows for thread mentions: %w", err)
+		return nil, fmt.Errorf("get history windows for thread mentions: %w", err)
 	}
 
 	var mentionedAccounts []string
@@ -545,17 +582,80 @@ func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, th
 			sub := h.buildThreadSubscription(msg, threadRoomID, p.UserID, p.Account, eventSiteID, msg.CreatedAt)
 			sub.HasMention = true
 			if err := h.threadStore.MarkThreadSubscriptionMention(ctx, sub); err != nil {
-				return fmt.Errorf("mark thread subscription mention for user %s: %w", p.UserID, err)
+				return nil, fmt.Errorf("mark thread subscription mention for user %s: %w", p.UserID, err)
 			}
 			if err := h.publishThreadSubInboxIfRemote(ctx, sub, p.SiteID, msg.ID); err != nil {
-				return fmt.Errorf("publish thread mention inbox for user %s: %w", p.UserID, err)
+				return nil, fmt.Errorf("publish thread mention inbox for user %s: %w", p.UserID, err)
 			}
 		}
 		mentionedAccounts = append(mentionedAccounts, p.Account)
 	}
 	if len(mentionedAccounts) > 0 {
 		if err := h.threadStore.AddReplyAccounts(ctx, threadRoomID, mentionedAccounts); err != nil {
-			return fmt.Errorf("add mentioned accounts to thread room replyAccounts: %w", err)
+			return nil, fmt.Errorf("add mentioned accounts to thread room replyAccounts: %w", err)
+		}
+	}
+	return mentionedAccounts, nil
+}
+
+// fanOutThreadUnread marks the reply's parent thread unread for every
+// follower except the sender: one local UpdateMany, plus one
+// thread_unread_added outbox event per remote home site so each follower's
+// origin-site replica converges. recipients may contain the sender and
+// duplicates (the caller concatenates two independently-deduped lists); both
+// are stripped here before any write.
+//
+// msgID is this reply's own message ID and MUST be part of the outbox dedup
+// key (mirrors publishThreadSubInboxIfRemote's dedup seed in this file):
+// threadUnread is cleared by reads, so two distinct replies to the same
+// thread with the same remote audience are NOT redundant — a read between
+// them means the second reply is a genuinely new unread event. Keying only
+// on (parentMessageID, site, accounts) would let JetStream's Nats-Msg-Id
+// dedup window silently swallow that second reply's publish whenever it
+// lands within the window, permanently losing the recipient's badge.
+func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageID, msgID, sender string, recipients []string) error {
+	accounts := make([]string, 0, len(recipients))
+	seen := map[string]struct{}{sender: {}}
+	for _, a := range recipients {
+		if _, dup := seen[a]; dup {
+			continue
+		}
+		seen[a] = struct{}{}
+		accounts = append(accounts, a)
+	}
+	if len(accounts) == 0 {
+		return nil
+	}
+	if err := h.threadStore.AddThreadUnread(ctx, roomID, parentMessageID, accounts); err != nil {
+		return fmt.Errorf("add thread unread: %w", err)
+	}
+
+	bySite := map[string][]string{}
+	for _, a := range accounts {
+		// A genuine lookup failure NAKs (mirrors every other lookupOwnerSiteID call
+		// site in this file); "not found" already degrades to ("", nil) inside the
+		// helper, so it — like a same-site home — simply needs no federation here.
+		site, err := h.lookupOwnerSiteID(ctx, a, "thread-unread recipient")
+		if err != nil {
+			return fmt.Errorf("lookup owner site for %s: %w", a, err)
+		}
+		if site == "" || site == h.siteID {
+			continue
+		}
+		bySite[site] = append(bySite[site], a)
+	}
+
+	now := time.Now().UTC().UnixMilli()
+	for site, accs := range bySite {
+		payload, err := sonic.Marshal(model.ThreadUnreadAddedEvent{
+			RoomID: roomID, ParentMessageID: parentMessageID, Accounts: accs, Timestamp: now,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal thread_unread_added: %w", err)
+		}
+		dedupID := fmt.Sprintf("thread-unread:%s:%s:%s", parentMessageID, msgID, site)
+		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, site, model.InboxThreadUnreadAdded, payload, dedupID, now); err != nil {
+			return fmt.Errorf("federate thread_unread_added to %s: %w", site, err)
 		}
 	}
 	return nil

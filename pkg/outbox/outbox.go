@@ -31,6 +31,7 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	// inbox-worker's UpsertThreadSubscription is $setOnInsert (immutable identity)
 	// + $max hasMention (monotonic), so out-of-order/duplicate applies converge.
 	model.InboxThreadSubscriptionUpserted,
+	model.InboxThreadUnreadAdded,
 }
 
 // OrderedEventTypes are the OUTBOX event types forwarded by outbox-worker's

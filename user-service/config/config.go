@@ -41,9 +41,14 @@ type Config struct {
 	OIDCClientID     string        `env:"OIDC_CLIENT_ID"     envDefault:""`
 	SSORefreshWindow time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string      `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_admin"`
-	Mongo           MongoConfig `envPrefix:"MONGO_"`
-	NATS            NATSConfig  `envPrefix:"NATS_"`
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_admin"`
+	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
+	// accelerator (pkg/badgecache); empty disables it (Phase A deploys need no
+	// Valkey — badge.count.batch falls back to computing counts on the fly).
+	ValkeyAddrs    []string    `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
+	ValkeyPassword string      `env:"VALKEY_PASSWORD" envDefault:""`
+	Mongo          MongoConfig `envPrefix:"MONGO_"`
+	NATS           NATSConfig  `envPrefix:"NATS_"`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.

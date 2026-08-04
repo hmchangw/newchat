@@ -395,6 +395,47 @@ func TestInbox_UpdateSubscriptionOpen_MissingSubscriptionErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "subscription not found")
 }
 
+func TestInboxStore_SubscriptionHasThreadUnread_True(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	_, err := store.subCol.InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", ThreadUnread: []string{"p1", "p2"},
+	})
+	require.NoError(t, err)
+
+	got, err := store.SubscriptionHasThreadUnread(ctx, "r1", "alice")
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+func TestInboxStore_SubscriptionHasThreadUnread_FalseWhenEmpty(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	_, err := store.subCol.InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+	})
+	require.NoError(t, err)
+
+	got, err := store.SubscriptionHasThreadUnread(ctx, "r1", "alice")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+func TestInboxStore_SubscriptionHasThreadUnread_FalseWhenMissingSubscription(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	got, err := store.SubscriptionHasThreadUnread(ctx, "no-such-room", "ghost")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
 func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
@@ -732,7 +773,6 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
 		JoinedAt:     now.Add(-time.Hour),
 		ThreadUnread: []string{"p1", "p2"},
-		Alert:        true,
 	}
 	_, err := db.Collection("subscriptions").InsertOne(ctx, &seedSub)
 	require.NoError(t, err)
@@ -745,17 +785,77 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, true, now))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, now))
 
 	var gotSub model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&gotSub))
 	assert.Equal(t, []string{"p2"}, gotSub.ThreadUnread)
-	assert.True(t, gotSub.Alert)
 
 	var gotTS model.ThreadSubscription
 	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
 	require.NotNil(t, gotTS.LastSeenAt)
 	assert.Equal(t, now, gotTS.LastSeenAt.UTC().Truncate(time.Millisecond))
+	assert.False(t, gotTS.HasMention)
+}
+
+// An empty/nil newThreadUnread must $unset the field, not store an empty array.
+func TestInboxStore_ApplyThreadRead_EmptyArrayUnsetsField(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+	ctx := context.Background()
+
+	seedSub := model.Subscription{
+		ID: "sub-1", RoomID: "r1", SiteID: "site-b",
+		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
+		JoinedAt:     time.Now().UTC().Add(-time.Hour),
+		ThreadUnread: []string{"p1"},
+	}
+	_, err := db.Collection("subscriptions").InsertOne(ctx, &seedSub)
+	require.NoError(t, err)
+
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	seedTS := model.ThreadSubscription{
+		ID: "tsub-1", ParentMessageID: "p1", RoomID: "r1",
+		ThreadRoomID: "tr1", UserAccount: "alice", SiteID: "site-b",
+		HasMention: true, CreatedAt: created, UpdatedAt: created,
+	}
+	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
+	require.NoError(t, err)
+
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", nil, time.Now().UTC()))
+
+	var raw bson.M
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
+	_, present := raw["threadUnread"]
+	assert.False(t, present, "threadUnread must be $unset, not stored as empty array")
+}
+
+// Missing subscription: the guarded thread-sub update still succeeds; the
+// subsequent Subscription write matches nothing and is a silent no-op.
+func TestInboxStore_ApplyThreadRead_MissingSubscription_NoError(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	seedTS := model.ThreadSubscription{
+		ID: "tsub-1", ParentMessageID: "p1", RoomID: "r1",
+		ThreadRoomID: "tr1", UserAccount: "alice", SiteID: "site-b",
+		HasMention: true, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
+	}
+	_, err := db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
+	require.NoError(t, err)
+
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, now))
+
+	var gotTS model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
 	assert.False(t, gotTS.HasMention)
 }
 
@@ -779,8 +879,8 @@ func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = db.Collection("subscriptions").InsertMany(ctx, []any{
-		&model.Subscription{ID: "sA1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}, Alert: true},
-		&model.Subscription{ID: "sB1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}, Alert: true},
+		&model.Subscription{ID: "sA1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}},
+		&model.Subscription{ID: "sB1", RoomID: "r1", SiteID: "site-b", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}},
 	})
 	require.NoError(t, err)
 
@@ -799,11 +899,10 @@ func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
 	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsA3"}).Decode(&ts3))
 	assert.Equal(t, now.Add(time.Hour), ts3.LastSeenAt.UTC().Truncate(time.Millisecond))
 
-	// alice's subscription: threadUnread unset, alert cleared.
+	// alice's subscription: threadUnread unset.
 	var rawA model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA1"}).Decode(&rawA))
 	assert.Empty(t, rawA.ThreadUnread)
-	assert.False(t, rawA.Alert)
 
 	// bob untouched.
 	var tsB model.ThreadSubscription
@@ -812,41 +911,38 @@ func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
 	var subB model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&subB))
 	assert.Equal(t, []string{"p9"}, subB.ThreadUnread)
-	assert.True(t, subB.Alert)
 }
 
-func TestInboxStore_ApplyThreadRead_EmptyArrayUnsetsField(t *testing.T) {
+func TestInboxStore_AddThreadUnread_Integration(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
 	ctx := context.Background()
 
-	seedSub := model.Subscription{
-		ID: "sub-1", RoomID: "r1", SiteID: "site-b",
-		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
-		JoinedAt: time.Now().UTC().Add(-time.Hour), ThreadUnread: []string{"p1"}, Alert: true,
-	}
-	_, err := db.Collection("subscriptions").InsertOne(ctx, &seedSub)
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		&model.Subscription{ID: "sA", RoomID: "r1", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+		&model.Subscription{ID: "sB", RoomID: "r1", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p1"}},
+		&model.Subscription{ID: "sC", RoomID: "r2", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+	})
 	require.NoError(t, err)
 
-	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
-	seedTS := model.ThreadSubscription{
-		ID: "tsub-1", ParentMessageID: "p1", RoomID: "r1",
-		ThreadRoomID: "tr1", UserAccount: "alice", SiteID: "site-b",
-		HasMention: true, CreatedAt: created, UpdatedAt: created,
-	}
-	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
-	require.NoError(t, err)
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", []string{"alice", "bob"}))
+	// Idempotent under redelivery:
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", []string{"alice", "bob"}))
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", nil, false, time.Now().UTC()))
+	var a, b, c model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA"}).Decode(&a))
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB"}).Decode(&b))
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sC"}).Decode(&c))
+	assert.Equal(t, []string{"p1"}, a.ThreadUnread)
+	assert.Equal(t, []string{"p1"}, b.ThreadUnread, "$addToSet must not duplicate")
+	assert.Nil(t, c.ThreadUnread, "other rooms untouched")
+}
 
-	var raw bson.M
-	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
-	_, present := raw["threadUnread"]
-	assert.False(t, present, "threadUnread must be $unset, not stored as empty array")
-	assert.Equal(t, false, raw["alert"])
+func TestInboxStore_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
+	db := setupMongo(t)
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	ctx := context.Background()
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", nil))
 }
 
 // Stale event: thread-sub guard rejects, same gate skips the Subscription.
@@ -863,8 +959,9 @@ func TestInboxStore_ApplyThreadRead_OutOfOrderThreadSub(t *testing.T) {
 
 	seedSub := model.Subscription{
 		ID: "sub-1", RoomID: "r1", SiteID: "site-b",
-		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
-		JoinedAt: t1.Add(-time.Hour), ThreadUnread: []string{"p1", "p2"}, Alert: true,
+		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
+		JoinedAt:     t1.Add(-time.Hour),
+		ThreadUnread: []string{"p1", "p2"},
 	}
 	_, err := db.Collection("subscriptions").InsertOne(ctx, &seedSub)
 	require.NoError(t, err)
@@ -877,41 +974,16 @@ func TestInboxStore_ApplyThreadRead_OutOfOrderThreadSub(t *testing.T) {
 	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, false, t1))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, t1))
 
 	var gotSub model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&gotSub))
 	assert.Equal(t, []string{"p1", "p2"}, gotSub.ThreadUnread)
-	assert.True(t, gotSub.Alert)
 
 	var gotTS model.ThreadSubscription
 	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
 	require.NotNil(t, gotTS.LastSeenAt)
 	assert.Equal(t, t2, gotTS.LastSeenAt.UTC().Truncate(time.Millisecond))
-}
-
-func TestInboxStore_ApplyThreadRead_MissingSubscription_NoError(t *testing.T) {
-	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
-	ctx := context.Background()
-
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	seedTS := model.ThreadSubscription{
-		ID: "tsub-1", ParentMessageID: "p1", RoomID: "r1",
-		ThreadRoomID: "tr1", UserAccount: "alice", SiteID: "site-b",
-		HasMention: true, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
-	}
-	_, err := db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
-	require.NoError(t, err)
-
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, true, now))
-
-	var gotTS model.ThreadSubscription
-	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
-	assert.False(t, gotTS.HasMention)
 }
 
 // newSubFixture returns a Subscription fixture with Member role and the given name.
@@ -1237,7 +1309,7 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 	assert.True(t, got.UpdatedAt.Equal(later), "updatedAt advances to the later event")
 }
 
-// Missing thread-sub: gate doesn't match, Subscription is skipped too.
+// Missing thread-sub: the guarded update matches nothing and is a silent no-op.
 func TestInboxStore_ApplyThreadRead_MissingThreadSubscription_NoError(t *testing.T) {
 	db := setupMongo(t)
 	store := &mongoInboxStore{
@@ -1248,18 +1320,22 @@ func TestInboxStore_ApplyThreadRead_MissingThreadSubscription_NoError(t *testing
 
 	seedSub := model.Subscription{
 		ID: "sub-1", RoomID: "r1", SiteID: "site-b",
-		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
-		JoinedAt: time.Now().UTC().Add(-time.Hour), ThreadUnread: []string{"p1"}, Alert: true,
+		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
+		JoinedAt:     time.Now().UTC().Add(-time.Hour),
+		ThreadUnread: []string{"p1"},
 	}
 	_, err := db.Collection("subscriptions").InsertOne(ctx, &seedSub)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr-missing", "alice", nil, false, time.Now().UTC()))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr-missing", "alice", nil, time.Now().UTC()))
+
+	count, err := db.Collection("thread_subscriptions").CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Zero(t, count)
 
 	var gotSub model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&gotSub))
 	assert.Equal(t, []string{"p1"}, gotSub.ThreadUnread)
-	assert.True(t, gotSub.Alert)
 }
 
 func newGuardStore(db *mongo.Database) *mongoInboxStore {

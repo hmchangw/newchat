@@ -52,6 +52,7 @@ type config struct {
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`   // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
 	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
 	Mode                   stream.Pipeline         `env:"MODE,required"`                                 // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -60,8 +61,22 @@ type config struct {
 	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
+// mongoMemberLoader loads a room's member list from the subscriptions
+// collection and enriches each member with their HOME site from the users
+// collection (one batch $in query per room per cache fill — amortized by the
+// roomsubcache TTL, not per event). Subscription.siteId is deliberately NOT
+// read: it is the ROOM's home site (docs/client-api.md, Subscription schema),
+// identical for every member at the room's own site, and routing badge RPCs by
+// it sent every count to the local user-service (and created badge:{account}
+// Valkey sets at a site whose clear hooks never fire).
+//
+// NOTE: this revises the original "notification-worker does no users-collection
+// lookups" contract (docs/notification-worker-downstream-contracts.md §3) —
+// consciously, and only at cache-fill time, to route badge RPCs to each
+// recipient's home site.
 type mongoMemberLoader struct {
-	col *mongo.Collection
+	col   *mongo.Collection // subscriptions
+	users *mongo.Collection // users — home-site (siteId) lookup
 }
 
 func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
@@ -111,7 +126,49 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 	if err := cur.Err(); err != nil {
 		return nil, fmt.Errorf("iterate subscriptions: %w", err)
 	}
+	if err := m.fillHomeSites(ctx, roomID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// fillHomeSites stamps each member's HomeSiteID from the users collection
+// ({account $in members}, projected to {account, siteId}). An account missing
+// from users leaves HomeSiteID empty — that member degrades to no badge count
+// downstream rather than misrouting the RPC.
+func (m *mongoMemberLoader) fillHomeSites(ctx context.Context, roomID string, members []roomsubcache.Member) error {
+	if len(members) == 0 {
+		return nil
+	}
+	accounts := make([]string, 0, len(members))
+	for i := range members {
+		accounts = append(accounts, members[i].Account)
+	}
+	cur, err := m.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}},
+		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "siteId": 1}))
+	if err != nil {
+		return fmt.Errorf("find home sites for room %s members: %w", roomID, err)
+	}
+	defer cur.Close(ctx)
+
+	siteByAccount := make(map[string]string, len(accounts))
+	for cur.Next(ctx) {
+		var doc struct {
+			Account string `bson:"account"`
+			SiteID  string `bson:"siteId"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			return fmt.Errorf("decode user home site: %w", err)
+		}
+		siteByAccount[doc.Account] = doc.SiteID
+	}
+	if err := cur.Err(); err != nil {
+		return fmt.Errorf("iterate user home sites: %w", err)
+	}
+	for i := range members {
+		members[i].HomeSiteID = siteByAccount[members[i].Account]
+	}
+	return nil
 }
 
 func main() {
@@ -144,6 +201,7 @@ func main() {
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
+	usersCol := db.Collection("users")
 
 	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 		valkeyutil.WithObservability(sdk),
@@ -165,7 +223,7 @@ func main() {
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
-	loader := &mongoMemberLoader{col: subCol}
+	loader := &mongoMemberLoader{col: subCol, users: usersCol}
 	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
@@ -207,6 +265,11 @@ func main() {
 		)
 	}
 
+	var badge badgeClient
+	if cfg.BadgeCountEnabled {
+		badge = newNatsBadgeClient(nc)
+	}
+
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
@@ -215,6 +278,7 @@ func main() {
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
+		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 	})
@@ -328,6 +392,7 @@ func main() {
 		"push_recipient_batch_size", cfg.PushRecipientBatchSize,
 		"valkey_addrs", cfg.ValkeyAddrs,
 		"presence_enabled", cfg.PresenceEnabled,
+		"badge_count_enabled", cfg.BadgeCountEnabled,
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,

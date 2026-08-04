@@ -122,10 +122,11 @@ type RoomStore interface {
 	// candidates pipeline and the async job reports success despite the
 	// requested user never being added.
 	FindExistingAccounts(ctx context.Context, accounts []string) ([]string, error)
-	// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
-	// keyed by (roomID, account). Returns model.ErrSubscriptionNotFound
-	// (wrapped) when no subscription matches.
-	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
+	// UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
+	// (roomID, account), clearing alert and hasMention (reading the room
+	// dismisses both). Returns model.ErrSubscriptionNotFound (wrapped) when
+	// no subscription matches.
+	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error
 	// ToggleSubscriptionMute atomically flips muted via a single FindOneAndUpdate,
 	// stamping muteUpdatedAt so the origin doc carries the same high-water mark the
 	// federated event publishes (inbox-worker guards remote applies against it).
@@ -195,11 +196,20 @@ type RoomStore interface {
 	// filter rejects a threadId that belongs to a different room than the request subject.
 	GetThreadSubscriptionByParent(ctx context.Context, account, parentMessageID, roomID string) (*model.ThreadSubscription, error)
 
-	// UpdateSubscriptionThreadRead atomically removes threadID from threadUnread and returns
-	// the updated slice (nil when empty) and the updated alert flag.
-	UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) (newThreadUnread []string, newAlert bool, err error)
-
 	UpdateThreadSubscriptionRead(ctx context.Context, threadRoomID, account string, lastSeenAt time.Time) error
+
+	// UpdateSubscriptionThreadRead removes threadID from the subscription's
+	// threadUnread array via $pull and returns the resulting array (nil when
+	// empty — the field is $unset rather than stored as an empty array).
+	// Returns model.ErrSubscriptionNotFound (wrapped) when no subscription
+	// matches (roomID, account).
+	UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error)
+
+	// ClearSubscriptionThreadUnreadForAccount removes threadUnread from every
+	// one of account's subscriptions that currently has unread threads
+	// (threadUnread.0 exists). Subscriptions with no unread threads are not
+	// matched.
+	ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error
 
 	// ClearThreadSubscriptionsForAccount marks every one of account's thread
 	// subscriptions on this site as read (lastSeenAt=now, updatedAt=now,
@@ -207,12 +217,6 @@ type RoomStore interface {
 	// convergence rides one thread_read_all event, so no per-row snapshot is
 	// returned.
 	ClearThreadSubscriptionsForAccount(ctx context.Context, account string, now time.Time) error
-
-	// ClearSubscriptionThreadUnreadForAccount clears thread-unread state on every
-	// one of account's subscriptions that currently has unread threads: removes
-	// threadUnread and sets alert=false. Subscriptions without unread threads are
-	// left untouched so a non-thread alert source is preserved.
-	ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error
 
 	// GetThreadRoomByID returns the thread room document for threadRoomID.
 	// Returns (nil, nil) when no document matches.

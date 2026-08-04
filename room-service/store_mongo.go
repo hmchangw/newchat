@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"regexp"
 	"time"
 
@@ -263,8 +262,8 @@ var roomAppReadProjection = bson.D{
 // integration test guards drift.
 var subscriptionReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "u", Value: 1}, {Key: "roomId", Value: 1},
-	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1}, {Key: "alert", Value: 1},
-	{Key: "threadUnread", Value: 1}, {Key: "lastSeenAt", Value: 1},
+	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1},
+	{Key: "lastSeenAt", Value: 1}, {Key: "threadUnread", Value: 1},
 }
 
 func (s *MongoStore) GetRoom(ctx context.Context, id string) (*model.Room, error) {
@@ -1035,13 +1034,13 @@ func (s *MongoStore) FindExistingAccounts(ctx context.Context, accounts []string
 	return out, nil
 }
 
-// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
-// keyed by (roomID, account). Returns model.ErrSubscriptionNotFound when no
-// subscription matches.
-func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+// UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
+// (roomID, account), clearing alert and hasMention. Returns
+// model.ErrSubscriptionNotFound when no subscription matches.
+func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error {
 	res, err := s.subscriptions.UpdateOne(ctx,
 		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert, "hasMention": false}},
+		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": false, "hasMention": false}},
 	)
 	if err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
@@ -1349,40 +1348,6 @@ func (s *MongoStore) GetThreadSubscriptionByParent(ctx context.Context, account,
 	return &ts, nil
 }
 
-// UpdateSubscriptionThreadRead removes threadID from threadUnread using a $pull
-// and returns the resulting state. If threadUnread becomes empty a second update
-// clears alert and removes the field.
-func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, bool, error) {
-	filter := bson.M{"roomId": roomID, "u.account": account}
-
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	var updated model.Subscription
-	err := s.subscriptions.FindOneAndUpdate(ctx, filter,
-		bson.M{"$pull": bson.M{"threadUnread": threadID}},
-		opts,
-	).Decode(&updated)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, false, fmt.Errorf("update subscription thread-read for %q in room %q: %w",
-			account, roomID, model.ErrSubscriptionNotFound)
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, err)
-	}
-
-	if len(updated.ThreadUnread) == 0 {
-		if _, err = s.subscriptions.UpdateOne(ctx, filter, bson.M{
-			"$set":   bson.M{"alert": false},
-			"$unset": bson.M{"threadUnread": ""},
-		}); err != nil {
-			slog.WarnContext(ctx, "clear alert after empty threadUnread",
-				"error", err, "account", account, "roomID", roomID)
-		}
-		return nil, false, nil
-	}
-
-	return updated.ThreadUnread, updated.Alert, nil
-}
-
 // ListDefaultChannelTabApps returns apps whose channelTab.enabled AND
 // channelTab.default are both true, sorted by channelTab.name asc.
 // Projection: _id, assistant, channelTab. Empty result is ([], nil).
@@ -1653,6 +1618,41 @@ func (s *MongoStore) UpdateThreadSubscriptionRead(ctx context.Context, threadRoo
 	return nil
 }
 
+// UpdateSubscriptionThreadRead removes threadID from threadUnread via a single
+// $pull and returns the resulting array (nil when empty). A drained array stays
+// stored as [] — omitempty keeps it off the wire and every reader checks
+// len > 0, so a second $unset round-trip buys nothing. Missing subscription →
+// ErrSubscriptionNotFound.
+func (s *MongoStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error) {
+	filter := bson.M{"roomId": roomID, "u.account": account}
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var updated model.Subscription
+	err := s.subscriptions.FindOneAndUpdate(ctx, filter,
+		bson.M{"$pull": bson.M{"threadUnread": threadID}}, opts).Decode(&updated)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update subscription thread-read for %q in room %q: %w", account, roomID, err)
+	}
+	if len(updated.ThreadUnread) == 0 {
+		return nil, nil
+	}
+	return updated.ThreadUnread, nil
+}
+
+// ClearSubscriptionThreadUnreadForAccount removes threadUnread from every one
+// of account's subscriptions that has unread threads.
+func (s *MongoStore) ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error {
+	if _, err := s.subscriptions.UpdateMany(ctx,
+		bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}},
+		bson.M{"$unset": bson.M{"threadUnread": ""}},
+	); err != nil {
+		return fmt.Errorf("clear subscription thread-unread for %q: %w", account, err)
+	}
+	return nil
+}
+
 // ClearThreadSubscriptionsForAccount marks every one of account's thread
 // subscriptions as read in one account-scoped bulk update. No order-safety guard
 // on the source-site write; the $lt guard lives on the inbox-worker side. A
@@ -1666,21 +1666,6 @@ func (s *MongoStore) ClearThreadSubscriptionsForAccount(ctx context.Context, acc
 		"hasMention": false,
 	}}); err != nil {
 		return fmt.Errorf("clear thread subscriptions for %q: %w", account, err)
-	}
-	return nil
-}
-
-// ClearSubscriptionThreadUnreadForAccount removes threadUnread and clears alert on
-// every one of account's subscriptions that currently has unread threads
-// (threadUnread.0 exists). Mirrors the single-thread "empty threadUnread → alert
-// cleared" rule; subscriptions with no unread threads are not matched, so a
-// non-thread alert is preserved.
-func (s *MongoStore) ClearSubscriptionThreadUnreadForAccount(ctx context.Context, account string) error {
-	if _, err := s.subscriptions.UpdateMany(ctx,
-		bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}},
-		bson.M{"$set": bson.M{"alert": false}, "$unset": bson.M{"threadUnread": ""}},
-	); err != nil {
-		return fmt.Errorf("clear subscription thread-unread for %q: %w", account, err)
 	}
 	return nil
 }

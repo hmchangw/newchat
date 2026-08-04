@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -27,6 +28,22 @@ func TestConfig_MaxWorkers(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 32, cfg.MaxWorkers)
 	})
+}
+
+func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
+	require.NoError(t, os.Unsetenv("VALKEY_ADDRS"))
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+}
+
+func TestConfig_ValkeyAddrsParsed(t *testing.T) {
+	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
+	t.Setenv("VALKEY_PASSWORD", "hunter2")
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
 func TestIsMembershipSubject(t *testing.T) {

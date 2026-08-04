@@ -638,27 +638,26 @@ func (mr *MockRoomStoreMockRecorder) UpdateRoomVisibility(ctx, roomID, restricte
 }
 
 // UpdateSubscriptionRead mocks base method.
-func (m *MockRoomStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+func (m *MockRoomStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateSubscriptionRead", ctx, roomID, account, lastSeenAt, alert)
+	ret := m.ctrl.Call(m, "UpdateSubscriptionRead", ctx, roomID, account, lastSeenAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateSubscriptionRead indicates an expected call of UpdateSubscriptionRead.
-func (mr *MockRoomStoreMockRecorder) UpdateSubscriptionRead(ctx, roomID, account, lastSeenAt, alert any) *gomock.Call {
+func (mr *MockRoomStoreMockRecorder) UpdateSubscriptionRead(ctx, roomID, account, lastSeenAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRead", reflect.TypeOf((*MockRoomStore)(nil).UpdateSubscriptionRead), ctx, roomID, account, lastSeenAt, alert)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRead", reflect.TypeOf((*MockRoomStore)(nil).UpdateSubscriptionRead), ctx, roomID, account, lastSeenAt)
 }
 
 // UpdateSubscriptionThreadRead mocks base method.
-func (m *MockRoomStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, bool, error) {
+func (m *MockRoomStore) UpdateSubscriptionThreadRead(ctx context.Context, roomID, account, threadID string) ([]string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateSubscriptionThreadRead", ctx, roomID, account, threadID)
 	ret0, _ := ret[0].([]string)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateSubscriptionThreadRead indicates an expected call of UpdateSubscriptionThreadRead.

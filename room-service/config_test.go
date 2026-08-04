@@ -51,6 +51,28 @@ func TestLegacyRoomOrigins_EnvParse(t *testing.T) {
 	assert.Error(t, err, "malformed JSON must fail startup, not be silently ignored")
 }
 
+func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	require.NoError(t, os.Unsetenv("VALKEY_ADDRS"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+}
+
+func TestConfig_ValkeyAddrsParsed(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
+	t.Setenv("VALKEY_PASSWORD", "hunter2")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
+}
+
 func TestConfig_RoomSubjectMode(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")

@@ -699,7 +699,6 @@ func TestSubscriptionJSON(t *testing.T) {
 			JoinedAt:           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			LastSeenAt:         &lsa,
 			HasMention:         true,
-			ThreadUnread:       []string{"parent-1", "parent-2"},
 			Alert:              true,
 			Muted:              true,
 			Favorite:           true,
@@ -737,7 +736,7 @@ func TestIsRoomMember(t *testing.T) {
 	assert.True(t, model.IsRoomMember(&model.Subscription{RoomID: "r1"}), "populated sub is a member")
 }
 
-func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
+func TestSubscriptionJSON_AlertAlwaysPresent(t *testing.T) {
 	s := model.Subscription{
 		ID:       "s1",
 		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
@@ -753,9 +752,6 @@ func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
 
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
-
-	_, hasThreadUnread := raw["threadUnread"]
-	assert.False(t, hasThreadUnread, "nil/empty ThreadUnread must be omitted from JSON")
 
 	alertVal, hasAlert := raw["alert"]
 	assert.True(t, hasAlert, "alert must be present in JSON even when false")
@@ -775,7 +771,6 @@ func TestSubscriptionJSON_ThreadUnreadOmittedAlertAlwaysPresent(t *testing.T) {
 
 	var dst model.Subscription
 	require.NoError(t, json.Unmarshal(data, &dst))
-	assert.Nil(t, dst.ThreadUnread, "absent threadUnread must unmarshal to nil")
 	assert.False(t, dst.Alert)
 	assert.False(t, dst.Favorite)
 }
@@ -3788,23 +3783,19 @@ func TestMessageThreadReadRequestJSON(t *testing.T) {
 
 func TestThreadReadEventJSON(t *testing.T) {
 	src := model.ThreadReadEvent{
-		Account:         "alice",
-		RoomID:          "r1",
-		ThreadRoomID:    "tr1",
-		ParentMessageID: "01970a4f8c2d7c9aQRST",
-		NewThreadUnread: []string{"t2", "t3"},
-		Alert:           true,
-		LastSeenAt:      1735689600000,
-		Timestamp:       1735689600001,
+		Account:      "alice",
+		RoomID:       "r1",
+		ThreadRoomID: "tr1",
+		LastSeenAt:   1735689600000,
+		Timestamp:    1735689600001,
 	}
 	roundTrip(t, &src, &model.ThreadReadEvent{})
 }
 
 func TestInboxEventJSON_ThreadRead(t *testing.T) {
 	payload := model.ThreadReadEvent{
-		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
-		ParentMessageID: "p1", NewThreadUnread: []string{"t2"},
-		Alert: false, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+		Account: "alice", ThreadRoomID: "tr1",
+		LastSeenAt: 1735689600000, Timestamp: 1735689600001,
 	}
 	data, err := json.Marshal(&payload)
 	require.NoError(t, err)
@@ -5074,6 +5065,44 @@ func TestSearchMessageEnrichmentJSON(t *testing.T) {
 	assert.NotContains(t, string(b), "\"room\"")
 	assert.NotContains(t, string(b), "\"sender\"")
 	assert.NotContains(t, string(b), "\"tshow\"")
+}
+
+func TestSubscriptionJSON_ThreadUnreadRoundTrip(t *testing.T) {
+	s := model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", RoomType: model.RoomTypeChannel, SiteID: "site-a",
+		Roles: []model.Role{model.RoleMember}, JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		ThreadUnread: []string{"p1", "p2"},
+	}
+	roundTrip(t, &s, &model.Subscription{})
+
+	s.ThreadUnread = nil
+	data, err := json.Marshal(&s)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	_, present := raw["threadUnread"]
+	assert.False(t, present, "nil ThreadUnread must be omitted")
+}
+
+func TestThreadUnreadAddedEventJSON(t *testing.T) {
+	src := model.ThreadUnreadAddedEvent{
+		RoomID: "r1", ParentMessageID: "p1",
+		Accounts: []string{"alice", "bob"}, Timestamp: 1735689600000,
+	}
+	roundTrip(t, &src, &model.ThreadUnreadAddedEvent{})
+}
+
+func TestThreadReadEventJSON_NewThreadUnread(t *testing.T) {
+	src := model.ThreadReadEvent{
+		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
+		NewThreadUnread: []string{"p2"}, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+	}
+	roundTrip(t, &src, &model.ThreadReadEvent{})
+	// Wire-compat: a payload without the field decodes to nil (old producers).
+	var dst model.ThreadReadEvent
+	require.NoError(t, json.Unmarshal([]byte(`{"account":"a","threadRoomId":"tr","lastSeenAt":1,"timestamp":2}`), &dst))
+	assert.Nil(t, dst.NewThreadUnread)
 }
 
 func TestMessageAppInfoJSON(t *testing.T) {

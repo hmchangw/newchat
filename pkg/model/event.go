@@ -139,6 +139,7 @@ const (
 	InboxThreadSubscriptionUpserted  InboxEventType = "thread_subscription_upserted"
 	InboxThreadRead                  InboxEventType = "thread_read"
 	InboxThreadReadAll               InboxEventType = "thread_read_all"
+	InboxThreadUnreadAdded           InboxEventType = "thread_unread_added"
 	InboxRoomRenamed                 InboxEventType = "room_renamed"
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
@@ -159,29 +160,49 @@ type SubscriptionReadEvent struct {
 	Account    string `json:"account"    bson:"account"`
 	RoomID     string `json:"roomId"     bson:"roomId"`
 	LastSeenAt int64  `json:"lastSeenAt" bson:"lastSeenAt"`
-	Alert      bool   `json:"alert"      bson:"alert"`
-	Timestamp  int64  `json:"timestamp"  bson:"timestamp"`
+	// Alert carries real values only from data-migration CDC (which mirrors the
+	// legacy stack's alert flag); live room reads always send false, since
+	// reading a room clears the alert.
+	Alert     bool  `json:"alert"      bson:"alert"`
+	Timestamp int64 `json:"timestamp"  bson:"timestamp"`
 }
 
-// ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The source site
-// ships the authoritative NewThreadUnread+Alert; the destination applies them as-is.
+// ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The
+// destination advances the home-replica ThreadSubscription read state
+// (lastSeenAt, hasMention) under a $lt order-safety guard, and — gated on that
+// same guard matching — mirrors NewThreadUnread onto the home-replica
+// Subscription. RoomID rides here (not the OutboxEvent envelope) because the
+// destination InboxEvent carries no room context of its own.
 type ThreadReadEvent struct {
-	Account         string   `json:"account"`
-	RoomID          string   `json:"roomId"`
-	ThreadRoomID    string   `json:"threadRoomId"`
-	ParentMessageID string   `json:"parentMessageId"`
-	NewThreadUnread []string `json:"newThreadUnread"`
-	Alert           bool     `json:"alert"`
-	LastSeenAt      int64    `json:"lastSeenAt"`
+	Account      string `json:"account"`
+	RoomID       string `json:"roomId"`
+	ThreadRoomID string `json:"threadRoomId"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+	// NewThreadUnread is the result of a $pull array operation removing the
+	// thread's parent from subscription.threadUnread. post-$pull array; nil/absent
+	// means cleared.
+	NewThreadUnread []string `json:"newThreadUnread,omitempty"`
 	Timestamp       int64    `json:"timestamp"`
 }
 
 // ThreadReadAllEvent is InboxEvent.Payload for "thread_read_all": the destination inbox-worker
-// advances every thread subscription to LastSeenAt under a high-water-mark guard, clearing hasMention/threadUnread/alert.
+// advances every thread subscription to LastSeenAt under a high-water-mark guard, clearing hasMention.
 type ThreadReadAllEvent struct {
 	Account    string `json:"account"`
 	LastSeenAt int64  `json:"lastSeenAt"`
 	Timestamp  int64  `json:"timestamp"`
+}
+
+// ThreadUnreadAddedEvent is InboxEvent.Payload for "thread_unread_added":
+// one event per destination site per thread reply, Accounts scoped to that
+// site's followers. The destination $addToSet-merges ParentMessageID into
+// each account's subscription.threadUnread for RoomID (idempotent, so the
+// event rides the concurrent outbox lane).
+type ThreadUnreadAddedEvent struct {
+	RoomID          string   `json:"roomId"`
+	ParentMessageID string   `json:"parentMessageId"`
+	Accounts        []string `json:"accounts"`
+	Timestamp       int64    `json:"timestamp"`
 }
 
 type InboxEvent struct {

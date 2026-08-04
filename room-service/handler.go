@@ -33,6 +33,16 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+// badgeCache is the consumer-defined interface for the thread-unread badge's
+// Valkey accelerator (pkg/badgecache.Cache satisfies it). Nil when Valkey is
+// not configured (VALKEY_ADDRS empty) — every call site guards with a nil
+// check, matching the dekProvisioner/graphClient optional-dependency pattern,
+// so a disabled cache is a silent no-op.
+type badgeCache interface {
+	ClearRoom(ctx context.Context, account, roomID string)
+	ClearAll(ctx context.Context, account string)
+}
+
 type Handler struct {
 	store RoomStore
 	// keyStore reads/writes room keys in the rooms collection (always wired in
@@ -42,7 +52,11 @@ type Handler struct {
 	// at-rest DEK creation at room-create time (message-worker's lazy create
 	// still covers remote sites and pre-rollout rooms). Injected as a field
 	// rather than a constructor arg to avoid churning every NewHandler caller.
-	dekProvisioner           DEKProvisioner
+	dekProvisioner DEKProvisioner
+	// badge is the thread-unread badge cache accelerator; nil disables the
+	// best-effort ClearRoom/ClearAll hooks on the read paths (VALKEY_ADDRS
+	// unset). Injected as a field post-construction, mirroring dekProvisioner.
+	badge                    badgeCache
 	memberListClient         MemberListClient
 	msgReader                MessageReader
 	siteID                   string
@@ -1310,18 +1324,21 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, fmt.Errorf("get subscription: %w", err)
 	}
 
-	newAlert := sub.Alert && len(sub.ThreadUnread) > 0
 	now := time.Now().UTC()
 
-	if err := h.store.UpdateSubscriptionRead(ctx, roomID, account, now, newAlert); err != nil {
-		return nil, fmt.Errorf("update subscription read: %w", err)
-	}
-
+	// The read-position write no longer depends on the fetched sub (alert is
+	// cleared unconditionally), so it runs concurrently with the two lookups.
 	var (
 		userSiteID string
 		room       *model.Room
 	)
 	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		if err := h.store.UpdateSubscriptionRead(gctx, roomID, account, now); err != nil {
+			return fmt.Errorf("update subscription read: %w", err)
+		}
+		return nil
+	})
 	g.Go(func() error {
 		s, err := h.store.GetUserSiteID(gctx, account)
 		if err != nil {
@@ -1342,6 +1359,14 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, err
 	}
 
+	// Best-effort badge cache clear: only when the reader has no thread-unread
+	// left on this subscription (fetched before the read applied) and is
+	// home-local — a cross-site reader's home replica is cleared by
+	// inbox-worker once the federated subscription_read event lands.
+	if len(sub.ThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
+		h.badge.ClearRoom(ctx, account, roomID)
+	}
+
 	switch {
 	case userSiteID == "":
 		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
@@ -1350,7 +1375,7 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 			Account:    account,
 			RoomID:     roomID,
 			LastSeenAt: now.UnixMilli(),
-			Alert:      newAlert,
+			Alert:      false, // reading always clears; see SubscriptionReadEvent.Alert
 			Timestamp:  now.UnixMilli(),
 		}
 		payloadData, err := json.Marshal(payload)
@@ -1375,7 +1400,7 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 	if !model.IsBot(account) {
 		updatedSub := *sub
 		updatedSub.LastSeenAt = &now
-		updatedSub.Alert = newAlert
+		updatedSub.Alert = false
 		// Set the derived flags explicitly (don't rely on the projection omitting
 		// them). Reading the room clears both hasMention and hasGroupMention.
 		updatedSub.HasMention = false
@@ -1621,14 +1646,13 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	now := time.Now().UTC()
 
 	var newThreadUnread []string
-	var newAlert bool
 	wg, wctx := errgroup.WithContext(ctx)
 	wg.Go(func() error {
-		var err error
-		newThreadUnread, newAlert, err = h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, req.ThreadID)
+		nu, err := h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, req.ThreadID)
 		if err != nil {
 			return fmt.Errorf("update subscription thread-read: %w", err)
 		}
+		newThreadUnread = nu
 		return nil
 	})
 	wg.Go(func() error {
@@ -1641,6 +1665,14 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		return nil, err
 	}
 
+	// Best-effort badge cache clear: only when the $pull left no threadUnread
+	// entries on this subscription and the reader is home-local — a cross-site
+	// reader's home replica is cleared by inbox-worker once the federated
+	// thread_read event lands.
+	if len(newThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
+		h.badge.ClearRoom(ctx, account, roomID)
+	}
+
 	switch {
 	case userSiteID == "":
 		slog.Warn("user not found locally; skipping cross-site inbox", "account", account)
@@ -1649,9 +1681,7 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 			Account:         account,
 			RoomID:          roomID,
 			ThreadRoomID:    tsub.ThreadRoomID,
-			ParentMessageID: req.ThreadID,
 			NewThreadUnread: newThreadUnread,
-			Alert:           newAlert,
 			LastSeenAt:      now.UnixMilli(),
 			Timestamp:       now.UnixMilli(),
 		}
@@ -1674,14 +1704,13 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 	return &model.StatusReply{Status: "accepted"}, nil
 }
 
-// clearAllThreadRead clears every one of the account's thread-unread indicators on
-// this site: thread-subscription read state (lastSeenAt=now, hasMention=false) and
-// room-subscription thread-unread state (threadUnread removed, alert=false). It is
-// the per-site leaf of the user-service clear-all-thread-unread aggregator. Unlike
-// the single-thread path it deliberately skips the thread-room read-floor recompute
-// and thread_message_read fan-out (a bulk dismiss must not advance sender receipts).
-// For a cross-site user the whole dismiss rides one thread_read_all event, which
-// inbox-worker applies as the same bulk clear on the user's home replica.
+// clearAllThreadRead clears the account's thread-subscription read state on this
+// site (lastSeenAt=now, hasMention=false). It is the per-site leaf of the
+// user-service clear-all-thread-unread aggregator. It deliberately skips the
+// thread-room read-floor recompute and thread_message_read fan-out (a bulk
+// dismiss must not advance sender receipts). For a cross-site user the whole
+// dismiss rides one thread_read_all event, which inbox-worker applies as the
+// same bulk clear on the user's home replica.
 func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThreadReadAllRequest) (*model.RoomThreadReadAllResponse, error) {
 	var ctx context.Context = c
 	account := strings.TrimSpace(req.Account)
@@ -1692,31 +1721,37 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 
 	now := time.Now().UTC()
 
-	var (
-		homeSite                  string
-		clearErr, subErr, siteErr error
-	)
+	var homeSite string
 	var g errgroup.Group
 	g.Go(func() error {
-		clearErr = h.store.ClearThreadSubscriptionsForAccount(ctx, account, now)
-		return clearErr
+		if err := h.store.ClearThreadSubscriptionsForAccount(ctx, account, now); err != nil {
+			return fmt.Errorf("clear thread subscriptions: %w", err)
+		}
+		return nil
 	})
 	g.Go(func() error {
-		subErr = h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account)
-		return subErr
+		if err := h.store.ClearSubscriptionThreadUnreadForAccount(ctx, account); err != nil {
+			return fmt.Errorf("clear subscription thread-unread: %w", err)
+		}
+		return nil
 	})
 	g.Go(func() error {
-		homeSite, siteErr = h.store.GetUserSiteID(ctx, account)
-		return siteErr
+		s, err := h.store.GetUserSiteID(ctx, account)
+		if err != nil {
+			return fmt.Errorf("get user siteId: %w", err)
+		}
+		homeSite = s
+		return nil
 	})
-	_ = g.Wait()
-	switch {
-	case clearErr != nil:
-		return nil, fmt.Errorf("clear thread subscriptions: %w", clearErr)
-	case subErr != nil:
-		return nil, fmt.Errorf("clear subscription thread-unread: %w", subErr)
-	case siteErr != nil:
-		return nil, fmt.Errorf("get user siteId: %w", siteErr)
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	// Best-effort badge cache clear: only for the home-local account — a
+	// cross-site account's home replica is cleared by inbox-worker once the
+	// federated thread_read_all event lands.
+	if homeSite == h.siteID && h.badge != nil {
+		h.badge.ClearAll(ctx, account)
 	}
 
 	switch {

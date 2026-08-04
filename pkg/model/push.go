@@ -11,6 +11,10 @@ type PushNotificationEvent struct {
 	Data      PushNotificationData `json:"data"      bson:"data"`
 	RoomID    string               `json:"roomId"    bson:"roomId"`
 	Timestamp int64                `json:"timestamp" bson:"timestamp"`
+	// UnreadCounts maps account → badge unread-room count capped at 10,
+	// stamped per recipient at notify time. Accounts whose home-site badge
+	// RPC failed are absent — clients refresh the true count on open.
+	UnreadCounts map[string]int `json:"unreadCounts,omitempty" bson:"unreadCounts,omitempty"`
 }
 
 // PushNotificationData is the push payload; short legacy tag names (rid/tmid/prid) are spelled

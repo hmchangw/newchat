@@ -42,6 +42,20 @@ func (m *MockInboxStore) EXPECT() *MockInboxStoreMockRecorder {
 	return m.recorder
 }
 
+// AddThreadUnread mocks base method.
+func (m *MockInboxStore) AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddThreadUnread", ctx, roomID, parentMessageID, accounts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddThreadUnread indicates an expected call of AddThreadUnread.
+func (mr *MockInboxStoreMockRecorder) AddThreadUnread(ctx, roomID, parentMessageID, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddThreadUnread", reflect.TypeOf((*MockInboxStore)(nil).AddThreadUnread), ctx, roomID, parentMessageID, accounts)
+}
+
 // ApplySubscriptionRestriction mocks base method.
 func (m *MockInboxStore) ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
@@ -57,17 +71,17 @@ func (mr *MockInboxStoreMockRecorder) ApplySubscriptionRestriction(ctx, roomID, 
 }
 
 // ApplyThreadRead mocks base method.
-func (m *MockInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
+func (m *MockInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ApplyThreadRead", ctx, roomID, threadRoomID, account, newThreadUnread, alert, lastSeenAt)
+	ret := m.ctrl.Call(m, "ApplyThreadRead", ctx, roomID, threadRoomID, account, newThreadUnread, lastSeenAt)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ApplyThreadRead indicates an expected call of ApplyThreadRead.
-func (mr *MockInboxStoreMockRecorder) ApplyThreadRead(ctx, roomID, threadRoomID, account, newThreadUnread, alert, lastSeenAt any) *gomock.Call {
+func (mr *MockInboxStoreMockRecorder) ApplyThreadRead(ctx, roomID, threadRoomID, account, newThreadUnread, lastSeenAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyThreadRead", reflect.TypeOf((*MockInboxStore)(nil).ApplyThreadRead), ctx, roomID, threadRoomID, account, newThreadUnread, alert, lastSeenAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyThreadRead", reflect.TypeOf((*MockInboxStore)(nil).ApplyThreadRead), ctx, roomID, threadRoomID, account, newThreadUnread, lastSeenAt)
 }
 
 // ApplyThreadReadAll mocks base method.
@@ -155,6 +169,21 @@ func (mr *MockInboxStoreMockRecorder) FindUsersByAccounts(ctx, accounts any) *go
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUsersByAccounts", reflect.TypeOf((*MockInboxStore)(nil).FindUsersByAccounts), ctx, accounts)
 }
 
+// SubscriptionHasThreadUnread mocks base method.
+func (m *MockInboxStore) SubscriptionHasThreadUnread(ctx context.Context, roomID, account string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SubscriptionHasThreadUnread", ctx, roomID, account)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SubscriptionHasThreadUnread indicates an expected call of SubscriptionHasThreadUnread.
+func (mr *MockInboxStoreMockRecorder) SubscriptionHasThreadUnread(ctx, roomID, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SubscriptionHasThreadUnread", reflect.TypeOf((*MockInboxStore)(nil).SubscriptionHasThreadUnread), ctx, roomID, account)
+}
+
 // UpdateSubscriptionFavorite mocks base method.
 func (m *MockInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error {
 	m.ctrl.T.Helper()
@@ -195,6 +224,20 @@ func (m *MockInboxStore) UpdateSubscriptionNamesForRoom(ctx context.Context, roo
 func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionNamesForRoom(ctx, roomID, newName, nameUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionNamesForRoom", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionNamesForRoom), ctx, roomID, newName, nameUpdatedAt)
+}
+
+// UpdateSubscriptionOpen mocks base method.
+func (m *MockInboxStore) UpdateSubscriptionOpen(ctx context.Context, roomID, account string, open bool) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateSubscriptionOpen", ctx, roomID, account, open)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateSubscriptionOpen indicates an expected call of UpdateSubscriptionOpen.
+func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionOpen(ctx, roomID, account, open any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionOpen", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionOpen), ctx, roomID, account, open)
 }
 
 // UpdateSubscriptionRead mocks base method.
