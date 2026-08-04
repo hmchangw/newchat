@@ -257,6 +257,8 @@ Set when `msg.ForwardedMessage != nil`. `Body` remains `msg.Content` (possibly e
 4. Deploy `notification-worker` (flag).
 5. Deploy `message-gatekeeper` (starts accepting forward requests).
 
+**Multi-site ordering:** complete steps 1–4 on every site before deploying step 5 (`message-gatekeeper`) to any site — a gatekeeper emitting forwards while a remote site still runs an old `message-worker` would persist federated copies without the snapshot (old binaries silently drop the unknown `forwardedMessage` field), causing silent cross-site divergence.
+
 Old binaries after the migration are unaffected — gocql tolerates extra columns/UDTs.
 
 ## TDD ordering

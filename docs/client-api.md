@@ -5793,7 +5793,7 @@ The same subject and request body cover three send variants: plain message, thre
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `id` | string | yes | The message's ID. Must be 20-char base62. The client generates this and uses it for client-side optimistic rendering. |
-| `content` | string | yes* | The message body, ≤ 20 KiB. *Required unless `attachments` is present — a message with attachments may have empty `content`. |
+| `content` | string | yes* | The message body, ≤ 20 KiB. *Required unless `attachments` is present or the message is a forward (`forwardedMessageId` set) — both may have empty `content`. |
 | `requestId` | string | yes | A 36-char hyphenated UUID (v4 or v7) the client generates. **Validated** — an empty or malformed `requestId` is rejected with no message published. The async reply is delivered to `chat.user.{account}.response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded bytes — the JSON of one [Attachment](#attachment) from the upload endpoint ([§2.3](#23-http--protected-image-uploaddownload)). Max 1 entry, ≤ 8 KiB total. Stored opaquely and returned **decoded** (as `Attachment[]`) in message payloads. |
 | `threadParentMessageId` | string | no | Set when posting a thread reply. Must be a valid 20-char base62 message ID. |

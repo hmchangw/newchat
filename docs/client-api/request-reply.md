@@ -2023,7 +2023,7 @@ and quoted message; variant determined by optional fields.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `id` | string | yes | 20-char base62 client-generated message ID. |
-| `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present. |
+| `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present or the message is a forward (`forwardedMessageId` set). |
 | `requestId` | string | yes | 36-char hyphenated UUID (v4 or v7). Async reply delivered to `…response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded JSON of one [Attachment](../client-api.md#attachment) from the upload endpoint. Max 1 entry, ≤ 8 KiB total; returned decoded as `Attachment[]` in message payloads. |
 | `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |

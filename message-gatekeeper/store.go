@@ -27,11 +27,11 @@ type Store interface {
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
 }
 
-// ParentMessageFetcher resolves a quoted parent message into a snapshot
-// suitable for embedding on the new message's canonical event. Implementations
-// should treat any failure (not found, RPC timeout, forbidden, etc.) as a
-// reason to return an error — the handler soft-fails on every error and ships
-// the message without the quote.
+// ParentMessageFetcher resolves referenced messages into snapshots for embedding
+// on a new message's canonical event. Its two methods carry different failure
+// contracts: quote fetches soft-fail (the handler ships the message without the
+// quote), while forward-source fetches hard-fail (any error rejects the send) —
+// see each method's doc.
 type ParentMessageFetcher interface {
 	FetchQuotedParent(ctx context.Context, account, roomID, siteID, messageID string) (*cassandra.QuotedParentMessage, error)
 	// FetchForwardedSource fetches the forward source from the SOURCE room's
