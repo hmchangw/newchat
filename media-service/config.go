@@ -86,6 +86,11 @@ type config struct {
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB/MinIO.
+	// 0 disables the cap (unbounded spawn).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 // clusterBaseURL returns the configured base URL for a site, or "" if unknown.

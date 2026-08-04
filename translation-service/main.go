@@ -31,8 +31,11 @@ type Config struct {
 	J1Token        string        `env:"TRANSLATION_J1_TOKEN"         envDefault:""`
 	HTTPTimeout    time.Duration `env:"TRANSLATION_HTTP_TIMEOUT"     envDefault:"30s"`
 	TokenSkew      time.Duration `env:"TRANSLATION_TOKEN_SKEW"       envDefault:"60s"`
-	MaxWorkers     int           `env:"MAX_WORKERS"                  envDefault:"100"`
-	NATS           NATSConfig    `envPrefix:"NATS_"`
+	// MaxConcurrency caps in-flight request handlers so a slow translate backend
+	// can't accumulate goroutines and outbound connections without ceiling. 0
+	// disables the cap (unbounded spawn).
+	MaxConcurrency int        `env:"MAX_CONCURRENCY"              envDefault:"100"`
+	NATS           NATSConfig `envPrefix:"NATS_"`
 }
 
 // newTranslator selects the backend. The stream backend fails fast when its
@@ -94,7 +97,12 @@ func main() {
 	// Cap in-flight handlers so a slow translate backend can't accumulate goroutines
 	// and outbound connections without ceiling; on saturation the router replies
 	// errcode.Unavailable("service busy") so the caller can retry immediately.
-	router := natsrouter.Default(nc, "translation-service", natsrouter.WithMaxConcurrency(cfg.MaxWorkers))
+	// MAX_CONCURRENCY=0 disables the cap (unbounded spawn).
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.Default(nc, "translation-service", routerOpts...)
 	natsrouter.Register(router, subject.TranslateRequestPattern(cfg.SiteID), handler.Translate)
 
 	slog.Info("translation-service running", "site", cfg.SiteID, "backend", cfg.Backend)
