@@ -17,6 +17,7 @@ Let a user forward an existing chat message into one or more other rooms. The fo
 - **Chain depth stays 1.** Forwarding a message that is itself a forward captures that message's *own* content (its comment) only — the nested `forwardedMessage` snapshot is dropped, and the snapshot's sender is the immediate message's sender. Forwarding a forward whose own comment is empty is rejected (nothing forwardable). A source's `quotedParentMessage` is likewise not copied into the snapshot.
 - **Hard-fail policy.** Any failure to fetch or accept the source (not found, forbidden, RPC error, timeout, attachment/card/system rejection) fails that send; the error is replied to the client and the message is NOT published to MESSAGES_CANONICAL. No placeholder snapshot, no `Unverified` marker, no message-worker re-projection — a forward without its content is meaningless, and hard-fail removes the entire cross-room re-projection problem.
 - **Snapshot is immutable and self-contained.** Captured at forward time; later edits or deletion of the source do not touch it. It is never access-window-redacted on read (see Read path).
+- **Client body override.** An optional `forwardedContent` on the send request replaces `ForwardedMessage.Msg` — for forwarding a selected excerpt rather than the whole message. The source is still fetched and every rule above still runs against it; only the body is substituted, and it is applied *after* the reject rules so an override can replace a real body but never manufacture one for a source that had none. Deliberately carries **no provenance marker**: once stored, a client-supplied body is indistinguishable from the fetched one, under the source author's identity. Everything else on the snapshot stays server-derived.
 - **Notification marks forwards.** Push payload gains a `forwarded` flag so clients can render "forwarded a message" even when `content` is empty.
 - **Search indexes only the comment.** The snapshot is never indexed — this is already the status quo (search-sync-worker maps only `Content`); zero search changes.
 
@@ -205,7 +206,7 @@ The snapshot's `msg` body joins the encrypted bundle, mirroring the quote treatm
 - `buildCassandraMessage`: assign `cm.ForwardedMessage = msg.ForwardedMessage` (no clone/re-encode needed — no attachments).
 - `SaveMessage` + `saveMessageEncrypted`: bind `forwarded_message` in both `messages_by_room` and `messages_by_id` INSERTs. Encrypted variant strips the body into `enc_payload` via the atrest changes.
 - `SaveThreadMessage` / `saveThreadMessageEncrypted`: untouched (gatekeeper guarantees no forward reaches the thread path).
-- No re-projection hook — hard-fail means every persisted snapshot is trusted.
+- No re-projection hook — hard-fail means every persisted snapshot's *identity* (sender, room, timestamps, thread identity) is server-derived and trusted. The body is not: see "Client body override" below.
 - Tests: handler table extension (snapshot pointer reaches the store); integration round-trip on both tables, plaintext and encrypted.
 
 ## What is NOT changed

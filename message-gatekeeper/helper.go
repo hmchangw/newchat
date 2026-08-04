@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -14,6 +16,20 @@ import (
 // (CHAT_BASE_URL); its trailing slash is trimmed so the link never doubles up.
 func messageLink(baseURL, roomID, messageID string) string {
 	return fmt.Sprintf("%s/%s/%s", strings.TrimRight(baseURL, "/"), roomID, messageID)
+}
+
+// validateContentSize caps a client-supplied body at maxContentBytes, naming the
+// offending field in the error. Shared by every body the client can send (the
+// message content and the forwarded-snapshot override) so the cap, the message
+// and the metadata keys can't drift apart between them.
+func validateContentSize(field, value string) error {
+	if len(value) <= maxContentBytes {
+		return nil
+	}
+	return errcode.BadRequest(
+		fmt.Sprintf("%s exceeds maximum size of %d bytes", field, maxContentBytes),
+		errcode.WithMetadata("maxContentBytes", strconv.Itoa(maxContentBytes), "attempted", strconv.Itoa(len(value))),
+	)
 }
 
 // isBot reports whether account is bot-like — a real ".bot" bot or the

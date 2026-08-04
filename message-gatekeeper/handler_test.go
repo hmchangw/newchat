@@ -2693,26 +2693,14 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 			},
 		},
 		{
-			name:       "forwardedContent does not bypass the source reject rules — deleted source still rejects",
+			// Each individual reject rule has its own row above; this pins that
+			// supplying a body override doesn't buy past any of them.
+			name:       "forwardedContent does not bypass the source reject rules",
 			buildData:  func() []byte { return fwdReqOverride("check this", "looks fine to me") },
 			setupStore: subscribed,
 			setupFetcher: func(f *MockParentMessageFetcher) {
 				src := okSource()
 				src.Deleted = true
-				f.EXPECT().
-					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
-					Return(src, nil)
-			},
-			wantErr:       true,
-			wantNoPublish: true,
-		},
-		{
-			name:       "forwardedContent does not bypass the source reject rules — card source still rejects",
-			buildData:  func() []byte { return fwdReqOverride("check this", "looks fine to me") },
-			setupStore: subscribed,
-			setupFetcher: func(f *MockParentMessageFetcher) {
-				src := okSource()
-				src.Card = json.RawMessage(`{"template":"x"}`)
 				f.EXPECT().
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)

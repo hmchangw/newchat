@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -276,11 +275,8 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		if len(req.Attachments) > 0 {
 			return nil, errcode.BadRequest("a forward cannot carry attachments")
 		}
-		if len(req.ForwardedContent) > maxContentBytes {
-			return nil, errcode.BadRequest(
-				fmt.Sprintf("forwardedContent exceeds maximum size of %d bytes", maxContentBytes),
-				errcode.WithMetadata("maxContentBytes", strconv.Itoa(maxContentBytes), "attempted", strconv.Itoa(len(req.ForwardedContent))),
-			)
+		if err := validateContentSize("forwardedContent", req.ForwardedContent); err != nil {
+			return nil, err
 		}
 	} else if req.ForwardedContent != "" {
 		return nil, errcode.BadRequest("forwardedContent requires forwardedMessageId")
@@ -292,12 +288,8 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest("content must not be empty")
 	}
 
-	// Validate content does not exceed 20KB
-	if len(req.Content) > maxContentBytes {
-		return nil, errcode.BadRequest(
-			fmt.Sprintf("content exceeds maximum size of %d bytes", maxContentBytes),
-			errcode.WithMetadata("maxContentBytes", strconv.Itoa(maxContentBytes), "attempted", strconv.Itoa(len(req.Content))),
-		)
+	if err := validateContentSize("content", req.Content); err != nil {
+		return nil, err
 	}
 
 	// Validate attachments: count + total byte caps. Blobs are otherwise opaque
