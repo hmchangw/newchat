@@ -55,7 +55,7 @@ type messageCollection struct {
 	teamsUsers teamsUserResolver
 }
 
-// newMessageCollection binds to the user MESSAGES_CANONICAL stream and also indexes
+// newMessageCollection binds to the user MESSAGES-CANONICAL stream and also indexes
 // migrated Teams history off .teams.batch (one consumer covers both).
 func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMode bool) *messageCollection {
 	return &messageCollection{
@@ -69,7 +69,7 @@ func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMod
 	}
 }
 
-// newBotMessageCollection binds to BOT_MESSAGES_CANONICAL and shares BuildAction with the user flow.
+// newBotMessageCollection binds to BOT-MESSAGES-CANONICAL and shares BuildAction with the user flow.
 func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollection {
 	return &messageCollection{
 		indexPrefix:  indexPrefix,

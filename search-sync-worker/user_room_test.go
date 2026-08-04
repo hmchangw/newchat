@@ -24,7 +24,7 @@ func TestUserRoomCollection_Metadata(t *testing.T) {
 	assert.NotNil(t, coll.TemplateBody())
 
 	cfg := coll.StreamConfig("site-a")
-	assert.Equal(t, "INBOX_site-a", cfg.Name)
+	assert.Equal(t, "INBOX-site-a", cfg.Name)
 	assert.Equal(t, []string{
 		"chat.inbox.site-a.internal.>",
 		"chat.inbox.site-a.external.>",

@@ -48,28 +48,28 @@ func TestBootstrapStreams(t *testing.T) {
 		{
 			name:        "disabled - verifies existing stream",
 			enabled:     false,
-			existing:    map[string]bool{"MESSAGES_CANONICAL_test": true},
+			existing:    map[string]bool{"MESSAGES-CANONICAL-test": true},
 			wantCreated: nil,
 		},
 		{
 			name:       "disabled - fails when stream missing",
 			enabled:    false,
 			existing:   map[string]bool{},
-			wantErrSub: "verify MESSAGES_CANONICAL stream",
+			wantErrSub: "verify MESSAGES-CANONICAL stream",
 		},
 		{
-			name:        "enabled - creates MESSAGES_CANONICAL",
+			name:        "enabled - creates MESSAGES-CANONICAL",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES_CANONICAL_test"},
+			wantCreated: []string{"MESSAGES-CANONICAL-test"},
 		},
 		{
-			name:       "enabled - wraps MESSAGES_CANONICAL creator error",
+			name:       "enabled - wraps MESSAGES-CANONICAL creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
-			failOn:     "MESSAGES_CANONICAL_test",
+			failOn:     "MESSAGES-CANONICAL-test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create MESSAGES_CANONICAL stream",
+			wantErrSub: "create MESSAGES-CANONICAL stream",
 		},
 	}
 	for _, tc := range tests {

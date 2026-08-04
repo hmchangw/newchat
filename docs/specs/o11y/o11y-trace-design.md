@@ -109,8 +109,8 @@ named `process <subject>` by `otelnats` from the subject directly.
 
 ## 1. Scenario A — User sends a message in a group
 
-Flow (CLAUDE.md event flow; `MESSAGES → MESSAGES_CANONICAL → fan-out`):
-client → `MESSAGES` → `message-gatekeeper` validates → `MESSAGES_CANONICAL` →
+Flow (CLAUDE.md event flow; `MESSAGES → MESSAGES-CANONICAL → fan-out`):
+client → `MESSAGES` → `message-gatekeeper` validates → `MESSAGES-CANONICAL` →
 **4 independent consumers** (`message-worker`, `broadcast-worker`,
 `notification-worker`, `search-sync-worker`).
 
@@ -292,7 +292,7 @@ flowchart LR
 ## 5. Scenario E — Send a DM
 
 A DM room is **exactly two participants**. Sending a DM message uses the **same
-pipeline as Scenario A** (client → `MESSAGES` → gatekeeper → `MESSAGES_CANONICAL`
+pipeline as Scenario A** (client → `MESSAGES` → gatekeeper → `MESSAGES-CANONICAL`
 → message-worker/broadcast/notification/search-sync); only `roomType=dm` and
 broadcast delivers to the two participants. No new span shape.
 

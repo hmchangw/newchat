@@ -19,14 +19,14 @@ func TestStreamConfigs(t *testing.T) {
 		wantName string
 		wantSubj string
 	}{
-		{"Messages", stream.Messages(siteID), "MESSAGES_site-a", "chat.user.*.room.*.site-a.msg.>"},
-		{"MessagesCanonical", stream.MessagesCanonical(siteID), "MESSAGES_CANONICAL_site-a", "chat.msg.canonical.site-a.>"},
-		{"Rooms", stream.Rooms(siteID), "ROOMS_site-a", "chat.room.canonical.site-a.>"},
-		{"Outbox", stream.Outbox(siteID), "OUTBOX_site-a", "chat.outbox.site-a.>"},
-		{"PushNotification", stream.PushNotification(siteID), "PUSH_NOTIFICATION_site-a", "chat.server.notification.push.site-a.>"},
-		{"OrgSyncStream", stream.OrgSyncStream(siteID), "HR_site-a", "chat.hr.site-a.>"},
-		{"BotMessagesCanonical", stream.BotMessagesCanonical(siteID), "BOT_MESSAGES_CANONICAL_site-a", "chat.bot.canonical.site-a.>"},
-		{"BotPushNotification", stream.BotPushNotification(siteID), "BOT_PUSH_NOTIFICATION_site-a", "chat.bot.notification.push.site-a.>"},
+		{"Messages", stream.Messages(siteID), "MESSAGES-site-a", "chat.user.*.room.*.site-a.msg.>"},
+		{"MessagesCanonical", stream.MessagesCanonical(siteID), "MESSAGES-CANONICAL-site-a", "chat.msg.canonical.site-a.>"},
+		{"Rooms", stream.Rooms(siteID), "ROOMS-site-a", "chat.room.canonical.site-a.>"},
+		{"Outbox", stream.Outbox(siteID), "OUTBOX-site-a", "chat.outbox.site-a.>"},
+		{"PushNotification", stream.PushNotification(siteID), "PUSH-NOTIFICATION-site-a", "chat.server.notification.push.site-a.>"},
+		{"OrgSyncStream", stream.OrgSyncStream(siteID), "HR-site-a", "chat.hr.site-a.>"},
+		{"BotMessagesCanonical", stream.BotMessagesCanonical(siteID), "BOT-MESSAGES-CANONICAL-site-a", "chat.bot.canonical.site-a.>"},
+		{"BotPushNotification", stream.BotPushNotification(siteID), "BOT-PUSH-NOTIFICATION-site-a", "chat.bot.notification.push.site-a.>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -40,7 +40,7 @@ func TestStreamConfigs(t *testing.T) {
 func TestInboxConfig(t *testing.T) {
 	cfg := stream.Inbox("site-a")
 
-	assert.Equal(t, "INBOX_site-a", cfg.Name)
+	assert.Equal(t, "INBOX-site-a", cfg.Name)
 	// Two non-overlapping patterns: internal (same-site feed) and external (cross-site).
 	assert.Equal(t, []string{
 		"chat.inbox.site-a.internal.>",

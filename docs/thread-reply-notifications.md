@@ -7,7 +7,7 @@ implements thread reply fan-out in **broadcast-worker** and the reply-count badg
 **notification-worker was intentionally left unchanged.** A separate engineer owns that service.
 
 > ⚠️ **Regression introduced by PR #245:** This PR publishes `EventThreadReplyAdded` events to
-> `MESSAGES_CANONICAL` (subject `chat.msg.canonical.<siteID>.thread.reply`). The current
+> `MESSAGES-CANONICAL` (subject `chat.msg.canonical.<siteID>.thread.reply`). The current
 > notification-worker handler has no event-type guard, so every thread reply now fires a
 > `"new_message"` push notification to **all room members** with a nearly empty `Message` body
 > (`Content=""`, `UserID=""`). The sender-exclusion guard (`User.ID == senderID`) never fires

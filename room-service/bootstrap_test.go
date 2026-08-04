@@ -48,7 +48,7 @@ func TestBootstrapStreams(t *testing.T) {
 		{
 			name:        "disabled - verifies existing stream",
 			enabled:     false,
-			existing:    map[string]bool{"ROOMS_test": true},
+			existing:    map[string]bool{"ROOMS-test": true},
 			wantCreated: nil,
 		},
 		{
@@ -61,13 +61,13 @@ func TestBootstrapStreams(t *testing.T) {
 			name:        "enabled - creates ROOMS",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"ROOMS_test"},
+			wantCreated: []string{"ROOMS-test"},
 		},
 		{
 			name:       "enabled - wraps ROOMS creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
-			failOn:     "ROOMS_test",
+			failOn:     "ROOMS-test",
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create ROOMS stream",
 		},

@@ -3289,7 +3289,7 @@ func TestMongoStore_EnsureIndexes_NewCompoundIndexes(t *testing.T) {
 	}
 }
 
-// setupRoomsStream creates the ROOMS_{siteID} JetStream stream and returns a JetStream
+// setupRoomsStream creates the ROOMS-{siteID} JetStream stream and returns a JetStream
 // client. The stream captures all chat.room.canonical.{siteID}.* events published by
 // the handler's publishToStream closure.
 func setupRoomsStream(t *testing.T, nc *nats.Conn, siteID string) jetstream.JetStream {
@@ -3483,7 +3483,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
 		// Capture publishes via the handler's stream-publish callback so we can
-		// assert the sys message lands without standing up the MESSAGES_CANONICAL
+		// assert the sys message lands without standing up the MESSAGES-CANONICAL
 		// stream just for this test.
 		type captured struct {
 			subj string

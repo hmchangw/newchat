@@ -59,7 +59,7 @@ func (f *fakePublisher) PublishWithMsgID(_ context.Context, subj string, data []
 	f.lastSubj = subj
 	f.lastData = append([]byte(nil), data...)
 	f.lastMsgID = msgID
-	return &jetstream.PubAck{Stream: "BOT_MESSAGES_CANONICAL_test", Sequence: 1}, f.err
+	return &jetstream.PubAck{Stream: "BOT-MESSAGES-CANONICAL-test", Sequence: 1}, f.err
 }
 
 // newCtx builds a *natsrouter.Context bypassing the router and NATS bus.

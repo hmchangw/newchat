@@ -19,7 +19,7 @@ dependency failures and pod restarts, and report bounded per-RPC metrics.
 ```text
 loadgen
   -> message-gatekeeper
-  -> MESSAGES_CANONICAL
+  -> MESSAGES-CANONICAL
   -> message-worker
   -> Cassandra
 
@@ -86,7 +86,7 @@ Kubernetes Jobs and Deployment, Helm, Argo CD, `go.uber.org/mock`,
 3. A successful gatekeeper response contains the accepted `model.Message`.
    The asynchronous response subject is the authoritative admission event for
    the recent-message catalog.
-4. Gatekeeper success only proves publication to `MESSAGES_CANONICAL`; it does
+4. Gatekeeper success only proves publication to `MESSAGES-CANONICAL`; it does
    not prove that `message-worker` has persisted the message. The configured
    `persist_grace` and read-back sampler cover that gap.
 5. Edit and soft-delete are sender-only. The catalog must retain the original

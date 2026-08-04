@@ -7,7 +7,7 @@ import (
 )
 
 // CanonicalDedupID returns the Nats-Msg-Id for a MessageEvent published to
-// MESSAGES_CANONICAL. The op suffix keeps event keyspaces disjoint within the
+// MESSAGES-CANONICAL. The op suffix keeps event keyspaces disjoint within the
 // stream's dedup window; the per-op timestamp/discriminator suffix gives each
 // distinct occurrence its own key. Unknown event types fall back to the bare
 // messageID.

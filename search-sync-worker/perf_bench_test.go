@@ -9,7 +9,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// benchMessageData builds one realistic MESSAGES_CANONICAL event payload.
+// benchMessageData builds one realistic MESSAGES-CANONICAL event payload.
 func benchMessageData(b *testing.B) []byte {
 	b.Helper()
 	evt := model.MessageEvent{

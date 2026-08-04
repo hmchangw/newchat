@@ -20,7 +20,7 @@ import (
 )
 
 // TestLoadgenSmallPreset_EndToEnd verifies the generator publishes messages,
-// a fake gatekeeper forwards them to MESSAGES_CANONICAL, two JetStream
+// a fake gatekeeper forwards them to MESSAGES-CANONICAL, two JetStream
 // consumers drain the stream, a fake broadcast-worker emits room events,
 // and MongoDB shows the seeded room data.
 func TestLoadgenSmallPreset_EndToEnd(t *testing.T) {

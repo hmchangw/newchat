@@ -27,7 +27,7 @@ services:
       # Valkey backs the room-meta L2 cache.
       - VALKEY_ADDRS=valkey:6379
       - ROOM_META_L2_TTL=15m
-      # BOT_MESSAGES_CANONICAL is owned by bot-message-handler; consumers only verify.
+      # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumers only verify.
       - BOOTSTRAP_STREAMS=false
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
