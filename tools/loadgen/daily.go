@@ -821,9 +821,20 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		jszURL = "http://nats:8222/jsz"
 	}
 
-	// Backend services don't currently expose /metrics endpoints, so the
-	// service-error scraper is a no-op until they do. Pass an empty URL map
-	// — Scrape will return an empty delta map without making any requests.
+	// The service-error verdict arm is dormant, but not for the reason this
+	// comment used to give: services DO expose /metrics now (:9090 for
+	// hand-rolled counters, :2112 for the o11y SDK). What is missing is the
+	// metric — no service in this repo emits slog_errors_total, so wiring URLs
+	// here would scrape real endpoints, find no such family, and report a
+	// permanent zero that reads as "no service errors".
+	//
+	// Unblocking it needs a uniform per-service error counter first. The
+	// natsrouter middleware in docs/specs/o11y/o11y-slo.md §8 P1
+	// (rpc_server_duration_seconds{subject_pattern, errcode_category}) is the
+	// intended source; point serviceErrorCounterName at it and fill this map
+	// once it ships. scrapeErrorCounter fails with errCounterFamilyAbsent if
+	// the family is missing, so a half-done wiring surfaces instead of
+	// silently passing.
 	scraper := newServiceScraper()
 	svcURLs := map[string]string{}
 

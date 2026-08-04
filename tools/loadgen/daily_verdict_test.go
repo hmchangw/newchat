@@ -204,6 +204,40 @@ other_total 100
 	require.Equal(t, 5.0, v)
 }
 
+// An endpoint that serves metrics but not this family is not the same as a
+// service reporting zero errors. Collapsing the two would let a wired-up but
+// wrong metric name read as permanently healthy.
+func TestScrapeErrorCounter_AbsentFamilyIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("# TYPE other_total counter\nother_total 100\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := scrapeErrorCounter(context.Background(), srv.URL)
+	require.ErrorIs(t, err, errCounterFamilyAbsent)
+}
+
+func TestScrapeErrorCounter_PresentButZeroIsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("slog_errors_total{level=\"error\"} 0\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	v, err := scrapeErrorCounter(context.Background(), srv.URL)
+	require.NoError(t, err)
+	require.Equal(t, 0.0, v)
+}
+
+func TestSumCounterFamily_ReportsPresence(t *testing.T) {
+	body := "foo_total{a=\"x\"} 3\nfoo_total{a=\"y\"} 4\nunrelated 99\n"
+	sum, found := sumCounterFamily(body, "foo_total")
+	require.True(t, found)
+	require.Equal(t, 7.0, sum)
+
+	_, found = sumCounterFamily(body, "missing_total")
+	require.False(t, found)
+}
+
 func TestSumCounterFamily_HandlesCommentsAndBlankLines(t *testing.T) {
 	body := `
 # HELP foo
@@ -212,8 +246,42 @@ foo_total{a="x"} 3
 foo_total{a="y"} 4
 unrelated 99
 `
-	require.Equal(t, 7.0, sumCounterFamily(body, "foo_total"))
-	require.Equal(t, 0.0, sumCounterFamily(body, "missing"))
+	sum, found := sumCounterFamily(body, "foo_total")
+	require.True(t, found)
+	require.Equal(t, 7.0, sum)
+
+	sum, found = sumCounterFamily(body, "missing")
+	require.False(t, found)
+	require.Equal(t, 0.0, sum)
+}
+
+// A misconfigured metric name must not pass as "no errors". Scrape keeps
+// tolerating the reading (a down service shouldn't fail the run) but says so,
+// so a half-done wiring is visible instead of permanently green.
+func TestServiceScraper_ReportsAbsentFamily(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("other_total 100\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newServiceScraper()
+	out, err := s.Scrape(context.Background(), map[string]string{"svc": srv.URL})
+
+	require.NoError(t, err, "an unreadable service must not abort the step")
+	require.Equal(t, int64(0), out["svc"])
+	require.Equal(t, []string{"svc"}, s.Unavailable())
+}
+
+func TestServiceScraper_HealthyServiceIsNotUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("slog_errors_total 0\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newServiceScraper()
+	_, err := s.Scrape(context.Background(), map[string]string{"svc": srv.URL})
+	require.NoError(t, err)
+	require.Empty(t, s.Unavailable())
 }
 
 func TestServiceScraper_DeltaAfterBaseline(t *testing.T) {
