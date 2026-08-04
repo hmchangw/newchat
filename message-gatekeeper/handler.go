@@ -255,8 +255,32 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid quoted parent message ID %q: must be a 20-char base62 string", req.QuotedParentMessageID))
 	}
 
-	// A message with attachments may carry empty content.
-	if req.Content == "" && len(req.Attachments) == 0 {
+	// Forward validation: both fields together, a valid source ID, and no
+	// combination with thread/quote/attachments — a forward is a main-timeline
+	// message carrying a comment plus a server-built snapshot (see
+	// docs/superpowers/specs/2026-08-03-message-forwarding-design.md).
+	isForward := req.ForwardedMessageID != "" || req.ForwardedRoomID != ""
+	if isForward {
+		if req.ForwardedMessageID == "" || req.ForwardedRoomID == "" {
+			return nil, errcode.BadRequest("forwardedMessageId and forwardedRoomId must be set together")
+		}
+		if !idgen.IsValidMessageID(req.ForwardedMessageID) {
+			return nil, errcode.BadRequest(fmt.Sprintf("invalid forwarded message ID %q: must be a 20-char base62 string", req.ForwardedMessageID))
+		}
+		if req.QuotedParentMessageID != "" {
+			return nil, errcode.BadRequest("a forward cannot also quote a message")
+		}
+		if req.ThreadParentMessageID != "" {
+			return nil, errcode.BadRequest("a forward cannot target a thread")
+		}
+		if len(req.Attachments) > 0 {
+			return nil, errcode.BadRequest("a forward cannot carry attachments")
+		}
+	}
+
+	// A message with attachments may carry empty content; so may a forward
+	// (the snapshot is the content).
+	if req.Content == "" && len(req.Attachments) == 0 && !isForward {
 		return nil, errcode.BadRequest("content must not be empty")
 	}
 
@@ -344,6 +368,11 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID, "unverified", quotedUnverified)
 	}
 
+	forwardSnapshot, err := h.resolveForwardSnapshot(ctx, account, siteID, req)
+	if err != nil {
+		return nil, err
+	}
+
 	// Resolve the thread parent's createdAt + sender account server-side,
 	// best-effort: a fetch failure ships the event without the values (each
 	// consumer falls back to a store it owns), so a Cassandra outage never blocks
@@ -385,6 +414,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		ThreadParentMessageCreatedAt: threadParentCreatedAt,
 		TShow:                        tshow,
 		QuotedParentMessage:          quotedSnapshot,
+		ForwardedMessage:             forwardSnapshot,
 		Attachments:                  req.Attachments,
 		Type:                         req.Type,
 	}
@@ -492,6 +522,63 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 		return nil, false, cerr
 	}
 	return snap, false, nil
+}
+
+// resolveForwardSnapshot fetches the forward source (from the SOURCE room's
+// msg.get subject — history-service enforces the forwarder's subscription and
+// access window there) and projects it into the immutable snapshot. Hard-fail
+// policy: ANY failure rejects the send — no placeholder, no re-projection (a
+// forward without its content is meaningless). Transport failures collapse to
+// a typed unavailable error so the JetStream msg is replied+acked, never
+// Nak-looped on a dead history.
+func (h *Handler) resolveForwardSnapshot(ctx context.Context, account, siteID string, req *model.SendMessageRequest) (*cassandra.ForwardedMessage, error) {
+	if req.ForwardedMessageID == "" {
+		return nil, nil
+	}
+	src, err := h.parentFetcher.FetchForwardedSource(ctx, account, req.ForwardedRoomID, siteID, req.ForwardedMessageID)
+	if err == nil && src == nil {
+		err = fmt.Errorf("fetch forward source %s: fetcher returned nil projection", req.ForwardedMessageID)
+	}
+	if err != nil {
+		var ee *errcode.Error
+		if errors.As(err, &ee) {
+			// Preserve the upstream category (not_found, forbidden,
+			// unavailable, …) — hard-fail on all of them, never degrade.
+			return nil, ee
+		}
+		slog.WarnContext(ctx, "forward source fetch failed",
+			"request_id", req.RequestID, "forwarded_id", req.ForwardedMessageID, "error", err)
+		return nil, errcode.Unavailable("forward source temporarily unavailable")
+	}
+	if src.Deleted {
+		return nil, errcode.BadRequest("cannot forward a deleted message")
+	}
+	if model.IsSystemMessageType(src.Type) {
+		return nil, errcode.BadRequest("cannot forward a system message")
+	}
+	if len(src.Attachments) > 0 {
+		return nil, errcode.BadRequest("cannot forward a message with attachments")
+	}
+	if len(src.Card) > 0 {
+		return nil, errcode.BadRequest("cannot forward a card message")
+	}
+	// Chain depth stays 1: forwarding a forward captures only that message's
+	// own comment; the nested snapshot is dropped, and an empty comment leaves
+	// nothing forwardable.
+	if len(src.ForwardedMessage) > 0 && src.Msg == "" {
+		return nil, errcode.BadRequest("source forward has no forwardable content")
+	}
+	return &cassandra.ForwardedMessage{
+		MessageID:             req.ForwardedMessageID,
+		RoomID:                src.RoomID,
+		Sender:                src.Sender,
+		CreatedAt:             src.CreatedAt,
+		Msg:                   src.Msg,
+		Mentions:              src.Mentions,
+		MessageLink:           src.MessageLink,
+		ThreadParentID:        src.ThreadParentID,
+		ThreadParentCreatedAt: src.ThreadParentCreatedAt,
+	}, nil
 }
 
 // quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a

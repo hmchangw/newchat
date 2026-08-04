@@ -2266,3 +2266,388 @@ func TestHandler_processMessage_NonThreadMessage_NoParentFetch(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, *published, 1)
 }
+
+func TestHandler_ProcessMessage_Forward(t *testing.T) {
+	validID := idgen.GenerateMessageID()
+	fwdID := idgen.GenerateMessageID()
+	validRequestID := "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	validAccount, validRoomID, validSiteID := "alice", "room-dst", "site-a"
+	srcRoomID := "room-src"
+	srcCreatedAt := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	sub := &model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: validAccount}, RoomID: validRoomID, Roles: []model.Role{model.RoleMember}}
+	okSource := func() *forwardSourceProjection {
+		return &forwardSourceProjection{
+			RoomID: srcRoomID, Sender: cassandra.Participant{ID: "u5", Account: "eve"},
+			CreatedAt: srcCreatedAt, Msg: "original body",
+			Mentions:    []cassandra.Participant{{ID: "u2", Account: "bob"}},
+			MessageLink: "https://chat.example.com/" + srcRoomID + "/" + fwdID,
+		}
+	}
+	subscribed := func(s *MockStore) {
+		s.EXPECT().GetSubscription(gomock.Any(), validAccount, validRoomID).Return(sub, nil)
+		s.EXPECT().GetRoomMeta(gomock.Any(), validRoomID).Return(roommetacache.Meta{ID: validRoomID, UserCount: 1}, nil)
+	}
+	fwdReq := func(content string) []byte {
+		data, _ := json.Marshal(model.SendMessageRequest{
+			ID: validID, Content: content, RequestID: validRequestID,
+			ForwardedMessageID: fwdID, ForwardedRoomID: srcRoomID,
+		})
+		return data
+	}
+
+	tests := []struct {
+		name          string
+		buildData     func() []byte
+		setupStore    func(s *MockStore)
+		setupFetcher  func(f *MockParentMessageFetcher) // optional; nil → no fetcher expectations
+		wantErr       bool
+		wantInfra     bool
+		checkErr      func(t *testing.T, err error) // optional; called on wantErr cases
+		wantNoPublish bool                          // assert published slice is empty on wantErr
+		checkResult   func(t *testing.T, data []byte, published []publishedMsg)
+	}{
+		{
+			name:       "happy path with comment",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Equal(t, fwdID, msg.ForwardedMessage.MessageID)
+				assert.Equal(t, srcRoomID, msg.ForwardedMessage.RoomID)
+				assert.Equal(t, "original body", msg.ForwardedMessage.Msg)
+				assert.Equal(t, "eve", msg.ForwardedMessage.Sender.Account)
+				assert.NotEmpty(t, msg.ForwardedMessage.MessageLink)
+				assert.Equal(t, "check this", msg.Content)
+
+				require.Len(t, published, 1)
+				var evt model.MessageEvent
+				require.NoError(t, json.Unmarshal(published[0].data, &evt))
+				require.NotNil(t, evt.Message.ForwardedMessage)
+				assert.Equal(t, msg.ForwardedMessage, evt.Message.ForwardedMessage)
+				assert.Equal(t, "check this", evt.Message.Content)
+			},
+		},
+		{
+			name:       "happy path with empty content",
+			buildData:  func() []byte { return fwdReq("") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				assert.Equal(t, "", msg.Content)
+				require.NotNil(t, msg.ForwardedMessage)
+				require.Len(t, published, 1)
+			},
+		},
+		{
+			name: "forwardedMessageId without forwardedRoomId → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "hello", RequestID: validRequestID,
+					ForwardedMessageID: fwdID,
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name: "forwardedRoomId without forwardedMessageId → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "hello", RequestID: validRequestID,
+					ForwardedRoomID: srcRoomID,
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name: "invalid forwardedMessageId → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "hello", RequestID: validRequestID,
+					ForwardedMessageID: "nope!", ForwardedRoomID: srcRoomID,
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name: "forward + quotedParentMessageId → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "check this", RequestID: validRequestID,
+					ForwardedMessageID: fwdID, ForwardedRoomID: srcRoomID,
+					QuotedParentMessageID: idgen.GenerateMessageID(),
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name: "forward + threadParentMessageId → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "check this", RequestID: validRequestID,
+					ForwardedMessageID: fwdID, ForwardedRoomID: srcRoomID,
+					ThreadParentMessageID: idgen.GenerateMessageID(),
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name: "forward + attachments on the new message → bad_request",
+			buildData: func() []byte {
+				data, _ := json.Marshal(model.SendMessageRequest{
+					ID: validID, Content: "check this", RequestID: validRequestID,
+					ForwardedMessageID: fwdID, ForwardedRoomID: srcRoomID,
+					Attachments: [][]byte{[]byte(`{"id":"a1"}`)},
+				})
+				return data
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "source not found → typed not_found, no publish",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(nil, errcode.NotFound("message not found"))
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeNotFound, ee.Code)
+			},
+		},
+		{
+			name:       "source forbidden → typed forbidden",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(nil, errcode.Forbidden("not subscribed to room"))
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeForbidden, ee.Code)
+			},
+		},
+		{
+			name:       "transport failure → typed unavailable (Ack, not Nak)",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(nil, fmt.Errorf("history request: nats: timeout"))
+			},
+			wantErr:       true,
+			wantInfra:     false,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeUnavailable, ee.Code)
+			},
+		},
+		{
+			name:       "deleted source → bad_request",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Deleted = true
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "system-message source → bad_request",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Type = model.MessageTypeRoomRenamed
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "source with attachments → bad_request",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Attachments = json.RawMessage(`[{"id":"f1"}]`)
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "source with card → bad_request",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Card = json.RawMessage(`{"template":"x"}`)
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       "forward-of-forward with comment → snapshot carries the comment only",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Msg = "their comment"
+				src.ForwardedMessage = json.RawMessage(`{"messageId":"m-deeper"}`)
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Equal(t, "their comment", msg.ForwardedMessage.Msg)
+				assert.NotContains(t, string(data), "m-deeper", "chain depth stays 1 — nested snapshot must not leak into the reply")
+				require.Len(t, published, 1)
+				assert.NotContains(t, string(published[0].data), "m-deeper", "chain depth stays 1 — nested snapshot must not leak into the canonical event")
+			},
+		},
+		{
+			name:       "forward-of-forward with empty comment → bad_request",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Msg = ""
+				src.ForwardedMessage = json.RawMessage(`{"messageId":"m-deeper"}`)
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+		},
+		{
+			name:       `"important" source is forwardable`,
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.Type = model.MessageTypeImportant
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				require.Len(t, published, 1)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			tc.setupStore(store)
+
+			fetcher := NewMockParentMessageFetcher(ctrl)
+			if tc.setupFetcher != nil {
+				tc.setupFetcher(fetcher)
+			}
+
+			var published []publishedMsg
+			pub := makePublishFunc(&published, nil)
+
+			h := &Handler{
+				store:              store,
+				publish:            pub,
+				siteID:             validSiteID,
+				parentFetcher:      fetcher,
+				largeRoomThreshold: 500,
+			}
+
+			var req model.SendMessageRequest
+			_ = json.Unmarshal(tc.buildData(), &req) // rows build valid JSON; ignore parse errors here
+			data, err := h.processMessage(context.Background(), validAccount, validRoomID, validSiteID, &req)
+
+			if tc.wantErr {
+				require.Error(t, err)
+				var ee *errcode.Error
+				hasErrcode := errors.As(err, &ee)
+				if tc.wantInfra {
+					assert.False(t, hasErrcode, "expected infra error (no *errcode.Error), got %T: %v", err, err)
+				} else {
+					assert.True(t, hasErrcode, "expected validation *errcode.Error, got %T: %v", err, err)
+				}
+				if tc.checkErr != nil {
+					tc.checkErr(t, err)
+				}
+				if tc.wantNoPublish {
+					assert.Empty(t, published, "no canonical publish should occur on rejection")
+				}
+				return
+			}
+			require.NoError(t, err)
+			if tc.checkResult != nil {
+				tc.checkResult(t, data, published)
+			}
+		})
+	}
+}
