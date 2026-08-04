@@ -18,6 +18,10 @@ func defaultSteps(workload string) string {
 		// each attempt costs auth-service a JWT sign. Ramping into the
 		// thousands would measure signing throughput nobody will ever need.
 		return "50,100,200,500,1000"
+	case "search":
+		// The workload model puts search at ~5 ops/user/day (R_search in
+		// docs/nats-traffic-estimation.md §4), far below the message path.
+		return "100,200,500,1000,2000"
 	default:
 		return "500,1000,2000,5000,10000"
 	}
@@ -31,7 +35,7 @@ func buildThresholds(p95, p99 time.Duration, errRate float64, pendingGrowth uint
 // the report. Returns the process exit code.
 func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("max-rps", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read|login")
+	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read|login|search")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	stepsFlag := fs.String("steps", "", "ascending RPS list, e.g. 500,1k,2k,5k,10k (default depends on workload)")
@@ -56,6 +60,8 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	// login-only tunables:
 	authURL := fs.String("auth-url", "", "login only: auth-service base URL (default AUTH_URL)")
 	loginKeyPool := fs.Int("login-key-pool", 256, "login only: pre-generated NKey pool size")
+	// search-only tunable:
+	searchMixFlag := fs.String("search-mix", "messages:60,rooms:30,users:10", "search only: endpoint mix")
 	csvPath := fs.String("csv", "", "optional CSV output path")
 	_ = fs.Parse(args)
 
@@ -134,6 +140,27 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			return 1
 		}
 		w, cleanup, presetID = lw, clean, p.Name
+	case "search":
+		p, ok := BuiltinPreset(*preset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown preset: %s\n", *preset)
+			return 2
+		}
+		searchMix, err := ParseSearchMix(*searchMixFlag)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			return 2
+		}
+		if *requestTimeout <= 0 {
+			fmt.Fprintln(os.Stderr, "--request-timeout must be > 0")
+			return 2
+		}
+		sw, clean, err := newSearchWorkload(cfg, &p, *seed, searchMix, *requestTimeout)
+		if err != nil {
+			slog.Error("init search workload", "error", err)
+			return 1
+		}
+		w, cleanup, presetID = sw, clean, p.Name
 	case "history":
 		p, ok := BuiltinHistoryPreset(*preset)
 		if !ok {

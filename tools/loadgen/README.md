@@ -644,7 +644,7 @@ list of steps, holds at each step for a measurement window, evaluates SLO
 signals, and reports the largest step at which every signal passed.
 
 ```bash
-loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read|login --preset=<name> [flags]
+loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read|login|search --preset=<name> [flags]
 ```
 
 ### Quick start
@@ -662,6 +662,9 @@ loadgen max-rps --workload=read-receipt --preset=history-medium --steps=200,500,
 
 # login: drive auth-service's HTTP leg (no seeding needed)
 loadgen max-rps --workload=login --preset=medium --slo-p95=1s
+
+# search: drive search-service request/reply (reads the existing index)
+loadgen max-rps --workload=search --preset=medium --slo-p95=1s
 ```
 
 Via the deploy Makefile:
@@ -675,12 +678,13 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, `thread-read`, or `login` |
-| `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets; `login` reuses the message presets for its account set) |
-| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` / login `50,100,200,500,1k` | explicit ordered RPS list; `k` suffix = ×1000 |
-| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / login**: per-request reply timeout |
+| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, `thread-read`, `login`, or `search` |
+| `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets; `login` and `search` reuse the message presets for their account set) |
+| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` / login `50,100,200,500,1k` / search `100,200,500,1k,2k` | explicit ordered RPS list; `k` suffix = ×1000 |
+| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / login / search**: per-request reply timeout |
 | `--auth-url` | `$AUTH_URL` | **login only**: auth-service base URL |
 | `--login-key-pool` | `256` | **login only**: pre-generated NKey pool size |
+| `--search-mix` | `messages:60,rooms:30,users:10` | **search only**: endpoint mix |
 | `--warmup` | `10s` | per-step warmup (samples discarded) |
 | `--hold` | `30s` | per-step measurement window |
 | `--cooldown` | `5s` | per-step settle gap before next step |
@@ -830,6 +834,49 @@ rejects yields a small sample and an honest INCONCLUSIVE, instead of a 100%
 error rate that looks like a service failure. Only successful logins are
 timed — SLO-3 gates on *succeeded **and** within the bound*, so timing a
 failure would let it drag the percentile in whichever direction it landed.
+
+### Search workload (`--workload=search`)
+
+Drives search-service's request/reply endpoints so **SLO-7** — *search returns
+ok / eligible search requests* (`docs/specs/o11y/o11y-slo.md` §5) — can be
+measured under load.
+
+```bash
+loadgen max-rps --workload=search --preset=medium --slo-p95=1s
+```
+
+No seeding step: search reads whatever the index already holds, so run it
+after a messages or daily run has produced indexable traffic — against an
+empty index the queries still exercise the full path but every hit list is
+empty, which measures neither scoring nor the enrichment path.
+
+Accounts come from the chosen message preset. `--search-mix` sets the endpoint
+share (default `messages:60,rooms:30,users:10`); each endpoint gates as its own
+latency series, because an ES query over messages and a spotlight-index room
+lookup have different cost models and one bound across both would be
+meaningless.
+
+Outcome classification uses the shared `o11y-slo.md` §0.1 eligibility rule
+(see the login workload above), applied to the reply's `errcode` envelope:
+`bad_request`/`unauthenticated`/`forbidden`/`not_found`/`conflict` leave the
+denominator, while `internal`/`unavailable`/`too_many_requests` and a request
+timeout burn budget. Only successful searches are timed, matching SLO-8's
+"successful search returns within 1 s / **successful** searches" — gating on
+success so a fast failure cannot improve the number.
+
+**What this cannot tell you.** Two limits are worth stating before reading a
+green run as proof search is healthy:
+
+- **SLO-8 is not scorable server-side yet.** `search_service_request_duration`
+  carries only a `kind` attribute — no status — so successful requests can't be
+  isolated from failed ones in the service's own histogram. This workload
+  measures latency client-side, but the §8 P4 status label is still required
+  before SLO-8 can be enforced from production recording rules.
+- **A total outage does not show up as a failed ratio server-side.** §5 calls
+  this out: SLO-7's denominator is search-service-local, so a dead service
+  reads as *no traffic* rather than as failures. Client-side this workload does
+  see it — timeouts classify as failures — which is a useful cross-check, but
+  it is not a substitute for the health-check/prober backstop §5 asks for.
 
 ### Bottleneck attribution
 
