@@ -2029,6 +2029,8 @@ and quoted message; variant determined by optional fields.
 | `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |
 | `tshow` | boolean | no | "Also send to channel". Only meaningful on a thread reply; ignored on non-thread sends. |
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
+| `forwardedMessageId` | string | no | Forward: the source message's ID. Set with `forwardedRoomId`. The server fetches the source from the source room (subscription + access window enforced there) and embeds an immutable text-only snapshot; any fetch failure rejects the send (hard-fail, no placeholder). Mutually exclusive with `threadParentMessageId` / `quotedParentMessageId` / `attachments`; `content` becomes optional. One `msg.send` per destination room. |
+| `forwardedRoomId` | string | no | The source message's room ID. Required with `forwardedMessageId`. |
 
 #### Async success response
 
@@ -2047,6 +2049,7 @@ Delivered on `chat.user.{account}.response.{requestId}`.
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort; absent when unresolved at send time. |
 | `tshow` | boolean | Present only when `tshow: true` on a thread reply. |
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Present only for a quoted send. |
+| `forwardedMessage` | [ForwardedMessage](../client-api.md#forwardedmessage) | Present only for a forward. |
 
 #### Async error response
 

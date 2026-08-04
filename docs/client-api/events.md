@@ -334,6 +334,7 @@ Cassandra projection).
 | `type` | string | Optional. Message type — a server-set system type (`room_created`, etc.) or the client-settable `"important"`. Absent for a normal message. |
 | `sysMsgData` | string | Optional. Base64-encoded raw JSON payload for system messages. |
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Optional. |
+| `forwardedMessage` | [ForwardedMessage](../client-api.md#forwardedmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](../client-api.md#participant) | Optional. |
 
