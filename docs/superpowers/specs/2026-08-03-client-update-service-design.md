@@ -49,7 +49,7 @@ client-update-service/
   version.go           # HandleUpload (POST) + HandleDownload (GET)
   cache.go             # blobCache: expirable.LRU[string, cachedBlob] + singleflight
   store.go             # versionStore interface + //go:generate mockgen
-  store_minio.go       # streaming MinIO impl (Put, Stat, Open) + ensureBucket + cancelReadCloser (ported from upload-service)
+  store_minio.go       # streaming MinIO impl (Put, Open) + ensureBucket + cancelReadCloser (ported from upload-service)
   routes.go            # RegisterRoutes(r, h)
   middleware.go        # request-ID + access-log middleware (ported from upload-service)
   handler_test.go      # health/wiring unit tests
@@ -76,19 +76,27 @@ type blobInfo struct {
 type versionStore interface {
     // Put streams r (of known size) to the object at key with the given content type.
     Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error
-    // Stat returns metadata only (HEAD), or ErrObjectNotFound (wrapped) when absent.
-    Stat(ctx context.Context, key string) (blobInfo, error)
-    // Open returns a streaming reader + metadata, or ErrObjectNotFound (wrapped) when absent.
+    // Open returns a streaming reader + metadata (size + content-type), or
+    // ErrObjectNotFound (wrapped) when absent. Metadata comes from the opened
+    // object's own Stat() — no separate HEAD round-trip.
     Open(ctx context.Context, key string) (io.ReadCloser, blobInfo, error)
 }
 ```
 
+> **Interface note.** `minioutil.ObjectStore` exposes only
+> `BucketExists/PutObject/GetObject/ListObjects/RemoveObject` — **no `StatObject`**.
+> So the store has no separate `Stat`/HEAD method: `Open` derives `blobInfo` from
+> the opened object's `obj.Stat()` (which `GetObject` supports), and the cache
+> size decision is made from that. This keeps the store on the shared interface
+> with no type assertions.
+
 `store_minio.go` implements it over `minioutil.ObjectStore`:
 - `Put` → `PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{ContentType: ct})`.
-- `Stat` → `StatObject` (HEAD); `NoSuchKey` → `ErrObjectNotFound`.
-- `Open` → `GetObject` + `Stat()` probe, wrapped in the `cancelReadCloser`
-  pattern from `upload-service/store_minio.go` so the download-timeout context is
-  released on `Close()`; `NoSuchKey` → `ErrObjectNotFound`.
+- `Open` → `GetObject` + `obj.Stat()` probe (surfaces a missing object / dead
+  backend before any body is read; also yields `Size` + `ContentType` for
+  `blobInfo`), wrapped in the `cancelReadCloser` pattern from
+  `upload-service/store_minio.go` so the download-timeout context is released on
+  `Close()`; `NoSuchKey` → `ErrObjectNotFound`.
 
 **Object key:** `chat.go/chat-versions/<fileName>` (fixed `objectPrefix`
 constant, mirroring the legacy `defaultFilePath` root).
@@ -140,6 +148,12 @@ func newBlobCache(maxEntries int, ttl time.Duration, maxObjectBytes int64) *blob
 func (c *blobCache) get(key string) (cachedBlob, bool)
 func (c *blobCache) add(key string, b cachedBlob)
 func (c *blobCache) remove(key string)   // used on overwrite-upload to drop a stale copy
+
+// loadCacheable collapses concurrent misses for key via singleflight. loader
+// opens the object and returns (blob, cacheable): a cacheable blob is add()-ed
+// and shared with all waiters; a non-cacheable result (object over maxObjectBytes)
+// is returned but never stored, so its callers fall back to direct streaming.
+func (c *blobCache) loadCacheable(key string, loader func() (cachedBlob, bool, error)) (cachedBlob, bool, error)
 ```
 
 - `expirable.LRU` gives **both** bounds: `maxEntries` capacity (LRU eviction, no
@@ -156,25 +170,37 @@ func (c *blobCache) remove(key string)   // used on overwrite-upload to drop a s
 
 ### Download flow (`HandleDownload`) — the changed path
 
+Because there is no HEAD, the size is not known until the object is opened. The
+flow therefore opens once under singleflight, decides cacheable-vs-stream from
+the opened object's size, and only then buffers or streams:
+
 1. Validate `fileName`: non-empty, path-clean, reject `/` and `..` (traversal).
 2. `cache.get(key)` → **hit**: `c.Data(200, blob.contentType, blob.body)`; done.
-3. **Miss** → `info, err := store.Stat(ctx, key)`:
-   - `ErrObjectNotFound` → `404 errcode.NotFound("version not found")`.
-   - other error → wrapped `%w` → `500 internal`.
-4. **Cacheable** (`info.Size <= maxObjectBytes`): load under `singleflight.Do(key)`
-   — re-check cache, `store.Open`, read exactly `info.Size` bytes into a buffer,
-   `cache.add(key, blob)`, return blob. Serve `c.Data(200, ct, blob.body)`.
-   Concurrent misses for the same key share the one load.
-5. **Too large** (`info.Size > maxObjectBytes`): `rc, info, _ := store.Open(ctx, key)`;
-   set headers; `c.DataFromReader(200, info.Size, ct, rc, nil)`; `defer rc.Close()`.
+3. **Miss** → `res, err := cache.loadCacheable(key, loader)` where `loader`:
+   `rc, info, err := store.Open(ctx, key)` (`defer rc.Close()`); if
+   `info.Size <= maxObjectBytes` read exactly `info.Size` bytes into a buffer and
+   return a **cacheable** `cachedBlob`; else return a **non-cacheable** marker
+   carrying only `info` (size + content-type), body discarded. `singleflight`
+   collapses concurrent misses for the same key into one `Open`.
+   - loader error `ErrObjectNotFound` → `404 errcode.NotFound("version not found")`;
+     other error → wrapped `%w` → `500 internal`.
+4. **Cacheable result:** `cache.add(key, blob)` (done inside `loadCacheable`) and
+   serve `c.Data(200, blob.contentType, blob.body)`.
+5. **Non-cacheable result** (`info.Size > maxObjectBytes`): re-open and stream —
+   `rc, info, _ := store.Open(ctx, key)`; set headers;
+   `c.DataFromReader(200, info.Size, info.ContentType, rc, nil)`; `defer rc.Close()`.
    Never cached; constant memory.
 
 Response headers on both success paths: `Content-Type` (from `blobInfo`),
 `Content-Length` (`info.Size`), `Content-Disposition: attachment; filename="<fileName>"`.
 
-> Trade-off: the miss path does a `Stat` (HEAD) before `Open` (GET) to decide
-> cacheable-vs-stream up front. Cache **hits** — the steady state the cache
-> exists for — do neither.
+> Trade-off: a too-large object is opened twice on a cold miss — once in the
+> singleflight loader to learn its size, once to stream. That path is rare (only
+> objects over `CACHE_MAX_OBJECT_BYTES`) and the first open reads no body (closed
+> after `Stat()`), so the cost is a second GET setup, not a double transfer.
+> Cacheable objects — the common case — open exactly once; cache **hits** open
+> zero times. Singleflight matters here: an update rollout is a thundering herd
+> of clients hitting one brand-new version at the same moment.
 
 ### Upload flow (`HandleUpload`)
 
@@ -206,7 +232,7 @@ Response headers on both success paths: `Content-Type` (from `blobInfo`),
   | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | *(required)* | Secrets never defaulted |
   | `MINIO_USE_SSL` | `false` | |
   | `MINIO_BUCKET` | *(required)* | Created at startup if absent (see Bucket bootstrap) |
-  | `MINIO_DOWNLOAD_TIMEOUT` | `5m` | Bounds Stat+stream |
+  | `MINIO_DOWNLOAD_TIMEOUT` | `5m` | Bounds a single Open (Stat probe + streamed body) |
   | `HTTP_WRITE_TIMEOUT` | `10m` | Large executables stream slowly |
   | `CACHE_MAX_ENTRIES` | `4` | LRU capacity; `0` disables the cache |
   | `CACHE_TTL` | `6h` | Per-entry expiry |
@@ -237,14 +263,16 @@ Response headers on both success paths: `Content-Type` (from `blobInfo`),
   `configFile`; missing `executeFile`; empty file; wrong config extension;
   malformed multipart; `Put` error → `500`; overwrite evicts the cache key.
 - Download: cache hit → served without any store call; miss+cacheable →
-  `Stat`+`Open`, cached, served; miss+too-large → streamed, **not** cached;
-  empty/`..`/`/` name → `400`; `ErrObjectNotFound` → `404`; store error → `500`.
+  one `Open`, cached, served (second request is a cache hit, no store call);
+  miss+too-large → opened, streamed, **not** cached; empty/`..`/`/` name → `400`;
+  `ErrObjectNotFound` → `404`; store error → `500`.
 - Health: `200 {"status":"ok"}`.
 
 **Unit — `cache_test.go`:** hit; miss; TTL expiry (entry gone after `ttl`);
-LRU eviction past `maxEntries`; `maxObjectBytes` refusal; `remove` drops an entry;
-singleflight collapses N concurrent misses into 1 load (assert loader called
-once); disabled cache (`maxEntries==0`) always misses.
+LRU eviction past `maxEntries`; `add` refuses a body over `maxObjectBytes`;
+`remove` drops an entry; `loadCacheable` caches a cacheable result and shares it,
+returns (but does not store) a non-cacheable result; singleflight collapses N
+concurrent misses into 1 loader call; disabled cache (`maxEntries==0`) always misses.
 
 **Integration — `integration_test.go` (`//go:build integration`):**
 `TestMain` → `testutil.RunTests(m)`; `testutil.MinIO(t, "clientupdate")` real
