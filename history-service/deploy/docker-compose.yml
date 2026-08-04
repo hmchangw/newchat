@@ -18,6 +18,10 @@ services:
       - MONGO_DB=chat
       - CASSANDRA_HOSTS=cassandra
       - CASSANDRA_KEYSPACE=chat
+      # Shared Valkey cluster fronts the subauthcache L2 (the subscription-authz
+      # outage buffer). Empty disables the L2 tier (fail-open to Mongo); set here
+      # so the Mongo-outage-survival read path is exercisable in local dev.
+      - VALKEY_ADDRS=valkey:6379
       - ATREST_ENABLED=true
       - VAULT_ADDR=http://vault:8200
       - VAULT_TOKEN=dev-only-token
