@@ -457,9 +457,8 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		Timestamp: now.UnixMilli(),
 	}
 	memberEvtData, _ := json.Marshal(memberEvt)
-	if err := h.publish(ctx, subject.MemberEvent(req.RoomID), memberEvtData, ""); err != nil {
-		slog.ErrorContext(ctx, "member event publish failed", "error", err, "room_id", req.RoomID)
-	}
+	crossSite, crossSiteAt := h.roomLocalityForMember(ctx, req.RoomID)
+	h.publishMemberEvent(ctx, req.RoomID, crossSite, crossSiteAt, memberEvtData, "member_removed")
 
 	// Wrapper Type collapses to member_removed even for self-leave so
 	// search-sync-worker dispatches on one MV op; inner Type is preserved.
@@ -669,9 +668,8 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 			Timestamp: now.UnixMilli(),
 		}
 		memberEvtData, _ := json.Marshal(memberEvt)
-		if err := h.publish(ctx, subject.MemberEvent(req.RoomID), memberEvtData, ""); err != nil {
-			slog.ErrorContext(ctx, "member event publish failed", "error", err, "room_id", req.RoomID)
-		}
+		crossSite, crossSiteAt := h.roomLocalityForMember(ctx, req.RoomID)
+		h.publishMemberEvent(ctx, req.RoomID, crossSite, crossSiteAt, memberEvtData, "member_removed")
 
 		internalEvt := model.InboxEvent{
 			Type:       model.InboxMemberRemoved,
@@ -1173,13 +1171,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		memberAddEvt.Accounts = nil
 		memberAddEvt.Members = buildAddedMembers(&req, inputs.orgDisplayRows, userMap)
 		memberAddData, _ := json.Marshal(memberAddEvt)
-		if err := h.publish(ctx, subject.RoomMemberEvent(req.RoomID), memberAddData, ""); err != nil {
-			slog.ErrorContext(ctx, "member add event publish failed",
-				"error", err,
-				"room_id", req.RoomID,
-				"request_id", natsutil.RequestIDFromContext(ctx),
-			)
-		}
+		// Route on the room's prior locality: at a flip all existing members are still
+		// on the local subject (they re-subscribe global only after their next
+		// subscription.list), and the newly-added remote member bootstraps its roster
+		// via member.list — so prior-state routing reaches everyone who needs the delta.
+		h.publishMemberEvent(ctx, req.RoomID, room.CrossSite, room.CrossSiteAt, memberAddData, "member_added")
 
 		if len(actualAccounts) > 0 {
 			internalEvt := model.InboxEvent{
@@ -2347,6 +2343,36 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 			slog.Error("publish room event failed", "error", err, "op", op, "room_id", roomID, "subject", subj)
 		}
 	}
+}
+
+// publishMemberEvent fans a member add/remove event out via subject.RoomMemberEventTargets
+// so it routes on the same namespace(s) as the room's .event — a same-site room's roster
+// events land on the local subject its clients subscribe to (and a flipped room dual-publishes
+// during the grace window). Sanctioned path (a .semgrep rule blocks inline publishes); best-effort.
+func (h *Handler) publishMemberEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) {
+	now := time.Now().UTC()
+	for _, subj := range subject.RoomMemberEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.publish(ctx, subj, payload, ""); err != nil {
+			slog.Error("publish member event failed", "error", err, "op", op, "room_id", roomID, "subject", subj)
+		}
+	}
+}
+
+// roomLocalityForMember fetches a room's crossSite/crossSiteAt for member-event routing
+// (removes don't change locality, so the cached meta is authoritative). In global mode the
+// read is skipped — routing is global regardless of crossSite. On a read error it returns
+// nil,nil — the RoomMemberEventTargets fail-safe routes global, never a silent miss.
+func (h *Handler) roomLocalityForMember(ctx context.Context, roomID string) (*bool, *time.Time) {
+	if !h.routeMode.UsesLocal() {
+		return nil, nil
+	}
+	room, err := h.store.GetRoomMeta(ctx, roomID)
+	if err != nil {
+		slog.WarnContext(ctx, "member event locality lookup failed; routing global",
+			"error", err, "room_id", roomID)
+		return nil, nil
+	}
+	return room.CrossSite, room.CrossSiteAt
 }
 
 func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requester, other *model.User, joinedAt time.Time) error {

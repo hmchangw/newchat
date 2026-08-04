@@ -1271,7 +1271,7 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, h.processAddMembers(ctx, body))
 
-	roomPubs := cap.publishesOnPrefix(subject.RoomMemberEvent(roomID))
+	roomPubs := cap.publishesOnPrefix(subject.RoomMemberEvent(roomID, true))
 	require.Len(t, roomPubs, 1, "exactly one room-scoped member_added event")
 	var evt model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(roomPubs[0].data, &evt))
@@ -1346,7 +1346,7 @@ func TestProcessAddMembers_RoomEventMembersEnrichment_Integration(t *testing.T) 
 	require.NoError(t, h2.processAddMembers(
 		natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-aaaa00000003"), body2))
 
-	assert.Empty(t, cap2.publishesOnPrefix(subject.RoomMemberEvent(roomID)),
+	assert.Empty(t, cap2.publishesOnPrefix(subject.RoomMemberEvent(roomID, true)),
 		"re-add of an already-present org fires no member_added event")
 
 	count, err := db.Collection("room_members").CountDocuments(ctx,

@@ -3,10 +3,11 @@ rules:
     languages: [go]
     severity: ERROR
     message: >
-      Publish a channel room's .event through the service's publishRoomEvent
-      helper, which fans out over subject.RoomEventTargets(id, crossSite,
-      routeMode). Passing a subject built inline by subject.RoomEvent /
-      RoomMsgStream / RoomMetadataUpdate to a publish call skips the
+      Publish a channel room's .event / .event.member through the service's
+      publishRoomEvent / publishMemberEvent helper, which fans out over
+      subject.RoomEventTargets / RoomMemberEventTargets(roomID, crossSite,
+      crossSiteAt, mode, now). Passing a subject built inline by subject.RoomEvent /
+      RoomMsgStream / RoomMetadataUpdate / RoomMemberEvent to a publish call skips the
       ROOM_SUBJECT_MODE global/local routing, so same-site rooms silently miss
       delivery once local mode is enabled (and dual mode loses its global
       safety-net publish). See pkg/subject.RoomEventTargets and each service's
@@ -28,3 +29,6 @@ rules:
           - pattern: $X.publish($CTX, subject.RoomEvent(...), ...)
           - pattern: $X.publish($CTX, subject.RoomMsgStream(...), ...)
           - pattern: $X.publish($CTX, subject.RoomMetadataUpdate(...), ...)
+          - pattern: $X.Publish($CTX, subject.RoomMemberEvent(...), ...)
+          - pattern: $X.publishCore($CTX, subject.RoomMemberEvent(...), ...)
+          - pattern: $X.publish($CTX, subject.RoomMemberEvent(...), ...)

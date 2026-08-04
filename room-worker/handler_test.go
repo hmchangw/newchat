@@ -125,7 +125,7 @@ func TestHandler_ProcessRemoveMember_SelfLeave_IndividualOnly(t *testing.T) {
 	}
 
 	assert.True(t, subjSet[subject.SubscriptionUpdate(account)], "expected subscription update published")
-	assert.True(t, subjSet[subject.MemberEvent(roomID)], "expected member event published")
+	assert.True(t, subjSet[subject.RoomMemberEvent(roomID, true)], "expected member event published")
 	assert.True(t, subjSet[subject.InboxInternal(siteID, model.InboxMemberRemoved)], "expected local INBOX member_removed published")
 
 	for _, p := range published {
@@ -197,7 +197,7 @@ func TestHandler_ProcessRemoveMember_BotTarget_RotatesAndSubUpdate(t *testing.T)
 	assert.True(t, subjSet[subject.SubscriptionUpdate(botAcct)], "bot gets a subscription.update on removal (FE-login capable)")
 	// Pin the encoding independently of the builder: weather.bot → weather_bot.
 	assert.True(t, subjSet["chat.user.weather_bot.event.subscription.update"], "bot subscription.update lands on its encoded per-user subject")
-	assert.True(t, subjSet[subject.MemberEvent(roomID)], "member event still fires for the removal")
+	assert.True(t, subjSet[subject.RoomMemberEvent(roomID, true)], "member event still fires for the removal")
 }
 
 func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
@@ -430,7 +430,7 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesIndividual(t *testing.T) {
 
 	// Verify the sys msg has type "member_removed"
 	for _, p := range published {
-		if p.subj == subject.MemberEvent(roomID) {
+		if p.subj == subject.RoomMemberEvent(roomID, true) {
 			var evt model.MemberRemoveEvent
 			require.NoError(t, json.Unmarshal(p.data, &evt))
 			assert.Equal(t, "member_removed", evt.Type)
@@ -657,6 +657,51 @@ func TestProcessAddMembers_SameSite_NoCrossSiteWrite(t *testing.T) {
 	reqData, _ := json.Marshal(req)
 	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
 	require.NoError(t, h.processAddMembers(ctx, reqData))
+}
+
+// TestProcessAddMembers_LocalMode_MemberEventOnLocalSubject verifies that in local
+// mode a same-site room's member_added event publishes on the local .event.member
+// subject (not the global one), so a client subscribed on the local prefix for the
+// room receives the roster update.
+func TestProcessAddMembers_LocalMode_MemberEventOnLocalSubject(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	var published []publishedMsg
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}
+	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteLocal)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), nil, []string{"x"}, "r1").
+		Return([]AddMemberCandidate{{Account: "x", HasSubscription: false, HasIndividualRoomMember: false, SiteID: "site-a"}}, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+	expectGetRoom(store, "r1", "eng")
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"x"}).Return([]model.User{
+		{ID: "u2", Account: "x", SiteID: "site-a", EngName: "X"},
+	}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a", EngName: "Alice"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", 1, 0, gomock.Any()).Return(false, nil)
+	store.EXPECT().SetRoomCrossSite(gomock.Any(), gomock.Any()).Times(0)
+
+	req := model.AddMembersRequest{RoomID: "r1", Users: []string{"x"}, RequesterAccount: "alice", Timestamp: 1}
+	reqData, _ := json.Marshal(req)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+	require.NoError(t, h.processAddMembers(ctx, reqData))
+
+	var gotLocal, gotGlobal bool
+	for _, p := range published {
+		switch p.subj {
+		case subject.RoomMemberEvent("r1", false):
+			gotLocal = true
+		case subject.RoomMemberEvent("r1", true):
+			gotGlobal = true
+		}
+	}
+	assert.True(t, gotLocal, "member event must publish on the local subject in local mode for a same-site room")
+	assert.False(t, gotGlobal, "member event must NOT publish on the global subject for a same-site room in local mode")
 }
 
 // TestProcessAddMembers_Redelivery_CrossSite_StillMarks is the regression test
@@ -1024,7 +1069,7 @@ func TestHandler_ProcessAddMembers_HistoryAll(t *testing.T) {
 // RoomMemberEvent(roomID). Fails the test if no such publish occurred.
 func findMemberAddEvent(t *testing.T, published []publishedMsg, roomID string) (model.MemberAddEvent, []byte) {
 	t.Helper()
-	want := subject.RoomMemberEvent(roomID)
+	want := subject.RoomMemberEvent(roomID, true)
 	for _, p := range published {
 		if p.subj != want {
 			continue
@@ -1464,7 +1509,7 @@ func TestHandler_ProcessAddMembers_OrgDisplayFetchErrorFailsBeforeWrites(t *test
 	assert.Contains(t, err.Error(), "org display")
 
 	for _, p := range published {
-		assert.NotEqual(t, subject.RoomMemberEvent("r1"), p.subj, "no room event may be published when enrichment fails")
+		assert.NotEqual(t, subject.RoomMemberEvent("r1", true), p.subj, "no room event may be published when enrichment fails")
 	}
 }
 
@@ -1681,7 +1726,7 @@ func TestHandler_ProcessRemoveMember_OwnerRemovesOrg(t *testing.T) {
 	assert.True(t, subjSet[subject.SubscriptionUpdate("carol")], "expected subscription update for carol")
 	assert.True(t, subjSet[subject.SubscriptionUpdate("dave")], "expected subscription update for dave")
 	assert.False(t, subjSet[subject.SubscriptionUpdate("eve")], "eve has individual membership, should not be removed")
-	assert.True(t, subjSet[subject.MemberEvent(roomID)], "expected member event published")
+	assert.True(t, subjSet[subject.RoomMemberEvent(roomID, true)], "expected member event published")
 
 	// Sys-message must carry sender (UserAccount = requester) and Content
 	// rendered from the org's SectName (spec §2.4). The previous version of
@@ -2035,7 +2080,7 @@ func TestHandler_ProcessAddMembers_OrgReAddAlreadyPresent_NoEvent(t *testing.T) 
 	data, _ := json.Marshal(req)
 	require.NoError(t, h.processAddMembers(natsutil.WithRequestID(context.Background(), testRequestID), data))
 
-	memberEventSubj := subject.RoomMemberEvent("r1")
+	memberEventSubj := subject.RoomMemberEvent("r1", true)
 	sysMsgSubj := subject.MsgCanonicalCreated("site-a")
 	for _, p := range published {
 		assert.NotEqual(t, memberEventSubj, p.subj, "re-add of a present org must NOT publish member_added")
