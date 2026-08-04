@@ -12,7 +12,7 @@ Companions (o11y specs): `../../specs/o11y/o11y-metrics-inventory.md`,
 `../../specs/o11y/o11y-trace-design.md`,
 `../../specs/o11y/o11y-performance-and-sampling.md`. Error budget policy:
 placeholder (`o11y-error-budget-policy.md`, to be written). Load-test alignment:
-`../end-to-end-load-test-plan.md` (§10 here is the summary; the plan owns execution).
+`end-to-end-load-test-plan.md` (§10 here is the summary; the plan owns execution).
 
 ---
 
@@ -128,7 +128,7 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 user-perceived delivery, observational until a prober exists (§8 P6). See §2.
 
 Percentiles behind the bounds stay as **diagnostic** dashboard signals (p99
-publication age, p95 search, oldest-pending federation age), not SLO targets.
+enqueue age, p95 search, oldest-pending federation age), not SLO targets.
 
 ---
 
@@ -161,7 +161,7 @@ bound` (never implying an ordering the architecture lacks).
 
 A NATS PubAck is **not** delivery, and a NATS protocol receive is **not** render:
 dashboards can read green while a recipient's client shows nothing. v1 commits only
-to persistence + channel publication and names them so; the last mile is split into
+to persistence + channel enqueue-acceptance and names them so; the last mile is split into
 a protocol-receive prober (loadgen) and a render prober (browser) — neither is v1.
 
 ### Denominator & outcome contract
@@ -441,11 +441,11 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
 | P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds`; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
-| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-health / async-error counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b enqueue-loss backstop | SLO-1b/6/8/9 |
+| P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
 | P6 | **loadgen NATS-subscribe prober** (protocol receipt) + SLO assertion mode (§10) · login→connect→initial-data; sparse-journey floor; SLO-aware load asserts. **Render is out of scope here** — proves protocol receipt, not decrypt/render | protocol-receive last-mile SLI |
 | P6b | **browser synthetic / RUM** prober — decrypt/render/state-apply | render-level declared last mile |
-| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/6/9 exact instead of approximate) · **SLO-1b server-confirmed publication boundary** (flush checkpoint / durable-PubAck path, replacing v1 enqueue-acceptance) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
+| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/6/9 exact instead of approximate) · **SLO-1b/2 server-confirmed publication boundary** (flush checkpoint / durable-PubAck path, migrating both off v1 enqueue-acceptance) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
 
 ---
 
@@ -470,7 +470,7 @@ framework is reusable but does not yet assert against these SLOs:
 | SLO | loadgen coverage today | Gap to `ready` |
 |---|---|---|
 | SLO-1a | **partial** — soak read-back | per-message outcome accounting |
-| SLO-1b / 2 | **partial** — E2 stage correlation | channel-scoped `ok`/`failed` + enqueue-age accounting (protocol-receipt, not render) |
+| SLO-1b / 2 | **missing (enqueue boundary)** | the enforced boundary needs the service-side `broadcast_channel_enqueue_total`/`_age_seconds`; loadgen's E2 stage correlation measures **protocol receipt** (observational — a different, downstream boundary), not the enqueue metric. Split the two explicitly. |
 | SLO-4 / 5 | **near-ready** | per-endpoint `good within bound / eligible attempts` accounting |
 | SLO-3 (auth) | **missing** — auth is a stub | HTTP login driver |
 | SLO-7 / 8 (search) | **missing** | search workload |
@@ -484,8 +484,11 @@ service recording rules or a NATS exporter.
 
 **Required before "validates":** an **SLO assertion mode** that counts
 `eligible`, `good`, and `missing-after-deadline` events (so a dropped
-reply/broadcast is a failure, not an excluded sample) and reads SLIs from the
-**same production recording rules**, not loadgen-local metrics.
+reply/broadcast is a failure, not an excluded sample) using the **same
+production source counters and good/valid predicates**, evaluated over **isolated
+run-window deltas** (not the 28-day aggregate recording rule, and not
+loadgen-local metrics). The run must also **drain/reset after warm-up** so
+warm-up completions cannot inflate the numerator.
 
 Two distinct thresholds, not one (the "50–70%" and "track this document" rules
 were in tension):
