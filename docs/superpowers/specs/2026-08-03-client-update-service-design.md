@@ -235,7 +235,7 @@ Response headers on both success paths: `Content-Type` (from `blobInfo`),
   | `MINIO_DOWNLOAD_TIMEOUT` | `5m` | Bounds a single Open (Stat probe + streamed body) |
   | `HTTP_WRITE_TIMEOUT` | `10m` | Large executables stream slowly |
   | `CACHE_MAX_ENTRIES` | `4` | LRU capacity; `0` disables the cache |
-  | `CACHE_TTL` | `6h` | Per-entry expiry |
+  | `CACHE_TTL` | `24h` | Per-entry expiry |
   | `CACHE_MAX_OBJECT_BYTES` | `536870912` (512 MiB) | Per-object cacheable cap; larger streams uncached |
 
   No `MAX_UPLOAD_BYTES` — uploads are uncapped (matches legacy).
@@ -298,7 +298,7 @@ Client-facing HTTP endpoints → update in the same PR (CLAUDE.md §5):
 
 1. **Health path** — `/healthz` only, per CLAUDE.md §6. (Legacy `/api/v1/health` dropped.)
 2. **Multipart field names** — keep legacy `configFile` / `executeFile`.
-3. **Cache defaults** — `CACHE_TTL = 6h`, `CACHE_MAX_OBJECT_BYTES = 512 MiB`;
+3. **Cache defaults** — `CACHE_TTL = 24h`, `CACHE_MAX_OBJECT_BYTES = 512 MiB`;
    `CACHE_MAX_ENTRIES = 4` so worst-case footprint stays ≈ 2 GiB (see Memory note).
 4. **Upload cap** — none; `MAX_UPLOAD_BYTES` removed (matches legacy).
 5. **Bucket** — `MINIO_BUCKET` names the bucket; created at startup if absent.
