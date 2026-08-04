@@ -2612,6 +2612,50 @@ func TestMessage_QuotedParentMessage_JSON(t *testing.T) {
 	})
 }
 
+func TestSendMessageRequest_ForwardFields_JSON(t *testing.T) {
+	req := model.SendMessageRequest{
+		ID:                 "01970a4f8c2d7c9aQRST",
+		Content:            "optional comment",
+		RequestID:          "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		ForwardedMessageID: "01970a4f8c2d7c9aSRCM",
+		ForwardedRoomID:    "r-src",
+	}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"forwardedMessageId":"01970a4f8c2d7c9aSRCM"`)
+	assert.Contains(t, string(data), `"forwardedRoomId":"r-src"`)
+	var got model.SendMessageRequest
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, req, got)
+
+	// omitempty: absent when not forwarding
+	plain, err := json.Marshal(model.SendMessageRequest{ID: "x", Content: "y", RequestID: "z"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(plain), "forwardedMessageId")
+	assert.NotContains(t, string(plain), "forwardedRoomId")
+}
+
+func TestMessage_ForwardedMessage_JSON(t *testing.T) {
+	msg := model.Message{
+		ID: "m-fwd", RoomID: "r-dst", UserID: "u1", UserAccount: "alice",
+		Content: "check this out", CreatedAt: time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC),
+		ForwardedMessage: &cassandra.ForwardedMessage{
+			MessageID: "m-src", RoomID: "r-src",
+			Sender:    cassandra.Participant{ID: "u5", Account: "eve"},
+			CreatedAt: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
+			Msg:       "original body",
+		},
+	}
+	data, err := json.Marshal(msg)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"forwardedMessage"`)
+	var got model.Message
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.NotNil(t, got.ForwardedMessage)
+	assert.Equal(t, "m-src", got.ForwardedMessage.MessageID)
+	assert.Equal(t, "original body", got.ForwardedMessage.Msg)
+}
+
 func TestSubscriptionNewFields(t *testing.T) {
 	t.Run("channel sub round-trips with empty IsSubscribed", func(t *testing.T) {
 		sub := model.Subscription{
