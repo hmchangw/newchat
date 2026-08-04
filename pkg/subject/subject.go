@@ -199,7 +199,7 @@ func RoomCanonical(siteID, operation string) string {
 }
 
 // RoomCanonicalTeamsCreate returns the room-canonical subject for a batch of
-// Teams-derived room-creation events for one site. Lands in ROOMS_{siteID}.
+// Teams-derived room-creation events for one site. Lands in ROOMS-{siteID}.
 func RoomCanonicalTeamsCreate(siteID string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.teams.create", siteID)
 }
@@ -219,7 +219,7 @@ func Outbox(originSiteID, destSiteID, eventType string) string {
 }
 
 // OutboxWildcard matches every event on a site's OUTBOX stream:
-// chat.outbox.{originSiteID}.>. Use as the OUTBOX_{siteID} stream's subject
+// chat.outbox.{originSiteID}.>. Use as the OUTBOX-{siteID} stream's subject
 // pattern and for a consumer draining all destinations; a per-destination
 // consumer filters chat.outbox.{originSiteID}.{destSiteID}.> instead.
 func OutboxWildcard(originSiteID string) string {
@@ -1482,7 +1482,7 @@ func PushNotificationFilter(siteID string) string {
 // ServerBroadcastThreadTCount is the core-NATS subject on which message-worker
 // publishes thread reply-count badge events. Broadcast-worker queue-subscribes
 // using the wildcard ServerBroadcastWildcard so this stays fire-and-forget
-// without polluting MESSAGES_CANONICAL (which is reserved for message CRUD).
+// without polluting MESSAGES-CANONICAL (which is reserved for message CRUD).
 func ServerBroadcastThreadTCount(siteID string) string {
 	return fmt.Sprintf("chat.server.broadcast.%s.thread.tcount", siteID)
 }
@@ -1524,7 +1524,7 @@ func MigrationOplog(siteID, collection, op string) string {
 	return fmt.Sprintf("chat.migration.oplog.%s.%s.%s", siteID, collection, op)
 }
 
-// MigrationOplogWildcard matches every oplog event for a site — the MIGRATION_OPLOG_{siteID} stream's subjects.
+// MigrationOplogWildcard matches every oplog event for a site — the MIGRATION-OPLOG-{siteID} stream's subjects.
 func MigrationOplogWildcard(siteID string) string {
 	return fmt.Sprintf("chat.migration.oplog.%s.>", siteID)
 }

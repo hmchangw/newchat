@@ -89,7 +89,7 @@ This doc covers the public client-facing API surface only.
 
 **Out of scope (backend-internal — clients never see these):**
 
-- Backend-only JetStream subjects (MESSAGES, MESSAGES_CANONICAL, INBOX, ROOMS, OUTBOX streams).
+- Backend-only JetStream subjects (MESSAGES, MESSAGES-CANONICAL, INBOX, ROOMS, OUTBOX streams).
 - Server-to-server subjects (`chat.server.request.…`).
 
 Room-encryption key events that clients consume are documented under the RPC that triggers them (Create Room, Add Members, Remove Member) and in [§5 Room Encryption](#5-room-encryption). Multi-site federation is transparent to clients: a cross-site action delivers the **same** events on the same `chat.user.{account}.…` / `chat.room.…` subjects as a same-site action, so this doc does not distinguish them.
@@ -1600,7 +1600,7 @@ The event uses a **dedicated flat struct** (`type: "room_renamed"`) — mirrorin
 
 **2. `chat.user.{requesterAccount}.response.{requestID}`** — an [`AsyncJobResult`](#asyncjobresult) to the requester when the rename finishes (requires `X-Request-ID`). `operation` is `"room.rename"`. `status` is `"ok"` on success or `"error"` if the async job fails.
 
-**3. Cross-site inbox events** — one event per remote site that has federated members. Published directly to `chat.inbox.{remoteSiteID}.external.room_renamed` (the destination's `INBOX_{remoteSiteID}` stream); remote `inbox-worker` mirrors the rename.
+**3. Cross-site inbox events** — one event per remote site that has federated members. Published directly to `chat.inbox.{remoteSiteID}.external.room_renamed` (the destination's `INBOX-{remoteSiteID}` stream); remote `inbox-worker` mirrors the rename.
 
 ##### Triggered events — error path
 
@@ -3442,7 +3442,7 @@ Pin and unpin share the same flat `PinStateRoomEvent` payload; `type` discrimina
 
 ##### Backend side effects (internal — not client-subscribable)
 
-On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES-CANONICAL-{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -3550,7 +3550,7 @@ Same flat `PinStateRoomEvent` payload as [Pin Message](#pin-message); `type` dis
 
 ##### Backend side effects (internal — not client-subscribable)
 
-On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES-CANONICAL-{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -5767,7 +5767,7 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
 
-This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES_CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
+This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES-CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
 
 The same subject and request body cover three send variants: plain message, thread reply, and quoted message. The variant is determined by which optional fields are set.
 
@@ -7300,7 +7300,7 @@ during read via `http.MaxBytesReader`.
 
 Sends a message into an existing room the bot is a member of. Returns
 the canonical `Message` document that landed on
-`BOT_MESSAGES_CANONICAL_{sub.siteId}`.
+`BOT-MESSAGES-CANONICAL-{sub.siteId}`.
 
 #### Request body
 

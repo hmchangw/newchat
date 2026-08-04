@@ -166,7 +166,7 @@ sequenceDiagram
     NATS->>GK: deliver
     GK->>GK: validate (membership, size, mentions)
     GK->>NATS: pub chat.msg.canonical.{site}.created
-    Note over NATS: MESSAGES_CANONICAL stream<br/>(single source of truth)
+    Note over NATS: MESSAGES-CANONICAL stream<br/>(single source of truth)
 
     NATS->>MW: canonical.created
     MW->>Cass: persist message
@@ -197,13 +197,13 @@ creation is opt-in (`BOOTSTRAP_STREAMS`) — owned by ops/IaC in production.
 flowchart LR
     Client(["Client"])
 
-    MESSAGES[["MESSAGES_{site}<br/>chat.user.*.room.*.{site}.msg.&gt;"]]
-    CANON[["MESSAGES_CANONICAL_{site}<br/>chat.msg.canonical.{site}.&gt;"]]
+    MESSAGES[["MESSAGES-{site}<br/>chat.user.*.room.*.{site}.msg.&gt;"]]
+    CANON[["MESSAGES-CANONICAL-{site}<br/>chat.msg.canonical.{site}.&gt;"]]
     FANOUT[["FANOUT_{site}<br/>fanout.{site}.&gt;"]]
-    ROOMS[["ROOMS_{site}<br/>member invites"]]
-    PUSH[["PUSH_NOTIFICATION_{site}<br/>push.{site}.&gt;"]]
-    OUTBOX[["OUTBOX_{site}<br/>outbox.{site}.&gt;"]]
-    INBOX[["INBOX_{site}<br/>chat.inbox.{site}.*"]]
+    ROOMS[["ROOMS-{site}<br/>member invites"]]
+    PUSH[["PUSH-NOTIFICATION-{site}<br/>push.{site}.&gt;"]]
+    OUTBOX[["OUTBOX-{site}<br/>outbox.{site}.&gt;"]]
+    INBOX[["INBOX-{site}<br/>chat.inbox.{site}.*"]]
 
     Client -->|msg.send| MESSAGES
     MESSAGES --> GK[message-gatekeeper]

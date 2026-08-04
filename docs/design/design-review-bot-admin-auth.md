@@ -36,7 +36,7 @@ or govern bot traffic.
 
 - **Blocks ~half of all message traffic.** Capacity planning (PR #461) sizes steady state at
   **4M messages/day = 2.1M human + 1.9M bot** — bots are a **~50% traffic tier**. The bot
-  pipeline runs on parallel `BOT_*` streams (`BOT_MESSAGES_CANONICAL`, `BOT_PUSH_NOTIFICATION`,
+  pipeline runs on parallel `BOT_*` streams (`BOT-MESSAGES-CANONICAL`, `BOT-PUSH-NOTIFICATION`,
   `BOT_PLATFORM`) sized at **1.9M bot messages/day** and **~190M bot room deliveries/day**.
   None of that traffic can be admitted or trusted without bot auth. *(Volumes are planned/
   placeholder capacity, not yet measured in production.)*
@@ -142,8 +142,8 @@ the bot pipeline is specified.
 | Metric | Value |
 |---|---|
 | Total messages/day | 4.0M (**2.1M human + 1.9M bot**) |
-| Bot-originated messages/day → `BOT_MESSAGES_CANONICAL` | 1.9M |
-| Bot push notifications/day → `BOT_PUSH_NOTIFICATION` | 1.9M |
+| Bot-originated messages/day → `BOT-MESSAGES-CANONICAL` | 1.9M |
+| Bot push notifications/day → `BOT-PUSH-NOTIFICATION` | 1.9M |
 | User→bot events/day → `BOT_PLATFORM` (webhook to external platforms) | 100K |
 | Bot fan-out per message (F_bot) | 100 |
 | Bot room deliveries/day | ~190M |

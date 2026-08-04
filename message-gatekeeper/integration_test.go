@@ -105,7 +105,7 @@ func buildHandlerWithCapture(t *testing.T, db *mongo.Database) (*Handler, func()
 // Mongo-backed processMessage and asserts the two end-to-end debug behaviors
 // that are only verifiable past the package boundary: (1) a flagged request
 // emits the flow breadcrumb, and (2) the X-Debug rung rides onto the outbound
-// MESSAGES_CANONICAL message so it propagates to downstream workers. The
+// MESSAGES-CANONICAL message so it propagates to downstream workers. The
 // unflagged control proves zero added output and no header bleed.
 func TestGatekeeper_DebugBreadcrumbsAndPropagation_Integration(t *testing.T) {
 	db := testutil.MongoDB(t, "message_gatekeeper_test")

@@ -47,7 +47,7 @@ func TestBootstrapStreams(t *testing.T) {
 		{
 			name:        "disabled - verifies existing stream",
 			enabled:     false,
-			existing:    map[string]bool{"OUTBOX_test": true},
+			existing:    map[string]bool{"OUTBOX-test": true},
 			wantCreated: nil,
 		},
 		{
@@ -60,13 +60,13 @@ func TestBootstrapStreams(t *testing.T) {
 			name:        "enabled - creates OUTBOX",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"OUTBOX_test"},
+			wantCreated: []string{"OUTBOX-test"},
 		},
 		{
 			name:       "enabled - wraps OUTBOX creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
-			failOn:     "OUTBOX_test",
+			failOn:     "OUTBOX-test",
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create OUTBOX stream",
 		},

@@ -44,7 +44,7 @@ type (
 // outboxPublisher is a raw NATS publish that stamps msgID as the Nats-Msg-Id header.
 type outboxPublisher func(ctx context.Context, subj string, data []byte, msgID string) error
 
-// sysmsgPublisher emits LOCAL-ONLY system messages onto BOT_MESSAGES_CANONICAL.
+// sysmsgPublisher emits LOCAL-ONLY system messages onto BOT-MESSAGES-CANONICAL.
 // nil disables sysmsg emission; membership state stays correct without the narrative message.
 type sysmsgPublisher interface {
 	PublishWithMsgID(ctx context.Context, subj string, data []byte, msgID string) error

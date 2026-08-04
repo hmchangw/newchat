@@ -69,7 +69,7 @@ func BotCanonicalCreated(siteID string) string {
 	return fmt.Sprintf("chat.bot.canonical.%s.created", siteID)
 }
 
-// BotCanonicalWildcard matches every subject on BOT_MESSAGES_CANONICAL; used as stream pattern.
+// BotCanonicalWildcard matches every subject on BOT-MESSAGES-CANONICAL; used as stream pattern.
 func BotCanonicalWildcard(siteID string) string {
 	return fmt.Sprintf("chat.bot.canonical.%s.>", siteID)
 }

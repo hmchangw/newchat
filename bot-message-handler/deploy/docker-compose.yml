@@ -15,7 +15,7 @@ services:
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - MAX_CONCURRENCY=200
-      # Owns BOT_MESSAGES_CANONICAL_{siteID}; provisions on boot in dev.
+      # Owns BOT-MESSAGES-CANONICAL-{siteID}; provisions on boot in dev.
       - BOOTSTRAP_STREAMS=true
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro

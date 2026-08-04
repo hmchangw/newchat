@@ -50,7 +50,7 @@ func TestBootstrapStreams(t *testing.T) {
 		{
 			name:        "disabled - verifies existing stream",
 			enabled:     false,
-			existing:    map[string]bool{"INBOX_test": true},
+			existing:    map[string]bool{"INBOX-test": true},
 			wantCreated: nil,
 		},
 		{
@@ -63,13 +63,13 @@ func TestBootstrapStreams(t *testing.T) {
 			name:        "enabled - creates INBOX with Name and Subjects",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"INBOX_test"},
+			wantCreated: []string{"INBOX-test"},
 		},
 		{
 			name:       "enabled - wraps INBOX creator error",
 			enabled:    true,
 			existing:   map[string]bool{},
-			failOn:     "INBOX_test",
+			failOn:     "INBOX-test",
 			failErr:    errors.New("nats down"),
 			wantErrSub: "create INBOX stream",
 		},

@@ -62,9 +62,9 @@ Client A (sender)
 Site A                              Site B
   |                                   |
   | room-worker publishes             |
-  | OutboxEvent to OUTBOX_siteA       |
+  | OutboxEvent to OUTBOX-siteA       |
   |                                   |
-  | [OUTBOX_siteA] ---(sourcing)---> [INBOX_siteB]
+  | [OUTBOX-siteA] ---(sourcing)---> [INBOX-siteB]
   |                                   |
   |                              inbox-worker processes:
   |                                member_added -> create local subscription
@@ -238,11 +238,11 @@ Roles: `"owner"`, `"member"`
 
 | Stream | Subject Pattern | Publisher | Consumer |
 |--------|----------------|-----------|----------|
-| `MESSAGES_{siteID}` | `chat.user.*.room.*.{siteID}.msg.>` | Client | message-worker |
+| `MESSAGES-{siteID}` | `chat.user.*.room.*.{siteID}.msg.>` | Client | message-worker |
 | `FANOUT_{siteID}` | `fanout.{siteID}.>` | message-worker | broadcast-worker, notification-worker |
-| `ROOMS_{siteID}` | `chat.user.*.request.room.*.{siteID}.member.>` | room-service | room-worker |
-| `OUTBOX_{siteID}` | `outbox.{siteID}.>` | room-worker, broadcast-worker | Remote INBOX |
-| `INBOX_{siteID}` | *(sourced from remote OUTBOX)* | Remote sites | inbox-worker |
+| `ROOMS-{siteID}` | `chat.user.*.request.room.*.{siteID}.member.>` | room-service | room-worker |
+| `OUTBOX-{siteID}` | `outbox.{siteID}.>` | room-worker, broadcast-worker | Remote INBOX |
+| `INBOX-{siteID}` | *(sourced from remote OUTBOX)* | Remote sites | inbox-worker |
 
 **Deduplication**: message-worker sets `Nats-Msg-Id` header to message ID on FANOUT publish.
 
@@ -320,7 +320,7 @@ All client publishes are under `chat.user.{account}.>`:
 
 ### 7.2 Message Worker (`message-worker/`)
 
-**Purpose**: JetStream consumer that processes incoming messages from `MESSAGES_{siteID}`.
+**Purpose**: JetStream consumer that processes incoming messages from `MESSAGES-{siteID}`.
 
 **Flow**:
 1. Consume message from MESSAGES stream
@@ -332,7 +332,7 @@ All client publishes are under `chat.user.{account}.>`:
 
 **Dependencies**: NATS + JetStream, MongoDB, Cassandra
 **Key Interface**: `MessageStore` — `GetSubscription`, `SaveMessage`, `UpdateRoomLastMessage`
-**Consumer**: Durable `"message-worker"` on `MESSAGES_{siteID}`
+**Consumer**: Durable `"message-worker"` on `MESSAGES-{siteID}`
 **Config**: `NATS_URL`, `SITE_ID`, `MONGO_URI`, `MONGO_DB`, `CASSANDRA_HOSTS`, `CASSANDRA_KEYSPACE`
 
 ### 7.3 Broadcast Worker (`broadcast-worker/`)
@@ -385,7 +385,7 @@ All client publishes are under `chat.user.{account}.>`:
 
 ### 7.6 Room Worker (`room-worker/`)
 
-**Purpose**: Processes approved member invitations from `ROOMS_{siteID}` JetStream stream.
+**Purpose**: Processes approved member invitations from `ROOMS-{siteID}` JetStream stream.
 
 **Flow**:
 1. Unmarshal `InviteMemberRequest`
@@ -397,11 +397,11 @@ All client publishes are under `chat.user.{account}.>`:
 
 **Dependencies**: NATS + JetStream, MongoDB
 **Key Interface**: `SubscriptionStore` — `CreateSubscription`, `ListByRoom`, `IncrementUserCount`, `GetRoom`
-**Consumer**: Durable `"room-worker"` on `ROOMS_{siteID}`
+**Consumer**: Durable `"room-worker"` on `ROOMS-{siteID}`
 
 ### 7.7 Inbox Worker (`inbox-worker/`)
 
-**Purpose**: Consumes cross-site `OutboxEvent` messages from `INBOX_{siteID}` and processes them locally.
+**Purpose**: Consumes cross-site `OutboxEvent` messages from `INBOX-{siteID}` and processes them locally.
 
 **Event Handlers**:
 - **`member_added`**: Unmarshal `InviteMemberRequest` from payload, create local `Subscription`, publish `SubscriptionUpdateEvent`
@@ -410,7 +410,7 @@ All client publishes are under `chat.user.{account}.>`:
 
 **Dependencies**: NATS + JetStream, MongoDB
 **Key Interface**: `InboxStore` — `CreateSubscription`, `UpsertRoom`
-**Consumer**: Durable `"inbox-worker"` on `INBOX_{siteID}`
+**Consumer**: Durable `"inbox-worker"` on `INBOX-{siteID}`
 
 ### 7.8 History Service (`history-service/`)
 
@@ -578,6 +578,6 @@ Per-service `docker-compose.yml` files in `build/<service>/` include only requir
 
 8. **HistorySharedSince**: Users only see messages from after they joined a room. The history-service uses subscription's `historySharedSince` as the lower bound for queries.
 
-9. **Cross-site Outbox/Inbox**: Local events go to `OUTBOX_{siteID}`, remote sites source them into their `INBOX_{siteID}` via JetStream cross-account sourcing. The inbox-worker processes them locally.
+9. **Cross-site Outbox/Inbox**: Local events go to `OUTBOX-{siteID}`, remote sites source them into their `INBOX-{siteID}` via JetStream cross-account sourcing. The inbox-worker processes them locally.
 
 10. **Client namespace isolation**: All client publishes are under `chat.user.{account}.>`. Room-scoped subjects are server-published only. This simplifies auth permissions to a single wildcard per user.

@@ -43,10 +43,10 @@ func TestBootstrapStreams(t *testing.T) {
 		wantCreated []string
 		wantErrSub  string
 	}{
-		{name: "disabled - verifies existing", enabled: false, existing: map[string]bool{"BOT_MESSAGES_CANONICAL_test": true}},
-		{name: "disabled - fails when missing", enabled: false, wantErrSub: "verify BOT_MESSAGES_CANONICAL stream"},
-		{name: "enabled - creates stream", enabled: true, wantCreated: []string{"BOT_MESSAGES_CANONICAL_test"}},
-		{name: "enabled - wraps creator error", enabled: true, failOn: "BOT_MESSAGES_CANONICAL_test", failErr: errors.New("nats down"), wantErrSub: "create BOT_MESSAGES_CANONICAL stream"},
+		{name: "disabled - verifies existing", enabled: false, existing: map[string]bool{"BOT-MESSAGES-CANONICAL-test": true}},
+		{name: "disabled - fails when missing", enabled: false, wantErrSub: "verify BOT-MESSAGES-CANONICAL stream"},
+		{name: "enabled - creates stream", enabled: true, wantCreated: []string{"BOT-MESSAGES-CANONICAL-test"}},
+		{name: "enabled - wraps creator error", enabled: true, failOn: "BOT-MESSAGES-CANONICAL-test", failErr: errors.New("nats down"), wantErrSub: "create BOT-MESSAGES-CANONICAL stream"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

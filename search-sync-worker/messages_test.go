@@ -63,7 +63,7 @@ func TestMessageCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 func TestMessageCollection_StreamConfig(t *testing.T) {
 	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	cfg := coll.StreamConfig("site-a")
-	assert.Equal(t, "MESSAGES_CANONICAL_site-a", cfg.Name)
+	assert.Equal(t, "MESSAGES-CANONICAL-site-a", cfg.Name)
 }
 
 func TestMessageCollection_ConsumerName(t *testing.T) {

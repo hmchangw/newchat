@@ -4,7 +4,7 @@ Run a message **insert → edit → soft-delete** through the full migration pip
 and confirm each one reaches the new stack while users are **not** notified.
 
 ```
- source-mongo (legacy RS)   ──▶  oplog-connector  ──▶  MIGRATION_OPLOG_site-local
+ source-mongo (legacy RS)   ──▶  oplog-connector  ──▶  MIGRATION-OPLOG-site-local
         [you write here]                                      │
                                                               ▼
                                                      oplog-transformer
@@ -216,6 +216,6 @@ make deps-down                                                       # shared in
 | vault "unhealthy" but logs show it unsealed | healthcheck probes `localhost` (IPv6); vault binds IPv4 → use the `--no-deps` workaround in **A2** |
 | services can't resolve `mongodb`/`cassandra` (`no such host`) | the `chat-local` network was recreated mid-run — see the ⚠️ above; `down` all projects and restart |
 | connector: `ChangeStreamHistoryLost` or no events | `source-mongo` RS not initiated → `docker exec migration-source-mongo mongosh --eval 'rs.status().ok'` must be `1` |
-| transformer `naks_total` climbing | `MESSAGES_CANONICAL_site-local` not provisioned → start a canonical service (**A2**: message-gatekeeper/worker has `BOOTSTRAP_STREAMS=true`); the transformer Naks-and-retries (lossless) until it exists |
-| transformer waits on startup: `waiting for stream to be created by the connector` | expected if the transformer started before the connector bootstrapped `MIGRATION_OPLOG`; it retries for up to 60s, no restart needed |
+| transformer `naks_total` climbing | `MESSAGES-CANONICAL-site-local` not provisioned → start a canonical service (**A2**: message-gatekeeper/worker has `BOOTSTRAP_STREAMS=true`); the transformer Naks-and-retries (lossless) until it exists |
+| transformer waits on startup: `waiting for stream to be created by the connector` | expected if the transformer started before the connector bootstrapped `MIGRATION-OPLOG`; it retries for up to 60s, no restart needed |
 | nothing in Cassandra | message-worker down or keyspace missing → check `docker compose -f docker-local/compose.services.yaml logs message-worker`; ensure Cassandra `9042` is up (`docker exec chat-local-cassandra cqlsh -e 'SELECT now() FROM system.local'`) |

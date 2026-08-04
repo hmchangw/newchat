@@ -16,7 +16,7 @@ import (
 // document per sectId. Many employees collapse to one document via
 // dedup in BuildAction.
 //
-// hr-syncer publishes into HR_{centralSiteID} at one central site;
+// hr-syncer publishes into HR-{centralSiteID} at one central site;
 // every fab site's search-sync-worker consumes from that same stream,
 // so stream config and subject filter target the central siteID
 // while the durable consumer name is scoped by localSiteID (so each

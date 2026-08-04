@@ -18,15 +18,15 @@ JetStream storage for one independent site. It covers:
 
 Each site runs its own NATS server, so these figures are per-site.
 
-> **Two phases.** A ~2-month **migration phase** (`MIGRATION_OPLOG`, §8) runs first and
+> **Two phases.** A ~2-month **migration phase** (`MIGRATION-OPLOG`, §8) runs first and
 > essentially alone; the **steady-state phase** (all other streams, §6–§7, §9) begins
 > only after migration completes. The two do not overlap and are never summed.
 >
 > **Stream inventory** — the streams below match `pkg/stream/stream.go` (canonical
 > names/subjects in §2.1); their **traffic volumes** remain estimates pending production
-> telemetry. **Cross-site federation** uses a per-site `OUTBOX_{siteID}`
+> telemetry. **Cross-site federation** uses a per-site `OUTBOX-{siteID}`
 > (`chat.outbox.{siteID}.>`) whose consumer outbox-worker forwards each event to the
-> destination's flat `INBOX_{siteID}` (`chat.inbox.{siteID}.>`). **Bot traffic** runs on a
+> destination's flat `INBOX-{siteID}` (`chat.inbox.{siteID}.>`). **Bot traffic** runs on a
 > parallel `BOT_*` pipeline. Both federation and the bot pipeline are folded into the
 > steady-state tables (§6.1/§9); the 4.5M/day total = 2.5M human + 2.0M bot (§4 split note).
 
@@ -35,33 +35,33 @@ Each site runs its own NATS server, so these figures are per-site.
 ### 2.1 JetStream streams
 
 Stream names/subjects below reflect the current code (`pkg/stream/stream.go` schema +
-`pkg/subject` builders), plus the new-design **`OUTBOX_{siteID}` + flat `INBOX_{siteID}`**
+`pkg/subject` builders), plus the new-design **`OUTBOX-{siteID}` + flat `INBOX-{siteID}`**
 federation and the parallel **`BOT_*`** bot pipeline — both folded into the steady-state
 estimate (§6.1/§9). `{siteID}` is the local site; `HR_` is keyed by the central site's ID.
 
 | Stream | Subject(s) | Producer | Consumer(s) | In estimate? |
 |--------|------------|----------|-------------|:---:|
-| `MESSAGES_{siteID}` | `chat.user.*.room.*.{siteID}.msg.>` | Client | message-gatekeeper | ✅ |
-| `MESSAGES_CANONICAL_{siteID}` | `chat.msg.canonical.{siteID}.>` | message-gatekeeper, room-worker (sys msgs) | message-worker, broadcast-worker, notification-worker, search-sync-worker | ✅ |
-| `ROOMS_{siteID}` | `chat.room.canonical.{siteID}.>` | room-service | room-worker | ✅ |
-| `INBOX_{siteID}` | `chat.inbox.{siteID}.>` | remote sites' `OUTBOX` (sourced), same-site services (local search feed) | inbox-worker, search-sync-worker | ✅ |
-| `OUTBOX_{siteID}` | `chat.outbox.{siteID}.>` | room-worker, room-service, message-worker, user-service (cross-site publishers) | outbox-worker → forwards to remote `INBOX_{destSiteID}` | ✅ |
-| `PUSH_NOTIFICATION_{siteID}` | `chat.server.notification.push.{siteID}.>` | notification-worker | push-gateway worker → APNs/FCM | ✅ |
-| `HR_{centralSiteID}` | `chat.hr.{centralSiteID}.>` | hr-syncer (central site) | search-sync-worker (every fab) | ✅ |
+| `MESSAGES-{siteID}` | `chat.user.*.room.*.{siteID}.msg.>` | Client | message-gatekeeper | ✅ |
+| `MESSAGES-CANONICAL-{siteID}` | `chat.msg.canonical.{siteID}.>` | message-gatekeeper, room-worker (sys msgs) | message-worker, broadcast-worker, notification-worker, search-sync-worker | ✅ |
+| `ROOMS-{siteID}` | `chat.room.canonical.{siteID}.>` | room-service | room-worker | ✅ |
+| `INBOX-{siteID}` | `chat.inbox.{siteID}.>` | remote sites' `OUTBOX` (sourced), same-site services (local search feed) | inbox-worker, search-sync-worker | ✅ |
+| `OUTBOX-{siteID}` | `chat.outbox.{siteID}.>` | room-worker, room-service, message-worker, user-service (cross-site publishers) | outbox-worker → forwards to remote `INBOX-{destSiteID}` | ✅ |
+| `PUSH-NOTIFICATION-{siteID}` | `chat.server.notification.push.{siteID}.>` | notification-worker | push-gateway worker → APNs/FCM | ✅ |
+| `HR-{centralSiteID}` | `chat.hr.{centralSiteID}.>` | hr-syncer (central site) | search-sync-worker (every fab) | ✅ |
 | `SYSTEM_{siteID}` | `chat.system.{siteID}.>` | system services (admin/ops events) | system consumers | ✅ *(negligible, ~10/day)* |
-| `MIGRATION_OPLOG_{siteID}` | `chat.migration.oplog.{siteID}.>` | oplog-connector | migration applier (1) | ⏱ §8 phase |
-| `BOT_MESSAGES_CANONICAL_{siteID}` | `chat.bot.msg.canonical.{siteID}.>` | Bot Msg Handler | Shared Sync Worker, Bot Broadcast Worker, Bot Notification Worker | ✅ |
-| `BOT_PUSH_NOTIFICATION_{siteID}` | `chat.bot.server.notification.push.{siteID}.>` | Bot Notification Worker | Bot Push Notification | ✅ |
+| `MIGRATION-OPLOG-{siteID}` | `chat.migration.oplog.{siteID}.>` | oplog-connector | migration applier (1) | ⏱ §8 phase |
+| `BOT-MESSAGES-CANONICAL-{siteID}` | `chat.bot.msg.canonical.{siteID}.>` | Bot Msg Handler | Shared Sync Worker, Bot Broadcast Worker, Bot Notification Worker | ✅ |
+| `BOT-PUSH-NOTIFICATION-{siteID}` | `chat.bot.server.notification.push.{siteID}.>` | Bot Notification Worker | Bot Push Notification | ✅ |
 | `BOT_PLATFORM_{siteID}` | `chat.bot.event.{siteID}.>` | Broadcast Worker | Bot Webhook Worker | ✅ |
 
 **Bot streams (parallel pipeline).** Bot message traffic is split off the normal
 (human) message flow onto a parallel `BOT_*` pipeline so it can be scaled, throttled, and
 observed independently:
 
-- `BOT_MESSAGES_CANONICAL_{siteID}` (`chat.bot.msg.canonical.{siteID}.>`) — the bot-side
-  analogue of `MESSAGES_CANONICAL`. **Bot Msg Handler** publishes validated bot messages;
+- `BOT-MESSAGES-CANONICAL-{siteID}` (`chat.bot.msg.canonical.{siteID}.>`) — the bot-side
+  analogue of `MESSAGES-CANONICAL`. **Bot Msg Handler** publishes validated bot messages;
   **Shared Sync Worker**, **Bot Broadcast Worker**, and **Bot Notification Worker** consume.
-- `BOT_PUSH_NOTIFICATION_{siteID}` (`chat.bot.server.notification.push.{siteID}.>`) — bot
+- `BOT-PUSH-NOTIFICATION-{siteID}` (`chat.bot.server.notification.push.{siteID}.>`) — bot
   mobile-push lane. **Bot Notification Worker** publishes; **Bot Push Notification** forwards
   to APNs/FCM.
 - `BOT_PLATFORM_{siteID}` (`chat.bot.event.{siteID}.>`) — outbound platform/webhook events.
@@ -70,10 +70,10 @@ observed independently:
 Bot traffic is sized alongside the human pipeline in §6.1/§9 (params in §4); the 4M/day
 total = 2.5M human + 2.0M bot. Payload sizes are in §3.
 
-**Federation via OUTBOX → INBOX.** Cross-site federation uses a per-site `OUTBOX_{siteID}`
+**Federation via OUTBOX → INBOX.** Cross-site federation uses a per-site `OUTBOX-{siteID}`
 stream (`chat.outbox.{siteID}.>`): a service at the origin site publishes each cross-site
 event to its **local** OUTBOX, and its consumer **outbox-worker** forwards each event to
-the destination's `INBOX_{destSiteID}` (`chat.inbox.{siteID}.>`), where inbox-worker
+the destination's `INBOX-{destSiteID}` (`chat.inbox.{siteID}.>`), where inbox-worker
 consumes and applies it to the local DB. `INBOX` carries no `internal`/`external` lane
 split — its single flat subject holds both the federated inflow and the same-site
 search-indexing feed.
@@ -101,7 +101,7 @@ is built by a `pkg/subject` builder (named in parentheses).
 > also moved from the placeholder `chat.user.{account}.event.presence` to
 > `chat.user.presence.state.{account}`. User notifications are **not** a core delivery
 > subject: they are handled by **notification-worker** via the push lane
-> (`PUSH_NOTIFICATION_{siteID}`, §2.1) → APNs/FCM, so the former
+> (`PUSH-NOTIFICATION-{siteID}`, §2.1) → APNs/FCM, so the former
 > `chat.user.{account}.notification` (`Notification`) subject is dropped here. The traffic
 > model (§6.2) sizes message + metadata as **one** combined `chat.room.{roomID}.event`
 > delivery (~1.3KB), matching the consolidated event.
@@ -148,14 +148,14 @@ for inventory completeness, delivered to watchers in §6.2.
 
 | Category | Streams / Endpoints | avg | max |
 |----------|---------------------|-----|-----|
-| Message JetStream | MESSAGES, MESSAGES_CANONICAL | 500B–1.5KB | ~20KB |
+| Message JetStream | MESSAGES, MESSAGES-CANONICAL | 500B–1.5KB | ~20KB |
 | Push notification | PUSH_NOTIFICATION | ~0.8KB | ~15KB |
 | HR sync | HR (≈ `model.User`: ~12 fields) | ~0.5KB | ~1KB |
-| Migration oplog | MIGRATION_OPLOG | ~130KB | — |
+| Migration oplog | MIGRATION-OPLOG | ~130KB | — |
 | Room JetStream | ROOMS | 200–400B | ~5KB |
 | Federation | INBOX, OUTBOX | 200–400B | ~5KB |
-| Bot message JetStream | BOT_MESSAGES_CANONICAL | 500B–1.5KB | ~20KB |
-| Bot push notification | BOT_PUSH_NOTIFICATION | ~0.8KB | ~15KB |
+| Bot message JetStream | BOT-MESSAGES-CANONICAL | 500B–1.5KB | ~20KB |
+| Bot push notification | BOT-PUSH-NOTIFICATION | ~0.8KB | ~15KB |
 | Bot platform event | BOT_PLATFORM | 200B–1KB | ~5KB |
 | Message R/R | history, search-messages | 15–50KB | 100KB+ |
 | Room R/R | RoomsInfoBatch, CreateRoom, member.list | 2–20KB | ~65KB |
@@ -186,7 +186,7 @@ for inventory completeness, delivered to watchers in §6.2.
 | Push notifications per day (human room msgs, = M_room) | M_push | 2,000,000 |
 | HR sync records per daily run (burst @ 100 msg/s) | M_hr | 40,000 |
 | Migration oplog QPS (sustained 24/7, 130KB payload, 1 consumer) | Q_mig | 200 |
-| Bot-originated messages per day (→ BOT_MESSAGES_CANONICAL) | M_bot | 2,000,000 |
+| Bot-originated messages per day (→ BOT-MESSAGES-CANONICAL) | M_bot | 2,000,000 |
 | Bot push notifications per day (= bot canonical input) | M_bot_push | 2,000,000 |
 | User→bot events per day (→ BOT_PLATFORM, forwarded by broadcast-worker) | M_bot_platform | 500,000 |
 | Bot fan-out per message (room delivery, core-NATS) | F_bot | 100 |
@@ -198,9 +198,9 @@ for inventory completeness, delivered to watchers in §6.2.
 > are read-only Room R/R. Lines tagged *(member-driven)* scale linearly with R_member.
 
 > **4.5M/day traffic split** (bot pipeline folded into §6.1/§9): user↔room 2.0M and user→bot
-> 0.5M flow through `MESSAGES`→`MESSAGES_CANONICAL` (M = 2.5M; broadcast-worker forwards the
+> 0.5M flow through `MESSAGES`→`MESSAGES-CANONICAL` (M = 2.5M; broadcast-worker forwards the
 > 0.5M user→bot subset to `BOT_PLATFORM`, no ×F). Bot-originated 2.0M enters via Bot Msg
-> Handler → `BOT_MESSAGES_CANONICAL`. Total = 2.5M human + 2.0M bot = 4.5M.
+> Handler → `BOT-MESSAGES-CANONICAL`. Total = 2.5M human + 2.0M bot = 4.5M.
 
 ## 5. Methodology — ingress vs. fan-out
 
@@ -232,19 +232,19 @@ counts publishes + consumer deliveries (JetStream), deliveries (core), or reques
 | Stream | Driver | Pub/day | Deliveries/day | Ops/day | avg msg/s | Payload | Bytes/day |
 |--------|--------|--------:|---------------:|--------:|----------:|---------|----------:|
 | `MESSAGES` | M (client → gatekeeper) | 2.5M | 2.5M | 5M | 58 | 1KB | 5 GB |
-| `MESSAGES_CANONICAL` | (M + member sys) × (1 pub + 4 consumers) | 2.92M | 11.7M | 14.6M | 169 | 1KB | 14.6 GB |
+| `MESSAGES-CANONICAL` | (M + member sys) × (1 pub + 4 consumers) | 2.92M | 11.7M | 14.6M | 169 | 1KB | 14.6 GB |
 | `ROOMS` *(member-driven)* | R_member × U | 0.42M | 0.42M | 0.83M | 10 | 0.4KB | 0.33 GB |
 | `INBOX` *(member-driven)* | (local feed R_member×U + federated inflow ×f_fed) × 2 consumers | 0.50M | 1.0M | 1.5M | 17 | 0.3KB | 0.45 GB |
 | `OUTBOX` *(member-driven)* | R_member × U × f_fed (1 pub + outbox-worker) | 0.08M | 0.08M | 0.17M | 2 | 0.3KB | 0.05 GB |
 | `PUSH_NOTIFICATION` | M_push × (1 pub + 1 consumer) | 2M | 2M | 4M | 46 | 0.8KB | 3.2 GB |
 | `HR` | M_hr × (1 pub + 1 consumer); 100 msg/s burst | 40K | 40K | 80K | ~1 (200/s burst) | 0.5KB | 0.04 GB |
 | `SYSTEM` | system/admin events (~10/day) | 10 | 10 | 20 | ~0 | — | ~0 GB |
-| `BOT_MESSAGES_CANONICAL` | M_bot × (1 pub + 3 consumers) | 2M | 6M | 8M | 93 | 1KB | 8 GB |
-| `BOT_PUSH_NOTIFICATION` | M_bot_push × (1 pub + 1 consumer) | 2M | 2M | 4M | 46 | 0.8KB | 3.2 GB |
+| `BOT-MESSAGES-CANONICAL` | M_bot × (1 pub + 3 consumers) | 2M | 6M | 8M | 93 | 1KB | 8 GB |
+| `BOT-PUSH-NOTIFICATION` | M_bot_push × (1 pub + 1 consumer) | 2M | 2M | 4M | 46 | 0.8KB | 3.2 GB |
 | `BOT_PLATFORM` | M_bot_platform × (1 pub + Bot Webhook Worker) | 0.5M | 0.5M | 1M | 12 | 1KB | 1 GB |
 | **JetStream subtotal** | | | | **~39M** | **~454** | | **~36 GB** |
 
-`MESSAGES_CANONICAL` pub = 2.5M human messages + ~0.42M member-change system messages.
+`MESSAGES-CANONICAL` pub = 2.5M human messages + ~0.42M member-change system messages.
 **OUTBOX** carries only the **cross-site subset** of member changes (`f_fed ≈ 20%` — those
 touching a federated room); its lone consumer **outbox-worker** forwards each to the
 destination site's `INBOX`. **INBOX** carries the local-origin search feed (all member
@@ -252,7 +252,7 @@ changes, `R_member × U`) **plus** the federated inflow from remote outbox-worke
 both on `chat.inbox.{siteID}.>` (×2 consumers: inbox-worker applies, search-sync-worker
 indexes). Bot streams (`BOT_*`) are the parallel bot
 pipeline (4M split in §4); bot room fan-out is core-NATS (§6.2 note), not shown here.
-`MIGRATION_OPLOG` is **excluded** — separate ~2-month phase (§8).
+`MIGRATION-OPLOG` is **excluded** — separate ~2-month phase (§8).
 
 ### 6.2 Core delivery subjects (server → client, fanned out ×F or ×P)
 
@@ -278,7 +278,7 @@ pipeline (4M split in §4); bot room fan-out is core-NATS (§6.2 note), not show
   `×F` row at ~1.3KB (~1KB body + ~0.3KB metadata).
 - **member-change** spans **two** subjects. The *system message* (`members_added` /
   `member_removed`) is a real `model.Message` published to `chat.msg.canonical.{siteID}.created`
-  (MESSAGES_CANONICAL, so it also rides the §6.1 CANONICAL member-sys pub) and delivered by
+  (MESSAGES-CANONICAL, so it also rides the §6.1 CANONICAL member-sys pub) and delivered by
   broadcast-worker on `chat.room.{roomID}.event` / `chat.user.{account}.event.room` — the
   same path as a normal message. The *member event* (`member_added` / `member_removed`) is
   published **directly** by room-worker to `chat.room.{roomID}.event.member`
@@ -348,7 +348,7 @@ Plus **server-to-server R/R** (§6.3) — server-side, **flat with D** — ~2.1M
 resp), ~25/s, ~4 GB/day per site. Like the JetStream layer it does not scale with D (§7);
 the ×D total in §7 scales only Core delivery + Client R/R.
 
-Excludes `MIGRATION_OPLOG` (separate phase — §8).
+Excludes `MIGRATION-OPLOG` (separate phase — §8).
 
 ### 6.5 Connection state
 
@@ -392,7 +392,7 @@ subscriber that re-subscribes and fetches its own state.
 |------------------------|-------------------------------|
 | All core deliveries (message, metadata, member-change, presence) | Message ingress (user sends from one client) |
 | Subscription, history, room, search, **presence** R/R (client-facing) | JetStream pipeline & terminal streams (server-side) |
-| Connections & subscription interests | `MIGRATION_OPLOG`, `PUSH`, `HR`, **server-to-server R/R** (§6.3, server-side, not client-facing) |
+| Connections & subscription interests | `MIGRATION-OPLOG`, `PUSH`, `HR`, **server-to-server R/R** (§6.3, server-side, not client-facing) |
 
 Rule of thumb: **ingress and server-side processing are flat; delivery/egress, R/R, and
 connection state scale with D.** Effective fan-out becomes `F × D = 500` per message.
@@ -409,7 +409,7 @@ connection state scale with D.** Effective fan-out becomes `F × D = 500` per me
 | **avg / peak msg/s** | ~6.0k / ~24k | **~28k / ~113k** | | |
 
 Connection state at D=5: **~104k connections** × (100 + 20) = **~12.5M subscription
-interests**. Excludes `MIGRATION_OPLOG` (server-side, does not scale with D — §8).
+interests**. Excludes `MIGRATION-OPLOG` (server-side, does not scale with D — §8).
 
 ### 7.3 Takeaways for multi-device
 
@@ -422,9 +422,9 @@ interests**. Excludes `MIGRATION_OPLOG` (server-side, does not scale with D — 
   simultaneous subscription-list fetches (150KB each) — jitter/rate-limit to avoid a
   thundering herd.
 
-## 8. Migration Phase — MIGRATION_OPLOG (standalone)
+## 8. Migration Phase — MIGRATION-OPLOG (standalone)
 
-`MIGRATION_OPLOG_{siteID}` runs as a distinct **~2-month migration phase that precedes
+`MIGRATION-OPLOG-{siteID}` runs as a distinct **~2-month migration phase that precedes
 live traffic** — the steady-state streams (§6–§7) and their storage (§9) carry
 essentially no load until migration completes. The two phases do **not** overlap, so
 these figures are reported on their own and must never be summed with the steady-state
@@ -455,7 +455,7 @@ the migration tolerates.
 
 ### 8.3 Sizing implications
 
-- **Isolate it.** Put MIGRATION_OPLOG on its own stream/account or dedicated NATS nodes
+- **Isolate it.** Put MIGRATION-OPLOG on its own stream/account or dedicated NATS nodes
   and disk so its ~52 MB/s and ~0.75 TB footprint cannot starve the live chat cutover
   that follows.
 - **Provision for the phase, then reclaim.** After the ~2-month window the stream can be
@@ -473,19 +473,19 @@ JetStream storage at steady state ≈ `publish-rate × retention (TTL) × payloa
 | `PUSH_NOTIFICATION` | 8 hr | 2.0M | 0.8KB | 0.67M | 0.5 GB |
 | `HR` | 8 hr | 40K (daily burst) | 0.5KB | 40K | 0.02 GB |
 | `SYSTEM` | 8 hr | 10 | — | negligible | ~0 GB |
-| `MESSAGES_CANONICAL` | 1 day | 2.92M | 1KB | 2.92M | 2.9 GB |
+| `MESSAGES-CANONICAL` | 1 day | 2.92M | 1KB | 2.92M | 2.9 GB |
 | `INBOX` | 7 day | 0.50M | 0.3KB | 3.5M | 1.1 GB |
 | `OUTBOX` | 7 day | 0.08M | 0.3KB | 0.59M | 0.2 GB |
 | `ROOMS` | 1 day | 0.42M | 0.4KB | 0.42M | 0.2 GB |
-| `BOT_MESSAGES_CANONICAL` | 1 day | 2.0M | 1KB | 2.0M | 2.0 GB |
-| `BOT_PUSH_NOTIFICATION` | 8 hr | 2.0M | 0.8KB | 0.67M | 0.5 GB |
+| `BOT-MESSAGES-CANONICAL` | 1 day | 2.0M | 1KB | 2.0M | 2.0 GB |
+| `BOT-PUSH-NOTIFICATION` | 8 hr | 2.0M | 0.8KB | 0.67M | 0.5 GB |
 | `BOT_PLATFORM` | 1 day | 0.5M | 1KB | 0.5M | 0.5 GB |
 | **TOTAL (logical)** | | | | | **~9 GB** |
 
-Excludes `MIGRATION_OPLOG` storage (separate phase — §8).
+Excludes `MIGRATION-OPLOG` storage (separate phase — §8).
 
 Notes:
-- `MESSAGES_CANONICAL` (2.9 GB) and `BOT_MESSAGES_CANONICAL` (2.0 GB) are the canonical
+- `MESSAGES-CANONICAL` (2.9 GB) and `BOT-MESSAGES-CANONICAL` (2.0 GB) are the canonical
   sources of truth; at **1-day** retention their footprint is modest. `INBOX` (1.1 GB, 7-day)
   is next; the steady-state storage total is ~9 GB (1-day canonical retention keeps it low).
 - `HR` is a once-daily 40K burst; with an 8 hr TTL the whole batch is retained for
@@ -504,7 +504,7 @@ reproduces §6.4 exactly; the rest scale by user count (all other parameters —
 R_member, etc. — held equal across fabs).
 
 Figures are **steady-state, single connection per user (D=1)**, and **exclude
-`MIGRATION_OPLOG`** (separate phase — §8). Per-fab numbers are **not summed** — size each
+`MIGRATION-OPLOG`** (separate phase — §8). Per-fab numbers are **not summed** — size each
 site independently. Peak ≈ 4× avg.
 
 | Fab | Users | Msg/day | Deliveries/day | avg msg/s | peak msg/s | Traffic/day | avg MB/s |
@@ -526,7 +526,7 @@ site independently. Peak ≈ 4× avg.
 
 Per-fab byte split holds at the §6.4 ratio for every site: **core delivery ~75%**, R/R
 ~21%, JetStream streams (incl. bot) ~5%. For multi-device (D), scale Deliveries/day,
-Traffic/day, and MB/s by the rule in §7 (≈ ×D); `MIGRATION_OPLOG` per fab is per §8 and
+Traffic/day, and MB/s by the rule in §7 (≈ ×D); `MIGRATION-OPLOG` per fab is per §8 and
 independent of D.
 
 ## 11. Caveats
@@ -539,15 +539,15 @@ independent of D.
   publishing to `chat.user.{account}.event.presence.{siteID}.{op}` and fanning out to the
   user's P watchers (~1.66M deliveries/day, negligible bytes). If these are server-only
   keepalives with no watcher fan-out, the delivery count drops ~20× (to ~83k/day).
-- **Cross-site federation is now modeled** (§6.1/§9): a per-site `OUTBOX_{siteID}`
+- **Cross-site federation is now modeled** (§6.1/§9): a per-site `OUTBOX-{siteID}`
   (`chat.outbox.{siteID}.>`) whose consumer **outbox-worker** forwards each event to the
-  destination's `INBOX_{siteID}` (`chat.inbox.{siteID}.>`). OUTBOX carries only the cross-site
+  destination's `INBOX-{siteID}` (`chat.inbox.{siteID}.>`). OUTBOX carries only the cross-site
   subset of member changes (`≈ R_member × U × f_fed`, f_fed ~20%); the symmetric INBOX inflow
   scales the same. Volumes are estimates pending telemetry.
-- **PUSH_NOTIFICATION / HR / BOT_* / MIGRATION_OPLOG streams are defined in
+- **PUSH_NOTIFICATION / HR / BOT_* / MIGRATION-OPLOG streams are defined in
   `pkg/stream/stream.go`** (names/subjects per §2.1); their **traffic volumes** here remain
   estimates — revisit against production telemetry.
-- **MIGRATION_OPLOG is a separate ~2-month phase (§8)** — reported standalone and never
+- **MIGRATION-OPLOG is a separate ~2-month phase (§8)** — reported standalone and never
   summed with steady-state. At ~4.5 TB/day traffic and ~0.75 TB storage it dwarfs
   the entire steady-state load (~0.73 TB/day) while running; isolate it and reclaim the
   capacity after cutover.

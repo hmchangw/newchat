@@ -30,7 +30,7 @@ services:
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.
       - NATS_MAX_PAYLOAD_BYTES=262144
-      # BOT_MESSAGES_CANONICAL owned by bot-message-handler; BOT_PUSH_NOTIFICATION is ops/IaC-owned.
+      # BOT-MESSAGES-CANONICAL owned by bot-message-handler; BOT-PUSH-NOTIFICATION is ops/IaC-owned.
       - BOOTSTRAP_STREAMS=false
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro

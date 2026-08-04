@@ -22,7 +22,7 @@ type metrics struct {
 func newMetrics(role string) (*metrics, error) {
 	m := otel.Meter("oplog-connector")
 	published, err := m.Int64Counter("oplog_events_published_total",
-		metric.WithDescription("CDC events published to MIGRATION_OPLOG, by role+collection"))
+		metric.WithDescription("CDC events published to MIGRATION-OPLOG, by role+collection"))
 	if err != nil {
 		return nil, fmt.Errorf("published counter: %w", err)
 	}

@@ -202,7 +202,7 @@ func main() {
 			}
 			return nil
 		}
-		// JetStream-backed (MESSAGES_CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
+		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
 		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}

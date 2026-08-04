@@ -32,7 +32,7 @@ func (a plainIterAdapter) Next(opts ...jetstream.NextOpt) (context.Context, jets
 }
 
 // startEmbeddedCanonicalConsumer spins up an in-process JetStream server (no
-// Docker) with the MESSAGES_CANONICAL stream and a broadcast-worker-style
+// Docker) with the MESSAGES-CANONICAL stream and a broadcast-worker-style
 // durable consumer, returning the JetStream handle, a consumeLoop-compatible
 // iterator, and the subject to publish canonical messages on.
 func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetStream, messageIterator, string) {

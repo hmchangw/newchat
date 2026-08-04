@@ -68,7 +68,7 @@ func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ je
 
 func TestCreateConsumerWithRetry_ImmediateSuccess(t *testing.T) {
 	js := &fakeJetStream{err: nil}
-	cons, err := createConsumerWithRetry(context.Background(), js, "MIGRATION_OPLOG_site1", jetstream.ConsumerConfig{})
+	cons, err := createConsumerWithRetry(context.Background(), js, "MIGRATION-OPLOG-site1", jetstream.ConsumerConfig{})
 	require.NoError(t, err)
 	assert.Nil(t, cons, "fake returns a nil consumer on success")
 	assert.Equal(t, 1, js.calls, "success on the first attempt — no retry")
@@ -76,7 +76,7 @@ func TestCreateConsumerWithRetry_ImmediateSuccess(t *testing.T) {
 
 func TestCreateConsumerWithRetry_NonRecoverableError(t *testing.T) {
 	js := &fakeJetStream{err: errors.New("boom")} // not ErrStreamNotFound → returned immediately
-	_, err := createConsumerWithRetry(context.Background(), js, "MIGRATION_OPLOG_site1", jetstream.ConsumerConfig{})
+	_, err := createConsumerWithRetry(context.Background(), js, "MIGRATION-OPLOG-site1", jetstream.ConsumerConfig{})
 	require.Error(t, err)
 	assert.Equal(t, 1, js.calls, "a non-stream-not-found error is not retried")
 }
@@ -85,7 +85,7 @@ func TestCreateConsumerWithRetry_ContextCancelledDuringWait(t *testing.T) {
 	js := &fakeJetStream{err: jetstream.ErrStreamNotFound} // would retry, but ctx is cancelled
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := createConsumerWithRetry(ctx, js, "MIGRATION_OPLOG_site1", jetstream.ConsumerConfig{})
+	_, err := createConsumerWithRetry(ctx, js, "MIGRATION-OPLOG-site1", jetstream.ConsumerConfig{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 }

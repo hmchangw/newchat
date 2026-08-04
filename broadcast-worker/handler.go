@@ -1,4 +1,4 @@
-// Package main fans out MESSAGES_CANONICAL room events with NAK-on-failure;
+// Package main fans out MESSAGES-CANONICAL room events with NAK-on-failure;
 // handleReacted also publishes the reaction author-notification with log-and-swallow.
 package main
 
@@ -57,7 +57,7 @@ type ParentFetcher interface {
 	FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (*ParentMessageInfo, error)
 }
 
-// Handler processes MESSAGES_CANONICAL messages and broadcasts room events.
+// Handler processes MESSAGES-CANONICAL messages and broadcasts room events.
 type Handler struct {
 	store         Store
 	userStore     userstore.UserStore
@@ -82,7 +82,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 	}
 }
 
-// HandleMessage processes a single MESSAGES_CANONICAL message payload.
+// HandleMessage processes a single MESSAGES-CANONICAL message payload.
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
@@ -983,7 +983,7 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 // they authored the reply and are therefore a thread participant, so their own
 // devices must receive the event for multi-device sync. The sender is added
 // directly here rather than relied upon via replyAccounts — replyAccounts is
-// written by message-worker on a separate, unordered MESSAGES_CANONICAL
+// written by message-worker on a separate, unordered MESSAGES-CANONICAL
 // consumer, so a fan-out that depended on it would race the sender's own first
 // reply and silently drop the echo. followers (thread repliers) and
 // extraAccounts (@-mentioned users) are merged after, deduped. Bots are always

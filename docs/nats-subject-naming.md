@@ -91,7 +91,7 @@ When offline, clients miss messages on non-active sidebar rooms. To restore ment
 
 #### Desktop Banner Notifications (Mobile Push)
 
-notification-worker publishes a `PushNotificationEvent` to `chat.server.notification.push.{siteID}.send` (captured by the `PUSH_NOTIFICATION_{siteID}` JetStream stream) for each eligible recipient. The push service consumes this stream and delivers the notification to the recipient's mobile device. The old per-user NATS core subject `chat.user.{account}.notification` is no longer used.
+notification-worker publishes a `PushNotificationEvent` to `chat.server.notification.push.{siteID}.send` (captured by the `PUSH-NOTIFICATION-{siteID}` JetStream stream) for each eligible recipient. The push service consumes this stream and delivers the notification to the recipient's mobile device. The old per-user NATS core subject `chat.user.{account}.notification` is no longer used.
 
 #### Reconnect Badge Restoration
 
@@ -147,7 +147,7 @@ All request subjects fall under the user's publish namespace. Responses are deli
 
 These subjects are used exclusively by backend services via JetStream. Clients never interact with them.
 
-### MESSAGES Stream (`MESSAGES_{siteID}`)
+### MESSAGES Stream (`MESSAGES-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -155,7 +155,7 @@ These subjects are used exclusively by backend services via JetStream. Clients n
 
 Stream wildcard: `chat.user.*.room.*.{siteID}.msg.>`
 
-### MESSAGES_CANONICAL Stream (`MESSAGES_CANONICAL_{siteID}`)
+### MESSAGES-CANONICAL Stream (`MESSAGES-CANONICAL-{siteID}`)
 
 The single source of truth for downstream consumers (broadcast-worker, notification-worker, search-sync-worker). One subject per mutation kind keeps consumers filterable.
 
@@ -178,7 +178,7 @@ Stream wildcard: `fanout.{siteID}.>`
 
 Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on each publish. JetStream uses this for server-side dedup, keeping `msgID` out of the subject and bounding subject cardinality to the number of rooms rather than the number of messages.
 
-### ROOMS Stream (`ROOMS_{siteID}`)
+### ROOMS Stream (`ROOMS-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -186,7 +186,7 @@ Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on
 
 Stream wildcard: `chat.user.*.request.room.*.{siteID}.member.>`
 
-### PUSH_NOTIFICATION Stream (`PUSH_NOTIFICATION_{siteID}`)
+### PUSH_NOTIFICATION Stream (`PUSH-NOTIFICATION-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -196,7 +196,7 @@ Stream wildcard: `chat.server.notification.push.{siteID}.>` (wildcard accommodat
 
 This is a server-only, backend stream. Clients never interact with it.
 
-### INBOX Stream (`INBOX_{siteID}`)
+### INBOX Stream (`INBOX-{siteID}`)
 
 Cross-site federation events are published **directly** into a site's INBOX —
 there is no OUTBOX stream and no sourcing/SubjectTransform. A service at the
