@@ -28,21 +28,22 @@ type accessTokenResponse struct {
 	JwtRequestID string `json:"jwtRequestId"`
 }
 
-// tokenProvider exchanges the J1 token (from config/env) for a J2 token via the
-// accessToken API, caching it until shortly before expiresAt (minus skew). Safe
-// for concurrent use.
+// tokenProvider exchanges a J1 token for a J2 token via the accessToken API,
+// caching it until shortly before expiresAt (minus skew). The J1 token comes
+// from readJ1 and is read fresh on every exchange (see j1Source). Safe for
+// concurrent use.
 type tokenProvider struct {
-	client  *resty.Client
-	j1Token string
-	skew    time.Duration
-	now     func() time.Time
+	client *resty.Client
+	readJ1 j1Source
+	skew   time.Duration
+	now    func() time.Time
 
 	mu        sync.Mutex
 	token     string    // cached J2 token
 	expiresAt time.Time // cache validity (parsed expiresAt minus skew)
 }
 
-func newTokenProvider(accessTokenURL, j1Token string, timeout, skew time.Duration) *tokenProvider {
+func newTokenProvider(accessTokenURL string, j1 j1Source, timeout, skew time.Duration) *tokenProvider {
 	// Cap the token-exchange timeout well below a translate call so a hung accessToken
 	// endpoint can't hold the lock (and every waiting translate) for the full timeout.
 	tokenTimeout := timeout
@@ -50,10 +51,10 @@ func newTokenProvider(accessTokenURL, j1Token string, timeout, skew time.Duratio
 		tokenTimeout = 5 * time.Second
 	}
 	return &tokenProvider{
-		client:  restyutil.New(accessTokenURL, restyutil.WithTimeout(tokenTimeout)),
-		j1Token: j1Token,
-		skew:    skew,
-		now:     time.Now,
+		client: restyutil.New(accessTokenURL, restyutil.WithTimeout(tokenTimeout)),
+		readJ1: j1,
+		skew:   skew,
+		now:    time.Now,
 	}
 }
 
@@ -83,9 +84,13 @@ func (p *tokenProvider) Refresh(ctx context.Context, stale string) (string, erro
 // fetchLocked calls the accessToken API, sending the J1 token in the JSON body
 // ({"key": <J1>}), and caches the J2 result. Caller must hold p.mu.
 func (p *tokenProvider) fetchLocked(ctx context.Context) (string, error) {
+	key, err := p.readJ1()
+	if err != nil {
+		return "", fmt.Errorf("read j1 token: %w", err)
+	}
 	resp, err := p.client.R().
 		SetContext(ctx).
-		SetBody(accessTokenRequest{Key: p.j1Token}).
+		SetBody(accessTokenRequest{Key: key}).
 		Post("")
 	if err != nil {
 		return "", fmt.Errorf("request access token: %w", err)

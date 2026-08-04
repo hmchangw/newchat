@@ -25,14 +25,17 @@ type Config struct {
 	SiteID string `env:"SITE_ID,required"`
 	// Required (no default): an omitted TRANSLATION_BACKEND fails fast at startup
 	// instead of silently serving mock translations in a deployed environment.
-	Backend        string        `env:"TRANSLATION_BACKEND,required"`
-	Endpoint       string        `env:"TRANSLATION_ENDPOINT"         envDefault:""`
-	AccessTokenURL string        `env:"TRANSLATION_ACCESS_TOKEN_URL" envDefault:""`
-	J1Token        string        `env:"TRANSLATION_J1_TOKEN"         envDefault:""`
-	HTTPTimeout    time.Duration `env:"TRANSLATION_HTTP_TIMEOUT"     envDefault:"30s"`
-	TokenSkew      time.Duration `env:"TRANSLATION_TOKEN_SKEW"       envDefault:"60s"`
-	MaxWorkers     int           `env:"MAX_WORKERS"                  envDefault:"100"`
-	NATS           NATSConfig    `envPrefix:"NATS_"`
+	Backend        string `env:"TRANSLATION_BACKEND,required"`
+	Endpoint       string `env:"TRANSLATION_ENDPOINT"         envDefault:""`
+	AccessTokenURL string `env:"TRANSLATION_ACCESS_TOKEN_URL" envDefault:""`
+	J1Token        string `env:"TRANSLATION_J1_TOKEN"         envDefault:""`
+	// J1TokenFile is read (and re-read on each token exchange) when TRANSLATION_J1_TOKEN
+	// is empty; defaults to the projected Kubernetes ServiceAccount token mount.
+	J1TokenFile string        `env:"TRANSLATION_J1_TOKEN_FILE" envDefault:"/var/run/secrets/kubernetes.io/serviceaccount/token"`
+	HTTPTimeout time.Duration `env:"TRANSLATION_HTTP_TIMEOUT"  envDefault:"30s"`
+	TokenSkew   time.Duration `env:"TRANSLATION_TOKEN_SKEW"       envDefault:"60s"`
+	MaxWorkers  int           `env:"MAX_WORKERS"                  envDefault:"100"`
+	NATS        NATSConfig    `envPrefix:"NATS_"`
 }
 
 // newTranslator selects the backend. The stream backend fails fast when its
@@ -49,15 +52,21 @@ func newTranslator(cfg *Config) (Translator, error) {
 		if cfg.AccessTokenURL == "" {
 			return nil, fmt.Errorf("TRANSLATION_ACCESS_TOKEN_URL is required when TRANSLATION_BACKEND=stream")
 		}
-		if cfg.J1Token == "" {
-			return nil, fmt.Errorf("TRANSLATION_J1_TOKEN is required when TRANSLATION_BACKEND=stream")
+		j1, err := newJ1Source(cfg.J1Token, cfg.J1TokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("%w when TRANSLATION_BACKEND=stream", err)
+		}
+		// Probe the source once so a missing/empty ServiceAccount token mount fails
+		// at startup, not on the first translate request.
+		if _, err := j1(); err != nil {
+			return nil, fmt.Errorf("validate j1 token source: %w", err)
 		}
 		// A non-positive timeout reaches resty's http.Client.Timeout as 0 (no timeout),
 		// so token/translate calls could hang forever — fail fast instead.
 		if cfg.HTTPTimeout <= 0 {
 			return nil, fmt.Errorf("TRANSLATION_HTTP_TIMEOUT must be positive when TRANSLATION_BACKEND=stream")
 		}
-		return newStreamTranslator(cfg.Endpoint, cfg.AccessTokenURL, cfg.J1Token, cfg.HTTPTimeout, cfg.TokenSkew), nil
+		return newStreamTranslator(cfg.Endpoint, cfg.AccessTokenURL, j1, cfg.HTTPTimeout, cfg.TokenSkew), nil
 	default:
 		return nil, fmt.Errorf("unknown TRANSLATION_BACKEND %q (want mock|stream)", cfg.Backend)
 	}

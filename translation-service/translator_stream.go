@@ -43,10 +43,10 @@ type streamTranslator struct {
 	tokens *tokenProvider
 }
 
-func newStreamTranslator(endpoint, accessTokenURL, j1Token string, timeout, skew time.Duration) *streamTranslator {
+func newStreamTranslator(endpoint, accessTokenURL string, j1 j1Source, timeout, skew time.Duration) *streamTranslator {
 	return &streamTranslator{
 		client: restyutil.New(endpoint, restyutil.WithTimeout(timeout)),
-		tokens: newTokenProvider(accessTokenURL, j1Token, timeout, skew),
+		tokens: newTokenProvider(accessTokenURL, j1, timeout, skew),
 	}
 }
 

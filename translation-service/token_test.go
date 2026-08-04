@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,7 +39,7 @@ func TestTokenProvider_FetchAndCache(t *testing.T) {
 	srv := accessTokenServer(t, "J2-abc", rfc3339In(time.Hour), &calls)
 	defer srv.Close()
 
-	p := newTokenProvider(srv.URL, "J1-secret", 5*time.Second, time.Minute)
+	p := newTokenProvider(srv.URL, staticJ1("J1-secret"), 5*time.Second, time.Minute)
 	tok, err := p.Token(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "J2-abc", tok)
@@ -54,7 +58,7 @@ func TestTokenProvider_RefetchWhenExpired(t *testing.T) {
 	srv := accessTokenServer(t, "J2-x", exp, &calls)
 	defer srv.Close()
 
-	p := newTokenProvider(srv.URL, "J1", 5*time.Second, time.Minute)
+	p := newTokenProvider(srv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 	p.now = func() time.Time { return base }
 
 	_, err := p.Token(context.Background())
@@ -69,7 +73,7 @@ func TestTokenProvider_ForceRefresh(t *testing.T) {
 	srv := accessTokenServer(t, "J2-tok", rfc3339In(time.Hour), &calls)
 	defer srv.Close()
 
-	p := newTokenProvider(srv.URL, "J1", 5*time.Second, time.Minute)
+	p := newTokenProvider(srv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 	tok, err := p.Token(context.Background())
 	require.NoError(t, err)
 
@@ -103,13 +107,77 @@ func TestTokenProvider_SendsJ1InBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newTokenProvider(srv.URL, "J1-secret", 5*time.Second, time.Minute)
+	p := newTokenProvider(srv.URL, staticJ1("J1-secret"), 5*time.Second, time.Minute)
 	_, err := p.Token(context.Background())
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{"key":"J1-secret"}`, gotBody) // J1 is sent in the body...
 	assert.Empty(t, gotAuthorization)                // ...not in an Authorization header
 	assert.Equal(t, "application/json", gotContentType)
+}
+
+// The J1 token is read fresh on each exchange, so a rotated ServiceAccount
+// token (a changing source) reaches the accessToken body without the provider
+// being reconstructed.
+func TestTokenProvider_RereadsJ1EachFetch(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotKeys []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		var req struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			t.Errorf("unmarshal request body: %v", err)
+			return
+		}
+		mu.Lock()
+		gotKeys = append(gotKeys, req.Key)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := io.WriteString(w, `{"token":"J2","expiresAt":"`+rfc3339In(time.Hour)+`"}`); err != nil {
+			t.Errorf("write token response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	var n int
+	src := func() (string, error) {
+		n++
+		return fmt.Sprintf("J1-v%d", n), nil
+	}
+
+	p := newTokenProvider(srv.URL, src, 5*time.Second, time.Minute)
+	tok, err := p.Token(context.Background())
+	require.NoError(t, err)
+	// Refresh with the token we just used forces a second exchange.
+	_, err = p.Refresh(context.Background(), tok)
+	require.NoError(t, err)
+
+	mu.Lock()
+	keys := append([]string(nil), gotKeys...)
+	mu.Unlock()
+	require.Len(t, keys, 2)
+	assert.Equal(t, "J1-v1", keys[0])
+	assert.Equal(t, "J1-v2", keys[1])
+}
+
+func TestTokenProvider_J1SourceError(t *testing.T) {
+	srv := accessTokenServer(t, "J2", rfc3339In(time.Hour), nil)
+	defer srv.Close()
+
+	src := func() (string, error) { return "", errors.New("boom") }
+	p := newTokenProvider(srv.URL, src, 5*time.Second, time.Minute)
+
+	_, err := p.Token(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read j1 token")
 }
 
 func TestTokenProvider_FetchErrors(t *testing.T) {
@@ -136,7 +204,7 @@ func TestTokenProvider_FetchErrors(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			p := newTokenProvider(srv.URL, "J1", 5*time.Second, time.Minute)
+			p := newTokenProvider(srv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 			_, err := p.Token(context.Background())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)

@@ -191,8 +191,11 @@ required. Lets the whole service run end-to-end in dev/CI immediately.
 
 Speaks the third-party streaming contract:
 
-- **Authentication (J1 → J2)**: a `tokenProvider` reads the **J1** token from
-  `TRANSLATION_J1_TOKEN`, POSTs it to the accessToken API (`TRANSLATION_ACCESS_TOKEN_URL`)
+- **Authentication (J1 → J2)**: a `tokenProvider` obtains the **J1** token from a
+  `j1Source` — `TRANSLATION_J1_TOKEN` (local/dev) when set, otherwise the file at
+  `TRANSLATION_J1_TOKEN_FILE` (default: the projected Kubernetes ServiceAccount token
+  mount), **re-read on each exchange** so a rotated token is picked up without a restart.
+  It POSTs the J1 to the accessToken API (`TRANSLATION_ACCESS_TOKEN_URL`)
   with `Content-Type: application/json` and the JSON body `{"key": <J1>}`, and receives
   `{token, expiresAt, username, jwtRequestId}`. The **J2** token (`token`) is cached until `expiresAt` minus a skew
   (`TRANSLATION_TOKEN_SKEW`, default 60s) and sent on the translate call as
@@ -214,8 +217,11 @@ Speaks the third-party streaming contract:
   timeout / connection drop) **without** a `[DONE]`, is a backend failure (raw-wrapped
   error → `internal` at the boundary).
 
-`newTranslator` fails fast if `TRANSLATION_ENDPOINT`, `TRANSLATION_ACCESS_TOKEN_URL`,
-or `TRANSLATION_J1_TOKEN` is empty when `TRANSLATION_BACKEND=stream`.
+`newTranslator` fails fast when `TRANSLATION_BACKEND=stream` if `TRANSLATION_ENDPOINT`
+or `TRANSLATION_ACCESS_TOKEN_URL` is empty, or if neither `TRANSLATION_J1_TOKEN` nor a
+readable `TRANSLATION_J1_TOKEN_FILE` yields a J1 token (the source is probed once at
+startup). See the follow-up design
+`2026-08-04-translation-j1-service-account-design.md`.
 
 ## Configuration (`caarlos0/env`)
 
@@ -227,7 +233,8 @@ or `TRANSLATION_J1_TOKEN` is empty when `TRANSLATION_BACKEND=stream`.
 | `TRANSLATION_BACKEND` | — | required (no default); `mock` \| `stream` |
 | `TRANSLATION_ENDPOINT` | `` | translate API URL; required when backend=`stream` |
 | `TRANSLATION_ACCESS_TOKEN_URL` | `` | accessToken (J1→J2) API URL; required when backend=`stream` |
-| `TRANSLATION_J1_TOKEN` | `` | secret J1 token; required when backend=`stream`; never logged |
+| `TRANSLATION_J1_TOKEN` | `` | J1 token literal; local/dev + test only; wins when set; never logged |
+| `TRANSLATION_J1_TOKEN_FILE` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | file read for J1 when the literal is empty (prod: ServiceAccount token); re-read each exchange; never logged |
 | `TRANSLATION_TOKEN_SKEW` | `60s` | refresh J2 this long before `expiresAt` |
 | `TRANSLATION_HTTP_TIMEOUT` | `30s` | Resty client timeout |
 | `MAX_WORKERS` | `100` | in-flight handler concurrency (semaphore) |

@@ -42,7 +42,7 @@ func streamTranslatorTo(t *testing.T, translateURL string) *streamTranslator {
 	t.Helper()
 	at := accessTokenServer(t, "J2-test", rfc3339In(time.Hour), nil)
 	t.Cleanup(at.Close)
-	return newStreamTranslator(translateURL, at.URL, "J1-test", 5*time.Second, time.Minute)
+	return newStreamTranslator(translateURL, at.URL, staticJ1("J1-test"), 5*time.Second, time.Minute)
 }
 
 func TestStreamTranslator_MergePreservesWhitespace(t *testing.T) {
@@ -138,7 +138,7 @@ func TestStreamTranslator_RefreshAndRetryOnJWTFailure(t *testing.T) {
 	atSrv := accessTokenServer(t, "J2-fresh", rfc3339In(time.Hour), &atCalls)
 	defer atSrv.Close()
 
-	tr := newStreamTranslator(tSrv.URL, atSrv.URL, "J1", 5*time.Second, time.Minute)
+	tr := newStreamTranslator(tSrv.URL, atSrv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 	got, err := tr.Translate(context.Background(), "hi", "zhTW")
 	require.NoError(t, err)
 	assert.Equal(t, "你好", got)
@@ -156,7 +156,7 @@ func TestStreamTranslator_JWTFailurePersistsAfterRefresh(t *testing.T) {
 	atSrv := accessTokenServer(t, "J2", rfc3339In(time.Hour), nil)
 	defer atSrv.Close()
 
-	tr := newStreamTranslator(tSrv.URL, atSrv.URL, "J1", 5*time.Second, time.Minute)
+	tr := newStreamTranslator(tSrv.URL, atSrv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 	_, err := tr.Translate(context.Background(), "hi", "en")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to verify jwt")
@@ -170,7 +170,7 @@ func TestStreamTranslator_TokenFetchError(t *testing.T) {
 	defer atSrv.Close()
 
 	// The translate endpoint is never reached because the token fetch fails first.
-	tr := newStreamTranslator("http://translate.invalid", atSrv.URL, "J1", 5*time.Second, time.Minute)
+	tr := newStreamTranslator("http://translate.invalid", atSrv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 	_, err := tr.Translate(context.Background(), "hi", "en")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "get access token")
@@ -195,7 +195,7 @@ func TestStreamTranslator_RefreshErrorAfterJWTFailure(t *testing.T) {
 	}))
 	defer atSrv.Close()
 
-	tr := newStreamTranslator(tSrv.URL, atSrv.URL, "J1", 5*time.Second, time.Minute)
+	tr := newStreamTranslator(tSrv.URL, atSrv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
 	_, err := tr.Translate(context.Background(), "hi", "zhTW")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "refresh access token after jwt failure")
