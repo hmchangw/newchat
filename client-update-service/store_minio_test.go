@@ -59,16 +59,16 @@ func TestEnsureBucket_MakeError(t *testing.T) {
 
 // fakeObjectStore is a minimal minioutil.ObjectStore for unit-testing Put.
 type fakeObjectStore struct {
-	putBucket  string
-	putKey     string
-	putSize    int64
-	putCT      string
-	putErr     error
+	putBucket string
+	putKey    string
+	putSize   int64
+	putCT     string
+	putErr    error
 }
 
 func (f *fakeObjectStore) BucketExists(context.Context, string) (bool, error) { return true, nil }
 
-func (f *fakeObjectStore) PutObject(_ context.Context, bucket, key string, _ io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+func (f *fakeObjectStore) PutObject(_ context.Context, bucket, key string, _ io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) { //nolint:gocritic // hugeParam: opts is passed by value to satisfy the minioutil.ObjectStore interface
 	f.putBucket, f.putKey, f.putSize, f.putCT = bucket, key, size, opts.ContentType
 	return minio.UploadInfo{}, f.putErr
 }
