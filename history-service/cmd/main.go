@@ -95,7 +95,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
+		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
+	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -182,14 +186,33 @@ func main() {
 
 	pub := publisher.New(js)
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
-	router := natsrouter.New(nc, "history-service")
+
+	// Bound in-flight handlers so a burst is shed at the door instead of piling
+	// unbounded concurrent work onto the (now explicitly capped) Mongo pool.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "history-service", routerOpts...)
 	router.Use(natsrouter.Recovery())
 	// RequestID must precede any handler that reads request_id from ctx —
 	// otherwise Classify's log line records an empty value.
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Logging())
+	// Deadline every request so a slow Mongo/Cassandra op is cancelled and its
+	// pooled connection released rather than held until the pool starves.
+	if cfg.RequestTimeout > 0 {
+		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+	}
 
 	svc.RegisterHandlers(router, cfg.SiteID)
+
+	slog.Info("connection guards configured",
+		"maxPoolSize", cfg.Mongo.MaxPoolSize,
+		"minPoolSize", cfg.Mongo.MinPoolSize,
+		"maxConcurrency", cfg.MaxConcurrency,
+		"requestTimeout", cfg.RequestTimeout,
+	)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
