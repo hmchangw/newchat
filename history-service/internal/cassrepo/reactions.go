@@ -31,6 +31,9 @@ func (r *Repository) AddReaction(ctx context.Context, msg *models.Message, key m
 	if msg.ThreadParentID != "" && msg.ThreadRoomID == "" {
 		return fmt.Errorf("react thread message %s: ThreadParentID %q is set but ThreadRoomID is empty", msg.MessageID, msg.ThreadParentID)
 	}
+	ctx, span := r.startRoomSpan(ctx, "cassrepo.AddReaction", msg.RoomID)
+	defer span.End()
+
 	reactedAt := reactor.ReactedAt
 
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
@@ -55,6 +58,8 @@ func (r *Repository) RemoveReaction(ctx context.Context, msg *models.Message, ke
 	if msg.ThreadParentID != "" && msg.ThreadRoomID == "" {
 		return fmt.Errorf("unreact thread message %s: ThreadParentID %q is set but ThreadRoomID is empty", msg.MessageID, msg.ThreadParentID)
 	}
+	ctx, span := r.startRoomSpan(ctx, "cassrepo.RemoveReaction", msg.RoomID)
+	defer span.End()
 
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
 	batch.Query(removeReactionMsgByID, key, msg.MessageID)

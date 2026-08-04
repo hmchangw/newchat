@@ -2,10 +2,15 @@ package cassrepo
 
 import (
 	"github.com/gocql/gocql"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
+
+// tracerName identifies this package's spans in the global tracer provider.
+const tracerName = "github.com/hmchangw/chat/history-service/internal/cassrepo"
 
 // Repository wraps a Cassandra session with the bucket sizer + read-walk
 // configuration shared by all queries against bucketed message tables, plus
@@ -15,6 +20,7 @@ type Repository struct {
 	bucket     msgbucket.Sizer
 	maxBuckets int
 	cipher     atrest.Cipher // nil when ATREST_ENABLED=false
+	tracer     trace.Tracer
 }
 
 // NewRepository wires a session, bucket sizer, max-walk depth, and (optional)
@@ -28,5 +34,6 @@ func NewRepository(session *gocql.Session, bucket msgbucket.Sizer, maxBuckets in
 		bucket:     bucket,
 		maxBuckets: maxBuckets,
 		cipher:     cipher,
+		tracer:     otel.Tracer(tracerName),
 	}
 }
