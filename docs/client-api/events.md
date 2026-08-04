@@ -48,7 +48,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
-| `chat.room.{roomID}.event.member` | member_added, member_left / member_removed |
+| `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
 | `chat.user.presence.state.{account}` | PresenceState |
 
@@ -742,7 +742,9 @@ the event on the same room stream they already subscribe to.
 
 ## member — room membership events
 
-**Subject:** `chat.room.{roomID}.event.member`
+**Subject:** `chat.room.{roomID}.event.member` — routed on the room's namespace by its
+`crossSite` flag (like `chat.room.{roomID}.event`): `chat.local.room.{roomID}.event.member`
+when `crossSite: false` (same-site), `chat.room.{roomID}.event.member` when `true`/unknown.
 
 ### member_added (MemberAddEvent)
 
