@@ -198,10 +198,15 @@ func RoomCanonical(siteID, operation string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.%s", siteID, operation)
 }
 
-// RoomCanonicalTeamsCreate returns the room-canonical subject for a batch of
-// Teams-derived room-creation events for one site. Lands in ROOMS-{siteID}.
-func RoomCanonicalTeamsCreate(siteID string) string {
-	return fmt.Sprintf("chat.room.canonical.%s.teams.create", siteID)
+// RoomTeamsCanonicalCreate returns the create subject for a batch of Teams-derived
+// room-creation events for one site. Lands in ROOMS-TEAMS-{siteID}.
+func RoomTeamsCanonicalCreate(siteID string) string {
+	return fmt.Sprintf("chat.teams.room.canonical.%s.create", siteID)
+}
+
+// RoomTeamsCanonicalWildcard is the ROOMS-TEAMS-{siteID} stream's subject binding.
+func RoomTeamsCanonicalWildcard(siteID string) string {
+	return fmt.Sprintf("chat.teams.room.canonical.%s.>", siteID)
 }
 
 // RoomCanonicalMemberEvent returns the post-mutation member-event subject (mute-only today).

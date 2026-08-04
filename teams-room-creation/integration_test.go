@@ -94,7 +94,7 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 	cons, err := js.CreateOrUpdateConsumer(ctx, rc.Name, jetstream.ConsumerConfig{
 		Durable:       "test-teams-room-create-consumer",
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubject: subject.RoomCanonicalTeamsCreate(siteID),
+		FilterSubject: subject.RoomTeamsCanonicalCreate(siteID),
 	})
 	require.NoError(t, err)
 

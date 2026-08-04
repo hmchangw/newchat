@@ -46,22 +46,28 @@ func TestBootstrapStreams(t *testing.T) {
 		wantErrSub  string
 	}{
 		{
-			name:        "disabled - verifies existing stream",
+			name:        "disabled - verifies existing streams",
 			enabled:     false,
-			existing:    map[string]bool{"ROOMS-test": true},
+			existing:    map[string]bool{"ROOMS-test": true, "ROOMS-TEAMS-test": true},
 			wantCreated: nil,
 		},
 		{
-			name:       "disabled - fails when stream missing",
+			name:       "disabled - fails when ROOMS missing",
 			enabled:    false,
 			existing:   map[string]bool{},
-			wantErrSub: "verify ROOMS stream",
+			wantErrSub: "verify ROOMS-test stream",
 		},
 		{
-			name:        "enabled - creates ROOMS",
+			name:       "disabled - fails when ROOMS-TEAMS missing",
+			enabled:    false,
+			existing:   map[string]bool{"ROOMS-test": true},
+			wantErrSub: "verify ROOMS-TEAMS-test stream",
+		},
+		{
+			name:        "enabled - creates both streams",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"ROOMS-test"},
+			wantCreated: []string{"ROOMS-test", "ROOMS-TEAMS-test"},
 		},
 		{
 			name:       "enabled - wraps ROOMS creator error",
@@ -69,7 +75,15 @@ func TestBootstrapStreams(t *testing.T) {
 			existing:   map[string]bool{},
 			failOn:     "ROOMS-test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create ROOMS stream",
+			wantErrSub: "create ROOMS-test stream",
+		},
+		{
+			name:       "enabled - wraps ROOMS-TEAMS creator error",
+			enabled:    true,
+			existing:   map[string]bool{},
+			failOn:     "ROOMS-TEAMS-test",
+			failErr:    errors.New("nats down"),
+			wantErrSub: "create ROOMS-TEAMS-test stream",
 		},
 	}
 	for _, tc := range tests {

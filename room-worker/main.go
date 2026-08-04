@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
@@ -229,42 +230,52 @@ func main() {
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer))
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	go func() {
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func() {
-				// recover() must run BEFORE the slot release so a panicking handler
-				// (e.g. a WithCause/WithMetadata misuse) Naks and is redelivered
-				// instead of crashing the worker — the async path runs outside
-				// natsrouter's recovery middleware.
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				runJobWithRecovery(msgCtx, handler, msg)
-			}()
+	// room-worker binds two streams: ROOMS (member/create/rename) and ROOMS-TEAMS
+	// (the Teams-migration room-create batch on its own stream). Each gets its own
+	// durable; both feed the same handler, routed by subject.
+	startConsumer := func(streamName, durableOverride string) o11ynats.MessagesContext {
+		cc := buildConsumerConfig(cfg.Consumer)
+		if durableOverride != "" {
+			cc.Durable = durableOverride
 		}
-	}()
+		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, cc)
+		if err != nil {
+			slog.Error("create consumer failed", "stream", streamName, "error", err)
+			os.Exit(1)
+		}
+		it, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			slog.Error("messages failed", "stream", streamName, "error", err)
+			os.Exit(1)
+		}
+		go func() {
+			for {
+				msgCtx, msg, err := it.Next()
+				if err != nil {
+					return
+				}
+				sem <- struct{}{}
+				wg.Add(1)
+				go func() {
+					// recover() must run BEFORE the slot release so a panicking handler
+					// Naks + redelivers instead of crashing the worker (async path runs
+					// outside natsrouter's recovery middleware).
+					defer func() {
+						<-sem
+						wg.Done()
+					}()
+					runJobWithRecovery(msgCtx, handler, msg)
+				}()
+			}
+		}()
+		return it
+	}
+
+	iter := startConsumer(streamCfg.Name, "")
+	teamsIter := startConsumer(stream.RoomsTeams(cfg.SiteID).Name, "room-worker-teams")
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -282,6 +293,7 @@ func main() {
 	hooks := []func(ctx context.Context) error{
 		func(ctx context.Context) error {
 			iter.Stop()
+			teamsIter.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {

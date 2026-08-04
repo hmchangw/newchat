@@ -235,7 +235,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		err = h.processAddMembers(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".member.remove"):
 		err = h.processRemoveMember(ctx, msg.Data())
-	case strings.HasSuffix(subj, ".teams.create"):
+	case strings.Contains(subj, ".teams.room.canonical."):
 		var data []byte
 		if data, err = natsutil.DecodePayload(msg); err == nil {
 			err = h.processTeamsRoomCreate(ctx, data)
