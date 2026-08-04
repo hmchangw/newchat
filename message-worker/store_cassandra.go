@@ -80,7 +80,7 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 // the legacy plaintext columns are left null. When s.cipher is nil the
 // legacy plaintext batch runs unchanged.
 func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, sender *cassParticipant, siteID string) error {
-	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveMessage", msg.RoomID)
+	ctx, span := s.startSpan(ctx, "cassandra.SaveMessage", msg.RoomID, msg.ID)
 	defer span.End()
 
 	if s.cipher != nil {
@@ -174,7 +174,7 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 // countAndSetParentTcount derives tcount from a COUNT query and blind-SETs it,
 // which is idempotent on redelivery without any CAS.
 func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Message, sender *cassParticipant, siteID string, threadRoomID string) (*int, error) {
-	ctx, span := s.startRoomSpan(ctx, "cassandra.SaveThreadMessage", msg.RoomID)
+	ctx, span := s.startSpan(ctx, "cassandra.SaveThreadMessage", msg.RoomID, msg.ID)
 	defer span.End()
 
 	if s.cipher != nil {
@@ -386,7 +386,7 @@ func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model
 // IF EXISTS prevents phantom rows on missing parents; misses log at ERROR
 // because a silent miss permanently breaks thread reads for that parent.
 func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, parentMessageID, roomID string, parentCreatedAt time.Time, threadRoomID string) error {
-	ctx, span := s.startRoomSpan(ctx, "cassandra.UpdateParentMessageThreadRoomID", roomID)
+	ctx, span := s.startSpan(ctx, "cassandra.UpdateParentMessageThreadRoomID", roomID, parentMessageID)
 	defer span.End()
 
 	parentBucket := s.bucket.Of(parentCreatedAt)
@@ -432,6 +432,9 @@ func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, pa
 // when the row is absent so the caller can drop an unverifiable quote. MessageLink
 // and Attachments are left to the caller.
 func (s *CassandraStore) GetQuotedParentSnapshot(ctx context.Context, messageID string) (*cassandra.QuotedParentMessage, bool, error) {
+	ctx, span := s.startSpan(ctx, "cassandra.GetQuotedParentSnapshot", "", messageID)
+	defer span.End()
+
 	var (
 		roomID                string
 		sender                cassandra.Participant
@@ -485,6 +488,9 @@ func (s *CassandraStore) GetQuotedParentSnapshot(ctx context.Context, messageID 
 // GetMessageCreatedAt point-reads created_at from messages_by_id. Returns
 // (zero, false, nil) when absent; a Cassandra failure errors so the worker NAKs.
 func (s *CassandraStore) GetMessageCreatedAt(ctx context.Context, messageID string) (time.Time, bool, error) {
+	ctx, span := s.startSpan(ctx, "cassandra.GetMessageCreatedAt", "", messageID)
+	defer span.End()
+
 	var createdAt time.Time
 	if err := s.cassSession.Query(
 		`SELECT created_at FROM messages_by_id WHERE message_id = ? LIMIT 1`,
@@ -501,6 +507,9 @@ func (s *CassandraStore) GetMessageCreatedAt(ctx context.Context, messageID stri
 // GetMessageSender reads the sender UDT from messages_by_id for the given message ID.
 // Returns an error if the message does not exist.
 func (s *CassandraStore) GetMessageSender(ctx context.Context, messageID string) (*cassParticipant, error) {
+	ctx, span := s.startSpan(ctx, "cassandra.GetMessageSender", "", messageID)
+	defer span.End()
+
 	var sender cassParticipant
 	if err := s.cassSession.Query(
 		`SELECT sender FROM messages_by_id WHERE message_id = ? LIMIT 1`,

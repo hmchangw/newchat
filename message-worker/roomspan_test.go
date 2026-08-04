@@ -39,10 +39,10 @@ func TestNewCassandraStore_SetsTracer(t *testing.T) {
 	assert.NotNil(t, s.tracer, "NewCassandraStore must default the tracer so production spans record")
 }
 
-func TestCassandraStore_startRoomSpan_TagsRoomID(t *testing.T) {
+func TestCassandraStore_startSpan_TagsRoomAndMessageID(t *testing.T) {
 	s, recorder := recordingStore(t)
 
-	ctx, span := s.startRoomSpan(context.Background(), "cassandra.SaveMessage", "room-9")
+	ctx, span := s.startSpan(context.Background(), "cassandra.SaveMessage", "room-9", "msg-1")
 	span.End()
 
 	assert.Equal(t,
@@ -57,13 +57,31 @@ func TestCassandraStore_startRoomSpan_TagsRoomID(t *testing.T) {
 	roomID, ok := spanAttr(ended[0], "room_id")
 	require.True(t, ok, "span must carry a room_id attribute")
 	assert.Equal(t, "room-9", roomID)
+	messageID, ok := spanAttr(ended[0], "message_id")
+	require.True(t, ok, "span must carry a message_id attribute")
+	assert.Equal(t, "msg-1", messageID)
 }
 
-func TestCassandraStore_startRoomSpan_NestsUnderParent(t *testing.T) {
+func TestCassandraStore_startSpan_OmitsEmptyRoom(t *testing.T) {
+	s, recorder := recordingStore(t)
+
+	_, span := s.startSpan(context.Background(), "cassandra.GetMessageSender", "", "msg-7")
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	messageID, ok := spanAttr(ended[0], "message_id")
+	require.True(t, ok, "span must carry message_id when only the message is known")
+	assert.Equal(t, "msg-7", messageID)
+	_, ok = spanAttr(ended[0], "room_id")
+	assert.False(t, ok, "an empty room id must be omitted, not written as an empty attribute")
+}
+
+func TestCassandraStore_startSpan_NestsUnderParent(t *testing.T) {
 	s, recorder := recordingStore(t)
 
 	parentCtx, parent := s.tracer.Start(context.Background(), "consume")
-	_, child := s.startRoomSpan(parentCtx, "cassandra.SaveThreadMessage", "room-3")
+	_, child := s.startSpan(parentCtx, "cassandra.SaveThreadMessage", "room-3", "msg-2")
 	child.End()
 	parent.End()
 
