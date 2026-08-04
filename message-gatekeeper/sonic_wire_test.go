@@ -22,6 +22,8 @@ func TestSonic_DecodesClientRequest(t *testing.T) {
 		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		ThreadParentMessageID: "01H8XGJ0PARENT0000000",
 		TShow:                 true,
+		ForwardedMessageID:    "01970a4f8c2d7c9aSRCM",
+		ForwardedRoomID:       "r-src",
 	}
 	wire, err := stdjson.Marshal(orig)
 	require.NoError(t, err)

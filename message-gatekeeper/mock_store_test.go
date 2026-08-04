@@ -97,6 +97,21 @@ func (m *MockParentMessageFetcher) EXPECT() *MockParentMessageFetcherMockRecorde
 	return m.recorder
 }
 
+// FetchForwardedSource mocks base method.
+func (m *MockParentMessageFetcher) FetchForwardedSource(ctx context.Context, account, srcRoomID, siteID, messageID string) (*forwardSourceProjection, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FetchForwardedSource", ctx, account, srcRoomID, siteID, messageID)
+	ret0, _ := ret[0].(*forwardSourceProjection)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FetchForwardedSource indicates an expected call of FetchForwardedSource.
+func (mr *MockParentMessageFetcherMockRecorder) FetchForwardedSource(ctx, account, srcRoomID, siteID, messageID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchForwardedSource", reflect.TypeOf((*MockParentMessageFetcher)(nil).FetchForwardedSource), ctx, account, srcRoomID, siteID, messageID)
+}
+
 // FetchQuotedParent mocks base method.
 func (m *MockParentMessageFetcher) FetchQuotedParent(ctx context.Context, account, roomID, siteID, messageID string) (*cassandra.QuotedParentMessage, error) {
 	m.ctrl.T.Helper()

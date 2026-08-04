@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -132,5 +133,78 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
+	})
+}
+
+func TestHistoryParentFetcher_FetchForwardedSource(t *testing.T) {
+	const (
+		account   = "alice"
+		srcRoomID = "r-src"
+		siteID    = "site-a"
+		messageID = "01970a4f8c2d7c9aSRCM"
+		baseURL   = "https://chat.example.com"
+	)
+
+	t.Run("success projects snapshot fields and reject signals", func(t *testing.T) {
+		nc := startTestNATS(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL)
+
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, srcRoomID, siteID), func(_ context.Context, m *nats.Msg) {
+			// history-service replies with the full cassandra.Message JSON;
+			// include reject-signal fields to prove the projection surfaces them.
+			_ = m.Respond([]byte(`{
+				"roomId":"r-src",
+				"sender":{"id":"u5","account":"eve"},
+				"createdAt":"2026-08-01T09:00:00Z",
+				"msg":"original body",
+				"mentions":[{"id":"u2","account":"bob"}],
+				"threadParentId":"01970a4f8c2d7c9aTHRD",
+				"deleted":false,
+				"attachments":[{"id":"f1","title":"a.png","type":"file"}],
+				"card":{"template":"approval"},
+				"forwardedMessage":{"messageId":"m-deeper"}
+			}`))
+		})
+		require.NoError(t, err)
+
+		got, err := fetcher.FetchForwardedSource(context.Background(), account, srcRoomID, siteID, messageID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "r-src", got.RoomID)
+		assert.Equal(t, "eve", got.Sender.Account)
+		assert.Equal(t, "original body", got.Msg)
+		assert.Len(t, got.Mentions, 1)
+		assert.Equal(t, "01970a4f8c2d7c9aTHRD", got.ThreadParentID)
+		assert.NotEmpty(t, got.Attachments, "attachment presence must survive the projection")
+		assert.NotEmpty(t, got.Card, "card presence must survive the projection")
+		assert.NotEmpty(t, got.ForwardedMessage, "chain presence must survive the projection")
+		assert.Equal(t, baseURL+"/r-src/"+messageID, got.MessageLink)
+	})
+
+	t.Run("errcode envelope propagates typed error", func(t *testing.T) {
+		nc := startTestNATS(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL)
+
+		_, err := nc.Subscribe(context.Background(), subject.MsgGet(account, srcRoomID, siteID), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"code":"not_found","error":"message not found"}`))
+		})
+		require.NoError(t, err)
+
+		got, err := fetcher.FetchForwardedSource(context.Background(), account, srcRoomID, siteID, messageID)
+		assert.Nil(t, got)
+		var ee *errcode.Error
+		require.ErrorAs(t, err, &ee)
+		assert.Equal(t, errcode.CodeNotFound, ee.Code)
+	})
+
+	t.Run("no responder wraps transport error", func(t *testing.T) {
+		nc := startTestNATS(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL)
+
+		got, err := fetcher.FetchForwardedSource(context.Background(), account, "r-nobody", siteID, messageID)
+		assert.Nil(t, got)
+		require.Error(t, err)
+		var ee *errcode.Error
+		assert.False(t, errors.As(err, &ee), "transport failure must stay a bare error")
 	})
 }

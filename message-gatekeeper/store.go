@@ -34,4 +34,9 @@ type Store interface {
 // the message without the quote.
 type ParentMessageFetcher interface {
 	FetchQuotedParent(ctx context.Context, account, roomID, siteID, messageID string) (*cassandra.QuotedParentMessage, error)
+	// FetchForwardedSource fetches the forward source from the SOURCE room's
+	// msg.get subject — history-service enforces the requester's subscription
+	// and access window there, so authorization needs no extra check here.
+	// Unlike quotes the caller hard-fails on every error (no placeholder).
+	FetchForwardedSource(ctx context.Context, account, srcRoomID, siteID, messageID string) (*forwardSourceProjection, error)
 }

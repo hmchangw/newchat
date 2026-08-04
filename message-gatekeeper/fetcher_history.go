@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -103,4 +104,59 @@ func (f *historyParentFetcher) FetchQuotedParent(
 		ThreadParentCreatedAt: parent.ThreadParentCreatedAt,
 		TShow:                 parent.TShow,
 	}, nil
+}
+
+// forwardSourceProjection decodes only the source-message fields the forward
+// path needs: the snapshot fields plus the accept/reject signals. Same sonic
+// rationale as quotedParentProjection — never decode the full cassandra.Message
+// (its struct-keyed Reactions map breaks sonic's decoder). Presence-only
+// fields decode as json.RawMessage: the handler branches on presence, never
+// the inner shape. All three are omitempty on the wire, so they are absent
+// (len 0) rather than JSON null when unset.
+type forwardSourceProjection struct {
+	RoomID                string                  `json:"roomId"`
+	Sender                cassandra.Participant   `json:"sender"`
+	CreatedAt             time.Time               `json:"createdAt"`
+	Msg                   string                  `json:"msg"`
+	Mentions              []cassandra.Participant `json:"mentions"`
+	ThreadParentID        string                  `json:"threadParentId"`
+	ThreadParentCreatedAt *time.Time              `json:"threadParentCreatedAt"`
+	Deleted               bool                    `json:"deleted"`
+	Type                  string                  `json:"type"`
+	Attachments           json.RawMessage         `json:"attachments"`      // presence-only
+	Card                  json.RawMessage         `json:"card"`             // presence-only
+	ForwardedMessage      json.RawMessage         `json:"forwardedMessage"` // presence-only (chain detection)
+	// MessageLink is built by the fetcher from chatBaseURL, not decoded from the reply.
+	MessageLink string `json:"-"`
+}
+
+// FetchForwardedSource issues a NATS request to history-service's
+// GetMessageByID handler on the SOURCE room's subject and projects the reply.
+// Every error (timeout, no responder, errcode envelope, unmarshal) is
+// returned — the caller hard-fails the send on any of them.
+func (f *historyParentFetcher) FetchForwardedSource(
+	ctx context.Context,
+	account, srcRoomID, siteID, messageID string,
+) (*forwardSourceProjection, error) {
+	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
+	}
+
+	subj := subject.MsgGet(account, srcRoomID, siteID)
+	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("forward source request: %w", err)
+	}
+
+	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
+		return nil, ee
+	}
+
+	var src forwardSourceProjection
+	if err := sonic.Unmarshal(msg.Data, &src); err != nil {
+		return nil, fmt.Errorf("unmarshal forward source: %w", err)
+	}
+	src.MessageLink = messageLink(f.chatBaseURL, src.RoomID, messageID)
+	return &src, nil
 }
