@@ -193,8 +193,8 @@ Speaks the third-party streaming contract:
 
 - **Authentication (J1 → J2)**: a `tokenProvider` reads the **J1** token from
   `TRANSLATION_J1_TOKEN`, POSTs it to the accessToken API (`TRANSLATION_ACCESS_TOKEN_URL`)
-  in the JSON body as `{"key": <J1>}`, and receives `{token, expiresAt, username,
-  jwtRequestId}`. The **J2** token (`token`) is cached until `expiresAt` minus a skew
+  with `Content-Type: application/json` and the JSON body `{"key": <J1>}`, and receives
+  `{token, expiresAt, username, jwtRequestId}`. The **J2** token (`token`) is cached until `expiresAt` minus a skew
   (`TRANSLATION_TOKEN_SKEW`, default 60s) and sent on the translate call as
   `Authorization: <J2>` (raw, no `Bearer`). The provider is mutex-guarded (safe for
   concurrent translate calls).

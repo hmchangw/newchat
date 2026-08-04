@@ -86,13 +86,20 @@ func TestTokenProvider_ForceRefresh(t *testing.T) {
 }
 
 func TestTokenProvider_SendsJ1InBody(t *testing.T) {
-	var gotBody, gotContentType string
+	var gotBody, gotContentType, gotAuthorization string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
 		gotBody = string(b)
 		gotContentType = r.Header.Get("Content-Type")
+		gotAuthorization = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"token":"J2","expiresAt":"`+rfc3339In(time.Hour)+`"}`)
+		if _, err := io.WriteString(w, `{"token":"J2","expiresAt":"`+rfc3339In(time.Hour)+`"}`); err != nil {
+			t.Errorf("write token response: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -100,7 +107,8 @@ func TestTokenProvider_SendsJ1InBody(t *testing.T) {
 	_, err := p.Token(context.Background())
 	require.NoError(t, err)
 
-	assert.JSONEq(t, `{"key":"J1-secret"}`, gotBody) // J1 is sent in the body, not an Authorization header
+	assert.JSONEq(t, `{"key":"J1-secret"}`, gotBody) // J1 is sent in the body...
+	assert.Empty(t, gotAuthorization)                // ...not in an Authorization header
 	assert.Equal(t, "application/json", gotContentType)
 }
 
