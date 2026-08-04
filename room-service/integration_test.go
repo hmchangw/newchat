@@ -117,7 +117,7 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	lastMentionAll := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Millisecond)
 	mustInsertRoom(t, db, &model.Room{
 		ID: "rproj", Name: "proj-room", Type: model.RoomTypeChannel, SiteID: "site-a",
-		UserCount: 7, AppCount: 3, Restricted: true, ExternalAccess: true,
+		UserCount: 7, AppCount: 3, Restricted: true, ExternalAccess: true, CrossSite: ptrBool(true),
 		LastMsgAt: &lastMsg, MinUserLastSeenAt: &minSeen, LastMsgID: "m123",
 		LastMentionAllAt: &lastMentionAll,
 	})
@@ -131,6 +131,8 @@ func TestMongoStore_GetRoom_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, 3, got.AppCount)
 	assert.True(t, got.Restricted)
 	assert.True(t, got.ExternalAccess)
+	require.NotNil(t, got.CrossSite, "crossSite must be in the projection (read-receipt fan-out routes on it via subject.RoomEventTargets)")
+	assert.True(t, *got.CrossSite)
 	require.NotNil(t, got.LastMsgAt)
 	assert.WithinDuration(t, lastMsg, *got.LastMsgAt, time.Second)
 	require.NotNil(t, got.MinUserLastSeenAt)
@@ -1397,7 +1399,7 @@ func TestAddMembers_SameSiteChannel_RoomMembersPath(t *testing.T) {
 		publishedData = data
 		return nil
 	}
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{
 		Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-a"}},
@@ -1457,7 +1459,7 @@ func TestAddMembers_SameSiteChannel_SubscriptionsFallback(t *testing.T) {
 		publishedData = data
 		return nil
 	}
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-a"}}}
 	resp, err := handler.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "target"}), req)
@@ -1493,7 +1495,7 @@ func TestAddMembers_RequesterNotSubscribed_Rejected(t *testing.T) {
 
 	// Same-site only: nil memberListClient is safe — request fails on the same-site
 	// GetSubscription check before reaching the cross-site branch.
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-a"}}}
 	_, err := handler.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "target"}), req)
@@ -1548,7 +1550,7 @@ func TestAddMembers_TwoSiteEndToEnd(t *testing.T) {
 	mustInsertSub(t, dbB, &model.Subscription{ID: "sb3", RoomID: "source", User: model.SubscriptionUser{ID: "req", Account: "alice"}})
 
 	// Site-B handler registers member.list endpoint (Register subscribes to MemberListWildcard).
-	handlerB := NewHandler(storeB, keyStore, nil, nil, "site-b", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handlerB := NewHandler(storeB, keyStore, nil, nil, "site-b", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	routerB := natsrouter.New(otelNCb, "room-service")
 	routerB.Use(natsrouter.RequireRequestID())
 	handlerB.Register(routerB)
@@ -1571,7 +1573,7 @@ func TestAddMembers_TwoSiteEndToEnd(t *testing.T) {
 		publishedData = data
 		return nil
 	}
-	handlerA := NewHandler(storeA, keyStore, memberListClient, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handlerA := NewHandler(storeA, keyStore, memberListClient, nil, "site-a", 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	// Call add-members on site-A with a site-B source channel
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-b"}}}
@@ -1624,7 +1626,7 @@ func TestAddMembers_CrossSiteTimeout(t *testing.T) {
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
 	memberListClient := NewNATSMemberListClient(nc, 200*time.Millisecond)
-	handler := NewHandler(store, keyStore, memberListClient, nil, "site-a", 1000, 500, 200*time.Millisecond, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, memberListClient, nil, "site-a", 1000, 500, 200*time.Millisecond, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 
 	req := model.AddMembersRequest{Channels: []model.ChannelRef{{RoomID: "source", SiteID: "site-b"}}}
 	_, err = handler.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "target"}), req)
@@ -1655,7 +1657,7 @@ func TestRoomsInfoBatchRPC_NoRequestID(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	router := natsrouter.New(otelNC, "room-service")
 	// Production-shaped base: mint, do not require.
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
@@ -1712,7 +1714,7 @@ func TestRoomsInfoBatchRPC(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = otelNC.Drain() })
 
-	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	handler := NewHandler(store, keyStore, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(context.Context, string, []byte, string) error { return nil }, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	router := natsrouter.New(otelNC, "room-service")
 	router.Use(natsrouter.RequireRequestID())
 	handler.Register(router)
@@ -1871,7 +1873,7 @@ func newRoomServiceHandler(t *testing.T, store *MongoStore, keyStore RoomKeyStor
 		lastData = data
 		return nil
 	}
-	h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0)
+	h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5, publish, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 	return h, func() (string, []byte) { return lastSubj, lastData }
 }
 
@@ -3287,7 +3289,7 @@ func TestMongoStore_EnsureIndexes_NewCompoundIndexes(t *testing.T) {
 	}
 }
 
-// setupRoomsStream creates the ROOMS_{siteID} JetStream stream and returns a JetStream
+// setupRoomsStream creates the ROOMS-{siteID} JetStream stream and returns a JetStream
 // client. The stream captures all chat.room.canonical.{siteID}.* events published by
 // the handler's publishToStream closure.
 func setupRoomsStream(t *testing.T, nc *nats.Conn, siteID string) jetstream.JetStream {
@@ -3356,7 +3358,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
-			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0)
+			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3425,7 +3427,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
 			func(context.Context, string, []byte, string) error { return nil },
-			func(context.Context, string, []byte) error { return nil }, nil, 0)
+			func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3481,7 +3483,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
 		// Capture publishes via the handler's stream-publish callback so we can
-		// assert the sys message lands without standing up the MESSAGES_CANONICAL
+		// assert the sys message lands without standing up the MESSAGES-CANONICAL
 		// stream just for this test.
 		type captured struct {
 			subj string
@@ -3502,7 +3504,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
-			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0)
+			publishToStream, func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3594,7 +3596,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		keyStore := setupKeyStore(t, db)
 		h := NewHandler(store, keyStore, nil, nil, siteID, 1000, 500, 5*time.Second, 5,
 			func(context.Context, string, []byte, string) error { return nil },
-			func(context.Context, string, []byte) error { return nil }, nil, 0)
+			func(context.Context, string, []byte) error { return nil }, nil, 0, subject.RouteGlobal)
 		router := natsrouter.New(handlerNC, "room-service")
 		router.Use(natsrouter.RequireRequestID())
 		h.Register(router)
@@ -3638,7 +3640,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		})
 		mustInsertUser(t, db, &model.User{
 			ID: "u-bob", Account: "bob", EngName: "Bob Chen", ChineseName: "陳博",
-			StatusIsShow: false, StatusText: "in a meeting",
+			StatusIsShow: true, StatusText: "in a meeting",
 		})
 		mustInsertSub(t, db, &model.Subscription{
 			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -3662,8 +3664,63 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		}, byAcct["alice"])
 		assert.Equal(t, model.MemberStatus{
 			Account: "bob", EngName: "Bob Chen", ChineseName: "陳博",
-			StatusIsShow: false, StatusText: "in a meeting",
+			StatusIsShow: true, StatusText: "in a meeting",
 		}, byAcct["bob"])
+	})
+
+	t.Run("members with statusIsShow=false are excluded", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛",
+			StatusIsShow: true, StatusText: "available",
+		})
+		// Non-empty statusText but the user has not opted to surface it; must be dropped.
+		mustInsertUser(t, db, &model.User{
+			ID: "u-bob", Account: "bob", EngName: "Bob", ChineseName: "博",
+			StatusIsShow: false, StatusText: "in a meeting",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-b", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "member with statusIsShow=false must be excluded")
+		assert.Equal(t, "alice", got[0].Account)
+	})
+
+	t.Run("member whose user doc lacks statusIsShow is excluded", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		mustInsertUser(t, db, &model.User{
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛",
+			StatusIsShow: true, StatusText: "available",
+		})
+		// Legacy doc: statusText present but no statusIsShow field at all — decodes
+		// as false, so it must be dropped like an explicit false.
+		_, err := db.Collection("users").InsertOne(ctx, bson.M{
+			"_id": "u-carol", "account": "carol", "engName": "Carol", "statusText": "busy",
+		})
+		require.NoError(t, err)
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+		mustInsertSub(t, db, &model.Subscription{
+			ID: "sub-c", User: model.SubscriptionUser{ID: "u-carol", Account: "carol"},
+			RoomID: "r1", SiteID: "site-a",
+		})
+
+		got, err := store.ListMemberStatuses(ctx, "r1", 5)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "member whose user doc lacks statusIsShow must be excluded")
+		assert.Equal(t, "alice", got[0].Account)
 	})
 
 	t.Run("members with empty statusText are excluded", func(t *testing.T) {
@@ -3721,7 +3778,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		store := NewMongoStore(db)
 		for i := 0; i < 5; i++ {
 			acct := fmt.Sprintf("user%d", i)
-			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct, StatusText: acct})
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, ChineseName: acct, StatusIsShow: true, StatusText: acct})
 			mustInsertSub(t, db, &model.Subscription{
 				ID: "sub-" + acct, User: model.SubscriptionUser{ID: "u-" + acct, Account: acct},
 				RoomID: "r1", SiteID: "site-a",
@@ -3736,7 +3793,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
 		mustInsertUser(t, db, &model.User{
-			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛", StatusText: "x",
+			ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛", StatusIsShow: true, StatusText: "x",
 		})
 		mustInsertSub(t, db, &model.Subscription{
 			ID: "sub-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -3772,7 +3829,7 @@ func TestMongoStore_ListMemberStatuses_Integration(t *testing.T) {
 		// Then 3 live subs.
 		for i := 0; i < 3; i++ {
 			acct := fmt.Sprintf("live%d", i)
-			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, StatusText: acct})
+			mustInsertUser(t, db, &model.User{ID: "u-" + acct, Account: acct, EngName: acct, StatusIsShow: true, StatusText: acct})
 			mustInsertSub(t, db, &model.Subscription{
 				ID:     fmt.Sprintf("sub-live%d", i),
 				User:   model.SubscriptionUser{ID: "u-" + acct, Account: acct},

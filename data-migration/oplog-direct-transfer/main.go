@@ -83,7 +83,7 @@ func main() {
 		filterSubjects = append(filterSubjects, subject.MigrationOplog(cfg.SiteID, coll, "*"))
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, targetClient)
@@ -195,7 +195,7 @@ func processOne(ctx context.Context, h *handler, m jetstream.Msg, mtr *metrics, 
 	}
 }
 
-// streamWaitTimeout bounds how long startup waits for the connector to bootstrap MIGRATION_OPLOG.
+// streamWaitTimeout bounds how long startup waits for the connector to bootstrap MIGRATION-OPLOG.
 const streamWaitTimeout = 60 * time.Second
 
 //nolint:gocritic // hugeParam: cfg passed by value to match jetstream.CreateOrUpdateConsumer's signature.

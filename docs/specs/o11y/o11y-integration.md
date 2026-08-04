@@ -1,8 +1,9 @@
 # Spec: Integrate the `flywindy/o11y` Observability SDK
 
 > **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
-> [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (pinned at
-> **v0.8.0**) as the single observability entry point across the chat platform.
+> [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (currently
+> pinned at **v0.9.1**) as the single observability entry point across the chat
+> platform.
 > Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
 > **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.
 >
@@ -153,13 +154,11 @@ integration test (§9).
 
 > **Outcome note (post-implementation):** "remove Marz32onE" means the chat repo
 > no longer imports `Marz32onE/instrumentation-go/otel-nats` **directly** — `grep`
-> over the tree is clean. It is NOT removed from the module graph: `o11y/nats`
-> wraps Marz's `otelnats`/`oteljetstream` internally (o11y has no native NATS
-> implementation in the current SDK), so it remains a legitimate **indirect** dependency
-> in `go.mod`. o11y also gates NATS tracing behind
-> `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` + `OTEL_NATS_TRACING_ENABLED` (both
-> default off, no programmatic override), so `pkg/natsutil.Connect` sets them on
-> unless an operator opted out.
+> over the tree is clean. As of o11y v0.9.1, `o11y/nats` wraps
+> `akira-core/instrumentation-go/otel-nats` v0.7.0 as an **indirect**
+> dependency. `pkg/natsutil.Connect` passes the SDK's resolved
+> `sdk.Toggles.Trace` through o11y's programmatic `WithTracingEnabled` option;
+> it no longer mutates process-global tracing env vars.
 
 **D3 — OTLP transport. → OTLP/HTTP (`:4318`).**
 `o11y` exports over HTTP; we currently use gRPC (`:4317`). Env/collector change,

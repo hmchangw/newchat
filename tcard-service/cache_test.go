@@ -162,54 +162,22 @@ func TestCardCache_SamePathDifferentVersionsCoexist(t *testing.T) {
 	assert.JSONEq(t, string(homeV2.Template), string(v2))
 }
 
-func TestCardCache_Add(t *testing.T) {
+func TestCardCache_Versions(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockCardStore(ctrl)
-	store.EXPECT().ListCards(gomock.Any()).Return([]card{homeCard}, nil)
+	homeV2 := card{Path: "home", CardVersion: "v2", Template: json.RawMessage(`{"_tcardVersion":"v2"}`)}
+	store.EXPECT().ListCards(gomock.Any()).Return([]card{homeCard, homeV2, profileCard}, nil)
 
 	cache := newCardCache()
+	assert.Empty(t, cache.Versions("home"), "a never-loaded cache knows no versions")
 
-	// Before the first load, Add is a no-op — no partial (falsely-ready) snapshot.
-	cache.Add(profileCard)
-	assert.False(t, cache.Ready())
-	_, ok := cache.Get("profile", "v2")
-	assert.False(t, ok)
-
-	// After a load, Add makes the card servable alongside the loaded set.
-	_, err := cache.Load(context.Background(), store)
-	require.NoError(t, err)
-	cache.Add(profileCard)
-	_, ok = cache.Get("home", "v1")
-	assert.True(t, ok)
-	got, ok := cache.Get("profile", "v2")
-	require.True(t, ok)
-	assert.JSONEq(t, string(profileCard.Template), string(got))
-}
-
-// A concurrent Add and Load must not corrupt the snapshot or drop the loaded
-// set (Add is CAS-retried); the race detector guards the read/write path.
-func TestCardCache_AddConcurrentWithLoad(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockCardStore(ctrl)
-	store.EXPECT().ListCards(gomock.Any()).Return([]card{homeCard, profileCard}, nil).AnyTimes()
-
-	cache := newCardCache()
 	_, err := cache.Load(context.Background(), store)
 	require.NoError(t, err)
 
-	extra := card{Path: "extra", CardVersion: "1.0.0", Template: json.RawMessage(`{"_tcardVersion":"1.0.0"}`)}
-	var wg sync.WaitGroup
-	for range 100 {
-		wg.Add(2)
-		go func() { defer wg.Done(); _, _ = cache.Load(context.Background(), store) }()
-		go func() { defer wg.Done(); cache.Add(extra) }()
-	}
-	wg.Wait()
-
-	_, ok := cache.Get("home", "v1")
-	assert.True(t, ok, "the loaded set survives a concurrent Add")
-	_, ok = cache.Get("profile", "v2")
-	assert.True(t, ok)
+	assert.ElementsMatch(t, []string{"v1", "v2"}, cache.Versions("home"), "every cached version of the path")
+	assert.Equal(t, []string{"v2"}, cache.Versions("profile"))
+	assert.Empty(t, cache.Versions("missing"), "an unknown path has no versions")
+	assert.Empty(t, cache.Versions(""), "the empty path is not a prefix match")
 }
 
 // TestCardCache_ConcurrentReadDuringLoad guards the lock-free read path: readers

@@ -45,7 +45,7 @@ type UserGetter interface {
 }
 
 // Handler processes messages from the MESSAGES stream and validates them
-// before publishing to MESSAGES_CANONICAL.
+// before publishing to MESSAGES-CANONICAL.
 type Handler struct {
 	store              Store
 	users              UserGetter
@@ -218,7 +218,7 @@ func accountFromSubject(subj string) string {
 }
 
 // processMessage validates a SendMessageRequest and publishes a MessageEvent
-// to MESSAGES_CANONICAL. Validation errors are typed *errcode.Error (reply +
+// to MESSAGES-CANONICAL. Validation errors are typed *errcode.Error (reply +
 // Ack); transient infra failures are bare fmt.Errorf (Nak for redelivery).
 func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID string, req *model.SendMessageRequest) ([]byte, error) {
 	// Validate siteID matches this service's siteID
@@ -230,7 +230,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// is published to chat.user.{account}.response.{requestId}, so an empty or
 	// malformed value would leave the client unable to correlate (or receive)
 	// the reply. Rejecting here fails fast instead of publishing an
-	// unacknowledgeable message to MESSAGES_CANONICAL.
+	// unacknowledgeable message to MESSAGES-CANONICAL.
 	if !idgen.IsValidUUID(req.RequestID) {
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid requestId %q: must be a hyphenated UUID", req.RequestID))
 	}
@@ -392,7 +392,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		Type:                         req.Type,
 	}
 
-	// Publish MessageEvent to MESSAGES_CANONICAL. QuotedParentUnverified rides the
+	// Publish MessageEvent to MESSAGES-CANONICAL. QuotedParentUnverified rides the
 	// envelope (not the persisted Message) so message-worker knows to re-project
 	// the authoritative snapshot before the durable write when the gatekeeper had
 	// to fall back to the untrusted client snapshot.
@@ -405,9 +405,9 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
-		return nil, fmt.Errorf("publish to MESSAGES_CANONICAL: %w", err)
+		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", err)
 	}
-	// flow: the message cleared the gate and was handed off to MESSAGES_CANONICAL.
+	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
 		"phase", "published", "request_id", req.RequestID, "subject", canonicalSubj, "bytes", len(evtData))
 

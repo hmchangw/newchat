@@ -9,7 +9,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// benchMessageData builds one realistic MESSAGES_CANONICAL event payload.
+// benchMessageData builds one realistic MESSAGES-CANONICAL event payload.
 func benchMessageData(b *testing.B) []byte {
 	b.Helper()
 	evt := model.MessageEvent{
@@ -78,7 +78,7 @@ func BenchmarkBuildAction_Message(b *testing.B) {
 func BenchmarkBuildAction_UserRoom(b *testing.B) {
 	for _, n := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprintf("accounts=%d", n), func(b *testing.B) {
-			coll := newUserRoomCollection("user-room-site-a")
+			coll := newUserRoomCollection("user-room-site-a", false)
 			data := benchMemberData(b, n)
 			b.ReportAllocs()
 			b.ResetTimer()

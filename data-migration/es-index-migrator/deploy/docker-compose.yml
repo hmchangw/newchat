@@ -1,0 +1,38 @@
+name: es-index-migrator
+
+# Local dev only. One-shot batch job (not a long-running worker): rebuilds a
+# site's ES indexes from that site's own *current-stack* Cassandra/MongoDB,
+# so — unlike the oplog-* siblings under data-migration/, which stand up
+# their own isolated source-mongo — this joins the shared chat-local network
+# (started via `make deps-up`) and reads/writes the same mongodb/cassandra/
+# elasticsearch services search-sync-worker and message-worker use.
+#
+# No ATREST_*/VAULT_* vars: this job never decrypts (see
+# docs/search_index_migration_spec.md, "No at-rest decryption dependency").
+# Index name env vars are copied verbatim from search-sync-worker/deploy/
+# docker-compose.yml so a local run targets the same indexes.
+
+services:
+  es-index-migrator:
+    build:
+      context: ../../..
+      dockerfile: data-migration/es-index-migrator/deploy/Dockerfile
+    environment:
+      - SITE_ID=site-local
+      - SEARCH_URL=http://elasticsearch:9200
+      - MSG_INDEX_PREFIX=messages-site-local-v1
+      - SPOTLIGHT_INDEX=spotlight-site-local-v1
+      - USER_ROOM_INDEX=user-room-mv-site-local
+      - MIGRATION_START_AT=2025-07-01T00:00:00Z
+      - MIGRATION_END_AT=2026-07-01T00:00:00Z
+      - MESSAGE_BUCKET_HOURS=72
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      - CASSANDRA_HOSTS=cassandra
+      - CASSANDRA_KEYSPACE=chat
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

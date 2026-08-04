@@ -17,5 +17,5 @@ func TestSettingsSetRequest_FieldsInlineAtTopLevel(t *testing.T) {
 	assert.True(t, *req.FullWidth)
 	require.NotNil(t, req.TranslateMessageInto)
 	assert.Equal(t, "en-US", *req.TranslateMessageInto)
-	assert.Nil(t, req.ScrollToBottomInChat)
+	assert.Nil(t, req.InitialChatScrollPosition)
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 func TestSpotlightOrgCollection_Metadata(t *testing.T) {
@@ -23,7 +24,7 @@ func TestSpotlightOrgCollection_Metadata(t *testing.T) {
 	assert.Equal(t, "spotlightorg-site-a_template", coll.TemplateName())
 
 	cfg := coll.StreamConfig("site-a")
-	assert.Equal(t, "HR_site-central", cfg.Name)
+	assert.Equal(t, "HR-site-central", cfg.Name)
 	assert.Equal(t, []string{"chat.hr.site-central.>"}, cfg.Subjects)
 	assert.Empty(t, cfg.Sources)
 
@@ -64,7 +65,7 @@ func TestSpotlightOrgTemplateBody(t *testing.T) {
 }
 
 func TestSpotlightOrgTemplateProperties_MatchesStruct(t *testing.T) {
-	props := esPropertiesFromStruct[SpotlightOrgIndex]()
+	props := searchindex.EsPropertiesFromStruct[SpotlightOrgIndex]()
 
 	typ := reflect.TypeOf(SpotlightOrgIndex{})
 	esFieldCount := 0

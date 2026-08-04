@@ -24,7 +24,7 @@ import (
 )
 
 // durableName is shared across sites — each site's consumer lives on its own
-// HR_{siteID} stream, so the same durable name never collides.
+// HR-{siteID} stream, so the same durable name never collides.
 const durableName = "hr-sync-worker"
 
 func main() {
@@ -48,7 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -123,7 +123,7 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			data, err := decodePayload(msg)
+			data, err := natsutil.DecodePayload(msg)
 			if err != nil {
 				// a bad frame won't decode on redelivery → poison
 				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest(fmt.Sprintf("decode payload: %s", err.Error()))))

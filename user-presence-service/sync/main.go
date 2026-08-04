@@ -98,7 +98,7 @@ func run() error {
 	}()
 	store := presencestore.NewValkeyStoreFromClient(clusterClient, cfg.StaleThreshold, cfg.ConnsTTL)
 
-	nc, err := natsutil.Connect(ctx, cfg.NATSURL, cfg.NATSCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NATSURL, cfg.NATSCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}

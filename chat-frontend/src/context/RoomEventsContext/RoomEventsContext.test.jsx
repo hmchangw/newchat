@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act, waitFor } from '@testing-library/react'
 import { useState } from 'react'
+import { PAGE_LIMIT } from '@/api'
 import { NatsContext } from '../NatsContext/NatsContext'
 import { RoomEventsProvider, useRoomEvents, useRoomSummaries, useSidebarSections, useSubscription } from './RoomEventsContext'
 import { BUFFER_MODE } from './reducer'
@@ -43,6 +44,7 @@ function roomToSub(room) {
       userCount: room.userCount,
       lastMsgAt: room.lastMsgAt ?? null,
       lastMsgId: room.lastMsgId,
+      crossSite: room.crossSite,
     },
   }
 }
@@ -493,24 +495,23 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
 
     function Probe() {
       const { messages, focusMessageId, bufferMode, jumpToMessage } = useRoomEvents('r1')
+      const { summaries } = useRoomSummaries()
       return (
         <div>
           <button onClick={() => jumpToMessage('m11').catch(() => {})}>jump</button>
           <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
           <div data-testid="focus">{focusMessageId ?? ''}</div>
           <div data-testid="mode">{bufferMode}</div>
+          <div data-testid="summaries">{summaries.length}</div>
         </div>
       )
     }
 
     render(wrap(<Probe />, nats))
-    // Wait for rooms list to load so summary is present (so jumpToMessage uses room siteId)
-    await waitFor(() =>
-      expect(request).toHaveBeenCalledWith(
-        'chat.user.alice.request.user.site-A.subscription.list',
-        { type: 'rooms' },
-      )
-    )
+    // Wait for the bootstrap reply to land in state.summaries — not merely for
+    // the request to be issued — so jumpToMessage reads the room's site-B
+    // siteId rather than racing the reply and falling back to the user's site.
+    await waitFor(() => expect(screen.getByTestId('summaries').textContent).toBe('1'))
 
     await act(async () => {
       screen.getByText('jump').click()
@@ -652,7 +653,7 @@ describe('RoomEventsProvider message.read wiring', () => {
     render(wrap(<Probe />, nats))
     await waitFor(() => expect(request).toHaveBeenCalledWith(
       'chat.user.alice.request.user.site-A.subscription.list',
-      { type: 'rooms' },
+      { type: 'rooms', offset: 0, limit: PAGE_LIMIT },
     ))
 
     act(() => { captured('g1') })
@@ -1012,6 +1013,119 @@ describe('RoomEventsProvider message.read wiring', () => {
   })
 })
 
+describe('RoomEventsProvider room subject routing by crossSite', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('subscribes a same-site room (crossSite:false) to the local namespace and a cross-site room (crossSite:true) to the global namespace', async () => {
+    const rooms = [
+      { id: 'L1', name: 'local-channel', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null, crossSite: false },
+      { id: 'G1', name: 'global-channel', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null, crossSite: true },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const subjects = []
+    const subscribe = vi.fn().mockImplementation((subject) => {
+      subjects.push(subject)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+
+    render(wrap(<SummariesProbe />, nats))
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('2'))
+
+    expect(subjects).toContain('chat.local.room.L1.event')
+    expect(subjects).not.toContain('chat.room.L1.event')
+    expect(subjects).toContain('chat.room.G1.event')
+    expect(subjects).not.toContain('chat.local.room.G1.event')
+  })
+
+  it('defaults to the global namespace when crossSite is absent on the room (server fail-safe)', async () => {
+    const rooms = [
+      { id: 'M1', name: 'missing-flag-channel', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const subjects = []
+    const subscribe = vi.fn().mockImplementation((subject) => {
+      subjects.push(subject)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+
+    render(wrap(<SummariesProbe />, nats))
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+
+    expect(subjects).toContain('chat.room.M1.event')
+    expect(subjects).not.toContain('chat.local.room.M1.event')
+  })
+
+  it('drops the local subscription and opens the global one when a room flips crossSite false→true', async () => {
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const handlers = new Map()
+    const unsubs = {}
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      const sub = { unsubscribe: vi.fn() }
+      unsubs[subject] = sub
+      return sub
+    })
+    const nats = mockNats({ request, subscribe })
+
+    render(wrap(<SummariesProbe />, nats))
+    await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+    // First "added": the room is same-site — local subject.
+    act(() => {
+      handlers.get('chat.user.alice.event.subscription.update')({
+        action: 'added',
+        subscription: {
+          roomId: 'flip1',
+          roomType: 'channel',
+          siteId: 'site-A',
+          name: 'flip-room',
+          room: { crossSite: false },
+        },
+      })
+    })
+    await waitFor(() =>
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.local.room.flip1.event')
+    )
+    expect(unsubs['chat.local.room.flip1.event'].unsubscribe).not.toHaveBeenCalled()
+
+    // Server later reports the room is now cross-site — a second "added"
+    // nudge carries the updated flag. The old local sub must be dropped
+    // and the global one opened.
+    act(() => {
+      handlers.get('chat.user.alice.event.subscription.update')({
+        action: 'added',
+        subscription: {
+          roomId: 'flip1',
+          roomType: 'channel',
+          siteId: 'site-A',
+          name: 'flip-room',
+          room: { crossSite: true },
+        },
+      })
+    })
+    await waitFor(() =>
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.room.flip1.event')
+    )
+    expect(unsubs['chat.local.room.flip1.event'].unsubscribe).toHaveBeenCalled()
+    expect(unsubs['chat.room.flip1.event'].unsubscribe).not.toHaveBeenCalled()
+  })
+})
+
 describe('RoomEventsProvider sidebar buckets bootstrap', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -1038,15 +1152,54 @@ describe('RoomEventsProvider sidebar buckets bootstrap', () => {
     const getApps = calls.find((c) => c.payload?.type === 'apps')
     const getRooms = calls.find((c) => c.payload?.type === 'rooms')
 
+    // Each bucket is paginated: the first-page request carries offset/limit.
     expect(getCurrent.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
-    expect(getCurrent.payload).toEqual({ type: 'current', favorite: true })
+    expect(getCurrent.payload).toEqual({ type: 'current', favorite: true, offset: 0, limit: PAGE_LIMIT })
     expect(getApps.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
-    expect(getApps.payload).toEqual({ type: 'apps' })
+    expect(getApps.payload).toEqual({ type: 'apps', offset: 0, limit: PAGE_LIMIT })
     expect(getRooms.subject).toBe('chat.user.alice.request.user.site-A.subscription.list')
-    expect(getRooms.payload).toEqual({ type: 'rooms' })
+    expect(getRooms.payload).toEqual({ type: 'rooms', offset: 0, limit: PAGE_LIMIT })
 
     // No `rooms.list` RPC was made.
     expect(calls.find((c) => c.subject.endsWith('.rooms.list'))).toBeUndefined()
+  })
+
+  it('seeds room keys carried by subscription.list into RoomKeysContext', async () => {
+    // subscription.list embeds the current room key under sub.room for
+    // encrypted channels. Seeding it at bootstrap means the first message in
+    // the room decrypts without a placeholder or an on-demand key fetch.
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    try {
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+          return Promise.resolve({
+            subscriptions: [
+              {
+                roomId: 'c1',
+                roomType: 'channel',
+                name: 'c1',
+                siteId: 'site-A',
+                room: { privateKey: 'AQIDBA==', keyVersion: 4 },
+              },
+              // No room key → not seeded (plaintext DM / no key provisioned).
+              { roomId: 'd1', roomType: 'dm', name: 'd1', siteId: 'site-A' },
+            ],
+          })
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+        throw new Error('unexpected subject: ' + subject)
+      })
+      const nats = mockNats({ request })
+
+      render(wrap(<SummariesProbe />, nats))
+      await waitFor(() => expect(seedKeys).toHaveBeenCalled())
+      expect(seedKeys).toHaveBeenCalledWith([
+        { roomId: 'c1', version: 4, privateKey: 'AQIDBA==' },
+      ])
+    } finally {
+      currentRoomKeysMock = prevMock
+    }
   })
 
   it('degrades gracefully (Promise.allSettled) when one bucket RPC fails', async () => {
@@ -1441,5 +1594,321 @@ describe('RoomEventsProvider missing-key path', () => {
 
     expect(ensureKey).not.toHaveBeenCalled()
     expect(decrypt).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a channel message whose decryption resolves after a user switch (stale-generation guard)', async () => {
+    // The real bug: alice's encrypted message is mid-decryption when the user
+    // switches to bob. The teardown sets cancelledRef=true and bob's new effect
+    // resets it to false, so the cancelledRef gate alone would let alice's late
+    // decrypt dispatch into bob's session. The generation guard must drop it.
+    let resolveDecrypt
+    const decrypt = vi.fn().mockImplementation(
+      () => new Promise((res) => { resolveDecrypt = res })
+    )
+    currentRoomKeysMock = { decrypt, hasKey: () => true, ensureKey: async () => false }
+
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const aliceRequest = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+        return Promise.resolve({
+          subscriptions: [
+            roomToSub({ id: 'r1', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgId: null, crossSite: true }),
+          ],
+        })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const bobRequest = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+
+    const aliceNats = mockNats({ request: aliceRequest, subscribe, user: { account: 'alice', siteId: 'site-A' } })
+    const bobNats = mockNats({ request: bobRequest, subscribe, user: { account: 'bob', siteId: 'site-A' } })
+
+    let probeMessages
+    function Probe() {
+      const { messages } = useRoomEvents('r1')
+      probeMessages = messages
+      return <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
+    }
+
+    const { rerender } = render(wrap(<Probe />, aliceNats))
+    await waitFor(() => expect(handlers.has('chat.room.r1.event')).toBe(true))
+
+    // Alice's message arrives; decryption starts but is left pending.
+    act(() => { handlers.get('chat.room.r1.event')(encEvent) })
+    await waitFor(() => expect(decrypt).toHaveBeenCalledTimes(1))
+
+    // Switch to bob: cleanup (cancelledRef=true) then a fresh effect
+    // (cancelledRef=false, generationRef bumped).
+    rerender(wrap(<Probe />, bobNats))
+    await waitFor(() => expect(bobRequest).toHaveBeenCalled())
+
+    // Alice's decrypt resolves late — the guard must drop the whole continuation.
+    await act(async () => {
+      resolveDecrypt(decryptedPayload)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(probeMessages.some((m) => m.id === 'm1')).toBe(false)
+  })
+})
+
+describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  // Server ships newest-first. Build a newest-first block of `n` messages
+  // whose timestamps ascend with the id index (m0 oldest … m<n-1> newest).
+  function serverPage(prefix, n, baseMinute = 0) {
+    const asc = Array.from({ length: n }, (_, i) => ({
+      id: `${prefix}${i}`,
+      roomId: 'a',
+      content: `${prefix}${i}`,
+      createdAt: new Date(Date.UTC(2026, 3, 17, 8, baseMinute + i, 0)).toISOString(),
+      sender: { account: 'bob' },
+    }))
+    return asc.reverse() // newest-first, as history-service returns
+  }
+
+  function OlderProbe() {
+    const { messages, loadHistory, loadOlder, hasMoreOlder, loadingOlder } = useRoomEvents('a')
+    return (
+      <div>
+        <button onClick={() => loadHistory()}>load</button>
+        <button onClick={() => loadOlder()?.catch?.(() => {})}>older</button>
+        <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
+        <div data-testid="hasMore">{String(hasMoreOlder)}</div>
+        <div data-testid="loadingOlder">{String(loadingOlder)}</div>
+      </div>
+    )
+  }
+
+  it('prepends an older page, fetched with a `before` cursor at the current top', async () => {
+    // Initial page is FULL (50) → hasMoreOlder true. Older page follows.
+    const first = serverPage('n', 50, 10) // n0 (08:10) … n49 (08:59)
+    const older = serverPage('o', 3, 0) // o0 (08:00) … o2 (08:02)
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.includes('.msg.history')) {
+        return Promise.resolve({ messages: payload?.before ? older : first })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    await act(async () => { screen.getByText('load').click() })
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('true'))
+    // Buffer starts at the newest page, oldest-first.
+    expect(screen.getByTestId('messages').textContent.startsWith('n0,n1')).toBe(true)
+
+    await act(async () => { screen.getByText('older').click() })
+    await waitFor(() =>
+      expect(screen.getByTestId('messages').textContent.startsWith('o0,o1,o2,n0')).toBe(true),
+    )
+
+    // The older fetch used `before` = the oldest loaded message's epoch millis.
+    const beforeCursor = new Date(Date.UTC(2026, 3, 17, 8, 10, 0)).getTime()
+    expect(request).toHaveBeenCalledWith(
+      'chat.user.alice.request.room.a.site-A.msg.history',
+      { limit: 50, before: beforeCursor },
+    )
+    // Older page was short (3 < 50) → no more older remain.
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('false'))
+  })
+
+  it('no-ops when the initial page was short (hasMoreOlder false)', async () => {
+    const first = serverPage('n', 5, 10) // short page → reached start
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.includes('.msg.history')) return Promise.resolve({ messages: first })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    await act(async () => { screen.getByText('load').click() })
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('false'))
+
+    const historyCallsBefore = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
+    await act(async () => { screen.getByText('older').click() })
+    const historyCallsAfter = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
+    // loadOlder must not fire a second history RPC.
+    expect(historyCallsAfter).toBe(historyCallsBefore)
+  })
+
+  it('no-ops before the initial history has loaded', async () => {
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      if (subject.includes('.msg.history')) return Promise.resolve({ messages: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    // Click older WITHOUT loading first.
+    await act(async () => { screen.getByText('older').click() })
+    const historyCalls = request.mock.calls.filter((c) => c[0].includes('.msg.history')).length
+    expect(historyCalls).toBe(0)
+  })
+})
+
+describe('added subscription.update room enrichment', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function AddedProbe({ roomId }) {
+    const { summaries } = useRoomSummaries()
+    const s = summaries.find((r) => r.id === roomId)
+    return (
+      <div>
+        <div data-testid="userCount">{String(s?.userCount)}</div>
+        <div data-testid="lastMsgAt">{String(s?.lastMsgAt)}</div>
+      </div>
+    )
+  }
+
+  /** Shared scaffold: seedKeys spy swapped into the RoomKeys mock, an empty
+   *  subscription.list bootstrap, and a handler-capturing subscribe. Callers
+   *  drive the returned handlers map and MUST invoke restore() when done. */
+  function setupSeedKeysHarness() {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    const request = vi.fn().mockImplementation((subject) => {
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected request: ' + subject)
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+    return { seedKeys, handlers, subscribe, nats, restore: () => { currentRoomKeysMock = prevMock } }
+  }
+
+  it('seeds the inline room key and applies room metadata from an added event', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
+      render(wrap(<AddedProbe roomId="enr1" />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+      act(() => {
+        handlers.get('chat.user.alice.event.subscription.update')({
+          action: 'added',
+          subscription: {
+            roomId: 'enr1',
+            roomType: 'channel',
+            siteId: 'site-A',
+            name: 'enriched-room',
+            room: {
+              name: 'enriched-room',
+              crossSite: false,
+              userCount: 7,
+              lastMsgAt: '2026-07-01T10:00:00Z',
+              privateKey: 'AQIDBA==',
+              keyVersion: 3,
+            },
+          },
+        })
+      })
+
+      // The inline key is seeded exactly like a subscription.list key.
+      await waitFor(() => expect(seedKeys).toHaveBeenCalled())
+      expect(seedKeys).toHaveBeenCalledWith([
+        { roomId: 'enr1', version: 3, privateKey: 'AQIDBA==' },
+      ])
+      // Room metadata renders without waiting for a metadata/message event.
+      expect(screen.getByTestId('userCount').textContent).toBe('7')
+      expect(screen.getByTestId('lastMsgAt').textContent).toBe('2026-07-01T10:00:00Z')
+      // crossSite: false → the local subject, not the global fail-safe.
+      expect(subscribe.mock.calls.map((c) => c[0])).toContain('chat.local.room.enr1.event')
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not seed keys when the added event carries no room key (keyless DM)', async () => {
+    const { seedKeys, handlers, subscribe, nats, restore } = setupSeedKeysHarness()
+    try {
+      render(wrap(<SummariesProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+
+      act(() => {
+        handlers.get('chat.user.alice.event.subscription.update')({
+          action: 'added',
+          subscription: {
+            roomId: 'dm1',
+            roomType: 'dm',
+            siteId: 'site-A',
+            name: 'bob',
+            room: { name: '', crossSite: false, userCount: 2 },
+          },
+        })
+      })
+
+      await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+      expect(seedKeys).not.toHaveBeenCalled()
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('stale-session guards (generation counter)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('drops a bootstrap that resolves after a re-login — no stale key seeding or subs', async () => {
+    const seedKeys = vi.fn()
+    const prevMock = currentRoomKeysMock
+    currentRoomKeysMock = { decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys }
+    try {
+      let resolveFirstRooms
+      let roomsCalls = 0
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+          roomsCalls++
+          if (roomsCalls === 1) return new Promise((res) => { resolveFirstRooms = res })
+          return Promise.resolve({ subscriptions: [] })
+        }
+        if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+        throw new Error('unexpected subject: ' + subject)
+      })
+      const subscribe = vi.fn().mockReturnValue({ unsubscribe: vi.fn() })
+
+      const nats1 = mockNats({ request, subscribe, user: { account: 'alice', siteId: 'site-A' } })
+      const { rerender } = render(wrap(<SummariesProbe />, nats1))
+      await waitFor(() => expect(roomsCalls).toBe(1))
+
+      // Re-login as a different user while alice's rooms fetch is still in flight.
+      const nats2 = mockNats({ request, subscribe, user: { account: 'carol', siteId: 'site-A' } })
+      rerender(wrap(<SummariesProbe />, nats2))
+      await waitFor(() => expect(roomsCalls).toBe(2))
+
+      // Alice's stale bootstrap resolves now, carrying a keyed channel room.
+      await act(async () => {
+        resolveFirstRooms({
+          subscriptions: [
+            {
+              roomId: 'stale1', roomType: 'channel', name: 'stale', siteId: 'site-A',
+              room: { crossSite: false, privateKey: 'AQIDBA==', keyVersion: 1 },
+            },
+          ],
+        })
+      })
+
+      expect(seedKeys).not.toHaveBeenCalled()
+      expect(subscribe.mock.calls.map((c) => c[0])).not.toContain('chat.local.room.stale1.event')
+      expect(screen.getByTestId('count').textContent).toBe('0')
+    } finally {
+      currentRoomKeysMock = prevMock
+    }
   })
 })

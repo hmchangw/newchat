@@ -19,6 +19,11 @@ vi.mock('@/context/RoomEventsContext', () => ({
   useSubscription: () => mockSubscription,
 }))
 
+// MessageRow reads useNats for the current user's account + media base URL.
+vi.mock('@/context/NatsContext', () => ({
+  useNats: () => ({ user: { account: 'me', baseUrl: 'https://media.test' } }),
+}))
+
 const msg = {
   id: 'm1',
   content: 'hello world',
@@ -33,6 +38,18 @@ describe('MessageRow', () => {
     expect(screen.getByText('Alice')).toBeInTheDocument()
     expect(screen.getByText('hello world')).toBeInTheDocument()
     expect(screen.getByText(/\d\d:\d\d/)).toBeInTheDocument()
+  })
+
+  it('renders the timestamp with both date and time', () => {
+    const { container } = render(
+      <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />
+    )
+    // createdAt is 2026-05-13T10:42:00Z — regardless of the test runner's
+    // timezone this stays within 2026, so asserting the year proves the date
+    // is rendered alongside the HH:MM time.
+    const timeEl = container.querySelector('.message-time')
+    expect(timeEl.textContent).toMatch(/2026/)
+    expect(timeEl.textContent).toMatch(/\d{1,2}:\d{2}/)
   })
 
   it('renders the row with tabindex 0 and data-message-id', () => {
@@ -261,6 +278,67 @@ describe('MessageRow — reply-count badge', () => {
       <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />
     )
     expect(screen.queryByRole('button', { name: /replies?/i })).not.toBeInTheDocument()
+  })
+
+  it('prefers userDisplayName over sender.engName for the sender label', () => {
+    render(
+      <MessageRow
+        message={{ ...msg, userDisplayName: 'Alice Lee (愛麗絲)' }}
+        room={room}
+        context="main"
+        onThread={() => {}}
+        onReply={() => {}}
+        onJumpToMessage={() => {}}
+      />,
+    )
+    expect(screen.getByText('Alice Lee (愛麗絲)')).toBeInTheDocument()
+    expect(screen.queryByText('Alice')).not.toBeInTheDocument()
+  })
+
+  it('shows a pinned indicator when pinnedAt is set', () => {
+    render(
+      <MessageRow
+        message={{ ...msg, pinnedAt: '2026-05-13T11:00:00Z', pinnedBy: { account: 'bob', engName: 'Bob' } }}
+        room={room}
+        context="main"
+        onThread={() => {}}
+        onReply={() => {}}
+        onJumpToMessage={() => {}}
+      />,
+    )
+    expect(screen.getByLabelText(/pinned/i)).toBeInTheDocument()
+  })
+
+  it('renders no pinned indicator on an unpinned message', () => {
+    render(
+      <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+    )
+    expect(screen.queryByLabelText(/pinned/i)).not.toBeInTheDocument()
+  })
+
+  it('renders attachments with URLs built from the media base', () => {
+    const message = {
+      ...msg,
+      attachments: [
+        { id: 'a1', title: 'doc.pdf', type: 'file', titleLink: 'api/v1/file/rooms/r1/file/a1', fileType: 'application/pdf' },
+      ],
+    }
+    render(
+      <MessageRow message={message} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+    )
+    expect(screen.getByRole('link', { name: /doc\.pdf/ })).toHaveAttribute(
+      'href',
+      'https://media.test/api/v1/file/rooms/r1/file/a1',
+    )
+  })
+
+  it('renders reaction chips carried by the message', () => {
+    const message = { ...msg, reactions: { '👍': [{ account: 'bob', displayName: 'Bob' }] } }
+    render(
+      <MessageRow message={message} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+    )
+    expect(screen.getByText('👍')).toBeInTheDocument()
+    expect(screen.getByText('1')).toBeInTheDocument()
   })
 
   it('no badge inside the thread panel even when tcount > 0', () => {

@@ -65,3 +65,88 @@ describe('MessageList', () => {
     expect(screen.getByTestId('row-r1').getAttribute('data-context')).toBe('thread')
   })
 })
+
+describe('MessageList: load-older-on-scroll', () => {
+  function scrollList(container, scrollTop) {
+    const list = container.querySelector('.message-list')
+    // jsdom has no layout — assign the properties the handler reads.
+    Object.defineProperty(list, 'scrollTop', { value: scrollTop, writable: true, configurable: true })
+    Object.defineProperty(list, 'scrollHeight', { value: 1000, writable: true, configurable: true })
+    list.dispatchEvent(new Event('scroll', { bubbles: true }))
+    return list
+  }
+
+  it('calls onLoadOlder when scrolled near the top and more older exist', () => {
+    const onLoadOlder = vi.fn()
+    const { container } = render(
+      <MessageList
+        messages={msgs}
+        hasLoadedHistory
+        context="main"
+        onLoadOlder={onLoadOlder}
+        hasMoreOlder
+      />,
+    )
+    scrollList(container, 10)
+    expect(onLoadOlder).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT call onLoadOlder when already loading', () => {
+    const onLoadOlder = vi.fn()
+    const { container } = render(
+      <MessageList
+        messages={msgs}
+        hasLoadedHistory
+        context="main"
+        onLoadOlder={onLoadOlder}
+        hasMoreOlder
+        loadingOlder
+      />,
+    )
+    scrollList(container, 10)
+    expect(onLoadOlder).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call onLoadOlder when there are no more older messages', () => {
+    const onLoadOlder = vi.fn()
+    const { container } = render(
+      <MessageList
+        messages={msgs}
+        hasLoadedHistory
+        context="main"
+        onLoadOlder={onLoadOlder}
+        hasMoreOlder={false}
+      />,
+    )
+    scrollList(container, 10)
+    expect(onLoadOlder).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call onLoadOlder when scrolled well below the top', () => {
+    const onLoadOlder = vi.fn()
+    const { container } = render(
+      <MessageList
+        messages={msgs}
+        hasLoadedHistory
+        context="main"
+        onLoadOlder={onLoadOlder}
+        hasMoreOlder
+      />,
+    )
+    scrollList(container, 800)
+    expect(onLoadOlder).not.toHaveBeenCalled()
+  })
+
+  it('renders the older-loading indicator when loadingOlder is true', () => {
+    render(
+      <MessageList
+        messages={msgs}
+        hasLoadedHistory
+        context="main"
+        hasMoreOlder
+        loadingOlder
+      />,
+    )
+    expect(screen.getByText(/earlier messages/i)).toBeInTheDocument()
+  })
+})

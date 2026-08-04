@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
-	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
@@ -51,37 +49,4 @@ func (s *mongoHRIdentityStore) FindUserByAccount(ctx context.Context, account st
 		return nil, fmt.Errorf("find user by account: %w", err)
 	}
 	return u, nil // FindOne yields (nil,nil) on no match
-}
-
-// UpsertUserIdentities builds the $set doc by hand (never a full-doc replace) so a
-// migrated identity write can't wipe roles/password/services on the live auth store.
-func (s *mongoHRIdentityStore) UpsertUserIdentities(ctx context.Context, users []model.IUserWithChange) error {
-	models := make([]mongo.WriteModel, 0, len(users))
-	for i := range users {
-		u := &users[i].User
-		if u.Account == "" {
-			// account is the identity key; an empty one would clobber every keyless row.
-			slog.WarnContext(ctx, "skip user identity upsert: empty account")
-			continue
-		}
-		models = append(models, mongo.NewUpdateOneModel().
-			// account is globally unique (users has a unique index on it), so it alone keys
-			// the identity. Migrated Teams users carry no employeeId — it is left unset.
-			SetFilter(bson.M{"account": u.Account}).
-			SetUpdate(bson.M{
-				"$set": bson.M{
-					"siteId": u.SiteID, "engName": u.EngName, "chineseName": u.ChineseName,
-				},
-				// Fresh UUIDv7 _id on insert — the persisted UserID search-sync reads back by account.
-				"$setOnInsert": bson.M{"_id": idgen.GenerateUUIDv7()},
-			}).
-			SetUpsert(true))
-	}
-	if len(models) == 0 {
-		return nil // BulkWrite errors on an empty slice; no-op cleanly.
-	}
-	if _, err := s.users.BulkWrite(ctx, models); err != nil {
-		return fmt.Errorf("bulk upsert user identities: %w", err)
-	}
-	return nil
 }

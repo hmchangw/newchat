@@ -7,26 +7,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
-
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/teams-hr-sync/transform"
 )
-
-const encodingZstd = "zstd"
-
-// zstdEncoder is a process-wide encoder reused across every publish; klauspost's
-// EncodeAll is safe for concurrent use.
-var zstdEncoder = mustNewZstdEncoder()
-
-func mustNewZstdEncoder() *zstd.Encoder {
-	e, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
-	if err != nil {
-		panic(fmt.Sprintf("init zstd encoder: %v", err))
-	}
-	return e
-}
 
 // publishFunc publishes one JetStream message with a Nats-Encoding value;
 // injected so unit tests capture payloads without a NATS connection.
@@ -89,5 +74,5 @@ func (p *publisher) publishZstd(ctx context.Context, subj string, payload any) e
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
-	return p.publish(ctx, subj, zstdEncoder.EncodeAll(data, nil), encodingZstd)
+	return p.publish(ctx, subj, natsutil.EncodeZstd(data), natsutil.EncodingZstd)
 }

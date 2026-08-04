@@ -27,12 +27,17 @@ func TestRun_HappyPath(t *testing.T) {
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: seenAt}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
 		Return([]msgraph.ChatMemberDetail{member("u1"), member("u2")}, nil)
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
-		Return(map[string]string{"u1": "alice", "u2": "bob"}, nil)
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]teamsUserRef{
+			"u1": {account: "alice", displayName: "Alice Smith"},
+			"u2": {account: "bob", displayName: "Bob Jones"},
+		}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", seenAt, gomock.Len(2), wtNow).DoAndReturn(
 		func(_ context.Context, _ string, _ time.Time, members []model.TeamsChatMember, _ time.Time) error {
 			assert.Equal(t, "alice", members[0].Account)
+			assert.Equal(t, "Alice Smith", members[0].DisplayName)
 			assert.Equal(t, "bob", members[1].Account)
+			assert.Equal(t, "Bob Jones", members[1].DisplayName)
 			return nil
 		})
 
@@ -52,7 +57,7 @@ func TestRun_GraphFailureKeepsFlagAndFailsRun(t *testing.T) {
 		Return(nil, fmt.Errorf("graph returned status 429"))
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:ok").
 		Return([]msgraph.ChatMemberDetail{member("u1")}, nil)
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).Return(map[string]string{"u1": "a"}, nil)
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).Return(map[string]teamsUserRef{"u1": {account: "a"}}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:ok", gomock.Any(), gomock.Len(1), wtNow).Return(nil)
 	// No SetMembersSynced for 19:bad: its needMemberSync must stay true.
 
@@ -66,7 +71,7 @@ func TestRun_WriteFailureFailsChat(t *testing.T) {
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:g1", UpdatedAt: wtNow}}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g1").
 		Return([]msgraph.ChatMemberDetail{member("u1")}, nil)
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).Return(map[string]string{"u1": "a"}, nil)
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).Return(map[string]teamsUserRef{"u1": {account: "a"}}, nil)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", gomock.Any(), gomock.Any(), wtNow).
 		Return(fmt.Errorf("mongo down"))
 
@@ -80,8 +85,8 @@ func TestRun_SupersededChatIsBenign(t *testing.T) {
 		Return([]msgraph.ChatMemberDetail{member("u1")}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:g2").
 		Return([]msgraph.ChatMemberDetail{member("u2")}, nil)
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).
-		Return(map[string]string{"u1": "a", "u2": "b"}, nil).AnyTimes()
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]teamsUserRef{"u1": {account: "a"}, "u2": {account: "b"}}, nil).AnyTimes()
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g1", gomock.Any(), gomock.Any(), wtNow).Return(errSuperseded)
 	chats.EXPECT().SetMembersSynced(gomock.Any(), "19:g2", gomock.Any(), gomock.Any(), wtNow).Return(nil)
 
@@ -99,19 +104,19 @@ func TestRun_ListChatsFailure(t *testing.T) {
 func TestRun_SharedMemberResolvedOncePerRun(t *testing.T) {
 	s, chats, users, graph := newTestSyncer(t, 4)
 	chats.EXPECT().ListChatsToSync(gomock.Any()).Return([]ChatToSync{{ID: "19:a", UpdatedAt: wtNow}, {ID: "19:b", UpdatedAt: wtNow}}, nil)
-	// Both chats contain the same member u9; the account cache resolves it once.
+	// Both chats contain the same member u9; the user-ref cache resolves it once.
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:a").
 		Return([]msgraph.ChatMemberDetail{member("u9")}, nil)
 	graph.EXPECT().ListChatMembers(gomock.Any(), "19:b").
 		Return([]msgraph.ChatMemberDetail{member("u9")}, nil)
 	var calls int
 	var mu sync.Mutex
-	users.EXPECT().AccountsByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, ids []string) (map[string]string, error) {
+	users.EXPECT().UsersByIDs(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, ids []string) (map[string]teamsUserRef, error) {
 			mu.Lock()
 			calls++
 			mu.Unlock()
-			return map[string]string{"u9": "nine"}, nil
+			return map[string]teamsUserRef{"u9": {account: "nine"}}, nil
 		}).MaxTimes(2) // cache dedups; with a concurrency window it is 1, worst case 2 — never per-chat unbounded
 	chats.EXPECT().SetMembersSynced(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Len(1), wtNow).Return(nil).Times(2)
 

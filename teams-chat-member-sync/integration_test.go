@@ -111,21 +111,24 @@ func TestMongoStore_SetMembersSynced_Superseded(t *testing.T) {
 	assert.Equal(t, seededMembers, got.Members, "members unchanged")
 }
 
-func TestMongoStore_AccountsByIDs(t *testing.T) {
+func TestMongoStore_UsersByIDs(t *testing.T) {
 	db := testutil.MongoDB(t, "teamsmembersync")
 	store := newMongoStore(db, db)
 	ctx := context.Background()
 	_, err := store.readUsers.Raw().InsertMany(ctx, []any{
-		model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", SiteID: "site-a"},
-		model.TeamsUser{ID: "u2", UPN: "bob@corp.example", Account: "bob", SiteID: "site-b"},
+		model.TeamsUser{ID: "u1", UPN: "alice@corp.example", Account: "alice", DisplayName: "Alice Smith", SiteID: "site-a"},
+		model.TeamsUser{ID: "u2", UPN: "bob@corp.example", Account: "bob", DisplayName: "Bob Jones", SiteID: "site-b"},
 	})
 	require.NoError(t, err)
 
-	got, err := store.AccountsByIDs(ctx, []string{"u1", "u2", "ghost"})
+	got, err := store.UsersByIDs(ctx, []string{"u1", "u2", "ghost"})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"u1": "alice", "u2": "bob"}, got, "unknown id absent from map")
+	assert.Equal(t, map[string]teamsUserRef{
+		"u1": {account: "alice", displayName: "Alice Smith"},
+		"u2": {account: "bob", displayName: "Bob Jones"},
+	}, got, "unknown id absent from map")
 
-	empty, err := store.AccountsByIDs(ctx, nil)
+	empty, err := store.UsersByIDs(ctx, nil)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }

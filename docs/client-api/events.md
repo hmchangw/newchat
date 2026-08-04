@@ -103,7 +103,7 @@ Two shapes exist — discriminated by `action`:
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path. |
-| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
+| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
 | `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. |
 | `timestamp` | number | Epoch ms (UTC). |
@@ -118,11 +118,24 @@ Two shapes exist — discriminated by `action`:
     "roomType": "channel",
     "siteId": "siteA",
     "roles": ["member"],
-    "joinedAt": "2026-05-06T08:01:23Z"
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": {
+      "siteId": "siteA",
+      "name": "engineering-announcements",
+      "crossSite": false,
+      "userCount": 12,
+      "appCount": 1,
+      "lastMsgAt": "2026-05-06T07:59:01Z",
+      "lastMsgId": "01970a4f8c2d7c9aM123",
+      "lastMentionAllAt": "2026-05-05T11:00:00Z",
+      "minUserLastSeenAt": "2026-05-04T09:30:00Z",
+      "privateKey": "<base64-encoded 32-byte room secret>",
+      "keyVersion": 0
+    }
   },
   "action": "added",
   "roomName": "engineering-announcements",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -155,7 +168,7 @@ fields are sent.
     "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "bob", "isBot": false }
   },
   "action": "removed",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -183,19 +196,21 @@ server never injects defaults).
 | Field | Type | Notes |
 |---|---|---|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | Full post-update settings; all seven fields optional. |
+| `settings` | UserSettings | Full post-update settings; all nine fields optional. |
 
 UserSettings — every field optional, present only when explicitly set:
 
 | Field | Type |
 |---|---|
 | `fullWidth` | boolean |
+| `themePreference` | string (`system`\|`light`\|`dark`) |
 | `translateMessageInto` | string |
-| `showMessagePreviewInSidebarList` | boolean |
+| `messagePreviewEnabled` | boolean |
 | `muteAllNotifications` | boolean |
-| `showMessagesAndPreviewsInNotifications` | boolean |
-| `showNotificationsDuringCallsAndMeetings` | boolean |
-| `scrollToBottomInChat` | boolean |
+| `alwaysAllowPriorityNotifications` | boolean |
+| `showPreviewsInNotifications` | boolean |
+| `showNotificationsInCall` | boolean |
+| `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 
 ```json
 {
@@ -210,7 +225,7 @@ UserSettings — every field optional, present only when explicitly set:
 
 **Subject:** `chat.user.{account}.event.room.key`
 
-Delivers the AES-256-GCM room key to channel members, **bots included** — bots receive it on their **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token, the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend). Fired at create, add, and remove.
+Delivers the AES-256-GCM room key to channel members on **key rotation** (member remove), **bots included** — bots receive it on their **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token, the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend). The **initial** key no longer arrives on this subject: create and add deliver it inline on the `added` `subscription.update` (`subscription.room.privateKey` / `keyVersion`).
 DM/botDM rooms are never encrypted and emit no key event.
 
 | Field | Type | Notes |
@@ -231,14 +246,14 @@ DM/botDM rooms are never encrypted and emit no key event.
 
 **When fired:**
 
-- **Create Room (channel):** one event per initial enrolled member.
-- **Add Members (channel):** one event per newly-subscribed member; existing members receive no duplicate. Bots receive the key on their encoded per-user subject (see §5 in the canonical doc).
 - **Remove Member (channel):** the key is rotated; every surviving member receives a new event with `version` incremented. The removed account stops receiving events.
+- **Create Room / Add Members no longer fire this event.** The initial key rides the `added` `subscription.update` (`subscription.room.privateKey` / `keyVersion`), delivered to each newly-subscribed member — bots on their encoded per-user subject (see §5 in the canonical doc).
 
-**Initial key bootstrap on (re)connect:** live events fire only when keys change.
+**Initial key bootstrap on (re)connect:** live events fire only on rotation.
 The initial key set is delivered via `room.privateKey` / `room.keyVersion` on each
 enriched [Subscription](../client-api.md#subscriptionroom) returned by
-`subscription.list` / `subscription.getChannels` / etc.
+`subscription.list` / `subscription.getChannels` / etc., and on the `added`
+`subscription.update` for rooms joined mid-session.
 
 **On-demand fetch:** if a client holds no key for `(roomId, version)` (e.g. reconnected
 after the live event was delivered), call
@@ -694,7 +709,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
   "type": "room_renamed",
   "roomId": "01970a4f8c2d7c9aQ",
   "siteId": "siteA",
-  "timestamp": 1746518483000,
+  "timestamp": 1778054483000,
   "newName": "engineering-general",
   "byAccount": "alice",
   "renamedAt": "2026-05-06T08:01:23Z"

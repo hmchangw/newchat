@@ -13,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/timeutil"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/models"
 	"github.com/hmchangw/chat/user-service/service/mocks"
@@ -1010,7 +1011,7 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 	}}
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
-	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}).
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}, map[string]model.RoomTimeHint{}).
 		Return(map[string]model.PreviewMessage{"r1": {MessageID: "m9", Content: "hi", CreatedAt: time.Unix(123, 0).UTC()}}, nil)
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err)
@@ -1019,6 +1020,39 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 	require.NotNil(t, room)
 	require.NotNil(t, room.PreviewMessage, "last message attached from rooms.get")
 	assert.Equal(t, "m9", room.PreviewMessage.MessageID)
+}
+
+// enrichLastMessage must build a hint from each room's already-resolved
+// LastMsgAt (set by enrichLocal before this runs) so history-service can skip
+// its own room-times read; a room with no Room object (soft-deleted) must
+// contribute no hint entry.
+func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
+	svc, subs, history := newSvcRawHistory(t)
+	lastMsgAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	storeSubs := []model.EnrichedSubscription{
+		{
+			Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
+			RoomName:     "General", UserCount: 3, LastMsgAt: &lastMsgAt,
+		},
+		{
+			// Soft-deleted: buildLocalRoom returns nil Room, so no hint for r2.
+			Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "old-room", RoomType: model.RoomTypeChannel},
+			RoomName:     "Del-old-room",
+		},
+	}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	wantHints := map[string]model.RoomTimeHint{"r1": {LastMsgAt: timeutil.TimeToMillis(&lastMsgAt)}}
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1", "r2"}, wantHints).
+		Return(map[string]model.PreviewMessage{}, nil)
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 2, "a local soft-deleted sub is kept with no Room, not dropped")
+	room1 := resp.Subscriptions[0].Base().Room
+	require.NotNil(t, room1)
+	room2 := resp.Subscriptions[1].Base().Room
+	assert.Nil(t, room2, "soft-deleted local room has no Room object")
 }
 
 // includeLastMessage:false skips the rooms.get RPC entirely.
@@ -1048,7 +1082,7 @@ func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	}}
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
-	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}).
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}, map[string]model.RoomTimeHint{}).
 		Return(nil, errors.New("history down"))
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err, "a degraded rooms.get must not fail the list")
@@ -1056,4 +1090,35 @@ func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	room := resp.Subscriptions[0].Base().Room
 	require.NotNil(t, room)
 	assert.Nil(t, room.PreviewMessage, "degraded site leaves LastMessage nil")
+}
+
+func TestBuildLocalRoom_CrossSite(t *testing.T) {
+	sub := &model.EnrichedSubscription{}
+	sub.CrossSite = ptrBool(true)
+	sub.RoomName = "chan"
+	got := buildLocalRoom(sub)
+	require.NotNil(t, got)
+	require.NotNil(t, got.CrossSite)
+	assert.True(t, *got.CrossSite)
+}
+
+func TestApplyRoomInfo_CrossSite(t *testing.T) {
+	sub := &model.Subscription{}
+	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan", CrossSite: ptrBool(true)})
+	assert.False(t, drop)
+	require.NotNil(t, sub.Room)
+	require.NotNil(t, sub.Room.CrossSite)
+	assert.True(t, *sub.Room.CrossSite)
+}
+
+// TestApplyRoomInfo_CrossSite_Nil pins that an unclassified cross-site room
+// (RoomInfo.CrossSite nil) passes through as nil on the SubscriptionRoom —
+// never coerced to false — so the wire response omits the field and the
+// frontend's `?? true` default resolves it to global (fail-safe).
+func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
+	sub := &model.Subscription{}
+	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan"})
+	assert.False(t, drop)
+	require.NotNil(t, sub.Room)
+	assert.Nil(t, sub.Room.CrossSite)
 }

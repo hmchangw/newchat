@@ -63,6 +63,8 @@ paths.
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
+   - [3.6 translation-service](#36-translation-service)
+     - [Translate Text](#translate-text)
 4. [Message Send](#4-message-send)
 5. [Room Encryption](#5-room-encryption)
 6. [Error envelope reference](#6-error-envelope-reference)
@@ -77,7 +79,7 @@ paths.
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
-    - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/register (admin)](#112-http--post-apiv1cardsregister-admin)
+    - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/validate (admin)](#112-http--post-apiv1cardsvalidate-admin)
 
 ---
 
@@ -87,7 +89,7 @@ This doc covers the public client-facing API surface only.
 
 **Out of scope (backend-internal — clients never see these):**
 
-- Backend-only JetStream subjects (MESSAGES, MESSAGES_CANONICAL, INBOX, ROOMS, OUTBOX streams).
+- Backend-only JetStream subjects (MESSAGES, MESSAGES-CANONICAL, INBOX, ROOMS, OUTBOX streams).
 - Server-to-server subjects (`chat.server.request.…`).
 
 Room-encryption key events that clients consume are documented under the RPC that triggers them (Create Room, Add Members, Remove Member) and in [§5 Room Encryption](#5-room-encryption). Multi-site federation is transparent to clients: a cross-site action delivers the **same** events on the same `chat.user.{account}.…` / `chat.room.…` subjects as a same-site action, so this doc does not distinguish them.
@@ -159,7 +161,8 @@ Login is a three-step sequence: portal userInfo lookup (§2.3) resolves the user
 | Publish | `_INBOX.>` | Required for the standard NATS request/reply pattern (the auto-generated reply inbox). |
 | Publish | `chat.user.presence.*.query.batch` | Batch presence-state queries. Read-only for the state broadcast (`chat.user.presence.state.*`) — this subject is deliberately named `query` so it cannot match the state pub-rule. |
 | Subscribe | `chat.user.{account}.>` | Receives all responses, notifications, and per-user events. |
-| Subscribe | `chat.room.>` | Subscribes to per-room message streams and room events for any room the user belongs to. |
+| Subscribe | `chat.room.>` | Subscribes to per-room message streams and room events for cross-site rooms (`crossSite: true`) the user belongs to. |
+| Subscribe | `chat.local.room.>` | Subscribes to per-room message streams and room events for same-site rooms (`crossSite: false`) the user belongs to. |
 | Subscribe | `_INBOX.>` | Required to receive replies to client-issued requests. |
 | Subscribe | `chat.user.presence.state.*` | Read anyone's live presence state broadcast. |
 
@@ -168,7 +171,7 @@ Permissions and connection limits come from the auth-service account's scoped si
 **Recommended baseline subscriptions on connect:**
 
 - `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
-- `chat.room.{roomID}.event` for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel.
+- the room-event subject for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel. Pick the subject by the room's `crossSite` flag (from `subscription.list`): `chat.room.{roomID}.event` when `crossSite: true`, `chat.local.room.{roomID}.event` when `crossSite: false`. **Absent/unknown `crossSite` defaults to the global `chat.room.{roomID}.event`** (fail-safe — a global room misrouted to the local subject would silently miss cross-site delivery).
 
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
 
@@ -666,6 +669,53 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 ---
 
+#### GET /api/v3/rooms/:roomId/protected-image/:fileId
+
+**Endpoint:** `GET /api/v3/rooms/:roomId/protected-image/:fileId`
+**Reply:** synchronous HTTP response (raw file bytes, not JSON)
+
+Backward-compatible download for inline images referenced by **legacy message
+data** (produced by a prior system version). Behaves exactly like
+`GET /api/v1/file/rooms/:roomId/file/:fileId` above, except the bytes are proxied
+from a **separate (legacy) Drive backend** with its own credentials. The client
+calls this with the old-style path preserved in legacy messages.
+
+#### Request
+
+| Field | Source | Type | Required | Notes |
+|---|---|---|---|---|
+| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
+| `fileId` | path | string | yes | Legacy Drive file ID (from the original message data). |
+| `drive_host` | query | string | yes | Legacy Drive base URL carried in the legacy message data. |
+
+#### Success response
+
+`HTTP 200` — raw image binary streamed directly (not JSON), with the upstream
+`Content-Type` (defaulting to `application/octet-stream`).
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). HTTP statuses:
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is required" }` — also `roomId is required`, `fileId is required`. |
+| 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
+| 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
+| 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context. |
+| 503 | `unavailable` | — | `{ "code": "unavailable", "error": "failed to retrieve file" }` — Drive signer/download failure. |
+
+#### Triggered events — success path
+
+`None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+---
+
 #### GET /api/v1/file-upload/:fileId/:fileName
 
 **Endpoint:** `GET /api/v1/file-upload/:fileId/:fileName`
@@ -864,8 +914,11 @@ display name for botDMs. It is never overwritten by the room's canonical name.
 
 All room-derived properties live under the nested `room` object
 ([SubscriptionRoom](#subscriptionroom)), populated at read time by the
-user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
-**not** present on subscriptions embedded in `subscription.update` events.
+user-service endpoints via room-service's `GetRoomsInfo` enrichment. On
+`subscription.update` events, `room` is populated **only** on `action:
+"added"` (built by room-worker at publish time, `previewMessage` always
+omitted, `privateKey`/`keyVersion` present only for encrypted channel rooms);
+it is absent on every other action.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -890,7 +943,7 @@ user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
 | `threadUnread` | string[] | Optional. Thread room IDs with unread replies. |
 | `restricted` | boolean | Optional. Denormalized room restricted flag. |
 | `externalAccess` | boolean | Optional. Denormalized room external-access flag. |
-| `room` | [SubscriptionRoom](#subscriptionroom) | Optional. Room-derived view (read-time enrichment; user-service endpoints only). |
+| `room` | [SubscriptionRoom](#subscriptionroom) | Optional. Room-derived view. Populated at read time by the user-service endpoints, and at publish time by room-worker on `added` `subscription.update` events (no user-service read needed); absent on every other event action. |
 | `favoriteUpdatedAt` | RFC3339 timestamp | Optional. Last time the user toggled favorite on the room (also bumped on un-favorite). |
 | `muteUpdatedAt` | RFC3339 timestamp | Optional. Last time the subscription's mute state changed. |
 | `rolesUpdatedAt` | RFC3339 timestamp | Optional. Last time the subscription's roles changed. |
@@ -900,15 +953,19 @@ user-service endpoints via room-service's `GetRoomsInfo` enrichment. `room` is
 #### SubscriptionRoom
 
 The room-derived view nested on an enriched [Subscription](#subscription).
-**Local** rooms are populated from the Mongo `$lookup` baseline (room metadata
-plus the E2E key) with no RPC. **Cross-site** rooms are populated from
-room-service's `GetRoomsInfo` RPC; if that RPC fails or the room isn't found, the
-`room` object is **omitted entirely** — the subscription still carries its own
-top-level `siteId`. All fields are optional (omitted when zero/unset).
+On the list endpoints, **local** rooms are populated from the Mongo `$lookup`
+baseline (room metadata plus the E2E key) with no RPC and **cross-site** rooms
+from room-service's `GetRoomsInfo` RPC; if that RPC fails or the room isn't
+found, the `room` object is **omitted entirely** — the subscription still
+carries its own top-level `siteId`. On `added` `subscription.update` events the
+same view is built by room-worker at publish time from the room's home-site
+document (`previewMessage` always omitted there). All fields are optional
+(omitted when zero/unset).
 
 | Field | Type | Notes |
 |---|---|---|
 | `siteId` | string | The room's home site. |
+| `crossSite` | bool | Tri-state. `true` → the room's real-time events are on `chat.room.{roomId}.>` (cross-gateway); `false` → CONFIRMED same-site, on `chat.local.room.{roomId}.>` (site-local). Omitted when the room's locality is unknown/unclassified (a pre-existing room the server hasn't classified yet) — clients MUST treat a missing value as `true` (global), never as `false`. |
 | `name` | string | The room's canonical name (may differ from the subscription `name`). |
 | `userCount` | number | Member count — human members, including QA `p_` test accounts (ordinary users). |
 | `appCount` | number | App count — `.bot` bots plus the `p_admin` platform-admin pseudo-account. |
@@ -1119,9 +1176,7 @@ The creator (from the subject) plus any members supplied via `users` / `orgs` / 
 
 **1. `chat.user.{account}.response.{requestID}`** — an `AsyncJobResult` to the requester when the job finishes (requires the `X-Request-ID` header). See the [AsyncJobResult schema](#asyncjobresult). `operation` is `"room.create"`.
 
-**2. `chat.user.{account}.event.subscription.update`** — one per enrolled member (including the owner), `action: "added"`. See the [subscription.update schema](#subscriptionupdate-event) under Add Members.
-
-**3. `chat.user.{account}.event.room.key`** — **channel rooms only:** one `RoomKeyEvent` per enrolled local member. DM/botDM rooms are not encrypted and emit no key event. See [§5 Room Encryption](#5-room-encryption).
+**2. `chat.user.{account}.event.subscription.update`** — one per enrolled member (including the owner), `action: "added"`. See the [subscription.update schema](#subscriptionupdate-event) under Add Members. The embedded `subscription.room` carries the room view — for **channel** rooms including the E2E key (`room.privateKey` / `room.keyVersion`); DM/botDM rooms are not encrypted and carry no key fields. No separate `room.key` event fires on create — see [§5 Room Encryption](#5-room-encryption).
 
 For **channel** rooms, the first messages (`type: "room_created"`, then `type: "members_added"` when initial members were enrolled) flow through the normal message pipeline and arrive as `new_message` room events (see [§4](#4-message-send)).
 
@@ -1147,7 +1202,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional; the server derives the room ID from the subject and ignores any non-matching value. |
-| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant**, else the request is rejected (see Error response); a bot whose home site differs from the room's is allowed (cross-site bot membership). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive both the `subscription.update` and the `room.key` event on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_admin` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
+| `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant**, else the request is rejected (see Error response); a bot whose home site differs from the room's is allowed (cross-site bot membership). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive the `subscription.update` event (with the room key inline under `subscription.room`) on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_admin` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
@@ -1210,12 +1265,12 @@ Shared by Add Members, Remove Member, and Update Member Role.
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path (only `subscription.u.account` is set there). |
-| `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
-| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, or `"opened"`. |
+| `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
+| `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
-On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is always present as a field (empty on `mute_toggled` / `favorite_toggled` / `opened`). `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
+On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is `omitempty`: set on `added` / `role_updated`, omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
 
 ```json
 {
@@ -1227,15 +1282,28 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
     "roomType": "channel",
     "siteId": "siteA",
     "roles": ["member"],
-    "joinedAt": "2026-05-06T08:01:23Z"
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": {
+      "siteId": "siteA",
+      "name": "engineering-announcements",
+      "crossSite": false,
+      "userCount": 12,
+      "appCount": 1,
+      "lastMsgAt": "2026-05-06T07:59:01Z",
+      "lastMsgId": "01970a4f8c2d7c9aM123",
+      "lastMentionAllAt": "2026-05-05T11:00:00Z",
+      "minUserLastSeenAt": "2026-05-04T09:30:00Z",
+      "privateKey": "<base64-encoded 32-byte room secret>",
+      "keyVersion": 0
+    }
   },
   "action": "added",
   "roomName": "engineering-announcements",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
-**3. `chat.user.{newMember}.event.room.key`** — a `RoomKeyEvent` per newly-subscribed member (channels). Existing members do not receive a duplicate. See [§5 Room Encryption](#5-room-encryption).
+**3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
 
@@ -1255,7 +1323,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
 > [!NOTE]
-> **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `room.key` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
+> **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
 
 ##### Triggered events — error path
 
@@ -1336,7 +1404,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
     "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "bob", "isBot": false }
   },
   "action": "removed",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -1436,7 +1504,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
   },
   "action": "role_updated",
   "roomName": "engineering-announcements",
-  "timestamp": 1746518483000
+  "timestamp": 1778054483000
 }
 ```
 
@@ -1520,7 +1588,7 @@ The event uses a **dedicated flat struct** (`type: "room_renamed"`) — mirrorin
   "type": "room_renamed",
   "roomId": "01970a4f8c2d7c9aQ",
   "siteId": "siteA",
-  "timestamp": 1746518483000,
+  "timestamp": 1778054483000,
   "newName": "engineering-general",
   "byAccount": "alice",
   "renamedAt": "2026-05-06T08:01:23Z"
@@ -1532,7 +1600,7 @@ The event uses a **dedicated flat struct** (`type: "room_renamed"`) — mirrorin
 
 **2. `chat.user.{requesterAccount}.response.{requestID}`** — an [`AsyncJobResult`](#asyncjobresult) to the requester when the rename finishes (requires `X-Request-ID`). `operation` is `"room.rename"`. `status` is `"ok"` on success or `"error"` if the async job fails.
 
-**3. Cross-site inbox events** — one event per remote site that has federated members. Published directly to `chat.inbox.{remoteSiteID}.external.room_renamed` (the destination's `INBOX_{remoteSiteID}` stream); remote `inbox-worker` mirrors the rename.
+**3. Cross-site inbox events** — one event per remote site that has federated members. Published directly to `chat.inbox.{remoteSiteID}.external.room_renamed` (the destination's `INBOX-{remoteSiteID}` stream); remote `inbox-worker` mirrors the rename.
 
 ##### Triggered events — error path
 
@@ -1679,7 +1747,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"only room me
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Upper bound on returned rows. When omitted, the server uses `min(3, room.userCount)` (an empty room returns an empty list); when supplied, must be `> 0` and `<= room.userCount`. Fewer rows may come back — members with an empty `statusText` are omitted (see `members`). |
+| `limit` | number | no | Upper bound on returned rows. When omitted, the server uses `min(3, room.userCount)` (an empty room returns an empty list); when supplied, must be `> 0` and `<= room.userCount`. Fewer rows may come back — members with an empty `statusText` or with `statusIsShow=false` are omitted (see `members`). |
 
 ```json
 { "limit": 5 }
@@ -1689,7 +1757,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"only room me
 
 | Field | Type | Notes |
 |---|---|---|
-| `members` | array<MemberStatus> | One entry per room subscription **with a non-empty `statusText`**, projected from the joined `users` document. Members without a status set are omitted. |
+| `members` | array<MemberStatus> | One entry per room subscription **with a non-empty `statusText` and `statusIsShow=true`**, projected from the joined `users` document. Members without a status set, or who have opted out of surfacing it (`statusIsShow=false`), are omitted. |
 
 `MemberStatus`:
 
@@ -1698,7 +1766,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"only room me
 | `account` | string | The user's account. |
 | `engName` | string | English display name. |
 | `chineseName` | string | Chinese display name. |
-| `statusIsShow` | boolean | Whether the user has chosen to surface their status text. |
+| `statusIsShow` | boolean | Whether the user has chosen to surface their status text. Always `true` — members with `statusIsShow=false` are omitted from `members`. |
 | `statusText` | string | Free-form presence text (e.g. `"available"`, `"in a meeting"`); always non-empty — members without a status are omitted from `members`. |
 
 ```json
@@ -2508,7 +2576,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 #### Start Teams Meeting
 
-Creates a Microsoft Teams `onlineMeeting` via the Graph API and returns its join URL. **Idempotent per room, including under concurrency:** the meeting is created via Graph's `createOrGet` endpoint keyed on a stable per-room `externalId`, and a first-class `teams_meetings` record with a unique key on `(roomId, siteId)` guards local state. Repeated or concurrent calls for the same room return the same meeting and publish exactly one `teams_meet_started` system message. The organizer and attendees are resolved to their Azure AD object IDs via a ROPC `User.Read.All` service account (`TEAMS_ROPC_USERNAME`/`TEAMS_ROPC_PASSWORD`); the organizer object ID scopes Graph's `createOrGet` and attendees are added by object ID. An attendee that cannot be resolved is omitted; an unresolvable organizer fails the request.
+Creates a Microsoft Teams `onlineMeeting` via the Graph API and returns its join URL. **Idempotent per room, including under concurrency:** the meeting is created via Graph's `createOrGet` endpoint keyed on a stable per-room `externalId`, and a first-class `teams_meetings` record with a unique key on `(roomId, siteId)` guards local state. Repeated or concurrent calls for the same room return the same meeting and publish exactly one `teams_meet_started` system message. The organizer and attendees are resolved to their Azure AD object IDs via the app-only `User.Read.All` Service Principal that creates the meeting; the organizer object ID scopes Graph's `createOrGet` and attendees are added by object ID. An attendee that cannot be resolved is omitted; an unresolvable organizer fails the request.
 
 > Graph client details (config env vars, app-only auth, the `createOrGet` idempotency key, the production application-access-policy requirement, and how to test without real credentials) are documented in [`docs/msgraph-client.md`](msgraph-client.md).
 
@@ -2549,7 +2617,7 @@ See [Error envelope](#6-error-envelope-reference).
 | — | `bad_request` | `roomId` empty (subject malformed). |
 | `not_room_member` | `forbidden` | Caller is not a member of the room. |
 | `max_room_size_reached` | `conflict` | Room has more than `ROOM_MEMBERS_LIMIT` (500) members. |
-| — | `internal` | Teams meetings not configured (including missing ROPC directory credentials), the organizer could not be resolved to an Azure object ID, or the Graph create failed. |
+| — | `internal` | Teams meetings not configured (Azure app credentials unset), the organizer could not be resolved to an Azure object ID, or the Graph create failed. |
 
 ##### Triggered events — success path
 
@@ -2593,15 +2661,15 @@ The paginated read RPCs (Load History, Load Next, Load Surrounding, Get Thread M
 
 | Field | Type | Notes |
 |---|---|---|
-| `lastMsgAt` | number | Optional. Room's most-recent-message time, UTC ms. |
-| `createdAt` | number | Optional. Room's creation time, UTC ms. |
+| `lastMsgAt` | number | Optional. Room's most-recent-message time, UTC ms. Supplying a valid value is what lets the server skip its MongoDB lookup. |
+| `createdAt` | number | Optional. Room's creation time, UTC ms. A refinement only — narrows the scan's lower bound; its absence never forces a lookup. |
 
-**What to pass for `meta`:** the server needs the room's `lastMsgAt` and `createdAt` to pick the Cassandra time-bucket window to scan. `meta` lets the client supply the values it already holds so the server can skip a MongoDB lookup:
+**What to pass for `meta`:** the server uses the room's `lastMsgAt` to pick the Cassandra time-bucket window to scan (and, when given, `createdAt` as the scan's lower bound). `meta` lets the client supply the values it already holds so the server can skip a MongoDB lookup:
 
-- `meta.lastMsgAt` — the room's most-recent-message time, as the client knows it from the room summary (the same `lastMsgAt` carried on `RoomEvent`s / the sidebar). Use the room's last-activity timestamp; for an empty room use its `createdAt`.
-- `meta.createdAt` — the room's creation time from the room summary.
+- `meta.lastMsgAt` — the room's most-recent-message time, as the client knows it from the room summary (the same `lastMsgAt` carried on `RoomEvent`s / the sidebar). **A valid `lastMsgAt` alone is sufficient to skip the lookup.** Use the room's last-activity timestamp; for an empty room use its `createdAt`.
+- `meta.createdAt` — the room's creation time from the room summary. Optional refinement: when present it floors the scan at the room's creation time instead of the server's default history window; when omitted the server still skips the lookup and simply uses that default floor.
 
-Both are **hints, not authority**: the server sanitizes them (ignores values that are negative, in the future, or mutually inconsistent) and falls back to a MongoDB fetch when a value is missing or fails sanitization. A client that does not have these values should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
+Both are **hints, not authority**: the server sanitizes each (values that are negative or in the future are ignored) and falls back to a MongoDB fetch when `lastMsgAt` is missing or fails sanitization — or when both are supplied but mutually inconsistent (a `createdAt` later than `lastMsgAt`), which triggers a re-fetch to resolve the inconsistency. A client that does not have `lastMsgAt` should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
 
 Common error envelopes across these RPCs (see §6 for the full shape):
 
@@ -3374,7 +3442,7 @@ Pin and unpin share the same flat `PinStateRoomEvent` payload; `type` discrimina
 
 ##### Backend side effects (internal — not client-subscribable)
 
-On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES-CANONICAL-{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -3482,7 +3550,7 @@ Same flat `PinStateRoomEvent` payload as [Pin Message](#pin-message); `type` dis
 
 ##### Backend side effects (internal — not client-subscribable)
 
-On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES-CANONICAL-{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -3901,6 +3969,17 @@ See [Error envelope](#6-error-envelope-reference).
       "card": {
         "template": "expense-approval-v1",
         "data": "eyJhbW91bnQiOjQyfQ=="
+      },
+      "tshow": true,
+      "sender": {
+        "account": "alice",
+        "hr": { "account": "alice", "chineseName": "王愛麗", "engName": "Alice Wong" }
+      },
+      "room": {
+        "id": "r1",
+        "name": "Bob Chan",
+        "type": "dm",
+        "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" }
       }
     }
   ],
@@ -3913,7 +3992,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `messages` | SearchMessage[] | Per-hit projection. Always an array (empty `[]` when no results). |
 | `total` | integer | Total matching hits (may exceed `messages.length` when paginating). |
 
-**`SearchMessage` fields** (all sourced directly from the ES message index — no Mongo round-trip):
+**`SearchMessage` fields** (base fields from the ES message index; `room`/`sender` resolved server-side):
 
 | Field | Type | Omitted when |
 |---|---|---|
@@ -3929,10 +4008,48 @@ See [Error envelope](#6-error-envelope-reference).
 | `threadParentMessageCreatedAt` | RFC3339 timestamp (nullable) | omitted when not a thread reply |
 | `attachments` | [Attachment](#attachment)[] | omitted when the message has no attachments |
 | `card` | [MessageCard](#messagecard) | omitted when the message carries no tcard |
+| `tshow` | boolean | omitted when false — set on a thread reply that is also shown in the parent channel timeline |
+| `sender` | [MessageSender](#messagesender) | present on every hit; `account` always set, `hr`/`appInfo` best-effort |
+| `room` | [MessageRoom](#messageroom) | present on every hit; `id` always set, `name`/`type`/`hrInfo`/`appInfo` best-effort |
 
 `attachments` and `card` are the message's payloads mirrored as-is from the index (same wire shape as history reads — decoded `Attachment` objects; `card.data` is base64-encoded bytes), so the client can render a hit (file row, tcard) without a follow-up history-service load.
 
-Display fields (user name, room name) are intentionally NOT carried in the response. Clients resolve them via their own subscription cache, subscription enrichment (HRInfo), or [profile.getByName](#profilegetbyname) (§3.4).
+`room` and `sender` are resolved server-side and are **best-effort**: individual fields are omitted when they cannot be resolved (e.g. the caller has no subscription for the room, or a federated channel's origin site is unreachable). The base message fields are always present.
+
+##### MessageSender
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | sender's account |
+| `hr` | [MessageHRInfo](#messagehrinfo) | human senders only; omitted when the users lookup missed |
+| `appInfo` | [MessageAppInfo](#messageappinfo) | bot senders only (`isSubscribed` never set here); omitted when the apps lookup missed |
+
+##### MessageRoom
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | roomId |
+| `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
+| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
+| `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
+| `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
+
+##### MessageHRInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | HR-directory account |
+| `chineseName` | string | omitted when empty |
+| `engName` | string | omitted when empty |
+
+##### MessageAppInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | app document id |
+| `name` | string | app display name |
+| `assistantName` | string | bot account (`assistant.name`) |
+| `isSubscribed` | boolean | `room.appInfo` only — the caller's subscription state for the bot (explicit `true`/`false`); absent on `sender.appInfo` |
 
 ##### Error response
 
@@ -4479,23 +4596,26 @@ None (empty payload).
 
 ##### Success response
 
-The stored settings object. All seven fields are optional and appear only when the user has explicitly set them:
+The stored settings object. All nine fields are optional and appear only when the user has explicitly set them:
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `fullWidth` | boolean | Full-width layout. |
+| `themePreference` | string | Theme: `"system"` \| `"light"` \| `"dark"`. |
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
-| `showMessagePreviewInSidebarList` | boolean | Show message previews in the sidebar list. |
+| `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. |
-| `showMessagesAndPreviewsInNotifications` | boolean | Show message content and previews in notifications. |
-| `showNotificationsDuringCallsAndMeetings` | boolean | Show notifications during calls and meetings. |
-| `scrollToBottomInChat` | boolean | Scroll to bottom when entering a chat. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. |
+| `showPreviewsInNotifications` | boolean | Show previews in notifications. |
+| `showNotificationsInCall` | boolean | Show notifications in call. |
+| `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 
 ```json
 {
   "fullWidth": true,
+  "themePreference": "dark",
   "translateMessageInto": "en-US",
-  "showMessagePreviewInSidebarList": true
+  "messagePreviewEnabled": true
 }
 ```
 
@@ -4523,17 +4643,19 @@ Partially updates the calling user's settings: **only the fields present in the 
 
 ##### Request body
 
-Any non-empty subset of the seven settings fields (same types as [`settings.get`](#settingsget)):
+Any non-empty subset of the nine settings fields (same types as [`settings.get`](#settingsget)):
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `fullWidth` | boolean | no | |
+| `themePreference` | string | no | One of `"system"`, `"light"`, `"dark"`; any other value is rejected. |
 | `translateMessageInto` | string | no | Language-tag shape: hyphen-separated letter/digit subtags, leading subtag letters-only (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`); or `""` to explicitly turn translation off. No value whitelist. |
-| `showMessagePreviewInSidebarList` | boolean | no | |
+| `messagePreviewEnabled` | boolean | no | |
 | `muteAllNotifications` | boolean | no | |
-| `showMessagesAndPreviewsInNotifications` | boolean | no | |
-| `showNotificationsDuringCallsAndMeetings` | boolean | no | |
-| `scrollToBottomInChat` | boolean | no | |
+| `alwaysAllowPriorityNotifications` | boolean | no | |
+| `showPreviewsInNotifications` | boolean | no | |
+| `showNotificationsInCall` | boolean | no | |
+| `initialChatScrollPosition` | string | no | One of `"lastRead"`, `"newest"`; any other value is rejected. |
 
 ```json
 { "fullWidth": false, "translateMessageInto": "ja" }
@@ -4570,7 +4692,7 @@ The payload carries the **full post-update settings** (replace, don't merge):
 | Field | Type | Notes |
 |-------|------|-------|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | The full post-update settings — same seven optional fields as [`settings.get`](#settingsget). |
+| `settings` | UserSettings | The full post-update settings — same nine optional fields as [`settings.get`](#settingsget). |
 
 ```json
 {
@@ -5563,6 +5685,79 @@ See [Error envelope](#6-error-envelope-reference).
 
 ---
 
+### 3.6 translation-service
+
+#### Translate Text
+
+**Subject:** `chat.user.{account}.request.translate.{siteID}.text`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` is the caller's **own (local) site ID** — the local `translation-service` handles the request. Translation is stateless and not federated across sites, so unlike `msg.send` there is no origin-site rule: always use your own site.
+
+Synchronous RPC. `translation-service` validates the request, calls the translation backend, and replies with a `TranslateResult` (the translated text) on success, or the standard [error envelope](#6-error-envelope-reference) on failure. Under handler saturation the router replies `unavailable` (`"service busy"`) so the client can retry.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | string | yes | The text to translate. No length cap is enforced by the service. |
+| `targetLang` | string | yes | Target language as a **BCP-47 tag** — send the user's [`settings.translateMessageInto`](#settingsget) value unchanged (no client-side conversion). See [Supported languages](#supported-languages). |
+
+##### Supported languages
+
+`targetLang` is a BCP-47 tag matched **case-insensitively** and tolerant of region/script subtags, so the value stored in `settings.translateMessageInto` is sent as-is. It resolves to one of five backend languages:
+
+| Language | Example tags that resolve | Resolves to |
+|---|---|---|
+| English | `en`, `en-US`, `en-GB` | English |
+| German | `de`, `de-DE` | German |
+| Japanese | `ja`, `ja-JP` | Japanese |
+| Traditional Chinese | `zh-Hant-TW`, `zh-Hant`, `zh-TW`, `zh-HK` | Traditional Chinese |
+| Simplified Chinese | `zh-Hans-CN`, `zh-Hans`, `zh-CN`, `zh-SG` | Simplified Chinese |
+
+Chinese resolves by script (`Hant`/`Hans`) or, absent a script, by region. A bare `zh` (no script or region) is ambiguous and rejected as `unsupported_lang`, as is `""` (translation off — the client should not send a request) and any language outside the five above (e.g. `fr`, `ko`). The result's `targetLang` echoes the tag you sent, not the resolved language.
+
+> **Breaking change:** `targetLang` now requires a BCP-47 tag. The former backend short codes `zhTW` / `zhCN` are **no longer accepted** and return `unsupported_lang` — send the BCP-47 form (`zh-Hant-TW` / `zh-Hans-CN`, or the user's `settings.translateMessageInto`) instead. (`en` / `de` / `ja` are unaffected, being valid BCP-47 tags already.) Deploy this in lockstep with the client that sends the settings value.
+
+#### Success response — `TranslateResult`
+
+| Field | Type | Notes |
+|---|---|---|
+| `translatedText` | string | The translated text. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag the client sent), not the resolved backend language. |
+
+```json
+{
+  "translatedText": "你好 世界",
+  "targetLang": "zh-Hant-TW"
+}
+```
+
+#### Error response
+
+See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code, reason?, error }` envelope:
+
+| Code | Reason | When |
+|---|---|---|
+| `bad_request` | `empty_text` | `text` is empty. |
+| `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
+| `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
+| `internal` | — | Translation backend failure. The raw cause is logged server-side, never returned. |
+
+```json
+{
+  "code": "bad_request",
+  "reason": "unsupported_lang",
+  "error": "unsupported targetLang"
+}
+```
+
+##### Triggered events
+
+`None — the reply is the only output.`
+
+---
+
 ## 4. Message Send
 
 ### Send Message
@@ -5572,7 +5767,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
 
-This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES_CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
+This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES-CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
 
 The same subject and request body cover three send variants: plain message, thread reply, and quoted message. The variant is determined by which optional fields are set.
 
@@ -5890,7 +6085,7 @@ Apply `newTcount` directly to the parent message's badge — do not compute a de
 
 ## 5. Room Encryption
 
-Channel messages can be end-to-end encrypted. The key material reaches clients as `RoomKeyEvent`s, which are triggered by the Create Room / Add Members / Remove Member RPCs (see their "Triggered events" sections). This section describes the event payload and how a client uses it to decrypt.
+Channel messages can be end-to-end encrypted. The key material reaches clients two ways: **inline** on the `added` `subscription.update` event (`subscription.room.privateKey` / `keyVersion` — Create Room and Add Members) and on `subscription.list`, and as live `RoomKeyEvent`s **on key rotation** (Remove Member — see its "Triggered events" section). This section describes the rotation event payload and how a client uses the key to decrypt.
 
 Each **channel** room has a 32-byte secret generated server-side at create time (`crypto/rand`). The secret is distributed to channel members and used directly as an AES-256-GCM key — no key derivation step. DM and botDM rooms are **not** encrypted: their messages fan out to per-user subjects that only the recipient can subscribe to, so they carry no room key, emit no `RoomKeyEvent`, and always broadcast plaintext `message` (no `encryptedMessage`).
 
@@ -5924,7 +6119,7 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 
 #### Client behavior
 
-1. On every `RoomKeyEvent`, store the key under `(roomId, version) → privateKey`.
+1. Store every key under `(roomId, version) → privateKey`, whatever the delivery path: `subscription.room.privateKey`/`keyVersion` on an `added` `subscription.update` or a `subscription.list` row, or a live `RoomKeyEvent` (rotation).
 2. To decrypt an incoming `encryptedMessage` payload:
    - Look up `privateKey` for `(roomId, encryptedMessage.version)`.
    - Use the 32-byte `privateKey` directly as the AES-256-GCM key (no key derivation step).
@@ -5936,14 +6131,13 @@ Clients are already authorized for `chat.user.{theirAccount}.>` and receive key 
 
 #### When clients receive `RoomKeyEvent`s
 
-- **Room creation (channels only):** sent to every initial member. DM/botDM rooms carry no key, so creation fires no `RoomKeyEvent`.
-- **Add member (channels only):** sent to each newly-added member; existing members do not receive a duplicate event.
 - **Remove member (channels only):** the server rotates the room key. Surviving members receive a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving events for the room.
-- **Bot members** are key-holders: they receive the `RoomKeyEvent` like any member, addressed to the bot's **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to). Bots also receive `subscription.update` on that same encoded subject (a bot can log into the chat frontend), delivered **before** the `room.key` so the client has a sub entry to store the key under.
+- **Room creation / Add member no longer fire `RoomKeyEvent`s.** The initial key reaches each newly-subscribed member inline on their `added` `subscription.update` (`subscription.room.privateKey` / `keyVersion`). DM/botDM rooms carry no key at all.
+- **Bot members** are key-holders like any member. A bot's events land on its **encoded** per-user subject (a dotted `.bot` account maps to a single NATS subject token — the form its JWT is scoped to): the `added` `subscription.update` carrying the initial key, and rotation `RoomKeyEvent`s afterwards (a bot can log into the chat frontend).
 
 Removed members keep prior keys for decrypting historical messages but cannot decrypt anything published after the rotation.
 
-**Initial key bootstrap on (re)connect:** live `RoomKeyEvent`s fire only when keys change. The initial set of keys for rooms the client is already subscribed to is delivered by the user-service subscription endpoints as `room.privateKey` / `room.keyVersion` on each enriched subscription (see §3.4 and [SubscriptionRoom](#subscriptionroom)). Live events keep the client current after bootstrap.
+**Initial key bootstrap on (re)connect:** live `RoomKeyEvent`s fire only on rotation. The initial set of keys for rooms the client is already subscribed to is delivered by the user-service subscription endpoints as `room.privateKey` / `room.keyVersion` on each enriched subscription (see §3.4 and [SubscriptionRoom](#subscriptionroom)); a room joined mid-session delivers its key the same way on the `added` `subscription.update`. Live rotation events keep the client current after bootstrap.
 
 ### Requesting a missing key
 
@@ -6002,9 +6196,10 @@ reply through the same caching path it uses for live events.
 
 #### Use as complement to live events
 
-This RPC complements — it does not replace — live `RoomKeyEvent`s on
-`chat.user.{account}.event.room.key`. Live events remain the primary
-delivery channel at room create / add-member / rotation. Clients
+This RPC complements — it does not replace — the primary delivery
+channels: the key inline on the `added` `subscription.update` /
+`subscription.list` (create, add, bootstrap) and live `RoomKeyEvent`s on
+`chat.user.{account}.event.room.key` (rotation). Clients
 should call `key.get` only when a received message cannot be decrypted
 with the keys they already hold, and back off after a failure so a
 chatty channel does not stampede the server for a key that is
@@ -7105,7 +7300,7 @@ during read via `http.MaxBytesReader`.
 
 Sends a message into an existing room the bot is a member of. Returns
 the canonical `Message` document that landed on
-`BOT_MESSAGES_CANONICAL_{sub.siteId}`.
+`BOT-MESSAGES-CANONICAL-{sub.siteId}`.
 
 #### Request body
 
@@ -7237,33 +7432,33 @@ Same catalogue as §10.4 plus:
 
 ## 11. tcard-service
 
-Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client publishes new templates (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.
+Serves versioned **AdaptiveCard** template documents from an in-memory cache backed by the MongoDB `cards` collection. Clients read a template by path + version (§11.1); an admin review client validates candidate templates before publishing them (§11.2). The internal `POST /api/v1/cards/refresh` (service-to-service cache reload) is **not** a client API and is intentionally omitted here.
 
 ### 11.1 HTTP — GET /api/v1/cards/{path}@{cardVersion}.template.json
 
 **Endpoint:** `GET /api/v1/cards/{path}@{cardVersion}.template.json`
 **Reply:** synchronous HTTP response
 
-Fetches one card template by `path` and `cardVersion`, served from cache with no per-request database read. The filename is a single URL segment: the service strips the `.template.json` suffix, splits the remainder on the **last** `@` into `path` and `cardVersion`, and returns the stored document verbatim minus the Mongo `_id` and the routing `path`.
+Fetches one card template by `path` and `cardVersion`, served from cache with no per-request database read. The service strips the `.template.json` suffix, splits the remainder on the **last** `@` into `path` and `cardVersion`, and returns the stored document verbatim minus the routing `path` and the storage-only fields `_id` and `migratedAt`. Only top-level keys are removed — an `id` on an element inside `body` is preserved.
 
 #### Request
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `path` | URL | string | yes | The card path — everything before the last `@`. May contain `@` but never `/`. |
+| `path` | URL | string | yes | The card path — everything before the last `@`. Contains `/` separators (`a/b/c`), matched by the route's trailing wildcard, so it spans multiple URL segments. |
 | `cardVersion` | URL | string | yes | Semantic version `a.b.c` — between the last `@` and the `.template.json` suffix. |
 
 ```http
-GET /api/v1/cards/welcome@1.0.0.template.json
+GET /api/v1/cards/greetings/en/welcome@1.0.0.template.json
 ```
 
 #### Success response
 
-`HTTP 200`, `Content-Type: application/json`. The stored card document minus `_id` and `path`.
+`HTTP 200`, `Content-Type: application/json`. The stored card document minus `path`, `_id` and `migratedAt`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `cardVersion` | string | The document's semantic version. |
+| `_tcardVersion` | string | The document's semantic version. |
 | `cardUsage` | any | Optional usage metadata; absent when the card has none. |
 | `type` | string | `"AdaptiveCard"`. |
 | `schema` | string | `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
@@ -7272,12 +7467,12 @@ GET /api/v1/cards/welcome@1.0.0.template.json
 
 ```json
 {
-  "cardVersion": "1.0.0",
+  "_tcardVersion": "1.0.0",
   "cardUsage": "greeting",
   "type": "AdaptiveCard",
   "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "version": "1.5",
-  "body": [{ "type": "TextBlock", "text": "Hi" }]
+  "body": [{ "type": "TextBlock", "id": "greeting", "text": "Hi" }]
 }
 ```
 
@@ -7287,8 +7482,24 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
-| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "card template request must include a version: {path}@{cardVersion}.template.json" }` — missing `.template.json` suffix, missing `@` version separator, or empty path/version. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "card template request must include a version: {path}@{version}.template.json" }` — missing `@` version separator or empty path/version. A request without the `.template.json` suffix is a directory listing instead (see below), not an error. |
 | 404 | `not_found` | — | `{ "code": "not_found", "error": "card template not found" }` — no cached card for that `(path, cardVersion)`. |
+
+#### Directory listing
+
+The same route without the `.template.json` suffix lists the **direct children** of the requested prefix. `GET /api/v1/cards/` lists the root; `GET /api/v1/cards/greetings/en` lists that folder.
+
+| Field | Type | Notes |
+|---|---|---|
+| `statusCode` | integer | Always `200`. |
+| `cards` | string[] | Direct child cards as `path@cardVersion`, sorted by path then descending semver. Empty array when none. |
+| `folders` | string[] | Direct child folders as full paths from root, sorted. Empty array when none. |
+
+```json
+{ "statusCode": 200, "cards": ["greetings/en/welcome@1.0.0"], "folders": [] }
+```
+
+Listing errors: `400 bad_request` `no version specified for card "<prefix>"` when the prefix names a card exactly (add `@version.template.json`); `404 not_found` `given path "<prefix>" for card list not found` for an unknown prefix; `404 not_found` `no paths or cards exist` before the cache's first load.
 
 #### Triggered events — success path
 
@@ -7300,34 +7511,34 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 ---
 
-### 11.2 HTTP — POST /api/v1/cards/register (admin)
+### 11.2 HTTP — POST /api/v1/cards/validate (admin)
 
-**Endpoint:** `POST /api/v1/cards/register`
+**Endpoint:** `POST /api/v1/cards/validate`
 **Reply:** synchronous HTTP response
 
-**Admin only.** Publishes a new card template: an admin reviews a submitted card and calls this to validate and insert it, after which it is immediately servable via §11.1. Not for end-user browsers. The request body is the full card document.
+**Admin only.** Checks a card document and stores nothing: an admin review client calls this to confirm a submitted card is well-formed and correctly versioned before it is published. A validated card is **not** inserted into `cards` and **not** added to the cache — it becomes servable via §11.1 only once it is written to the collection and the cache reloads. Not for end-user browsers. The request body is the full card document.
 
 #### Request
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `path` | string | yes | Card path. Must not contain `/`. |
-| `cardVersion` | string | yes | Semantic version `a.b.c`, no leading zeros. Must be **strictly greater** than the highest existing `cardVersion` for this `path`. |
-| `cardUsage` | any | no | Optional usage metadata. |
+| `path` | string | yes | Card path: exactly 3 non-empty `/`-separated segments (`a/b/c`). Must not contain `@`. |
+| `_tcardVersion` | string | yes | Semantic version `a.b.c`, no leading zeros. Must be **strictly greater** than every cached `_tcardVersion` for this `path`. |
+| `cardUsage` | any | no | Optional usage metadata. Not validated. |
 | `type` | string | yes | Must equal `"AdaptiveCard"`. |
 | `schema` | string | yes | Must equal `"http://adaptivecards.io/schemas/adaptive-card.json"`. |
 | `version` | string | yes | Must equal `"1.5"`. |
 | `body` | array | yes | Non-empty AdaptiveCard body array. |
 
 ```http
-POST /api/v1/cards/register
+POST /api/v1/cards/validate
 Content-Type: application/json
 ```
 
 ```json
 {
-  "path": "welcome",
-  "cardVersion": "1.0.0",
+  "path": "greetings/en/welcome",
+  "_tcardVersion": "1.0.0",
   "cardUsage": "greeting",
   "type": "AdaptiveCard",
   "schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -7338,7 +7549,7 @@ Content-Type: application/json
 
 #### Success response
 
-`HTTP 201`.
+`HTTP 200`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -7354,9 +7565,13 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
-| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "body must be a non-empty array" }` — a missing/empty required field, a `path` containing `/`, a non-semver or leading-zero `cardVersion`, a non-array `body`, or a `type`/`schema`/`version` that isn't the pinned value. |
-| 409 | `conflict` | — | `{ "code": "conflict", "error": "cardVersion must be the highest for this path" }` — `cardVersion` isn't strictly higher than the current max, or `(path, cardVersion)` already exists. |
-| 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — Mongo failure. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "body must be a non-empty array" }` — malformed JSON, a missing/empty required field, a `path` that isn't 3 non-empty segments or that contains `@`, a non-semver or leading-zero `_tcardVersion`, a non-array `body`, or a `type`/`schema`/`version` that isn't the pinned value. |
+| 409 | `conflict` | — | `{ "code": "conflict", "error": "_tcardVersion must be the highest for this path" }` — `_tcardVersion` isn't strictly higher than every cached version for this `path`. |
+| 503 | `unavailable` | — | `{ "code": "unavailable", "error": "card cache not loaded" }` — the cache has not finished its first load, so version ordering can't be judged yet. |
+
+Ordering is judged against the in-memory cache, which is as fresh as the last refresh (at startup, daily, or on demand). A card written to `cards` out-of-band since then is not yet counted.
+
+**This endpoint is advisory — it does not reserve the version or gate publishing.** The publishing path writes to `cards` directly and is not required to call this first; the collection's only hard constraint is the unique `(path, _tcardVersion)` index, which rejects an exact duplicate but accepts a *lower* version. A `200` means the card was well-formed and correctly ordered at the time of the call, not that publishing it is guaranteed safe.
 
 #### Triggered events — success path
 

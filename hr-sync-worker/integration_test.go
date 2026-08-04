@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
@@ -40,7 +41,7 @@ func startWorker(t *testing.T, js jetstream.JetStream, h *Handler, siteID string
 	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consCfg)
 	require.NoError(t, err)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		data, derr := decodePayload(msg)
+		data, derr := natsutil.DecodePayload(msg)
 		require.NoError(t, derr)
 		jsretry.Settle(context.Background(), msg, jsretry.DefaultBackoff, h.HandleMessage(context.Background(), msg.Subject(), data))
 	})
@@ -72,9 +73,9 @@ func TestWorker_EndToEnd(t *testing.T) {
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 
-	// pre-existing user with auth fields the identity upsert must not touch
-	// carries employeeId E1 — the identity upsert keys on it, so this row is
-	// the one alice's upsert must update in place (not a fresh insert).
+	// pre-existing user with auth fields the identity upsert must not touch;
+	// keyed by account (alice), so alice's upsert updates this row in place
+	// (not a fresh insert).
 	_, err = db.Collection(UserCollection).InsertOne(ctx,
 		bson.M{"_id": "u-alice", "account": "alice", "employeeId": "E1", "siteId": "old-site", "roles": []string{"admin"}, "services": bson.M{"password": bson.M{"bcrypt": "hash"}}})
 	require.NoError(t, err)
@@ -98,12 +99,12 @@ func TestWorker_EndToEnd(t *testing.T) {
 	publishJSON(t, js, "chat.hr.site-a.users.upsert", []model.IUserWithChange{
 		{User: model.User{Account: "alice", SiteID: "site-a", EngName: "Name alice", EmployeeID: "E1"}, ChangeType: model.IChangeTypeNewHire},
 		{User: model.User{Account: "carol", SiteID: "site-a", ChineseName: "卡蘿", EmployeeID: "E2"}, ChangeType: model.IChangeTypeNewHire},
-		// publisher-owned _id (Teams migration): honored on insert so every site
-		// converges on the same one, rather than each minting a per-site _id
-		{User: model.User{ID: "mig-id-1", Account: "mgrace", SiteID: "site-a", EmployeeID: "mig-id-1"}, ChangeType: model.IChangeTypeNewHire},
-		// no employeeId → skipped, never written (an empty key would match and
-		// clobber every other keyless row); the count assertion below proves it
-		{User: model.User{Account: "keyless", SiteID: "site-a"}, ChangeType: model.IChangeTypeNewHire},
+		// migrated external (Teams): no employeeId, publisher-owned deterministic
+		// _id honored on insert so every site converges on the same one
+		{User: model.User{ID: "mig-id-1", Account: "mgrace", SiteID: "site-a"}, ChangeType: model.IChangeTypeNewHire},
+		// no account → skipped, never written (account is the key; an empty one
+		// would clobber other rows); the count assertion below proves it
+		{User: model.User{SiteID: "site-a"}, ChangeType: model.IChangeTypeNewHire},
 	})
 
 	awaitCount(t, ctx, db, EmployeeCollection, bson.M{}, 2)
@@ -124,6 +125,7 @@ func TestWorker_EndToEnd(t *testing.T) {
 	var mgrace bson.M
 	require.NoError(t, db.Collection(UserCollection).FindOne(ctx, bson.M{"account": "mgrace"}).Decode(&mgrace))
 	assert.Equal(t, "mig-id-1", mgrace["_id"], "publisher-supplied _id is honored, not regenerated")
+	assert.Nil(t, mgrace["employeeId"], "migrated externals carry no employeeId")
 
 	// re-delivery (same batches again) → no dupes
 	publishJSON(t, js, "chat.hr.site-a.employees.upsert", batch)

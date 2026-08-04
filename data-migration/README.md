@@ -15,7 +15,7 @@ no nested `pkg/`/`internal/` here).
    history-migrator   ◀── bulk copy of state ≤ T ──┐ captures R
    (sibling, separate owner)                       │
                                                     ▼
-   oplog-connector    seed = R ──▶ startAfter(R) ──▶ live CDC ─▶ MIGRATION_OPLOG_{site}
+   oplog-connector    seed = R ──▶ startAfter(R) ──▶ live CDC ─▶ MIGRATION-OPLOG-{site}
    (this folder)                                                       │
                                                                        ▼
    oplog-transformer  ── consumes, models per collection ─▶ new stack DBs
@@ -26,9 +26,9 @@ no nested `pkg/`/`internal/` here).
 
 | Component | Status | Role |
 |-----------|--------|------|
-| **oplog-connector** | implemented | "Dumb pump": tails source change streams and publishes raw, opaque CDC events to `MIGRATION_OPLOG_{site}`. Lossless, ordered per collection, resumable. |
+| **oplog-connector** | implemented | "Dumb pump": tails source change streams and publishes raw, opaque CDC events to `MIGRATION-OPLOG-{site}`. Lossless, ordered per collection, resumable. |
 | history-migrator | not started | Bulk DB→DB copy of state ≤ the consistent cut; captures the resume token the connector seeds from. |
-| **oplog-transformer** | implemented (messages) | Consumes `MIGRATION_OPLOG_{site}`, formats migrated **messages**, and re-injects them into the new-stack pipeline. Other collections deferred. |
+| **oplog-transformer** | implemented (messages) | Consumes `MIGRATION-OPLOG-{site}`, formats migrated **messages**, and re-injects them into the new-stack pipeline. Other collections deferred. |
 
 See `docs/superpowers/specs/2026-06-08-oplog-connector-design.md` + `…2026-06-15-oplog-transformer-design.md` (designs)
 and the matching `docs/superpowers/plans/2026-06-11-…` + `…2026-06-15-oplog-transformer-implementation.md` (plans).

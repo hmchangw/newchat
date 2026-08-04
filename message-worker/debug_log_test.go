@@ -96,7 +96,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
 	ts := NewMockThreadStore(ctrl)
-	us.EXPECT().FindUserByID(gomock.Any(), "u-1").Return(user, nil).AnyTimes()
+	us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil).AnyTimes()
 	store.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a").Return(nil).AnyTimes()
 
 	h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil })
@@ -175,7 +175,7 @@ func TestHandleJetStreamMsg_FlowBreadcrumbs(t *testing.T) {
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
 	ts := NewMockThreadStore(ctrl)
-	us.EXPECT().FindUserByID(gomock.Any(), "u-1").Return(user, nil).AnyTimes()
+	us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil).AnyTimes()
 	store.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a").Return(nil).AnyTimes()
 	h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil })
 

@@ -178,11 +178,9 @@ func (s *MongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 	return &room, nil
 }
 
-// GetRoomMeta returns a room populated with only its stable fields
-// (ID/Type/Name/SiteID/UserCount) — the subset the add-member hot path reads.
-// When the meta cache is enabled it is served from the in-process LRU+TTL cache;
-// otherwise it falls through to a direct Mongo read. The returned room's
-// CreatedAt/UpdatedAt are zero — callers needing those must use GetRoom.
+// GetRoomMeta returns a room with only its stable fields (CreatedAt/UpdatedAt zero),
+// served from the meta cache when enabled. Its CrossSite is the PRIOR state — before
+// processAddMembers' SetRoomCrossSite write, which the local→global nudge gates on.
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Room, error) {
 	var (
 		meta roommetacache.Meta
@@ -196,7 +194,7 @@ func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Roo
 	if err != nil {
 		return nil, err
 	}
-	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount}, nil
+	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount, CrossSite: meta.CrossSite, CrossSiteAt: meta.CrossSiteAt}, nil
 }
 
 func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, error) {
@@ -600,8 +598,8 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 	if len(orgIDs) == 0 && len(directAccounts) == 0 {
 		return nil, nil
 	}
-	// 1. Resolve the candidate users (account + id).
-	type candidate struct{ ID, Account string }
+	// 1. Resolve the candidate users (account + id + home site).
+	type candidate struct{ ID, Account, SiteID string }
 	var candidates []candidate
 	if len(orgIDs) == 0 {
 		// Direct accounts only, cache-friendly. Bots are NOT filtered here —
@@ -611,25 +609,26 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 			return nil, fmt.Errorf("find add-member candidate users: %w", err)
 		}
 		for i := range users {
-			candidates = append(candidates, candidate{ID: users[i].ID, Account: users[i].Account})
+			candidates = append(candidates, candidate{ID: users[i].ID, Account: users[i].Account, SiteID: users[i].SiteID})
 		}
 	} else {
 		// Org expansion needs the sectId/deptId query. WithDirectBots admits
 		// listed bots while keeping the org arms bot-free.
 		filter := pipelines.MatchCandidatesFilterWithDirectBots(orgIDs, directAccounts, "")
-		cursor, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 1}))
+		cursor, err := s.users.Find(ctx, filter, options.Find().SetProjection(bson.M{"account": 1, "_id": 1, "siteId": 1}))
 		if err != nil {
 			return nil, fmt.Errorf("find add-member candidates: %w", err)
 		}
 		var rows []struct {
 			ID      string `bson:"_id"`
 			Account string `bson:"account"`
+			SiteID  string `bson:"siteId"`
 		}
 		if err := cursor.All(ctx, &rows); err != nil {
 			return nil, fmt.Errorf("decode add-member candidates: %w", err)
 		}
 		for _, r := range rows {
-			candidates = append(candidates, candidate{ID: r.ID, Account: r.Account})
+			candidates = append(candidates, candidate{ID: r.ID, Account: r.Account, SiteID: r.SiteID})
 		}
 	}
 	if len(candidates) == 0 {
@@ -656,7 +655,7 @@ func (s *MongoStore) ListAddMemberCandidates(ctx context.Context, orgIDs, direct
 	for i, c := range candidates {
 		_, hasSub := subbed[c.Account]
 		_, hasIRM := irm[c.ID]
-		out[i] = AddMemberCandidate{Account: c.Account, HasSubscription: hasSub, HasIndividualRoomMember: hasIRM}
+		out[i] = AddMemberCandidate{Account: c.Account, HasSubscription: hasSub, HasIndividualRoomMember: hasIRM, SiteID: c.SiteID}
 	}
 	return out, nil
 }
@@ -756,6 +755,31 @@ func (s *MongoStore) updateChannelRoom(ctx context.Context, roomID string, updat
 	}
 	if res.MatchedCount == 0 {
 		return ErrRoomNotFound
+	}
+	return nil
+}
+
+// SetRoomCrossSite marks a room global. Sticky/idempotent: only writes crossSite=true,
+// and the `crossSite != true` filter makes a redelivery a no-op (grace never refreshed).
+//
+// crossSiteAt=$$NOW (flip time) is stamped ONLY on a confirmed-same-site
+// (crossSite==false) → true flip: only those rooms have clients on the local subject
+// needing the RoomLocalityGrace window. Unclassified/nil rooms were already global.
+func (s *MongoStore) SetRoomCrossSite(ctx context.Context, roomID string) error {
+	_, err := s.rooms.UpdateOne(ctx,
+		bson.M{"_id": roomID, "crossSite": bson.M{"$ne": true}},
+		mongo.Pipeline{
+			bson.D{{Key: "$set", Value: bson.M{
+				// $crossSite is the PRE-update value, so grace stamps only on a false→true flip.
+				"crossSiteAt": bson.M{"$cond": bson.A{
+					bson.M{"$eq": bson.A{"$crossSite", false}}, "$$NOW", "$crossSiteAt",
+				}},
+				"crossSite": true,
+			}}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("set room crossSite %s: %w", roomID, err)
 	}
 	return nil
 }

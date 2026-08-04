@@ -59,11 +59,13 @@ type SubscriptionRepository interface {
 }
 
 // RoomRepository reads room metadata required by history handlers:
-// MinUserLastSeenAt as a per-user read-receipt floor surfaced to clients, and
-// GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds.
+// MinUserLastSeenAt as a per-user read-receipt floor surfaced to clients,
+// GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds, and
+// GetRoomTimesByIDs, the batched ($in) form for resolving many rooms at once.
 type RoomRepository interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
+	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
 }
 
@@ -101,6 +103,22 @@ type AppStore interface {
 	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
 }
 
+// PreviewCache fronts the per-room preview resolve on the rooms.get read path.
+// Positives are cached; not-found and errors pass through. *readcache.PreviewCache
+// satisfies it.
+type PreviewCache interface {
+	Get(ctx context.Context, roomID string, load func(context.Context) (models.PreviewMessage, bool, error)) (models.PreviewMessage, bool, error)
+}
+
+// Option configures optional HistoryService dependencies.
+type Option func(*HistoryService)
+
+// WithPreviewCache installs a room-preview cache used by RoomsGet. Without it,
+// previews resolve directly (uncached).
+func WithPreviewCache(pc PreviewCache) Option {
+	return func(s *HistoryService) { s.previewCache = pc }
+}
+
 // HistoryService handles message history queries and mutations. Transport-agnostic.
 type HistoryService struct {
 	msgReader          MessageReader
@@ -116,6 +134,7 @@ type HistoryService struct {
 	largeRoomThreshold int
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
+	previewCache       PreviewCache
 }
 
 func New(
@@ -128,8 +147,9 @@ func New(
 	users UserStore,
 	apps AppStore,
 	cfg *config.Config,
+	opts ...Option,
 ) *HistoryService {
-	return &HistoryService{
+	s := &HistoryService{
 		msgReader:          msgs,
 		msgWriter:          msgs,
 		subscriptions:      subs,
@@ -144,6 +164,10 @@ func New(
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // RegisterHandlers wires all NATS endpoints. Panics on subscription failure (fatal at startup).

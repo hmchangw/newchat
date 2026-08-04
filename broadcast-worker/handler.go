@@ -1,4 +1,4 @@
-// Package main fans out MESSAGES_CANONICAL room events with NAK-on-failure;
+// Package main fans out MESSAGES-CANONICAL room events with NAK-on-failure;
 // handleReacted also publishes the reaction author-notification with log-and-swallow.
 package main
 
@@ -57,7 +57,7 @@ type ParentFetcher interface {
 	FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (*ParentMessageInfo, error)
 }
 
-// Handler processes MESSAGES_CANONICAL messages and broadcasts room events.
+// Handler processes MESSAGES-CANONICAL messages and broadcasts room events.
 type Handler struct {
 	store         Store
 	userStore     userstore.UserStore
@@ -66,9 +66,10 @@ type Handler struct {
 	parentFetcher ParentFetcher
 	encrypt       bool
 	encoder       *roomcrypto.Encoder
+	routeMode     subject.RoomRouteMode
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool) *Handler {
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode) *Handler {
 	return &Handler{
 		store:         store,
 		userStore:     userStore,
@@ -77,10 +78,11 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		parentFetcher: parentFetcher,
 		encrypt:       encrypt,
 		encoder:       roomcrypto.NewEncoder(),
+		routeMode:     routeMode,
 	}
 }
 
-// HandleMessage processes a single MESSAGES_CANONICAL message payload.
+// HandleMessage processes a single MESSAGES-CANONICAL message payload.
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
@@ -198,9 +200,9 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		return h.publishChannelEvent(ctx, meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
+		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		return h.publishDMEvents(ctx, meta, clientMsg, evt.Timestamp, resolved.Accounts)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping fan-out",
 			"type", meta.Type,
@@ -259,7 +261,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// Do NOT call SetSubscriptionMentions here: TShow=false replies are invisible
 		// in the main channel, so a room-level mention badge would appear with no
 		// visible message to explain it.
-		roomEvt := buildRoomEvent(meta, clientMsg, evt.Timestamp)
+		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
 		roomEvt.MentionAll = resolved.MentionAll
 		if len(resolved.Participants) > 0 {
 			roomEvt.Mentions = resolved.Participants
@@ -274,7 +276,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
 		// touch subscriptions here. lastMsgAt is intentionally NOT updated (would
 		// wrongly mark hasUnread for non-participants).
-		return h.publishDMEvents(ctx, meta, clientMsg, evt.Timestamp, resolved.Accounts)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping thread fan-out",
 			"type", meta.Type,
@@ -460,8 +462,8 @@ func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, n
 	}
 	switch room.Type {
 	case model.RoomTypeChannel:
-		if err := h.pub.Publish(ctx, subject.RoomEvent(room.ID), payload); err != nil {
-			return fmt.Errorf("publish thread metadata for channel room %s: %w", room.ID, err)
+		if err := h.publishRoomEvent(ctx, room.ID, room.CrossSite, room.CrossSiteAt, payload, "thread metadata"); err != nil {
+			return err
 		}
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		for _, account := range room.Accounts {
@@ -666,10 +668,7 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 
 	switch room.Type {
 	case model.RoomTypeChannel:
-		if err := h.pub.Publish(ctx, subject.RoomEvent(room.ID), payload); err != nil {
-			return fmt.Errorf("publish %s event for room %s message %s: %w", roomEvtType, room.ID, messageID, err)
-		}
-		return nil
+		return h.publishRoomEvent(ctx, room.ID, room.CrossSite, room.CrossSiteAt, payload, fmt.Sprintf("%s event (message %s)", roomEvtType, messageID))
 
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		for _, account := range room.Accounts {
@@ -797,7 +796,7 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	return nil
 }
 
-func (h *Handler) publishChannelEvent(ctx context.Context, meta roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionAll bool, mentions []model.Participant) error {
+func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionAll bool, mentions []model.Participant) error {
 	evt := buildRoomEvent(meta, clientMsg, timestamp)
 	evt.MentionAll = mentionAll
 	if len(mentions) > 0 {
@@ -815,7 +814,20 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta roommetacache.Me
 	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", meta.ID,
 		"type", string(meta.Type), "delivery", "room-stream", "audience", meta.UserCount)
-	return h.pub.Publish(ctx, subject.RoomEvent(meta.ID), payload)
+	return h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
+}
+
+// publishRoomEvent fans a channel room's .event out via subject.RoomEventTargets — the
+// sanctioned path enforced by .semgrep room-subject-publish-must-route (never inline a subject).
+func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) error {
+	now := time.Now().UTC()
+	var pubErr error
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.pub.Publish(ctx, subj, payload); err != nil {
+			pubErr = fmt.Errorf("publish %s for room %s to %s: %w", op, roomID, subj, err)
+		}
+	}
+	return pubErr
 }
 
 // debugFlowFanout emits the flow-rung outcome of a per-recipient fan-out:
@@ -836,7 +848,7 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 		"request_id", natsutil.RequestIDFromContext(ctx), "account", account, "room_id", roomID)
 }
 
-func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string) error {
+func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string) error {
 	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
 	if err != nil {
 		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
@@ -886,7 +898,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta roommetacache.Meta, 
 	return nil
 }
 
-func buildRoomEvent(meta roommetacache.Meta, clientMsg *model.ClientMessage, eventTimestamp int64) model.RoomEvent {
+func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, eventTimestamp int64) model.RoomEvent {
 	return model.RoomEvent{
 		Type:           model.RoomEventNewMessage,
 		RoomID:         meta.ID,
@@ -971,7 +983,7 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 // they authored the reply and are therefore a thread participant, so their own
 // devices must receive the event for multi-device sync. The sender is added
 // directly here rather than relied upon via replyAccounts — replyAccounts is
-// written by message-worker on a separate, unordered MESSAGES_CANONICAL
+// written by message-worker on a separate, unordered MESSAGES-CANONICAL
 // consumer, so a fan-out that depended on it would race the sender's own first
 // reply and silently drop the echo. followers (thread repliers) and
 // extraAccounts (@-mentioned users) are merged after, deduped. Bots are always

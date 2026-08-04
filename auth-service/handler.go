@@ -303,7 +303,10 @@ func (h *AuthHandler) handleDevAuth(ctx context.Context, c *gin.Context, req aut
 // docs/client-api.md §2.1 — a platform-team template change must mirror both):
 //
 //	Pub allow: chat.user.{account}.>, _INBOX.>, chat.user.presence.*.query.batch (+allow-pub-response)
-//	Sub allow: chat.user.{account}.>, chat.room.>, _INBOX.>, chat.user.presence.state.*
+//	Sub allow: chat.user.{account}.>, chat.room.>, chat.local.room.>, _INBOX.>, chat.user.presence.state.*
+//
+// The list above is documentation only (the live grant is the platform-team
+// template); the leaf node denies chat.local.> cross-gateway, so it stays site-local.
 func (h *AuthHandler) signNATSJWT(userPubKey, account string) (string, error) {
 	uc := jwt.NewUserClaims(userPubKey)
 	uc.IssuerAccount = h.accountPubKey

@@ -30,6 +30,15 @@ export interface SubscriptionHRInfo {
 export interface SubscriptionRoom {
   siteId?: string
   name?: string
+  /** Mirrors model.Room.CrossSite — tri-state on the wire. `true` means the
+   *  room has ≥1 member whose home site differs from the room's own siteId;
+   *  `false` means the server has CONFIRMED the room is same-site; both are
+   *  authoritative. Selects the NATS namespace the client subscribes the
+   *  room's `.event` subject to (see `api/_transport/subjects.ts::roomEvent`).
+   *  ABSENT means unknown/unclassified (a pre-existing room the server
+   *  hasn't backfilled yet) — callers MUST default a missing value to `true`
+   *  (global) rather than `false`, matching the server's fail-safe. */
+  crossSite?: boolean
   userCount?: number
   appCount?: number
   lastMsgAt?: string | null
@@ -113,6 +122,9 @@ export interface User {
   engName?: string
   chineseName?: string
   employeeId?: string
+  /** Media/API gateway origin (portal baseUrl). Set on connect; used to build
+   *  absolute attachment URLs and authenticate media uploads/downloads. */
+  baseUrl?: string
 }
 
 /** Mirrors model.Room. Timestamps come down as RFC-3339 strings.
@@ -135,6 +147,10 @@ export interface Room {
   /** Set client-side on DM rooms so the sidebar has a friendly fallback
    *  while the canonical name lands via subscription.update. */
   subscriptionName?: string
+  /** Resolved (never missing) — see SubscriptionRoom.crossSite. Producers of
+   *  a `Room` MUST default a missing wire value to `true` (global) before
+   *  setting this field, so every consumer can read it directly. */
+  crossSite: boolean
 }
 
 /** Mirrors model.Participant — the embedded sender/reader on messages
@@ -145,6 +161,48 @@ export interface Participant {
   engName?: string
   chineseName?: string
   siteId?: string
+}
+
+/** One reactor on a message reaction. Mirrors the wire `reactionUser`
+ *  (cassandra.Reactions.MarshalJSON): account + server-composed displayName. */
+export interface ReactionUser {
+  account: string
+  displayName: string
+}
+
+/** Pixel size of an uploaded image. Mirrors cassandra.ImageDimensions. */
+export interface ImageDimensions {
+  width: number
+  height: number
+}
+
+/** Render-ready descriptor for an uploaded file. Mirrors
+ *  pkg/model/cassandra.Attachment. Media-specific fields are present only for
+ *  the matching MIME family. `titleLink` is a path RELATIVE to the media
+ *  gateway base URL. */
+export interface Attachment {
+  id: string
+  title: string
+  type: string
+  description?: string
+  titleLink: string
+  titleLinkDownload?: boolean
+  fileType?: string
+  imageUrl?: string
+  imageType?: string
+  imageSize?: number
+  imageDimensions?: ImageDimensions
+  /** Base64 32×32 blurred JPEG placeholder (image only). */
+  imagePreview?: string
+  audioUrl?: string
+  audioType?: string
+  audioSize?: number
+  videoUrl?: string
+  videoType?: string
+  videoSize?: number
+  /** Client-only: a local object URL for an optimistic just-sent image.
+   *  Never arrives from the server; preferred as the <img> src when present. */
+  localUrl?: string
 }
 
 /** Cassandra's QuotedParentMessage shape — what gets embedded on a
@@ -197,8 +255,20 @@ export interface Message {
   sysMsgData?: string
   sender?: Participant
   userAccount?: string
+  /** Server-composed render-ready sender name (engName + chineseName +
+   *  account fallback). Preferred over sender.* for display. */
+  userDisplayName?: string
   mentions?: Participant[]
+  /** Decoded attachment objects (image/audio/video/file). */
+  attachments?: Attachment[]
+  /** Reactions grouped by shortcode → reactors (server emits map<emoji,
+   *  ReactionUser[]>, sorted oldest-first). */
+  reactions?: Record<string, ReactionUser[]>
   quotedParentMessage?: QuotedParentMessage
+  /** RFC3339 pin time; present on pinned messages. */
+  pinnedAt?: string
+  /** The actor who pinned the message. */
+  pinnedBy?: Participant
   threadParentMessageId?: string
   threadParentMessageCreatedAt?: string
   /** Outgoing local-only flag — set by optimistic appenders. Never

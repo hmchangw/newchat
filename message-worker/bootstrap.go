@@ -31,7 +31,7 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams handles the JetStream MESSAGES_CANONICAL stream this
+// bootstrapStreams handles the JetStream MESSAGES-CANONICAL stream this
 // service uses. When enabled (dev/integration), it creates the stream via
 // CreateOrUpdateStream. When disabled (production), it verifies the stream
 // exists via Stream() and returns an error if it doesn't — fail-fast so a
@@ -47,7 +47,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 			Name:     canonicalCfg.Name,
 			Subjects: canonicalCfg.Subjects,
 		}); err != nil {
-			return fmt.Errorf("create MESSAGES_CANONICAL stream: %w", err)
+			return fmt.Errorf("create MESSAGES-CANONICAL stream: %w", err)
 		}
 		return nil
 	}
@@ -55,7 +55,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 	// ops/IaC owns provisioning, and a missing stream means the deploy is
 	// broken before the first publish or consume.
 	if _, err := js.Stream(ctx, canonicalCfg.Name); err != nil {
-		return fmt.Errorf("verify MESSAGES_CANONICAL stream: %w", err)
+		return fmt.Errorf("verify MESSAGES-CANONICAL stream: %w", err)
 	}
 	return nil
 }

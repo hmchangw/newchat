@@ -9,21 +9,22 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 func TestUserRoomCollection_TemplateName_DerivesFromEnv(t *testing.T) {
-	c := newUserRoomCollection("user-room-mv-site-a")
+	c := newUserRoomCollection("user-room-mv-site-a", false)
 	assert.Equal(t, "user-room-mv-site-a_template", c.TemplateName())
 }
 
 func TestUserRoomCollection_Metadata(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 
 	assert.Equal(t, "user-room-sync", coll.ConsumerName())
 	assert.NotNil(t, coll.TemplateBody())
 
 	cfg := coll.StreamConfig("site-a")
-	assert.Equal(t, "INBOX_site-a", cfg.Name)
+	assert.Equal(t, "INBOX-site-a", cfg.Name)
 	assert.Equal(t, []string{
 		"chat.inbox.site-a.internal.>",
 		"chat.inbox.site-a.external.>",
@@ -40,7 +41,7 @@ func TestUserRoomCollection_Metadata(t *testing.T) {
 }
 
 func TestUserRoomCollection_TemplateBody_PatternIsExactName(t *testing.T) {
-	c := newUserRoomCollection("user-room-mv-site-a")
+	c := newUserRoomCollection("user-room-mv-site-a", false)
 	body := c.TemplateBody()
 	require.NotNil(t, body)
 
@@ -53,7 +54,7 @@ func TestUserRoomCollection_TemplateBody_PatternIsExactName(t *testing.T) {
 }
 
 func TestUserRoomCollection_TemplateBody(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	body := coll.TemplateBody()
 	require.NotNil(t, body)
 
@@ -87,7 +88,7 @@ func TestUserRoomCollection_TemplateBody(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689600000
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, ts)
@@ -111,7 +112,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 	require.True(t, ok)
 	// Stored-script reference: the action carries only the script id, never
 	// the inlined source — that's the whole point of moving to stored scripts.
-	assert.Equal(t, addRoomScriptID, script["id"])
+	assert.Equal(t, searchindex.AddRoomScriptID, script["id"])
 	assert.NotContains(t, script, "source")
 
 	params := script["params"].(map[string]any)
@@ -139,7 +140,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	// Bots and the platform-admin pseudo-account can log into the chat frontend
 	// and use search like any user, so they enter the user-room index too.
@@ -157,7 +158,7 @@ func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_Bot_Indexed(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"weather.bot"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 1000)
@@ -169,7 +170,7 @@ func TestUserRoomCollection_BuildAction_Bot_Indexed(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_MemberAdded_Restricted(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689700000
 	const hssVal int64 = 1735689500000
@@ -207,7 +208,7 @@ func TestUserRoomCollection_BuildAction_MemberAdded_Restricted(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	const ts int64 = 1735689700000
 	data := makeInboxMemberEvent(t, model.InboxMemberRemoved, payload, ts)
@@ -226,7 +227,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 
 	script, ok := body["script"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, removeRoomScriptID, script["id"])
+	assert.Equal(t, searchindex.RemoveRoomScriptID, script["id"])
 	assert.NotContains(t, script, "source")
 
 	params := script["params"].(map[string]any)
@@ -246,7 +247,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved(t *testing.T) {
 // document_missing_exception on a never-indexed doc is a benign ack (see
 // isBulkItemSuccess).
 func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"weather.bot", "p_adminsiteA"}
 	const ts int64 = 1735689800000
@@ -265,7 +266,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T
 		var body map[string]any
 		require.NoError(t, json.Unmarshal(action.Doc, &body))
 		script := body["script"].(map[string]any)
-		assert.Equal(t, removeRoomScriptID, script["id"])
+		assert.Equal(t, searchindex.RemoveRoomScriptID, script["id"])
 		_, hasUpsert := body["upsert"]
 		assert.False(t, hasUpsert, "remove update must not contain an upsert")
 		docIDs[i] = action.DocID
@@ -277,7 +278,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_BotsCleanedUp(t *testing.T
 // mixed removal fans out to a remove-room update for BOTH the human and the bot
 // — the human because they were indexed, the bot as defensive cleanup.
 func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "weather.bot"}
 	const ts int64 = 1735689800000
@@ -292,7 +293,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testin
 		assert.Equal(t, searchengine.ActionUpdate, action.Action)
 		var body map[string]any
 		require.NoError(t, json.Unmarshal(action.Doc, &body))
-		assert.Equal(t, removeRoomScriptID, body["script"].(map[string]any)["id"])
+		assert.Equal(t, searchindex.RemoveRoomScriptID, body["script"].(map[string]any)["id"])
 		docIDs[i] = action.DocID
 	}
 	assert.ElementsMatch(t, []string{"alice", "weather.bot"}, docIDs)
@@ -303,7 +304,7 @@ func TestUserRoomCollection_BuildAction_MemberRemoved_MixedHumanAndBot(t *testin
 // seeded with `restrictedRooms[rid] = hss` and an empty `rooms[]`. All
 // actions share the same HSS (event-level field).
 func TestUserRoomCollection_BuildAction_BulkMixed_AllRestricted(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob", "carol"}
 	const hssVal int64 = 1735689500000
@@ -335,12 +336,12 @@ func TestUserRoomCollection_BuildAction_BulkMixed_AllRestricted(t *testing.T) {
 // restrictedRooms and guards with the LWW timestamp; the remove script evicts
 // from both slots regardless of which currently holds the rid.
 func TestUserRoomCollection_StoredScripts(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	scripts := coll.StoredScripts()
 	require.Len(t, scripts, 2)
 
-	add, ok := scripts[addRoomScriptID]
-	require.True(t, ok, "add script must be registered under addRoomScriptID")
+	add, ok := scripts[searchindex.AddRoomScriptID]
+	require.True(t, ok, "add script must be registered under searchindex.AddRoomScriptID")
 	var addBody map[string]any
 	require.NoError(t, json.Unmarshal(add, &addBody))
 	addScript := addBody["script"].(map[string]any)
@@ -353,8 +354,8 @@ func TestUserRoomCollection_StoredScripts(t *testing.T) {
 	assert.Contains(t, addSrc, "params.ts")
 	assert.Contains(t, addSrc, "params.hss")
 
-	remove, ok := scripts[removeRoomScriptID]
-	require.True(t, ok, "remove script must be registered under removeRoomScriptID")
+	remove, ok := scripts[searchindex.RemoveRoomScriptID]
+	require.True(t, ok, "remove script must be registered under searchindex.RemoveRoomScriptID")
 	var removeBody map[string]any
 	require.NoError(t, json.Unmarshal(remove, &removeBody))
 	removeScript := removeBody["script"].(map[string]any)
@@ -371,7 +372,7 @@ func TestUserRoomCollection_StoredScripts(t *testing.T) {
 // with N accounts produces N distinct user-room update actions (each keyed
 // by a different account).
 func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 	payload := baseInboxMemberEvent()
 	payload.Accounts = []string{"alice", "bob", "carol"}
 	data := makeInboxMemberEvent(t, model.InboxMemberAdded, payload, 12345)
@@ -393,7 +394,7 @@ func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
 }
 
 func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {
-	coll := newUserRoomCollection("user-room-site-a")
+	coll := newUserRoomCollection("user-room-site-a", false)
 
 	t.Run("malformed inbox event", func(t *testing.T) {
 		_, err := coll.BuildAction([]byte("{invalid"))

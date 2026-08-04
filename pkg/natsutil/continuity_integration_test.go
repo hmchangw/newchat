@@ -37,7 +37,7 @@ func TestPipelineTraceContinuity(t *testing.T) {
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	prop := propagation.TraceContext{}
 
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", tp, prop)
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", tp, prop, true)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 

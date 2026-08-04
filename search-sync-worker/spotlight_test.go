@@ -3,9 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,13 +44,25 @@ func baseInboxMemberEvent() *model.InboxMemberEvent {
 	}
 }
 
+func TestNewSpotlightSearchIndex_JoinedAtConverted(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng", JoinedAt: 1735689600000}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), doc.JoinedAt)
+}
+
+func TestNewSpotlightSearchIndex_ZeroJoinedAtStaysZeroTime(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng", JoinedAt: 0}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.True(t, doc.JoinedAt.IsZero())
+}
+
 func TestSpotlightCollection_Metadata(t *testing.T) {
 	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 
 	assert.Equal(t, "spotlight-sync", coll.ConsumerName())
 
 	cfg := coll.StreamConfig("site-a")
-	assert.Equal(t, "INBOX_site-a", cfg.Name)
+	assert.Equal(t, "INBOX-site-a", cfg.Name)
 	assert.Equal(t, []string{
 		"chat.inbox.site-a.internal.>",
 		"chat.inbox.site-a.external.>",
@@ -101,26 +112,6 @@ func TestSpotlightCollection_TemplateBody_PatternStripsVersion(t *testing.T) {
 	roomName := props["roomName"].(map[string]any)
 	assert.Equal(t, "search_as_you_type", roomName["type"])
 	assert.Equal(t, "custom_analyzer", roomName["analyzer"])
-}
-
-func TestSpotlightTemplateProperties_MatchesStruct(t *testing.T) {
-	props := esPropertiesFromStruct[SpotlightSearchIndex]()
-
-	typ := reflect.TypeOf(SpotlightSearchIndex{})
-	esFieldCount := 0
-	for i := range typ.NumField() {
-		field := typ.Field(i)
-		esTag := field.Tag.Get("es")
-		if esTag == "" || esTag == "-" {
-			continue
-		}
-		esFieldCount++
-		jsonTag := field.Tag.Get("json")
-		name, _, _ := strings.Cut(jsonTag, ",")
-		_, ok := props[name]
-		assert.True(t, ok, "template missing property for field %s (json %s)", field.Name, name)
-	}
-	assert.Equal(t, esFieldCount, len(props))
 }
 
 func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {

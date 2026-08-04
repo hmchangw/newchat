@@ -13,10 +13,11 @@ import (
 )
 
 // cachedUser is the in-memory projection of one teams_user, used for member
-// account resolution and the siteID vote.
+// identity resolution and the siteID vote.
 type cachedUser struct {
-	siteID  string
-	account string
+	siteID      string
+	account     string
+	displayName string
 }
 
 // syncConfig carries the orchestration knobs. Now is injectable for tests.
@@ -103,9 +104,11 @@ const inlineMemberThreshold = 25
 func buildChat(gc msgraph.Chat, cache map[string]cachedUser, now time.Time, defaultSiteID string) model.TeamsChat {
 	members := make([]model.TeamsChatMember, 0, len(gc.Members))
 	for _, m := range gc.Members {
+		cu := cache[m.UserID]
 		members = append(members, model.TeamsChatMember{
 			ID:                          m.UserID,
-			Account:                     cache[m.UserID].account,
+			Account:                     cu.account,
+			DisplayName:                 cu.displayName,
 			VisibleHistoryStartDateTime: m.VisibleHistoryStartDateTime,
 		})
 	}
@@ -141,7 +144,7 @@ func (s *syncer) run(ctx context.Context) error {
 	}
 	cache := make(map[string]cachedUser, len(users))
 	for _, u := range users {
-		cache[u.ID] = cachedUser{siteID: u.SiteID, account: u.Account}
+		cache[u.ID] = cachedUser{siteID: u.SiteID, account: u.Account, displayName: u.DisplayName}
 	}
 
 	to := startOfDayUTC(s.cfg.Now())

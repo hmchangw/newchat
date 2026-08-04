@@ -12,6 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
 
@@ -31,9 +32,9 @@ type teamsBatchHandler struct {
 	tr       MessageTransformer
 }
 
-func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string) *teamsBatchHandler {
+func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, publishUsers func(ctx context.Context, users []model.IUserWithChange) error) *teamsBatchHandler {
 	cache, _ := lru.New[string, resolvedSender](teamsSenderCacheSize) // errors only on size<=0
-	resolver := newSenderResolver(hrStore, siteID, cache)
+	resolver := newSenderResolver(hrStore, siteID, cache, publishUsers)
 	return &teamsBatchHandler{
 		store:    store,
 		siteID:   siteID,
@@ -46,8 +47,14 @@ func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string) *
 // handled (per-message errors are logged, not redelivered), Nak on an infra
 // failure so at-least-once redelivery re-runs the idempotent batch.
 func (h *teamsBatchHandler) consume(ctx context.Context, msg jetstream.Msg) {
+	data, err := natsutil.DecodePayload(msg)
+	if err != nil {
+		// A corrupt frame never decodes on redelivery — drop it as poison.
+		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("decode teams batch payload")))
+		return
+	}
 	var req model.TeamsBatchRequest
-	if err := sonic.Unmarshal(msg.Data(), &req); err != nil {
+	if err := sonic.Unmarshal(data, &req); err != nil {
 		// A malformed batch can never parse on redelivery — drop it as poison.
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("malformed teams batch")))
 		return

@@ -40,7 +40,7 @@ enabled, so no login is required):
   Note on "by subject": `prometheus-nats-exporter` (via jsz) does **not** emit
   per-subject message counts, so there is no true per-subject breakdown. The
   practical axes are **per-stream** (each stream owns a subject namespace, e.g.
-  `MESSAGES_*` carries `chat.user.*...msg.>`) and **per-consumer** (durables are
+  `MESSAGES-*` carries `chat.user.*...msg.>`) and **per-consumer** (durables are
   named after the consuming service) — both dashboards break out along these.
 
 The JetStream dashboard only has data once a NATS server is running

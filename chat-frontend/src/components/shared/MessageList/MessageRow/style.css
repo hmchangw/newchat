@@ -156,6 +156,10 @@
   font-size: var(--text-xs);
   font-style: italic;
 }
+.message-pinned {
+  font-size: var(--text-xs);
+  cursor: default;
+}
 .message-row-own .message-actions-host {
   left: auto;
   right: 0;

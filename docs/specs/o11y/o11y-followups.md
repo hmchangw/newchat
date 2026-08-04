@@ -106,10 +106,12 @@ Switch to `restyutil` (whose `otelhttp` transport picks up the global provider).
 pivot is one-directional. Add a one-line span attribute in the `natsrouter` and
 `ginutil` RequestID middlewares to close the loop.
 
-### F7 — Replace the `os.Setenv` NATS-tracing gate with an upstream option
-`pkg/natsutil.enableNATSTracing` pokes process-global env (`os.Setenv`) inside
-`Connect` because the SDK exposes no programmatic switch. Upstream a
-`WithTracingEnabled` option to `flywindy/o11y` and drop the env mutation.
+### F7 — Replace the `os.Setenv` NATS-tracing gate with an upstream option (DONE)
+Completed with `flywindy/o11y` v0.9.1. `pkg/natsutil.Connect` now receives the
+SDK's resolved `sdk.Toggles.Trace` value and forwards it through
+`o11ynats.WithTracingEnabled`; the process-global `os.Setenv` gate mutation and
+duplicate environment parsing are gone. Trace-off connections select the
+upstream direct/native path.
 
 ### F8 — Minor cleanups
 - `minioutil.WithObservability` has no production caller yet (only `testutil`) —

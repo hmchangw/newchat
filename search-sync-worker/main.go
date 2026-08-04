@@ -164,7 +164,7 @@ func main() {
 	msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 	msgColl.teamsUsers = newMongoTeamsUserResolver(db)
 
-	// Second consumer over messageCollection, bound to BOT_MESSAGES_CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
+	// Second consumer over messageCollection, bound to BOT-MESSAGES-CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
 	botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
 	botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
@@ -175,7 +175,7 @@ func main() {
 		botMsgColl,
 		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
 		newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
-		newUserRoomCollection(cfg.UserRoomIndex),
+		newUserRoomCollection(cfg.UserRoomIndex, cfg.DevMode),
 	}
 
 	for _, coll := range collections {
@@ -208,7 +208,7 @@ func main() {
 		}
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)

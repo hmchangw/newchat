@@ -575,6 +575,36 @@ func TestSendMessageRequestJSON(t *testing.T) {
 
 }
 
+func TestRoomsGetRequestJSON(t *testing.T) {
+	t.Run("with hints round-trip", func(t *testing.T) {
+		lastMsgAt := int64(1735689600000)
+		createdAt := int64(1735600000000)
+		src := model.RoomsGetRequest{
+			RoomIDs: []string{"r1", "r2"},
+			Hints: map[string]model.RoomTimeHint{
+				"r1": {LastMsgAt: &lastMsgAt, CreatedAt: &createdAt},
+				"r2": {LastMsgAt: &lastMsgAt},
+			},
+		}
+		roundTrip(t, &src, &model.RoomsGetRequest{})
+	})
+
+	t.Run("nil hints omitted", func(t *testing.T) {
+		src := model.RoomsGetRequest{RoomIDs: []string{"r1"}}
+		data, err := json.Marshal(&src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["hints"]
+		assert.False(t, present, "hints should be omitted when nil")
+
+		var dst model.RoomsGetRequest
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Nil(t, dst.Hints, "absent JSON field must unmarshal to nil map")
+	})
+}
+
 func TestMessageEventJSON(t *testing.T) {
 	e := model.MessageEvent{
 		Message: model.Message{
@@ -1940,12 +1970,51 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 		assert.Equal(t, "2025-01-04T09:10:11Z", raw["minUserLastSeenAt"], "minUserLastSeenAt must be RFC3339, not epoch millis")
 	})
 
-	t.Run("zero value omits all fields", func(t *testing.T) {
+	t.Run("zero value omits all fields including crossSite", func(t *testing.T) {
 		// #nosec G117 -- test roundtrip on a model whose PrivateKey field is part of the wire schema
 		data, err := json.Marshal(&model.SubscriptionRoom{})
 		require.NoError(t, err)
+		// A nil CrossSite (unclassified/unbackfilled room) omits the field so the
+		// frontend's `?? true` default resolves it to global (fail-safe).
 		assert.JSONEq(t, `{}`, string(data))
 	})
+}
+
+func TestRoom_CrossSiteRoundTrip(t *testing.T) {
+	r := model.Room{ID: "r1", SiteID: "site-a", CrossSite: boolPtr(true),
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	var got model.Room
+	roundTrip(t, &r, &got)
+	require.NotNil(t, got.CrossSite)
+	assert.True(t, *got.CrossSite)
+
+	sr := model.SubscriptionRoom{SiteID: "site-a", CrossSite: boolPtr(true)}
+	var gotSR model.SubscriptionRoom
+	// SubscriptionRoom is json-only (bson:"-")
+	// #nosec G117 -- serialization test; PrivateKey field is part of the wire schema and unset here
+	data, err := json.Marshal(&sr)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &gotSR))
+	require.NotNil(t, gotSR.CrossSite)
+	assert.True(t, *gotSR.CrossSite)
+
+	// An explicit false must still serialize: the frontend routes a room to the
+	// local NATS namespace only on an explicit crossSite:false, defaulting to
+	// global when the field is absent (nil). omitempty on a *bool only omits nil,
+	// never an explicit false, so this must not be dropped.
+	// #nosec G117 -- serialization test; PrivateKey field is part of the wire schema and unset here
+	falseB, err := json.Marshal(model.SubscriptionRoom{SiteID: "site-a", CrossSite: boolPtr(false)})
+	require.NoError(t, err)
+	assert.Contains(t, string(falseB), `"crossSite":false`)
+
+	// A nil CrossSite (unclassified) must omit the field entirely — never
+	// serialize as false, which would look like a confirmed same-site room.
+	// #nosec G117 -- serialization test; PrivateKey field is part of the wire schema and unset here
+	nilB, err := json.Marshal(model.SubscriptionRoom{SiteID: "site-a"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(nilB), `"crossSite"`)
 }
 
 func TestRoomInfo_MinUserLastSeenAt(t *testing.T) {
@@ -2896,6 +2965,10 @@ func TestSearchOrgsJSON(t *testing.T) {
 		assert.Equal(t, "DIV1", org["divisionId"])
 	})
 }
+
+// boolPtr returns a pointer to b, for constructing tri-state *bool fields
+// (e.g. Room.CrossSite) in test literals.
+func boolPtr(b bool) *bool { return &b }
 
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.
 func roundTrip[T any](t *testing.T, src *T, dst *T) {
@@ -4718,8 +4791,8 @@ func TestTeamsChatJSON(t *testing.T) {
 		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{
-			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
-			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+			{ID: "aad-user-1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", DisplayName: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 		SiteID:         "site-a",
 		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
@@ -4788,8 +4861,8 @@ func TestTeamsChatBSON(t *testing.T) {
 		CreatedDateTime:     time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC),
 		LastUpdatedDateTime: time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC),
 		Members: []model.TeamsChatMember{
-			{ID: "aad-user-1", Account: "alice", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
-			{ID: "aad-guest-9", Account: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+			{ID: "aad-user-1", Account: "alice", DisplayName: "Alice Smith", VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)},
+			{ID: "aad-guest-9", Account: "", DisplayName: "", VisibleHistoryStartDateTime: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
 		},
 		SiteID:         "site-a",
 		UpdatedAt:      time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
@@ -4809,6 +4882,19 @@ func TestTeamsChatBSON(t *testing.T) {
 	assert.Equal(t, "site-a", rawDoc["siteId"])
 	assert.Equal(t, true, rawDoc["needMemberSync"])
 
+	// Member subdoc keys are asserted raw: a round-trip is symmetric, so it
+	// would accept a misspelled tag, but stores and projections read these
+	// exact names.
+	var rawMembers struct {
+		Members []bson.M `bson:"members"`
+	}
+	require.NoError(t, bson.Unmarshal(data, &rawMembers))
+	require.Len(t, rawMembers.Members, 2)
+	for _, key := range []string{"id", "account", "displayName", "visibleHistoryStartDateTime"} {
+		assert.Contains(t, rawMembers.Members[0], key, "member subdoc must use the %q BSON key", key)
+	}
+	assert.Equal(t, "Alice Smith", rawMembers.Members[0]["displayName"])
+
 	// Round-trip to struct and verify equality
 	var dst model.TeamsChat
 	require.NoError(t, bson.Unmarshal(data, &dst))
@@ -4824,6 +4910,7 @@ func TestTeamsChatBSON(t *testing.T) {
 	for i, member := range c.Members {
 		assert.Equal(t, member.ID, dst.Members[i].ID)
 		assert.Equal(t, member.Account, dst.Members[i].Account)
+		assert.Equal(t, member.DisplayName, dst.Members[i].DisplayName)
 		assert.True(t, member.VisibleHistoryStartDateTime.UTC().Equal(dst.Members[i].VisibleHistoryStartDateTime.UTC()), "VisibleHistoryStartDateTime must match")
 	}
 }
@@ -4859,6 +4946,7 @@ func TestTeamsRoomCreateEventJSON(t *testing.T) {
 			Members: []model.TeamsRoomCreateMember{{
 				ID:                          "aad-user-1",
 				Account:                     "alice",
+				DisplayName:                 "Alice Smith",
 				VisibleHistoryStartDateTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 			}},
 		}},
@@ -4930,4 +5018,78 @@ func TestMessage_TypeBSONOmitEmpty(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(b, &raw))
 	_, ok := raw["type"]
 	assert.False(t, ok, "empty Type must be absent in BSON")
+}
+
+func TestTranslateRequest_JSON(t *testing.T) {
+	r := model.TranslateRequest{
+		Text:       "Hello world",
+		TargetLang: "zh-Hant-TW",
+	}
+	roundTrip(t, &r, &model.TranslateRequest{})
+}
+
+func TestTranslateResult_JSON(t *testing.T) {
+	r := model.TranslateResult{
+		TranslatedText: "你好 世界",
+		TargetLang:     "zh-Hant-TW",
+	}
+	roundTrip(t, &r, &model.TranslateResult{})
+}
+
+func TestSearchMessageEnrichmentJSON(t *testing.T) {
+	subscribed := true
+	m := model.SearchMessage{
+		MessageID:   "m1",
+		RoomID:      "r1",
+		SiteID:      "site-a",
+		UserAccount: "alice",
+		Content:     "hi",
+		CreatedAt:   time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+		TShow:       true,
+		Sender: &model.MessageSender{
+			Account: "alice",
+			HR:      &model.MessageHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice Wang"},
+		},
+		Room: &model.MessageRoom{
+			ID:      "r1",
+			Name:    "Weather App",
+			Type:    model.RoomTypeBotDM,
+			AppInfo: &model.MessageAppInfo{ID: "app-1", Name: "Weather App", AssistantName: "weather.bot", IsSubscribed: &subscribed},
+		},
+	}
+	roundTrip(t, &m, &model.SearchMessage{})
+
+	// dm room: hrInfo serializes chineseName (not the legacy "name" key).
+	b, err := json.Marshal(model.MessageRoom{
+		ID: "r2", Type: model.RoomTypeDM,
+		HRInfo: &model.MessageHRInfo{Account: "bob", ChineseName: "陳", EngName: "Bob Chan"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"chineseName":"陳"`)
+	assert.NotContains(t, string(b), `"appInfo"`)
+
+	// omitempty: a zero-value SearchMessage must not emit room/sender/tshow keys.
+	b, err = json.Marshal(model.SearchMessage{MessageID: "x"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "\"room\"")
+	assert.NotContains(t, string(b), "\"sender\"")
+	assert.NotContains(t, string(b), "\"tshow\"")
+}
+
+func TestMessageAppInfoJSON(t *testing.T) {
+	// Sender variant: IsSubscribed nil → key absent; no displayName/hr keys.
+	b, err := json.Marshal(model.MessageSender{
+		Account: "weather.bot",
+		AppInfo: &model.MessageAppInfo{ID: "app-1", Name: "Weather App", AssistantName: "weather.bot"},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "isSubscribed")
+	assert.NotContains(t, string(b), "displayName")
+	assert.NotContains(t, string(b), `"hr"`)
+
+	// Room variant: explicit false must serialize (pointer, not omitted).
+	unsubscribed := false
+	b, err = json.Marshal(model.MessageAppInfo{ID: "app-1", Name: "W", AssistantName: "w.bot", IsSubscribed: &unsubscribed})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"isSubscribed":false`)
 }

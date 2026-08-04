@@ -85,17 +85,17 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(resolved.Participants))
 
 	var sender *cassParticipant
-	user, err := h.userStore.FindUserByID(ctx, evt.Message.UserID)
+	user, err := h.userStore.FindUserByAccount(ctx, evt.Message.UserAccount)
 	if err != nil {
 		if model.IsSystemMessageType(evt.Message.Type) {
 			// System messages may have no real user; proceed with nil sender.
 			// A client type (e.g. important) has a real sender, so a lookup failure
 			// there falls through to the error branch like a normal message.
 			slog.WarnContext(ctx, "user not found for system message, using nil sender",
-				"user_id", evt.Message.UserID, "type", evt.Message.Type,
+				"account", evt.Message.UserAccount, "type", evt.Message.Type,
 				"request_id", natsutil.RequestIDFromContext(ctx))
 		} else {
-			return fmt.Errorf("lookup user %s: %w", evt.Message.UserID, err)
+			return fmt.Errorf("lookup user %s: %w", evt.Message.UserAccount, err)
 		}
 	} else {
 		sender = &cassParticipant{
@@ -191,7 +191,7 @@ func (h *Handler) reprojectUnverifiedQuote(ctx context.Context, evt *model.Messa
 	// cleared regardless of whether the parent was found.
 	evt.QuotedParentUnverified = false
 	if !found {
-		// Accepted trade-off: MESSAGES_CANONICAL doesn't order the parent's persist
+		// Accepted trade-off: MESSAGES-CANONICAL doesn't order the parent's persist
 		// relative to this reply, so a parent row still in flight reads as not-found
 		// and the quote is dropped permanently (no bounded retry). Quoting a parent
 		// that hasn't landed yet is a narrow race; dropping the quote is preferred
@@ -314,7 +314,7 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	// Skip thread_subscription writes + cross-site inbox for migrated replies: the collections migration
 	// owns them (migrated unfiltered); re-deriving here would dup-key the unique (threadRoomId,userAccount).
 	if !isMigration {
-		parentOwnerSite, err := h.lookupOwnerSiteID(ctx, parentSender.ID, "first-reply parent")
+		parentOwnerSite, err := h.lookupOwnerSiteID(ctx, parentSender.Account, "first-reply parent")
 		if err != nil {
 			return fmt.Errorf("lookup parent owner site: %w", err)
 		}
@@ -378,7 +378,7 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	switch {
 	case err == nil:
 		if !isMigration {
-			parentOwnerSite, lookupErr := h.lookupOwnerSiteID(ctx, parentSender.ID, "subsequent-reply parent")
+			parentOwnerSite, lookupErr := h.lookupOwnerSiteID(ctx, parentSender.Account, "subsequent-reply parent")
 			if lookupErr != nil {
 				return "", fmt.Errorf("lookup parent owner site: %w", lookupErr)
 			}
@@ -460,20 +460,20 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	return existingRoom.ID, nil
 }
 
-// lookupOwnerSiteID resolves a user's home site by ID.
+// lookupOwnerSiteID resolves a user's home site by account.
 // Returns ("", nil) when the user is not found (logs a warning) so callers
 // can skip that user gracefully — parallels the errMessageNotFound branch
 // already in this file. Other DB errors are returned for the caller to NAK on.
-func (h *Handler) lookupOwnerSiteID(ctx context.Context, userID, role string) (string, error) {
-	user, err := h.userStore.FindUserByID(ctx, userID)
+func (h *Handler) lookupOwnerSiteID(ctx context.Context, account, role string) (string, error) {
+	user, err := h.userStore.FindUserByAccount(ctx, account)
 	if err != nil {
 		if errors.Is(err, userstore.ErrUserNotFound) {
 			slog.WarnContext(ctx, "owner user not found — skipping cross-site inbox publish; local thread subscription insert/upsert continues",
-				"user_id", userID, "role", role,
+				"account", account, "role", role,
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			return "", nil
 		}
-		return "", fmt.Errorf("lookup user %s: %w", userID, err)
+		return "", fmt.Errorf("lookup user %s: %w", account, err)
 	}
 	return user.SiteID, nil
 }
@@ -586,7 +586,7 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 		return fmt.Errorf("marshal thread subscription: %w", err)
 	}
 	// Dedup-ID seed (threadRoomID + userID + msg.ID + hasMention + destSiteID):
-	// msg.ID is stable across MESSAGES_CANONICAL redeliveries so the same publish
+	// msg.ID is stable across MESSAGES-CANONICAL redeliveries so the same publish
 	// yields the same ID; different users on the same destination differ via userID;
 	// hasMention is in the seed so a HasMention=false upsert and a later
 	// HasMention=true update get distinct dedup IDs (else stream-level dedup would
@@ -602,7 +602,7 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 
 // publishThreadReplyEvent fires a badge event via core NATS so broadcast-worker
 // can update the reply-count badge for thread followers. Published to
-// chat.server.broadcast.{siteID}.thread.tcount (not MESSAGES_CANONICAL) because
+// chat.server.broadcast.{siteID}.thread.tcount (not MESSAGES-CANONICAL) because
 // badge updates are best-effort and do not belong in the message CRUD event store.
 func (h *Handler) publishThreadReplyEvent(ctx context.Context, msg *model.Message, newTcount int) error {
 	tlm := msg.CreatedAt

@@ -25,38 +25,38 @@ type syncer struct {
 	users TeamsUserStore
 	graph membersFetcher
 	cfg   syncConfig
-	cache *accountCache
+	cache *userRefCache
 }
 
 func newSyncer(chats TeamsChatStore, users TeamsUserStore, graph membersFetcher, cfg syncConfig) *syncer {
-	return &syncer{chats: chats, users: users, graph: graph, cfg: cfg, cache: newAccountCache(users)}
+	return &syncer{chats: chats, users: users, graph: graph, cfg: cfg, cache: newUserRefCache(users)}
 }
 
-// accountCache is a process-wide userId->account cache shared by all workers.
-// It batches uncached ids into a single AccountsByIDs query and caches misses (as "").
+// userRefCache is a process-wide userId->teams_user cache shared by all workers.
+// It batches uncached ids into a single UsersByIDs query and caches misses (as the zero ref).
 // Under concurrency, two goroutines racing on the same uncached id may each issue
 // a lookup — harmless and self-healing (the map write is mutex-guarded, resolved value is identical).
-type accountCache struct {
+type userRefCache struct {
 	users TeamsUserStore
 	mu    sync.Mutex
-	cache map[string]string
+	cache map[string]teamsUserRef
 }
 
-func newAccountCache(users TeamsUserStore) *accountCache {
-	return &accountCache{users: users, cache: make(map[string]string)}
+func newUserRefCache(users TeamsUserStore) *userRefCache {
+	return &userRefCache{users: users, cache: make(map[string]teamsUserRef)}
 }
 
-// resolve returns account for each requested id, querying teams_user only for
-// ids not already cached and caching every result including misses.
-func (c *accountCache) resolve(ctx context.Context, ids []string) (map[string]string, error) {
-	out := make(map[string]string, len(ids))
+// resolve returns the teams_user ref for each requested id, querying teams_user
+// only for ids not already cached and caching every result including misses.
+func (c *userRefCache) resolve(ctx context.Context, ids []string) (map[string]teamsUserRef, error) {
+	out := make(map[string]teamsUserRef, len(ids))
 	var missing []string
 	seen := make(map[string]struct{}) // dedup within this call
 
 	c.mu.Lock()
 	for _, id := range ids {
-		if acct, ok := c.cache[id]; ok {
-			out[id] = acct
+		if ref, ok := c.cache[id]; ok {
+			out[id] = ref
 		} else if _, alreadySeen := seen[id]; !alreadySeen {
 			missing = append(missing, id)
 			seen[id] = struct{}{}
@@ -67,39 +67,41 @@ func (c *accountCache) resolve(ctx context.Context, ids []string) (map[string]st
 	if len(missing) == 0 {
 		return out, nil
 	}
-	found, err := c.users.AccountsByIDs(ctx, missing)
+	found, err := c.users.UsersByIDs(ctx, missing)
 	if err != nil {
-		return nil, fmt.Errorf("resolve accounts: %w", err)
+		return nil, fmt.Errorf("resolve teams users: %w", err)
 	}
 
 	c.mu.Lock()
 	for _, id := range missing {
-		acct := found[id] // "" when absent — a cached miss
-		c.cache[id] = acct
-		out[id] = acct
+		ref := found[id] // zero ref when absent — a cached miss
+		c.cache[id] = ref
+		out[id] = ref
 	}
 	c.mu.Unlock()
 	return out, nil
 }
 
 // buildMembers maps Graph members to stored members, resolving every member's
-// account from teams_user by userId through the batched, cached lookup.
-// Members absent from teams_user keep account "".
+// account and display name from teams_user by userId through the batched,
+// cached lookup. Members absent from teams_user keep both fields empty.
 func (s *syncer) buildMembers(ctx context.Context, raw []msgraph.ChatMemberDetail) ([]model.TeamsChatMember, error) {
 	ids := make([]string, 0, len(raw))
 	for _, m := range raw {
 		ids = append(ids, m.UserID)
 	}
-	accounts, err := s.cache.resolve(ctx, ids)
+	refs, err := s.cache.resolve(ctx, ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve member identity: %w", err)
 	}
 
 	members := make([]model.TeamsChatMember, 0, len(raw))
 	for _, m := range raw {
+		ref := refs[m.UserID]
 		members = append(members, model.TeamsChatMember{
 			ID:                          m.UserID,
-			Account:                     accounts[m.UserID],
+			Account:                     ref.account,
+			DisplayName:                 ref.displayName,
 			VisibleHistoryStartDateTime: m.VisibleHistoryStartDateTime,
 		})
 	}
@@ -166,7 +168,7 @@ func (s *syncer) run(ctx context.Context) error {
 	return nil
 }
 
-// syncChat fetches one chat's members, resolves accounts, and writes the list
+// syncChat fetches one chat's members, resolves their teams_user identity, and writes the list
 // back. On any error the chat's needMemberSync is left true (no SetMembersSynced)
 // so it is retried next run. A superseded write (errSuperseded) is likewise
 // left for retry but is not a failure — see run.

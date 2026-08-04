@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type config struct {
@@ -52,13 +53,6 @@ type config struct {
 	TeamsClientID     string `env:"TEAMS_CLIENT_ID"          envDefault:""`
 	TeamsClientSecret string `env:"TEAMS_CLIENT_SECRET"      envDefault:""`
 	TeamsEmailDomain  string `env:"TEAMS_EMAIL_DOMAIN"       envDefault:"dev.local"`
-	// TeamsROPCUsername/Password are the service-account resource-owner
-	// credentials for the ROPC (grant_type=password) directory lookup used to
-	// resolve meeting organizer/attendee Azure object IDs (User.Read.All). They
-	// reuse TeamsClientID/TeamsClientSecret as the confidential client. When
-	// unset the meetings RPC reports not-configured.
-	TeamsROPCUsername string `env:"TEAMS_ROPC_USERNAME"      envDefault:""`
-	TeamsROPCPassword string `env:"TEAMS_ROPC_PASSWORD"      envDefault:""`
 	// TeamsTLSInsecure disables Graph TLS verification (dev/on-prem self-signed
 	// certs only). Never enable in production.
 	TeamsTLSInsecure bool `env:"TEAMS_TLS_INSECURE" envDefault:"false"`
@@ -80,6 +74,10 @@ type config struct {
 	DebugLog logctx.Config      `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
+	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
+	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
+	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -132,6 +130,12 @@ func main() {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
 		os.Exit(1)
 	}
+	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
+	if err != nil {
+		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
+		os.Exit(1)
+	}
+	subject.SetRoomLocalityGrace(cfg.RoomLocalityGrace)
 
 	ctx := context.Background()
 
@@ -141,7 +145,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -190,9 +194,10 @@ func main() {
 
 	// Graph clients back the meetings RPC. Constructed only when the Azure app
 	// credentials are present; otherwise the meetings RPC reports not-configured
-	// while the deep-link RPCs keep working. The directory client (ROPC,
-	// User.Read.All) resolves organizer/attendee object IDs and is required for
-	// meetings — it reuses the same app credentials as the confidential client.
+	// while the deep-link RPCs keep working. One app-only client serves both the
+	// meetings (Client) and directory (DirectoryReader, User.Read.All) surfaces —
+	// the directory lookup resolves organizer/attendee object IDs on the same
+	// Service Principal that creates the meeting.
 	var graphClient msgraph.Client
 	var directoryClient msgraph.DirectoryReader
 	if cfg.TeamsTenantID != "" && cfg.TeamsClientID != "" && cfg.TeamsClientSecret != "" {
@@ -207,20 +212,10 @@ func main() {
 		if cfg.TeamsTLSInsecure {
 			slog.Warn("Graph TLS verification disabled — dev/on-prem only, never production", "TEAMS_TLS_INSECURE", true)
 		}
-		graphClient, err = msgraph.NewMeetingsClient(graphCfg)
+		graphClient, directoryClient, err = msgraph.NewMeetingsDirectoryClient(graphCfg)
 		if err != nil {
 			slog.Error("build graph meetings client", "error", err)
 			os.Exit(1)
-		}
-		if cfg.TeamsROPCUsername != "" && cfg.TeamsROPCPassword != "" {
-			directoryClient, err = msgraph.NewDirectoryROPCClient(graphCfg,
-				msgraph.ROPCCredentials{Username: cfg.TeamsROPCUsername, Password: cfg.TeamsROPCPassword})
-			if err != nil {
-				slog.Error("build graph directory client", "error", err)
-				os.Exit(1)
-			}
-		} else {
-			slog.Warn("TEAMS_ROPC_USERNAME/PASSWORD unset — Teams meetings RPC will report not-configured")
 		}
 	}
 
@@ -262,6 +257,7 @@ func main() {
 		},
 		cfg.LegacyRoomOrigins.byID,
 		nc.NatsConn().MaxPayload(),
+		roomRouteMode,
 	)
 	handler.dekProvisioner = dekProvisioner
 	handler.graphClient = graphClient

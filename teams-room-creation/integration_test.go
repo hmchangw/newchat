@@ -30,7 +30,7 @@ import (
 // satisfy that parameter). The connection is drained on test cleanup.
 func dial(t *testing.T) (*o11ynats.Conn, o11ynats.JetStream) {
 	t.Helper()
-	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{})
+	nc, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 	js, err := nc.JetStream()
@@ -50,7 +50,9 @@ func fetchOne(t *testing.T, ctx context.Context, cons o11ynats.Consumer, timeout
 	case fm, ok := <-batch.Messages():
 		require.True(t, ok, "expected one message on the fetch batch")
 		require.NoError(t, fm.Msg.Ack())
-		return fm.Msg.Data()
+		data, err := natsutil.DecodePayload(fm.Msg)
+		require.NoError(t, err)
+		return data
 	case <-time.After(timeout):
 		t.Fatal("timed out waiting for JetStream message")
 		return nil

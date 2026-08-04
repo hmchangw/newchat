@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -57,7 +55,7 @@ type messageCollection struct {
 	teamsUsers teamsUserResolver
 }
 
-// newMessageCollection binds to the user MESSAGES_CANONICAL stream and also indexes
+// newMessageCollection binds to the user MESSAGES-CANONICAL stream and also indexes
 // migrated Teams history off .teams.batch (one consumer covers both).
 func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMode bool) *messageCollection {
 	return &messageCollection{
@@ -71,7 +69,7 @@ func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMod
 	}
 }
 
-// newBotMessageCollection binds to BOT_MESSAGES_CANONICAL and shares BuildAction with the user flow.
+// newBotMessageCollection binds to BOT-MESSAGES-CANONICAL and shares BuildAction with the user flow.
 func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollection {
 	return &messageCollection{
 		indexPrefix:  indexPrefix,
@@ -111,11 +109,11 @@ func (c *messageCollection) FilterSubjects(siteID string) []string {
 }
 
 func (c *messageCollection) TemplateName() string {
-	return fmt.Sprintf("%s_template", searchindex.StripVersionBase(c.indexPrefix))
+	return searchindex.MessageTemplateName(c.indexPrefix)
 }
 
 func (c *messageCollection) TemplateBody() json.RawMessage {
-	return messageTemplateBody(c.indexPrefix, c.devMode)
+	return searchindex.MessageTemplateBody(c.indexPrefix, c.devMode)
 }
 
 // StoredScripts returns nil — message indexing uses plain index/delete bulk actions with no painless scripts.
@@ -127,7 +125,7 @@ func (c *messageCollection) StoredScripts() map[string]json.RawMessage {
 // monthly indices; the same pattern the template targets.
 func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
 	// Error discarded: input is a static map of literals, marshal cannot fail.
-	body, _ := json.Marshal(map[string]any{"properties": messageTemplateProperties()})
+	body, _ := json.Marshal(map[string]any{"properties": searchindex.EsPropertiesFromStruct[searchindex.MessageDoc]()})
 	return searchindex.IndexPattern(c.indexPrefix), body
 }
 
@@ -189,13 +187,23 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 	for _, raw := range req.Messages {
 		var tm teamsmigrate.Message
 		if err := json.Unmarshal(raw, &tm); err != nil {
-			continue // one malformed record must not drop its valid siblings
+			// One malformed record must not drop its valid siblings, but a
+			// batch that should only ever contain what the migration writer
+			// itself persisted having an unparseable entry is unexpected —
+			// surface it instead of vanishing silently.
+			slog.Warn("skip teams migration record: unmarshal failed", "error", err)
+			continue
 		}
 		if tm.ID == "" || tm.RoomID == "" || tm.CreatedDateTime.IsZero() {
+			// The migration writer already filters these before persisting
+			// (see model.TeamsBatchSkipped), so this shouldn't normally
+			// trigger — log it as a signal that invariant was violated.
+			slog.Warn("skip teams migration record: missing id/roomId/createdAt",
+				"messageId", tm.ID, "roomId", tm.RoomID)
 			continue // can't address idempotently / no index bucket
 		}
 		if teamsmigrate.MessageType(tm.MessageType) != "" {
-			continue // system message — not indexed content
+			continue // system message — not indexed content, not a failure
 		}
 		keeps = append(keeps, tm)
 		if tm.From.ID != "" {
@@ -209,7 +217,10 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 	for i := range keeps {
 		tm := &keeps[i]
 		id := identities[tm.From.ID] // zero value (empty account/userID) when unresolved
-		doc := MessageSearchIndex{
+		// Built directly rather than via searchindex.NewMessageDoc: that
+		// constructor decodes cassandra.Message's attachment column, which
+		// has no counterpart in teamsmigrate.Message.
+		doc := searchindex.MessageDoc{
 			MessageID:   teamsmigrate.DeterministicMessageID(tm.RoomID, tm.ID),
 			RoomID:      tm.RoomID,
 			SiteID:      c.siteID,
@@ -221,7 +232,7 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 		body, _ := json.Marshal(doc)
 		actions = append(actions, searchengine.BulkAction{
 			Action: searchengine.ActionIndex,
-			Index:  indexName(c.indexPrefix, tm.CreatedDateTime),
+			Index:  searchindex.MessageIndexName(c.indexPrefix, tm.CreatedDateTime),
 			DocID:  doc.MessageID,
 			// Deterministic id + createdAt as the external version make a batch replay
 			// idempotent (a re-index of the same doc 409s, handled as success).
@@ -264,45 +275,14 @@ func actionableEvent(e model.EventType) bool {
 	}
 }
 
-// MessageSearchIndex is the Elasticsearch document for messages, mirroring pkg/model.Message; the
-// `es` tag (keyword/text/date/boolean, text,custom_analyzer, or object_disabled) drives the template — add new Message fields here and populate them in newMessageSearchIndex().
-type MessageSearchIndex struct {
-	MessageID   string `json:"messageId"                              es:"keyword"`
-	RoomID      string `json:"roomId"                                 es:"keyword"`
-	SiteID      string `json:"siteId"                                 es:"keyword"`
-	UserID      string `json:"userId"                                 es:"keyword"`
-	UserAccount string `json:"userAccount"                            es:"keyword"`
-	// IsBot flags bot-authored messages so search-service can filter/facet by source.
-	IsBot                 bool       `json:"isBot,omitempty"                        es:"boolean"`
-	Content               string     `json:"content,omitempty"                      es:"text,custom_analyzer"`
-	CreatedAt             time.Time  `json:"createdAt"                              es:"date"`
-	EditedAt              *time.Time `json:"editedAt,omitempty"                     es:"date"`
-	UpdatedAt             *time.Time `json:"updatedAt,omitempty"                    es:"date"`
-	ThreadParentID        string     `json:"threadParentMessageId,omitempty"        es:"keyword"`
-	ThreadParentCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty" es:"date"`
-	TShow                 bool       `json:"tshow,omitempty"                        es:"boolean"`
-
-	// Searched attachment/tcard projections. AttachmentText is one string —
-	// every attachment title+description joined — so an AND query can mix
-	// words from both. CardData duplicates card.data — accepted.
-	AttachmentText string `json:"attachmentText,omitempty" es:"text,custom_analyzer"`
-	CardData       string `json:"cardData,omitempty"       es:"text,custom_analyzer"`
-
-	// Render payloads stored as-is (never indexed) so search hits can be
-	// rendered on the frontend without a history-service lookup.
-	Attachments []cassandra.Attachment `json:"attachments,omitempty" es:"object_disabled"`
-	Card        *cassandra.Card        `json:"card,omitempty"        es:"object_disabled"`
-}
-
 // newMessageSearchIndex maps a MessageEvent to a search index document.
-func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
-	doc := MessageSearchIndex{
+func newMessageSearchIndex(evt *model.MessageEvent) (searchindex.MessageDoc, error) {
+	return searchindex.NewMessageDoc(searchindex.MessageFields{
 		MessageID:             evt.Message.ID,
 		RoomID:                evt.Message.RoomID,
 		SiteID:                evt.SiteID,
 		UserID:                evt.Message.UserID,
 		UserAccount:           evt.Message.UserAccount,
-		IsBot:                 model.IsBot(evt.Message.UserAccount),
 		Content:               evt.Message.Content,
 		CreatedAt:             evt.Message.CreatedAt,
 		EditedAt:              evt.Message.EditedAt,
@@ -310,38 +290,13 @@ func newMessageSearchIndex(evt *model.MessageEvent) MessageSearchIndex {
 		ThreadParentID:        evt.Message.ThreadParentMessageID,
 		ThreadParentCreatedAt: evt.Message.ThreadParentMessageCreatedAt,
 		TShow:                 evt.Message.TShow,
-	}
-
-	// Lenient decode: a malformed blob is skipped by DecodeAttachments; one
-	// bad attachment must not block indexing the rest of the message.
-	attachments, _ := cassandra.DecodeAttachments(evt.Message.Attachments)
-	doc.Attachments = attachments
-	var attachmentText []string
-	for i := range attachments {
-		a := &attachments[i]
-		if a.Title != "" {
-			attachmentText = append(attachmentText, a.Title)
-		}
-		if a.Description != "" {
-			attachmentText = append(attachmentText, a.Description)
-		}
-	}
-	doc.AttachmentText = strings.Join(attachmentText, " ")
-
-	if evt.Message.Card != nil {
-		doc.Card = evt.Message.Card
-		doc.CardData = string(evt.Message.Card.Data)
-	}
-
-	return doc
-}
-
-func indexName(prefix string, createdAt time.Time) string {
-	return fmt.Sprintf("%s-%s", prefix, createdAt.UTC().Format("2006-01"))
+		Attachments:           evt.Message.Attachments,
+		Card:                  evt.Message.Card,
+	})
 }
 
 func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengine.BulkAction {
-	index := indexName(indexPrefix, evt.Message.CreatedAt)
+	index := searchindex.MessageIndexName(indexPrefix, evt.Message.CreatedAt)
 
 	// Only an explicit EventDeleted removes the doc; created/updated (and any unstamped legacy/replayed event) take the index upsert path.
 	if evt.Event == model.EventDeleted {
@@ -364,63 +319,13 @@ func buildMessageAction(evt *model.MessageEvent, indexPrefix string) searchengin
 }
 
 func buildDocument(evt *model.MessageEvent) json.RawMessage {
-	doc := newMessageSearchIndex(evt)
+	doc, err := newMessageSearchIndex(evt)
+	if err != nil {
+		// Not fatal — the doc is still fully usable, just missing the skipped
+		// attachment(s). Logged so silent data loss is at least observable.
+		slog.Warn("message doc built with skipped attachments", "error", err,
+			"messageId", evt.Message.ID, "roomId", evt.Message.RoomID)
+	}
 	data, _ := json.Marshal(doc)
-	return data
-}
-
-// messageTemplateProperties generates ES mapping properties from MessageSearchIndex struct tags. The `es` tag is the source of truth.
-func messageTemplateProperties() map[string]any {
-	return esPropertiesFromStruct[MessageSearchIndex]()
-}
-
-func messageTemplateBody(prefix string, devMode bool) json.RawMessage {
-	shards := 4
-	replicas := 2
-	if devMode {
-		shards = 1
-		replicas = 0
-	}
-	tmpl := map[string]any{
-		"index_patterns": []string{searchindex.IndexPattern(prefix)},
-		"template": map[string]any{
-			"settings": map[string]any{
-				"index": map[string]any{
-					"number_of_shards":   shards,
-					"number_of_replicas": replicas,
-					"refresh_interval":   "30s",
-				},
-				"analysis": map[string]any{
-					"analyzer": map[string]any{
-						"custom_analyzer": map[string]any{
-							"type":        "custom",
-							"tokenizer":   "underscore_preserving",
-							"filter":      []string{"underscore_subword", "cjk_bigram", "lowercase"},
-							"char_filter": []string{"html_strip"},
-						},
-					},
-					"tokenizer": map[string]any{
-						"underscore_preserving": map[string]any{
-							"type":    "pattern",
-							"pattern": `[\s,;!?()\[\]{}"'<>]+`,
-						},
-					},
-					"filter": map[string]any{
-						"underscore_subword": map[string]any{
-							"type":                 "word_delimiter_graph",
-							"split_on_case_change": false,
-							"split_on_numerics":    false,
-							"preserve_original":    true,
-						},
-					},
-				},
-			},
-			"mappings": map[string]any{
-				"dynamic":    false,
-				"properties": messageTemplateProperties(),
-			},
-		},
-	}
-	data, _ := json.Marshal(tmpl)
 	return data
 }

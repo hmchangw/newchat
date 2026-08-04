@@ -17,7 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode/errtest"
 )
 
-// validCardJSON is a well-formed register body; helpers override one field to
+// validCardJSON is a well-formed card body; helpers override one field to
 // exercise the failure paths.
 const validCardJSON = `{"path":"greetings/en/welcome","_tcardVersion":"1.0.0","type":"AdaptiveCard",` +
 	`"schema":"http://adaptivecards.io/schemas/adaptive-card.json","version":"1.5",` +
@@ -375,21 +375,77 @@ func TestCardHandler_HandleList_CacheStates(t *testing.T) {
 	})
 }
 
-func TestHandleRegister_HappyPath(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockCardStore(ctrl)
-	store.EXPECT().ListVersions(gomock.Any(), "greetings/en/welcome").Return(nil, nil)
-	store.EXPECT().InsertCard(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().GetCard(gomock.Any(), "greetings/en/welcome", "1.0.0").
-		Return(card{Path: "greetings/en/welcome", CardVersion: "1.0.0", Template: json.RawMessage(`{}`)}, true, nil)
-
-	r := setupRouter(t, NewCardHandler(newCardCache(), store))
-	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", validCardJSON)
-	require.Equal(t, http.StatusCreated, w.Code)
+func TestHandleValidate_HappyPath(t *testing.T) {
+	// A nil store proves the endpoint never reaches Mongo.
+	r := setupRouter(t, NewCardHandler(cacheWith(), nil))
+	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", validCardJSON)
+	require.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"success":true}`, w.Body.String())
 }
 
-func TestHandleRegister_ValidationErrors(t *testing.T) {
+// Validation is read-only: the card is neither cached nor servable afterwards.
+func TestHandleValidate_DoesNotPersistOrCache(t *testing.T) {
+	cache := cacheWith()
+	r := setupRouter(t, NewCardHandler(cache, nil))
+
+	require.Equal(t, http.StatusOK,
+		doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", validCardJSON).Code)
+
+	_, ok := cache.Get("greetings/en/welcome", "1.0.0")
+	assert.False(t, ok, "validate must not add the card to the cache")
+	assert.Equal(t, http.StatusNotFound,
+		doRequest(t, r, http.MethodGet, "/api/v1/cards/greetings/en/welcome@1.0.0.template.json").Code)
+}
+
+// The highest-version check reads the cache snapshot, not Mongo.
+func TestHandleValidate_VersionOrdering(t *testing.T) {
+	mk := func(version string) card {
+		return card{Path: "greetings/en/welcome", CardVersion: version, Template: json.RawMessage(`{}`)}
+	}
+	tests := []struct {
+		name   string
+		cached []card
+		want   int
+	}{
+		{name: "no cached version for the path", cached: nil, want: http.StatusOK},
+		{name: "strictly higher than the cached version", cached: []card{mk("0.9.0")}, want: http.StatusOK},
+		{name: "higher than every cached version", cached: []card{mk("0.1.0"), mk("0.9.9")}, want: http.StatusOK},
+		{name: "equal to a cached version", cached: []card{mk("1.0.0")}, want: http.StatusConflict},
+		{name: "lower than a cached version", cached: []card{mk("2.0.0")}, want: http.StatusConflict},
+		{name: "lower than one of several cached versions", cached: []card{mk("0.1.0"), mk("3.0.0")}, want: http.StatusConflict},
+		{
+			name:   "a non-semver cached version is ignored",
+			cached: []card{{Path: "greetings/en/welcome", CardVersion: "v1", Template: json.RawMessage(`{}`)}},
+			want:   http.StatusOK,
+		},
+		{
+			name:   "a higher version under a different path does not block",
+			cached: []card{{Path: "greetings/en/goodbye", CardVersion: "9.9.9", Template: json.RawMessage(`{}`)}},
+			want:   http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := setupRouter(t, NewCardHandler(cacheWith(tt.cached...), nil))
+			w := doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", validCardJSON)
+			require.Equal(t, tt.want, w.Code)
+			if tt.want == http.StatusConflict {
+				errtest.AssertCode(t, w.Body.Bytes(), errcode.CodeConflict)
+			}
+		})
+	}
+}
+
+// Before the first cache load there is nothing to order against, so the service
+// reports itself unavailable rather than passing every version as the highest.
+func TestHandleValidate_CacheNotLoaded(t *testing.T) {
+	r := setupRouter(t, NewCardHandler(newCardCache(), nil))
+	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", validCardJSON)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	errtest.AssertCode(t, w.Body.Bytes(), errcode.CodeUnavailable)
+}
+
+func TestHandleValidate_ValidationErrors(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -414,59 +470,26 @@ func TestHandleRegister_ValidationErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			store := NewMockCardStore(ctrl) // validation fails before any store call
-			r := setupRouter(t, NewCardHandler(newCardCache(), store))
-			w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", tt.body)
+			// A never-loaded cache: field checks need no snapshot, so a malformed
+			// card is 400 rather than the 503 an ordering check would give.
+			r := setupRouter(t, NewCardHandler(newCardCache(), nil))
+			w := doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", tt.body)
 			require.Equal(t, http.StatusBadRequest, w.Code)
 			errtest.AssertCode(t, w.Body.Bytes(), errcode.CodeBadRequest)
 		})
 	}
 }
 
-func TestHandleRegister_InvalidJSON(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockCardStore(ctrl)
-	r := setupRouter(t, NewCardHandler(newCardCache(), store))
-	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", `{not json`)
+func TestHandleValidate_InvalidJSON(t *testing.T) {
+	r := setupRouter(t, NewCardHandler(cacheWith(), nil))
+	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/validate", `{not json`)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	errtest.AssertCode(t, w.Body.Bytes(), errcode.CodeBadRequest)
 }
 
-func TestHandleRegister_NotHighest(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockCardStore(ctrl)
-	store.EXPECT().ListVersions(gomock.Any(), "greetings/en/welcome").Return([]string{"2.0.0"}, nil)
-
-	r := setupRouter(t, NewCardHandler(newCardCache(), store))
+// The endpoint moved: the register path is no longer routed.
+func TestHandleValidate_RegisterRouteRemoved(t *testing.T) {
+	r := setupRouter(t, NewCardHandler(cacheWith(), nil))
 	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", validCardJSON)
-	require.Equal(t, http.StatusConflict, w.Code)
-	errtest.AssertCode(t, w.Body.Bytes(), errcode.CodeConflict)
-}
-
-func TestHandleRegister_Duplicate(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockCardStore(ctrl)
-	store.EXPECT().ListVersions(gomock.Any(), "greetings/en/welcome").Return([]string{"0.9.0"}, nil)
-	store.EXPECT().InsertCard(gomock.Any(), gomock.Any()).Return(ErrDuplicateCard)
-
-	r := setupRouter(t, NewCardHandler(newCardCache(), store))
-	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", validCardJSON)
-	require.Equal(t, http.StatusConflict, w.Code)
-	errtest.AssertCode(t, w.Body.Bytes(), errcode.CodeConflict)
-}
-
-// The insert succeeded; a failure fetching it back for the cache must not fail
-// the request — the card is persisted and appears on the next refresh.
-func TestHandleRegister_CacheAddFailureStill201(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockCardStore(ctrl)
-	store.EXPECT().ListVersions(gomock.Any(), "greetings/en/welcome").Return(nil, nil)
-	store.EXPECT().InsertCard(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().GetCard(gomock.Any(), "greetings/en/welcome", "1.0.0").Return(card{}, false, errors.New("mongo down"))
-
-	r := setupRouter(t, NewCardHandler(newCardCache(), store))
-	w := doJSON(t, r, http.MethodPost, "/api/v1/cards/register", validCardJSON)
-	require.Equal(t, http.StatusCreated, w.Code)
-	assert.JSONEq(t, `{"success":true}`, w.Body.String())
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }

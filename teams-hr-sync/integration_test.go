@@ -79,10 +79,10 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{
-		Name: "HR_SYNC_E2E", Subjects: []string{"chat.hr.>"},
+		Name: "HR-SYNC-E2E", Subjects: []string{"chat.hr.>"},
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), "HR_SYNC_E2E") })
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), "HR-SYNC-E2E") })
 
 	fg := &fakeGraph{}
 	tokenURL, baseURL := newFakeGraphServer(t, fg)

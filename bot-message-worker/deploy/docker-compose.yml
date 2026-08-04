@@ -20,7 +20,7 @@ services:
       - MONGO_DB=chat
       - MAX_WORKERS=100
       - MAX_DELIVER=5
-      # BOT_MESSAGES_CANONICAL is owned by bot-message-handler; consumer only verifies.
+      # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumer only verifies.
       - BOOTSTRAP_STREAMS=false
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro

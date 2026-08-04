@@ -44,8 +44,8 @@ flowchart LR
     CA["Clients (Site A)<br/>web / mobile"] -->|WebSocket| NA
     CB["Clients (Site B)<br/>web / mobile"] -->|WebSocket| NB
 
-    NA -. "OUTBOX_A → INBOX_B<br/>(JetStream cross-site source)" .-> NB
-    NB -. "OUTBOX_B → INBOX_A" .-> NA
+    NA -. "OUTBOX-A → INBOX-B<br/>(JetStream cross-site source)" .-> NB
+    NB -. "OUTBOX-B → INBOX-A" .-> NA
 
     Portal["portal-service<br/>(site directory)"] -.-> CA
     Portal -.-> CB
@@ -166,7 +166,7 @@ sequenceDiagram
     NATS->>GK: deliver
     GK->>GK: validate (membership, size, mentions)
     GK->>NATS: pub chat.msg.canonical.{site}.created
-    Note over NATS: MESSAGES_CANONICAL stream<br/>(single source of truth)
+    Note over NATS: MESSAGES-CANONICAL stream<br/>(single source of truth)
 
     NATS->>MW: canonical.created
     MW->>Cass: persist message
@@ -180,7 +180,7 @@ sequenceDiagram
 
     NATS->>NW: fanout / canonical.created
     NW->>NATS: pub chat.server.notification.push.{site}.send
-    Note over NATS: PUSH_NOTIFICATION stream → push service
+    Note over NATS: PUSH-NOTIFICATION stream → push service
 
     NATS->>SS: canonical.created
     SS->>SS: index message in Elasticsearch
@@ -190,20 +190,20 @@ sequenceDiagram
 
 ## 4. JetStream Stream Topology
 
-Streams are named `<STREAM>_<siteID>` (see `pkg/stream/stream.go`). Stream
+Streams are named `<STREAM>-<siteID>` (see `pkg/stream/stream.go`). Stream
 creation is opt-in (`BOOTSTRAP_STREAMS`) — owned by ops/IaC in production.
 
 ```mermaid
 flowchart LR
     Client(["Client"])
 
-    MESSAGES[["MESSAGES_{site}<br/>chat.user.*.room.*.{site}.msg.&gt;"]]
-    CANON[["MESSAGES_CANONICAL_{site}<br/>chat.msg.canonical.{site}.&gt;"]]
-    FANOUT[["FANOUT_{site}<br/>fanout.{site}.&gt;"]]
-    ROOMS[["ROOMS_{site}<br/>member invites"]]
-    PUSH[["PUSH_NOTIFICATION_{site}<br/>push.{site}.&gt;"]]
-    OUTBOX[["OUTBOX_{site}<br/>outbox.{site}.&gt;"]]
-    INBOX[["INBOX_{site}<br/>chat.inbox.{site}.*"]]
+    MESSAGES[["MESSAGES-{site}<br/>chat.user.*.room.*.{site}.msg.&gt;"]]
+    CANON[["MESSAGES-CANONICAL-{site}<br/>chat.msg.canonical.{site}.&gt;"]]
+    FANOUT[["FANOUT-{site}<br/>fanout.{site}.&gt;"]]
+    ROOMS[["ROOMS-{site}<br/>member invites"]]
+    PUSH[["PUSH-NOTIFICATION-{site}<br/>push.{site}.&gt;"]]
+    OUTBOX[["OUTBOX-{site}<br/>outbox.{site}.&gt;"]]
+    INBOX[["INBOX-{site}<br/>chat.inbox.{site}.*"]]
 
     Client -->|msg.send| MESSAGES
     MESSAGES --> GK[message-gatekeeper]

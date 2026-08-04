@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -80,7 +82,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -181,7 +183,19 @@ func main() {
 	// for a one-shot job). Its batches are transformed + written straight to
 	// Cassandra — never re-published, so broadcast/notification stay silent;
 	// search-sync indexes off the same .teams.batch subject.
-	teamsMigration := newTeamsBatchHandler(store, newMongoHRIdentityStore(db), cfg.SiteID)
+	// The migration only runs against the central site, so cfg.SiteID here is the
+	// central site — the same one HR-sync's own users.upsert publishes to.
+	teamsMigration := newTeamsBatchHandler(store, newMongoHRIdentityStore(db), cfg.SiteID,
+		func(ctx context.Context, users []model.IUserWithChange) error {
+			data, err := json.Marshal(users)
+			if err != nil {
+				return fmt.Errorf("marshal user identity fanout: %w", err)
+			}
+			if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data)); err != nil {
+				return fmt.Errorf("publish user identity fanout: %w", err)
+			}
+			return nil
+		})
 	teamsBatchSubj := subject.MsgCanonicalTeamsBatch(cfg.SiteID)
 
 	go func() {

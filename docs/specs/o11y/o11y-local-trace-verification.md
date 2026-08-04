@@ -1,7 +1,7 @@
 # Local o11y Trace Verification
 
 This checklist verifies the trace shape that the chat repo can produce with
-`github.com/flywindy/o11y` v0.8.0 JetStream `Fetch()` and request/reply
+`github.com/flywindy/o11y` v0.9.1 JetStream `Fetch()` and request/reply
 reply-link support.
 It intentionally does not replace `docs/specs/o11y/o11y-trace-design.md`; use this
 as the repeatable local smoke procedure.
@@ -21,8 +21,9 @@ as the repeatable local smoke procedure.
   stay empty.
 - `OTEL_ENABLED=true` for `chat-frontend`.
 - Backend services use `pkg/obs.Init` and `pkg/natsutil.Connect`.
-- NATS tracing gate is enabled by `pkg/natsutil.Connect` **only when
-  `O11Y_ENABLED=true`** (otherwise the hot path stays native-cost).
+- `pkg/natsutil.Connect` receives `sdk.Toggles.Trace`; tracing-enabled services
+  use the wrapped path, while tracing-disabled services use the direct/native
+  path.
 
 Useful local endpoints:
 

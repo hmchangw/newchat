@@ -1,0 +1,30 @@
+rules:
+  - id: room-subject-publish-must-route
+    languages: [go]
+    severity: ERROR
+    message: >
+      Publish a channel room's .event through the service's publishRoomEvent
+      helper, which fans out over subject.RoomEventTargets(id, crossSite,
+      routeMode). Passing a subject built inline by subject.RoomEvent /
+      RoomMsgStream / RoomMetadataUpdate to a publish call skips the
+      ROOM_SUBJECT_MODE global/local routing, so same-site rooms silently miss
+      delivery once local mode is enabled (and dual mode loses its global
+      safety-net publish). See pkg/subject.RoomEventTargets and each service's
+      publishRoomEvent.
+    paths:
+      exclude:
+        # Tests legitimately build room subjects inline to assert on them, and
+        # loadgen is a self-contained harness that publishes+subscribes global.
+        - "**/*_test.go"
+        - "**/tools/loadgen/**"
+    patterns:
+      - pattern-either:
+          - pattern: $X.Publish($CTX, subject.RoomEvent(...), ...)
+          - pattern: $X.Publish($CTX, subject.RoomMsgStream(...), ...)
+          - pattern: $X.Publish($CTX, subject.RoomMetadataUpdate(...), ...)
+          - pattern: $X.publishCore($CTX, subject.RoomEvent(...), ...)
+          - pattern: $X.publishCore($CTX, subject.RoomMsgStream(...), ...)
+          - pattern: $X.publishCore($CTX, subject.RoomMetadataUpdate(...), ...)
+          - pattern: $X.publish($CTX, subject.RoomEvent(...), ...)
+          - pattern: $X.publish($CTX, subject.RoomMsgStream(...), ...)
+          - pattern: $X.publish($CTX, subject.RoomMetadataUpdate(...), ...)

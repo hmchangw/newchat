@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/searchindex"
 )
 
 // fakeParentResolver is a test double for parentCreatedAtResolver.
@@ -47,7 +48,7 @@ func threadReplyData(t *testing.T, event model.EventType, parentCreatedAt *time.
 
 func indexedThreadParentCreatedAt(t *testing.T, doc json.RawMessage) *time.Time {
 	t.Helper()
-	var idx MessageSearchIndex
+	var idx searchindex.MessageDoc
 	require.NoError(t, json.Unmarshal(doc, &idx))
 	return idx.ThreadParentCreatedAt
 }

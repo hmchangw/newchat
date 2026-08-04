@@ -32,6 +32,29 @@ type UserRoomDoc struct {
 	RestrictedRooms map[string]int64 `json:"restrictedRooms"`
 }
 
+// SubscriptionMeta is the caller's subscription projection used for enrichment:
+// the room type, the join-key Name (DM counterpart account / botDM bot
+// account), and the botDM IsSubscribed flag.
+type SubscriptionMeta struct {
+	RoomType     model.RoomType
+	Name         string
+	IsSubscribed bool
+}
+
+// HRUser is the users-collection projection used to render display / HR names.
+type HRUser struct {
+	Account     string
+	EngName     string
+	ChineseName string
+}
+
+// AppRef is the apps-collection projection used to render appInfo objects.
+type AppRef struct {
+	ID            string
+	Name          string
+	AssistantName string
+}
+
 // MongoStore is the Mongo-backed store interface for search-service.
 type MongoStore interface {
 	SearchAppsByName(
@@ -40,6 +63,23 @@ type MongoStore interface {
 		assistantEnabled *bool,
 		offset, limit int,
 	) ([]model.App, error)
+
+	// SubscriptionsByRoomIDs returns the caller's subscription meta for the given
+	// rooms, keyed by roomID. Rooms with no subscription are omitted.
+	SubscriptionsByRoomIDs(ctx context.Context, account string, roomIDs []string) (map[string]SubscriptionMeta, error)
+
+	// UsersByAccounts returns HR/display projections keyed by account. Missing accounts are omitted.
+	UsersByAccounts(ctx context.Context, accounts []string) (map[string]HRUser, error)
+
+	// AppsByAssistantNames returns app projections keyed by their assistant.name (bot account). Missing are omitted.
+	AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]AppRef, error)
+}
+
+// RoomInfoClient fetches canonical room metadata from room-service on a given
+// site (the RoomsInfoBatch server↔server RPC), used only for channel/discussion
+// room names (cross-site safe: caller groups by the hit's siteID).
+type RoomInfoClient interface {
+	GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
 }
 
 // SearchUsersClient is the outbound HTTP interface for user search.

@@ -22,7 +22,7 @@ func TestHandleSetCookie_Partitioned(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewHandler(nil, nil, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, tt.partitioned)
+			h := NewHandler(nil, nil, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, tt.partitioned, &fakeDrive{})
 
 			gin.SetMode(gin.TestMode)
 			w := httptest.NewRecorder()

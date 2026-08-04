@@ -85,7 +85,7 @@ func TestPrintSummary_WithConsumers(t *testing.T) {
 		Inject: "gateway",
 		Consumers: []ConsumerStat{
 			{
-				Stream: "MESSAGES_CANONICAL_site-a", Durable: "message-worker",
+				Stream: "MESSAGES-CANONICAL-site-a", Durable: "message-worker",
 				MinPending: 0, PeakPending: 150, FinalPending: 2,
 				PeakAckPending: 10, Redelivered: 1,
 			},

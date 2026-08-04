@@ -47,7 +47,7 @@ func TestPushMappings_PushesOnlyCollectionsWithMappings(t *testing.T) {
 		newMessageCollection("messages-x-v1", "site-x", time.Time{}, false),
 		newSpotlightCollection("spotlight-x", false),
 		newSpotlightOrgCollection("spotlight-org-x", "s1", "hr", false),
-		newUserRoomCollection("user-room-x"),
+		newUserRoomCollection("user-room-x", false),
 	}
 
 	require.NoError(t, pushMappings(context.Background(), eng, collections))

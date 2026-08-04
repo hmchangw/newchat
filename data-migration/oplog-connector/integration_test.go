@@ -64,7 +64,7 @@ func createSourceCollection(t *testing.T, db *mongo.Database, coll string) *mong
 }
 
 // TestConnector_RealPublishEndToEnd runs the full connector (start → real NATS publish) and reads
-// the envelope back off MIGRATION_OPLOG — covering main.go wiring and the real o11y/nats JetStream path.
+// the envelope back off MIGRATION-OPLOG — covering main.go wiring and the real o11y/nats JetStream path.
 func TestConnector_RealPublishEndToEnd(t *testing.T) {
 	const coll = "rocketchat_message"
 	client, uri := startReplicaSet(t)
@@ -94,14 +94,14 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sdkShutdown(context.Background()) })
 
-	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator)
+	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer conn.Close()
 
 	_, err = source.InsertOne(ctx, bson.M{"_id": "m1", "msg": "hi"})
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())
@@ -109,7 +109,7 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 
 	var gotID string
 	require.Eventually(t, func() bool {
-		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION_OPLOG_site1", jetstream.ConsumerConfig{
+		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION-OPLOG-site1", jetstream.ConsumerConfig{
 			AckPolicy:      jetstream.AckExplicitPolicy,
 			FilterSubjects: []string{"chat.migration.oplog.site1.>"},
 		})
@@ -127,7 +127,7 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 			}
 		}
 		return gotID != ""
-	}, 40*time.Second, 500*time.Millisecond, "insert envelope must land on MIGRATION_OPLOG")
+	}, 40*time.Second, 500*time.Millisecond, "insert envelope must land on MIGRATION-OPLOG")
 
 	assert.NotEmpty(t, gotID, "published event carries a Nats-Msg-Id dedup key")
 }
@@ -345,7 +345,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sdkShutdown(context.Background()) })
 
-	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator)
+	conn, err := start(ctx, &cfg, nil, sdk, sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -354,7 +354,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 	_, err = msgs.InsertOne(ctx, bson.M{"_id": "m1", "msg": "hi"}) // no watcher — must not be forwarded
 	require.NoError(t, err)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, "", sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, nc.Drain()) }()
 	js, err := jetstream.New(nc.NatsConn())
@@ -362,7 +362,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 
 	var subjects []string
 	require.Eventually(t, func() bool {
-		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION_OPLOG_sitecr", jetstream.ConsumerConfig{
+		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION-OPLOG-sitecr", jetstream.ConsumerConfig{
 			AckPolicy:      jetstream.AckExplicitPolicy,
 			FilterSubjects: []string{"chat.migration.oplog.sitecr.>"},
 		})
@@ -378,7 +378,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 			subjects = append(subjects, m.Subject())
 		}
 		return slices.Contains(subjects, "chat.migration.oplog.sitecr.rocketchat_room.insert")
-	}, 40*time.Second, 500*time.Millisecond, "room insert must land on MIGRATION_OPLOG")
+	}, 40*time.Second, 500*time.Millisecond, "room insert must land on MIGRATION-OPLOG")
 
 	for _, s := range subjects {
 		assert.NotContains(t, s, "rocketchat_message",

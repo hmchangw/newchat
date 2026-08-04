@@ -42,6 +42,12 @@ type Meta struct {
 	Name      string         `json:"name"`
 	SiteID    string         `json:"siteId"`
 	UserCount int            `json:"userCount"`
+	// CrossSite mirrors Room.CrossSite (tri-state). omitempty so an unclassified
+	// room's L2 (Valkey) JSON entry omits it rather than caching a misleading false.
+	CrossSite *bool `json:"crossSite,omitempty"`
+	// CrossSiteAt mirrors Room.CrossSiteAt — the flip time driving the post-flip
+	// grace window (nil for rooms born cross-site). See pkg/subject.RoomEventTargets.
+	CrossSiteAt *time.Time `json:"crossSiteAt,omitempty"`
 }
 
 // Loader fetches a fresh Meta for the given roomID. The cache calls
@@ -185,26 +191,32 @@ func (w *Wrapper[S]) GetRoomMeta(ctx context.Context, roomID string) (Meta, erro
 // safe to errors.Is-check.
 func FetchFromMongo(ctx context.Context, rooms *mongo.Collection, roomID string) (Meta, error) {
 	opts := options.FindOne().SetProjection(bson.M{
-		"type":      1,
-		"name":      1,
-		"siteId":    1,
-		"userCount": 1,
+		"type":        1,
+		"name":        1,
+		"siteId":      1,
+		"userCount":   1,
+		"crossSite":   1,
+		"crossSiteAt": 1,
 	})
 	var doc struct {
-		ID        string         `bson:"_id"`
-		Type      model.RoomType `bson:"type"`
-		Name      string         `bson:"name"`
-		SiteID    string         `bson:"siteId"`
-		UserCount int            `bson:"userCount"`
+		ID          string         `bson:"_id"`
+		Type        model.RoomType `bson:"type"`
+		Name        string         `bson:"name"`
+		SiteID      string         `bson:"siteId"`
+		UserCount   int            `bson:"userCount"`
+		CrossSite   *bool          `bson:"crossSite"`
+		CrossSiteAt *time.Time     `bson:"crossSiteAt"`
 	}
 	if err := rooms.FindOne(ctx, bson.M{"_id": roomID}, opts).Decode(&doc); err != nil {
 		return Meta{}, fmt.Errorf("fetch room meta %s: %w", roomID, err)
 	}
 	return Meta{
-		ID:        doc.ID,
-		Type:      doc.Type,
-		Name:      doc.Name,
-		SiteID:    doc.SiteID,
-		UserCount: doc.UserCount,
+		ID:          doc.ID,
+		Type:        doc.Type,
+		Name:        doc.Name,
+		SiteID:      doc.SiteID,
+		UserCount:   doc.UserCount,
+		CrossSite:   doc.CrossSite,
+		CrossSiteAt: doc.CrossSiteAt,
 	}, nil
 }

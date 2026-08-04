@@ -98,7 +98,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		mongoutil.Disconnect(ctx, targetClient)
@@ -138,7 +138,7 @@ func main() {
 	}
 
 	streamName := stream.MigrationOplog(cfg.SiteID).Name
-	// The connector owns MIGRATION_OPLOG and may bootstrap it slightly after we start.
+	// The connector owns MIGRATION-OPLOG and may bootstrap it slightly after we start.
 	// Wait for the stream to appear rather than crash-loop on "stream not found".
 	cons, err := createConsumerWithRetry(ctx, js, streamName, jetstream.ConsumerConfig{
 		Durable:       cfg.ConsumerDurable,
@@ -261,7 +261,7 @@ func hasDestinationSite(sites []string) bool {
 	return false
 }
 
-// streamWaitTimeout bounds how long startup waits for the connector to bootstrap MIGRATION_OPLOG.
+// streamWaitTimeout bounds how long startup waits for the connector to bootstrap MIGRATION-OPLOG.
 const streamWaitTimeout = 60 * time.Second
 
 // createConsumerWithRetry creates the durable consumer, retrying while the stream does not yet exist

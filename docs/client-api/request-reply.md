@@ -29,6 +29,7 @@ For connection, auth, shared schemas, and error reference, see [../client-api.md
    - [POST /api/v1/file/rooms/:roomId/upload/images](#post-apiv1fileroomsroomiduploadimages)
    - [POST /api/v1/file/rooms/:roomId/upload/file](#post-apiv1fileroomsroomiduploadfile)
    - [GET /api/v1/file/rooms/:roomId/file/:fileId](#get-apiv1fileroomsroomidfilefileid)
+   - [GET /api/v3/rooms/:roomId/protected-image/:fileId](#get-apiv3roomsroomidprotected-imagefileid)
    - [GET /api/v1/file-upload/:fileId/:fileName](#get-apiv1file-uploadfileidfilename)
    - [Media Service — avatar endpoints](#media-service--avatar-endpoints)
    - [Media Service — emoji endpoints](#media-service--emoji-endpoints)
@@ -142,6 +143,23 @@ header wins); caller must be a room member. `drive_host` query param required.
 Called with the `relativePath` (image upload) or `titleLink` (file upload)
 returned by the upload endpoints. See
 [../client-api.md §2.4](../client-api.md#get-apiv1fileroomsroomidfilefileid).
+
+**Emits:** `None — HTTP-only.`
+
+---
+
+### GET /api/v3/rooms/:roomId/protected-image/:fileId
+
+**Endpoint:** `GET /api/v3/rooms/:roomId/protected-image/:fileId`
+**Reply:** synchronous HTTP response (raw file bytes, any type)
+
+Backward-compatible download for inline images in **legacy message data** (prior
+system version). Identical to `GET /api/v1/file/rooms/:roomId/file/:fileId` but
+proxied from a separate (legacy) Drive backend with its own credentials.
+`ssoToken` required (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie`
+for browser `<img>` downloads; header wins); caller must be a room member.
+`drive_host` query param required. See
+[../client-api.md §2.4](../client-api.md#get-apiv3roomsroomidprotected-imagefileid).
 
 **Emits:** `None — HTTP-only.`
 
@@ -312,7 +330,7 @@ DM/self-DM already exists: `{ "status": "exists", "roomId": "<existing room id>"
 - `user "<account>": user not found` / `org "<orgId>": invalid org`
 - `"exceeds maximum capacity (N): would create M members"`
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.create"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per enrolled member), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — one per enrolled local member), `new_message` system messages (`room_created`, `members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.create"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per enrolled member, embedding the room object incl. the room key for channels; no separate `room.key` event), `new_message` system messages (`room_created`, `members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -328,7 +346,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `roomId` | string | no | Optional echo; server derives from subject. |
-| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant and a local home site; bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get both `subscription.update` and `room.key` on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
+| `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant (a bot whose home site differs from the room's is allowed — cross-site bot membership); bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get `subscription.update` (with the room key inline under `subscription.room`) on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
 | `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
@@ -346,7 +364,7 @@ available (no app record / disabled assistant), user/org not found.
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
 ```
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — every new member, bots included, on the encoded per-user subject), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject, embedding the room object incl. the room key for channels; no separate `room.key` event), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -481,7 +499,7 @@ platform admin. Channel rooms only.
 
 #### Success response
 
-`{ "members": MemberStatus[] }` — members with non-empty `statusText` only.
+`{ "members": MemberStatus[] }` — members with non-empty `statusText` and `statusIsShow=true` only.
 See `MemberStatus` schema in [../client-api.md §3.1](../client-api.md#get-member-statuses).
 
 #### Errors
@@ -1269,8 +1287,15 @@ with `AND`) — terms split across e.g. message text and a filename match nothin
 `createdAt`, `editedAt` (nullable), `updatedAt` (nullable), `threadParentMessageId`
 (omitted when not a reply), `threadParentMessageCreatedAt` (omitted when not a reply),
 `attachments` (`Attachment[]`, omitted when the message has no attachments),
-`card` (`MessageCard`, omitted when the message carries no tcard).
-All sourced from ES — no Mongo round-trip. `attachments`/`card` mirror the message
+`card` (`MessageCard`, omitted when the message carries no tcard),
+`tshow` (boolean, omitted when false),
+`sender` (`{account, hr?, appInfo?}` — `hr` `{account, chineseName, engName}` for
+human senders, `appInfo` `{id, name, assistantName}` for bot senders),
+`room` (`{id, name, type, hrInfo?, appInfo?}` — `hrInfo` `{account, chineseName,
+engName}` only for `dm`, `appInfo` `{id, name, assistantName, isSubscribed}` only
+for `botDM`).
+Base fields are sourced from ES; `room`/`sender` are resolved server-side (best-effort,
+individual fields omitted when unresolved). `attachments`/`card` mirror the message
 payloads as-is (same wire shape as history reads) so hits render without a follow-up
 history load.
 
@@ -1514,17 +1539,19 @@ None (empty payload).
 
 #### Success response
 
-The stored settings object. All seven fields optional, present only when explicitly set:
+The stored settings object. All nine fields optional, present only when explicitly set:
 
 | Field | Type |
 |---|---|
 | `fullWidth` | boolean |
+| `themePreference` | string (`system`\|`light`\|`dark`) |
 | `translateMessageInto` | string |
-| `showMessagePreviewInSidebarList` | boolean |
+| `messagePreviewEnabled` | boolean |
 | `muteAllNotifications` | boolean |
-| `showMessagesAndPreviewsInNotifications` | boolean |
-| `showNotificationsDuringCallsAndMeetings` | boolean |
-| `scrollToBottomInChat` | boolean |
+| `alwaysAllowPriorityNotifications` | boolean |
+| `showPreviewsInNotifications` | boolean |
+| `showNotificationsInCall` | boolean |
+| `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 
 `{ "fullWidth": true, "translateMessageInto": "en-US" }`
 
@@ -1545,7 +1572,7 @@ fields keep their stored value (or stay absent). At least one field required.
 
 #### Request body
 
-Any non-empty subset of the seven settings fields (same table as
+Any non-empty subset of the nine settings fields (same table as
 [settings.get](#settingsget)). `translateMessageInto` must be a language-tag
 shape — hyphen-separated letter/digit subtags, leading subtag letters-only
 (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`) — or `""` to explicitly turn
@@ -2032,6 +2059,41 @@ error table. Key errors:
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
 
 **Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
+
+---
+
+### Translate Text
+
+**Subject:** `chat.user.{account}.request.translate.{siteID}.text`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+`{siteID}` is the caller's own (local) site ID — translation is stateless and not
+federated, so always use your own site (no origin-site rule like `msg.send`).
+
+Synchronous RPC. `translation-service` translates `text` into `targetLang` and replies
+with a `TranslateResult`, or the standard error envelope on failure.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | string | yes | Text to translate. No length cap. |
+| `targetLang` | string | yes | BCP-47 tag; send the user's `settings.translateMessageInto` value unchanged (`en`, `en-US`, `zh-Hant-TW`, `zh-Hans-CN`, `de`, `ja`). See [../client-api.md §3.6](../client-api.md#supported-languages). |
+
+#### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `translatedText` | string | The translated text. |
+| `targetLang` | string | Echoes the request `targetLang` (the BCP-47 tag sent), not the resolved backend language. |
+
+`{ "translatedText": "你好 世界", "targetLang": "zh-Hant-TW" }`
+
+#### Error response
+
+Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `internal` for a backend failure. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+
+**Emits:** none — the reply is the only output.
 
 ---
 

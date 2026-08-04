@@ -16,6 +16,9 @@ export default function RoomMessageArea({ room, onThread, onReply }) {
     hasLoadedHistory,
     historyError,
     loadHistory,
+    loadOlder,
+    hasMoreOlder,
+    loadingOlder,
     bufferMode,
     pendingCount,
     focusMessageId,
@@ -34,10 +37,15 @@ export default function RoomMessageArea({ room, onThread, onReply }) {
     loadHistory().catch(() => {})
   }, [room, loadHistory])
 
+  // Auto-scroll to the bottom on a NEW message (the last id changes) or the
+  // initial load. Keyed on the last message's id — NOT the whole `messages`
+  // array — so prepending an older page (which changes the FIRST id, not the
+  // last) doesn't yank the user back down to the live tail while they read.
+  const lastMsgId = messages.length ? messages[messages.length - 1].id : null
   useEffect(() => {
     if (bufferMode === BUFFER_MODE.HISTORICAL) return
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, bufferMode])
+  }, [lastMsgId, bufferMode])
 
   useEffect(() => {
     if (bufferMode === BUFFER_MODE.LIVE) {
@@ -107,6 +115,9 @@ export default function RoomMessageArea({ room, onThread, onReply }) {
         onDelete={handleDelete}
         onJumpToMessage={(msgId) => jumpToMessage?.(msgId)?.catch?.(() => {})}
         onFocusConsumed={() => dispatch({ type: 'FOCUS_CLEARED', roomId: room.id })}
+        onLoadOlder={() => loadOlder?.()?.catch?.(() => {})}
+        hasMoreOlder={hasMoreOlder}
+        loadingOlder={loadingOlder}
         bottomRef={bottomRef}
       />
       {bufferMode === BUFFER_MODE.HISTORICAL && pendingCount > 0 && (

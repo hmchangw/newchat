@@ -416,7 +416,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, _ []byte, published []publishedMsg) {
-				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES_CANONICAL")
+				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES-CANONICAL")
 			},
 		},
 		{
@@ -444,7 +444,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, _ []byte, published []publishedMsg) {
-				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES_CANONICAL")
+				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES-CANONICAL")
 			},
 		},
 		{
@@ -472,7 +472,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, _ []byte, published []publishedMsg) {
-				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES_CANONICAL")
+				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES-CANONICAL")
 			},
 		},
 		{
@@ -626,7 +626,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, _ []byte, published []publishedMsg) {
-				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES_CANONICAL")
+				assert.Len(t, published, 1, "bypass path must still publish to MESSAGES-CANONICAL")
 			},
 		},
 		{
@@ -1927,7 +1927,7 @@ func TestHandleJetStreamMsg_BotSubject_DecodesAccount(t *testing.T) {
 	h.HandleJetStreamMsg(context.Background(), msg)
 
 	assert.True(t, msg.acked, "successful send must Ack")
-	require.Len(t, published, 1, "must publish to MESSAGES_CANONICAL")
+	require.Len(t, published, 1, "must publish to MESSAGES-CANONICAL")
 	require.Len(t, captured, 1, "must send exactly one reply")
 	assert.Equal(t, "chat.user.weather_bot.response."+reqUUID, captured[0].Subject,
 		"reply must be addressed on the ENCODED account token")

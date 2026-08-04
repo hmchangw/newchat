@@ -64,10 +64,10 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 }
 
 // ListUsers returns every teams_user projected to the sync fields
-// (_id, siteId, account, from). Served by the primary.
+// (_id, siteId, account, displayName, from). Served by the primary.
 func (s *mongoStore) ListUsers(ctx context.Context) ([]model.TeamsUser, error) {
 	users, err := s.users.FindMany(ctx, bson.M{}, mongoutil.WithProjection(bson.M{
-		"_id": 1, "siteId": 1, "account": 1, "from": 1,
+		"_id": 1, "siteId": 1, "account": 1, "displayName": 1, "from": 1,
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("list teams users: %w", err)
