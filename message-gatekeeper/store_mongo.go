@@ -58,7 +58,12 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 		})
 		return auth, subscribed, err
 	}
-	auth, subscribed, err := subauthcache.ReadThrough(ctx, s.valkey, loader, roomID, account, s.subTTL, s.subRec)
+	// Slide the L2 TTL on hits while the subscription breaker is not closed, so an
+	// active room's authz decision survives a Mongo outage of any length (not just
+	// one TTL window). Re-arming stops when the breaker recloses, re-bounding
+	// staleness to the TTL.
+	auth, subscribed, err := subauthcache.ReadThrough(ctx, s.valkey, loader, roomID, account, s.subTTL, s.subRec,
+		subauthcache.WithSlideOnDegraded(func() bool { return s.subBreaker.State() != circuitbreaker.StateClosed }))
 	if err != nil {
 		return nil, fmt.Errorf("get subscription for %s in %s: %w", account, roomID, err)
 	}

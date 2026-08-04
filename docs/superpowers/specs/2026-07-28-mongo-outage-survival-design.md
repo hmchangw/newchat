@@ -128,6 +128,19 @@ minutes** (`*_SUB_L2_TTL`), covering the 60-minute target plus margin.
 No separate "retention map" is needed — the long L2 TTL *is* the retention
 window. The L1 tier keeps its existing 2m freshness TTL unchanged.
 
+**Sliding TTL removes the ceiling for active rooms.** The fixed 90-min TTL
+bounds survival to one window; for a longer outage, entries expire and cold
+misses fail. To lift that ceiling, `subauthcache.ReadThrough` accepts
+`WithSlideOnDegraded(func() bool)` and **re-arms an L2 hit's TTL** whenever the
+predicate reports true — wired to "the Mongo circuit breaker is not closed"
+(open or half-open). During an outage, L1 expires every ~2m and falls through to
+L2, so an actively-read entry is pushed forward on each hit and **never expires
+for the outage's duration, however long**. It is gated on the breaker so
+normal-mode freshness is untouched (no re-arm when healthy → entries still
+expire at the TTL and re-read Mongo), and it re-bounds to the TTL on recovery
+(re-arming stops once the breaker recloses). The re-arm reuses the existing
+`Set` primitive (no `valkeyutil.Client` change) and is best-effort.
+
 Room-meta L2 already exists at 15m; it fails-open regardless, so its TTL is
 left as-is (a bump is optional and out of scope).
 

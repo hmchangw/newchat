@@ -232,3 +232,70 @@ func TestReadThrough_ValkeyGetError_FailsOpenToLoader(t *testing.T) {
 	assert.Equal(t, "u1", got.ID)
 	assert.Equal(t, 1, rec.err)
 }
+
+// seedL2 populates the L2 entry for (room1, alice) via a healthy read-through,
+// returning the fake with the entry warm. setHits is 1 after this (the populate).
+func seedL2(t *testing.T) *fakeValkey {
+	t.Helper()
+	fv := newFakeValkey()
+	loader := func(context.Context, string, string) (SubAuth, bool, error) {
+		return SubAuth{ID: "u1", Account: "alice"}, true, nil
+	}
+	_, subscribed, err := ReadThrough(context.Background(), fv, loader, "room1", "alice", time.Hour, &spyRecorder{})
+	require.NoError(t, err)
+	require.True(t, subscribed)
+	require.Equal(t, 1, fv.setHits, "seed should populate L2 once")
+	return fv
+}
+
+// mustNotLoad fails the test if the loader runs (i.e. the call was not an L2 hit).
+func mustNotLoad(t *testing.T) Loader {
+	return func(context.Context, string, string) (SubAuth, bool, error) {
+		t.Fatal("loader must not run on an L2 hit")
+		return SubAuth{}, false, nil
+	}
+}
+
+func TestReadThrough_SlidesL2TTLOnHitWhenDegraded(t *testing.T) {
+	fv := seedL2(t)
+	base := fv.setHits // 1
+
+	got, subscribed, err := ReadThrough(context.Background(), fv, mustNotLoad(t), "room1", "alice", time.Hour, &spyRecorder{},
+		WithSlideOnDegraded(func() bool { return true }))
+	require.NoError(t, err)
+	assert.True(t, subscribed)
+	assert.Equal(t, "u1", got.ID)
+	assert.Equal(t, base+1, fv.setHits, "a degraded L2 hit must re-arm the TTL (one extra Set)")
+}
+
+func TestReadThrough_DoesNotSlideWhenHealthy(t *testing.T) {
+	fv := seedL2(t)
+	base := fv.setHits
+
+	got, subscribed, err := ReadThrough(context.Background(), fv, mustNotLoad(t), "room1", "alice", time.Hour, &spyRecorder{},
+		WithSlideOnDegraded(func() bool { return false }))
+	require.NoError(t, err)
+	assert.True(t, subscribed)
+	assert.Equal(t, "u1", got.ID)
+	assert.Equal(t, base, fv.setHits, "a healthy L2 hit must not re-arm the TTL")
+}
+
+func TestReadThrough_NoSlideOptionMeansNoRearm(t *testing.T) {
+	fv := seedL2(t)
+	base := fv.setHits
+
+	_, _, err := ReadThrough(context.Background(), fv, mustNotLoad(t), "room1", "alice", time.Hour, &spyRecorder{})
+	require.NoError(t, err)
+	assert.Equal(t, base, fv.setHits, "without the slide option an L2 hit must not re-arm")
+}
+
+func TestReadThrough_SlideRearmFailureStillServes(t *testing.T) {
+	fv := seedL2(t)
+	fv.setErr = errors.New("valkey set failed") // re-arm will fail; read must still succeed
+
+	got, subscribed, err := ReadThrough(context.Background(), fv, mustNotLoad(t), "room1", "alice", time.Hour, &spyRecorder{},
+		WithSlideOnDegraded(func() bool { return true }))
+	require.NoError(t, err, "a failed TTL re-arm is best-effort and must not fail the read")
+	assert.True(t, subscribed)
+	assert.Equal(t, "u1", got.ID)
+}

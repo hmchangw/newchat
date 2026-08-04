@@ -91,6 +91,25 @@ func fromSubscription(sub *model.Subscription) SubAuth {
 	return a
 }
 
+// Option configures ReadThrough.
+type Option func(*readThroughOpts)
+
+type readThroughOpts struct {
+	slideOnDegraded func() bool
+}
+
+// WithSlideOnDegraded re-arms an L2 hit's TTL whenever degraded() reports true
+// (i.e. the Mongo circuit breaker is not closed). An actively-read entry is then
+// pushed forward on every hit, so it never expires for the duration of a Mongo
+// outage of any length. Normal-mode freshness is untouched — no re-arm when
+// degraded() is false, so entries still expire at their TTL and re-read Mongo —
+// and post-recovery staleness stays bounded by the TTL, since an entry stops
+// being re-armed once reads stop or the breaker closes. Pass nil (or omit the
+// option) to disable sliding.
+func WithSlideOnDegraded(degraded func() bool) Option {
+	return func(o *readThroughOpts) { o.slideOnDegraded = degraded }
+}
+
 // ReadThrough resolves a SubAuth through the L2 (Valkey) tier: GET on the cache
 // key, and on miss (or any L2 error) fall back to loader and repopulate L2 with
 // ttl when the loader reports subscribed=true. Fail-open — a nil client or any
@@ -98,14 +117,22 @@ func fromSubscription(sub *model.Subscription) SubAuth {
 // A non-positive ttl fully bypasses L2 (no read, no write) — Valkey treats
 // ttl==0 as "store forever", so this is the only safe way to honor a config
 // convention of "0 disables the cache" without caching an authz decision
-// without an expiry.
-func ReadThrough(ctx context.Context, client valkeyutil.Client, loader Loader, roomID, account string, ttl time.Duration, rec Recorder) (SubAuth, bool, error) {
+// without an expiry. An L2 hit re-arms its TTL when WithSlideOnDegraded's
+// predicate reports true (see that option).
+func ReadThrough(ctx context.Context, client valkeyutil.Client, loader Loader, roomID, account string, ttl time.Duration, rec Recorder, opts ...Option) (SubAuth, bool, error) {
 	if rec == nil {
 		rec = noopRecorder{}
+	}
+	var o readThroughOpts
+	for _, opt := range opts {
+		opt(&o)
 	}
 	l2Enabled := client != nil && ttl > 0
 	if l2Enabled {
 		if auth, found := readL2(ctx, client, roomID, account, rec); found {
+			if o.slideOnDegraded != nil && o.slideOnDegraded() {
+				slideL2TTL(ctx, client, roomID, account, auth, ttl)
+			}
 			return auth, true, nil
 		}
 	}
@@ -120,6 +147,16 @@ func ReadThrough(ctx context.Context, client valkeyutil.Client, loader Loader, r
 		}
 	}
 	return auth, subscribed, nil
+}
+
+// slideL2TTL re-arms the L2 entry's TTL by re-writing it (a Valkey SET resets the
+// key's expiry). Best-effort: a failure is logged and swallowed — the value was
+// already served, and the next Mongo-healthy read repopulates with a fresh TTL.
+func slideL2TTL(ctx context.Context, client valkeyutil.Client, roomID, account string, auth SubAuth, ttl time.Duration) {
+	if err := valkeyutil.SetJSONWithTTL(ctx, client, SubKey(roomID, account), auth, ttl); err != nil {
+		slog.WarnContext(ctx, "subauth L2 TTL slide failed (entry keeps its current deadline)",
+			"room_id", roomID, "error", err)
+	}
 }
 
 // readL2 attempts the L2 read; records the outcome. Returns found=true only on

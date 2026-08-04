@@ -222,7 +222,8 @@ func main() {
 			})
 			return auth, sub, err
 		}
-		auth, subscribed, err := subauthcache.ReadThrough(ctx, subValkey, loader, roomID, account, cfg.SubL2TTL, subRec)
+		auth, subscribed, err := subauthcache.ReadThrough(ctx, subValkey, loader, roomID, account, cfg.SubL2TTL, subRec,
+			subauthcache.WithSlideOnDegraded(func() bool { return breaker.State() != circuitbreaker.StateClosed }))
 		if err != nil {
 			return nil, false, err
 		}
