@@ -27,7 +27,7 @@ Each site runs its own NATS server, so these figures are per-site.
 > telemetry. **Cross-site federation** uses a per-site `OUTBOX-{siteID}`
 > (`chat.outbox.{siteID}.>`) whose consumer outbox-worker forwards each event to the
 > destination's flat `INBOX-{siteID}` (`chat.inbox.{siteID}.>`). **Bot traffic** runs on a
-> parallel `BOT_*` pipeline. Both federation and the bot pipeline are folded into the
+> parallel `BOT-*` pipeline. Both federation and the bot pipeline are folded into the
 > steady-state tables (§6.1/§9); the 4.5M/day total = 2.5M human + 2.0M bot (§4 split note).
 
 ## 2. Stream & Endpoint Inventory
@@ -36,8 +36,8 @@ Each site runs its own NATS server, so these figures are per-site.
 
 Stream names/subjects below reflect the current code (`pkg/stream/stream.go` schema +
 `pkg/subject` builders), plus the new-design **`OUTBOX-{siteID}` + flat `INBOX-{siteID}`**
-federation and the parallel **`BOT_*`** bot pipeline — both folded into the steady-state
-estimate (§6.1/§9). `{siteID}` is the local site; `HR_` is keyed by the central site's ID.
+federation and the parallel **`BOT-*`** bot pipeline — both folded into the steady-state
+estimate (§6.1/§9). `{siteID}` is the local site; `HR-` is keyed by the central site's ID.
 
 | Stream | Subject(s) | Producer | Consumer(s) | In estimate? |
 |--------|------------|----------|-------------|:---:|
@@ -52,10 +52,10 @@ estimate (§6.1/§9). `{siteID}` is the local site; `HR_` is keyed by the centra
 | `MIGRATION-OPLOG-{siteID}` | `chat.migration.oplog.{siteID}.>` | oplog-connector | migration applier (1) | ⏱ §8 phase |
 | `BOT-MESSAGES-CANONICAL-{siteID}` | `chat.bot.msg.canonical.{siteID}.>` | Bot Msg Handler | Shared Sync Worker, Bot Broadcast Worker, Bot Notification Worker | ✅ |
 | `BOT-PUSH-NOTIFICATION-{siteID}` | `chat.bot.server.notification.push.{siteID}.>` | Bot Notification Worker | Bot Push Notification | ✅ |
-| `BOT_PLATFORM_{siteID}` | `chat.bot.event.{siteID}.>` | Broadcast Worker | Bot Webhook Worker | ✅ |
+| `BOT-PLATFORM-{siteID}` | `chat.bot.event.{siteID}.>` | Broadcast Worker | Bot Webhook Worker | ✅ |
 
 **Bot streams (parallel pipeline).** Bot message traffic is split off the normal
-(human) message flow onto a parallel `BOT_*` pipeline so it can be scaled, throttled, and
+(human) message flow onto a parallel `BOT-*` pipeline so it can be scaled, throttled, and
 observed independently:
 
 - `BOT-MESSAGES-CANONICAL-{siteID}` (`chat.bot.msg.canonical.{siteID}.>`) — the bot-side
@@ -64,7 +64,7 @@ observed independently:
 - `BOT-PUSH-NOTIFICATION-{siteID}` (`chat.bot.server.notification.push.{siteID}.>`) — bot
   mobile-push lane. **Bot Notification Worker** publishes; **Bot Push Notification** forwards
   to APNs/FCM.
-- `BOT_PLATFORM_{siteID}` (`chat.bot.event.{siteID}.>`) — outbound platform/webhook events.
+- `BOT-PLATFORM-{siteID}` (`chat.bot.event.{siteID}.>`) — outbound platform/webhook events.
   **Broadcast Worker** publishes; **Bot Webhook Worker** delivers to external bot platforms.
 
 Bot traffic is sized alongside the human pipeline in §6.1/§9 (params in §4); the 4M/day
@@ -149,14 +149,14 @@ for inventory completeness, delivered to watchers in §6.2.
 | Category | Streams / Endpoints | avg | max |
 |----------|---------------------|-----|-----|
 | Message JetStream | MESSAGES, MESSAGES-CANONICAL | 500B–1.5KB | ~20KB |
-| Push notification | PUSH_NOTIFICATION | ~0.8KB | ~15KB |
+| Push notification | PUSH-NOTIFICATION | ~0.8KB | ~15KB |
 | HR sync | HR (≈ `model.User`: ~12 fields) | ~0.5KB | ~1KB |
 | Migration oplog | MIGRATION-OPLOG | ~130KB | — |
 | Room JetStream | ROOMS | 200–400B | ~5KB |
 | Federation | INBOX, OUTBOX | 200–400B | ~5KB |
 | Bot message JetStream | BOT-MESSAGES-CANONICAL | 500B–1.5KB | ~20KB |
 | Bot push notification | BOT-PUSH-NOTIFICATION | ~0.8KB | ~15KB |
-| Bot platform event | BOT_PLATFORM | 200B–1KB | ~5KB |
+| Bot platform event | BOT-PLATFORM | 200B–1KB | ~5KB |
 | Message R/R | history, search-messages | 15–50KB | 100KB+ |
 | Room R/R | RoomsInfoBatch, CreateRoom, member.list | 2–20KB | ~65KB |
 | Subscription R/R | subscription.get*, member-list | 100–300KB | ~700KB |
@@ -170,8 +170,8 @@ for inventory completeness, delivered to watchers in §6.2.
 | Users | U | 20,789 |
 | Subjects subscribed per connection | S | 100 (user + room) |
 | Presence subjects watched per connection | P | **20** |
-| Human messages per day (pipeline) | M | 2,500,000 *(user↔room 2.0M + user→bot 0.5M via broadcast-worker→BOT_PLATFORM). 4.5M total = 2.5M human + 2.0M bot.* |
-| Human messages fanned ×F to rooms | M_room | 2,000,000 *(user↔room only; botDM/mention go to BOT_PLATFORM, no ×F)* |
+| Human messages per day (pipeline) | M | 2,500,000 *(user↔room 2.0M + user→bot 0.5M via broadcast-worker→BOT-PLATFORM). 4.5M total = 2.5M human + 2.0M bot.* |
+| Human messages fanned ×F to rooms | M_room | 2,000,000 *(user↔room only; botDM/mention go to BOT-PLATFORM, no ×F)* |
 | Recipients per room (fan-out) | F | 100 |
 | Subscription R/R ops per day per connection | R_sub | **10** |
 | Message-history R/R ops per day per connection | R_hist | **150** |
@@ -188,7 +188,7 @@ for inventory completeness, delivered to watchers in §6.2.
 | Migration oplog QPS (sustained 24/7, 130KB payload, 1 consumer) | Q_mig | 200 |
 | Bot-originated messages per day (→ BOT-MESSAGES-CANONICAL) | M_bot | 2,000,000 |
 | Bot push notifications per day (= bot canonical input) | M_bot_push | 2,000,000 |
-| User→bot events per day (→ BOT_PLATFORM, forwarded by broadcast-worker) | M_bot_platform | 500,000 |
+| User→bot events per day (→ BOT-PLATFORM, forwarded by broadcast-worker) | M_bot_platform | 500,000 |
 | Bot fan-out per message (room delivery, core-NATS) | F_bot | 100 |
 | Peak factor (business-hours concentration) | k | ~4× |
 
@@ -199,7 +199,7 @@ for inventory completeness, delivered to watchers in §6.2.
 
 > **4.5M/day traffic split** (bot pipeline folded into §6.1/§9): user↔room 2.0M and user→bot
 > 0.5M flow through `MESSAGES`→`MESSAGES-CANONICAL` (M = 2.5M; broadcast-worker forwards the
-> 0.5M user→bot subset to `BOT_PLATFORM`, no ×F). Bot-originated 2.0M enters via Bot Msg
+> 0.5M user→bot subset to `BOT-PLATFORM`, no ×F). Bot-originated 2.0M enters via Bot Msg
 > Handler → `BOT-MESSAGES-CANONICAL`. Total = 2.5M human + 2.0M bot = 4.5M.
 
 ## 5. Methodology — ingress vs. fan-out
@@ -211,14 +211,14 @@ to subscribers). Each message flows:
 Client ─pub→ MESSAGES ─→ gatekeeper ─pub→ CANONICAL ─→ 4 consumers
                                                        └─ broadcast-worker ─pub→ chat.room.{id}.event (+DM chat.user.{a}.event.room) ──→ ×F members
                                                        └─ broadcast-worker ─pub→ room metadata (lastMessageAt) ──→ ×F members
-                                                       └─ notification-worker ─pub→ PUSH_NOTIFICATION → push gateway → APNs/FCM
+                                                       └─ notification-worker ─pub→ PUSH-NOTIFICATION → push gateway → APNs/FCM
 ```
 
 Per message: **~7 JetStream hops** (2 stores + 5 consumer deliveries, persisted) plus
 **~2×F core deliveries** (room stream + metadata). The broadcast-worker publishes once
 per subject; the multiplication happens at the NATS delivery layer.
 
-`PUSH_NOTIFICATION` and `HR` are **terminal JetStream streams** — a single
+`PUSH-NOTIFICATION` and `HR` are **terminal JetStream streams** — a single
 worker consumes and forwards out-of-band (APNs/FCM, HR DB), so they incur no ×F NATS
 fan-out.
 
@@ -236,12 +236,12 @@ counts publishes + consumer deliveries (JetStream), deliveries (core), or reques
 | `ROOMS` *(member-driven)* | R_member × U | 0.42M | 0.42M | 0.83M | 10 | 0.4KB | 0.33 GB |
 | `INBOX` *(member-driven)* | (local feed R_member×U + federated inflow ×f_fed) × 2 consumers | 0.50M | 1.0M | 1.5M | 17 | 0.3KB | 0.45 GB |
 | `OUTBOX` *(member-driven)* | R_member × U × f_fed (1 pub + outbox-worker) | 0.08M | 0.08M | 0.17M | 2 | 0.3KB | 0.05 GB |
-| `PUSH_NOTIFICATION` | M_push × (1 pub + 1 consumer) | 2M | 2M | 4M | 46 | 0.8KB | 3.2 GB |
+| `PUSH-NOTIFICATION` | M_push × (1 pub + 1 consumer) | 2M | 2M | 4M | 46 | 0.8KB | 3.2 GB |
 | `HR` | M_hr × (1 pub + 1 consumer); 100 msg/s burst | 40K | 40K | 80K | ~1 (200/s burst) | 0.5KB | 0.04 GB |
 | `SYSTEM` | system/admin events (~10/day) | 10 | 10 | 20 | ~0 | — | ~0 GB |
 | `BOT-MESSAGES-CANONICAL` | M_bot × (1 pub + 3 consumers) | 2M | 6M | 8M | 93 | 1KB | 8 GB |
 | `BOT-PUSH-NOTIFICATION` | M_bot_push × (1 pub + 1 consumer) | 2M | 2M | 4M | 46 | 0.8KB | 3.2 GB |
-| `BOT_PLATFORM` | M_bot_platform × (1 pub + Bot Webhook Worker) | 0.5M | 0.5M | 1M | 12 | 1KB | 1 GB |
+| `BOT-PLATFORM` | M_bot_platform × (1 pub + Bot Webhook Worker) | 0.5M | 0.5M | 1M | 12 | 1KB | 1 GB |
 | **JetStream subtotal** | | | | **~39M** | **~454** | | **~36 GB** |
 
 `MESSAGES-CANONICAL` pub = 2.5M human messages + ~0.42M member-change system messages.
@@ -250,7 +250,7 @@ touching a federated room); its lone consumer **outbox-worker** forwards each to
 destination site's `INBOX`. **INBOX** carries the local-origin search feed (all member
 changes, `R_member × U`) **plus** the federated inflow from remote outbox-workers (`×f_fed`),
 both on `chat.inbox.{siteID}.>` (×2 consumers: inbox-worker applies, search-sync-worker
-indexes). Bot streams (`BOT_*`) are the parallel bot
+indexes). Bot streams (`BOT-*`) are the parallel bot
 pipeline (4M split in §4); bot room fan-out is core-NATS (§6.2 note), not shown here.
 `MIGRATION-OPLOG` is **excluded** — separate ~2-month phase (§8).
 
@@ -339,7 +339,7 @@ doesn't inflate it.
 
 | Layer | Ops or deliveries/day | avg msg/s | Bytes/day |
 |-------|----------------------:|----------:|----------:|
-| JetStream streams (incl. `BOT_*`, server-side/flat) | ~39M | ~454 | ~36 GB |
+| JetStream streams (incl. `BOT-*`, server-side/flat) | ~39M | ~454 | ~36 GB |
 | Core delivery subjects (scales with D) | ~470M | ~5,440 | ~543 GB |
 | Client R/R (req + resp, scales with D) | ~11M | ~130 | ~149 GB |
 | **TOTAL (steady-state, D=1)** | **~0.52B/day** | **~6,020/s avg · ~24,100/s peak** | **~0.73 TB/day** |
@@ -470,7 +470,7 @@ JetStream storage at steady state ≈ `publish-rate × retention (TTL) × payloa
 | Stream | TTL | Pub/day | Payload | Retained msgs | Logical storage |
 |--------|-----|--------:|---------|--------------:|----------------:|
 | `MESSAGES` | 8 hr | 2.5M | 1KB | 0.83M | 0.8 GB |
-| `PUSH_NOTIFICATION` | 8 hr | 2.0M | 0.8KB | 0.67M | 0.5 GB |
+| `PUSH-NOTIFICATION` | 8 hr | 2.0M | 0.8KB | 0.67M | 0.5 GB |
 | `HR` | 8 hr | 40K (daily burst) | 0.5KB | 40K | 0.02 GB |
 | `SYSTEM` | 8 hr | 10 | — | negligible | ~0 GB |
 | `MESSAGES-CANONICAL` | 1 day | 2.92M | 1KB | 2.92M | 2.9 GB |
@@ -479,7 +479,7 @@ JetStream storage at steady state ≈ `publish-rate × retention (TTL) × payloa
 | `ROOMS` | 1 day | 0.42M | 0.4KB | 0.42M | 0.2 GB |
 | `BOT-MESSAGES-CANONICAL` | 1 day | 2.0M | 1KB | 2.0M | 2.0 GB |
 | `BOT-PUSH-NOTIFICATION` | 8 hr | 2.0M | 0.8KB | 0.67M | 0.5 GB |
-| `BOT_PLATFORM` | 1 day | 0.5M | 1KB | 0.5M | 0.5 GB |
+| `BOT-PLATFORM` | 1 day | 0.5M | 1KB | 0.5M | 0.5 GB |
 | **TOTAL (logical)** | | | | | **~9 GB** |
 
 Excludes `MIGRATION-OPLOG` storage (separate phase — §8).
@@ -544,7 +544,7 @@ independent of D.
   destination's `INBOX-{siteID}` (`chat.inbox.{siteID}.>`). OUTBOX carries only the cross-site
   subset of member changes (`≈ R_member × U × f_fed`, f_fed ~20%); the symmetric INBOX inflow
   scales the same. Volumes are estimates pending telemetry.
-- **PUSH_NOTIFICATION / HR / BOT_* / MIGRATION-OPLOG streams are defined in
+- **PUSH-NOTIFICATION / HR / BOT-* / MIGRATION-OPLOG streams are defined in
   `pkg/stream/stream.go`** (names/subjects per §2.1); their **traffic volumes** here remain
   estimates — revisit against production telemetry.
 - **MIGRATION-OPLOG is a separate ~2-month phase (§8)** — reported standalone and never
@@ -554,7 +554,7 @@ independent of D.
 - **Message delivery is the dominant steady-state cost** (~71% of bytes, ~4,630 msg/s) —
   **human + bot** messages in one combined event, fanned ×F = 100 on (M_room + M_bot) = 4.0M.
   Reducing effective fan-out (§6.7) is the highest-value lever.
-- **Bot pipeline (`BOT_*`) is folded into the steady-state tables** (§6.1 traffic, §9
+- **Bot pipeline (`BOT-*`) is folded into the steady-state tables** (§6.1 traffic, §9
   storage, §4 params) — the 4.5M total = 2.5M human + 2.0M bot (§4 split note). Bot room
   fan-out is core-NATS (~190M deliveries/day, §6.2 note) and not yet in the bytes.
 - **Peak factor k ≈ 4** assumes 80% of traffic in a 10-hour window with 2× intra-window

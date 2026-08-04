@@ -44,11 +44,8 @@ func TestMembersSustained_EndToEnd(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create the MESSAGES-CANONICAL stream as well — runMembersSustained tries
-	// to sample the "room-worker" consumer on the ROOMS stream, but also uses
-	// natsutil.Connect which may set up JetStream consumers. We create ROOMS
-	// above; the MESSAGES-CANONICAL is not required for the members workload but
-	// creating ROOMS is sufficient.
+	// ROOMS alone is sufficient: runMembersSustained samples the "room-worker"
+	// consumer on it, and MESSAGES-CANONICAL is unused by the members workload.
 
 	// Simulated room-service: subscribes on the member-add wildcard, sends
 	// a reply, and publishes the canonical event to the ROOMS stream.

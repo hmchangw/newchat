@@ -56,13 +56,15 @@ func TestNowMs(t *testing.T) {
 // called, which these tests never do) and overrides only CreateOrUpdateConsumer.
 type fakeJetStream struct {
 	o11ynats.JetStream
-	calls int
-	err   error
+	calls     int
+	gotStream string
+	err       error
 }
 
 //nolint:gocritic // cfg by value matches the o11ynats.JetStream interface signature.
-func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, _ string, _ jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
+func (f *fakeJetStream) CreateOrUpdateConsumer(_ context.Context, stream string, _ jetstream.ConsumerConfig) (o11ynats.Consumer, error) {
 	f.calls++
+	f.gotStream = stream
 	return nil, f.err
 }
 
@@ -72,6 +74,7 @@ func TestCreateConsumerWithRetry_ImmediateSuccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, cons, "fake returns a nil consumer on success")
 	assert.Equal(t, 1, js.calls, "success on the first attempt — no retry")
+	assert.Equal(t, "MIGRATION-OPLOG-site1", js.gotStream, "the hyphenated stream name reaches JetStream unaltered")
 }
 
 func TestCreateConsumerWithRetry_NonRecoverableError(t *testing.T) {
@@ -79,6 +82,7 @@ func TestCreateConsumerWithRetry_NonRecoverableError(t *testing.T) {
 	_, err := createConsumerWithRetry(context.Background(), js, "MIGRATION-OPLOG-site1", jetstream.ConsumerConfig{})
 	require.Error(t, err)
 	assert.Equal(t, 1, js.calls, "a non-stream-not-found error is not retried")
+	assert.Equal(t, "MIGRATION-OPLOG-site1", js.gotStream, "the hyphenated stream name reaches JetStream unaltered")
 }
 
 func TestCreateConsumerWithRetry_ContextCancelledDuringWait(t *testing.T) {

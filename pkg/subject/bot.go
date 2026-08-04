@@ -79,7 +79,7 @@ func BotPushNotification(siteID, kind string) string {
 	return fmt.Sprintf("chat.bot.notification.push.%s.%s", siteID, kind)
 }
 
-// BotPushNotificationWildcard matches every subject on BOT_PUSH_NOTIFICATION.
+// BotPushNotificationWildcard matches every subject on BOT-PUSH-NOTIFICATION.
 func BotPushNotificationWildcard(siteID string) string {
 	return fmt.Sprintf("chat.bot.notification.push.%s.>", siteID)
 }

@@ -26,7 +26,7 @@ On connect, every client subscribes to `chat.user.{account}.>`. This single wild
 | Subject | Direction | Publisher | Purpose |
 |---------|-----------|-----------|---------|
 | `chat.user.{account}.stream.msg` | Server → Client | broadcast-worker | DM message delivery |
-| `chat.user.{account}.notification` | Server → Client | _(removed — see PUSH_NOTIFICATION stream below)_ | _(deprecated)_ |
+| `chat.user.{account}.notification` | Server → Client | _(removed — see PUSH-NOTIFICATION stream below)_ | _(deprecated)_ |
 | `chat.user.{account}.event.subscription.update` | Server → Client | room-worker, inbox-worker | Room added/removed from user's list |
 | `chat.user.{account}.event.room.metadata.update` | Server → Client | room-worker | Room metadata changed (for rooms in sidebar) |
 | `chat.user.{account}.response.{requestID}` | Server → Client | various services | Response to a client request |
@@ -168,7 +168,7 @@ The single source of truth for downstream consumers (broadcast-worker, notificat
 
 Stream wildcard: `chat.msg.canonical.{siteID}.>`
 
-### FANOUT Stream (`FANOUT_{siteID}`)
+### FANOUT Stream (`FANOUT-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -186,7 +186,7 @@ Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on
 
 Stream wildcard: `chat.user.*.request.room.*.{siteID}.member.>`
 
-### PUSH_NOTIFICATION Stream (`PUSH-NOTIFICATION-{siteID}`)
+### PUSH-NOTIFICATION Stream (`PUSH-NOTIFICATION-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -306,7 +306,7 @@ Client A (sender)                    NATS                         Client B (rece
     |                                  |--- pub: chat.server.          |
     |                                  |    notification.push.         |
     |                                  |    {siteID}.send              |
-    |                                  |   (PUSH_NOTIFICATION stream)  |
+    |                                  |   (PUSH-NOTIFICATION stream)  |
     |                                  |                               |
     |--- pub: chat.user.A             |                               |
     |        .room.R1.typing -------->|                               |

@@ -36,8 +36,8 @@ or govern bot traffic.
 
 - **Blocks ~half of all message traffic.** Capacity planning (PR #461) sizes steady state at
   **4M messages/day = 2.1M human + 1.9M bot** — bots are a **~50% traffic tier**. The bot
-  pipeline runs on parallel `BOT_*` streams (`BOT-MESSAGES-CANONICAL`, `BOT-PUSH-NOTIFICATION`,
-  `BOT_PLATFORM`) sized at **1.9M bot messages/day** and **~190M bot room deliveries/day**.
+  pipeline runs on parallel `BOT-*` streams (`BOT-MESSAGES-CANONICAL`, `BOT-PUSH-NOTIFICATION`,
+  `BOT-PLATFORM`) sized at **1.9M bot messages/day** and **~190M bot room deliveries/day**.
   None of that traffic can be admitted or trusted without bot auth. *(Volumes are planned/
   placeholder capacity, not yet measured in production.)*
 - **Adoption blocker:** every planned bot/admin integration story depends on this login +
@@ -89,7 +89,7 @@ auth-service validates the **botplatform session token** → mints a **scoped NA
 
 - **Unblocks the bot platform** — provides the trusted front door for the ~50% bot traffic
   tier so bots/admins can authenticate and be admitted.
-- **Fault isolation** — bot traffic runs on a **parallel `BOT_*` pipeline** deliberately
+- **Fault isolation** — bot traffic runs on a **parallel `BOT-*` pipeline** deliberately
   split from the human flow so it can be *scaled, throttled, and observed independently*;
   a bot flood cannot drown human messages.
 - **Least privilege** — bots/admins get the **same scoped NATS JWT as users**, not elevated
@@ -144,9 +144,9 @@ the bot pipeline is specified.
 | Total messages/day | 4.0M (**2.1M human + 1.9M bot**) |
 | Bot-originated messages/day → `BOT-MESSAGES-CANONICAL` | 1.9M |
 | Bot push notifications/day → `BOT-PUSH-NOTIFICATION` | 1.9M |
-| User→bot events/day → `BOT_PLATFORM` (webhook to external platforms) | 100K |
+| User→bot events/day → `BOT-PLATFORM` (webhook to external platforms) | 100K |
 | Bot fan-out per message (F_bot) | 100 |
 | Bot room deliveries/day | ~190M |
 
-Rationale in the doc: bot traffic is split onto a parallel `BOT_*` pipeline *"so it can be
+Rationale in the doc: bot traffic is split onto a parallel `BOT-*` pipeline *"so it can be
 scaled, throttled, and observed independently."*
