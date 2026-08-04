@@ -80,6 +80,8 @@ paths.
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
     - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/validate (admin)](#112-http--post-apiv1cardsvalidate-admin)
+12. [Client Update Service](#12-client-update-service)
+    - [POST /api/v1/version](#post-apiv1version) · [GET /api/v1/version/:fileName](#get-apiv1versionfilename)
 
 ---
 
@@ -7580,3 +7582,79 @@ Ordering is judged against the in-memory cache, which is as fresh as the last re
 #### Triggered events — error path
 
 `None.`
+
+---
+
+## 12. Client Update Service
+
+Public HTTP endpoints served by `client-update-service`. Distributes client
+software-update artifacts (a `.yaml` descriptor + an executable) stored in MinIO.
+Uploads and downloads stream end-to-end; downloads are fronted by a bounded
+TTL+size in-memory cache.
+
+> [!WARNING]
+> **These endpoints are UNAUTHENTICATED in v1.** Anyone who can reach the service
+> can upload or download update artifacts. **They MUST be network-restricted
+> before any production exposure.**
+
+### POST /api/v1/version
+
+**Auth:** none (v1)
+
+Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
+and streamed straight to MinIO (no size cap). An upload of an existing file name
+overwrites it and evicts any cached copy.
+
+#### Request
+
+| Part | Type | Required | Notes |
+|---|---|---|---|
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. Stored as `application/x-yaml`. Rejected if empty or not `.yaml`/`.yml`. |
+| `executeFile` | file (binary) | yes | The executable. Stored as `application/octet-stream`. Rejected if empty. |
+
+#### Response
+
+| Status | Condition |
+|---|---|
+| `200 OK` | Both files stored. |
+| `400 Bad Request` | Missing/empty `configFile` or `executeFile`; `configFile` not `.yaml`/`.yml`; malformed multipart body. |
+| `500 Internal Server Error` | MinIO write failure. |
+
+##### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | string | Always `"success"`. |
+
+```json
+{ "result": "success" }
+```
+
+### GET /api/v1/version/:fileName
+
+**Auth:** none (v1)
+
+Downloads an artifact by file name. Served from an in-memory cache when present
+(TTL `CACHE_TTL`, default 24h); on a miss the object is fetched from MinIO and
+cached if it is within `CACHE_MAX_OBJECT_BYTES` (default 512 MiB), otherwise
+streamed uncached. A re-upload of the same name busts the cache.
+
+#### Response
+
+| Status | Condition | Notes |
+|---|---|---|
+| `200 OK` | Artifact found | Streams the bytes. `Content-Type` as stored; `Content-Disposition: attachment; filename="<fileName>"`; `Content-Length` set. |
+| `400 Bad Request` | Empty or path-unsafe `fileName` (contains `/`, `\`, or `..`) | |
+| `404 Not Found` | No artifact with that name | |
+| `500 Internal Server Error` | MinIO read failure | |
+
+```
+GET /api/v1/version/app.yaml   -> 200 (application/x-yaml)
+GET /api/v1/version/app.exe    -> 200 (application/octet-stream)
+```
+
+### GET /healthz
+
+**Auth:** none
+
+Liveness probe. Always `200 {"status":"ok"}`.
