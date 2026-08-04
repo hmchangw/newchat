@@ -323,6 +323,10 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 // bounded well under history-service's 100-roomId batch cap, so no chunk-split is
 // needed. Reuses the caller's per-site grouping. A degraded/absent site, or a room the
 // RPC omits, just leaves PreviewMessage nil; it never fails the list.
+// Each room already carrying a resolved sub.Room.LastMsgAt (set by enrichLocal/
+// enrichCrossSite, which both run before this) is passed as a hint so
+// history-service can skip its own room-times read for that room; rooms with no
+// Room (soft-deleted/degraded) contribute no hint.
 func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
@@ -343,7 +347,14 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 			if c.Err() != nil {
 				return
 			}
-			m, err := s.history.RoomsGet(c, site, roomIDsBySite[site])
+			hints := map[string]model.RoomTimeHint{}
+			for _, j := range idxBySite[site] {
+				if subs[j].Room == nil || subs[j].Room.LastMsgAt == nil {
+					continue
+				}
+				hints[subs[j].RoomID] = model.RoomTimeHint{LastMsgAt: timeutil.TimeToMillis(subs[j].Room.LastMsgAt)}
+			}
+			m, err := s.history.RoomsGet(c, site, roomIDsBySite[site], hints)
 			if err != nil {
 				slog.WarnContext(c, "last-message enrichment degraded", "account", c.Param("account"), "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
 				return

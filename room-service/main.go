@@ -89,6 +89,8 @@ type config struct {
 	// hooks become no-ops — Phase A deploys need no Valkey).
 	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
 	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
+	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -146,6 +148,7 @@ func main() {
 		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
 		os.Exit(1)
 	}
+	subject.SetRoomLocalityGrace(cfg.RoomLocalityGrace)
 
 	ctx := context.Background()
 

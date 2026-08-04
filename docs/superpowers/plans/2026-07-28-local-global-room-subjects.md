@@ -32,7 +32,7 @@ Every task through Task 11 leaves production behavior unchanged because publishe
 - `pkg/subject/subject.go` — locality-aware `RoomEvent`/`RoomMsgStream`/`RoomMetadataUpdate`.
 - `pkg/roommetacache/roommetacache.go` — `Meta.CrossSite` + Mongo projection.
 - `room-worker/store.go` + `store_mongo.go` — `SetRoomCrossSite`.
-- `room-worker/handler.go` — set flag in `processAddMembers` + `processCreateRoom`; transition nudge; publisher routing.
+- `room-worker/handler.go` — set flag in `processAddMembers` + `processCreateRoom`; publisher routing.
 - `room-service/handler.go` — `roomsInfoBatch` returns `CrossSite`; RoomEvent publisher routing.
 - `user-service/mongorepo/subscriptions.go` — `$lookup` projects `crossSite`.
 - `user-service/service/subscriptions.go` — `buildLocalRoom`/`applyRoomInfo` map `CrossSite`.
@@ -786,55 +786,16 @@ git commit -m "feat(data-migration): backfill crossSite=true for existing cross-
 
 ---
 
-### Task 14: Local→global transition nudge
+### Task 14: Local→global transition nudge — DROPPED
 
-*(unchanged from the original plan — publishes a per-user `event.room.update` nudge to existing members when `processAddMembers` flips a room local→global, so connected clients re-subscribe. Offline/dropped clients self-correct via `subscription.list`.)*
-
-**Files:**
-- Modify: `room-worker/handler.go` (`processAddMembers` — after the Task 5 `SetRoomCrossSite` call)
-- Test: `room-worker/handler_test.go`
-
-- [ ] **Step 1: Write the failing tests:**
-
-```go
-func TestProcessAddMembers_NudgesExistingMembersOnFlip(t *testing.T) {
-	// room previously local (loaded room CrossSite=false), adding a site-b member →
-	// expect a publish on subject.UserRoomUpdate(existingMemberAccount)
-}
-func TestProcessAddMembers_NoNudgeWhenAlreadyGlobal(t *testing.T) {
-	// loaded room CrossSite=true already → no nudge
-}
-```
-
-- [ ] **Step 2: Run to verify they fail** — `make test SERVICE=room-worker`.
-
-- [ ] **Step 3: Implement**, gating on the room's prior state (already loaded before the write). Only when `!room.CrossSite && len(accountsBySite) > 0`:
-
-```go
-	if !room.CrossSite && len(accountsBySite) > 0 {
-		// Room just flipped local→global. Nudge existing members' always-on per-user
-		// tree so connected clients re-fetch subscription.list and re-subscribe to the
-		// global namespace. Best-effort: offline/dropped clients self-correct on reconnect.
-		evt := model.RoomMetadataUpdateEvent{RoomID: req.RoomID, Timestamp: now.UnixMilli()}
-		data, _ := json.Marshal(evt)
-		for _, acc := range existingMemberAccounts { // members present BEFORE this add
-			if err := h.publish(ctx, subject.UserRoomUpdate(acc), data, ""); err != nil {
-				slog.WarnContext(ctx, "room-locality nudge publish failed", "account", acc, "roomId", req.RoomID)
-			}
-		}
-	}
-```
-
-Derive `existingMemberAccounts` from the pre-add membership `loadAddMemberInputs` already reads — no new read. Confirm the client already treats `event.room.update` as a trigger to refresh its subscription list; the nudge only needs to prompt a refresh (the flag is authoritative).
-
-- [ ] **Step 4: Run to verify they pass** — `make test SERVICE=room-worker`, `make lint`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add room-worker/handler.go room-worker/handler_test.go
-git commit -m "feat(room-worker): nudge existing members when a room flips local->global"
-```
+Originally this task published a per-user `event.room.update` nudge to existing
+members when `processAddMembers` flipped a room local→global, so connected
+clients would re-subscribe immediately. It was **dropped in review**: mass-nudging
+every subscriber (a full room-subscriber read + a publish per member) is heavy for
+large rooms, and it is unnecessary — the transition grace window (`RoomLocalityGrace`)
+already dual-publishes to the local subject for a bounded period after a flip, so
+members still on the local lane keep receiving. Clients pick up the new `crossSite`
+value and re-subscribe on their next `subscription.list`; the flag is authoritative.
 
 ---
 
@@ -919,7 +880,7 @@ git commit -m "docs: local/global room namespaces, chat.local.room.> grant, ROOM
 - Write path at federation points → Tasks 5 (add), 6 (create); room-worker only (room-service is an RPC front). ✓
 - Publisher routing (broadcast-worker + room-service/worker), gated → Tasks 10 (helper+mode), 11, 12. ✓
 - Client payload + subscribe → Tasks 7, 8, 9 (payload) + Task 15 (frontend subscribe). ✓
-- Transition nudge (per-user, gap-tolerant) → Task 14. ✓
+- Transition gap coverage → the `RoomLocalityGrace` dual-publish window (Task 14 nudge dropped in review). ✓
 - Backfill of pre-existing cross-site rooms → Task 13. ✓
 - Auth grant + docs + rollout → Task 16. ✓
 - Non-goals (per-user tree, demote) → excluded. ✓

@@ -33,10 +33,12 @@ type UserRoomDoc struct {
 }
 
 // SubscriptionMeta is the caller's subscription projection used for enrichment:
-// the room type plus the join-key Name (DM counterpart account / botDM bot account).
+// the room type, the join-key Name (DM counterpart account / botDM bot
+// account), and the botDM IsSubscribed flag.
 type SubscriptionMeta struct {
-	RoomType model.RoomType
-	Name     string
+	RoomType     model.RoomType
+	Name         string
+	IsSubscribed bool
 }
 
 // HRUser is the users-collection projection used to render display / HR names.
@@ -44,6 +46,13 @@ type HRUser struct {
 	Account     string
 	EngName     string
 	ChineseName string
+}
+
+// AppRef is the apps-collection projection used to render appInfo objects.
+type AppRef struct {
+	ID            string
+	Name          string
+	AssistantName string
 }
 
 // MongoStore is the Mongo-backed store interface for search-service.
@@ -62,8 +71,8 @@ type MongoStore interface {
 	// UsersByAccounts returns HR/display projections keyed by account. Missing accounts are omitted.
 	UsersByAccounts(ctx context.Context, accounts []string) (map[string]HRUser, error)
 
-	// AppsByAssistantNames returns apps keyed by their assistant.name (bot account). Missing are omitted.
-	AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error)
+	// AppsByAssistantNames returns app projections keyed by their assistant.name (bot account). Missing are omitted.
+	AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]AppRef, error)
 }
 
 // RoomInfoClient fetches canonical room metadata from room-service on a given

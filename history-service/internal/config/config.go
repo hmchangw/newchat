@@ -65,6 +65,11 @@ type Config struct {
 	RoomCacheSize int           `env:"HISTORY_ROOM_CACHE_SIZE" envDefault:"50000"`
 	RoomCacheTTL  time.Duration `env:"HISTORY_ROOM_CACHE_TTL"  envDefault:"10s"`
 
+	// Room-list preview cache (resolved last-eligible message per room).
+	// Positives-only; lastMsgAt volatility ⇒ short TTL. Set size or ttl to 0 to disable.
+	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
+	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -100,6 +105,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.RoomCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_ROOM_CACHE_TTL must be >= 0, got %s", cfg.RoomCacheTTL)
+	}
+	if cfg.PreviewCacheSize < 0 {
+		return fmt.Errorf("HISTORY_PREVIEW_CACHE_SIZE must be >= 0, got %d", cfg.PreviewCacheSize)
+	}
+	if cfg.PreviewCacheTTL < 0 {
+		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
 	}
 	return nil
 }

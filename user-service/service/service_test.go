@@ -32,7 +32,7 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 	refresher := mocks.NewMockTokenRefresher(ctrl)
 	// ListSubscriptions now enriches last-message via history.RoomsGet; default it to a
 	// no-op so list tests that don't exercise last-message need no per-test stub.
-	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	// The same mock backs both publishers (federation + client fanout) —
 	// expectations are subject-scoped, so tests stay unambiguous.
 	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, ssoTokens, validator, refresher, cfg), subs, users, apps, rooms, history, pub

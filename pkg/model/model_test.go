@@ -575,6 +575,36 @@ func TestSendMessageRequestJSON(t *testing.T) {
 
 }
 
+func TestRoomsGetRequestJSON(t *testing.T) {
+	t.Run("with hints round-trip", func(t *testing.T) {
+		lastMsgAt := int64(1735689600000)
+		createdAt := int64(1735600000000)
+		src := model.RoomsGetRequest{
+			RoomIDs: []string{"r1", "r2"},
+			Hints: map[string]model.RoomTimeHint{
+				"r1": {LastMsgAt: &lastMsgAt, CreatedAt: &createdAt},
+				"r2": {LastMsgAt: &lastMsgAt},
+			},
+		}
+		roundTrip(t, &src, &model.RoomsGetRequest{})
+	})
+
+	t.Run("nil hints omitted", func(t *testing.T) {
+		src := model.RoomsGetRequest{RoomIDs: []string{"r1"}}
+		data, err := json.Marshal(&src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["hints"]
+		assert.False(t, present, "hints should be omitted when nil")
+
+		var dst model.RoomsGetRequest
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Nil(t, dst.Hints, "absent JSON field must unmarshal to nil map")
+	})
+}
+
 func TestMessageEventJSON(t *testing.T) {
 	e := model.MessageEvent{
 		Message: model.Message{
@@ -4998,6 +5028,7 @@ func TestTranslateResult_JSON(t *testing.T) {
 }
 
 func TestSearchMessageEnrichmentJSON(t *testing.T) {
+	subscribed := true
 	m := model.SearchMessage{
 		MessageID:   "m1",
 		RoomID:      "r1",
@@ -5006,18 +5037,30 @@ func TestSearchMessageEnrichmentJSON(t *testing.T) {
 		Content:     "hi",
 		CreatedAt:   time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
 		TShow:       true,
-		Sender:      &model.MessageSender{Account: "alice", DisplayName: "Alice Wong"},
+		Sender: &model.MessageSender{
+			Account: "alice",
+			HR:      &model.MessageHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice Wang"},
+		},
 		Room: &model.MessageRoom{
-			ID:     "r1",
-			Name:   "Bob Chan",
-			Type:   model.RoomTypeDM,
-			HRInfo: &model.SubscriptionHRInfo{Account: "bob", Name: "陳", EngName: "Bob Chan"},
+			ID:      "r1",
+			Name:    "Weather App",
+			Type:    model.RoomTypeBotDM,
+			AppInfo: &model.MessageAppInfo{ID: "app-1", Name: "Weather App", AssistantName: "weather.bot", IsSubscribed: &subscribed},
 		},
 	}
 	roundTrip(t, &m, &model.SearchMessage{})
 
+	// dm room: hrInfo serializes chineseName (not the legacy "name" key).
+	b, err := json.Marshal(model.MessageRoom{
+		ID: "r2", Type: model.RoomTypeDM,
+		HRInfo: &model.MessageHRInfo{Account: "bob", ChineseName: "陳", EngName: "Bob Chan"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"chineseName":"陳"`)
+	assert.NotContains(t, string(b), `"appInfo"`)
+
 	// omitempty: a zero-value SearchMessage must not emit room/sender/tshow keys.
-	b, err := json.Marshal(model.SearchMessage{MessageID: "x"})
+	b, err = json.Marshal(model.SearchMessage{MessageID: "x"})
 	require.NoError(t, err)
 	assert.NotContains(t, string(b), "\"room\"")
 	assert.NotContains(t, string(b), "\"sender\"")
@@ -5060,4 +5103,22 @@ func TestThreadReadEventJSON_NewThreadUnread(t *testing.T) {
 	var dst model.ThreadReadEvent
 	require.NoError(t, json.Unmarshal([]byte(`{"account":"a","threadRoomId":"tr","lastSeenAt":1,"timestamp":2}`), &dst))
 	assert.Nil(t, dst.NewThreadUnread)
+}
+
+func TestMessageAppInfoJSON(t *testing.T) {
+	// Sender variant: IsSubscribed nil → key absent; no displayName/hr keys.
+	b, err := json.Marshal(model.MessageSender{
+		Account: "weather.bot",
+		AppInfo: &model.MessageAppInfo{ID: "app-1", Name: "Weather App", AssistantName: "weather.bot"},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "isSubscribed")
+	assert.NotContains(t, string(b), "displayName")
+	assert.NotContains(t, string(b), `"hr"`)
+
+	// Room variant: explicit false must serialize (pointer, not omitted).
+	unsubscribed := false
+	b, err = json.Marshal(model.MessageAppInfo{ID: "app-1", Name: "W", AssistantName: "w.bot", IsSubscribed: &unsubscribed})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"isSubscribed":false`)
 }

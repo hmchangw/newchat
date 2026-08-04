@@ -153,10 +153,10 @@ func (m *MockMongoStore) EXPECT() *MockMongoStoreMockRecorder {
 }
 
 // AppsByAssistantNames mocks base method.
-func (m *MockMongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]model.App, error) {
+func (m *MockMongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]AppRef, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "AppsByAssistantNames", ctx, botAccounts)
-	ret0, _ := ret[0].(map[string]model.App)
+	ret0, _ := ret[0].(map[string]AppRef)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

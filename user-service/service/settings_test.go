@@ -142,6 +142,39 @@ func TestSetSettings_ValidTranslateTags(t *testing.T) {
 	}
 }
 
+func TestSetSettings_InvalidEnums(t *testing.T) {
+	svc, _, _, _, _, _, _ := newSvc(t)
+	bad := []model.UserSettings{
+		{ThemePreference: ptrStr("blue")},
+		{ThemePreference: ptrStr("")},
+		{InitialChatScrollPosition: ptrStr("top")},
+		{InitialChatScrollPosition: ptrStr("")},
+	}
+	for _, s := range bad {
+		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{UserSettings: s})
+		requireCode(t, err, errcode.CodeBadRequest)
+	}
+}
+
+func TestSetSettings_ValidEnums(t *testing.T) {
+	svc, _, users, _, _, _, pub := newSvc(t)
+	expectInbox(pub)
+	for _, s := range []model.UserSettings{
+		{ThemePreference: ptrStr(model.ThemePreferenceSystem)},
+		{ThemePreference: ptrStr(model.ThemePreferenceLight)},
+		{ThemePreference: ptrStr(model.ThemePreferenceDark)},
+		{InitialChatScrollPosition: ptrStr(model.InitialChatScrollLastRead)},
+		{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)},
+	} {
+		settings := s
+		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
+			Return(&model.User{Settings: &settings}, nil)
+		pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).Return(nil)
+		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{UserSettings: settings})
+		require.NoError(t, err)
+	}
+}
+
 func TestSetSettings_NotFound(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
 	users.EXPECT().UpdateUserSettings(gomock.Any(), "ghost", gomock.Any()).Return(nil, nil)

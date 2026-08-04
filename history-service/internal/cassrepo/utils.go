@@ -54,7 +54,9 @@ type PageRequest struct {
 
 const (
 	defaultCassPageSize = 50
-	maxPageSize         = 100
+	// MaxPageSize is the per-query row cap for message reads. Callers that build a
+	// PageRequest directly (bypassing ParsePageRequest) should clamp to it.
+	MaxPageSize = 100
 )
 
 // maxCursorBytes caps decoded page-state size; 512 is generous vs. real tokens (10–100 B) yet blocks pathological allocations.
@@ -69,8 +71,8 @@ func ParsePageRequest(cursorStr string, pageSize int) (PageRequest, error) {
 	if pageSize <= 0 {
 		pageSize = defaultCassPageSize
 	}
-	if pageSize > maxPageSize {
-		pageSize = maxPageSize
+	if pageSize > MaxPageSize {
+		pageSize = MaxPageSize
 	}
 	return PageRequest{Cursor: cursor, PageSize: pageSize}, nil
 }
