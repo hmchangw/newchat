@@ -13,6 +13,12 @@ import (
 	"github.com/hmchangw/chat/pkg/restyutil"
 )
 
+// accessTokenRequest is the J1→J2 exchange request body: the J1 token is sent as
+// the "key" field, not an Authorization header.
+type accessTokenRequest struct {
+	Key string `json:"key"`
+}
+
 // accessTokenResponse is the accessToken API reply. token is the J2 token used as
 // the Authorization header on the translate API.
 type accessTokenResponse struct {
@@ -74,12 +80,12 @@ func (p *tokenProvider) Refresh(ctx context.Context, stale string) (string, erro
 	return p.fetchLocked(ctx)
 }
 
-// fetchLocked calls the accessToken API with the J1 token and caches the J2
-// result. Caller must hold p.mu.
+// fetchLocked calls the accessToken API, sending the J1 token in the JSON body
+// ({"key": <J1>}), and caches the J2 result. Caller must hold p.mu.
 func (p *tokenProvider) fetchLocked(ctx context.Context) (string, error) {
 	resp, err := p.client.R().
 		SetContext(ctx).
-		SetHeader("Authorization", p.j1Token).
+		SetBody(accessTokenRequest{Key: p.j1Token}).
 		Post("")
 	if err != nil {
 		return "", fmt.Errorf("request access token: %w", err)

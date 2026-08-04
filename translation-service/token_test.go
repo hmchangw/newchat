@@ -85,6 +85,25 @@ func TestTokenProvider_ForceRefresh(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
 
+func TestTokenProvider_SendsJ1InBody(t *testing.T) {
+	var gotBody, gotContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		gotContentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"token":"J2","expiresAt":"`+rfc3339In(time.Hour)+`"}`)
+	}))
+	defer srv.Close()
+
+	p := newTokenProvider(srv.URL, "J1-secret", 5*time.Second, time.Minute)
+	_, err := p.Token(context.Background())
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{"key":"J1-secret"}`, gotBody) // J1 is sent in the body, not an Authorization header
+	assert.Equal(t, "application/json", gotContentType)
+}
+
 func TestTokenProvider_FetchErrors(t *testing.T) {
 	cases := []struct {
 		name    string
