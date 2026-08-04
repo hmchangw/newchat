@@ -55,8 +55,10 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.inbox.site-a.internal.member_removed"},
 		{"MsgCanonicalCreated", subject.MsgCanonicalCreated("site-a"),
 			"chat.msg.canonical.site-a.created"},
-		{"MsgCanonicalTeamsBatch", subject.MsgCanonicalTeamsBatch("site-a"),
-			"chat.msg.canonical.site-a.teams.batch"},
+		{"MsgTeamsCanonicalBatch", subject.MsgTeamsCanonicalBatch("site-a"),
+			"chat.teams.msg.canonical.site-a.batch"},
+		{"MsgTeamsCanonicalWildcard", subject.MsgTeamsCanonicalWildcard("site-a"),
+			"chat.teams.msg.canonical.site-a.>"},
 		// single-token: matches the .created/.updated/... events but NOT the
 		// two-token .teams.batch envelope.
 		{"MsgCanonicalMessageWildcard", subject.MsgCanonicalMessageWildcard("site-a"),

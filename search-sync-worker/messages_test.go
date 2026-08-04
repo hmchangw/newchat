@@ -562,16 +562,22 @@ func teamsBatch(t *testing.T, msgs ...teamsmigrate.Message) []byte {
 	return data
 }
 
-func TestMessageCollection_FilterSubjects_UserIncludesTeamsBatch(t *testing.T) {
+func TestMessageCollection_FilterSubjects(t *testing.T) {
+	// The teams batch subject now lives on its own MESSAGES-TEAMS stream/consumer —
+	// neither the user nor the bot collection binds it anymore.
 	user := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
-	assert.Equal(t, []string{
-		"chat.msg.canonical.site-a.*",
-		"chat.msg.canonical.site-a.teams.batch",
-	}, user.FilterSubjects("site-a"))
+	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, user.FilterSubjects("site-a"))
 
-	// The bot stream carries no .teams.batch, so its collection must not bind it.
 	bot := newBotMessageCollection("msgs-v1", false)
 	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, bot.FilterSubjects("site-a"))
+
+	teams := newTeamsMessageCollection("msgs-v1", "site-a", false)
+	assert.Equal(t, []string{"chat.teams.msg.canonical.site-a.batch"}, teams.FilterSubjects("site-a"))
+	assert.Empty(t, teams.TemplateName(), "teams-only collection skips template — the user collection already owns it")
+	assert.Nil(t, teams.TemplateBody())
+	pattern, body := teams.MappingUpdate()
+	assert.Empty(t, pattern)
+	assert.Nil(t, body)
 }
 
 // fakeTeamsUserResolver returns a fixed id→identity map (nil error).
