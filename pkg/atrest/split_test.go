@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
@@ -87,4 +88,46 @@ func TestStripEncryptedFields_NullsContent(t *testing.T) {
 	assert.Equal(t, "p", in.QuotedParentMessage.MessageID)
 	assert.Empty(t, in.QuotedParentMessage.Msg)
 	assert.Nil(t, in.QuotedParentMessage.Attachments)
+}
+
+func TestSplitForEncryption_ForwardedContent(t *testing.T) {
+	msg := &cassandra.Message{
+		RoomID: "r1", MessageID: "m1", Msg: "comment",
+		ForwardedMessage: &cassandra.ForwardedMessage{
+			MessageID: "m-src", RoomID: "r-src", Msg: "forwarded body",
+			Sender: cassandra.Participant{ID: "u5", Account: "eve"},
+		},
+	}
+	out := SplitForEncryption(msg)
+	require.NotNil(t, out.ForwardedContent)
+	assert.Equal(t, "forwarded body", out.ForwardedContent.Msg)
+	// input not mutated
+	assert.Equal(t, "forwarded body", msg.ForwardedMessage.Msg)
+}
+
+func TestSplitForEncryption_ForwardedContent_EmptyBodyOmitted(t *testing.T) {
+	msg := &cassandra.Message{RoomID: "r1", MessageID: "m1",
+		ForwardedMessage: &cassandra.ForwardedMessage{MessageID: "m-src", RoomID: "r-src"}}
+	assert.Nil(t, SplitForEncryption(msg).ForwardedContent)
+}
+
+func TestStripEncryptedFields_BlanksForwardedBody(t *testing.T) {
+	msg := &cassandra.Message{Msg: "comment",
+		ForwardedMessage: &cassandra.ForwardedMessage{MessageID: "m-src", Msg: "forwarded body"}}
+	StripEncryptedFields(msg)
+	assert.Empty(t, msg.ForwardedMessage.Msg)
+	assert.Equal(t, "m-src", msg.ForwardedMessage.MessageID, "metadata survives")
+}
+
+func TestApplyDecryptedFields_RestoresForwardedBody(t *testing.T) {
+	msg := &cassandra.Message{ForwardedMessage: &cassandra.ForwardedMessage{MessageID: "m-src"}}
+	ApplyDecryptedFields(msg, &EncryptedFields{Msg: "comment", ForwardedContent: &ForwardedEncrypted{Msg: "forwarded body"}})
+	assert.Equal(t, "comment", msg.Msg)
+	assert.Equal(t, "forwarded body", msg.ForwardedMessage.Msg)
+
+	// Defensive: bundle carries forward content but the UDT column was lost — struct is created.
+	bare := &cassandra.Message{}
+	ApplyDecryptedFields(bare, &EncryptedFields{ForwardedContent: &ForwardedEncrypted{Msg: "x"}})
+	require.NotNil(t, bare.ForwardedMessage)
+	assert.Equal(t, "x", bare.ForwardedMessage.Msg)
 }
