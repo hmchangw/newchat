@@ -33,6 +33,7 @@ func ConnectRead(ctx context.Context, uri, username, password string, opts ...Op
 
 func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string, opts ...Option) (*mongo.Client, error) {
 	cfg := newConnectConfig(opts...)
+	cfg.applyTuning(clientOpts)
 
 	var cleanup func(context.Context) error
 	if cfg.obs != nil {

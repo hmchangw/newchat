@@ -26,6 +26,16 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
+	// MaxPoolSize caps connections per server. This is authoritative — it is
+	// always applied to the client, overriding any maxPoolSize in the URI — so
+	// the pool ceiling is explicit rather than the driver default of 100.
+	// Connections are created lazily and are further gated by MAX_CONCURRENCY
+	// (a handler holds at most one at a time), so this is a generous headroom
+	// ceiling, not a count of connections that get opened. Operators must keep
+	// pods × MaxPoolSize under the cluster's connection limit.
+	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"500"`
+	// MinPoolSize keeps a warm connection floor; 0 lets the pool drain to empty.
+	MinPoolSize uint64 `env:"MIN_POOL_SIZE" envDefault:"0"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -52,6 +62,15 @@ type Config struct {
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
+	// disables the cap (unbounded spawn — the previous behavior).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// RequestTimeout bounds each request handler so a slow MongoDB/Cassandra op
+	// is cancelled and its pooled connection returned instead of held. 0
+	// disables the per-request deadline.
+	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
 
 	// Subscription access-check cache. Only positive subscriptions are cached,
 	// so the TTL bounds how long revoked access can stay readable. Set size or
@@ -111,6 +130,19 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	// 0 makes the driver treat the pool as unbounded — reject it so the cap stays explicit.
+	if cfg.Mongo.MaxPoolSize < 1 {
+		return fmt.Errorf("MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.Mongo.MaxPoolSize)
+	}
+	if cfg.Mongo.MinPoolSize > cfg.Mongo.MaxPoolSize {
+		return fmt.Errorf("MONGO_MIN_POOL_SIZE (%d) must be <= MONGO_MAX_POOL_SIZE (%d)", cfg.Mongo.MinPoolSize, cfg.Mongo.MaxPoolSize)
+	}
+	if cfg.MaxConcurrency < 0 {
+		return fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)
+	}
+	if cfg.RequestTimeout < 0 {
+		return fmt.Errorf("REQUEST_TIMEOUT must be >= 0, got %s", cfg.RequestTimeout)
 	}
 	return nil
 }
