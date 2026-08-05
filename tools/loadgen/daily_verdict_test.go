@@ -255,6 +255,36 @@ unrelated 99
 	require.Equal(t, 0.0, sum)
 }
 
+// A send whose broadcast never arrives is invisible to daily's error_rate: the
+// action returned nil (the publish succeeded), so it counts in AttemptedOps but
+// never in FailedOps, and contributes no latency sample. The more the pipeline
+// drops, the healthier the run reads.
+func TestEvaluateStep_TripsOnMissingBroadcasts(t *testing.T) {
+	in := stepInputs{
+		N: 1000, HoldDuration: time.Minute,
+		AttemptedOps: 10000, FailedOps: 0, MissingBroadcasts: 500,
+		LatencySamples: []float64{10, 20, 30},
+	}
+	r := evaluateStep(in, defaultThresholds())
+
+	assert.True(t, r.Tripped)
+	assert.InDelta(t, 0.05, r.MissingBroadcastRate, 1e-9)
+	require.NotEmpty(t, r.TrippedReasons)
+	assert.Contains(t, strings.Join(r.TrippedReasons, "; "), "missing broadcast")
+}
+
+func TestEvaluateStep_ToleratesMissingBroadcastsUnderThreshold(t *testing.T) {
+	in := stepInputs{
+		N: 1000, HoldDuration: time.Minute,
+		AttemptedOps: 100000, FailedOps: 0, MissingBroadcasts: 50,
+		LatencySamples: []float64{10, 20, 30},
+	}
+	r := evaluateStep(in, defaultThresholds())
+
+	assert.False(t, r.Tripped)
+	assert.Empty(t, r.TrippedReasons)
+}
+
 // A misconfigured metric name must not pass as "no errors". Scrape keeps
 // tolerating the reading (a down service shouldn't fail the run) but says so,
 // so a half-done wiring is visible instead of permanently green.

@@ -29,6 +29,38 @@ func TestRenderConsole_IncludesAnswerLine(t *testing.T) {
 	require.Contains(t, out, "ANSWER: N = 1000")
 }
 
+// Dropped broadcasts must be readable off the table, not just inferable from
+// a trip reason: a step limited by dropped delivery is diagnosed very
+// differently from one limited by latency.
+func TestRenderConsole_ShowsMissingBroadcastRate(t *testing.T) {
+	results := []StepResult{{
+		N: 2000, AttemptedOps: 10000, MissingBroadcasts: 120,
+		MissingBroadcastRate: 0.012, Tripped: true,
+		TrippedReasons: []string{"missing broadcast rate=0.0120 > 0.0010"},
+	}}
+	var buf bytes.Buffer
+	renderConsole(&buf, results)
+	out := buf.String()
+
+	assert.Contains(t, out, "miss%", "table needs a missing-broadcast column")
+	assert.Contains(t, out, "1.20", "the rate itself must be visible")
+}
+
+func TestWriteDailyCSV_MissingBroadcastColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/out.csv"
+	results := []StepResult{{
+		N: 1000, AttemptedOps: 10000, MissingBroadcasts: 7, MissingBroadcastRate: 0.0007,
+	}}
+	require.NoError(t, writeDailyCSV(path, results))
+
+	data, err := os.ReadFile(path) // #nosec G304 -- test-owned temp path
+	require.NoError(t, err)
+	out := string(data)
+	assert.Contains(t, out, "missing_broadcasts")
+	assert.Contains(t, out, "missing_broadcast_rate")
+}
+
 func TestWriteCSV_OneRowPerStep(t *testing.T) {
 	results := []StepResult{
 		{N: 1000, P50LatencyMs: 10, StartedAt: time.Unix(1700000000, 0)},

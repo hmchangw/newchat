@@ -60,7 +60,10 @@ func sendMessage(a actionCtx, u *userState, content string) error {
 		return fmt.Errorf("marshal send-message: %w", err)
 	}
 	if a.Collector != nil {
-		a.Collector.RecordPublish(reqID, msgID, time.Now())
+		// Broadcast-only: daily never subscribes to the reply subject, so
+		// registering a request-ID correlation would leave an entry nothing
+		// can ever clear.
+		a.Collector.RecordPublishBroadcastOnly(msgID, time.Now())
 	}
 	if err := a.Publish(a.Ctx, subject.MsgSend(u.Account, roomID, a.SiteID), data); err != nil {
 		if a.Collector != nil {
@@ -183,7 +186,10 @@ func threadReply(a actionCtx, u *userState, parentID, content string) error {
 		return fmt.Errorf("marshal thread-reply: %w", err)
 	}
 	if a.Collector != nil {
-		a.Collector.RecordPublish(reqID, msgID, time.Now())
+		// Broadcast-only: daily never subscribes to the reply subject, so
+		// registering a request-ID correlation would leave an entry nothing
+		// can ever clear.
+		a.Collector.RecordPublishBroadcastOnly(msgID, time.Now())
 	}
 	if err := a.Publish(a.Ctx, subject.MsgSend(u.Account, roomID, a.SiteID), data); err != nil {
 		if a.Collector != nil {
