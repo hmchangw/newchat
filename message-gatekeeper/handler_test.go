@@ -2279,8 +2279,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 		return &forwardSourceProjection{
 			RoomID: srcRoomID, Sender: cassandra.Participant{ID: "u5", Account: "eve"},
 			CreatedAt: srcCreatedAt, Msg: "original body",
-			Mentions:    []cassandra.Participant{{ID: "u2", Account: "bob"}},
-			MessageLink: "https://chat.example.com/" + srcRoomID + "/" + fwdID,
+			Mentions: []cassandra.Participant{{ID: "u2", Account: "bob"}},
 		}
 	}
 	subscribed := func(s *MockStore) {
@@ -2332,7 +2331,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				assert.Equal(t, srcRoomID, msg.ForwardedMessage.RoomID)
 				assert.Equal(t, "original body", msg.ForwardedMessage.Msg)
 				assert.Equal(t, "eve", msg.ForwardedMessage.Sender.Account)
-				assert.NotEmpty(t, msg.ForwardedMessage.MessageLink)
+				assert.NotContains(t, string(data), "messageLink", "the snapshot carries no deep link")
 				assert.Equal(t, "check this", msg.Content)
 
 				require.Len(t, published, 1)
@@ -2609,7 +2608,6 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				assert.Equal(t, srcRoomID, msg.ForwardedMessage.RoomID)
 				assert.Equal(t, "eve", msg.ForwardedMessage.Sender.Account)
 				assert.Equal(t, srcCreatedAt, msg.ForwardedMessage.CreatedAt)
-				assert.NotEmpty(t, msg.ForwardedMessage.MessageLink)
 				assert.Len(t, msg.ForwardedMessage.Mentions, 1)
 				assert.Equal(t, "check this", msg.Content)
 

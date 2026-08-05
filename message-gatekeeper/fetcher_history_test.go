@@ -178,7 +178,6 @@ func TestHistoryParentFetcher_FetchForwardedSource(t *testing.T) {
 		assert.NotEmpty(t, got.Attachments, "attachment presence must survive the projection")
 		assert.NotEmpty(t, got.Card, "card presence must survive the projection")
 		assert.NotEmpty(t, got.ForwardedMessage, "chain presence must survive the projection")
-		assert.Equal(t, baseURL+"/r-src/"+messageID, got.MessageLink)
 	})
 
 	t.Run("errcode envelope propagates typed error", func(t *testing.T) {

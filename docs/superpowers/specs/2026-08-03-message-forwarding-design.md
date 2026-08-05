@@ -92,7 +92,6 @@ type ForwardedMessage struct {
     CreatedAt             time.Time     `json:"createdAt"                       cql:"created_at"`
     Msg                   string        `json:"msg,omitempty"                   cql:"msg"`
     Mentions              []Participant `json:"mentions,omitempty"              cql:"mentions"`
-    MessageLink           string        `json:"messageLink,omitempty"           cql:"message_link"`
     ThreadParentID        string        `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
     ThreadParentCreatedAt *time.Time    `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
 }
@@ -136,7 +135,7 @@ FetchForwardedSource(ctx context.Context, account, srcRoomID, siteID, messageID 
 - Subject: `subject.MsgGet(account, srcRoomID, siteID)` — the *source* room. history-service's existing `findMessage` room check, subscription check, and access-window enforcement provide authorization for free. Cross-room reads are the point, so unlike quotes there is no same-room expectation.
 - 2-second timeout, sonic codec, narrow projection struct (never decode the full `cassandra.Message` under sonic — the struct-keyed `Reactions` map breaks its decoder). The projection must additionally expose enough to enforce the text-only and chaining rules: `attachments` (presence only), `card` (presence only), `type`, `forwardedMessage` (presence only), plus the snapshot fields (`msg`, `sender`, `mentions`, `createdAt`, `roomId`, `threadParentId`, `threadParentCreatedAt`).
 - Post-fetch rejections (all `bad_request`): source has attachments; source has a card; source is a system message; source is a forward with empty `msg`.
-- Snapshot projection: copy `MessageID`, `RoomID` (from the reply), `Sender`, `CreatedAt`, `Msg`, `Mentions`, `ThreadParentID`, `ThreadParentCreatedAt`; build `MessageLink` from the injected `chatBaseURL` as `{base}/{roomID}/{messageID}` (existing `messageLink` helper).
+- Snapshot projection: copy `MessageID`, `RoomID` (from the reply), `Sender`, `CreatedAt`, `Msg`, `Mentions`, `ThreadParentID`, `ThreadParentCreatedAt`. No `MessageLink` — the snapshot carries no deep link; clients build one from `roomId` + `messageId` if they need it.
 - **Hard-fail**: every fetch error — typed errcode (not_found / forbidden / …) or transport (timeout, no responders, unmarshal) — fails the send. No `quoteFetchErrIsTerminal`-style tiering, no placeholder. Transport errors are wrapped into a client-facing typed error (`errcode.Unavailable`-class) so the JetStream message is acked and replied, not endlessly redelivered.
 
 ### `handler.go`
@@ -162,7 +161,6 @@ CREATE TYPE IF NOT EXISTS chat."ForwardedMessage" (
   created_at               TIMESTAMP,
   mentions                 SET<FROZEN<"Participant">>,
   message_id               TEXT,
-  message_link             TEXT,
   msg                      TEXT,
   room_id                  TEXT,
   sender                   FROZEN<"Participant">,

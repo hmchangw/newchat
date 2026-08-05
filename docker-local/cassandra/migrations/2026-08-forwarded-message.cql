@@ -9,7 +9,6 @@ CREATE TYPE IF NOT EXISTS chat."ForwardedMessage"(
   created_at TIMESTAMP,
   mentions SET<FROZEN<"Participant">>,
   message_id TEXT,
-  message_link TEXT,
   msg TEXT,
   room_id TEXT,
   sender FROZEN<"Participant">,

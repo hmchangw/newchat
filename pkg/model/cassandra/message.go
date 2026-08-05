@@ -76,7 +76,6 @@ type ForwardedMessage struct {
 	CreatedAt             time.Time     `json:"createdAt"                       cql:"created_at"`
 	Msg                   string        `json:"msg,omitempty"                   cql:"msg"`
 	Mentions              []Participant `json:"mentions,omitempty"              cql:"mentions"`
-	MessageLink           string        `json:"messageLink,omitempty"           cql:"message_link"`
 	ThreadParentID        string        `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
 	ThreadParentCreatedAt *time.Time    `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
 }

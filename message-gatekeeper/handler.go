@@ -583,7 +583,6 @@ func (h *Handler) resolveForwardSnapshot(ctx context.Context, account, siteID st
 		CreatedAt:             src.CreatedAt,
 		Msg:                   msg,
 		Mentions:              src.Mentions,
-		MessageLink:           src.MessageLink,
 		ThreadParentID:        src.ThreadParentID,
 		ThreadParentCreatedAt: src.ThreadParentCreatedAt,
 	}, nil

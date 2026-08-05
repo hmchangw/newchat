@@ -126,8 +126,6 @@ type forwardSourceProjection struct {
 	Attachments           json.RawMessage         `json:"attachments"`      // presence-only
 	Card                  json.RawMessage         `json:"card"`             // presence-only
 	ForwardedMessage      json.RawMessage         `json:"forwardedMessage"` // presence-only (chain detection)
-	// MessageLink is built by the fetcher from chatBaseURL, not decoded from the reply.
-	MessageLink string `json:"-"`
 }
 
 // FetchForwardedSource issues a NATS request to history-service's
@@ -157,6 +155,5 @@ func (f *historyParentFetcher) FetchForwardedSource(
 	if err := sonic.Unmarshal(msg.Data, &src); err != nil {
 		return nil, fmt.Errorf("unmarshal forward source: %w", err)
 	}
-	src.MessageLink = messageLink(f.chatBaseURL, src.RoomID, messageID)
 	return &src, nil
 }

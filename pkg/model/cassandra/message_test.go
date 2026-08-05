@@ -250,7 +250,6 @@ func TestForwardedMessage_JSON(t *testing.T) {
 		CreatedAt:             time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC),
 		Msg:                   "the forwarded body",
 		Mentions:              []Participant{{ID: "u2", Account: "bob"}},
-		MessageLink:           "https://chat.example.com/r-src/01970a4f8c2d7c9aQRST",
 		ThreadParentID:        "01970a4f8c2d7c9aTHRD",
 		ThreadParentCreatedAt: &threadParent,
 	}
@@ -267,7 +266,6 @@ func TestForwardedMessage_JSON_Minimal(t *testing.T) {
 	got := roundTrip(t, f)
 	assert.Empty(t, got.Msg)
 	assert.Nil(t, got.Mentions)
-	assert.Empty(t, got.MessageLink)
 	assert.Empty(t, got.ThreadParentID)
 	assert.Nil(t, got.ThreadParentCreatedAt)
 }

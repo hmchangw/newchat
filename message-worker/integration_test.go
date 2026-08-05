@@ -2168,7 +2168,7 @@ func TestCassandraStore_SaveMessage_ForwardedMessage(t *testing.T) {
 		MessageID: "01970a4f8c2d7c9aSRCM", RoomID: "r-src",
 		Sender:    cassandra.Participant{ID: "u5", Account: "eve"},
 		CreatedAt: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).UTC(),
-		Msg:       "original body", MessageLink: "https://chat.example.com/r-src/01970a4f8c2d7c9aSRCM",
+		Msg:       "original body",
 	}
 	msg := &model.Message{ID: idgen.GenerateMessageID(), RoomID: "r-dst", Content: "comment",
 		CreatedAt: time.Now().UTC().Truncate(time.Millisecond), ForwardedMessage: fwd}
