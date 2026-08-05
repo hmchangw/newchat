@@ -502,6 +502,19 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 	if err := h.publishMutation(ctx, room, model.RoomEventMessageDeleted, msg.ID, &del); err != nil {
 		return fmt.Errorf("publish delete mutation for room %s message %s: %w", room.ID, msg.ID, err)
 	}
+	// Walk the room's denormalized last-message fields back off the deleted message when it was the
+	// room's current last — otherwise room.lastMsgAt (subscription.list sort key) and the preview
+	// keep pointing at a deleted message. NewRoomLastRecomputed gates it (unset ⇒ hidden thread
+	// reply, read degrade, or old producer ⇒ leave the fields as-is). Best-effort: the field is
+	// decorative and self-heals on the next message, so a write blip mustn't redeliver the fan-out.
+	if evt.NewRoomLastRecomputed && msg.ID == room.LastMsgID {
+		setMentionAll := mention.Parse(msg.Content).MentionAll // lastMentionAllAt shifts only if the deleted msg was @all
+		if err := h.store.SetRoomLastMessage(ctx, room.ID, evt.NewRoomLastMsgID, evt.NewRoomLastMsgAt, setMentionAll, evt.NewRoomLastMentionAllAt); err != nil {
+			slog.ErrorContext(ctx, "walk back room last message failed",
+				"error", err, "room_id", room.ID, "message_id", msg.ID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
+		}
+	}
 	// TShow=true thread replies appear in the main room (handled by publishMutation
 	// above) but still count toward the thread's reply-count badge. Since
 	// handleThreadDeleted is bypassed for TShow=true, we publish the badge update here.

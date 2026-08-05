@@ -97,6 +97,44 @@ func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID st
 	return nil
 }
 
+// SetRoomLastMessage applies the delete walk-back to a room's denormalized last-message fields.
+// Direct write (not coalesced) — deletes are rare, unlike the coalesced send path. A nil
+// lastMsgID/lastMsgAt clears those fields (the room has no surviving message). setMentionAll gates
+// lastMentionAllAt: true sets it to mentionAllAt (or clears it when mentionAllAt is nil); false
+// leaves it untouched (the deleted message was not an @all, so the room's @all floor is unchanged).
+func (m *mongoStore) SetRoomLastMessage(ctx context.Context, roomID string, lastMsgID *string, lastMsgAt *time.Time, setMentionAll bool, mentionAllAt *time.Time) error {
+	set := bson.M{}
+	unset := bson.M{}
+	if lastMsgID != nil && lastMsgAt != nil {
+		set["lastMsgId"] = *lastMsgID
+		set["lastMsgAt"] = *lastMsgAt
+		set["updatedAt"] = *lastMsgAt
+	} else {
+		set["lastMsgId"] = "" // lastMsgId has no omitempty; keep the field present as empty
+		set["updatedAt"] = time.Now().UTC()
+		unset["lastMsgAt"] = ""
+	}
+	if setMentionAll {
+		if mentionAllAt != nil {
+			set["lastMentionAllAt"] = *mentionAllAt
+		} else {
+			unset["lastMentionAllAt"] = ""
+		}
+	}
+	update := bson.M{"$set": set}
+	if len(unset) > 0 {
+		update["$unset"] = unset
+	}
+	res, err := m.roomCol.UpdateOne(ctx, bson.M{"_id": roomID}, update)
+	if err != nil {
+		return fmt.Errorf("set room last message %s: %w", roomID, err)
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("set room last message %s: %w", roomID, mongo.ErrNoDocuments)
+	}
+	return nil
+}
+
 // BulkUpdateRoomLastMessage applies a batch of room.lastMsgAt/lastMsgId
 // updates in a single unordered BulkWrite. Missing rooms (MatchedCount==0
 // per model) are not surfaced — lastMsgAt is decorative and the source-of-

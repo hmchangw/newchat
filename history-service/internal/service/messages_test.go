@@ -1927,6 +1927,124 @@ func TestHistoryService_DeleteMessage_LastMessage_PublishesNilPreview(t *testing
 	require.NoError(t, err)
 }
 
+// Deleting the room's last message surfaces the room last-message walk-back: broadcast-worker
+// walks room.lastMsgAt/lastMsgId back to the surviving message the preview resolved.
+func TestHistoryService_DeleteMessage_LastMessage_SurfacesRoomWalkback(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-2", RoomID: "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-2").Return(hydrated, nil)
+	msgs.EXPECT().SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	survivorAt := time.Date(2026, 5, 14, 11, 0, 0, 0, time.UTC)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "msg-1", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "prior", CreatedAt: survivorAt},
+		}, false), nil)
+
+	pub.EXPECT().Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.True(t, evt.NewRoomLastRecomputed)
+			require.NotNil(t, evt.NewRoomLastMsgID)
+			assert.Equal(t, "msg-1", *evt.NewRoomLastMsgID)
+			require.NotNil(t, evt.NewRoomLastMsgAt)
+			assert.Equal(t, survivorAt, evt.NewRoomLastMsgAt.UTC())
+			assert.Nil(t, evt.NewRoomLastMentionAllAt, "deleted message was not @all")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-2"})
+	require.NoError(t, err)
+}
+
+// Deleting the room's only message signals a clear: Recomputed=true with nil NewRoomLastMsg*.
+func TestHistoryService_DeleteMessage_EmptyRoom_SignalsClear(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1", RoomID: "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil)
+
+	pub.EXPECT().Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.True(t, evt.NewRoomLastRecomputed, "empty room is a confident clear, not a degrade")
+			assert.Nil(t, evt.NewRoomLastMsgID)
+			assert.Nil(t, evt.NewRoomLastMsgAt)
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+}
+
+// Deleting an @all message walks lastMentionAllAt back to the latest surviving @all.
+func TestHistoryService_DeleteMessage_MentionAll_RecomputesMentionAllAt(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-2", RoomID: "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "heads up @all",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-2").Return(hydrated, nil)
+	msgs.EXPECT().SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	survivorAt := time.Date(2026, 5, 14, 11, 30, 0, 0, time.UTC)
+	olderAllAt := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	// One page serves both walks (DESC): preview stops at the newest eligible (msg-1, not @all);
+	// the @all walk skips it and finds the older @all (msg-0).
+	page := makePage([]models.Message{
+		{MessageID: "msg-1", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "just text", CreatedAt: survivorAt},
+		{MessageID: "msg-0", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "@all earlier", CreatedAt: olderAllAt},
+	}, false)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(page, nil).AnyTimes()
+
+	pub.EXPECT().Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			require.NotNil(t, evt.NewRoomLastMsgID)
+			assert.Equal(t, "msg-1", *evt.NewRoomLastMsgID)
+			require.NotNil(t, evt.NewRoomLastMentionAllAt, "an @all delete recomputes lastMentionAllAt")
+			assert.Equal(t, olderAllAt, evt.NewRoomLastMentionAllAt.UTC())
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-2"})
+	require.NoError(t, err)
+}
+
 // A hidden thread reply (TShow=false) edit skips the room-preview walk (no GetMessagesBefore) and
 // carries no preview; clients tell it apart via ThreadParentMessageID and drive the preview themselves.
 func TestHistoryService_EditMessage_HiddenThreadReply_SkipsPreviewWalk(t *testing.T) {

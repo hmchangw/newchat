@@ -488,7 +488,7 @@ Thread-reply deletes **additionally** emit a
 }
 ```
 
-When the deleted message was the room's last eligible message, `previewMessage` is **omitted**.
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted**. The server also walks the room's denormalized last-message fields back to the latest surviving message, so the next [`subscription.list`](../client-api.md#subscriptionroom) shows the correct `lastMsgAt` (room-list sort key), `lastMsgId`, and `lastMentionAllAt` — or clears them when the room is now empty. Deleting an `@all` message likewise recomputes `lastMentionAllAt` to the latest surviving `@all`.
 
 ---
 

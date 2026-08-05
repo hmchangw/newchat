@@ -4299,6 +4299,71 @@ func TestMessageEvent_NewThreadLastMsgAt(t *testing.T) {
 	})
 }
 
+func TestMessageEvent_RoomLastWalkbackFields(t *testing.T) {
+	ts := time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC)
+
+	t.Run("zero-value room walk-back fields omitted from JSON", func(t *testing.T) {
+		e := model.MessageEvent{
+			Message:   model.Message{ID: "m1", RoomID: "r1"},
+			SiteID:    "site-a",
+			Timestamp: ts.UnixMilli(),
+		}
+		data, err := json.Marshal(e)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		for _, k := range []string{"newRoomLastRecomputed", "newRoomLastMsgAt", "newRoomLastMsgId", "newRoomLastMentionAllAt"} {
+			_, present := raw[k]
+			assert.Falsef(t, present, "zero-value %s must be omitted from JSON", k)
+		}
+	})
+
+	t.Run("populated room walk-back fields round-trip JSON", func(t *testing.T) {
+		id := "msg-0"
+		e := model.MessageEvent{
+			Message:                 model.Message{ID: "m1", RoomID: "r1"},
+			SiteID:                  "site-a",
+			Timestamp:               ts.UnixMilli(),
+			NewRoomLastRecomputed:   true,
+			NewRoomLastMsgAt:        &ts,
+			NewRoomLastMsgID:        &id,
+			NewRoomLastMentionAllAt: &ts,
+		}
+		data, err := json.Marshal(e)
+		require.NoError(t, err)
+		var dst model.MessageEvent
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.True(t, dst.NewRoomLastRecomputed)
+		require.NotNil(t, dst.NewRoomLastMsgID)
+		assert.Equal(t, "msg-0", *dst.NewRoomLastMsgID)
+		require.NotNil(t, dst.NewRoomLastMsgAt)
+		assert.True(t, dst.NewRoomLastMsgAt.Equal(ts))
+		require.NotNil(t, dst.NewRoomLastMentionAllAt)
+		assert.True(t, dst.NewRoomLastMentionAllAt.Equal(ts))
+	})
+
+	t.Run("room walk-back fields are transport-only (absent from BSON)", func(t *testing.T) {
+		id := "msg-0"
+		e := model.MessageEvent{
+			Message:                 model.Message{ID: "m1", RoomID: "r1"},
+			SiteID:                  "site-a",
+			Timestamp:               ts.UnixMilli(),
+			NewRoomLastRecomputed:   true,
+			NewRoomLastMsgAt:        &ts,
+			NewRoomLastMsgID:        &id,
+			NewRoomLastMentionAllAt: &ts,
+		}
+		data, err := bson.Marshal(e)
+		require.NoError(t, err)
+		var raw bson.M
+		require.NoError(t, bson.Unmarshal(data, &raw))
+		for _, k := range []string{"newRoomLastRecomputed", "newRoomLastMsgAt", "newRoomLastMsgId", "newRoomLastMentionAllAt"} {
+			_, present := raw[k]
+			assert.Falsef(t, present, "%s uses bson:\"-\" and must never persist", k)
+		}
+	})
+}
+
 func TestThreadMetadataUpdatedEvent_NewThreadLastMsgAt(t *testing.T) {
 	ts := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
 

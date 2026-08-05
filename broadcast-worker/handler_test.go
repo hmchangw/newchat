@@ -901,6 +901,103 @@ func TestHandleDeleted_OmitsPreviewWhenNil(t *testing.T) {
 		"a nil preview must be omitted from the fan-out, not sent as null")
 }
 
+// deleteWalkbackEvent builds a deleted-message event carrying the room last-message walk-back.
+func deleteWalkbackEvent(roomID, msgID, content string, recomputed bool, newID *string, newAt, newMentionAllAt *time.Time) model.MessageEvent {
+	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	return model.MessageEvent{
+		Event:     model.EventDeleted,
+		SiteID:    "site-a",
+		Timestamp: deleted.UnixMilli(),
+		Message: model.Message{
+			ID: msgID, RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content: content, CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
+		},
+		NewRoomLastRecomputed:   recomputed,
+		NewRoomLastMsgID:        newID,
+		NewRoomLastMsgAt:        newAt,
+		NewRoomLastMentionAllAt: newMentionAllAt,
+	}
+}
+
+// Deleting the room's current last message applies the walk-back to the room doc.
+func TestHandleDeleted_WalkbackApplied_WhenDeletedWasLast(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	pub := &mockPublisher{}
+
+	roomID := "r1"
+	store.EXPECT().GetRoom(gomock.Any(), roomID).
+		Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "msg-1"}, nil)
+	newID := "msg-0"
+	newAt := time.Date(2026, 5, 14, 11, 0, 0, 0, time.UTC)
+	store.EXPECT().SetRoomLastMessage(gomock.Any(), roomID, &newID, &newAt, false, (*time.Time)(nil)).Return(nil)
+
+	evt := deleteWalkbackEvent(roomID, "msg-1", "plain", true, &newID, &newAt, nil)
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+	h := NewHandler(store, NewMockUserStore(ctrl), pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+}
+
+// Deleting a non-last message never touches the room's last-message fields.
+func TestHandleDeleted_WalkbackSkipped_WhenDeletedNotLast(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	pub := &mockPublisher{}
+
+	roomID := "r1"
+	store.EXPECT().GetRoom(gomock.Any(), roomID).
+		Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "msg-9"}, nil)
+	// No SetRoomLastMessage expectation: gomock fails the test if it is called.
+
+	newID := "msg-0"
+	newAt := time.Date(2026, 5, 14, 11, 0, 0, 0, time.UTC)
+	evt := deleteWalkbackEvent(roomID, "msg-1", "plain", true, &newID, &newAt, nil)
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+	h := NewHandler(store, NewMockUserStore(ctrl), pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+}
+
+// Deleting the room's only message clears the fields (nil last-msg pointers under the guard).
+func TestHandleDeleted_WalkbackClears_WhenRoomEmptied(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	pub := &mockPublisher{}
+
+	roomID := "r1"
+	store.EXPECT().GetRoom(gomock.Any(), roomID).
+		Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "msg-1"}, nil)
+	store.EXPECT().SetRoomLastMessage(gomock.Any(), roomID, (*string)(nil), (*time.Time)(nil), false, (*time.Time)(nil)).Return(nil)
+
+	evt := deleteWalkbackEvent(roomID, "msg-1", "plain", true, nil, nil, nil)
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+	h := NewHandler(store, NewMockUserStore(ctrl), pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+}
+
+// Deleting an @all last message flags lastMentionAllAt for update (broadcast re-parses content).
+func TestHandleDeleted_WalkbackTouchesMentionAll_WhenDeletedWasAll(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	pub := &mockPublisher{}
+
+	roomID := "r1"
+	store.EXPECT().GetRoom(gomock.Any(), roomID).
+		Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a", LastMsgID: "msg-1"}, nil)
+	newID := "msg-0"
+	newAt := time.Date(2026, 5, 14, 11, 0, 0, 0, time.UTC)
+	mentionAllAt := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().SetRoomLastMessage(gomock.Any(), roomID, &newID, &newAt, true, &mentionAllAt).Return(nil)
+
+	evt := deleteWalkbackEvent(roomID, "msg-1", "notice @all", true, &newID, &newAt, &mentionAllAt)
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+	h := NewHandler(store, NewMockUserStore(ctrl), pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+}
+
 func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)

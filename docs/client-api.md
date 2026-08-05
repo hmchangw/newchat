@@ -3347,7 +3347,7 @@ The payload is flat:
 }
 ```
 
-When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely.
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely. In that case the server also walks the room's denormalized last-message fields back to the latest surviving message, so the next [`subscription.list`](#subscriptionroom) reflects the correct `lastMsgAt` (room-list sort key), `lastMsgId`, and `lastMentionAllAt` — or clears them when the deleted message was the room's only one. Deleting an `@all` message likewise recomputes `lastMentionAllAt` to the latest surviving `@all` (clearing the group-mention badge when none remains).
 
 **Thread-reply deletes additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. The `DeleteRoomEvent` and `ThreadMetadataUpdatedEvent` are published independently; clients must handle each on its own.
 

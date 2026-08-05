@@ -132,6 +132,20 @@ func (mr *MockStoreMockRecorder) ListSubscriptions(ctx, roomID any) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSubscriptions", reflect.TypeOf((*MockStore)(nil).ListSubscriptions), ctx, roomID)
 }
 
+// SetRoomLastMessage mocks base method.
+func (m *MockStore) SetRoomLastMessage(ctx context.Context, roomID string, lastMsgID *string, lastMsgAt *time.Time, setMentionAll bool, mentionAllAt *time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetRoomLastMessage", ctx, roomID, lastMsgID, lastMsgAt, setMentionAll, mentionAllAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetRoomLastMessage indicates an expected call of SetRoomLastMessage.
+func (mr *MockStoreMockRecorder) SetRoomLastMessage(ctx, roomID, lastMsgID, lastMsgAt, setMentionAll, mentionAllAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRoomLastMessage", reflect.TypeOf((*MockStore)(nil).SetRoomLastMessage), ctx, roomID, lastMsgID, lastMsgAt, setMentionAll, mentionAllAt)
+}
+
 // SetSubscriptionMentions mocks base method.
 func (m *MockStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
 	m.ctrl.T.Helper()
