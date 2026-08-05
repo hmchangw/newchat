@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -172,11 +173,13 @@ func (g *searchQueryGen) build(e searchEndpoint, i int) []byte {
 // only successes are timed: SLO-8 gates on "successful search returns within
 // the bound", so a fast failure must not improve the number (§5).
 type searchCollector struct {
-	mu       sync.Mutex
-	samples  map[searchEndpoint][]time.Duration
-	good     map[searchEndpoint]int
-	failed   map[searchEndpoint]int
-	excluded map[searchEndpoint]int
+	mu         sync.Mutex
+	samples    map[searchEndpoint][]time.Duration
+	good       map[searchEndpoint]int
+	failed     map[searchEndpoint]int
+	excluded   map[searchEndpoint]int
+	saturation int
+	underrun   int
 }
 
 func newSearchCollector() *searchCollector {
@@ -200,6 +203,36 @@ func (c *searchCollector) Record(e searchEndpoint, o sloOutcome, d time.Duration
 	case outcomeExcluded:
 		c.excluded[e]++
 	}
+}
+
+// RecordSaturation / RecordUnderrun tally load-box limits, never service
+// failures: saturation means the in-flight pool was full, underrun means the
+// pacer could not release on schedule. Both feed the INCONCLUSIVE guard.
+func (c *searchCollector) RecordSaturation() {
+	c.mu.Lock()
+	c.saturation++
+	c.mu.Unlock()
+}
+
+func (c *searchCollector) RecordUnderrun(n int) {
+	if n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.underrun += n
+	c.mu.Unlock()
+}
+
+func (c *searchCollector) Saturation() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.saturation
+}
+
+func (c *searchCollector) Underrun() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.underrun
 }
 
 func (c *searchCollector) Samples(e searchEndpoint) []time.Duration {
@@ -229,6 +262,8 @@ func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector) rp
 		Hold:         hold,
 		AttemptedOps: good + failed,
 		FailedOps:    failed,
+		Saturation:   c.Saturation(),
+		EmitUnderrun: c.Underrun(),
 	}
 	for _, e := range searchEndpoints {
 		in.Latencies = append(in.Latencies, seriesSamples{Name: e.String(), Samples: c.Samples(e)})
@@ -286,51 +321,39 @@ func (w *searchWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 }
 
 // drive emits at targetRPS for d, recording every outcome into c.
+//
+// Uses the shared batched pacer rather than a ticker per request: at the top
+// of this workload's default ramp the per-request interval is 500µs, below
+// what the Go runtime can schedule, and it silently coalesces ticks — the load
+// box would cap the achieved rate long before search-service did.
 func (w *searchWorkload) drive(ctx context.Context, targetRPS int, d time.Duration, c *searchCollector) error {
 	runCtx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 
-	sem := make(chan struct{}, w.maxInFlt)
-	var wg sync.WaitGroup
-	interval := time.Second / time.Duration(max(1, targetRPS))
-	tick := time.NewTicker(max(interval, time.Microsecond))
-	defer tick.Stop()
-
-	i := 0
-	for {
-		select {
-		case <-runCtx.Done():
-			wg.Wait()
-			// The parent being cancelled is a real abort; this step's own
-			// deadline expiring is the normal end of the window.
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return nil
-		case <-tick.C:
+	var seq atomic.Int64
+	pacedDispatch(runCtx, targetRPS, w.maxInFlt,
+		c.RecordUnderrun,
+		c.RecordSaturation,
+		func(context.Context) {
+			i := int(seq.Add(1) - 1)
 			endpoint := w.mix.pick(i)
 			sub := w.fixtures.Subscriptions[i%len(w.fixtures.Subscriptions)]
-			body := w.queries.build(endpoint, i)
-			i++
-			select {
-			case sem <- struct{}{}:
-			default:
-				continue // in-flight pool full; the rate shortfall drives INCONCLUSIVE
+			subj := searchSubjectFor(endpoint, sub.User.Account, w.siteID)
+
+			start := time.Now()
+			msg, err := w.nc.Request(subj, w.queries.build(endpoint, i), w.requestTimeout)
+			elapsed := time.Since(start)
+			var data []byte
+			if msg != nil {
+				data = msg.Data
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-				subj := searchSubjectFor(endpoint, sub.User.Account, w.siteID)
-				start := time.Now()
-				msg, err := w.nc.Request(subj, body, w.requestTimeout)
-				elapsed := time.Since(start)
-				var data []byte
-				if msg != nil {
-					data = msg.Data
-				}
-				c.Record(endpoint, classifySearchReply(data, err), elapsed)
-			}()
-		}
+			c.Record(endpoint, classifySearchReply(data, err), elapsed)
+		})
+
+	// The parent being cancelled is a real abort; this step's own deadline
+	// expiring is the normal end of the window.
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
+	return nil
 }

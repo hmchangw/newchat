@@ -56,7 +56,7 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	beforeModeFlag := fs.String("before-mode", "open:70,scrollback:30", "history only: before-cursor mix")
 	scrollbackPages := fs.Int("scrollback-pages", 5, "history only: pages per scrollback chain")
 	pageLimit := fs.Int("page-limit", 20, "history only: page limit")
-	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read/login: per-request timeout")
+	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read/thread-read/login/search: per-request timeout")
 	// login-only tunables:
 	authURL := fs.String("auth-url", "", "login only: auth-service base URL (default AUTH_URL)")
 	loginKeyPool := fs.Int("login-key-pool", 256, "login only: pre-generated NKey pool size")
@@ -97,7 +97,7 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			fmt.Fprintln(os.Stderr, err.Error())
 			return 2
 		}
-		mw, clean, err := newMessagesWorkload(ctx, cfg, &p, injectMode, *seed)
+		mw, clean, err := newMessagesWorkload(ctx, cfg, &p, injectMode, *seed, resolveDrainWindow(*sloP99))
 		if err != nil {
 			slog.Error("init messages workload", "error", err)
 			return 1
@@ -114,7 +114,7 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			return 2
 		}
 		tf := BuildThreadFixtures(&p, *seed, *parentsPerRoom, cfg.SiteID)
-		tw, clean, err := newThreadWorkload(ctx, cfg, &p, &tf, *seed)
+		tw, clean, err := newThreadWorkload(ctx, cfg, &p, &tf, *seed, resolveDrainWindow(*sloP99))
 		if err != nil {
 			slog.Error("init thread workload", "error", err)
 			return 1

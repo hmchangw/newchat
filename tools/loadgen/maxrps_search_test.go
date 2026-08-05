@@ -83,6 +83,19 @@ func TestBuildSearchInputs(t *testing.T) {
 	assert.ElementsMatch(t, []string{"messages", "rooms", "users"}, names)
 }
 
+func TestBuildSearchInputs_UnderrunIsNotFailure(t *testing.T) {
+	c := newSearchCollector()
+	c.Record(searchMessages, outcomeGood, 10*time.Millisecond)
+	c.RecordUnderrun(9)
+	c.RecordSaturation()
+
+	in := buildSearchInputs(100, time.Second, c)
+
+	assert.Equal(t, 9, in.EmitUnderrun)
+	assert.Equal(t, 1, in.Saturation)
+	assert.Equal(t, 0, in.FailedOps)
+}
+
 func TestSearchCollector_OnlyTimesSuccesses(t *testing.T) {
 	c := newSearchCollector()
 	c.Record(searchMessages, outcomeGood, 30*time.Millisecond)

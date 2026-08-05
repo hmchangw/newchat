@@ -79,6 +79,28 @@ func TestBuildMessagesInputs_PendingUnavailableIsInconclusive(t *testing.T) {
 // A publish whose reply or broadcast never arrives is a delivery failure, not
 // an absent sample. Excluding it lets the run look healthier the more messages
 // the system drops, because the surviving samples are the fast ones.
+// A fixed drain would flag in-flight messages as dropped whenever the operator
+// raises the latency bound above it — manufacturing failures on exactly the
+// exploratory runs that widen the bound on purpose.
+func TestResolveDrainWindow(t *testing.T) {
+	tests := []struct {
+		name string
+		p99  time.Duration
+		want time.Duration
+	}{
+		{"default bound keeps the floor", 250 * time.Millisecond, 2 * time.Second},
+		{"tight bound keeps the floor", 10 * time.Millisecond, 2 * time.Second},
+		{"loose bound scales past the floor", 3 * time.Second, 6 * time.Second},
+		{"exactly at the floor boundary", time.Second, 2 * time.Second},
+		{"unset bound falls back to the floor", 0, 2 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, resolveDrainWindow(tc.p99))
+		})
+	}
+}
+
 func TestBuildMessagesInputs_CarriesMissingCounts(t *testing.T) {
 	delta := msgCounters{
 		published: 1000,
