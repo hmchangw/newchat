@@ -3,6 +3,8 @@ package mongorepo
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -21,6 +23,19 @@ const roomsCollection = "rooms"
 // deletedRoomNameRegex matches room-service's soft-delete rename ("Del-"+name); the deleted-filter excludes matching local subs.
 const deletedRoomNameRegex = "^Del-"
 
+// deletedRoomNamePrefix is the Go-side twin of deletedRoomNameRegex, used by the
+// phased list path where the deleted-filter runs in memory instead of in a pipeline.
+const deletedRoomNamePrefix = "Del-"
+
+// Sort-key cache defaults: staleness only affects list ordering and the
+// pre-page filters (the page itself is enriched from a fresh room read), so a
+// short TTL keeps ordering near-live while absorbing the per-request room
+// reads. Overridable via WithSortKeyCache; non-positive values disable.
+const (
+	defaultSortKeyCacheSize = 100_000
+	defaultSortKeyCacheTTL  = 15 * time.Second
+)
+
 // SubscriptionRepo is the Mongo implementation of service.SubscriptionRepository.
 type SubscriptionRepo struct {
 	subscriptions *mongoutil.Collection[model.Subscription]
@@ -28,17 +43,37 @@ type SubscriptionRepo struct {
 	// room baseline) over the same subscriptions collection; writes go through
 	// subscriptions so the baseline fields are never persisted.
 	enriched *mongoutil.Collection[model.EnrichedSubscription]
+	// rooms serves the phased list path's batched reads (sort keys + page
+	// baselines); owned by room-service, referenced only by name.
+	rooms    *mongo.Collection
+	sortKeys *sortKeyCache
 	siteID   string // this instance's site — distinguishes local vs cross-site rows in the deleted-filter
 }
 
+// SubscriptionRepoOption configures a SubscriptionRepo at construction.
+type SubscriptionRepoOption func(*SubscriptionRepo)
+
+// WithSortKeyCache overrides the sort-key cache's capacity and TTL; a
+// non-positive size or ttl disables the cache entirely (every list resolves
+// sort keys from a fresh batched Mongo read).
+func WithSortKeyCache(size int, ttl time.Duration) SubscriptionRepoOption {
+	return func(r *SubscriptionRepo) { r.sortKeys = newSortKeyCache(size, ttl) }
+}
+
 // NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
-func NewSubscriptionRepo(db *mongo.Database, siteID string) *SubscriptionRepo {
+func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...SubscriptionRepoOption) *SubscriptionRepo {
 	col := db.Collection(subscriptionsCollection)
-	return &SubscriptionRepo{
+	r := &SubscriptionRepo{
 		subscriptions: mongoutil.NewCollection[model.Subscription](col),
 		enriched:      mongoutil.NewCollection[model.EnrichedSubscription](col),
+		rooms:         db.Collection(roomsCollection),
+		sortKeys:      newSortKeyCache(defaultSortKeyCacheSize, defaultSortKeyCacheTTL),
 		siteID:        siteID,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // EnsureIndexes creates the subscription indexes this service queries on.
@@ -159,13 +194,11 @@ func roomMatchStages() []bson.D {
 	}
 }
 
-// subscriptionProjection is the terminal $project for the member-match pipeline:
-// an inclusion projection of the subscription's fields (incl. the room baseline
-// copied to the top level). Being inclusion-only, it naturally drops the
-// pipeline's scratch arrays (__matchedRoom, __members, __memberAccounts). extra adds
-// further caller-named fields.
-func subscriptionProjection(extra bson.M) bson.M {
-	proj := bson.M{
+// subscriptionFieldsProjection is the inclusion projection of the subscription
+// document's own fields — what the phased list path fetches per matching sub
+// (the room baseline is joined separately, page-sized).
+func subscriptionFieldsProjection() bson.M {
+	return bson.M{
 		"_id":                1,
 		"u":                  1,
 		"roomId":             1,
@@ -192,17 +225,23 @@ func subscriptionProjection(extra bson.M) bson.M {
 		"rolesUpdatedAt":    1,
 		"nameUpdatedAt":     1,
 		"restrictUpdatedAt": 1,
-		// room baseline copied to the top level (consumed by local enrichment)
-		"userCount":         1,
-		"lastMsgAt":         1,
-		"lastMsgId":         1,
-		"lastMentionAllAt":  1,
-		"minUserLastSeenAt": 1,
-		"appCount":          1,
-		"roomName":          1,
-		"crossSite":         1,
-		"encKeyPriv":        1,
-		"encKeyVer":         1,
+	}
+}
+
+// subscriptionProjection is the terminal $project for the member-match pipeline:
+// an inclusion projection of the subscription's fields (incl. the room baseline
+// copied to the top level). Being inclusion-only, it naturally drops the
+// pipeline's scratch arrays (__matchedRoom, __members, __memberAccounts). extra adds
+// further caller-named fields.
+func subscriptionProjection(extra bson.M) bson.M {
+	proj := subscriptionFieldsProjection()
+	// room baseline copied to the top level (consumed by local enrichment)
+	for _, k := range []string{
+		"userCount", "lastMsgAt", "lastMsgId", "lastMentionAllAt",
+		"minUserLastSeenAt", "appCount", "roomName", "crossSite",
+		"encKeyPriv", "encKeyVer",
+	} {
+		proj[k] = 1
 	}
 	for k, v := range extra {
 		proj[k] = v
@@ -226,11 +265,20 @@ func dedupeStrings(in []string) []string {
 
 // AggregateSubscriptions returns one page of account's subscriptions for listType
 // (rooms = dm+channel, apps = subscribed botDMs, current = both) ordered by room
-// activity (lastMsgAt) desc, plus a hasMore flag (over-fetch by one). Locally soft-deleted
-// (^Del-) rooms are excluded. favorite restricts to favorited rows and pins the
-// caller's self-DM first; withinDays windows the rooms type on the room's lastMsgAt
-// (ignored for apps/current).
+// activity (lastMsgAt, falling back to room createdAt) desc, plus a hasMore flag
+// (over-fetch by one). Locally soft-deleted (^Del-) rooms are excluded. favorite
+// restricts to favorited rows and pins the caller's self-DM first; withinDays
+// windows the rooms type on the room's lastMsgAt (ignored for apps/current).
+//
+// Phased read path — no per-sub $lookup and no in-Mongo sort over the joined
+// rooms: (1) one indexed fetch of the account's matching subs, (2) per-room sort
+// keys from the process-local cache with misses batched into one $in read,
+// (3) deleted-filter/window/sort/page in memory, (4) one fresh $in read of the
+// page's room baselines. Ordering and the pre-page filters tolerate sort-key
+// staleness up to the cache TTL; the page rows themselves are always enriched
+// from a fresh room read (which also re-drops rooms soft-deleted meanwhile).
 func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, listType string, favorite bool, withinDays *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
+	var zero mongoutil.OffsetPageHasMore[model.EnrichedSubscription]
 	match := bson.M{"u.account": account}
 	switch listType {
 	case "current":
@@ -250,39 +298,222 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// Exclude rooms explicitly closed by the user; a missing field (defensive)
 	// and open:true both pass. Applied to subscription.list only.
 	match["open"] = bson.M{"$ne": false}
-	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
-	// rooms have no local room doc and are kept (their deletion isn't visible here).
-	pipeline := bson.A{bson.M{"$match": match}}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
-	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
-	// not the subscription's _updatedAt. rooms-type only; cross-site / no-message
-	// rooms (null lastMsgAt) fall outside the window.
-	if listType == "rooms" && withinDays != nil {
-		cutoff := time.Now().UTC().AddDate(0, 0, -*withinDays)
-		pipeline = append(pipeline, bson.M{"$match": bson.M{"lastMsgAt": bson.M{"$gte": cutoff}}})
+	subs, err := r.subscriptions.FindMany(ctx, match, mongoutil.WithProjection(subscriptionFieldsProjection()))
+	if err != nil {
+		return zero, fmt.Errorf("find subscriptions: %w", err)
 	}
-	pipeline = append(pipeline, sortStages(account, favorite)...)
-	// Scaling ceiling: the room join + activity sort run over the full matched set before
-	// the skip/limit page (the sort key lives on the joined room, so it can't be pushed past
-	// the lookup). Fine at realistic per-account sub counts; the fix for very large accounts is
-	// denormalizing room activity onto the subscription — a write-side change tracked separately.
-	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
+	keys, err := r.resolveSortKeys(ctx, subs)
+	if err != nil {
+		return zero, err
+	}
+	rows := buildListRows(subs, keys, account, listType, favorite, withinDays)
+	sortListRows(rows)
+	pageRows, hasMore := pageListRows(rows, page)
+	data, err := r.enrichSubscriptionPage(ctx, pageRows)
+	if err != nil {
+		return zero, err
+	}
+	return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: data, HasMore: hasMore}, nil
 }
 
-// sortStages orders rows by room activity (lastMsgAt) desc then name asc. In the
-// favorite view the caller's self-DM (a dm whose counterpart name is the caller)
-// is pinned first via a computed flag.
-func sortStages(account string, favorite bool) bson.A {
-	if !favorite {
-		return bson.A{bson.M{"$sort": bson.D{{Key: "__sortKey", Value: -1}, {Key: "name", Value: 1}}}}
+// listRow pairs a fetched subscription with its resolved sort position.
+type listRow struct {
+	sub model.Subscription
+	// sortAt is room lastMsgAt, falling back to room createdAt; nil (missing or
+	// signal-less room) sorts after every dated row — same order the old
+	// in-Mongo $ifNull sort produced.
+	sortAt *time.Time
+	selfDM bool // favorite view only: pins the caller's self-DM first
+}
+
+// buildListRows applies the in-memory row filters (locally soft-deleted rooms,
+// the rooms-type activity window) and computes each row's sort position from
+// the resolved sort keys. Missing rooms (cross-site) are kept — their deletion
+// isn't visible here — except under the window, which requires a dated room.
+func buildListRows(subs []model.Subscription, keys map[string]roomSortKey, account, listType string, favorite bool, withinDays *int) []listRow {
+	var cutoff *time.Time
+	if listType == "rooms" && withinDays != nil {
+		c := time.Now().UTC().AddDate(0, 0, -*withinDays)
+		cutoff = &c
 	}
-	return bson.A{
-		bson.M{"$addFields": bson.M{"__selfDM": bson.M{"$and": bson.A{
-			bson.M{"$eq": bson.A{"$roomType", "dm"}},
-			bson.M{"$eq": bson.A{"$name", account}},
-		}}}},
-		bson.M{"$sort": bson.D{{Key: "__selfDM", Value: -1}, {Key: "__sortKey", Value: -1}, {Key: "name", Value: 1}}},
+	rows := make([]listRow, 0, len(subs))
+	for i := range subs {
+		key := keys[subs[i].RoomID]
+		if !key.Missing && strings.HasPrefix(key.Name, deletedRoomNamePrefix) {
+			continue
+		}
+		if cutoff != nil && (key.LastMsgAt == nil || key.LastMsgAt.Before(*cutoff)) {
+			continue
+		}
+		sortAt := key.LastMsgAt
+		if sortAt == nil {
+			sortAt = key.CreatedAt
+		}
+		rows = append(rows, listRow{
+			sub:    subs[i],
+			sortAt: sortAt,
+			selfDM: favorite && subs[i].RoomType == model.RoomTypeDM && subs[i].Name == account,
+		})
 	}
+	return rows
+}
+
+// sortListRows orders rows the way the old in-Mongo sort did: pinned self-DM
+// first (favorite view), then activity desc with nil keys last, then name asc.
+func sortListRows(rows []listRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := &rows[i], &rows[j]
+		if a.selfDM != b.selfDM {
+			return a.selfDM
+		}
+		switch {
+		case a.sortAt != nil && b.sortAt != nil:
+			if !a.sortAt.Equal(*b.sortAt) {
+				return a.sortAt.After(*b.sortAt)
+			}
+		case a.sortAt != nil:
+			return true
+		case b.sortAt != nil:
+			return false
+		}
+		return a.sub.Name < b.sub.Name
+	})
+}
+
+// pageListRows slices the sorted rows to the requested page, over-reading one
+// row to derive hasMore (mirrors mongoutil.AggregatePagedHasMore).
+func pageListRows(rows []listRow, page mongoutil.OffsetPageRequest) ([]listRow, bool) {
+	n := int64(len(rows))
+	start := min(page.Offset, n)
+	end := min(start+page.Limit+1, n)
+	window := rows[start:end]
+	hasMore := int64(len(window)) > page.Limit
+	if hasMore {
+		window = window[:page.Limit]
+	}
+	return window, hasMore
+}
+
+// resolveSortKeys returns the roomSortKey for every sub's room, serving from
+// the cache and batching all misses into a single projected $in read. Rooms
+// absent from that read are negative-cached as Missing so cross-site rooms
+// don't re-probe Mongo on every list.
+func (r *SubscriptionRepo) resolveSortKeys(ctx context.Context, subs []model.Subscription) (map[string]roomSortKey, error) {
+	keys := make(map[string]roomSortKey, len(subs))
+	// The unique (roomId, u.account) index makes one account's roomIDs distinct
+	// already — no dedup needed.
+	var misses []string
+	for i := range subs {
+		id := subs[i].RoomID
+		if k, ok := r.sortKeys.get(id); ok {
+			keys[id] = k
+		} else {
+			misses = append(misses, id)
+		}
+	}
+	if len(misses) == 0 {
+		return keys, nil
+	}
+	cur, err := r.rooms.Find(ctx, bson.M{"_id": bson.M{"$in": misses}},
+		options.Find().SetProjection(bson.M{"name": 1, "lastMsgAt": 1, "createdAt": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("find room sort keys: %w", err)
+	}
+	var docs []struct {
+		ID        string     `bson:"_id"`
+		Name      string     `bson:"name"`
+		LastMsgAt *time.Time `bson:"lastMsgAt"`
+		CreatedAt *time.Time `bson:"createdAt"`
+	}
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("decode room sort keys: %w", err)
+	}
+	for i := range docs {
+		k := roomSortKey{Name: docs[i].Name, LastMsgAt: docs[i].LastMsgAt, CreatedAt: docs[i].CreatedAt}
+		keys[docs[i].ID] = k
+		r.sortKeys.add(docs[i].ID, k)
+	}
+	for _, id := range misses {
+		if _, ok := keys[id]; !ok {
+			keys[id] = roomSortKey{Missing: true}
+			r.sortKeys.add(id, roomSortKey{Missing: true})
+		}
+	}
+	return keys, nil
+}
+
+// roomBaseline is the fresh page-sized room read backing enrichSubscriptionPage
+// — the same field set roomsEnrichStages projects through its $lookup.
+type roomBaseline struct {
+	ID                string     `bson:"_id"`
+	Name              string     `bson:"name"`
+	UserCount         int        `bson:"userCount"`
+	AppCount          int        `bson:"appCount"`
+	LastMsgAt         *time.Time `bson:"lastMsgAt"`
+	LastMsgID         string     `bson:"lastMsgId"`
+	LastMentionAllAt  *time.Time `bson:"lastMentionAllAt"`
+	MinUserLastSeenAt *time.Time `bson:"minUserLastSeenAt"`
+	CreatedAt         *time.Time `bson:"createdAt"`
+	CrossSite         *bool      `bson:"crossSite"`
+	EncKey            struct {
+		Priv []byte `bson:"priv"`
+		Ver  int    `bson:"ver"`
+	} `bson:"encKey"`
+}
+
+// enrichSubscriptionPage attaches the room baseline to each page row from one
+// fresh $in read (LOCAL rows; missing rooms — cross-site — stay zero-valued),
+// drops rows whose room turned soft-deleted since the sort keys were cached,
+// and opportunistically refreshes the sort-key cache with the fresh values.
+func (r *SubscriptionRepo) enrichSubscriptionPage(ctx context.Context, rows []listRow) ([]model.EnrichedSubscription, error) {
+	out := make([]model.EnrichedSubscription, 0, len(rows))
+	if len(rows) == 0 {
+		return out, nil
+	}
+	ids := make([]string, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].sub.RoomID)
+	}
+	cur, err := r.rooms.Find(ctx, bson.M{"_id": bson.M{"$in": ids}},
+		options.Find().SetProjection(bson.M{
+			"name": 1, "userCount": 1, "appCount": 1, "lastMsgAt": 1, "lastMsgId": 1,
+			"lastMentionAllAt": 1, "minUserLastSeenAt": 1, "createdAt": 1,
+			"encKey.priv": 1, "encKey.ver": 1, "crossSite": 1,
+		}))
+	if err != nil {
+		return nil, fmt.Errorf("find room baselines: %w", err)
+	}
+	var docs []roomBaseline
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("decode room baselines: %w", err)
+	}
+	baselines := make(map[string]*roomBaseline, len(docs))
+	for i := range docs {
+		baselines[docs[i].ID] = &docs[i]
+		r.sortKeys.add(docs[i].ID, roomSortKey{
+			Name: docs[i].Name, LastMsgAt: docs[i].LastMsgAt, CreatedAt: docs[i].CreatedAt,
+		})
+	}
+	for i := range rows {
+		es := model.EnrichedSubscription{Subscription: rows[i].sub}
+		if b, ok := baselines[rows[i].sub.RoomID]; ok {
+			if strings.HasPrefix(b.Name, deletedRoomNamePrefix) {
+				continue
+			}
+			es.UserCount = b.UserCount
+			es.AppCount = b.AppCount
+			es.LastMsgAt = b.LastMsgAt
+			es.LastMsgID = b.LastMsgID
+			es.LastMentionAllAt = b.LastMentionAllAt
+			es.MinUserLastSeenAt = b.MinUserLastSeenAt
+			es.RoomName = b.Name
+			es.CrossSite = b.CrossSite
+			es.RoomKeyPriv = b.EncKey.Priv
+			es.RoomKeyVer = b.EncKey.Ver
+		}
+		out = append(out, es)
+	}
+	return out, nil
 }
 
 // FindChannelsByMembers returns one page of the requester's channel subs whose room contains the requester and ALL given members (bots excluded by the ".bot" suffix), room.createdAt desc, plus a hasMore flag (over-fetch by one).
