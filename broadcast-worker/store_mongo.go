@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -32,19 +33,16 @@ type mongoStore struct {
 	roomCol       *mongo.Collection
 	subCol        *mongo.Collection
 	threadRoomCol *mongo.Collection
+	appCol        *mongo.Collection
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
 	metaRec       roommetacache.Recorder
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration) *mongoStore {
+func NewMongoStore(roomCol, subCol, threadRoomCol, appCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration) *mongoStore {
 	return &mongoStore{
-		roomCol:       roomCol,
-		subCol:        subCol,
-		threadRoomCol: threadRoomCol,
-		valkey:        valkey,
-		metaTTL:       metaTTL,
-		metaRec:       cachemetrics.For("roommeta", "l2"),
+		roomCol: roomCol, subCol: subCol, threadRoomCol: threadRoomCol, appCol: appCol,
+		valkey: valkey, metaTTL: metaTTL, metaRec: cachemetrics.For("roommeta", "l2"),
 	}
 }
 
@@ -75,19 +73,38 @@ func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetaca
 	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec)
 }
 
-func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
+// roomLastMsgUpdateModel builds the per-room update. With a preview it becomes
+// an aggregation-pipeline update so the watermark guard can compare against the
+// stored previewAsOf; without one it stays a plain $set (system messages and
+// lastMsgAt-only flushes must never touch the stored preview).
+//
+//nolint:gocritic // hugeParam: roomLastMsgUpdate is the map value type shared with the coalescer buffer; callers already hold it by value, so a pointer here would just relocate the copy.
+func roomLastMsgUpdateModel(u roomLastMsgUpdate) any {
 	fields := bson.M{
-		"lastMsgAt": msgAt,
-		"lastMsgId": msgID,
-		"updatedAt": msgAt,
+		"lastMsgAt": u.at,
+		"lastMsgId": u.msgID,
+		"updatedAt": u.at,
 	}
-	if mentionAll {
-		fields["lastMentionAllAt"] = msgAt
+	if !u.lastMentionAllAt.IsZero() {
+		fields["lastMentionAllAt"] = u.lastMentionAllAt
 	}
-	filter := bson.M{"_id": roomID}
-	update := bson.M{"$set": fields}
+	if u.preview == nil {
+		return bson.M{"$set": fields}
+	}
+	for k, v := range preview.GuardedSetFields(u.preview, u.previewAsOf) {
+		fields[k] = v
+	}
+	// Pipeline form: plain values (time.Time, base62 ids) marshal as literals;
+	// only the guarded preview fields are aggregation expressions.
+	return mongo.Pipeline{{{Key: "$set", Value: fields}}}
+}
 
-	res, err := m.roomCol.UpdateOne(ctx, filter, update)
+func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, pvw *model.PreviewMessage, previewAsOf int64) error {
+	u := roomLastMsgUpdate{msgID: msgID, at: msgAt, preview: pvw, previewAsOf: previewAsOf}
+	if mentionAll {
+		u.lastMentionAllAt = msgAt
+	}
+	res, err := m.roomCol.UpdateOne(ctx, bson.M{"_id": roomID}, roomLastMsgUpdateModel(u))
 	if err != nil {
 		return fmt.Errorf("update room last message %s: %w", roomID, err)
 	}
@@ -98,31 +115,66 @@ func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID st
 }
 
 // BulkUpdateRoomLastMessage applies a batch of room.lastMsgAt/lastMsgId
-// updates in a single unordered BulkWrite. Missing rooms (MatchedCount==0
-// per model) are not surfaced — lastMsgAt is decorative and the source-of-
-// truth message has already been persisted to Cassandra by message-worker.
+// (and, when present, watermark-guarded preview) updates in a single
+// unordered BulkWrite. Missing rooms (MatchedCount==0 per model) are not
+// surfaced — lastMsgAt is decorative and the source-of-truth message has
+// already been persisted to Cassandra by message-worker.
 func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for roomID, u := range updates {
-		fields := bson.M{
-			"lastMsgAt": u.at,
-			"lastMsgId": u.msgID,
-			"updatedAt": u.at,
-		}
-		if !u.lastMentionAllAt.IsZero() {
-			fields["lastMentionAllAt"] = u.lastMentionAllAt
-		}
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).
-			SetUpdate(bson.M{"$set": fields}))
+			SetUpdate(roomLastMsgUpdateModel(u)))
 	}
 	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
 		return fmt.Errorf("bulk update room last message (%d rooms): %w", len(updates), err)
 	}
 	return nil
+}
+
+// SetRoomPreviewMessage persists a post-mutation (edit/delete) preview via a
+// watermark-guarded aggregation-pipeline update so redeliveries/races cannot
+// regress a newer stored preview.
+func (m *mongoStore) SetRoomPreviewMessage(ctx context.Context, roomID string, pvw *model.PreviewMessage, asOf int64) error {
+	if pvw == nil {
+		return nil
+	}
+	pipeline := mongo.Pipeline{{{Key: "$set", Value: preview.GuardedSetFields(pvw, asOf)}}}
+	if _, err := m.roomCol.UpdateOne(ctx, bson.M{"_id": roomID}, pipeline); err != nil {
+		return fmt.Errorf("set room preview %s: %w", roomID, err)
+	}
+	return nil
+}
+
+// ClearRoomPreviewMessage removes the stored preview once a mutation left the room
+// with no eligible survivor, via the same watermark-guarded pipeline update so a
+// redelivered older write cannot resurrect it.
+func (m *mongoStore) ClearRoomPreviewMessage(ctx context.Context, roomID string, asOf int64) error {
+	pipeline := mongo.Pipeline{{{Key: "$set", Value: preview.GuardedClearFields(asOf)}}}
+	if _, err := m.roomCol.UpdateOne(ctx, bson.M{"_id": roomID}, pipeline); err != nil {
+		return fmt.Errorf("clear room preview %s: %w", roomID, err)
+	}
+	return nil
+}
+
+// AppNameByAccount returns the app display name for a bot account
+// (assistant.name), or ("", nil) when no app matches.
+func (m *mongoStore) AppNameByAccount(ctx context.Context, botAccount string) (string, error) {
+	var doc struct {
+		Name string `bson:"name"`
+	}
+	opts := options.FindOne().SetProjection(bson.M{"name": 1, "_id": 0})
+	err := m.appCol.FindOne(ctx, bson.M{"assistant.name": botAccount}, opts).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", nil
+		}
+		return "", fmt.Errorf("find app by assistant name: %w", err)
+	}
+	return doc.Name, nil
 }
 
 // subscriptionMentionsFilter matches subs that have NOT already read past

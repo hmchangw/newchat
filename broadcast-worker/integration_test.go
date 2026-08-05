@@ -77,7 +77,7 @@ func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
@@ -123,7 +123,7 @@ func TestBroadcastWorker_ChannelRoom_MentionAll_Integration(t *testing.T) {
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
@@ -163,7 +163,7 @@ func TestBroadcastWorker_ChannelRoom_IndividualMention_Integration(t *testing.T)
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
@@ -214,7 +214,7 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	keyStore := &fakeRoomKeyProvider{pair: nil}
@@ -275,7 +275,7 @@ func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 
@@ -326,7 +326,7 @@ func TestBroadcastWorker_PersistsLastMessage_Integration(t *testing.T) {
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	cached, err := newCachedMetaStore(store, 10, time.Minute)
 	require.NoError(t, err)
 
@@ -371,7 +371,7 @@ func TestBroadcastWorker_BulkUpdateRoomLastMessage_Integration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 
 	t1 := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Second)
@@ -400,7 +400,7 @@ func TestBroadcastWorker_BulkUpdateRoomLastMessage_Integration(t *testing.T) {
 
 func TestBroadcastWorker_BulkUpdateRoomLastMessage_EmptyIsNoOp_Integration(t *testing.T) {
 	db := setupMongo(t)
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 	require.NoError(t, store.BulkUpdateRoomLastMessage(context.Background(), nil))
 	require.NoError(t, store.BulkUpdateRoomLastMessage(context.Background(), map[string]roomLastMsgUpdate{}))
 }
@@ -408,7 +408,7 @@ func TestBroadcastWorker_BulkUpdateRoomLastMessage_EmptyIsNoOp_Integration(t *te
 func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 
 	// Seed a thread room document with replyAccounts (siteID isolation is handled
 	// at the deployment level — each site has its own MongoDB instance).
@@ -449,7 +449,7 @@ func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
 func TestBroadcastWorker_EnsureIndexes_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 
 	// EnsureIndexes should be idempotent — call it twice without error.
 	require.NoError(t, store.EnsureIndexes(ctx))
@@ -493,7 +493,7 @@ func TestBroadcastWorker_EnsureIndexes_Integration(t *testing.T) {
 func TestAdvanceSubscriptionLastSeen_OnlyAdvances(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 
 	t1 := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	_, err := db.Collection("subscriptions").InsertOne(ctx, model.Subscription{
@@ -523,7 +523,7 @@ func TestAdvanceSubscriptionLastSeen_OnlyAdvances(t *testing.T) {
 func TestSetSubscriptionMentions_ReadGuard_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 
 	msgAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	readAt := msgAt.Add(time.Minute) // already read past the message
@@ -547,7 +547,7 @@ func TestSetSubscriptionMentions_ReadGuard_Integration(t *testing.T) {
 func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, 0)
 
 	shared := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	_, err := db.Collection("subscriptions").InsertMany(ctx, []interface{}{
@@ -570,4 +570,129 @@ func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	empty, err := store.GetHistorySharedSince(ctx, "r-hss", nil)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
+}
+
+func TestMongoStore_SetRoomPreviewMessage_WatermarkGuard(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, time.Minute)
+	ctx := context.Background()
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r1", "name": "room"})
+	require.NoError(t, err)
+
+	p1 := &model.PreviewMessage{MessageID: "m1", Content: "one", CreatedAt: time.UnixMilli(1000).UTC()}
+	p2 := &model.PreviewMessage{MessageID: "m2", Content: "two", CreatedAt: time.UnixMilli(2000).UTC()}
+
+	// First write lands (doc had no previewAsOf => 0).
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", p2, 200))
+	// Older asOf rejected.
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", p1, 100))
+	got := readRoomPreview(t, db, "r1") // helper below
+	assert.Equal(t, "m2", got.MessageID)
+
+	// Sequential-delete shape: NEWER asOf carrying an OLDER-createdAt preview
+	// must land (delete m2 => preview becomes m1, watermark is the event ts).
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", p1, 300))
+	got = readRoomPreview(t, db, "r1")
+	assert.Equal(t, "m1", got.MessageID)
+
+	// Content with a "$" prefix must persist verbatim ($literal shielding).
+	pDollar := &model.PreviewMessage{MessageID: "m3", Content: "$lookup is not a field path", CreatedAt: time.UnixMilli(3000).UTC()}
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", pDollar, 400))
+	got = readRoomPreview(t, db, "r1")
+	assert.Equal(t, "$lookup is not a field path", got.Content)
+}
+
+func TestMongoStore_ClearRoomPreviewMessage_WatermarkGuard(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, time.Minute)
+	ctx := context.Background()
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r1", "name": "room"})
+	require.NoError(t, err)
+
+	p1 := &model.PreviewMessage{MessageID: "m1", Content: "one", CreatedAt: time.UnixMilli(1000).UTC()}
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", p1, 200))
+
+	// Stale clear (asOf < stored previewAsOf) is rejected — preview survives.
+	require.NoError(t, store.ClearRoomPreviewMessage(ctx, "r1", 100))
+	assert.Equal(t, "m1", readRoomPreview(t, db, "r1").MessageID)
+
+	// Clear at >= the watermark lands: the field is REMOVED, not zeroed.
+	require.NoError(t, store.ClearRoomPreviewMessage(ctx, "r1", 300))
+	var raw bson.M
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r1"}).Decode(&raw))
+	_, present := raw["previewMessage"]
+	assert.False(t, present, "cleared preview must be absent from the doc, not an empty sub-doc")
+	assert.EqualValues(t, 300, raw["previewAsOf"], "previewAsOf must advance so an older redelivery can't resurrect it")
+
+	// A redelivered older create cannot resurrect the cleared preview.
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", p1, 250))
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r1"}).Decode(&raw))
+	_, present = raw["previewMessage"]
+	assert.False(t, present, "stale re-set must not resurrect the cleared preview")
+
+	// A newer write after a clear still lands.
+	p2 := &model.PreviewMessage{MessageID: "m2", Content: "two", CreatedAt: time.UnixMilli(2000).UTC()}
+	require.NoError(t, store.SetRoomPreviewMessage(ctx, "r1", p2, 400))
+	assert.Equal(t, "m2", readRoomPreview(t, db, "r1").MessageID)
+}
+
+func readRoomPreview(t *testing.T, db *mongo.Database, roomID string) *model.PreviewMessage {
+	t.Helper()
+	var room model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(context.Background(), bson.M{"_id": roomID}).Decode(&room))
+	require.NotNil(t, room.PreviewMessage)
+	return room.PreviewMessage
+}
+
+func TestMongoStore_BulkUpdateRoomLastMessage_PreviewFolded(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, time.Minute)
+	ctx := context.Background()
+	for _, id := range []string{"ra", "rb"} {
+		_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": id, "name": id})
+		require.NoError(t, err)
+	}
+
+	pvw := &model.PreviewMessage{MessageID: "m1", Content: "hi", CreatedAt: time.UnixMilli(1000).UTC()}
+	require.NoError(t, store.BulkUpdateRoomLastMessage(ctx, map[string]roomLastMsgUpdate{
+		// ra: eligible message => preview folded into the same $set.
+		"ra": {msgID: "m1", at: time.UnixMilli(1000).UTC(), preview: pvw, previewAsOf: 1000},
+		// rb: system-message-only flush => lastMsgAt advances, preview untouched.
+		"rb": {msgID: "sys1", at: time.UnixMilli(1000).UTC()},
+	}))
+
+	var ra model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "ra"}).Decode(&ra))
+	require.NotNil(t, ra.PreviewMessage)
+	assert.Equal(t, "m1", ra.PreviewMessage.MessageID)
+	assert.Equal(t, "m1", ra.LastMsgID)
+
+	var rb model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "rb"}).Decode(&rb))
+	assert.Nil(t, rb.PreviewMessage)
+	assert.Equal(t, "sys1", rb.LastMsgID)
+
+	// A later system-only flush entry must not clobber a stored preview.
+	require.NoError(t, store.BulkUpdateRoomLastMessage(ctx, map[string]roomLastMsgUpdate{
+		"ra": {msgID: "sys2", at: time.UnixMilli(2000).UTC()},
+	}))
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "ra"}).Decode(&ra))
+	require.NotNil(t, ra.PreviewMessage, "system flush must not clear the preview")
+	assert.Equal(t, "sys2", ra.LastMsgID)
+}
+
+func TestMongoStore_AppNameByAccount(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), nil, time.Minute)
+	ctx := context.Background()
+	_, err := db.Collection("apps").InsertOne(ctx, bson.M{"_id": "app1", "name": "Helper App", "assistant": bson.M{"name": "bot.helper"}})
+	require.NoError(t, err)
+
+	name, err := store.AppNameByAccount(ctx, "bot.helper")
+	require.NoError(t, err)
+	assert.Equal(t, "Helper App", name)
+
+	name, err = store.AppNameByAccount(ctx, "bot.unknown")
+	require.NoError(t, err)
+	assert.Equal(t, "", name)
 }
