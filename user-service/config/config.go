@@ -32,6 +32,11 @@ type Config struct {
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
 	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
 	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	// Room sort-key cache for subscription.list (see mongorepo.WithSortKeyCache).
+	// Staleness is TTL-bounded and affects only list ordering and pre-page
+	// filters; a non-positive size or TTL disables the cache entirely.
+	SortKeyCacheSize int           `env:"SUBS_SORTKEY_CACHE_SIZE" envDefault:"100000"`
+	SortKeyCacheTTL  time.Duration `env:"SUBS_SORTKEY_CACHE_TTL"  envDefault:"15s"`
 	// OIDC settings for the SSO token vault — optional as a unit: unset OIDC_ISSUER_URL disables the endpoints; the rest is validated in Load.
 	OIDCIssuerURL string `env:"OIDC_ISSUER_URL" envDefault:""`
 	// OIDCAudiences must include the access-token `aud` — refresh re-verifies the minted

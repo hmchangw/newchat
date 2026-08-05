@@ -4732,7 +4732,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 | `subscriptions` | array<[Subscription](#subscription)> | One page of room-info-enriched subscription records. |
 | `hasMore`       | boolean           | `true` when at least one more record follows this page (the server over-fetches `limit + 1` to decide). Request the next page by advancing `offset` by the `limit` you sent. |
 
-`subscriptions` is one page of [Subscription](#subscription) records (full schema in §3.0), room-info-enriched per the behavior below. Ordered by the room's `lastMsgAt` descending (rooms with no messages fall back to the room's `createdAt`). In the `favorite` view the caller's self-DM is pinned first; otherwise favorites are **not** pinned by this ordering.
+`subscriptions` is one page of [Subscription](#subscription) records (full schema in §3.0), room-info-enriched per the behavior below. Ordered by the room's `lastMsgAt` descending (rooms with no messages fall back to the room's `createdAt`). In the `favorite` view the caller's self-DM is pinned first; otherwise favorites are **not** pinned by this ordering. Ordering freshness is bounded by a short server-side cache (default 15s): a room's position may lag its newest message by up to that window, while the returned records' `room` fields are always fresh.
 
 Results are **paginated** by `offset`/`limit` (offset-based): the server returns the requested window and `hasMore` signals whether another page follows. `limit` defaults to `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`) when omitted and is capped at `MAX_SUBSCRIPTION_LIMIT` (default `1000`); omitting `offset`/`limit` yields the first page.
 
