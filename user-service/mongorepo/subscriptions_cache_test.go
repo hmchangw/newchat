@@ -110,6 +110,43 @@ func TestAggregateSubscriptions_DelRenameDropsRowDespiteWarmCache_Integration(t 
 		"soft-deleted room must disappear from the list immediately, cache or not")
 }
 
+// A page must be refilled from later live candidates when the fresh read drops
+// rows that turned Del- after their sort keys were cached: the client must get
+// a full page of live rows and a HasMore computed from the live sequence — not
+// a short page with a dangling HasMore that makes the next offset skip rows.
+func TestAggregateSubscriptions_PageRefillsPastFreshSoftDeletes_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC()
+
+	for i, id := range []string{"a", "b", "c", "d"} {
+		seed(t, db, "rooms",
+			bson.M{"_id": "r-" + id, "name": "Room" + id, "siteId": "site-a", "userCount": 1,
+				"lastMsgAt": t0.Add(-time.Duration(i) * time.Minute)},
+		)
+		seed(t, db, "subscriptions",
+			bson.M{"_id": "s-" + id, "u": bson.M{"_id": "u-refill", "account": "refill"}, "roomId": "r-" + id,
+				"name": "Room" + id, "roomType": "channel", "siteId": "site-a"},
+		)
+	}
+
+	require.Equal(t, []string{"s-a", "s-b", "s-c", "s-d"}, listIDs(t, r, "refill", "rooms"), "warm the cache with all four live")
+
+	// The two rows the first page would serve turn soft-deleted out-of-band.
+	_, err := db.Collection("rooms").UpdateMany(ctx, bson.M{"_id": bson.M{"$in": bson.A{"r-a", "r-b"}}},
+		bson.M{"$set": bson.M{"name": "Del-Gone"}})
+	require.NoError(t, err)
+
+	page, err := r.AggregateSubscriptions(ctx, "refill", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 2})
+	require.NoError(t, err)
+	ids := make([]string, 0, len(page.Data))
+	for _, sub := range page.Data {
+		ids = append(ids, sub.ID)
+	}
+	assert.Equal(t, []string{"s-c", "s-d"}, ids, "page must refill from the next live candidates")
+	assert.False(t, page.HasMore, "no live rows remain beyond the refilled page")
+}
+
 // Ordering contract pinned before the sort moves out of Mongo: rows with no
 // activity signal (no local room, or a room with neither lastMsgAt nor
 // createdAt) sort after every keyed row, name ascending among themselves; a

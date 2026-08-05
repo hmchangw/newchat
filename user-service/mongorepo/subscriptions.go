@@ -51,29 +51,39 @@ type SubscriptionRepo struct {
 }
 
 // SubscriptionRepoOption configures a SubscriptionRepo at construction.
-type SubscriptionRepoOption func(*SubscriptionRepo)
+type SubscriptionRepoOption func(*repoConfig)
+
+// repoConfig collects construction options so the sort-key cache is built
+// exactly once, after every option has spoken.
+type repoConfig struct {
+	sortKeyCacheSize int
+	sortKeyCacheTTL  time.Duration
+}
 
 // WithSortKeyCache overrides the sort-key cache's capacity and TTL; a
 // non-positive size or ttl disables the cache entirely (every list resolves
 // sort keys from a fresh batched Mongo read).
 func WithSortKeyCache(size int, ttl time.Duration) SubscriptionRepoOption {
-	return func(r *SubscriptionRepo) { r.sortKeys = newSortKeyCache(size, ttl) }
+	return func(c *repoConfig) {
+		c.sortKeyCacheSize = size
+		c.sortKeyCacheTTL = ttl
+	}
 }
 
 // NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
 func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...SubscriptionRepoOption) *SubscriptionRepo {
+	cfg := repoConfig{sortKeyCacheSize: defaultSortKeyCacheSize, sortKeyCacheTTL: defaultSortKeyCacheTTL}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	col := db.Collection(subscriptionsCollection)
-	r := &SubscriptionRepo{
+	return &SubscriptionRepo{
 		subscriptions: mongoutil.NewCollection[model.Subscription](col),
 		enriched:      mongoutil.NewCollection[model.EnrichedSubscription](col),
 		rooms:         db.Collection(roomsCollection),
-		sortKeys:      newSortKeyCache(defaultSortKeyCacheSize, defaultSortKeyCacheTTL),
+		sortKeys:      newSortKeyCache(cfg.sortKeyCacheSize, cfg.sortKeyCacheTTL),
 		siteID:        siteID,
 	}
-	for _, opt := range opts {
-		opt(r)
-	}
-	return r
 }
 
 // EnsureIndexes creates the subscription indexes this service queries on.
@@ -308,8 +318,7 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	}
 	rows := buildListRows(subs, keys, account, listType, favorite, withinDays)
 	sortListRows(rows)
-	pageRows, hasMore := pageListRows(rows, page)
-	data, err := r.enrichSubscriptionPage(ctx, pageRows)
+	data, hasMore, err := r.fillListPage(ctx, rows, page)
 	if err != nil {
 		return zero, err
 	}
@@ -380,18 +389,33 @@ func sortListRows(rows []listRow) {
 	})
 }
 
-// pageListRows slices the sorted rows to the requested page, over-reading one
-// row to derive hasMore (mirrors mongoutil.AggregatePagedHasMore).
-func pageListRows(rows []listRow, page mongoutil.OffsetPageRequest) ([]listRow, bool) {
-	n := int64(len(rows))
-	start := min(page.Offset, n)
-	end := min(start+page.Limit+1, n)
-	window := rows[start:end]
-	hasMore := int64(len(window)) > page.Limit
-	if hasMore {
-		window = window[:page.Limit]
+// fillListPage walks the sorted candidates from the page offset, freshly
+// enriching limit+1-sized batches (mirrors mongoutil.AggregatePagedHasMore's
+// over-read) and refilling from later candidates whenever the fresh read drops
+// a row whose room turned Del- after its sort key was cached — so the page and
+// hasMore always describe the live sequence, never a short page with a
+// dangling hasMore whose next offset would skip live rows. Steady state (no
+// stale deletion in the window) is the usual single batch; each refill round
+// costs one more page-sized read and only happens within the cache TTL of a
+// soft-delete.
+func (r *SubscriptionRepo) fillListPage(ctx context.Context, rows []listRow, page mongoutil.OffsetPageRequest) ([]model.EnrichedSubscription, bool, error) {
+	candidates := rows[min(page.Offset, int64(len(rows))):]
+	need := page.Limit + 1
+	collected := make([]model.EnrichedSubscription, 0, need)
+	for len(candidates) > 0 && int64(len(collected)) < need {
+		take := min(need-int64(len(collected)), int64(len(candidates)))
+		batch, err := r.enrichListRows(ctx, candidates[:take])
+		if err != nil {
+			return nil, false, err
+		}
+		collected = append(collected, batch...)
+		candidates = candidates[take:]
 	}
-	return window, hasMore
+	hasMore := int64(len(collected)) > page.Limit
+	if hasMore {
+		collected = collected[:page.Limit]
+	}
+	return collected, hasMore, nil
 }
 
 // resolveSortKeys returns the roomSortKey for every sub's room, serving from
@@ -461,11 +485,12 @@ type roomBaseline struct {
 	} `bson:"encKey"`
 }
 
-// enrichSubscriptionPage attaches the room baseline to each page row from one
-// fresh $in read (LOCAL rows; missing rooms — cross-site — stay zero-valued),
-// drops rows whose room turned soft-deleted since the sort keys were cached,
-// and opportunistically refreshes the sort-key cache with the fresh values.
-func (r *SubscriptionRepo) enrichSubscriptionPage(ctx context.Context, rows []listRow) ([]model.EnrichedSubscription, error) {
+// enrichListRows attaches the room baseline to each row of one fill batch from
+// one fresh $in read (LOCAL rows; missing rooms — cross-site — stay
+// zero-valued), drops rows whose room turned soft-deleted since the sort keys
+// were cached (fillListPage refills the gap from later candidates), and
+// opportunistically refreshes the sort-key cache with the fresh values.
+func (r *SubscriptionRepo) enrichListRows(ctx context.Context, rows []listRow) ([]model.EnrichedSubscription, error) {
 	out := make([]model.EnrichedSubscription, 0, len(rows))
 	if len(rows) == 0 {
 		return out, nil
