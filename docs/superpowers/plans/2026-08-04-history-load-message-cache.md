@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a cache for `history-service`'s **Cassandra message-page reads** — the load-history / scroll-back hot path — which is the one part of the read path that is currently uncached (only the Mongo lookups behind it are cached today, in `history-service/internal/readcache`). The cache serves the repeated, cross-user "scroll up into history" workload from memory/Valkey instead of re-walking buckets and re-decrypting rows in Cassandra.
+**Goal:** Add a cache for `history-service`'s **Cassandra message-page reads** — the load-history path — which is the one part of the read path that is currently uncached (only the Mongo lookups behind it are cached today, in `history-service/internal/readcache`). The cache serves the repeated, cross-user room-open + scroll-back workload from memory/Valkey instead of re-walking buckets and re-decrypting rows in Cassandra.
+
+**Key framing (corrected):** the first page and scroll-back are the **same handler** — `LoadHistory` — differing only in the `Before` anchor (`now` for the first page, an older message's timestamp for scroll-back). This path is **timestamp-anchored, not cursor-based**: `LoadHistoryRequest` carries `Before *int64`, the response has no cursor, and the handler always reads with an empty cursor (`internal/service/messages.go:61`, `parsePageRequest("", limit)`). The client paginates backward by sending `Before = createdAt of its oldest held message` — a real, stored, immutable message timestamp. So two users scrolling the same room to the same depth send the **identical** `Before` millisecond and issue byte-identical queries → shared cache hits. The anchors are drawn from the shared message set, not per-session opaque tokens, which is *why* the cache earns its keep. (The cursor-bearing forward path, `LoadNextMessages` → `GetMessagesAfter`, is a separate, later phase — see Phasing.)
 
 ## Why this is feasible (grounded in the current code)
 
@@ -13,23 +15,29 @@
 
 ## Architecture
 
-A **read-through decorator** (`internal/msgpagecache.Reader`) wraps `*cassrepo.Repository` and satisfies `service.MessageReader`. It caches the four paginated page-read methods (`GetMessagesBefore`, `GetMessagesBetweenDesc`, `GetMessagesAfter`, `GetAllMessagesAsc`); all other `MessageReader` methods pass straight through to the wrapped repo.
+A **read-through decorator** (`internal/msgpagecache.Reader`) wraps `*cassrepo.Repository` and satisfies `service.MessageReader`. **Phase 1 caches only the two timestamp-anchored `LoadHistory` reader methods** — `GetMessagesBefore` (full-history rooms) and `GetMessagesBetweenDesc` (restricted-history rooms). The cursor-bearing forward method `GetMessagesAfter` and the `GetAllMessagesAsc` sweep are **not** cached in Phase 1 (see Phasing); every other `MessageReader` method passes straight through to the wrapped repo.
 
-**Sealed-only caching.** For each call the decorator computes whether the entire bucket walk stays strictly below the **current** bucket (`sizer.Of(now)`):
-- `GetMessagesBefore` / `GetMessagesBetweenDesc` (DESC): cacheable iff `sizer.Of(before) < currentBucket`.
-- `GetMessagesAfter` / `GetAllMessagesAsc` (ASC): cacheable iff `sizer.Of(ceiling) < currentBucket`.
+**Sealed-only caching.** For each `LoadHistory` read the decorator caches iff the walk stays strictly below the **current** bucket — i.e. `sizer.Of(before) < sizer.Of(now)`. The "latest page" of an *active* room (`before ≈ now`, touching the hot current bucket) is **never cached**: it is the volatile request and clients reconcile it from real-time delivery anyway.
 
-The "latest page" (`before = now`, which touches the hot current bucket) is **never cached** — it is the volatile request and clients keep it fresh from real-time delivery anyway. The high-value, repeated, **cross-user** requests — infinite scroll into history, which arrive with a server-generated `Cursor` anchored in older buckets — are fully sealed and cached. Two users independently scrolling the same room receive identical deterministic `NextCursor` values at each step, so their page-N requests carry identical cache keys → shared hits.
+Two facts make this gate cover far more than deep scroll-back:
+- **`before` is capped at `lastMsgAt+1ms`** (`internal/service/messages.go:50-52`). So for any room dormant longer than one bucket window (72h), the *first-page* read already anchors in a **sealed** bucket and is cached by Phase 1 — the long tail of quiet rooms you flagged as the majority of opens is captured here, not deferred.
+- **Anchors collide across users.** Because `before` is a shared, immutable message `createdAt` (not a per-session cursor), independent users scrolling the same room to the same depth issue identical `GetMessagesBefore(room, before, …)` calls → the same cache key → shared hits that stay valid until the room actually changes.
+
+Only rooms *active within the current 72h window* have their first page in the hot bucket, and those are exactly the rooms whose members are already live in the foreground and rarely call `LoadHistory`. Caching that hot first page is Phase 2.
 
 **Two tiers, mirroring `roommetacache`:**
 - **L1** — in-process `expirable.LRU` keyed by the compound cache key, storing the **JSON-encoded** `cassrepo.Page[models.Message]` as `[]byte` (see the mutation hazard below), singleflight-deduped, `cachemetrics.For("history_msg_page", "l1")`.
 - **L2** — Valkey string key holding the same JSON, read-through on L1 miss, repopulated with a TTL. Shared across replicas, survives restarts. Fail-open: any Valkey error logs at warn and degrades to the live Cassandra read.
 
-**Key + generation-based invalidation.** Because the cache key is compound (method + bounds + cursor + pageSize) rather than one key per room, individual entries cannot be enumerated to delete on a write. Instead every key is namespaced by a **per-room generation counter** held in Valkey (`hist:{roomID}:gen`, hash-tagged on `{roomID}`):
+**Key + generation-based invalidation.** The Phase 1 key is compound — `(roomID, method, before-ms, floorBucket, accessSince-ms, pageSize)` — with **no cursor** (the `LoadHistory` path always reads with an empty cursor). Because a room has many `before` anchors, entries can't be enumerated to delete on a write; instead every key is namespaced by a **per-room generation counter** held in Valkey (`hist:{roomID}:gen`, hash-tagged on `{roomID}`):
 
 ```
-key = "hist:{" + roomID + "}:pg:" + gen + ":" + method + ":" + boundsFingerprint + ":" + pageSize
+key = "hist:{" + roomID + "}:pg:" + gen + ":" + method + ":b=" + beforeMs + ":f=" + floorBucket + ":s=" + accessSinceMs + ":" + pageSize
 ```
+
+- **`before` goes in the key exact** (it's the `created_at < before` query bound and the cross-user collision point — a real message millisecond).
+- **`floor` is quantized to its bucket, not stored raw.** `floor = max(roomCreatedAt, now−historyFloor)`; for rooms older than the 365-day floor the raw value drifts with wall-clock and would cause false misses even when the returned page is byte-identical (the floor only bites when a walk reaches the very bottom). Keying on `sizer.Of(floor)` moves the key at most once per 72h bucket instead of continuously, preserving hit rate.
+- **`accessSince` (restricted-history rooms) is in the key** so users who share a join time share entries and users with different visible windows get correctly-distinct entries.
 
 - On any mutation the write-site calls `Bump(ctx, roomID)` → `IncrEx(hist:{roomID}:gen)`. The next read reads the new gen, so every previously-cached page for that room is instantly orphaned (and expires by TTL).
 - Reads resolve the gen via `Gen(ctx, roomID)` — a Valkey `GET`, itself fronted by a **short-TTL L1** (default 1s) so a burst of pages for one room shares one gen lookup. A missing gen key reads as gen `0`.
@@ -56,8 +64,14 @@ Caching at the `MessageReader` seam is also **pre-redaction and pre-attachment-d
 
 ### Cross-user key correctness
 
-- The `accessSince == nil` path (full-history rooms) uses `GetMessagesBefore` → fully shareable across all members.
-- The `accessSince != nil` path uses `GetMessagesBetweenDesc(roomID, *accessSince, before)`; `accessSince` (when history was shared with a user) is part of the bounds fingerprint, so users sharing a join time share a key and users with different windows get correctly-distinct keys.
+- The `accessSince == nil` path (full-history rooms) uses `GetMessagesBefore` → the key is `(roomID, before-ms, floorBucket, pageSize)`, fully shareable across all members because `before` is a shared message timestamp.
+- The `accessSince != nil` path uses `GetMessagesBetweenDesc(roomID, *accessSince, before)`; `accessSince` is in the key, so users sharing a join time share entries and users with different windows get correctly-distinct entries.
+
+### Phasing
+
+- **Phase 1 (this plan, Tasks 1–7): timestamp-anchored `LoadHistory` reads.** Caches `GetMessagesBefore` + `GetMessagesBetweenDesc` for sealed `before` anchors. This covers deep scroll-back **and** the first page of every room dormant > 72h (via the `lastMsgAt+1ms` cap) — the broad, correct-by-immutability win, with generation invalidation.
+- **Phase 2 (optional, later): the hot first page.** Cache `before ≈ now` (current bucket) with a short TTL. Correctness there depends on invalidating on new messages, which `history-service` does *not* author — so it needs the canonical-event consumer (Task 7 note) subscribing to `created`, or a TTL short enough that the real-time stream masks the gap. Benefits read-heavy / open-herd rooms active within the current window.
+- **Phase 3 (optional, later): the forward cursor path.** Cache `LoadNextMessages` → `GetMessagesAfter`. Its key must include the request `Cursor`, whose gocql `pageState` is an opaque, version-dependent token; it is deterministic given identical data + page size but is a weaker cross-user collision guarantee than a message timestamp, so it is deliberately last.
 
 **Tech Stack:** Go 1.25, `pkg/valkeyutil` (go-redis/v9 cluster wrapper), `github.com/hashicorp/golang-lru/v2/expirable`, `golang.org/x/sync/singleflight`, `pkg/cachemetrics`, `pkg/msgbucket`, `encoding/json`, `pkg/testutil` (testcontainers Valkey + Cassandra), testify, `go.uber.org/mock`.
 
@@ -68,7 +82,7 @@ Caching at the `MessageReader` seam is also **pre-redaction and pre-attachment-d
 ## File Structure
 
 **New files:**
-- `history-service/internal/msgpagecache/msgpagecache.go` — `Key`, generation `Gen`/`Bump`, `Reader` decorator (read-through over the four page methods; pass-through for the rest), JSON codec, config-driven construction. The only genuinely new logic.
+- `history-service/internal/msgpagecache/msgpagecache.go` — `Key`, generation `Gen`/`Bump`, `Reader` decorator (Phase 1 read-through over `GetMessagesBefore`/`GetMessagesBetweenDesc`; pass-through for the rest), JSON codec, config-driven construction. The only genuinely new logic.
 - `history-service/internal/msgpagecache/msgpagecache_test.go` — unit tests (fake `valkeyutil.Client` + a stub `MessageReader`; no containers).
 - `history-service/internal/msgpagecache/integration_test.go` — integration tests (real Valkey + Cassandra) + this package's `TestMain`.
 
@@ -130,7 +144,7 @@ Expected: FAIL — `undefined: pageKey`, `undefined: NewReader`, etc.
 
 - [ ] **Step 3: Implement `msgpagecache.go`**
 
-Sketch (fill in per the tests). `Reader` embeds the wrapped `MessageReader` so pass-through methods need no boilerplate; only the four page methods are overridden.
+Sketch (fill in per the tests). `Reader` embeds the wrapped `MessageReader` so pass-through methods need no boilerplate; in **Phase 1 only `GetMessagesBefore` and `GetMessagesBetweenDesc` are overridden** (the timestamp-anchored `LoadHistory` methods). `GetMessagesAfter` / `GetAllMessagesAsc` are left to the embed (Phase 2/3), so their cursor never enters a key.
 
 ```go
 package msgpagecache
@@ -163,8 +177,9 @@ func pageKey(roomID string, gen uint64, method, bounds string, pageSize int) str
 	return "hist:{" + roomID + "}:pg:" + strconv.FormatUint(gen, 10) + ":" + method + ":" + bounds + ":" + strconv.Itoa(pageSize)
 }
 
-// Reader decorates a service.MessageReader with an L1+L2 cache for the four
-// sealed-bucket page reads. All other methods pass through via the embed.
+// Reader decorates a service.MessageReader with an L1+L2 cache for the
+// sealed-bucket LoadHistory reads (GetMessagesBefore/GetMessagesBetweenDesc).
+// All other methods pass through via the embed.
 type Reader struct {
 	service.MessageReader
 	valkey   valkeyutil.Client
@@ -180,21 +195,26 @@ func NewReader(inner service.MessageReader, valkey valkeyutil.Client, sizer msgb
 
 func (r *Reader) currentBucket() int64 { return r.sizer.Of(now()) }
 
-// boundsFingerprint canonicalizes the per-method bounds + cursor into the key.
-func boundsBefore(before, floor time.Time, pr cassrepo.PageRequest) string { /* unixmilli + cursor.Encode() */ }
-// ... boundsBetween, boundsAfter, boundsAllAsc
+// bounds canonicalizes the per-method key fields. NO cursor: the LoadHistory
+// path always reads with an empty cursor. floor is quantized to its bucket so a
+// drifting now-historyFloor doesn't leak false misses into the key.
+func boundsBefore(before, floor time.Time, sizer msgbucket.Sizer) string {
+	return "b=" + strconv.FormatInt(before.UnixMilli(), 10) + ":f=" + strconv.FormatInt(sizer.Of(floor), 10)
+}
+// boundsBetween additionally folds in accessSince (the "since" bound) exactly.
 
 func (r *Reader) GetMessagesBefore(ctx context.Context, roomID string, before, floor time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
 	if r.valkey == nil || r.sizer.Of(before) >= r.currentBucket() {
 		return r.MessageReader.GetMessagesBefore(ctx, roomID, before, floor, pr) // hot/disabled → live
 	}
-	return r.readThrough(ctx, roomID, "before", boundsBefore(before, floor, pr), pr.PageSize,
+	return r.readThrough(ctx, roomID, "before", boundsBefore(before, floor, r.sizer), pr.PageSize,
 		func(ctx context.Context) (cassrepo.Page[models.Message], error) {
 			return r.MessageReader.GetMessagesBefore(ctx, roomID, before, floor, pr)
 		})
 }
-// GetMessagesBetweenDesc / GetMessagesAfter / GetAllMessagesAsc: identical shape,
-// ASC pair gates on r.sizer.Of(ceiling) >= currentBucket().
+// GetMessagesBetweenDesc: identical shape, same sizer.Of(before) < currentBucket
+// gate, bounds includes accessSince. GetMessagesAfter / GetAllMessagesAsc are
+// NOT overridden in Phase 1 (embed handles them → always live).
 
 // readThrough: gen := r.gen(ctx, roomID); key := pageKey(...); GET L1 → GET L2 → load+SET.
 //   Decode a FRESH Page from bytes on every return (copy-safe). Fail-open on any Valkey error.
@@ -499,7 +519,8 @@ git push -u origin claude/load-history-cache-feasibility-m1c9c9
 
 **Design coverage:**
 - Caches the one uncached hot path (Cassandra page reads) at the `MessageReader` seam → decorator (Task 1), wired without touching handler logic (Task 5). ✓
-- Sealed-only: hot "latest" page always live; scroll-back cached and cross-user shareable → `sizer.Of(before/ceiling) < currentBucket` gate (Task 1). ✓
+- Sealed-only, timestamp-anchored: hot current-bucket "latest" page always live; sealed `LoadHistory` reads (scroll-back + dormant-room first pages) cached and cross-user shareable because `before` is a shared message timestamp, not a cursor → `sizer.Of(before) < currentBucket` gate (Task 1). ✓
+- Phase 1 scope = `GetMessagesBefore` + `GetMessagesBetweenDesc` only; cursor-bearing `GetMessagesAfter` and `GetAllMessagesAsc` deferred to Phase 2/3 so no opaque `pageState` enters a key. ✓
 - In-place-mutation hazard (`redactUnavailableQuotes`/`setDecodedAttachments`) → cache stores encoded bytes, decodes a fresh Page per hit; L1==L2 format (Task 1, tested copy-safety Tasks 1 & 6). ✓
 - L1+L2 mirroring `roommetacache`, fail-open, singleflight, cachemetrics → Task 1. ✓
 - Invalidation for a compound-keyed cache → per-room generation counter, write-site `Bump` at all 8 mutation sites (Tasks 3-4); delete guarded on `applied`. ✓
@@ -507,7 +528,7 @@ git push -u origin claude/load-history-cache-feasibility-m1c9c9
 - Config-gated and default-off when `VALKEY_ADDRS` unset → Task 2 + main guard (Task 5). ✓
 - No client-api.md change (internal-only) → stated up front. ✓
 
-**Type/signature consistency:** `NewReader(inner service.MessageReader, valkey valkeyutil.Client, sizer msgbucket.Sizer, l1Size int, ttl, genTTL time.Duration) (*Reader, error)`; `Reader` embeds `service.MessageReader` and overrides the four page methods with identical `cassrepo.Page[models.Message]` return types matching the interface at `service.go:20-23`; `Bump(ctx, roomID)` satisfies `service.PageCacheBuster`; `WithPageCacheBuster` mirrors the existing `WithPreviewCache` Option. Valkey usage (`ConnectCluster`, `GetJSON`/`SetJSONWithTTL` or raw `Get`/`Set`, `IncrEx(key, 0)`, `Disconnect`) matches `pkg/valkeyutil/valkey.go`.
+**Type/signature consistency:** `NewReader(inner service.MessageReader, valkey valkeyutil.Client, sizer msgbucket.Sizer, l1Size int, ttl, genTTL time.Duration) (*Reader, error)`; `Reader` embeds `service.MessageReader` and (Phase 1) overrides `GetMessagesBefore`/`GetMessagesBetweenDesc` with identical `cassrepo.Page[models.Message]` return types matching the interface at `service.go:20-21`; `Bump(ctx, roomID)` satisfies `service.PageCacheBuster`; `WithPageCacheBuster` mirrors the existing `WithPreviewCache` Option. Valkey usage (`ConnectCluster`, `GetJSON`/`SetJSONWithTTL` or raw `Get`/`Set`, `IncrEx(key, 0)`, `Disconnect`) matches `pkg/valkeyutil/valkey.go`.
 
 **Placeholder scan:** Task 1's implementation is a sketch (marked as such) to be completed test-first; every other task shows concrete code/edits with exact file:line anchors and an expected command result. Compose edits (Task 7) instruct reading the file first because indentation/service-name vary.
 
