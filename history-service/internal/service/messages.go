@@ -652,7 +652,7 @@ func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models
 	if msg.ThreadParentID != "" && !msg.TShow {
 		return nil
 	}
-	if preview, ok := s.roomLastPreviewMessage(c, roomID, nil, at); ok {
+	if preview, ok := s.roomLastPreviewMessage(c, roomID, roomTimesResolution{state: roomTimesFallback}, at); ok {
 		return &preview
 	}
 	return nil

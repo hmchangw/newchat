@@ -224,11 +224,11 @@ func TestHistoryService_RoomsGet_ScanBudgetExhausted_NoEligibleMessage(t *testin
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 
-	// The batched read returns a zero lastMsgAt (room never messaged); sanitizeLastMsgAt
-	// rejects the zero value the same way it would reject any implausible hint, so
-	// resolveRoomTimes falls back to the per-room GetRoomTimes read for this one room.
+	// The batched read returns a zero lastMsgAt (room never messaged); the batch result
+	// is authoritative, so no per-room GetRoomTimes re-read of the same document — the
+	// walk just runs with a now+skew ceiling and finds nothing.
 	stubRoomTimes(rooms, []string{"r1"}, time.Time{}, roomCreatedAt)
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(time.Time{}, roomCreatedAt, nil)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage(nil, false), nil)
 
@@ -649,22 +649,44 @@ func TestHistoryService_RoomsGet_TooManyHints_BadRequest(t *testing.T) {
 	assertBadRequestErr(t, err, "too many hints")
 }
 
-// A requested unhinted room that GetRoomTimesByIDs does not return (e.g. deleted
-// between the caller's list read and this resolve, so it's absent from the batch
-// result map) keeps a nil meta and falls through to the per-room GetRoomTimes path —
-// it must not be silently dropped by the batch step.
-func TestHistoryService_RoomsGet_UnhintedRoomAbsentFromBatch_FallsBackPerRoom(t *testing.T) {
+// A requested unhinted room that a successful GetRoomTimesByIDs does not return does
+// not exist in this site's rooms collection (an orphaned subscription's room, or one
+// deleted between the caller's list read and this resolve). A per-room retry of the
+// same read is doomed, so the room is dropped without touching Mongo (or Cassandra)
+// again; sibling rooms are unaffected.
+func TestHistoryService_RoomsGet_UnhintedRoomAbsentFromBatch_SkippedWithoutPerRoomRead(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
-	// Batch returns an empty map: r1 is unhinted but absent from the result.
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
+	// Batch covers both ids but only r2 exists; "gone" is absent from the result map.
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), gomock.InAnyOrder([]string{"gone", "r2"})).
+		Return(map[string]mongorepo.RoomTimes{"r2": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt}}, nil).
+		Times(1)
+	// No GetMessagesBefore for "gone" — it's dropped before the preview walk.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r2", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m2", RoomID: "r2", Msg: "hey", CreatedAt: roomLastMsgAt}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"gone", "r2"}})
+	require.NoError(t, err)
+	assert.NotContains(t, resp.Rooms, "gone")
+	assert.Equal(t, "m2", resp.Rooms["r2"].MessageID)
+}
+
+// Batch-resolved times are trusted verbatim — even values the hint sanitizer would
+// reject (a pre-2020 lastMsgAt on a legacy room) — because they came from our own
+// rooms collection; the old behavior re-read the very same document per-room just to
+// get the identical values past the sanitizer.
+func TestHistoryService_RoomsGet_BatchTimesTrustedVerbatim(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
+	legacyLast := time.Date(2019, 6, 1, 0, 0, 0, 0, time.UTC)
 	rooms.EXPECT().
 		GetRoomTimesByIDs(gomock.Any(), []string{"r1"}).
-		Return(map[string]mongorepo.RoomTimes{}, nil).
+		Return(map[string]mongorepo.RoomTimes{"r1": {LastMsgAt: legacyLast, CreatedAt: legacyLast.Add(-time.Hour)}}, nil).
 		Times(1)
-	// Absent from the batch → the per-room fallback fires exactly once.
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(roomLastMsgAt, roomCreatedAt, nil).Times(1)
 
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: legacyLast}}, false), nil)
 
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
