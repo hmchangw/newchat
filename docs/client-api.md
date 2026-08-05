@@ -1305,7 +1305,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 
 **3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
+**4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Routed on the room's namespace exactly like `chat.room.{roomID}.event` — pick the subject by the room's `crossSite` flag (`chat.local.room.{roomID}.event.member` when `crossSite: false`, `chat.room.{roomID}.event.member` when `crossSite: true`/unknown). Delivered to clients subscribed to the room on that namespace.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1410,7 +1410,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 **3. `chat.user.{survivor}.event.room.key`** — on a channel removal the room key is **rotated**; every surviving member receives a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving key events. See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberRemoveEvent` (`type: "member_left"` for a self-leave, `"member_removed"` for a forced removal or org removal). Delivered to clients subscribed to `chat.room.>`.
+**4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberRemoveEvent` (`type: "member_left"` for a self-leave, `"member_removed"` for a forced removal or org removal). Routed on the room's namespace by its `crossSite` flag, exactly like the add event above (`chat.local.room.{roomID}.event.member` when `crossSite: false`).
 
 | Field | Type | Notes |
 |---|---|---|

@@ -190,10 +190,6 @@ func MemberList(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.member.list", account, roomID, siteID)
 }
 
-func MemberEvent(roomID string) string {
-	return fmt.Sprintf("chat.room.%s.event.member", roomID)
-}
-
 func RoomCanonical(siteID, operation string) string {
 	return fmt.Sprintf("chat.room.canonical.%s.%s", siteID, operation)
 }
@@ -379,30 +375,57 @@ func ParseRoomRouteMode(s string) (RoomRouteMode, error) {
 	}
 }
 
-// usesLocal reports whether the route mode publishes to the local subject at
-// all (dual or local). Global mode never touches the local namespace.
-func (m RoomRouteMode) usesLocal() bool { return m != RouteGlobal }
+// UsesLocal reports whether the route mode publishes to the local subject at
+// all (dual or local). Global mode never touches the local namespace, so callers
+// can skip a locality lookup entirely — routing is global regardless of crossSite.
+func (m RoomRouteMode) UsesLocal() bool { return m != RouteGlobal }
 
-// RoomEventTargets returns the .event subject(s) to publish a room event to.
-// Fail-safe: only an explicit crossSite=false routes local (nil/true → global).
-// A room flipped within the locality grace window (crossSiteAt set) also gets a local
-// copy in local/dual mode so not-yet-resubscribed members keep receiving (order: local, global).
-func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+// roomRouteGlobals returns which namespace(s) a room's per-room events route to,
+// as global flags (false=local chat.local.room.>, true=global chat.room.>), honoring
+// crossSite, mode, and the post-flip grace window. Shared by every per-room subject
+// (.event, .event.member) so they route identically. Fail-safe: only an explicit
+// crossSite=false routes local (nil/true → global). A room flipped within the locality
+// grace window (crossSiteAt set) also gets a local copy in local/dual mode so
+// not-yet-resubscribed members keep receiving (order: local, global).
+func roomRouteGlobals(crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []bool {
 	if crossSite != nil && !*crossSite { // confirmed same-site
 		switch mode {
 		case RouteLocal:
-			return []string{RoomEvent(roomID, false)}
+			return []bool{false}
 		case RouteDual:
-			return []string{RoomEvent(roomID, false), RoomEvent(roomID, true)}
+			return []bool{false, true}
 		default:
-			return []string{RoomEvent(roomID, true)}
+			return []bool{true}
 		}
 	}
 	// nil or cross-site → global, plus a local copy during the post-flip grace window.
-	if mode.usesLocal() && crossSiteAt != nil && now.Before(crossSiteAt.Add(roomLocalityGrace)) {
-		return []string{RoomEvent(roomID, false), RoomEvent(roomID, true)}
+	if mode.UsesLocal() && crossSiteAt != nil && now.Before(crossSiteAt.Add(roomLocalityGrace)) {
+		return []bool{false, true}
 	}
-	return []string{RoomEvent(roomID, true)}
+	return []bool{true}
+}
+
+// RoomEventTargets returns the .event subject(s) to publish a room event to.
+func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+	globals := roomRouteGlobals(crossSite, crossSiteAt, mode, now)
+	out := make([]string, len(globals))
+	for i, g := range globals {
+		out[i] = RoomEvent(roomID, g)
+	}
+	return out
+}
+
+// RoomMemberEventTargets returns the .event.member subject(s) to publish a member
+// add/remove event to. Routes identically to RoomEventTargets so a same-site room's
+// roster events land on the local namespace and a flipped room dual-publishes during
+// the grace window — otherwise a client on the local prefix misses member events.
+func RoomMemberEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+	globals := roomRouteGlobals(crossSite, crossSiteAt, mode, now)
+	out := make([]string, len(globals))
+	for i, g := range globals {
+		out[i] = RoomMemberEvent(roomID, g)
+	}
+	return out
 }
 
 func UserRoomEvent(account string) string {
@@ -882,14 +905,18 @@ func RoomCreateWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.%s.create", siteID)
 }
 
-func RoomMemberEvent(roomID string) string {
-	return fmt.Sprintf("chat.room.%s.event.member", roomID)
+// RoomMemberEvent returns a room's member-event subject on the given namespace:
+// global=true → chat.room.{id}.event.member; global=false → chat.local.room.{id}.event.member.
+// Route via RoomMemberEventTargets rather than calling this directly at a publish site.
+func RoomMemberEvent(roomID string, global bool) string {
+	return roomBase(roomID, global) + ".event.member"
 }
 
 // RoomMemberEventWildcard is the subscription pattern matching member events
-// (member_added / member_removed) across all rooms on this site.
-func RoomMemberEventWildcard() string {
-	return "chat.room.*.event.member"
+// (member_added / member_removed) across all rooms on this site, on the given
+// namespace. A same-site room's member events land on the local (global=false) lane.
+func RoomMemberEventWildcard(global bool) string {
+	return roomBase("*", global) + ".event.member"
 }
 
 func MsgThreadParentPattern(siteID string) string {
