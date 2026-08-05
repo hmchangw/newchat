@@ -113,21 +113,22 @@ type RoomsGetRequest struct {
 	Hints map[string]RoomTimeHint `json:"hints,omitempty"`
 }
 
-// PreviewMessage is a room's most-recent eligible message, resolved at read time and
-// enriched for the room-list preview. Content is the full message body; the client
-// truncates for display. Sender/mentions carry render-ready wire Participants (a bot
-// sender's displayName is its app name). Shared wire type: history-service's rooms.get
-// RPC produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
+// PreviewMessage is a room's most-recent eligible message, enriched for the
+// room-list preview. Content is a snippet capped at preview.MaxContentRunes
+// (500 runes) — no longer the full body. Sender/mentions carry render-ready
+// wire Participants (a bot sender's displayName is its app name). Shared wire
+// type: history-service's rooms.get RPC produces it, user-service's
+// subscription.list embeds it, and it persists on the room doc (Room.PreviewMessage).
 type PreviewMessage struct {
-	MessageID   string                 `json:"messageId"`
-	Sender      Participant            `json:"sender"`
-	Content     string                 `json:"content"`
-	CreatedAt   time.Time              `json:"createdAt"`
-	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
-	Mentions    []Participant          `json:"mentions,omitempty"`
+	MessageID   string                 `json:"messageId"             bson:"messageId"`
+	Sender      Participant            `json:"sender"                bson:"sender"`
+	Content     string                 `json:"content"               bson:"content"`
+	CreatedAt   time.Time              `json:"createdAt"             bson:"createdAt"`
+	Attachments []cassandra.Attachment `json:"attachments,omitempty" bson:"attachments,omitempty"`
+	Mentions    []Participant          `json:"mentions,omitempty"    bson:"mentions,omitempty"`
 	// VisibleTo is surfaced now; its write-path (populating the column) is a separate
 	// follow-up, so it's empty until that lands.
-	VisibleTo string `json:"visibleTo,omitempty"`
+	VisibleTo string `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 	// TODO(#106): forwardSource — wired after the Forwarded snapshot merges.
 }
 

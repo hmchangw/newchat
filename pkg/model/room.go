@@ -12,14 +12,24 @@ const (
 )
 
 type Room struct {
-	ID                string     `json:"id" bson:"_id"`
-	Name              string     `json:"name" bson:"name"`
-	Type              RoomType   `json:"type" bson:"type"`
-	SiteID            string     `json:"siteId" bson:"siteId"`
-	UserCount         int        `json:"userCount" bson:"userCount"`
-	AppCount          int        `json:"appCount" bson:"appCount"`
-	LastMsgAt         *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
-	LastMsgID         string     `json:"lastMsgId" bson:"lastMsgId"`
+	ID        string     `json:"id" bson:"_id"`
+	Name      string     `json:"name" bson:"name"`
+	Type      RoomType   `json:"type" bson:"type"`
+	SiteID    string     `json:"siteId" bson:"siteId"`
+	UserCount int        `json:"userCount" bson:"userCount"`
+	AppCount  int        `json:"appCount" bson:"appCount"`
+	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
+	LastMsgID string     `json:"lastMsgId" bson:"lastMsgId"`
+	// PreviewMessage is the denormalized last eligible preview, written by
+	// broadcast-worker (coalesced create path, guarded edit/delete path) and
+	// lazily warm-backed by history-service. Serves the local subscription.list
+	// without a rooms.get RPC.
+	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
+	// PreviewAsOf is the ordering watermark for previewMessage writes: the
+	// canonical event Timestamp (epoch ms) that produced the stored preview
+	// (warm-backs use the preview's own createdAt, always ≤ any event ts).
+	// Guard key only; never serialized to clients.
+	PreviewAsOf       int64      `json:"-" bson:"previewAsOf,omitempty"`
 	LastMentionAllAt  *time.Time `json:"lastMentionAllAt,omitempty" bson:"lastMentionAllAt,omitempty"`
 	MinUserLastSeenAt *time.Time `json:"minUserLastSeenAt,omitempty" bson:"minUserLastSeenAt,omitempty"`
 	CreatedAt         time.Time  `json:"createdAt" bson:"createdAt"`

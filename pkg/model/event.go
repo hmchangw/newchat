@@ -47,6 +47,11 @@ type MessageEvent struct {
 	// PreviewMessage is the room's refreshed preview, computed by history-service on
 	// edit/delete for broadcast-worker to relay. nil for other events or when cleared.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
+	// PreviewGone marks that history-service's post-mutation walk completed and
+	// found NO eligible survivor (vs nil PreviewMessage alone, which also covers
+	// a degraded walk): broadcast-worker clears the room's stored preview. bson:"-"
+	// like PreviewMessage — canonical-stream only, never persisted or client-facing.
+	PreviewGone bool `json:"previewGone,omitempty" bson:"-"`
 }
 
 // ReactionAction is the toggle direction on ReactionDelta.Action; defined type (not alias) so constants give compile-time safety vs raw strings.

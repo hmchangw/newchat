@@ -104,6 +104,11 @@ type EnrichedSubscription struct {
 	// subscriptions collection — it lives only on this read-time aggregation result.
 	RoomKeyPriv []byte `json:"-" bson:"encKeyPriv,omitempty"`
 	RoomKeyVer  int    `json:"-" bson:"encKeyVer,omitempty"`
+	// PreviewMessage is the denormalized room preview projected by the rooms
+	// $lookup ($addFields "previewMessage": "$room.previewMessage"). Internal:
+	// builds sub.Room.PreviewMessage for LOCAL subs when the read-from-doc flag
+	// is on; nil for cross-site subs and unwarmed rooms (rooms.get fallback).
+	PreviewMessage *PreviewMessage `json:"-" bson:"previewMessage,omitempty"`
 }
 
 // SubscriptionRoom is the room-derived view nested on an enriched subscription.
@@ -133,9 +138,10 @@ type SubscriptionRoom struct {
 	// on subscription.list (same payload as the room.key.get RPC).
 	PrivateKey *string `json:"privateKey,omitempty" bson:"-"`
 	KeyVersion *int    `json:"keyVersion,omitempty" bson:"-"`
-	// LastMessage is resolved at read time via history-service's rooms.get RPC
-	// (A2 — no denormalized write path). Omitted when the room has no message,
-	// the enriching site RPC degraded, or the room is soft-deleted (Room==nil).
+	// PreviewMessage is the room's last eligible message. LOCAL subs read it from
+	// the denormalized room doc (previewMessage) when available, falling back to
+	// history-service's rooms.get RPC; cross-site subs always use the RPC. Omitted
+	// when the room has no eligible message, enrichment degraded, or Room==nil.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
