@@ -14,13 +14,8 @@ type cachedBlob struct {
 	contentType string
 }
 
-// blobCache fronts version downloads with a size+TTL-bounded LRU and singleflight.
-// A nil lru means the cache is disabled (get always misses, add/remove no-op).
-//
-// gen is an invalidation generation bumped on every remove. loadCacheable captures
-// it before opening the object and refuses to store the loaded blob if it changed
-// meanwhile — so an upload's Put+remove that races an in-flight download fill can
-// never restore the pre-upload artifact into the cache.
+// blobCache fronts downloads with a size+TTL-bounded LRU and singleflight; a nil lru
+// means disabled. gen bumps on every remove so a fill racing an upload can't revive stale data.
 type blobCache struct {
 	lru            *lru.LRU[string, cachedBlob]
 	sf             singleflight.Group
@@ -31,9 +26,8 @@ type blobCache struct {
 // enabled reports whether caching is on. When off, callers must not buffer objects.
 func (c *blobCache) enabled() bool { return c.lru != nil }
 
-// newBlobCache builds a cache bounded to maxEntries LRU slots and a per-entry ttl.
-// Objects larger than maxObjectBytes are never stored. maxEntries<=0 or ttl<=0
-// disables caching entirely.
+// newBlobCache bounds the cache to maxEntries slots + per-entry ttl; objects over
+// maxObjectBytes are never stored. maxEntries<=0 or ttl<=0 disables caching.
 func newBlobCache(maxEntries int, ttl time.Duration, maxObjectBytes int64) *blobCache {
 	c := &blobCache{maxObjectBytes: maxObjectBytes}
 	if maxEntries > 0 && ttl > 0 {
@@ -66,10 +60,8 @@ func (c *blobCache) remove(key string) {
 	c.lru.Remove(key)
 }
 
-// loadCacheable collapses concurrent misses for key via singleflight. loader opens
-// the object and returns (blob, cacheable): a cacheable blob is stored and shared
-// with all waiters; a non-cacheable result (object over maxObjectBytes) is returned
-// but never stored, so its callers fall back to direct streaming.
+// loadCacheable collapses concurrent misses via singleflight. A cacheable loader result
+// is stored and shared; a non-cacheable one is returned but not stored (caller streams it).
 func (c *blobCache) loadCacheable(key string, loader func() (cachedBlob, bool, error)) (cachedBlob, bool, error) {
 	type result struct {
 		blob      cachedBlob

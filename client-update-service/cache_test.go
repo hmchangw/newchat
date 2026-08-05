@@ -99,9 +99,8 @@ func TestBlobCache_LoadCacheable_NonCacheableNotStored(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestBlobCache_LoadCacheable_InvalidatedDuringFillNotStored simulates an upload
-// (remove) landing while a download's loader is mid-flight: the loaded blob must
-// NOT be cached, so a stale artifact can't survive the invalidation until TTL.
+// An upload (remove) landing mid-fill must keep the loaded blob out of the cache,
+// so a stale artifact can't survive the invalidation until TTL.
 func TestBlobCache_LoadCacheable_InvalidatedDuringFillNotStored(t *testing.T) {
 	c := newBlobCache(4, time.Hour, 1024)
 	blob, cacheable, err := c.loadCacheable("k", func() (cachedBlob, bool, error) {

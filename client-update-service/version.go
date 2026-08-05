@@ -83,9 +83,8 @@ func (h *Handler) HandleUpload(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"result": "success"})
 }
 
-// storeFormFile streams one multipart part to MinIO and drops any stale cached copy.
-// The stored content type comes from the uploaded part's Content-Type header;
-// fallbackContentType is used only when the client did not declare one.
+// storeFormFile streams one part to MinIO and drops any stale cached copy. Content type
+// comes from the part's Content-Type header, falling back to fallbackContentType.
 func (h *Handler) storeFormFile(ctx context.Context, fh *multipart.FileHeader, fallbackContentType string) error {
 	f, err := fh.Open()
 	if err != nil {
@@ -151,9 +150,8 @@ func (h *Handler) HandleDownload(c *gin.Context) {
 	h.streamObject(ctx, c, fileName, key)
 }
 
-// loadObject opens key and, when it fits the cache cap, reads its whole body into a
-// cachedBlob (cacheable=true). Oversized objects return cacheable=false with only the
-// content-type, so the caller streams them instead.
+// loadObject opens key and, when it fits the cache cap, buffers the body (cacheable=true).
+// Oversized objects return cacheable=false with only the content type, so the caller streams.
 func (h *Handler) loadObject(ctx context.Context, key string) (cachedBlob, bool, error) {
 	rc, info, err := h.store.Open(ctx, key)
 	if err != nil {

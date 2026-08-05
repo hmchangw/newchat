@@ -37,9 +37,8 @@ type fileSpec struct {
 	contentType string
 }
 
-// multipartBody builds a multipart form; omit a field by leaving it out of files.
-// Parts are written via CreatePart so the Content-Type header is set only when the
-// fileSpec declares one (CreateFormFile would always force application/octet-stream).
+// multipartBody builds a multipart form (omit a field by leaving it out). Parts use
+// CreatePart so Content-Type is set only when declared (CreateFormFile forces octet-stream).
 func multipartBody(t *testing.T, files map[string]fileSpec) (*bytes.Buffer, string) {
 	t.Helper()
 	body := &bytes.Buffer{}

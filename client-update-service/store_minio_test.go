@@ -108,10 +108,8 @@ func TestMinioVersionStore_Put_WrapsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "put object bkt/k")
 }
 
-// TestMinioVersionStore_Open_GetObjectError covers the branch where GetObject
-// fails outright (e.g. invalid bucket/object args); the Stat-based branches
-// (success and NoSuchKey->ErrObjectNotFound) need a real *minio.Object and are
-// covered by the integration tests.
+// Covers the GetObject-error branch; the Stat-based branches need a real *minio.Object
+// and are covered by the integration tests.
 func TestMinioVersionStore_Open_GetObjectError(t *testing.T) {
 	f := &fakeObjectStore{getErr: errors.New("invalid object name")}
 	s := newMinioVersionStore(f, "bkt", time.Second)

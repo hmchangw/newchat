@@ -31,10 +31,8 @@ func (s *minioVersionStore) Put(ctx context.Context, key string, r io.Reader, si
 	return nil
 }
 
-// Open returns a streaming reader for key. It Stat-probes first so a missing object
-// or dead backend surfaces before any body is written; the returned blobInfo carries
-// the object's Size and ContentType. minio-go ties Reads to the GetObject context, so
-// the cancel must outlive Open — cancelReadCloser releases it on Close.
+// Open Stat-probes first so a missing object or dead backend surfaces before any body.
+// Reads are tied to the GetObject context, so cancelReadCloser releases it on Close.
 func (s *minioVersionStore) Open(ctx context.Context, key string) (io.ReadCloser, blobInfo, error) {
 	tctx, cancel := context.WithTimeout(ctx, s.downloadTimeout)
 	obj, err := s.client.GetObject(tctx, s.bucket, key, minio.GetObjectOptions{})
@@ -66,9 +64,8 @@ type bucketClient interface {
 	MakeBucket(ctx context.Context, name string, opts minio.MakeBucketOptions) error
 }
 
-// ensureBucket creates the bucket when absent. It is idempotent and race-safe: a
-// concurrent create surfacing as BucketAlreadyOwnedByYou/BucketAlreadyExists is
-// treated as success.
+// ensureBucket creates the bucket when absent; idempotent and race-safe (a concurrent
+// create surfacing as BucketAlreadyOwnedByYou/BucketAlreadyExists is treated as success).
 func ensureBucket(ctx context.Context, client bucketClient, name string) error {
 	exists, err := client.BucketExists(ctx, name)
 	if err != nil {
