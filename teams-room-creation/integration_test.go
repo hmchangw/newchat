@@ -80,8 +80,8 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 
 	_, js := dial(t)
 
-	// Create the ROOMS stream so the publish lands (dev-only; ops owns it in prod).
-	rc := stream.Rooms(siteID)
+	// Create the ROOMS-TEAMS stream so the publish lands (dev-only; ops owns it in prod).
+	rc := stream.RoomsTeams(siteID)
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: rc.Name, Subjects: rc.Subjects})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), rc.Name) })
@@ -94,7 +94,7 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 	cons, err := js.CreateOrUpdateConsumer(ctx, rc.Name, jetstream.ConsumerConfig{
 		Durable:       "test-teams-room-create-consumer",
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubject: subject.RoomCanonicalTeamsCreate(siteID),
+		FilterSubject: subject.RoomTeamsCanonicalCreate(siteID),
 	})
 	require.NoError(t, err)
 

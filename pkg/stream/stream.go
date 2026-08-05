@@ -43,6 +43,16 @@ func Rooms(siteID string) Config {
 	}
 }
 
+// RoomsTeams returns ROOMS-TEAMS-{siteID}, isolating the Teams-migration
+// room-create batch on its own stream. room-worker owns bootstrap + consumes;
+// teams-room-creation publishes.
+func RoomsTeams(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("ROOMS-TEAMS-%s", siteID),
+		Subjects: []string{subject.RoomTeamsCanonicalWildcard(siteID)},
+	}
+}
+
 // PushNotification returns the PUSH-NOTIFICATION-{siteID} stream config; ops-owned in prod.
 func PushNotification(siteID string) Config {
 	return Config{

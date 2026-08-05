@@ -198,6 +198,16 @@ Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on
 
 Stream wildcard: `chat.user.*.request.room.*.{siteID}.member.>`
 
+### ROOMS-TEAMS Stream (`ROOMS-TEAMS-{siteID}`)
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.teams.room.canonical.{siteID}.create` | teams-room-creation | room-worker | Teams-migration room-create batch |
+
+Stream wildcard: `chat.teams.room.canonical.{siteID}.>`
+
+Server-only backend stream, isolated from `ROOMS` so the one-shot migration path can't interfere with live member ops. Clients never interact with it.
+
 ### PUSH-NOTIFICATION Stream (`PUSH-NOTIFICATION-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |

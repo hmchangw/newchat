@@ -38,6 +38,7 @@ func (f *fakeStreamManager) Stream(_ context.Context, name string) (o11ynats.Str
 func TestBootstrapStreams(t *testing.T) {
 	tests := []struct {
 		name        string
+		mode        string
 		enabled     bool
 		existing    map[string]bool
 		failOn      string
@@ -46,36 +47,54 @@ func TestBootstrapStreams(t *testing.T) {
 		wantErrSub  string
 	}{
 		{
-			name:        "disabled - verifies existing stream",
+			name:        "default disabled - verifies ROOMS",
+			mode:        "default",
 			enabled:     false,
 			existing:    map[string]bool{"ROOMS-test": true},
 			wantCreated: nil,
 		},
 		{
-			name:       "disabled - fails when stream missing",
+			name:       "default disabled - fails when ROOMS missing",
+			mode:       "default",
 			enabled:    false,
 			existing:   map[string]bool{},
-			wantErrSub: "verify ROOMS stream",
+			wantErrSub: "verify ROOMS-test stream",
 		},
 		{
-			name:        "enabled - creates ROOMS",
+			name:       "teams disabled - fails when ROOMS-TEAMS missing",
+			mode:       "teams",
+			enabled:    false,
+			existing:   map[string]bool{"ROOMS-test": true},
+			wantErrSub: "verify ROOMS-TEAMS-test stream",
+		},
+		{
+			name:        "default enabled - creates ROOMS only",
+			mode:        "default",
 			enabled:     true,
 			existing:    map[string]bool{},
 			wantCreated: []string{"ROOMS-test"},
 		},
 		{
-			name:       "enabled - wraps ROOMS creator error",
+			name:        "teams enabled - creates ROOMS-TEAMS only",
+			mode:        "teams",
+			enabled:     true,
+			existing:    map[string]bool{},
+			wantCreated: []string{"ROOMS-TEAMS-test"},
+		},
+		{
+			name:       "enabled - wraps creator error",
+			mode:       "default",
 			enabled:    true,
 			existing:   map[string]bool{},
 			failOn:     "ROOMS-test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create ROOMS stream",
+			wantErrSub: "create ROOMS-test stream",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing}
-			err := bootstrapStreams(context.Background(), fake, "test", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "test", tc.mode, tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
