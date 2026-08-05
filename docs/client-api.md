@@ -7609,8 +7609,8 @@ overwrites it and evicts any cached copy.
 
 | Part | Type | Required | Notes |
 |---|---|---|---|
-| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. Stored as `application/x-yaml`. Rejected if empty or not `.yaml`/`.yml`. |
-| `executeFile` | file (binary) | yes | The executable. Stored as `application/octet-stream`. Rejected if empty. |
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. Stored with the part's declared `Content-Type` (fallback `application/x-yaml` when the part sends none). Rejected if empty or not `.yaml`/`.yml`. |
+| `executeFile` | file (binary) | yes | The executable. Stored with the part's declared `Content-Type` (fallback `application/octet-stream` when the part sends none). Rejected if empty. |
 
 #### Response
 

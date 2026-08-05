@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -27,15 +29,28 @@ func rc(s string) io.ReadCloser { return io.NopCloser(strings.NewReader(s)) }
 
 func bytesBufferString(s string) *bytes.Buffer { return bytes.NewBufferString(s) }
 
-type fileSpec struct{ name, content string }
+// fileSpec describes one multipart file part. contentType, when empty, means the
+// part is written with no Content-Type header (exercises the upload fallback).
+type fileSpec struct {
+	name        string
+	content     string
+	contentType string
+}
 
 // multipartBody builds a multipart form; omit a field by leaving it out of files.
+// Parts are written via CreatePart so the Content-Type header is set only when the
+// fileSpec declares one (CreateFormFile would always force application/octet-stream).
 func multipartBody(t *testing.T, files map[string]fileSpec) (*bytes.Buffer, string) {
 	t.Helper()
 	body := &bytes.Buffer{}
 	w := multipart.NewWriter(body)
 	for field, fs := range files {
-		fw, err := w.CreateFormFile(field, fs.name)
+		hdr := textproto.MIMEHeader{}
+		hdr.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, fs.name))
+		if fs.contentType != "" {
+			hdr.Set("Content-Type", fs.contentType)
+		}
+		fw, err := w.CreatePart(hdr)
 		require.NoError(t, err)
 		_, err = io.WriteString(fw, fs.content)
 		require.NoError(t, err)

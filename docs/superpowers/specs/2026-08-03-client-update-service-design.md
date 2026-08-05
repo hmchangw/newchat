@@ -208,9 +208,11 @@ Response headers on both success paths: `Content-Type` (from `blobInfo`),
   imposed none, and streaming keeps memory bounded regardless of body size
   (Gin spills large multipart parts to temp files; each part reader is streamed
   straight to MinIO, never `ReadAll`-ed).
-- Two required form files: `configFile` (`.yaml`/`.yml`, stored
-  `application/x-yaml`) and `executeFile` (stored `application/octet-stream`).
-  Each `*multipart.FileHeader` reader streamed to `Put` with `fileHeader.Size`.
+- Two required form files: `configFile` (`.yaml`/`.yml`) and `executeFile`. Each
+  `*multipart.FileHeader` reader is streamed to `Put` with `fileHeader.Size`. The
+  stored content type is taken from the part's `Content-Type` header, falling back
+  to `application/x-yaml` (config) / `application/octet-stream` (executable) when
+  the client sends none.
 - On a successful overwrite of an existing name, `cache.remove(key)` so a stale
   copy isn't served within the TTL window.
 - Success `200`: `{"result":"success"}`. Errors: `400` (bad multipart,

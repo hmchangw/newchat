@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -72,12 +73,18 @@ func (h *Handler) HandleUpload(c *gin.Context) {
 }
 
 // storeFormFile streams one multipart part to MinIO and drops any stale cached copy.
-func (h *Handler) storeFormFile(ctx context.Context, fh *multipart.FileHeader, contentType string) error {
+// The stored content type comes from the uploaded part's Content-Type header;
+// fallbackContentType is used only when the client did not declare one.
+func (h *Handler) storeFormFile(ctx context.Context, fh *multipart.FileHeader, fallbackContentType string) error {
 	f, err := fh.Open()
 	if err != nil {
 		return fmt.Errorf("open upload %q: %w", fh.Filename, err)
 	}
 	defer f.Close()
+	contentType := fh.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = fallbackContentType
+	}
 	key := objectKey(fh.Filename)
 	if err := h.store.Put(ctx, key, f, fh.Size, contentType); err != nil {
 		return fmt.Errorf("store upload %q: %w", fh.Filename, err)
@@ -160,8 +167,11 @@ func (h *Handler) streamObject(ctx context.Context, c *gin.Context, fileName, ke
 	})
 }
 
+// serveBytes writes a cached blob with the same headers the streamed path sets:
+// Content-Type, an explicit Content-Length, and the download disposition.
 func serveBytes(c *gin.Context, fileName string, blob cachedBlob) {
 	c.Header("Content-Disposition", contentDisposition(fileName))
+	c.Header("Content-Length", strconv.Itoa(len(blob.body)))
 	c.Data(http.StatusOK, blob.contentType, blob.body)
 }
 

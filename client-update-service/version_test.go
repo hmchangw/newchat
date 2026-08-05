@@ -31,6 +31,40 @@ func TestHandleUpload_Success(t *testing.T) {
 	assert.JSONEq(t, `{"result":"success"}`, w.Body.String())
 }
 
+func TestHandleUpload_UsesPartContentType(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	// The part's declared Content-Type must win over the fallback.
+	store.EXPECT().Put(gomock.Any(), objectKey("app.yaml"), gomock.Any(), int64(6), "text/yaml").Return(nil)
+	store.EXPECT().Put(gomock.Any(), objectKey("app.exe"), gomock.Any(), int64(4), "application/x-msdownload").Return(nil)
+	h := NewHandler(store, testCache(1024))
+
+	body, ct := multipartBody(t, map[string]fileSpec{
+		"configFile":  {name: "app.yaml", content: "config", contentType: "text/yaml"},
+		"executeFile": {name: "app.exe", content: "bin!", contentType: "application/x-msdownload"},
+	})
+	c, w := uploadCtx(t, body, ct)
+	h.HandleUpload(c)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleUpload_FallbackContentTypeWhenPartHeaderAbsent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	// No Content-Type on either part -> fallbacks apply.
+	store.EXPECT().Put(gomock.Any(), objectKey("app.yaml"), gomock.Any(), int64(1), "application/x-yaml").Return(nil)
+	store.EXPECT().Put(gomock.Any(), objectKey("app.exe"), gomock.Any(), int64(3), "application/octet-stream").Return(nil)
+	h := NewHandler(store, testCache(1024))
+
+	body, ct := multipartBody(t, map[string]fileSpec{
+		"configFile":  {name: "app.yaml", content: "c"},
+		"executeFile": {name: "app.exe", content: "bin"},
+	})
+	c, w := uploadCtx(t, body, ct)
+	h.HandleUpload(c)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestHandleUpload_MissingConfigFile_400(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))
@@ -129,6 +163,7 @@ func TestHandleDownload_CacheHit_NoStoreCall(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "BIN", w.Body.String())
 	assert.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
+	assert.Equal(t, "3", w.Header().Get("Content-Length"), "cache path must set Content-Length")
 	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="app.exe"`)
 }
 
@@ -145,6 +180,7 @@ func TestHandleDownload_MissCacheable_CachesAndServes(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "hello", w.Body.String())
 	assert.Equal(t, "application/x-yaml", w.Header().Get("Content-Type"))
+	assert.Equal(t, "5", w.Header().Get("Content-Length"))
 
 	// Second request must be served from cache — no further Open (Times(1) above enforces it).
 	c2, w2 := downloadCtx(t, "app.yaml")
@@ -168,6 +204,9 @@ func TestHandleDownload_MissTooLarge_StreamsUncached(t *testing.T) {
 	h.HandleDownload(c)
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "BIGDATA", w.Body.String())
+	assert.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"), "stream path must set Content-Type")
+	assert.Equal(t, "7", w.Header().Get("Content-Length"), "stream path must set Content-Length")
+	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="big.exe"`)
 	_, ok := cache.get(objectKey("big.exe"))
 	assert.False(t, ok, "oversized object must not be cached")
 }

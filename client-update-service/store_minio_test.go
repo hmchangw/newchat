@@ -64,6 +64,7 @@ type fakeObjectStore struct {
 	putSize   int64
 	putCT     string
 	putErr    error
+	getErr    error
 }
 
 func (f *fakeObjectStore) BucketExists(context.Context, string) (bool, error) { return true, nil }
@@ -74,7 +75,7 @@ func (f *fakeObjectStore) PutObject(_ context.Context, bucket, key string, _ io.
 }
 
 func (f *fakeObjectStore) GetObject(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error) {
-	return nil, nil
+	return nil, f.getErr
 }
 
 func (f *fakeObjectStore) ListObjects(context.Context, string, minio.ListObjectsOptions) <-chan minio.ObjectInfo {
@@ -104,6 +105,20 @@ func TestMinioVersionStore_Put_WrapsError(t *testing.T) {
 	err := s.Put(context.Background(), "k", strings.NewReader("x"), 1, "application/octet-stream")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "put object bkt/k")
+}
+
+// TestMinioVersionStore_Open_GetObjectError covers the branch where GetObject
+// fails outright (e.g. invalid bucket/object args); the Stat-based branches
+// (success and NoSuchKey->ErrObjectNotFound) need a real *minio.Object and are
+// covered by the integration tests.
+func TestMinioVersionStore_Open_GetObjectError(t *testing.T) {
+	f := &fakeObjectStore{getErr: errors.New("invalid object name")}
+	s := newMinioVersionStore(f, "bkt", time.Second)
+	rc, info, err := s.Open(context.Background(), "k")
+	require.Error(t, err)
+	assert.Nil(t, rc)
+	assert.Equal(t, blobInfo{}, info)
+	assert.Contains(t, err.Error(), "get object bkt/k")
 }
 
 func TestIsNotFound(t *testing.T) {
