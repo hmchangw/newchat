@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-05
 **Status:** Draft — awaiting user review
-**Predecessor:** `2026-08-03-room-preview-read-performance-design.md` (Phase 1 landed in
-#173/#175; this spec is the concrete Phase 2, pursued by explicit user decision rather
-than the metrics gate).
+**Predecessor:** `2026-08-03-room-preview-read-performance-design.md` (Phase 1 landed
+in `#173`/`#175`; this spec is the concrete Phase 2, pursued by explicit user decision
+rather than the metrics gate).
 
 ## Goal
 
