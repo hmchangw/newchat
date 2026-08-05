@@ -91,6 +91,10 @@ type Config struct {
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
 	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
 	DebugLog logctx.Config  `envPrefix:"DEBUG_LOG_"`
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
+	// MongoDB. 0 disables the cap (unbounded spawn).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 func main() {
@@ -195,7 +199,14 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto Elasticsearch/MongoDB.
+	// MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "search-service", routerOpts...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

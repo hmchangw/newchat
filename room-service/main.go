@@ -78,6 +78,10 @@ type config struct {
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
+	// disables the cap (unbounded spawn).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -267,7 +271,13 @@ func main() {
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
-	router := natsrouter.New(nc, "room-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "room-service", routerOpts...)
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	handler.Register(router)
 
