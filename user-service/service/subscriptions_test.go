@@ -21,8 +21,18 @@ import (
 
 // newSvcRawHistory builds a service exposing the history mock WITHOUT newSvc's
 // permissive RoomsGet default, so last-message enrichment tests can set an exact
-// RoomsGet expectation (result or error).
+// RoomsGet expectation (result or error). previewFromDoc defaults to the zero
+// value (false), matching pre-denormalization behavior.
 func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockHistoryClient) {
+	t.Helper()
+	svc, subs, history, _ := newSvcRawHistoryFlag(t, false)
+	return svc, subs, history
+}
+
+// newSvcRawHistoryFlag is newSvcRawHistory with an explicit SubscriptionPreviewFromDoc
+// value, plus the RoomClient mock (needed by cross-site last-message tests, whose
+// subs also flow through enrichCrossSite's GetRoomsInfo fan-out).
+func newSvcRawHistoryFlag(t *testing.T, previewFromDoc bool) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockHistoryClient, *mocks.MockRoomClient) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -33,8 +43,8 @@ func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionReposi
 	presence := mocks.NewMockPresenceClient(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
-	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100}
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, nil, nil, nil, cfg), subs, history
+	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, SubscriptionPreviewFromDoc: previewFromDoc}
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, nil, nil, nil, cfg), subs, history, rooms
 }
 
 func TestListSubscriptions_Types(t *testing.T) {
@@ -122,7 +132,7 @@ func TestBuildLocalRoom_MinUserLastSeenAt(t *testing.T) {
 		RoomName:          "Eng",
 		MinUserLastSeenAt: &floor,
 	}
-	room := buildLocalRoom(&sub)
+	room := buildLocalRoom(&sub, false)
 	require.NotNil(t, room)
 	require.NotNil(t, room.MinUserLastSeenAt, "local baseline minUserLastSeenAt must reach the room object")
 	assert.Equal(t, floor, *room.MinUserLastSeenAt)
@@ -544,6 +554,26 @@ func TestGetDM_Enriched(t *testing.T) {
 	assert.Equal(t, "Bob", resp.Subscription.HRInfo.EngName)
 }
 
+// GetDM never requests last-message enrichment (withLastMsg=false) — even with
+// the preview-from-doc flag on and a baseline preview present on the room doc,
+// the wire room must never surface a previewMessage.
+func TestGetDM_Enriched_FlagOn_NoPreview(t *testing.T) {
+	svc, subs, _, _ := newSvcRawHistoryFlag(t, true)
+	subs.EXPECT().GetDMSubscription(gomock.Any(), "alice", "bob").
+		Return(&model.EnrichedDMSubscription{
+			EnrichedSubscription: model.EnrichedSubscription{
+				Subscription:   model.Subscription{ID: "d1", SiteID: "site-a", RoomID: "r1", Name: "bob"},
+				RoomName:       "Renamed",
+				PreviewMessage: &model.PreviewMessage{MessageID: "m-baseline"},
+			},
+			HRInfo: &model.SubscriptionHRInfo{Account: "bob", Name: "bob", EngName: "Bob"},
+		}, nil)
+	resp, err := svc.GetDM(ctx("alice", "site-a"), models.GetDMRequest{AccountName: "bob"})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Subscription.Room)
+	assert.Nil(t, resp.Subscription.Room.PreviewMessage, "GetDM never enriches last-message — a baseline preview must never leak through")
+}
+
 func TestGetByRoomID_Empty(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	_, err := svc.GetByRoomID(ctx("alice", "site-a"), models.GetByRoomIDRequest{RoomID: ""})
@@ -583,6 +613,25 @@ func TestGetByRoomID_OK_Enriched(t *testing.T) {
 	assert.Equal(t, "Stale", base.Name, "subscription name must survive enrichment")
 	require.NotNil(t, base.Room, "enriched room must propagate through the 1-elem slice")
 	assert.Equal(t, "Renamed", base.Room.Name)
+}
+
+// GetByRoomID never requests last-message enrichment (withLastMsg=false) — even
+// with the preview-from-doc flag on and a baseline preview present on the room
+// doc, the wire room must never surface a previewMessage.
+func TestGetByRoomID_OK_Enriched_FlagOn_NoPreview(t *testing.T) {
+	svc, subs, _, _ := newSvcRawHistoryFlag(t, true)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").
+		Return(&model.EnrichedSubscription{
+			Subscription:   model.Subscription{ID: "s1", SiteID: "site-a", RoomID: "r1", Name: "Stale"},
+			RoomName:       "Renamed",
+			PreviewMessage: &model.PreviewMessage{MessageID: "m-baseline"},
+		}, nil)
+	resp, err := svc.GetByRoomID(ctx("alice", "site-a"), models.GetByRoomIDRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	base := resp.Subscriptions[0].Base()
+	require.NotNil(t, base.Room)
+	assert.Nil(t, base.Room.PreviewMessage, "GetByRoomID never enriches last-message — a baseline preview must never leak through")
 }
 
 func TestGetChannels_Empty(t *testing.T) {
@@ -1074,6 +1123,29 @@ func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
 	assert.Nil(t, room.PreviewMessage, "excluded last message stays nil")
 }
 
+// includeLastMessage:false must skip the preview entirely even when the
+// preview-from-doc flag is ON and the room already carries a baseline preview:
+// withLastMsg gates whether enrichLocal is allowed to copy it onto Room at all,
+// matching docs/client-api.md's "Omitted when ... includeLastMessage: false".
+func TestListSubscriptions_LastMessage_SkippedWhenExcluded_FlagOn(t *testing.T) {
+	svc, subs, _, _ := newSvcRawHistoryFlag(t, true)
+	storeSubs := []model.EnrichedSubscription{{
+		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
+		RoomName:     "General", UserCount: 3,
+		PreviewMessage: &model.PreviewMessage{MessageID: "m-baseline"},
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	// No history.RoomsGet EXPECT — the mock ctrl fails if it's called.
+	no := false
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current", IncludeLastMessage: &no})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	room := resp.Subscriptions[0].Base().Room
+	require.NotNil(t, room)
+	assert.Nil(t, room.PreviewMessage, "flag on but includeLastMessage:false must still omit the preview — a baseline value must never leak through")
+}
+
 func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
 	svc, subs, history := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
@@ -1096,7 +1168,7 @@ func TestBuildLocalRoom_CrossSite(t *testing.T) {
 	sub := &model.EnrichedSubscription{}
 	sub.CrossSite = ptrBool(true)
 	sub.RoomName = "chan"
-	got := buildLocalRoom(sub)
+	got := buildLocalRoom(sub, false)
 	require.NotNil(t, got)
 	require.NotNil(t, got.CrossSite)
 	assert.True(t, *got.CrossSite)
@@ -1121,4 +1193,189 @@ func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
 	assert.False(t, drop)
 	require.NotNil(t, sub.Room)
 	assert.Nil(t, sub.Room.CrossSite)
+}
+
+// buildLocalRoom's includePreview param gates whether the baseline PreviewMessage
+// (from the $lookup) reaches the wire room object.
+func TestBuildLocalRoom_IncludePreview(t *testing.T) {
+	baseline := &model.PreviewMessage{MessageID: "m1"}
+	sub := &model.EnrichedSubscription{RoomName: "chan", PreviewMessage: baseline}
+
+	included := buildLocalRoom(sub, true)
+	require.NotNil(t, included)
+	require.NotNil(t, included.PreviewMessage, "includePreview=true copies the baseline onto the room")
+	assert.Equal(t, "m1", included.PreviewMessage.MessageID)
+
+	excluded := buildLocalRoom(sub, false)
+	require.NotNil(t, excluded)
+	assert.Nil(t, excluded.PreviewMessage, "includePreview=false leaves the room's preview nil despite a baseline value")
+}
+
+// residualLastMsgRooms filters a site's local index/roomID lists down to subs
+// with no room object yet, or a room object whose baseline preview is nil —
+// the set that still needs a rooms.get resolve.
+func TestResidualLastMsgRooms(t *testing.T) {
+	subs := []model.EnrichedSubscription{
+		{Subscription: model.Subscription{ID: "s0", RoomID: "r0"}},                                                                                        // no Room yet (enrichLocal hasn't run) → residual
+		{Subscription: model.Subscription{ID: "s1", RoomID: "r1", Room: &model.SubscriptionRoom{}}},                                                       // Room present, no preview → residual
+		{Subscription: model.Subscription{ID: "s2", RoomID: "r2", Room: &model.SubscriptionRoom{PreviewMessage: &model.PreviewMessage{MessageID: "m2"}}}}, // baseline preview present → served, excluded
+	}
+	idx, ids := residualLastMsgRooms(subs, []int{0, 1, 2})
+	assert.Equal(t, []int{0, 1}, idx)
+	assert.Equal(t, []string{"r0", "r1"}, ids)
+}
+
+func TestResidualLastMsgRooms_AllServed(t *testing.T) {
+	subs := []model.EnrichedSubscription{
+		{Subscription: model.Subscription{ID: "s0", RoomID: "r0", Room: &model.SubscriptionRoom{PreviewMessage: &model.PreviewMessage{MessageID: "m0"}}}},
+	}
+	idx, ids := residualLastMsgRooms(subs, []int{0})
+	assert.Empty(t, idx)
+	assert.Empty(t, ids)
+}
+
+// TestEnrichLastMessage_LocalPreviewFromDocSkipsRPC: flag on, two LOCAL subs —
+// r1 carries a baseline PreviewMessage (from the $lookup), r2 does not. Only the
+// residual (r2) must reach RoomsGet; r1's Room.PreviewMessage must be the baseline.
+func TestEnrichLastMessage_LocalPreviewFromDocSkipsRPC(t *testing.T) {
+	svc, subs, history, _ := newSvcRawHistoryFlag(t, true)
+	baseline := &model.PreviewMessage{MessageID: "m-baseline", Content: "hi", CreatedAt: time.Unix(100, 0).UTC()}
+	storeSubs := []model.EnrichedSubscription{
+		{
+			Subscription:   model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
+			RoomName:       "General",
+			PreviewMessage: baseline,
+		},
+		{
+			Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "random", RoomType: model.RoomTypeChannel},
+			RoomName:     "Random",
+		},
+	}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	// Exactly ONE RoomsGet for the local site, requesting only the residual room.
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r2"}, gomock.Any()).
+		Return(map[string]model.PreviewMessage{"r2": {MessageID: "m-rpc"}}, nil)
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 2)
+	byID := map[string]*model.SubscriptionRoom{}
+	for _, item := range resp.Subscriptions {
+		byID[item.Base().ID] = item.Base().Room
+	}
+	require.NotNil(t, byID["s1"])
+	require.NotNil(t, byID["s1"].PreviewMessage)
+	assert.Equal(t, "m-baseline", byID["s1"].PreviewMessage.MessageID, "baseline-carrying room served from the doc, no RPC needed")
+	require.NotNil(t, byID["s2"])
+	require.NotNil(t, byID["s2"].PreviewMessage)
+	assert.Equal(t, "m-rpc", byID["s2"].PreviewMessage.MessageID, "residual room resolved via the RPC")
+}
+
+// TestEnrichLastMessage_AllLocalPreviewsPresent_NoLocalRPC: flag on, every LOCAL
+// sub already carries a baseline preview ⇒ RoomsGet must not be called for the
+// local site at all.
+func TestEnrichLastMessage_AllLocalPreviewsPresent_NoLocalRPC(t *testing.T) {
+	svc, subs, _, _ := newSvcRawHistoryFlag(t, true)
+	b1 := &model.PreviewMessage{MessageID: "m1"}
+	b2 := &model.PreviewMessage{MessageID: "m2"}
+	storeSubs := []model.EnrichedSubscription{
+		{
+			Subscription:   model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
+			RoomName:       "General",
+			PreviewMessage: b1,
+		},
+		{
+			Subscription:   model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "random", RoomType: model.RoomTypeChannel},
+			RoomName:       "Random",
+			PreviewMessage: b2,
+		},
+	}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	// No history.RoomsGet EXPECT for the local site — the mock ctrl fails the test if it's called.
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 2)
+	byID := map[string]*model.SubscriptionRoom{}
+	for _, item := range resp.Subscriptions {
+		byID[item.Base().ID] = item.Base().Room
+	}
+	require.NotNil(t, byID["s1"].PreviewMessage)
+	assert.Equal(t, "m1", byID["s1"].PreviewMessage.MessageID)
+	require.NotNil(t, byID["s2"].PreviewMessage)
+	assert.Equal(t, "m2", byID["s2"].PreviewMessage.MessageID)
+}
+
+// TestEnrichLastMessage_FlagOff_BehavesAsToday: flag off ⇒ baseline previews are
+// IGNORED entirely. RoomsGet is called with ALL local roomIDs (no residual
+// filtering) and the RPC result is authoritative — a room the RPC omits ends
+// with a nil preview even though it carries a baseline value; the baseline
+// never leaks through.
+func TestEnrichLastMessage_FlagOff_BehavesAsToday(t *testing.T) {
+	svc, subs, history, _ := newSvcRawHistoryFlag(t, false)
+	baseline1 := &model.PreviewMessage{MessageID: "m-baseline-1"}
+	baseline2 := &model.PreviewMessage{MessageID: "m-baseline-2"}
+	storeSubs := []model.EnrichedSubscription{
+		{
+			Subscription:   model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
+			RoomName:       "General",
+			PreviewMessage: baseline1,
+		},
+		{
+			Subscription:   model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "random", RoomType: model.RoomTypeChannel},
+			RoomName:       "Random",
+			PreviewMessage: baseline2,
+		},
+	}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	// Flag off ⇒ ALL local roomIDs requested regardless of baseline presence;
+	// only r1 comes back from the RPC.
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.InAnyOrder([]string{"r1", "r2"}), gomock.Any()).
+		Return(map[string]model.PreviewMessage{"r1": {MessageID: "m-rpc"}}, nil)
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 2)
+	byID := map[string]*model.SubscriptionRoom{}
+	for _, item := range resp.Subscriptions {
+		byID[item.Base().ID] = item.Base().Room
+	}
+	require.NotNil(t, byID["s1"].PreviewMessage)
+	assert.Equal(t, "m-rpc", byID["s1"].PreviewMessage.MessageID, "flag off: the RPC result wins over the baseline")
+	assert.Nil(t, byID["s2"].PreviewMessage, "flag off: RPC omission yields nil even though a baseline preview exists — it never leaks through")
+}
+
+// TestEnrichLastMessage_CrossSiteUnaffected: flag on, a cross-site sub still
+// fans out to its site's RoomsGet with the full roomID list — cross-site rooms
+// never carry a local baseline preview, so there is no residual filtering to apply.
+func TestEnrichLastMessage_CrossSiteUnaffected(t *testing.T) {
+	svc, subs, history, rooms := newSvcRawHistoryFlag(t, true)
+	storeSubs := []model.EnrichedSubscription{
+		{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b", Name: "remote1", RoomType: model.RoomTypeChannel}},
+		{Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-b", Name: "remote2", RoomType: model.RoomTypeChannel}},
+	}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"r1", "r2"})).
+		Return([]model.RoomInfo{
+			{RoomID: "r1", Found: true, SiteID: "site-b", Name: "Remote1"},
+			{RoomID: "r2", Found: true, SiteID: "site-b", Name: "Remote2"},
+		}, nil)
+	history.EXPECT().RoomsGet(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"r1", "r2"}), gomock.Any()).
+		Return(map[string]model.PreviewMessage{"r1": {MessageID: "m-r1"}, "r2": {MessageID: "m-r2"}}, nil)
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 2)
+	byID := map[string]*model.SubscriptionRoom{}
+	for _, item := range resp.Subscriptions {
+		byID[item.Base().ID] = item.Base().Room
+	}
+	require.NotNil(t, byID["s1"].PreviewMessage)
+	assert.Equal(t, "m-r1", byID["s1"].PreviewMessage.MessageID)
+	require.NotNil(t, byID["s2"].PreviewMessage)
+	assert.Equal(t, "m-r2", byID["s2"].PreviewMessage.MessageID)
 }

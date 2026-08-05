@@ -61,8 +61,27 @@ func (r *SubscriptionRepo) EnsureIndexes(ctx context.Context) error {
 // it drops local soft-deleted (^Del-) rooms — the list, count, and active paths all
 // pass true. A missing/cross-site room has no room.name so it is kept either way. The
 // rooms-type activity window is applied separately by the caller on the room's
-// lastMsgAt (surfaced here).
-func roomsEnrichStages(dropDeleted bool) bson.A {
+// lastMsgAt (surfaced here). withPreview projects/copies the room's denormalized
+// previewMessage (~600B/row) — pass true only from a call site that actually decodes
+// EnrichedSubscription.PreviewMessage (the subscription-list path); count/active-set
+// paths never consume it, so they pass false to keep the projection precise.
+func roomsEnrichStages(dropDeleted, withPreview bool) bson.A {
+	roomProject := bson.M{
+		"name":              1,
+		"userCount":         1,
+		"appCount":          1,
+		"lastMsgAt":         1,
+		"lastMsgId":         1,
+		"lastMentionAllAt":  1,
+		"minUserLastSeenAt": 1,
+		"createdAt":         1,
+		"encKey.priv":       1,
+		"encKey.ver":        1,
+		"crossSite":         1,
+	}
+	if withPreview {
+		roomProject["previewMessage"] = 1
+	}
 	stages := bson.A{
 		// Project only the room fields this enrichment surfaces (not the whole room doc) so
 		// the join+sort working set stays lean; the correlated $expr/_id match uses the _id
@@ -72,19 +91,7 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 			"let":  bson.M{"rid": "$roomId"},
 			"pipeline": bson.A{
 				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
-				bson.M{"$project": bson.M{
-					"name":              1,
-					"userCount":         1,
-					"appCount":          1,
-					"lastMsgAt":         1,
-					"lastMsgId":         1,
-					"lastMentionAllAt":  1,
-					"minUserLastSeenAt": 1,
-					"createdAt":         1,
-					"encKey.priv":       1,
-					"encKey.ver":        1,
-					"crossSite":         1,
-				}},
+				bson.M{"$project": roomProject},
 			},
 			"as": "room",
 		}},
@@ -94,24 +101,28 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 		// A local Del- room.name matches the regex → inverted by $not → dropped.
 		stages = append(stages, bson.M{"$match": bson.M{"room.name": bson.M{"$not": bson.M{"$regex": deletedRoomNameRegex}}}})
 	}
+	addFields := bson.M{
+		"userCount":         "$room.userCount",
+		"lastMsgAt":         "$room.lastMsgAt",
+		"lastMsgId":         "$room.lastMsgId",
+		"lastMentionAllAt":  "$room.lastMentionAllAt",
+		"minUserLastSeenAt": "$room.minUserLastSeenAt",
+		"appCount":          "$room.appCount",
+		"roomName":          "$room.name",
+		"crossSite":         "$room.crossSite",
+		// Sort key: room activity (lastMsgAt), falling back to room.createdAt for
+		// rooms with no messages. Null for cross-site/missing rooms (they sort last).
+		"__sortKey": bson.M{"$ifNull": bson.A{"$room.lastMsgAt", "$room.createdAt"}},
+		// Room E2E key baseline (current slot) for local enrichment — folds the
+		// key read into this single $lookup, no separate keystore round-trip.
+		"encKeyPriv": "$room.encKey.priv",
+		"encKeyVer":  "$room.encKey.ver",
+	}
+	if withPreview {
+		addFields["previewMessage"] = "$room.previewMessage"
+	}
 	return append(stages,
-		bson.M{"$addFields": bson.M{
-			"userCount":         "$room.userCount",
-			"lastMsgAt":         "$room.lastMsgAt",
-			"lastMsgId":         "$room.lastMsgId",
-			"lastMentionAllAt":  "$room.lastMentionAllAt",
-			"minUserLastSeenAt": "$room.minUserLastSeenAt",
-			"appCount":          "$room.appCount",
-			"roomName":          "$room.name",
-			"crossSite":         "$room.crossSite",
-			// Sort key: room activity (lastMsgAt), falling back to room.createdAt for
-			// rooms with no messages. Null for cross-site/missing rooms (they sort last).
-			"__sortKey": bson.M{"$ifNull": bson.A{"$room.lastMsgAt", "$room.createdAt"}},
-			// Room E2E key baseline (current slot) for local enrichment — folds the
-			// key read into this single $lookup, no separate keystore round-trip.
-			"encKeyPriv": "$room.encKey.priv",
-			"encKeyVer":  "$room.encKey.ver",
-		}},
+		bson.M{"$addFields": addFields},
 		bson.M{"$project": bson.M{"room": 0}},
 	)
 }
@@ -250,10 +261,12 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// Exclude rooms explicitly closed by the user; a missing field (defensive)
 	// and open:true both pass. Applied to subscription.list only.
 	match["open"] = bson.M{"$ne": false}
-	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
-	// rooms have no local room doc and are kept (their deletion isn't visible here).
+	// roomsEnrichStages(true, true) drops locally soft-deleted (^Del-) rooms and
+	// projects previewMessage — this is the only call site that decodes
+	// EnrichedSubscription.PreviewMessage. Cross-site rooms have no local room doc
+	// and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	pipeline = append(pipeline, roomsEnrichStages(true, true)...)
 	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
 	// not the subscription's _updatedAt. rooms-type only; cross-site / no-message
 	// rooms (null lastMsgAt) fall outside the window.
@@ -349,7 +362,9 @@ func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, targe
 		bson.M{"$match": bson.M{"u.account": account, "name": target, "roomType": "dm"}},
 		bson.M{"$limit": int64(1)}, // (account, name, roomType=dm) is unique — short-circuit defensively
 	}
-	pipeline = append(pipeline, roomsEnrichStages(false)...)
+	// withPreview=false: GetDM never enriches last-message (withLastMsg=false at
+	// the service layer), so the preview would never be surfaced anyway.
+	pipeline = append(pipeline, roomsEnrichStages(false, false)...)
 	pipeline = append(pipeline,
 		bson.M{"$lookup": bson.M{"from": usersCollection, "localField": "name", "foreignField": "account", "as": "hrUser"}},
 		bson.M{"$unwind": bson.M{"path": "$hrUser", "preserveNullAndEmptyArrays": true}},
@@ -383,7 +398,9 @@ func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, targe
 // GetSubscriptionByRoomID returns the requester's deleted-filtered sub for roomID, or (nil, nil); (account, roomId) is unique in practice.
 func (r *SubscriptionRepo) GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": bson.M{"u.account": account, "roomId": roomID}}}
-	pipeline = append(pipeline, roomsEnrichStages(false)...)
+	// withPreview=false: GetByRoomID never enriches last-message (withLastMsg=false
+	// at the service layer), so the preview would never be surfaced anyway.
+	pipeline = append(pipeline, roomsEnrichStages(false, false)...)
 	pipeline = append(pipeline, bson.M{"$limit": int64(1)}) // (roomId, u.account) is unique — short-circuit defensively
 	out, err := r.enriched.Aggregate(ctx, pipeline)
 	if err != nil {
@@ -408,7 +425,8 @@ func activeSubscriptionFilter(account string) bson.M {
 // CountActiveSubscriptions counts the deleted-filtered active set via $count over the enriched pipeline (CountDocuments cannot see the join).
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	// withPreview=false: this path counts rows only, never decodes PreviewMessage.
+	pipeline = append(pipeline, roomsEnrichStages(true, false)...)
 	pipeline = append(pipeline, bson.M{"$count": "n"})
 	cur, err := r.subscriptions.Raw().Aggregate(ctx, pipeline)
 	if err != nil {
@@ -429,7 +447,9 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 // GetActiveSubscriptions returns the deleted-filtered active set used by the unread count, capped by limit.
 func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	// withPreview=false: the unread-count read (up to ~1000 rows) never consumes
+	// the preview — keep the projection precise (CLAUDE.md: always project precisely).
+	pipeline = append(pipeline, roomsEnrichStages(true, false)...)
 	// MongoDB rejects $limit:0 — callers short-circuit zero; stay defensive here.
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
