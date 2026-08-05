@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nkeys"
@@ -31,6 +32,7 @@ type loginCollector struct {
 	failed     int
 	excluded   int
 	saturation int
+	underrun   int
 }
 
 func newLoginCollector() *loginCollector { return &loginCollector{} }
@@ -64,10 +66,23 @@ func (c *loginCollector) RecordSaturation() {
 	c.mu.Unlock()
 }
 
+// RecordUnderrun notes events the pacer could not release on schedule. Also a
+// load-box limit, and distinct from saturation: underrun means the dispatch
+// loop fell behind, saturation means it kept up but the pool was full.
+func (c *loginCollector) RecordUnderrun(n int) {
+	if n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.underrun += n
+	c.mu.Unlock()
+}
+
 func (c *loginCollector) Good() int       { return c.count(func() int { return c.good }) }
 func (c *loginCollector) Failed() int     { return c.count(func() int { return c.failed }) }
 func (c *loginCollector) Excluded() int   { return c.count(func() int { return c.excluded }) }
 func (c *loginCollector) Saturation() int { return c.count(func() int { return c.saturation }) }
+func (c *loginCollector) Underrun() int   { return c.count(func() int { return c.underrun }) }
 
 func (c *loginCollector) count(read func() int) int {
 	c.mu.Lock()
@@ -87,6 +102,7 @@ func buildLoginInputs(targetRPS int, hold time.Duration, c *loginCollector) rpsS
 		AttemptedOps: good + failed,
 		FailedOps:    failed,
 		Saturation:   c.Saturation(),
+		EmitUnderrun: c.Underrun(),
 		Latencies:    []seriesSamples{{Name: "login", Samples: c.Samples()}},
 	}
 }
@@ -214,46 +230,30 @@ func (w *loginWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hold
 }
 
 // drive emits at targetRPS for d, recording every outcome into c.
+//
+// Uses the shared batched pacer rather than a ticker per request: at rates
+// above ~1k the per-request interval falls below what the Go runtime can
+// schedule, and it silently coalesces ticks — the load box would cap the
+// achieved rate long before auth-service did.
 func (w *loginWorkload) drive(ctx context.Context, targetRPS int, d time.Duration, c *loginCollector) error {
 	runCtx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 
-	sem := make(chan struct{}, w.maxInFlt)
-	var wg sync.WaitGroup
-	interval := time.Second / time.Duration(max(1, targetRPS))
-	tick := time.NewTicker(max(interval, time.Microsecond))
-	defer tick.Stop()
-
-	i := 0
-	for {
-		select {
-		case <-runCtx.Done():
-			wg.Wait()
-			// The parent being cancelled is a real abort; the step's own
-			// deadline expiring is the normal end of the window.
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return nil
-		case <-tick.C:
+	var seq atomic.Int64
+	pacedDispatch(runCtx, targetRPS, w.maxInFlt,
+		c.RecordUnderrun,
+		c.RecordSaturation,
+		func(reqCtx context.Context) {
+			i := int(seq.Add(1) - 1)
 			sub := w.fixtures.Subscriptions[i%len(w.fixtures.Subscriptions)]
-			key := w.keys.next(i)
-			i++
-			select {
-			case sem <- struct{}{}:
-			default:
-				// In-flight pool full: record saturation rather than blocking
-				// the pacer, which would silently lower the achieved rate.
-				c.RecordSaturation()
-				continue
-			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-				outcome, elapsed := w.requester.login(runCtx, sub.User.Account, key)
-				c.Record(outcome, elapsed)
-			}()
-		}
+			outcome, elapsed := w.requester.login(reqCtx, sub.User.Account, w.keys.next(i))
+			c.Record(outcome, elapsed)
+		})
+
+	// The parent being cancelled is a real abort; this step's own deadline
+	// expiring is the normal end of the window.
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
+	return nil
 }

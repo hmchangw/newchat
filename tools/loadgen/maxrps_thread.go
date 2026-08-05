@@ -32,6 +32,9 @@ type threadWorkload struct {
 	publisher Publisher
 	canonical string
 	durables  []string
+	// drain is how long RunStep waits after stopping the generator before
+	// counting unanswered publishes. Scaled to the configured latency bound.
+	drain time.Duration
 }
 
 func (w *threadWorkload) Label() string { return "thread" }
@@ -40,7 +43,7 @@ func (w *threadWorkload) Label() string { return "thread" }
 // the publisher. The returned cleanup unsubscribes, shuts the metrics server,
 // and drains NATS. fixtures must already be seeded (rooms/subs/keys in Mongo,
 // parents in Cassandra).
-func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixtures *ThreadFixtures, seed int64) (*threadWorkload, func(), error) {
+func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixtures *ThreadFixtures, seed int64, drain time.Duration) (*threadWorkload, func(), error) {
 	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
@@ -110,6 +113,7 @@ func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixture
 		publisher: newNatsCorePublisher(nc.NatsConn(), InjectFrontdoor, js),
 		canonical: stream.MessagesCanonical(cfg.SiteID).Name,
 		durables:  []string{"message-worker", "broadcast-worker"},
+		drain:     drain,
 	}
 	cleanup := func() {
 		_ = e1Sub.Unsubscribe()
@@ -196,7 +200,7 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	endPending, perr2 := w.snapshotPending(ctx)
 	cancel()
 	wg.Wait()
-	time.Sleep(drainWindow) // let in-flight replies/broadcasts land
+	time.Sleep(w.drain) // let in-flight replies/broadcasts land
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {

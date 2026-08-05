@@ -25,12 +25,21 @@ type msgCounters struct {
 
 var msgErrorReasons = []string{"publish", "marshal", "gatekeeper", "bad_reply", "saturated", "underrun"}
 
-// drainWindow is how long a step waits after the generator stops before it
-// decides a publish went unanswered. It doubles the 1 s bound SLO-2 sets for
-// channel broadcast publication (docs/specs/o11y/o11y-slo.md §1), so an
-// in-flight straggler has room to land and only genuinely dropped deliveries
-// remain in the correlation maps.
-const drainWindow = 2 * time.Second
+// minDrainWindow is the floor for how long a step waits after the generator
+// stops before deciding a publish went unanswered. It doubles the 1 s bound
+// SLO-2 sets for channel broadcast publication (docs/specs/o11y/o11y-slo.md
+// §1), so an in-flight straggler has room to land and only genuinely dropped
+// deliveries remain in the correlation maps.
+const minDrainWindow = 2 * time.Second
+
+// resolveDrainWindow scales the drain to the configured latency bound. A fixed
+// drain is only safe while the bound stays well under it: an operator who
+// raises --slo-p99 above the drain (exploratory runs often do) would otherwise
+// see messages that are still legitimately in flight — and still within the
+// bound they just set — counted as dropped.
+func resolveDrainWindow(sloP99 time.Duration) time.Duration {
+	return max(minDrainWindow, 2*sloP99)
+}
 
 // diffCounters returns end-start for published and each tracked reason.
 func diffCounters(start, end msgCounters) msgCounters {
@@ -106,6 +115,9 @@ type messagesWorkload struct {
 	publisher Publisher
 	canonical string
 	durables  []string
+	// drain is how long RunStep waits after stopping the generator before
+	// counting unanswered publishes. Scaled to the configured latency bound.
+	drain time.Duration
 }
 
 func (w *messagesWorkload) Label() string { return "messages" }
@@ -113,7 +125,7 @@ func (w *messagesWorkload) Label() string { return "messages" }
 // newMessagesWorkload wires NATS, the metrics server, the E1/E2 subscriptions,
 // and the publisher. The returned cleanup unsubscribes, shuts the metrics server
 // and drains NATS.
-func newMessagesWorkload(ctx context.Context, cfg *config, preset *Preset, inject InjectMode, seed int64) (*messagesWorkload, func(), error) {
+func newMessagesWorkload(ctx context.Context, cfg *config, preset *Preset, inject InjectMode, seed int64, drain time.Duration) (*messagesWorkload, func(), error) {
 	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
@@ -183,6 +195,7 @@ func newMessagesWorkload(ctx context.Context, cfg *config, preset *Preset, injec
 		publisher: newNatsCorePublisher(nc.NatsConn(), inject, js),
 		canonical: stream.MessagesCanonical(cfg.SiteID).Name,
 		durables:  []string{"message-worker", "broadcast-worker"},
+		drain:     drain,
 	}
 	cleanup := func() {
 		_ = e1Sub.Unsubscribe()
@@ -266,7 +279,7 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	endPending, perr2 := w.snapshotPending(ctx)
 	cancel()
 	wg.Wait()
-	time.Sleep(drainWindow) // let in-flight replies/broadcasts land
+	time.Sleep(w.drain) // let in-flight replies/broadcasts land
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {

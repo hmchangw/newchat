@@ -71,6 +71,19 @@ func TestBuildLoginInputs_SaturationIsNotFailure(t *testing.T) {
 	assert.Equal(t, 1, in.AttemptedOps)
 }
 
+// Events the pacer could not release on schedule are a load-box limit. They
+// must reach EmitUnderrun (which explains an INCONCLUSIVE) and never FailedOps.
+func TestBuildLoginInputs_UnderrunIsNotFailure(t *testing.T) {
+	c := newLoginCollector()
+	c.Record(outcomeGood, 10*time.Millisecond)
+	c.RecordUnderrun(17)
+
+	in := buildLoginInputs(100, time.Second, c)
+
+	assert.Equal(t, 17, in.EmitUnderrun)
+	assert.Equal(t, 0, in.FailedOps)
+}
+
 func TestDefaultSteps_LoginRampsLowerThanMessages(t *testing.T) {
 	// Login happens once per session, not per message; ramping it like the
 	// message path would just measure JWT signing throughput.
