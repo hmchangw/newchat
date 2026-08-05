@@ -394,8 +394,9 @@ type RoomRenamedRoomEvent struct {
 	RenamedAt time.Time     `json:"renamedAt" bson:"renamedAt"`
 }
 
-// RoomRestrictedRoomEvent is published when a channel's restricted/externalAccess flags change;
-// OwnerAccount is set only on the unrestricted→restricted transition. Drives the client's subscription update.
+// RoomRestrictedRoomEvent is published when a channel's restricted/externalAccess flags change.
+// OwnerAccount carries whatever the caller designated — set on any restricting call, including
+// an owner rotation on an already-restricted room. Drives the client's subscription update.
 type RoomRestrictedRoomEvent struct {
 	Type           RoomEventType `json:"type" bson:"type"`
 	RoomID         string        `json:"roomId" bson:"roomId"`

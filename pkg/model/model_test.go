@@ -4000,13 +4000,6 @@ func TestRoomRestrictedRoomEventJSON(t *testing.T) {
 	roundTrip(t, &e, &model.RoomRestrictedRoomEvent{})
 }
 
-func TestRoomRestrictedSysDataJSON(t *testing.T) {
-	d := model.RoomRestrictedSysData{
-		Restricted: true, ExternalAccess: false, ByAccount: "admin1", OwnerAccount: "alice",
-	}
-	roundTrip(t, &d, &model.RoomRestrictedSysData{})
-}
-
 func TestRoomRenamedInboxPayloadJSON(t *testing.T) {
 	p := model.RoomRenamedInboxPayload{RoomID: "r1", NewName: "x", Timestamp: 1700000000000}
 	roundTrip(t, &p, &model.RoomRenamedInboxPayload{})

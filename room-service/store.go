@@ -237,9 +237,10 @@ type RoomStore interface {
 	// ApplySubscriptionRestriction writes the {restricted, externalAccess} denorm
 	// flags to every subscription of the room. When restricted=true and
 	// ownerAccount is non-empty, an aggregation-pipeline $cond also rewrites
-	// roles so only ownerAccount holds RoleOwner. Returns ErrOwnerNotSubscribed
-	// when ownerAccount has no active subscription in the room (the rewrite
-	// would leave zero owners). Stamps restrictUpdatedAt so the origin doc
+	// roles so only ownerAccount holds RoleOwner. An empty ownerAccount writes
+	// the flags alone and leaves every member's roles as they were. Returns
+	// ErrOwnerNotSubscribed when ownerAccount has no active subscription in the
+	// room (the rewrite would leave zero owners). Stamps restrictUpdatedAt so the origin doc
 	// carries the same high-water mark the federated event publishes (inbox-worker
 	// guards remote applies against it).
 	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error

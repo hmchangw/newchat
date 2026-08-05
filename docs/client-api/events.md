@@ -724,7 +724,14 @@ Flat event. Emitted when a channel's `restricted` / `externalAccess` flags chang
 This is a **server-internal admin RPC** — not a client-callable request. Clients receive
 the event on the same room stream they already subscribe to.
 
-**Subject:** `chat.room.{roomID}.event`.
+This is a **state update, not a message**: apply it to the local subscription and render
+nothing. No system message accompanies it, so a restriction change never appears in the room
+timeline and never notifies.
+
+**Subject:** `chat.room.{roomID}.event` — or `chat.local.room.{roomID}.event` for a
+same-site room, depending on the deployment's room-subject routing mode (see
+[client-api.md §Subscriptions](../client-api.md#2-nats-subjects)). Subscribe to whichever
+subject you already use for that room's messages.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -734,9 +741,23 @@ the event on the same room stream they already subscribe to.
 | `timestamp` | number | Publish time (UTC ms). |
 | `restricted` | boolean | The new restricted state. |
 | `externalAccess` | boolean | The new external-access state. |
-| `ownerAccount` | string | Optional. Omitted unless this was an unrestricted→restricted transition with a designated owner. |
+| `ownerAccount` | string | Optional. The account designated as sole owner by this call. Present on any restricting call that named one — including an owner rotation on an already-restricted room; omitted when none was sent. |
 | `byAccount` | string | The admin who made the change. |
 | `changedAt` | string | ISO-8601 timestamp of when the change was applied. |
+
+```json
+{
+  "type": "room_restricted",
+  "roomId": "01970a4f8c2d7c9aQ",
+  "siteId": "siteA",
+  "timestamp": 1778054483000,
+  "restricted": true,
+  "externalAccess": true,
+  "ownerAccount": "alice",
+  "byAccount": "p_admin",
+  "changedAt": "2026-08-03T09:41:23Z"
+}
+```
 
 ---
 

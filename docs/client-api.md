@@ -1612,12 +1612,12 @@ When the synchronous reply is an error envelope, the request was rejected before
 > **Server-internal — not a client RPC.** The "Set Room Restricted" RPC (formerly "Set Room Visibility") is admin-only and lives outside the client API surface. It is a **synchronous** server-to-server NATS request/reply on `chat.server.request.room.{siteID}.restricted`. Admin tooling sends a `RoomRestrictedRequest` (`pkg/model/room.go`) carrying:
 >
 > - `roomId` — channel room to mutate
-> - `account` — the admin caller (used for the sys-message authorship + audit log)
-> - `restricted` — whether the room is members-only; on the `false → true` transition `ownerAccount` is required and that account is promoted to sole owner
+> - `account` — the admin caller; carried as `byAccount` on the room event and recorded in room-service's log line
+> - `restricted` — whether the room is members-only
 > - `externalAccess` — whether the room is reachable from outside the company network (e.g. internet-side / off-VPN clients). This is a network-access gate, NOT a cross-site federation flag
-> - `ownerAccount` — required on the unrestricted-to-restricted transition
+> - `ownerAccount` — **required** on the `false → true` transition. Whenever it is supplied together with `restricted: true` — transition or not — that account is promoted to **sole** owner and every other member is reset to plain member, so an already-restricted room can have its owner rotated. Omit it to change the flags without touching anyone's roles
 >
-> room-service does the Mongo writes, emits a single `OutboxEvent` on the OUTBOX stream (one target per remote federated site), and replies `{"status":"ok","requestId":"…"}` once the work is committed. `outbox-worker` forwards the cross-site `room_restricted` event (at-least-once) to each remote site's `chat.inbox.{remoteSiteID}.external.room_restricted`. No `AsyncJobResult` is emitted — the reply *is* the result.
+> room-service does the Mongo writes, emits one `OutboxEvent` on the OUTBOX stream per remote federated site, and replies `{"status":"ok","requestId":"…"}` once the work is committed. `outbox-worker` forwards the cross-site `room_restricted` event (at-least-once) to each remote site's `chat.inbox.{remoteSiteID}.external.room_restricted`. No `AsyncJobResult` is emitted — the reply *is* the result.
 >
 > Clients learn about the change via a **`RoomRestrictedRoomEvent`** (`type: "room_restricted"`) on the same `chat.room.{roomID}.event` stream they already subscribe to for chat messages. Like `RoomRenamedRoomEvent`, it's a flat struct with no zero-valued envelope fields:
 >
@@ -1629,7 +1629,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 > | `timestamp` | number | Publish time (UTC ms). |
 > | `restricted` | bool | The new restricted state. |
 > | `externalAccess` | bool | The new external-access state. |
-> | `ownerAccount` | string | Omitted unless this was an unrestricted→restricted transition with a designated owner. |
+> | `ownerAccount` | string | The account designated sole owner by this call. Present on any restricting call that named one, including an owner rotation on an already-restricted room; omitted when none was sent. |
 > | `byAccount` | string | The admin who made the change. |
 > | `changedAt` | string | ISO-8601 timestamp of when the change was applied. |
 
@@ -2706,7 +2706,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `visibleTo` | string | Optional. Visibility scope. |
 | `reactions` | map<emoji, [ReactionUser](#reactionuser)[]> | Optional. Omitted when absent; `{}` when present but empty. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
-| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`, `"room_restricted"`. For all six, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames / restricted changes, the leaving user for self-leave). |
+| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`. For all five, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames, the leaving user for self-leave). `"room_restricted"` also appears on historical messages: it is no longer produced — a restriction change emits a [room event](client-api/events.md#room_restricted-roomrestrictedroomevent) instead — but rows written before that change remain readable. |
 | `sysMsgData` | string | Optional. Base64-encoded JSON payload for system messages; shape depends on `type` (see [System-message `sysMsgData` payloads](#system-message-sysmsgdata-payloads)). |
 | `siteId` | string | Optional. The site that owns the message. |
 | `editedAt` | string | Optional. RFC 3339. Set after an edit. |
@@ -7062,6 +7062,69 @@ Lets the logged-in admin change their own password. Verifies `oldPassword` again
 #### Triggered events — success path
 
 `None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+### 9.12 Set room on-duty
+
+**Endpoint:** `POST /v1/admin/rooms/:roomId/onduty`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Toggles a channel room's on-duty state. On-duty staff work off the company network, so `onDuty: true` narrows who may change the roster (`restricted` — only owners may add members) and permits the connection from outside (`externalAccess`); `onDuty: false` clears both. No room or subscription field named `onDuty` exists — the parameter maps onto those two flags, which are owned by room-service.
+
+**Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything. No audit row is written — room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, is the only durable server-side record.
+
+Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to plain member. Turning duty **off** sends no owner, so roles are left exactly as they are.
+
+Channel rooms only. The caller must also hold the platform `admin` user role, which room-service verifies independently of the session check.
+
+The member floor and the require-an-owner rule apply **only to the unrestricted → restricted transition**. Calling with `onDuty: true` against a room that is *already* restricted rotates the owner — the new account is still validated as a member and still becomes sole owner — but the `RESTRICTED_ROOM_MIN_MEMBERS` floor (default 5) is not re-checked.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `onDuty` | boolean | yes | `true` sets `restricted` and `externalAccess`; `false` clears both. An absent field is rejected; an explicit `false` is accepted. |
+| `ownerAccount` | string | when `onDuty` is `true` | Account that becomes the room's sole owner. Must be a member of the room. Surrounding whitespace is trimmed, and a whitespace-only value counts as absent. Ignored when `onDuty` is `false`. |
+
+```json
+{ "onDuty": true, "ownerAccount": "alice" }
+```
+
+#### Success response
+
+`HTTP 200`
+
+```json
+{ "status": "ok" }
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | `onDuty` absent, not a boolean, body not valid JSON, or `ownerAccount` absent/blank while `onDuty` is `true`. |
+| 400 | `bad_request` | `non_channel_operation` | Target room is not a channel. |
+| 400 | `bad_request` | — | `ownerAccount` is not a member of the room. |
+| 401 | `unauthenticated` | `invalid_token` | Bearer token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Session lacks the `admin` role or its `siteId` does not match. |
+| 403 | `forbidden` | — | Caller does not hold the platform `admin` user role (raised by room-service). |
+| 404 | `not_found` | — | Room not found. |
+| 409 | `conflict` | — | Room has fewer members than `RESTRICTED_ROOM_MIN_MEMBERS`. Only on the unrestricted → restricted transition. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+| 503 | `unavailable` | — | room-service did not answer within `ROOM_RPC_TIMEOUT`, no responder was reachable, the client disconnected mid-call, room-service shed the request under load, or admin-service has no room-service client configured. The toggle is idempotent and may have applied — retry is safe. |
+
+#### Triggered events — success path
+
+[`room_restricted`](client-api/events.md#room_restricted-roomrestrictedroomevent) — a flat room event on the room's event subject carrying the new `restricted` / `externalAccess` values, the designated `ownerAccount`, and the acting admin. It is a state update, **not** a message: clients apply it to their local subscription and render nothing.
+
+No system message is published, so nothing appears in the room timeline and no push notification is sent.
+
+The event is published last, after every step that can still fail the call, so a non-2xx response means no event went out.
+
+For a room with members homed on other sites, room-service still fans the state change out to each remote site's inbox so their subscription copies stay in step. That is a server-to-server sync, not a client-visible event.
 
 #### Triggered events — error path
 

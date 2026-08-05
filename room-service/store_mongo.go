@@ -1709,8 +1709,9 @@ func (s *MongoStore) UpdateRoomVisibility(ctx context.Context, roomID string, re
 // flags to every subscription of the room. When restricted=true and ownerAccount
 // is non-empty, an aggregation-pipeline $cond also rewrites roles so only
 // ownerAccount holds RoleOwner — atomically, so the restrict transition cannot
-// land in a zero-owner state. Returns ErrOwnerNotSubscribed when ownerAccount
-// has no active subscription in the room.
+// land in a zero-owner state. An empty ownerAccount writes the flags alone and
+// leaves roles untouched. Returns ErrOwnerNotSubscribed when ownerAccount has no
+// active subscription in the room.
 func (s *MongoStore) ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error {
 	filter := bson.M{"roomId": roomID}
 

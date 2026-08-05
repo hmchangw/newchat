@@ -19,16 +19,20 @@ import (
 	"github.com/hmchangw/chat/pkg/session"
 )
 
-// Handler wires the AdminStore, session.Store, and Config into HTTP handler methods.
+// Handler wires the AdminStore, session.Store, Config, and room-service RPC
+// client into HTTP handler methods.
 type Handler struct {
 	store    AdminStore
 	sessions session.Store
 	cfg      Config
+	roomRPC  roomRequester
 }
 
-// newHandler constructs a Handler with the given stores and config.
-func newHandler(store AdminStore, sessions session.Store, cfg Config) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{store: store, sessions: sessions, cfg: cfg}
+// newHandler constructs a Handler with the given stores, config, and room RPC.
+// A nil rpc is tolerated so tests that never touch a room route need not build
+// one; the duty handler answers 503 rather than dereferencing it.
+func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	return &Handler{store: store, sessions: sessions, cfg: cfg, roomRPC: rpc}
 }
 
 // nowMillis returns the current UTC time in unix milliseconds. Injected as a
