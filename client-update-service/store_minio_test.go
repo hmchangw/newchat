@@ -104,6 +104,7 @@ func TestMinioVersionStore_Put_WrapsError(t *testing.T) {
 	s := newMinioVersionStore(f, "bkt", time.Second)
 	err := s.Put(context.Background(), "k", strings.NewReader("x"), 1, "application/octet-stream")
 	require.Error(t, err)
+	assert.ErrorIs(t, err, f.putErr, "Put must preserve the underlying cause in the chain")
 	assert.Contains(t, err.Error(), "put object bkt/k")
 }
 
@@ -118,6 +119,7 @@ func TestMinioVersionStore_Open_GetObjectError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, rc)
 	assert.Equal(t, blobInfo{}, info)
+	assert.ErrorIs(t, err, f.getErr, "Open must preserve the underlying GetObject cause")
 	assert.Contains(t, err.Error(), "get object bkt/k")
 }
 

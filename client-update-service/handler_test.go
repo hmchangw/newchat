@@ -87,13 +87,27 @@ func TestHandleHealth(t *testing.T) {
 	assert.JSONEq(t, `{"status":"ok"}`, w.Body.String())
 }
 
-// TestRoutesRegistered proves the three routes are wired.
+// TestRoutesRegistered proves all three method+path pairs are wired, so removing
+// any one route fails the test.
 func TestRoutesRegistered(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))
 	r := gin.New()
 	registerRoutes(r, h)
 
+	got := map[string]bool{}
+	for _, ri := range r.Routes() {
+		got[ri.Method+" "+ri.Path] = true
+	}
+	for _, want := range []string{
+		"GET /healthz",
+		"POST /api/v1/version",
+		"GET /api/v1/version/:fileName",
+	} {
+		assert.True(t, got[want], "route %q must be registered", want)
+	}
+
+	// And the health route actually responds.
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	assert.Equal(t, http.StatusOK, w.Code)

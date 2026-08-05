@@ -42,7 +42,9 @@ func TestIntegration_StoreRoundTrip(t *testing.T) {
 	rc, info, err := store.Open(ctx, objectKey("app.yaml"))
 	require.NoError(t, err)
 	defer rc.Close()
-	body, err := io.ReadAll(rc)
+	// Read exactly info.Size bytes (bounded-read contract), not io.ReadAll.
+	body := make([]byte, info.Size)
+	_, err = io.ReadFull(rc, body)
 	require.NoError(t, err)
 	assert.Equal(t, "version: 1", string(body))
 	assert.Equal(t, int64(10), info.Size)
@@ -62,12 +64,14 @@ func TestIntegration_EnsureBucketCreatesAbsent(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, ensureBucket(ctx, client, name))
+	t.Cleanup(func() {
+		assert.NoError(t, client.RemoveBucket(context.Background(), name))
+	})
 	exists, err := client.BucketExists(ctx, name)
 	require.NoError(t, err)
 	assert.True(t, exists)
 	// Idempotent second call.
 	require.NoError(t, ensureBucket(ctx, client, name))
-	_ = client.RemoveBucket(ctx, name)
 }
 
 func TestIntegration_DownloadServesFromCacheOnSecondHit(t *testing.T) {

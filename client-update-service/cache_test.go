@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +99,23 @@ func TestBlobCache_LoadCacheable_NonCacheableNotStored(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestBlobCache_LoadCacheable_InvalidatedDuringFillNotStored simulates an upload
+// (remove) landing while a download's loader is mid-flight: the loaded blob must
+// NOT be cached, so a stale artifact can't survive the invalidation until TTL.
+func TestBlobCache_LoadCacheable_InvalidatedDuringFillNotStored(t *testing.T) {
+	c := newBlobCache(4, time.Hour, 1024)
+	blob, cacheable, err := c.loadCacheable("k", func() (cachedBlob, bool, error) {
+		// An upload invalidates the key while we are "loading" the old body.
+		c.remove("k")
+		return cachedBlob{body: []byte("stale"), contentType: "x"}, true, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, cacheable, "the caller still receives the loaded blob")
+	assert.Equal(t, []byte("stale"), blob.body)
+	_, ok := c.get("k")
+	assert.False(t, ok, "a fill invalidated mid-flight must not be stored")
+}
+
 func TestBlobCache_LoadCacheable_PropagatesError(t *testing.T) {
 	c := newBlobCache(4, time.Hour, 1024)
 	sentinel := errors.New("boom")
@@ -109,35 +127,42 @@ func TestBlobCache_LoadCacheable_PropagatesError(t *testing.T) {
 
 func TestBlobCache_LoadCacheable_SingleflightCollapses(t *testing.T) {
 	c := newBlobCache(4, time.Hour, 1024)
-	var calls int
-	var mu sync.Mutex
+	var calls int32
+	entered := make(chan struct{}) // closed once, when the first loader is in-flight
 	release := make(chan struct{})
-	start := make(chan struct{})
+	var once sync.Once
+
+	loader := func() (cachedBlob, bool, error) {
+		atomic.AddInt32(&calls, 1)
+		once.Do(func() { close(entered) })
+		<-release // hold the singleflight call open so peers coalesce or hit the cache
+		return cachedBlob{body: []byte("v")}, true, nil
+	}
 
 	const n = 8
 	var wg sync.WaitGroup
-	wg.Add(n)
-	for i := 0; i < n; i++ {
+
+	// First caller occupies the in-flight singleflight slot for key "k".
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _, err := c.loadCacheable("k", loader)
+		assert.NoError(t, err)
+	}()
+	<-entered // deterministic: the first loader is now inside singleflight
+
+	// Peers launched now either coalesce onto the in-flight call or, once it
+	// completes and fills the cache, hit the cache — either way loader stays at 1.
+	for i := 0; i < n-1; i++ {
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			<-start
-			_, _, err := c.loadCacheable("k", func() (cachedBlob, bool, error) {
-				mu.Lock()
-				calls++
-				mu.Unlock()
-				<-release // hold the flight open so peers coalesce
-				return cachedBlob{body: []byte("v")}, true, nil
-			})
+			_, _, err := c.loadCacheable("k", loader)
 			assert.NoError(t, err)
 		}()
 	}
-	close(start)
-	// allow goroutines to converge on the in-flight call, then release.
-	time.Sleep(20 * time.Millisecond)
 	close(release)
 	wg.Wait()
 
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Equal(t, 1, calls, "singleflight must collapse concurrent misses into one loader call")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "singleflight must collapse concurrent misses into one loader call")
 }

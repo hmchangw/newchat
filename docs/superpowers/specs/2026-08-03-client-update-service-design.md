@@ -312,3 +312,9 @@ Client-facing HTTP endpoints → update in the same PR (CLAUDE.md §5):
   *If these artifacts are security-sensitive, revisit before release.*
 - Artifact listing / delete / GC endpoints; checksums/signatures; versioning &
   promotion; cross-site federation — all out of scope.
+- **Two-file upload is not atomic.** `configFile` and `executeFile` are two
+  independent MinIO objects; S3/MinIO has no cross-object transaction, and rolling
+  back a partial write could destroy a valid prior version. A failed second write
+  returns `500`, and the client retries the (idempotent) pair. A manifest/versioned
+  publish that makes the pair atomically swappable is a deliberate follow-up, not
+  a v1 requirement.

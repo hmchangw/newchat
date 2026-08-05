@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,31 @@ func TestHandleUpload_FallbackContentTypeWhenPartHeaderAbsent(t *testing.T) {
 	c, w := uploadCtx(t, body, ct)
 	h.HandleUpload(c)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleUpload_InvalidName_400(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))
+	// "e..vil.yaml" survives multipart's filepath.Base but fails validFileName ("..").
+	body, ct := multipartBody(t, map[string]fileSpec{
+		"configFile":  {name: "e..vil.yaml", content: "c"},
+		"executeFile": {name: "app.exe", content: "bin"},
+	})
+	c, w := uploadCtx(t, body, ct)
+	h.HandleUpload(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleUpload_EqualNames_400(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))
+	body, ct := multipartBody(t, map[string]fileSpec{
+		"configFile":  {name: "same.yaml", content: "c"},
+		"executeFile": {name: "same.yaml", content: "bin"},
+	})
+	c, w := uploadCtx(t, body, ct)
+	h.HandleUpload(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestHandleUpload_MissingConfigFile_400(t *testing.T) {
@@ -209,6 +235,21 @@ func TestHandleDownload_MissTooLarge_StreamsUncached(t *testing.T) {
 	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="big.exe"`)
 	_, ok := cache.get(objectKey("big.exe"))
 	assert.False(t, ok, "oversized object must not be cached")
+}
+
+func TestHandleDownload_DisabledCache_StreamsSingleOpen(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	// Disabled cache must stream with exactly one Open — no probe+re-open, no buffering.
+	store.EXPECT().Open(gomock.Any(), objectKey("app.yaml")).
+		Return(rc("hello"), blobInfo{Size: 5, ContentType: "application/x-yaml"}, nil).Times(1)
+	h := NewHandler(store, newBlobCache(0, time.Hour, 1024)) // disabled
+	c, w := downloadCtx(t, "app.yaml")
+	h.HandleDownload(c)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "hello", w.Body.String())
+	assert.Equal(t, "application/x-yaml", w.Header().Get("Content-Type"))
+	assert.Equal(t, "5", w.Header().Get("Content-Length"))
 }
 
 func TestHandleDownload_NotFound_404(t *testing.T) {

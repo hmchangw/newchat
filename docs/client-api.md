@@ -7657,4 +7657,14 @@ GET /api/v1/version/app.exe    -> 200 (application/octet-stream)
 
 **Auth:** none
 
-Liveness probe. Always `200 {"status":"ok"}`.
+Liveness probe.
+
+#### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+
+```json
+{ "status": "ok" }
+```

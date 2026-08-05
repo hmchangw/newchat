@@ -56,6 +56,17 @@ func (h *Handler) HandleUpload(c *gin.Context) {
 		errhttp.Write(ctx, c, errcode.BadRequest("uploaded files must not be empty"))
 		return
 	}
+	// Validate names on the way in, symmetric with HandleDownload: a name that
+	// fails validFileName (separators, traversal) could be stored but never fetched.
+	if !validFileName(cfgFile.Filename) || !validFileName(exeFile.Filename) {
+		errhttp.Write(ctx, c, errcode.BadRequest("invalid file name"))
+		return
+	}
+	// Equal names would make the second Put clobber the first object.
+	if cfgFile.Filename == exeFile.Filename {
+		errhttp.Write(ctx, c, errcode.BadRequest("configFile and executeFile must have different names"))
+		return
+	}
 	if !hasYAMLExt(cfgFile.Filename) {
 		errhttp.Write(ctx, c, errcode.BadRequest("configFile must be a .yaml or .yml file"))
 		return
@@ -80,7 +91,9 @@ func (h *Handler) storeFormFile(ctx context.Context, fh *multipart.FileHeader, f
 	if err != nil {
 		return fmt.Errorf("open upload %q: %w", fh.Filename, err)
 	}
-	defer f.Close()
+	// Close error is not actionable here: the part is read-only and Put already
+	// consumed (or errored on) the body, so discard it explicitly.
+	defer func() { _ = f.Close() }()
 	contentType := fh.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = fallbackContentType
@@ -107,6 +120,13 @@ func (h *Handler) HandleDownload(c *gin.Context) {
 		return
 	}
 	key := objectKey(fileName)
+
+	// A disabled cache streams straight from the store — never buffer a whole
+	// object just to have the cache drop it.
+	if !h.cache.enabled() {
+		h.streamObject(ctx, c, fileName, key)
+		return
+	}
 
 	if blob, ok := h.cache.get(key); ok {
 		serveBytes(c, fileName, blob)
