@@ -535,3 +535,96 @@ git push -u origin claude/load-history-cache-feasibility-m1c9c9
 **Placeholder scan:** Task 1's implementation is a sketch (marked as such) to be completed test-first; every other task shows concrete code/edits with exact file:line anchors and an expected command result. Compose edits (Task 7) instruct reading the file first because indentation/service-name vary.
 
 **Risk notes:** (1) `service.New` currently binds one value to both reader and writer — Task 5 splits them via an Option to inject the caching reader while the writer stays raw (both still `*cassrepo.Repository` underneath, so `MessageWriter` is unaffected). (2) The gen counter is unbounded-lifetime by design (a per-room namespace, not data) — negligible key growth, one small key per active room. (3) A very large sealed bucket produces a large cached page, but pages are `pageSize`-bounded (≤100 rows), so entry size is bounded regardless of bucket density.
+
+---
+
+# Appendix: Per-Bucket Cache — Alternative Architecture (design only, not yet planned)
+
+> This is a **different** caching architecture from the page-cache above, not a layer on top of it. It is written up so we can weigh it against the page-cache (Phase 1) + hot-first-page (Phase 2) before committing. It is **not** part of the Phase 1 task plan.
+
+## Principle
+
+Put the cache boundary exactly where the **mutability** boundary is. Messages only ever land in the **current** bucket; every **sealed** bucket (strictly older than `sizer.Of(now)`) is immutable except for edits/deletes/reactions of its own rows. So cache **per sealed bucket**, never cache the current bucket, and normal message flow invalidates nothing cached. The expensive part of a sparse-room read — walking dozens of buckets to gather a page — is then computed once per bucket and reused forever, across every read shape and every user.
+
+## Contrast with the page-cache in one line
+
+- **Page-cache (Phase 1/2):** one entry = one whole page result, keyed by `(room, before, floor, since, pageSize, gen)`. A new message (Phase 2) invalidates the entry, discarding the sealed-bucket walk baked into it; reuse is limited to byte-identical requests.
+- **Per-bucket:** one entry = one sealed bucket's full contents, keyed by `(room, bucket)`. A new message touches only the (uncached) current bucket; every read that walks a bucket reuses it. The 60-bucket walk in the "latest 20 across 6 months" case becomes **1 live query + ~59 cache hits**, and stays that way after each new message instead of re-walking.
+
+## Seam — inside `cassrepo`, not a `MessageReader` decorator
+
+The page-cache lives *above* `cassrepo` (a `MessageReader` decorator). The per-bucket cache lives *inside* `cassrepo`'s walker, because the reuse unit is the per-bucket query that `fillPage` (`internal/cassrepo/walker.go`) already issues one-at-a-time. `NewRepository` gains an optional bucket-cache dependency (Valkey client + L1 LRU + the `msgbucket.Sizer` it already holds); when absent, the walker behaves exactly as today.
+
+## What's cached
+
+- **Key:** `hist:{roomID}:bkt:{bucketStartMs}` (hash-tagged on `{roomID}`).
+- **Value:** gob-encoded, fully-decrypted `[]models.Message` for that `(room, bucket)` partition, in the table's clustering order (`created_at DESC, message_id DESC`) — i.e. the **complete** sealed bucket, not a page slice.
+- **Codec:** gob, for the same reason as the page-cache (the `Reactions` struct-keyed map is not JSON-round-trippable).
+
+## Why LoadHistory needs **no cursor-format change** (the key simplification)
+
+The intra-bucket resume cursor (`bucket + gocql pageState`) looked like the scary part of this design. It isn't, for the `LoadHistory` methods:
+
+`LoadHistory` is timestamp-anchored and **discards** `fillPage`'s `NextCursor`/`HasNext` — `LoadHistoryResponse` has neither field. The client continues by re-sending `before = oldest returned message's createdAt`, so every call re-walks fresh from `sizer.Of(before)` with a `created_at < before` filter. A page that fills mid-bucket is continued by the *next* timestamp-anchored call, never by a mid-bucket cursor. Therefore the per-bucket path for the DESC/`LoadHistory` methods needs only:
+
+> for each **sealed** bucket in the walk, fetch the full cached bucket, apply the same predicate the live `queryFn` would (`created_at < before` on the first bucket; `created_at > since` on the `since`/floor bucket for `BetweenDesc`) **in memory** on the sorted slice, and take up to `remaining` rows.
+
+No offset cursor, no wire-format change. (The ASC/forward `GetMessagesAfter` path — `LoadNextMessages` — *does* round-trip a cursor and would need an offset-based resume for cached buckets; that is Phase-3 scope and is the only place the cursor format is touched.)
+
+## Walker integration sketch
+
+Refactor `fillPage`'s per-bucket step (today: always `queryFn(bucket).Iter()` + `scan`) into a branch:
+
+```
+for each bucket in the walk (DESC), until pageSize or maxBuckets or floor:
+    if bucket >= currentBucket:               // hot (or the boundary) → live, as today
+        rows = queryFn(bucket, firstBucket).Iter() ; scan up to remaining
+    else:                                     // sealed → cache
+        full = bucketCache.Get(room, bucket)  // L1 → L2 → load full bucket + populate
+        rows = filterInMemory(full, firstBucket?created_at<before, floorBucket?created_at>since)
+        take up to remaining
+    accumulate; advance bucket
+```
+
+- `bucketCache.Get` loads the whole partition on a miss (`SELECT … WHERE room_id=? AND bucket=?`, no `created_at` bound, no page size) and caches it; hits skip Cassandra entirely.
+- `filterInMemory` is a bounded slice op on the already-sorted bucket (binary-search the `created_at` bounds, then slice).
+- Copy-safety: `Get` returns a freshly gob-decoded slice per call, so the in-memory filter and the service layer's later in-place redaction never mutate the cached blob.
+
+## Invalidation — simpler than the page-cache
+
+- **New message → no invalidation.** It lands in the current bucket, which is never cached. This removes the entire "history-service doesn't author `created`" problem that makes Phase 2 awkward — the tip is always live.
+- **Edit / delete / react / pin of an existing message →** the mutation handler already holds the message, so it knows `msg.CreatedAt`; bust exactly one key: `DEL hist:{roomID}:bkt:{sizer.Of(msg.CreatedAt)}`. **One key per bucket ⇒ a plain `DEL`, no generation counter** (the gen counter existed only because page keys couldn't be enumerated). These mutations are authored by history-service, so the bust is a synchronous write-site call, same 8 sites as Phase 1.
+- **Cross-site / federated edits** (applied by `message-worker`, not history-service): a short bucket TTL backstops, or the optional canonical-event consumer busts the bucket — identical trade-off to the page-cache.
+
+## Bucket-size guard (the one real new risk)
+
+A *dense* room's 72h bucket can hold thousands of rows; caching it whole is memory-heavy. Guard: on a full-bucket load, if the row/byte count exceeds a configurable cap (`MESSAGE_BUCKET_CACHE_MAX_ROWS`), **don't cache it — serve live**. This aligns cost with value:
+
+- A dense bucket already returns a full page in **one** query, so per-bucket caching saves little there anyway — skipping it costs almost nothing.
+- The value of per-bucket caching concentrates on **sparse** buckets (few rows each, many buckets walked), which are tiny to cache.
+
+So the guard sheds exactly the low-value/high-cost entries. (The page-cache has no equivalent risk because its entries are `pageSize`-bounded at ≤100 rows.)
+
+## Comparison
+
+| | Page-cache — Phase 1 (shipped) | Page-cache — Phase 2 | Per-bucket |
+|---|---|---|---|
+| Cache unit | whole page result | whole latest page | one sealed bucket |
+| Seam | `MessageReader` decorator (above cassrepo) | same | inside `cassrepo` walker |
+| Caches the hot first page of an active room | no | yes | no (current bucket always live) — but the sealed remainder of that page is cached |
+| New-message invalidation | n/a (hot skipped) | **required** (needs consumer/TTL; history-service can't author `created`) | **none needed** |
+| Edit/delete blast radius | room (gen bump) | room | **one bucket** (`DEL`) |
+| Reuse across read shapes / page sizes / scroll depth | identical requests only | latest page only | **any read that walks the bucket** |
+| Cost of the "latest 20 across 6 months" read after a new message | re-walk ~60 buckets | re-walk ~60 buckets | **1 live query + ~59 cache hits** |
+| Invalidation machinery | per-room generation counter | generation + `created` consumer | plain per-bucket `DEL`, no counter |
+| New risk | — | staleness window on the tip | oversized dense buckets → size guard |
+| Invasiveness | low (decorator) | low–medium | **medium** (walker refactor in cassrepo) |
+
+## When to prefer which
+
+- **Sparse rooms, long bucket walks, deep scrolling** (the 6-month case): per-bucket wins decisively — it is the only design that stops re-paying the multi-bucket walk after every write, and it keeps the tip fresh with no `created`-invalidation.
+- **Dense rooms, latest-page-only, little scrolling:** the walk is already ~1 bucket and cheap; per-bucket's advantage shrinks and the page-cache's simplicity (and Phase 2's hot-page hit) may be worth more. The size guard means per-bucket simply declines these buckets.
+
+## Sequencing recommendation
+
+Phase 1 (shipped) already delivers correct, broad sealed-history caching via the decorator. Rather than build Phase 2 (which adds the awkward `created`-invalidation path for a conditional win), the higher-leverage next step for the sparse-room workload is **per-bucket**, because it (a) subsumes what Phase 2 would cache — the sealed portion of an active room's first page — while keeping the tip live, (b) removes the `created`-invalidation problem entirely, and (c) attacks the bucket-walk cost head-on. The cost is a `cassrepo` walker refactor rather than a decorator. If we go this way, the Phase 1 decorator can either remain as a coarse outer layer or be retired in favor of the per-bucket layer once the latter covers the same reads. A separate task plan should be written before implementing.
