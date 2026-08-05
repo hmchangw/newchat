@@ -35,6 +35,17 @@ func (r *Repository) loadSealedBucket(ctx context.Context, roomID string, bucket
 	return rows, false, nil
 }
 
+// bustBucket invalidates the per-bucket cache entry for the message's bucket
+// after a mutation. No-op when caching is disabled. Callers pass the createdAt
+// of the row whose messages_by_room partition changed (the message itself, or a
+// thread parent whose tcount was recomputed).
+func (r *Repository) bustBucket(ctx context.Context, roomID string, createdAt time.Time) {
+	if r.bucketCache == nil {
+		return
+	}
+	r.bucketCache.Bust(ctx, roomID, r.bucket.Of(createdAt))
+}
+
 // sliceBounded applies, on a created_at-DESC slice, the in-memory equivalents of
 // the walk's row predicates and caps the result at limit:
 //   - before (exclusive upper): drop rows with created_at >= *before — mirrors

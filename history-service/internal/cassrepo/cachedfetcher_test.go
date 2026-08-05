@@ -138,6 +138,27 @@ func TestCachedDescFetcher_SealedBucket_RespectsRemaining(t *testing.T) {
 	assert.Equal(t, "b", rows[1].MessageID)
 }
 
+func TestBustBucket_EvictsMessageBucket(t *testing.T) {
+	mv := newMemValkey()
+	r := newCachedRepo(t, mv)
+	ctx := context.Background()
+	createdAt := fetcherNow.Add(-100 * time.Hour)
+	bucket := msgbucket.New(fetcherWindow).Of(createdAt)
+
+	seed, err := bucketcache.NewCache(mv, 1000, time.Minute)
+	require.NoError(t, err)
+	seed.Put(ctx, "r1", bucket, []models.Message{{MessageID: "x", RoomID: "r1", CreatedAt: createdAt}})
+	require.Contains(t, mv.data, bucketcache.Key("r1", bucket))
+
+	r.bustBucket(ctx, "r1", createdAt)
+	assert.NotContains(t, mv.data, bucketcache.Key("r1", bucket), "bustBucket must DEL the message's bucket")
+}
+
+func TestBustBucket_NilCache_NoPanic(t *testing.T) {
+	r := NewRepository(nil, msgbucket.New(fetcherWindow), 122, nil)
+	assert.NotPanics(t, func() { r.bustBucket(context.Background(), "r1", fetcherNow) })
+}
+
 func TestCachedDescFetcher_NilCache_AlwaysLive(t *testing.T) {
 	r := NewRepository(nil, msgbucket.New(fetcherWindow), 122, nil,
 		withClock(func() time.Time { return fetcherNow }))
