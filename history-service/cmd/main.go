@@ -9,6 +9,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
+	"github.com/hmchangw/chat/history-service/internal/msgpagecache"
 	"github.com/hmchangw/chat/history-service/internal/publisher"
 	"github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
@@ -24,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // checkConfig validates positive-integer config knobs and exits the process on
@@ -184,6 +186,27 @@ func main() {
 		slog.Info("preview cache enabled", "size", cfg.PreviewCacheSize, "ttl", cfg.PreviewCacheTTL)
 	}
 
+	// Message-page cache (L1 in-process + L2 Valkey) in front of the sealed
+	// Cassandra LoadHistory reads. Disabled when VALKEY_ADDRS is unset; the
+	// caching reader is slotted in as the message reader while mutations still
+	// hit cassRepo directly, and doubles as the write-site cache invalidator.
+	var msgValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 && cfg.MsgCacheL1Size > 0 && cfg.MsgCacheTTL > 0 {
+		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
+		if err != nil {
+			slog.Error("valkey connect (message-page cache) failed", "error", err)
+			os.Exit(1)
+		}
+		pageReader, perr := msgpagecache.NewReader(cassRepo, msgValkey, bucketSizer, cfg.MsgCacheL1Size, cfg.MsgCacheTTL, cfg.MsgGenTTL)
+		if perr != nil {
+			slog.Error("init message-page cache failed", "error", perr)
+			os.Exit(1)
+		}
+		opts = append(opts, service.WithMessageReader(pageReader), service.WithPageCacheBuster(pageReader))
+		slog.Info("message-page cache enabled", "l1Size", cfg.MsgCacheL1Size, "ttl", cfg.MsgCacheTTL, "genTTL", cfg.MsgGenTTL)
+	}
+
 	pub := publisher.New(js)
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
 
@@ -229,6 +252,7 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
+		func(ctx context.Context) error { valkeyutil.Disconnect(msgValkey); return nil },
 		func(ctx context.Context) error {
 			if vaultWrapper != nil {
 				return vaultWrapper.Close()
