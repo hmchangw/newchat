@@ -67,6 +67,11 @@ type RoomRepository interface {
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	// SetPreviewMessage warm-backs a walk-resolved preview onto the room doc,
+	// guarded by asOf (the preview's createdAt millis) so it fills empty docs but
+	// never regresses a newer event-driven write. Callers treat errors as
+	// best-effort (log, never fail the read).
+	SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, asOf int64) error
 }
 
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.

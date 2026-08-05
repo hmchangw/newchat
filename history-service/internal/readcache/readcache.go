@@ -154,6 +154,7 @@ type RoomSource interface {
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, asOf int64) error
 }
 
 type roomTimes struct {
@@ -223,6 +224,14 @@ func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, e
 // no per-room caching benefit to justify the bookkeeping.
 func (c *RoomCache) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
 	return c.inner.GetRoomTimesByIDs(ctx, ids)
+}
+
+// SetPreviewMessage bypasses the cache and delegates to the source — a write,
+// not a read this cache fronts.
+//
+//nolint:gocritic // hugeParam: pvw's by-value shape matches the RoomRepository.SetPreviewMessage contract this passes through unchanged.
+func (c *RoomCache) SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, asOf int64) error {
+	return c.inner.SetPreviewMessage(ctx, roomID, pvw, asOf)
 }
 
 // previewEntry is the cached resolved room preview. found=false is never stored

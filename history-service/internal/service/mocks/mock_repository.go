@@ -680,6 +680,20 @@ func (mr *MockRoomRepositoryMockRecorder) GetRoomUserCount(ctx, roomID any) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomUserCount", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomUserCount), ctx, roomID)
 }
 
+// SetPreviewMessage mocks base method.
+func (m *MockRoomRepository) SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, asOf int64) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetPreviewMessage", ctx, roomID, pvw, asOf)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetPreviewMessage indicates an expected call of SetPreviewMessage.
+func (mr *MockRoomRepositoryMockRecorder) SetPreviewMessage(ctx, roomID, pvw, asOf any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPreviewMessage", reflect.TypeOf((*MockRoomRepository)(nil).SetPreviewMessage), ctx, roomID, pvw, asOf)
+}
+
 // MockEventPublisher is a mock of EventPublisher interface.
 type MockEventPublisher struct {
 	ctrl     *gomock.Controller

@@ -12,6 +12,7 @@ import (
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
 const (
@@ -134,14 +135,22 @@ func (s *HistoryService) resolveRoomMetaHints(
 // fall through to a fresh resolve. meta is the caller/batch-resolved times hint
 // (nil when none applies); previewAfterMutation (edit/delete) keeps calling
 // roomLastPreviewMessage directly with meta=nil so mutations always see fresh state.
+// Both resolve paths (cache-miss loader and no-cache) route through the same load
+// closure so a walk that actually runs and finds a preview always warm-backs it;
+// a cache HIT never invokes load, so it never warm-backs (nothing new to persist).
 func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
-	if s.previewCache == nil {
-		return s.roomLastPreviewMessage(ctx, roomID, meta, now)
+	load := func(ctx context.Context) (models.PreviewMessage, bool, error) {
+		p, state := s.roomLastPreviewMessage(ctx, roomID, meta, now)
+		if state == previewFound {
+			s.warmBackPreview(ctx, roomID, p)
+		}
+		return p, state == previewFound, nil
 	}
-	preview, ok, err := s.previewCache.Get(ctx, roomID, func(ctx context.Context) (models.PreviewMessage, bool, error) {
-		p, found := s.roomLastPreviewMessage(ctx, roomID, meta, now)
-		return p, found, nil
-	})
+	if s.previewCache == nil {
+		p, found, _ := load(ctx)
+		return p, found
+	}
+	preview, ok, err := s.previewCache.Get(ctx, roomID, load)
 	if err != nil {
 		// ctx cancelled while waiting on a shared load — degrade like a read miss.
 		return models.PreviewMessage{}, false
@@ -149,18 +158,46 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta
 	return preview, ok
 }
 
-// roomLastPreviewMessage resolves one room's latest eligible preview message at read time.
+// warmBackPreview best-effort persists a walk-resolved preview so subsequent
+// reads serve it from the room doc instead of re-walking. asOf is the preview's
+// own createdAt millis — conservative by construction (<= any canonical event
+// timestamp that observed this message), so a warm-back can never outrank a
+// broadcast-worker event-driven write. Failures only cost the optimization,
+// never the read: log and continue.
+//
+//nolint:gocritic // hugeParam: p's by-value shape matches roomLastPreviewMessage's return and RoomRepository.SetPreviewMessage's contract; the copy cost is negligible on this best-effort path.
+func (s *HistoryService) warmBackPreview(ctx context.Context, roomID string, p models.PreviewMessage) {
+	if err := s.rooms.SetPreviewMessage(ctx, roomID, p, p.CreatedAt.UnixMilli()); err != nil {
+		slog.WarnContext(ctx, "preview warm-back failed", "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+	}
+}
+
+// previewResolveState distinguishes the two ways the preview walk can come back
+// without a message: a completed walk that definitively found none (previewEmpty,
+// safe to clear a stored preview) versus one that gave up mid-flight
+// (previewDegraded, where a survivor may still exist and clearing would lose data).
+type previewResolveState int
+
+const (
+	previewFound    previewResolveState = iota
+	previewEmpty                        // walk completed and definitively found no eligible message
+	previewDegraded                     // a read failed or the scan budget was exhausted — unknown
+)
+
+// roomLastPreviewMessage resolves one room's latest eligible preview message at read time,
+// reporting the walk outcome three-valued (see previewResolveState) so callers that must
+// tell "definitively none" apart from "unknown" (previewAfterMutation) can.
 // meta, when non-nil, is a caller/batch-resolved room-times hint that lets resolveRoomTimes
 // skip its own Mongo read (see resolveRoomMetaHints / resolveRoomTimes); pass nil to always
-// resolve fresh (previewAfterMutation's contract). ok=false means drop the room (empty,
-// all-ineligible within the walk cap, or a read failure). Walks backward from lastMsgAt in
-// pages, skipping ineligible messages.
-func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
+// resolve fresh (previewAfterMutation's contract). Walks backward from lastMsgAt in pages,
+// skipping ineligible messages.
+func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, previewResolveState) {
 	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-		return models.PreviewMessage{}, false
+		return models.PreviewMessage{}, previewDegraded
 	}
 
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
@@ -177,10 +214,10 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-			return models.PreviewMessage{}, false
+			return models.PreviewMessage{}, previewDegraded
 		}
 		if len(page.Data) == 0 {
-			return models.PreviewMessage{}, false // room empty or floor reached
+			return models.PreviewMessage{}, previewEmpty // room empty or floor reached
 		}
 		for i := range page.Data {
 			m := page.Data[i]
@@ -189,19 +226,21 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			if m.Deleted || pkgmodel.IsSystemMessageType(m.Type) {
 				continue
 			}
-			return s.toPreviewMessage(ctx, &m), true
+			return s.toPreviewMessage(ctx, &m), previewFound
 		}
 		// Whole page ineligible. HasNext=false means the walk reached a terminal
-		// state (floor/empty) — stop. Otherwise grow the page and continue strictly
-		// before the oldest one seen.
+		// state (floor/empty) — stop, definitively none. Otherwise grow the page
+		// and continue strictly before the oldest one seen.
 		scanned += len(page.Data)
 		if !page.HasNext {
-			return models.PreviewMessage{}, false
+			return models.PreviewMessage{}, previewEmpty
 		}
 		before = page.Data[len(page.Data)-1].CreatedAt
 		pageSize *= lastMsgWalkGrowth
 	}
-	return models.PreviewMessage{}, false // ineligible tail longer than the scan budget
+	// Ineligible tail longer than the scan budget: an eligible message may still
+	// exist beyond it, so this is unknown — never a clear signal.
+	return models.PreviewMessage{}, previewDegraded
 }
 
 // toPreviewMessage enriches an eligible message into the room-list preview: sender and
@@ -223,15 +262,15 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 		}
 	}
 
-	return models.PreviewMessage{
+	return preview.Build(models.PreviewMessage{
 		MessageID:   m.MessageID,
 		Sender:      sender,
 		Content:     m.Msg,
-		CreatedAt:   m.CreatedAt.UTC(),
+		CreatedAt:   m.CreatedAt,
 		Attachments: m.DecodedAttachments,
 		Mentions:    mentions,
 		VisibleTo:   m.VisibleTo,
-	}
+	})
 }
 
 // dedupRoomIDs removes duplicate roomIds, preserving first-seen order.

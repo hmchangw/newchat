@@ -211,3 +211,37 @@ func TestRoomRepo_GetRoomUserCount_RoomMissing(t *testing.T) {
 
 	require.ErrorIs(t, err, mongo.ErrNoDocuments)
 }
+
+// TestRoomRepo_SetPreviewMessage_WatermarkGuard mirrors the broadcast-worker
+// SetRoomPreviewMessage watermark test: the guard is shared (pkg/preview.GuardedSetFields),
+// so the same first-write-lands / lower-asOf-rejected shape applies to the warm-back path.
+func TestRoomRepo_SetPreviewMessage_WatermarkGuard(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "warmback-r1", "name": "room"})
+	require.NoError(t, err)
+
+	p1 := model.PreviewMessage{MessageID: "m1", Content: "one", CreatedAt: time.UnixMilli(1000).UTC()}
+	p2 := model.PreviewMessage{MessageID: "m2", Content: "two", CreatedAt: time.UnixMilli(2000).UTC()}
+
+	// First write lands on an empty doc (no previewAsOf => guard treats it as 0).
+	require.NoError(t, repo.SetPreviewMessage(ctx, "warmback-r1", p2, 200))
+	got := readWarmBackRoomPreview(t, db, "warmback-r1")
+	assert.Equal(t, "m2", got.PreviewMessage.MessageID)
+
+	// A lower asOf is rejected — the stored preview and watermark are unchanged.
+	require.NoError(t, repo.SetPreviewMessage(ctx, "warmback-r1", p1, 100))
+	got = readWarmBackRoomPreview(t, db, "warmback-r1")
+	assert.Equal(t, "m2", got.PreviewMessage.MessageID)
+	assert.Equal(t, int64(200), got.PreviewAsOf)
+}
+
+func readWarmBackRoomPreview(t *testing.T, db *mongo.Database, roomID string) *model.Room {
+	t.Helper()
+	var room model.Room
+	require.NoError(t, db.Collection("rooms").FindOne(context.Background(), bson.M{"_id": roomID}).Decode(&room))
+	require.NotNil(t, room.PreviewMessage)
+	return &room
+}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
 const roomsCollection = "rooms"
@@ -87,6 +88,20 @@ func (r *RoomRepo) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[str
 		out[room.ID] = RoomTimes{LastMsgAt: lastMsgAt, CreatedAt: room.CreatedAt}
 	}
 	return out, nil
+}
+
+// SetPreviewMessage warm-backs a walk-resolved preview, watermark-guarded (see
+// pkg/preview.GuardedSetFields). asOf is the preview's own createdAt millis —
+// conservative by construction: <= any canonical event timestamp that observed
+// this message, so a warm-back never outranks broadcast-worker's writes.
+//
+//nolint:gocritic // hugeParam: pvw's by-value shape is the RoomRepository.SetPreviewMessage contract shared with the mock and readcache.RoomCache passthrough; the copy cost is negligible on this best-effort write path.
+func (r *RoomRepo) SetPreviewMessage(ctx context.Context, roomID string, pvw model.PreviewMessage, asOf int64) error {
+	pipeline := mongo.Pipeline{{{Key: "$set", Value: preview.GuardedSetFields(&pvw, asOf)}}}
+	if _, err := r.rooms.Raw().UpdateOne(ctx, bson.M{"_id": roomID}, pipeline); err != nil {
+		return fmt.Errorf("warm-back room preview %s: %w", roomID, err)
+	}
+	return nil
 }
 
 // GetRoomUserCount returns the room's userCount via a projected findOne.

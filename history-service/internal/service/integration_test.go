@@ -160,6 +160,10 @@ func (stubRoomRepo) GetRoomUserCount(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
 
+func (stubRoomRepo) SetPreviewMessage(_ context.Context, _ string, _ models.PreviewMessage, _ int64) error {
+	return nil
+}
+
 func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)

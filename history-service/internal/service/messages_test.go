@@ -2712,3 +2712,197 @@ func TestHistoryService_GetMessagesByIDs_QuoteRedaction(t *testing.T) {
 	require.Len(t, result.Messages, 1)
 	assert.Equal(t, service.UnavailableQuoteMsg, result.Messages[0].QuotedParentMessage.Msg)
 }
+
+// Deleting the room's last eligible message must mark the walk as definitively
+// empty (PreviewGone) so broadcast-worker clears the stored room preview — a nil
+// PreviewMessage alone can't be distinguished from a degraded walk.
+func TestHistoryService_DeleteMessage_LastMessage_MarksPreviewGone(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1",
+		RoomID:    "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	// Empty page: the room has no eligible survivor — definitively empty, not degraded.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil)
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Nil(t, evt.PreviewMessage)
+			assert.True(t, evt.PreviewGone, "an empty walk must signal the stored preview should be cleared")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+}
+
+// A terminal all-ineligible page (HasNext=false) is also definitively empty.
+func TestHistoryService_DeleteMessage_AllIneligibleTerminalPage_MarksPreviewGone(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	hydrated := &models.Message{
+		MessageID: "msg-1", RoomID: "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: createdAt, Msg: "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "msg-1", RoomID: "r1", Deleted: true, CreatedAt: createdAt}}, false), nil)
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Nil(t, evt.PreviewMessage)
+			assert.True(t, evt.PreviewGone, "terminal all-ineligible page means no survivor exists")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+}
+
+// A failed history read is DEGRADED, not empty: an eligible survivor may well exist,
+// so the event must NOT tell broadcast-worker to clear the stored preview.
+func TestHistoryService_DeleteMessage_DegradedWalk_DoesNotMarkPreviewGone(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1", RoomID: "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC), Msg: "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), errors.New("cassandra timeout"))
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Nil(t, evt.PreviewMessage)
+			assert.False(t, evt.PreviewGone, "a read failure is unknown, never a clear signal")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+}
+
+// Exhausting the 250-row scan budget on an unbroken ineligible run is DEGRADED:
+// an eligible message may exist beyond the budget, so no clear signal.
+func TestHistoryService_DeleteMessage_ScanBudgetExhausted_DoesNotMarkPreviewGone(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	hydrated := &models.Message{
+		MessageID: "msg-1", RoomID: "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: createdAt, Msg: "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	// Every page full and HasNext=true: the walk only ever stops on the budget.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ time.Time, _ time.Time, pr cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			deleted := make([]models.Message, pr.PageSize)
+			for i := range deleted {
+				deleted[i] = models.Message{
+					MessageID: "d", RoomID: "r1", Deleted: true,
+					CreatedAt: createdAt.Add(-time.Duration(i) * time.Second),
+				}
+			}
+			return makePage(deleted, true), nil
+		}).AnyTimes()
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Nil(t, evt.PreviewMessage)
+			assert.False(t, evt.PreviewGone, "budget exhaustion is unknown, never a clear signal")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+}
+
+// A hidden thread reply never touches the room preview, so it must not carry a
+// clear signal either (broadcast-worker's thread branches skip persistence).
+func TestHistoryService_DeleteMessage_HiddenThreadReply_NoPreviewGone(t *testing.T) {
+	svc, msgs, subs, pub, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	parentCreatedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
+	hydrated := &models.Message{
+		MessageID: "reply-1", RoomID: "r1",
+		Sender:                models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt:             time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:                   "reply",
+		ThreadParentID:        "parent-1",
+		ThreadParentCreatedAt: &parentCreatedAt,
+		TShow:                 false,
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	// No GetMessagesBefore expectation: the walk must be skipped entirely.
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Nil(t, evt.PreviewMessage)
+			assert.False(t, evt.PreviewGone, "hidden thread replies never drive the room preview")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "reply-1"})
+	require.NoError(t, err)
+}

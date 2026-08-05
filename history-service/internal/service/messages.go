@@ -550,7 +550,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		Timestamp: editedAtMs,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, editedAt)
+	canonicalEvt.PreviewMessage, canonicalEvt.PreviewGone = s.previewAfterMutation(c, msg, roomID, editedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
 
 	return &models.EditMessageResponse{
@@ -629,7 +629,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
+	canonicalEvt.PreviewMessage, canonicalEvt.PreviewGone = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
 	return &models.DeleteMessageResponse{
@@ -642,16 +642,24 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 // subscription.list) to carry on an edit/delete fan-out. Hidden thread replies (TShow==false)
 // never appear in the room timeline, so they're skipped — clients tell those apart via the
 // event's threadParentMessageId and drive the room preview themselves. TShow==true replies do
-// appear in the room, so they still get a preview. nil for a hidden thread reply, when the room
-// has no eligible message, or on a read error.
-func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
+// appear in the room, so they still get a preview. The second return is the gone-signal:
+// true only when the walk COMPLETED and found no eligible survivor, so broadcast-worker may
+// clear the stored preview; a degraded walk returns (nil, false) and changes nothing.
+// Deliberately bypasses the preview cache (calls the walk directly) so a mutation always
+// sees fresh state.
+func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) (*models.PreviewMessage, bool) {
 	if msg.ThreadParentID != "" && !msg.TShow {
-		return nil
+		return nil, false
 	}
-	if preview, ok := s.roomLastPreviewMessage(c, roomID, nil, at); ok {
-		return &preview
+	preview, state := s.roomLastPreviewMessage(c, roomID, nil, at)
+	switch state {
+	case previewFound:
+		return &preview, false
+	case previewEmpty:
+		return nil, true
+	default: // previewDegraded — unknown, never clear
+		return nil, false
 	}
-	return nil
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).

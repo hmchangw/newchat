@@ -185,6 +185,11 @@ func (f *fakeRoomSource) GetRoomTimesByIDs(_ context.Context, ids []string) (map
 	return f.timesByIDs, nil
 }
 
+//nolint:gocritic // hugeParam: matches the RoomSource.SetPreviewMessage by-value contract.
+func (f *fakeRoomSource) SetPreviewMessage(_ context.Context, _ string, _ pkgmodel.PreviewMessage, _ int64) error {
+	return nil
+}
+
 func TestRoomCache_CachesRoomTimes(t *testing.T) {
 	last := time.Now().UTC()
 	created := last.Add(-time.Hour)
