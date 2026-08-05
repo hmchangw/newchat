@@ -205,13 +205,26 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
     loops accounts with a `failed` count), which v1 does not score; those and the
     true per-recipient *delivery* outcome are the **observational last mile**
     (declared) / v2 (§8 P7).
-  - `broadcast_channel_enqueue_age_seconds` = `now − evt.Timestamp` → SLO-2. **Good
-    predicate: age ≤ 1 s**; an enqueue later than the bound is **bad** (stays in
-    valid, not counted good). `evt.Timestamp` is the canonical event's server-set
-    timestamp (`gatekeeper handler.go`, `now.UnixMilli()`) → SLO-2 is
-    "**canonical acceptance → local enqueue accepted within 1 s**", not true
-    publication latency — the code can only observe the `PublishMsg` return
-    (enqueue), so server-confirmed **publication** latency stays in P7.
+  - `broadcast_channel_enqueue_age_seconds` = `broadcast-worker now − <acceptance
+    stamp>` → SLO-2. **Good predicate: age ≤ 1 s**; an enqueue later than the bound
+    is **bad** (stays in valid, not counted good). **The acceptance stamp is not yet
+    well-defined, and P2 must pin it.** The only timestamp on the envelope today is
+    `evt.Timestamp`, set in `gatekeeper handler.go` as `now.UnixMilli()` at the
+    **start of message build** (`handler.go:336`) — *before* the quote-snapshot
+    resolve, thread-parent fetch, and sender user-lookup (each a Mongo/Cassandra I/O
+    hop) and *before* the canonical `PublishMsg` (`handler.go:404`). So it sits
+    **earlier than canonical acceptance** by an unbounded, variable amount (a slow
+    lookup inflates it), which both mis-attributes gatekeeper lookup latency to the
+    broadcast leg and leaves the SLO-2 origin ill-defined. **P2 fixes the origin: a
+    dedicated canonical-acceptance timestamp captured immediately before the publish
+    call, or the JetStream metadata store timestamp** (`msg.Metadata().Timestamp`,
+    server-set when MESSAGES-CANONICAL persists the message — the true "canonical
+    accepted" instant, defined by a single clock on the stream server). Either way
+    SLO-2 measures "**canonical acceptance → local enqueue accepted within 1 s**",
+    not true publication latency: the code can only observe the `PublishMsg` return
+    (enqueue), so server-confirmed **publication** latency stays in P7. Because the
+    two ends sit in different processes, the age is a **cross-process wall-clock**
+    difference — see the clock-skew contract in Caveats.
 - **v1 scope: the room-subject path only.** DM/thread per-recipient
   partial-failure semantics are deferred; SLO-1b/2 count only
   `broadcast_path="room_subject"` canonical messages in v1 (channel non-thread
@@ -249,9 +262,22 @@ is the exemplar). 🔧 declared last-mile via P5/P6.
 
 ### Caveats
 
-- A publication is **one publish to a room subject, not N recipient deliveries**;
-  `UserCount` ≠ connected recipients. Denominators are messages/publications, not
-  recipients.
+- A channel broadcast is **one room-subject enqueue, not N recipient deliveries**;
+  `UserCount` ≠ connected recipients. Denominators are **canonical messages on the
+  room-subject path**, not recipients.
+- **Cross-process clock-skew contract (SLO-2).** `broadcast_channel_enqueue_age`
+  subtracts a gatekeeper-set stamp from broadcast-worker's `now` — two clocks on
+  two hosts — so the 1 s bound only means something if those clocks are disciplined.
+  **Requires** NTP/chrony on every node with **skew monitoring** (alert when a
+  node's offset exceeds ~10% of the bound, i.e. ~100 ms) so undetected drift can't
+  masquerade as latency. **Invalid samples** — `age < 0` (receiver clock behind
+  sender) or `age >` a sanity cap (e.g. 60 s, implying gross skew or a stale
+  redelivery, not real latency) — are **dropped from the ratio (neither good nor
+  valid) and counted in a separate `enqueue_age_invalid_total`**, never silently
+  folded into good or bad. A nonzero invalid rate is its own alert and, during a
+  load-test run, **fails the hard gate** (§10) — SLO-2 cannot be certified while
+  measurement integrity is in question. This contract is moot only once SLO-2 moves
+  to an in-process span (P7).
 - Ordering is not an SLO (JetStream orders within a stream only).
 - `published` denominator excludes gatekeeper-rejected messages per §0.1.
 
@@ -439,7 +465,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P | Work | Unlocks |
 |---|---|---|
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
-| P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds`; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
+| P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds`; **a well-defined SLO-2 age origin — a dedicated canonical-acceptance timestamp stamped immediately before the canonical publish, or the JetStream metadata store timestamp, replacing the build-start `evt.Timestamp`** (§2); `enqueue_age_invalid_total` for negative/skewed samples; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
@@ -487,8 +513,13 @@ service recording rules or a NATS exporter.
 reply/broadcast is a failure, not an excluded sample) using the **same
 production source counters and good/valid predicates**, evaluated over **isolated
 run-window deltas** (not the 28-day aggregate recording rule, and not
-loadgen-local metrics). The run must also **drain/reset after warm-up** so
-warm-up completions cannot inflate the numerator.
+loadgen-local metrics). The run must also **drain in-flight work at the end of
+warm-up, then capture counter baselines** — snapshot each production counter at the
+warm-up boundary and measure the run as the *delta* from that baseline, so warm-up
+completions can't inflate the numerator. (Prometheus counters are monotonic and
+shared with any other traffic on the series — they are **never reset**;
+baseline-and-delta is the isolation mechanism, alongside the dedicated test
+`SITE_ID` / tenant above.)
 
 Two distinct thresholds, not one (the "50–70%" and "track this document" rules
 were in tension):
