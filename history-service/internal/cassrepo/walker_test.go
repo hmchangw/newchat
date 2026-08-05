@@ -431,3 +431,50 @@ func TestWalkBuckets_ActuallyFansOutConcurrently(t *testing.T) {
 	assert.GreaterOrEqual(t, store.maxInFlight, 2, "expected concurrent bucket fetches")
 	assert.Len(t, res.Rows, 8)
 }
+
+// TestAdaptiveWaveWidth pins the demand-driven width policy: width ≈ how many
+// buckets we still expect to need, derived from rows-per-bucket seen so far,
+// clamped to [1, fanout]. Low density (empties/sparse) widens; high density
+// (near-full buckets) narrows.
+func TestAdaptiveWaveWidth(t *testing.T) {
+	tests := []struct {
+		name                                  string
+		rowsSeen, bucketsSeen, needed, fanout int
+		want                                  int
+	}{
+		{"all empty so far widens to fanout", 0, 3, 20, 8, 8},
+		{"dense bucket, tiny shortfall narrows to 1", 19, 1, 1, 8, 1},
+		{"one row per bucket needs many, caps at fanout", 3, 3, 17, 8, 8},
+		{"one row per bucket, small need", 2, 2, 3, 8, 3},
+		{"exact division", 4, 2, 4, 8, 2},
+		{"caps at fanout", 1, 10, 100, 4, 4},
+		{"never below 1", 100, 1, 1, 8, 1},
+		{"no observations yet defaults to 1", 0, 0, 20, 8, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, adaptiveWaveWidth(tc.rowsSeen, tc.bucketsSeen, tc.needed, tc.fanout))
+		})
+	}
+}
+
+// TestWalkBuckets_AdaptiveWidth_DenseUnderfillDoesNotOverfetch is the payoff of
+// adaptive widening: when the start bucket nearly fills the page, the next wave
+// must stay narrow instead of speculatively fetching a full fanout of fat data
+// buckets to satisfy a tiny shortfall. A fixed fanout=8 would touch ~9 buckets;
+// adaptive touches 2.
+func TestWalkBuckets_AdaptiveWidth_DenseUnderfillDoesNotOverfetch(t *testing.T) {
+	s := testSizer()
+	start := testStartBucket()
+	b1 := s.Prev(start)
+	store := &fakeCassandra{buckets: map[int64][]int{
+		start: seq(1, 19), // 19 of the 20 needed
+		b1:    {20, 21, 22},
+	}}
+
+	res := runDesc(t, store, start, noFloorDesc, 365, 20, 8, nil)
+
+	assert.Equal(t, seq(1, 20), res.Rows)
+	assert.LessOrEqual(t, len(store.fetchedBuckets()), 2,
+		"dense underfill must stay narrow, not fan out to fanout width; fetched=%v", store.fetchedBuckets())
+}

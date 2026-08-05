@@ -174,9 +174,12 @@ func fillPage[T any](
 //   - Wave 1 probes only the start bucket, so a dense start region fills the
 //     page in one query with no speculative reads (the same cost the old serial
 //     walk paid for busy rooms).
-//   - Once the start bucket underfills, later waves fetch up to fanout buckets at
-//     once, collapsing a long run of sparse/empty buckets from many serial
-//     round-trips into a few concurrent ones.
+//   - Once the start bucket underfills, later waves fetch several buckets at once,
+//     collapsing a long run of sparse/empty buckets from many serial round-trips
+//     into a few concurrent ones. Each wave's width adapts to the rows-per-bucket
+//     density seen so far (see adaptiveWaveWidth): sparse/empty runs widen toward
+//     fanout to skip fast, dense runs narrow toward 1 to avoid over-reading fat
+//     buckets for a small shortfall.
 //
 // Rows are always assembled in strict bucket order and the returned cursor is
 // identical to what a serial walk would produce — concurrency overlaps the I/O
@@ -231,7 +234,7 @@ func (w *bucketWalk[T]) run(ctx context.Context) (pageResult[T], error) {
 	out := make([]T, 0, w.pageSize)
 	curBucket := w.startBucket
 	walked := 0
-	waveWidth := 1 // wave 1 probes only the start bucket; widen after it underfills
+	waveWidth := 1 // wave 1 probes only the start bucket; widen adaptively after it underfills
 
 	for {
 		if w.crossedFloor(curBucket) {
@@ -263,10 +266,37 @@ func (w *bucketWalk[T]) run(ctx context.Context) (pageResult[T], error) {
 			// Contract: fewer than pageSize rows ⇒ bucket drained, safe to advance.
 		}
 
-		// Whole wave consumed, page still not full: widen and continue.
+		// Whole wave consumed, page still not full: size the next wave to the
+		// density seen so far (len(out) rows over walked buckets), then continue.
 		curBucket = w.advance(buckets[len(buckets)-1])
-		waveWidth = w.fanout
+		waveWidth = adaptiveWaveWidth(len(out), walked, w.pageSize-len(out), w.fanout)
 	}
+}
+
+// adaptiveWaveWidth sizes the next fan-out wave to how many buckets the walk
+// still expects to need: the rows still needed divided by the rows-per-bucket
+// density observed so far (empties count as zero rows), clamped to [1, fanout].
+//
+// This makes the walk self-tune to the data it's crossing: an empty/sparse run
+// (density → 0) widens toward fanout to skip fast, where over-read is cheap;
+// a dense region (buckets near a full page) narrows toward 1, so a small
+// shortfall doesn't speculatively fetch a whole fanout of fat buckets to use
+// one. Width only ever affects performance — the assembled page and cursor are
+// identical for any width (see the fan-out parity test).
+func adaptiveWaveWidth(rowsSeen, bucketsSeen, needed, fanout int) int {
+	density := rowsSeen
+	if density < 1 {
+		density = 1 // all-empty so far: treat as <1 row/bucket to widen fully
+	}
+	// ceil(needed * bucketsSeen / rowsSeen) = ceil(needed / avg-rows-per-bucket).
+	width := (needed*bucketsSeen + density - 1) / density
+	if width < 1 {
+		width = 1 // nothing observed yet (bucketsSeen==0) or none needed: at least one bucket
+	}
+	if width > fanout {
+		width = fanout
+	}
+	return width
 }
 
 // planWave lists the buckets to fetch next, starting at from and advancing,
@@ -294,7 +324,7 @@ func (w *bucketWalk[T]) fetchWave(ctx context.Context, buckets []int64) ([]bucke
 		pages[0] = p
 		return pages, nil
 	}
-	// planWave already bounds len(buckets) to the wave width (<= fanout), so the
+	// planWave/adaptiveWaveWidth already bound len(buckets) <= fanout, so the
 	// group needs no SetLimit.
 	g, gctx := errgroup.WithContext(ctx)
 	for i, bk := range buckets {
