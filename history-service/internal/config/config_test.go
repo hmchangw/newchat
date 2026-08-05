@@ -44,6 +44,38 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
+func TestValidate_RejectsNegativeMsgCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.MsgCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_MSG_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeMsgCacheL1Size(t *testing.T) {
+	cfg := baseValid()
+	cfg.MsgCacheL1Size = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_MSG_CACHE_L1_SIZE")
+}
+
+func TestValidate_RejectsNegativeMsgGenTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.MsgGenTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_MSG_GEN_TTL")
+}
+
+func TestValidate_AcceptsZeroMsgCacheAsDisable(t *testing.T) {
+	cfg := baseValid()
+	cfg.MsgCacheTTL = 0
+	cfg.MsgCacheL1Size = 0
+	cfg.MsgGenTTL = 0
+	require.NoError(t, validate(&cfg), "zero is the documented disable value")
+}
+
 func TestValidate_RejectsNegativeSubCacheSize(t *testing.T) {
 	cfg := baseValid()
 	cfg.SubCacheSize = -1

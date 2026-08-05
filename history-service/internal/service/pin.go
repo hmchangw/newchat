@@ -120,6 +120,7 @@ func (s *HistoryService) PinMessage(c *natsrouter.Context, siteID string, req mo
 	if err := s.msgWriter.PinMessage(c, msg, pinnedAt, pinnedBy); err != nil {
 		return nil, fmt.Errorf("pin message %s: %w", req.MessageID, err)
 	}
+	s.bustPageCache(c, roomID)
 
 	pinnedAtMs := pinnedAt.UnixMilli()
 	evt := model.MessageEvent{
@@ -164,6 +165,7 @@ func (s *HistoryService) UnpinMessage(c *natsrouter.Context, siteID string, req 
 	if err := s.msgWriter.UnpinMessage(c, msg); err != nil {
 		return nil, fmt.Errorf("unpin message %s: %w", req.MessageID, err)
 	}
+	s.bustPageCache(c, roomID)
 
 	evt := model.MessageEvent{
 		Event: model.EventUnpinned,

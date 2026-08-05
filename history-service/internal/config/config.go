@@ -89,6 +89,18 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// Message-page cache (Cassandra sealed-bucket LoadHistory reads). L2 is
+	// Valkey; when ValkeyAddrs is empty the whole cache is disabled and reads go
+	// direct to Cassandra. Only sealed buckets (strictly older than the current
+	// one) are cached; the hot "latest" page of an active room is always live.
+	ValkeyAddrs    []string      `env:"VALKEY_ADDRS"              envSeparator:","`
+	ValkeyPassword string        `env:"VALKEY_PASSWORD"           envDefault:""`
+	MsgCacheTTL    time.Duration `env:"HISTORY_MSG_CACHE_TTL"     envDefault:"30s"`
+	MsgCacheL1Size int           `env:"HISTORY_MSG_CACHE_L1_SIZE" envDefault:"50000"`
+	// MsgGenTTL bounds how long a per-room cache generation is held in L1 — the
+	// cross-replica invalidation window after a Bump.
+	MsgGenTTL time.Duration `env:"HISTORY_MSG_GEN_TTL" envDefault:"1s"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -130,6 +142,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if cfg.MsgCacheTTL < 0 {
+		return fmt.Errorf("HISTORY_MSG_CACHE_TTL must be >= 0, got %s", cfg.MsgCacheTTL)
+	}
+	if cfg.MsgCacheL1Size < 0 {
+		return fmt.Errorf("HISTORY_MSG_CACHE_L1_SIZE must be >= 0, got %d", cfg.MsgCacheL1Size)
+	}
+	if cfg.MsgGenTTL < 0 {
+		return fmt.Errorf("HISTORY_MSG_GEN_TTL must be >= 0, got %s", cfg.MsgGenTTL)
 	}
 	// 0 makes the driver treat the pool as unbounded — reject it so the cap stays explicit.
 	if cfg.Mongo.MaxPoolSize < 1 {

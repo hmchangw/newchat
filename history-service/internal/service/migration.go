@@ -54,6 +54,7 @@ func (s *HistoryService) MigrationEditMessage(c *natsrouter.Context, siteID stri
 		}
 		return nil, fmt.Errorf("migration edit message %s: %w", req.MessageID, err)
 	}
+	s.bustPageCache(c, msg.RoomID)
 
 	editedAt := req.EditedAt
 	evt := model.MessageEvent{
@@ -112,6 +113,7 @@ func (s *HistoryService) MigrationDeleteMessage(c *natsrouter.Context, siteID st
 	if _, _, _, _, err := s.msgWriter.SoftDeleteMessage(c, msg, req.DeletedAt); err != nil {
 		return nil, fmt.Errorf("migration delete message %s: %w", req.MessageID, err)
 	}
+	s.bustPageCache(c, msg.RoomID)
 
 	deletedAt := req.DeletedAt
 	evt := model.MessageEvent{

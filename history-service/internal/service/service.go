@@ -110,6 +110,12 @@ type PreviewCache interface {
 	Get(ctx context.Context, roomID string, load func(context.Context) (models.PreviewMessage, bool, error)) (models.PreviewMessage, bool, error)
 }
 
+// PageCacheBuster invalidates a room's message-page cache after a mutation.
+// *msgpagecache.Reader satisfies it via Bump.
+type PageCacheBuster interface {
+	Bump(ctx context.Context, roomID string)
+}
+
 // Option configures optional HistoryService dependencies.
 type Option func(*HistoryService)
 
@@ -117,6 +123,20 @@ type Option func(*HistoryService)
 // previews resolve directly (uncached).
 func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
+}
+
+// WithMessageReader overrides the reader used for history queries, leaving the
+// writer as the raw repository. Used to slot a caching decorator in front of
+// Cassandra page reads while mutations still hit the store directly.
+func WithMessageReader(r MessageReader) Option {
+	return func(s *HistoryService) { s.msgReader = r }
+}
+
+// WithPageCacheBuster installs the message-page cache invalidator called after
+// each mutation. Without it, bustPageCache is a no-op (cache off, or the cache
+// relies purely on its TTL).
+func WithPageCacheBuster(b PageCacheBuster) Option {
+	return func(s *HistoryService) { s.pageCacheBuster = b }
 }
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
@@ -135,6 +155,16 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
+	pageCacheBuster    PageCacheBuster
+}
+
+// bustPageCache invalidates a room's message-page cache after an authoritative
+// mutation. Nil-safe: a no-op when no buster is installed.
+func (s *HistoryService) bustPageCache(ctx context.Context, roomID string) {
+	if s.pageCacheBuster == nil {
+		return
+	}
+	s.pageCacheBuster.Bump(ctx, roomID)
 }
 
 func New(
