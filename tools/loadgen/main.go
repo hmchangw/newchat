@@ -890,7 +890,14 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		slog.Error("generator error", "error", err)
 	}
 	time.Sleep(2 * time.Second)
-	collector.Finalize()
+	// The generator has stopped and drained, so anything still unmatched was
+	// never delivered. Report it: discarding the counts here made a run that
+	// dropped member events look identical to one that delivered them all.
+	missingReplies, missingEvents := collector.Finalize()
+	if missingReplies > 0 || missingEvents > 0 {
+		slog.Warn("undelivered after drain",
+			"missing_replies", missingReplies, "missing_events", missingEvents)
+	}
 
 	shutCtx, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = metricsSrv.Shutdown(shutCtx)

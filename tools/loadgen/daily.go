@@ -64,6 +64,7 @@ SLO signals evaluated over the hold window:
   - p95 latency (publish→broadcast)        threshold 500ms
   - p99 latency                            threshold 1000ms
   - error rate                             threshold 0.1%
+  - missing broadcast rate                 threshold 0.1% (same as error rate)
   - any JetStream consumer pending growth  threshold +1000
     (notification-worker exempt: push-notification delay is tolerated)
   - any service slog_errors_total increase threshold +0
@@ -373,16 +374,22 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		actionSamples[actionKind(kind).String()] = ss
 	}
 
+	// Emitters keep running across steps, so there is no quiet point at which
+	// every unmatched publish is a drop. Count only those older than the
+	// delivery grace; anything more recent may still be legitimately in flight.
+	missingBroadcasts := env.collector.MissingBroadcastsOlderThan(time.Now().Add(-deliveryGrace))
+
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
-		EffectiveN:      int(env.activatedCount.Load()),
-		LatencySamples:  env.collector.LatencySamples(),
-		ActionSamplesMs: actionSamples,
-		AttemptedOps:    env.collector.AttemptedOps(),
-		FailedOps:       env.collector.FailedOps(),
-		ConsumerPending: pendingDeltas,
-		ServiceErrors:   svcErrors,
-		Self:            snapshotSelfMetrics(),
+		EffectiveN:        int(env.activatedCount.Load()),
+		LatencySamples:    env.collector.LatencySamples(),
+		ActionSamplesMs:   actionSamples,
+		AttemptedOps:      env.collector.AttemptedOps(),
+		FailedOps:         env.collector.FailedOps(),
+		MissingBroadcasts: int64(missingBroadcasts),
+		ConsumerPending:   pendingDeltas,
+		ServiceErrors:     svcErrors,
+		Self:              snapshotSelfMetrics(),
 	}
 	r := evaluateStep(in, env.thresholds)
 	snapshotPresenceStats(env, &r)
@@ -629,6 +636,12 @@ func presenceFlip(env *stepEnv, u *userState, wasActive bool) {
 // flagged this as a follow-up. Same seed → same fixtures → same action
 // stream, which is what makes regression CSV comparisons meaningful.
 const dailyRunSeed int64 = 42
+
+// deliveryGrace is how long after publish a broadcast may still arrive before
+// the send is treated as dropped. Double the 1000ms p99 threshold this
+// scenario gates on, matching drainWindow's rationale on the max-rps path: a
+// tail-latency straggler has room to land, and only genuine drops are counted.
+const deliveryGrace = 2 * time.Second
 
 //nolint:gocritic // cfg passed by value to match envFactory.Build signature
 func runDailyForTest(ctx context.Context, cfg dailyConfig, factory envFactory) ([]StepResult, error) {

@@ -107,9 +107,15 @@ type stepInputs struct {
 	ActionSamplesMs map[string][]float64 // per-action wall-clock latency in ms
 	AttemptedOps    int64
 	FailedOps       int64
-	ConsumerPending map[string]ConsumerPendingDelta
-	ServiceErrors   map[string]int64
-	Self            SelfMetrics
+	// MissingBroadcasts counts sends whose broadcast never arrived within the
+	// delivery grace. They are invisible to FailedOps — the action returned nil
+	// because the publish itself succeeded — so without this a step that drops
+	// deliveries reads as healthy, and reads *better* the more it drops, since
+	// the dropped sends are the slow ones that would have widened the tail.
+	MissingBroadcasts int64
+	ConsumerPending   map[string]ConsumerPendingDelta
+	ServiceErrors     map[string]int64
+	Self              SelfMetrics
 }
 
 // ActionLatencyStats summarises one action kind's wall-clock latency
@@ -151,6 +157,8 @@ type StepResult struct {
 	ErrorRate             float64
 	AttemptedOps          int64
 	FailedOps             int64
+	MissingBroadcasts     int64
+	MissingBroadcastRate  float64
 	ConsumerPending       map[string]ConsumerPendingDelta
 	ServiceErrorIncreases map[string]int64
 	LoadgenSelfMetrics    SelfMetrics
@@ -208,6 +216,7 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 		N: in.N, EffectiveN: in.EffectiveN,
 		StartedAt: in.StartedAt, HoldDuration: in.HoldDuration,
 		AttemptedOps: in.AttemptedOps, FailedOps: in.FailedOps,
+		MissingBroadcasts:     in.MissingBroadcasts,
 		ConsumerPending:       in.ConsumerPending,
 		ServiceErrorIncreases: in.ServiceErrors,
 		LoadgenSelfMetrics:    in.Self,
@@ -218,6 +227,7 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 	}
 	if in.AttemptedOps > 0 {
 		r.ErrorRate = float64(in.FailedOps) / float64(in.AttemptedOps)
+		r.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.AttemptedOps)
 	}
 
 	// Inconclusive overrides trip. Reserved for situations where the
@@ -261,6 +271,13 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 		r.Tripped = true
 		r.TrippedReasons = append(r.TrippedReasons,
 			fmt.Sprintf("error_rate=%.4f > %.4f", r.ErrorRate, th.ErrorRate))
+	}
+	// Gated at the same rate as hard errors: a send whose broadcast never
+	// arrives is, to every recipient, indistinguishable from one that failed.
+	if r.MissingBroadcastRate > th.ErrorRate {
+		r.Tripped = true
+		r.TrippedReasons = append(r.TrippedReasons,
+			fmt.Sprintf("missing broadcast rate=%.4f > %.4f", r.MissingBroadcastRate, th.ErrorRate))
 	}
 	for durable, d := range in.ConsumerPending {
 		switch {

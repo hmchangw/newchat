@@ -1043,6 +1043,7 @@ A step's verdict is one of `PASS`, `TRIP`, or `INCONCLUSIVE`.
 - `p95_latency_ms` > 500 — publish→broadcast latency, measured by correlating `RoomEvent.LastMsgID` with `RecordPublish` timestamps
 - `p99_latency_ms` > 1000 — same source
 - `error_rate` > 0.001 (0.1%) — failed publishes, request timeouts, gatekeeper 4xx/5xx; counted by the action emitter
+- `missing broadcast rate` > 0.001 (0.1%, same threshold as `error_rate`) — sends whose broadcast never arrived within a 2 s delivery grace. These are invisible to `error_rate`: the action returned nil because the *publish* succeeded, so the send counts in `attempted_ops` but never in `failed_ops` and contributes no latency sample. Without this signal a step that drops deliveries reads as healthy — and reads *better* the more it drops, because the dropped sends are the slow ones that would have widened the tail. Emitters run continuously across steps, so the count is age-based (published more than 2 s ago and still unmatched) rather than drain-based; anything more recent may still legitimately be in flight
 - any JetStream consumer's `num_pending` grew by more than 1000 over the hold — polled via `/jsz?consumers=true` at hold start and end. The `notification-worker` durable is exempt: push-notification delivery delay is tolerated by design, so its backlog never fails the run (still shown in `worst-pending-delta` for observability)
 - any service's `slog_errors_total` counter increased over the hold — currently a no-op because no service emits that counter; see known limitations
 - any durable that existed at hold-start was *missing* at hold-end (consumer crashed or was deleted) — applies to `notification-worker` too, since a vanished consumer is an availability failure, not a tolerated delay
@@ -1066,12 +1067,12 @@ don't count as PASS and don't stop the ramp.
 Console table at end of run:
 
 ```
-N        p50    p95    p99    err%    worst-pending-delta             verdict
-1000     12     45     89     0.00%   broadcast-worker +12             PASS
-2000     14     58     112    0.00%   broadcast-worker +34             PASS
-5000     22     94     180    0.01%   broadcast-worker +180            PASS
-10000    38     210    430    0.02%   broadcast-worker +890            PASS
-20000(10000) 71  480  980    0.04%   broadcast-worker +1240           INCONCLUSIVE
+N        p50    p95    p99    err%    miss%   worst-pending-delta             verdict
+1000     12     45     89     0.00%   0.00%   broadcast-worker +12             PASS
+2000     14     58     112    0.00%   0.00%   broadcast-worker +34             PASS
+5000     22     94     180    0.01%   0.00%   broadcast-worker +180            PASS
+10000    38     210    430    0.02%   0.01%   broadcast-worker +890            PASS
+20000(10000) 71  480  980    0.04%   0.02%   broadcast-worker +1240           INCONCLUSIVE
     reasons: inconclusive: only 10000/20000 users activated (pool caps too low)
 
 ANSWER: N = 10000 (last passing step)
