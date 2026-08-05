@@ -205,26 +205,27 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
     loops accounts with a `failed` count), which v1 does not score; those and the
     true per-recipient *delivery* outcome are the **observational last mile**
     (declared) / v2 (§8 P7).
-  - `broadcast_channel_enqueue_age_seconds` = `broadcast-worker now − <acceptance
-    stamp>` → SLO-2. **Good predicate: age ≤ 1 s**; an enqueue later than the bound
-    is **bad** (stays in valid, not counted good). **The acceptance stamp is not yet
-    well-defined, and P2 must pin it.** The only timestamp on the envelope today is
-    `evt.Timestamp`, set in `gatekeeper handler.go` as `now.UnixMilli()` at the
-    **start of message build** (`handler.go:336`) — *before* the quote-snapshot
-    resolve, thread-parent fetch, and sender user-lookup (each a Mongo/Cassandra I/O
-    hop) and *before* the canonical `PublishMsg` (`handler.go:404`). So it sits
-    **earlier than canonical acceptance** by an unbounded, variable amount (a slow
-    lookup inflates it), which both mis-attributes gatekeeper lookup latency to the
-    broadcast leg and leaves the SLO-2 origin ill-defined. **P2 fixes the origin: a
-    dedicated canonical-acceptance timestamp captured immediately before the publish
-    call, or the JetStream metadata store timestamp** (`msg.Metadata().Timestamp`,
-    server-set when MESSAGES-CANONICAL persists the message — the true "canonical
-    accepted" instant, defined by a single clock on the stream server). Either way
-    SLO-2 measures "**canonical acceptance → local enqueue accepted within 1 s**",
-    not true publication latency: the code can only observe the `PublishMsg` return
-    (enqueue), so server-confirmed **publication** latency stays in P7. Because the
-    two ends sit in different processes, the age is a **cross-process wall-clock**
-    difference — see the clock-skew contract in Caveats.
+  - `broadcast_channel_enqueue_age_seconds` = `broadcast-worker now −
+    msg.Metadata().Timestamp` → SLO-2. **Good predicate: age ≤ 1 s**; an enqueue
+    later than the bound is **bad** (stays in valid, not counted good). **The SLO-2
+    origin is the JetStream metadata store timestamp** (`msg.Metadata().Timestamp`,
+    server-set when MESSAGES-CANONICAL persists the message) — the true "canonical
+    accepted" instant, defined by a single clock on the stream server, and the value
+    P2 wires the age against. It is deliberately **not** `evt.Timestamp`: that field
+    is set in `gatekeeper handler.go` as `now.UnixMilli()` at the **start of message
+    build** (`handler.go:336`) — *before* the quote-snapshot resolve, thread-parent
+    fetch, and sender user-lookup (each a Mongo/Cassandra I/O hop) and *before* the
+    canonical `PublishMsg` (`handler.go:404`) — so it sits earlier than acceptance by
+    an unbounded, variable amount (a slow lookup inflates it) and would fold
+    gatekeeper's own processing time into the broadcast SLO. **That build→publish gap
+    is kept, but as a diagnostic, not the SLO:** a separate gatekeeper-internal
+    latency signal (`evt.Timestamp` → publish) explains *why* a canonical message was
+    accepted late, without contaminating SLO-2's origin. SLO-2 still measures
+    "**canonical acceptance → local enqueue accepted within 1 s**", not true
+    publication latency: the code can only observe the `PublishMsg` return (enqueue),
+    so server-confirmed **publication** latency stays in P7. Because the two ends sit
+    in different processes, the age is a **cross-process wall-clock** difference —
+    see the clock-skew contract in Caveats.
 - **v1 scope: the room-subject path only.** DM/thread per-recipient
   partial-failure semantics are deferred; SLO-1b/2 count only
   `broadcast_path="room_subject"` canonical messages in v1 (channel non-thread
@@ -465,7 +466,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P | Work | Unlocks |
 |---|---|---|
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
-| P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds`; **a well-defined SLO-2 age origin — a dedicated canonical-acceptance timestamp stamped immediately before the canonical publish, or the JetStream metadata store timestamp, replacing the build-start `evt.Timestamp`** (§2); `enqueue_age_invalid_total` for negative/skewed samples; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
+| P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate gatekeeper build→publish diagnostic latency (`evt.Timestamp`→publish), unscored**; `enqueue_age_invalid_total` for negative/skewed samples; terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
