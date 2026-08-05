@@ -9,6 +9,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/mention"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -156,11 +157,20 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta
 // all-ineligible within the walk cap, or a read failure). Walks backward from lastMsgAt in
 // pages, skipping ineligible messages.
 func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
+	pm, found, _ := s.roomLastPreviewMessageE(ctx, roomID, meta, now)
+	return pm, found
+}
+
+// roomLastPreviewMessageE is roomLastPreviewMessage with the degrade cause surfaced: a non-nil
+// error means a read failed (caller must NOT treat it as an empty room), found=false with a nil
+// error means the room genuinely has no eligible message. The delete walk-back needs this split to
+// tell "clear the room's last-message fields" (empty) from "leave them" (transient read failure).
+func (s *HistoryService) roomLastPreviewMessageE(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool, error) {
 	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-		return models.PreviewMessage{}, false
+		return models.PreviewMessage{}, false, err
 	}
 
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
@@ -177,10 +187,10 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-			return models.PreviewMessage{}, false
+			return models.PreviewMessage{}, false, err
 		}
 		if len(page.Data) == 0 {
-			return models.PreviewMessage{}, false // room empty or floor reached
+			return models.PreviewMessage{}, false, nil // room empty or floor reached
 		}
 		for i := range page.Data {
 			m := page.Data[i]
@@ -189,19 +199,62 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			if m.Deleted || pkgmodel.IsSystemMessageType(m.Type) {
 				continue
 			}
-			return s.toPreviewMessage(ctx, &m), true
+			return s.toPreviewMessage(ctx, &m), true, nil
 		}
 		// Whole page ineligible. HasNext=false means the walk reached a terminal
 		// state (floor/empty) — stop. Otherwise grow the page and continue strictly
 		// before the oldest one seen.
 		scanned += len(page.Data)
 		if !page.HasNext {
-			return models.PreviewMessage{}, false
+			return models.PreviewMessage{}, false, nil
 		}
 		before = page.Data[len(page.Data)-1].CreatedAt
 		pageSize *= lastMsgWalkGrowth
 	}
-	return models.PreviewMessage{}, false // ineligible tail longer than the scan budget
+	return models.PreviewMessage{}, false, nil // ineligible tail longer than the scan budget
+}
+
+// roomLastMentionAllAt walks backward for the CreatedAt of the room's latest surviving @all
+// message, so a delete can walk room.lastMentionAllAt back off a deleted @all. Same page walk as
+// the preview, but the eligibility predicate is "@all mention" (parsed from content). nil means no
+// surviving @all within the scan budget — a best-effort clear, matching the preview walk's ceiling.
+func (s *HistoryService) roomLastMentionAllAt(ctx context.Context, roomID string, now time.Time) *time.Time {
+	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, nil, now)
+	if err != nil {
+		return nil
+	}
+	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+	before := ceiling.Add(time.Millisecond)
+
+	pageSize := lastMsgWalkFirstPage
+	scanned := 0
+	for scanned < lastMsgWalkMaxScan {
+		pageSize = min(pageSize, lastMsgWalkMaxPage, lastMsgWalkMaxScan-scanned)
+		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, cassrepo.PageRequest{PageSize: pageSize})
+		if err != nil {
+			return nil
+		}
+		if len(page.Data) == 0 {
+			return nil
+		}
+		for i := range page.Data {
+			m := page.Data[i]
+			if m.Deleted || pkgmodel.IsSystemMessageType(m.Type) {
+				continue
+			}
+			if mention.Parse(m.Msg).MentionAll {
+				at := m.CreatedAt.UTC()
+				return &at
+			}
+		}
+		scanned += len(page.Data)
+		if !page.HasNext {
+			return nil
+		}
+		before = page.Data[len(page.Data)-1].CreatedAt
+		pageSize *= lastMsgWalkGrowth
+	}
+	return nil
 }
 
 // toPreviewMessage enriches an eligible message into the room-list preview: sender and

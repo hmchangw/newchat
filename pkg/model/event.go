@@ -38,6 +38,18 @@ type MessageEvent struct {
 	NewTCount *int `json:"newTcount,omitempty" bson:"newTcount"`
 	// NewThreadLastMsgAt is the timestamp of the most recent surviving thread reply after this operation (nil when no replies remain).
 	NewThreadLastMsgAt *time.Time `json:"newThreadLastMsgAt,omitempty" bson:"newThreadLastMsgAt,omitempty"`
+	// Room last-message walk-back (delete only), the room-level mirror of NewThreadLastMsgAt:
+	// after a delete, history-service recomputes the room's denormalized last-message fields so
+	// broadcast-worker can walk room.lastMsgAt/lastMsgId back to the latest surviving message.
+	// NewRoomLastRecomputed gates the whole apply — false (old producer, hidden-thread-reply, or a
+	// read degrade) means "leave the room fields untouched". When true, nil NewRoomLastMsgID/At means
+	// the room is now empty ⇒ clear. NewRoomLastMentionAllAt is set only when the deleted message was
+	// itself an @all (broadcast re-parses Message.Content to decide whether to apply it); nil then clears
+	// lastMentionAllAt. bson:"-": pure producer→consumer transport, never persisted (like PreviewMessage).
+	NewRoomLastRecomputed   bool       `json:"newRoomLastRecomputed,omitempty" bson:"-"`
+	NewRoomLastMsgAt        *time.Time `json:"newRoomLastMsgAt,omitempty" bson:"-"`
+	NewRoomLastMsgID        *string    `json:"newRoomLastMsgId,omitempty" bson:"-"`
+	NewRoomLastMentionAllAt *time.Time `json:"newRoomLastMentionAllAt,omitempty" bson:"-"`
 	// QuotedParentUnverified marks a degraded QuotedParentMessage placeholder built on a transient
 	// history outage; message-worker re-projects or drops it. bson:"-" enforces never-persisted (an untagged field would round-trip).
 	QuotedParentUnverified bool `json:"quotedParentUnverified,omitempty" bson:"-"`

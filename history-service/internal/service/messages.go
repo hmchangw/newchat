@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -629,7 +630,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
+	s.fillRoomLastWalkback(c, &canonicalEvt, msg, roomID, actualDeletedAt)
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
 
 	return &models.DeleteMessageResponse{
@@ -652,6 +653,36 @@ func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models
 		return &preview
 	}
 	return nil
+}
+
+// fillRoomLastWalkback fills the delete event's room preview AND the room last-message walk-back
+// fields (NewRoomLast*) from a single preview walk — the room-level mirror of the thread-level
+// NewThreadLastMsgAt walk-back. A hidden thread reply never appears in the room timeline, so its
+// delete touches neither. A read degrade also leaves the walk-back off (NewRoomLastRecomputed
+// stays false) so broadcast-worker keeps the room's existing fields rather than wrongly clearing.
+func (s *HistoryService) fillRoomLastWalkback(c *natsrouter.Context, ev *model.MessageEvent, msg *models.Message, roomID string, at time.Time) {
+	if msg.ThreadParentID != "" && !msg.TShow {
+		return
+	}
+	preview, found, err := s.roomLastPreviewMessageE(c, roomID, nil, at)
+	if err != nil {
+		return
+	}
+	if found {
+		ev.PreviewMessage = &preview
+		id := preview.MessageID
+		msgAt := preview.CreatedAt
+		ev.NewRoomLastMsgID = &id
+		ev.NewRoomLastMsgAt = &msgAt
+	}
+	// found==false ⇒ room now empty ⇒ nil NewRoomLastMsg* signals a clear.
+	ev.NewRoomLastRecomputed = true
+
+	// lastMentionAllAt only shifts when the deleted message was itself an @all; broadcast-worker
+	// re-parses Message.Content to gate the apply, so the extra walk is skipped otherwise.
+	if mention.Parse(msg.Msg).MentionAll {
+		ev.NewRoomLastMentionAllAt = s.roomLastMentionAllAt(c, roomID, at)
+	}
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).

@@ -1038,7 +1038,7 @@ Only the original sender may edit.
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.delete`
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Soft-delete (row preserved for audit). Only the original sender may delete. Idempotent.
+Soft-delete (row preserved for audit). Only the original sender may delete. Idempotent. When the deleted message was the room's current last message, the room's denormalized last-message fields (`lastMsgAt`/`lastMsgId`/`lastMentionAllAt`, seen in `subscription.list`) are walked back to the latest surviving message, or cleared when the room is emptied.
 
 #### Request body
 
