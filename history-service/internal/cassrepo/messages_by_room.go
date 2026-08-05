@@ -74,6 +74,70 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 	}
 }
 
+// liveMessageFetcher adapts a per-bucket queryFn into a bucketFetcher that runs
+// the paged Cassandra query and scans+decrypts up to `remaining` rows. This is
+// the behavior the walker had inline before the fetcher refactor.
+func (r *Repository) liveMessageFetcher(queryFn bucketQueryFn) bucketFetcher[models.Message] {
+	return func(ctx context.Context, bucket int64, firstBucket bool, remaining int, pageState []byte) ([]models.Message, []byte, error) {
+		q := queryFn(bucket, firstBucket).WithContext(ctx).PageSize(remaining)
+		if pageState != nil {
+			q = q.PageState(pageState)
+		}
+		iter := q.Iter()
+		rows, scanErr := r.scanMessagesUpTo(ctx)(iter, remaining)
+		nextPageState := iter.PageState()
+		if err := iter.Close(); err != nil {
+			return nil, nil, fmt.Errorf("scan bucket %d: %w", bucket, err)
+		}
+		if scanErr != nil {
+			return nil, nil, fmt.Errorf("scan bucket %d: %w", bucket, scanErr)
+		}
+		return rows, nextPageState, nil
+	}
+}
+
+// cachedDescFetcher wraps a live fetcher so sealed buckets (strictly older than
+// the current bucket) are served from the per-bucket cache — the whole bucket
+// loaded once, then bounds-filtered in memory — while the current/hot bucket,
+// oversized buckets, and (when caching is disabled) all buckets fall through to
+// live. `before` is the DESC upper bound (applied only on the first bucket);
+// `since` is the optional lower bound (applied only on the floor bucket, for
+// BetweenDesc). It is used ONLY by the DESC LoadHistory reads, whose emitted
+// cursor is discarded — the client re-anchors by timestamp — so returning a nil
+// resume state for a partially-consumed cached bucket is correct.
+func (r *Repository) cachedDescFetcher(roomID string, before time.Time, since *time.Time, floorBucket int64, live bucketFetcher[models.Message]) bucketFetcher[models.Message] {
+	if r.bucketCache == nil {
+		return live
+	}
+	currentBucket := r.bucket.Of(r.now())
+	return func(ctx context.Context, bucket int64, firstBucket bool, remaining int, pageState []byte) ([]models.Message, []byte, error) {
+		if bucket >= currentBucket {
+			return live(ctx, bucket, firstBucket, remaining, pageState)
+		}
+		full, ok := r.bucketCache.Get(ctx, roomID, bucket)
+		if !ok {
+			loaded, oversized, err := r.loadSealedBucket(ctx, roomID, bucket, r.maxCacheRows)
+			if err != nil {
+				return nil, nil, err
+			}
+			if oversized {
+				return live(ctx, bucket, firstBucket, remaining, pageState)
+			}
+			r.bucketCache.Put(ctx, roomID, bucket, loaded)
+			full = loaded
+		}
+		var upper *time.Time
+		if firstBucket {
+			upper = &before
+		}
+		var lower *time.Time
+		if since != nil && bucket == floorBucket {
+			lower = since
+		}
+		return sliceBounded(full, upper, lower, remaining), nil, nil
+	}
+}
+
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(floor)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
@@ -96,7 +160,8 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState,
+		r.cachedDescFetcher(roomID, before, nil, floorBucket, r.liveMessageFetcher(queryFn)),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages before: %w", err)
@@ -143,7 +208,8 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState,
+		r.cachedDescFetcher(roomID, before, &since, floorBucket, r.liveMessageFetcher(queryFn)),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages between desc: %w", err)
@@ -173,7 +239,7 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState, r.liveMessageFetcher(queryFn),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages after: %w", err)
@@ -197,7 +263,7 @@ func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState, r.liveMessageFetcher(queryFn),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get all messages asc: %w", err)
