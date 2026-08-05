@@ -59,6 +59,7 @@ func TestCardAction_JSON(t *testing.T) {
 		HideExecLog: true,
 		CardTmID:    "tm1",
 		Data:        []byte(`{"action":"yes"}`),
+		BotUsername: "expense-bot",
 	}
 	roundTrip(t, ca)
 }
@@ -69,6 +70,21 @@ func TestCardAction_JSON_Minimal(t *testing.T) {
 	assert.Empty(t, got.Text)
 	assert.Empty(t, got.CardID)
 	assert.False(t, got.HideExecLog)
+	assert.Empty(t, got.BotUsername)
+}
+
+// TestCardAction_JSON_BotUsername pins the wire tag so oplog-transformer /
+// canonical-event JSON round-trips preserve the field.
+func TestCardAction_JSON_BotUsername(t *testing.T) {
+	ca := CardAction{Verb: "approve", BotUsername: "expense-bot"}
+	b, err := json.Marshal(ca)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"botUsername":"expense-bot"`)
+
+	ca.BotUsername = "" // omitempty ⇒ absent when empty
+	b, err = json.Marshal(ca)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "botUsername")
 }
 
 func TestQuotedParentMessage_JSON(t *testing.T) {
