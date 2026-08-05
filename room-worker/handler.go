@@ -235,7 +235,10 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		err = h.processAddMembers(ctx, msg.Data())
 	case strings.HasSuffix(subj, ".member.remove"):
 		err = h.processRemoveMember(ctx, msg.Data())
-	case strings.Contains(subj, ".teams.room.canonical."):
+	// The second suffix is the pre-cutover subject (chat.room.canonical.{site}.teams.create);
+	// match it transitionally so an old-subject message still on ROOMS at cutover isn't
+	// misrouted to processCreateRoom. Remove once old durables drain.
+	case strings.Contains(subj, ".teams.room.canonical."), strings.HasSuffix(subj, ".teams.create"):
 		var data []byte
 		if data, err = natsutil.DecodePayload(msg); err == nil {
 			err = h.processTeamsRoomCreate(ctx, data)

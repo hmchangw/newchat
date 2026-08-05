@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
@@ -31,6 +30,10 @@ import (
 )
 
 type config struct {
+	// Mode selects which stream/consumer this pod binds: "default" runs the ROOMS
+	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
+	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
+	Mode              string                  `env:"MODE"            envDefault:"default"`
 	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
 	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
@@ -89,6 +92,11 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
+	if cfg.Mode != "default" && cfg.Mode != "teams" {
+		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
+		os.Exit(1)
+	}
+
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -131,7 +139,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
@@ -169,7 +177,13 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
+	// Mode picks the stream: "default" consumes ROOMS (member/create/rename ops),
+	// "teams" consumes ROOMS-TEAMS (the Teams-migration room-create batch). Two
+	// deploys of the same binary, gated by env only.
 	streamCfg := stream.Rooms(cfg.SiteID)
+	if cfg.Mode == "teams" {
+		streamCfg = stream.RoomsTeams(cfg.SiteID)
+	}
 
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
 	// User cache is on by default; a non-positive size disables it cleanly rather
@@ -233,49 +247,38 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	// room-worker binds two streams: ROOMS (member/create/rename) and ROOMS-TEAMS
-	// (the Teams-migration room-create batch on its own stream). Each gets its own
-	// durable; both feed the same handler, routed by subject.
-	startConsumer := func(streamName, durableOverride string) o11ynats.MessagesContext {
-		cc := buildConsumerConfig(cfg.Consumer)
-		if durableOverride != "" {
-			cc.Durable = durableOverride
-		}
-		cons, err := js.CreateOrUpdateConsumer(ctx, streamName, cc)
-		if err != nil {
-			slog.Error("create consumer failed", "stream", streamName, "error", err)
-			os.Exit(1)
-		}
-		it, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-		if err != nil {
-			slog.Error("messages failed", "stream", streamName, "error", err)
-			os.Exit(1)
-		}
-		go func() {
-			for {
-				msgCtx, msg, err := it.Next()
-				if err != nil {
-					return
-				}
-				sem <- struct{}{}
-				wg.Add(1)
-				go func() {
-					// recover() must run BEFORE the slot release so a panicking handler
-					// Naks + redelivers instead of crashing the worker (async path runs
-					// outside natsrouter's recovery middleware).
-					defer func() {
-						<-sem
-						wg.Done()
-					}()
-					runJobWithRecovery(msgCtx, handler, msg)
-				}()
-			}
-		}()
-		return it
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode))
+	if err != nil {
+		slog.Error("create consumer failed", "error", err)
+		os.Exit(1)
 	}
 
-	iter := startConsumer(streamCfg.Name, "")
-	teamsIter := startConsumer(stream.RoomsTeams(cfg.SiteID).Name, "room-worker-teams")
+	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	if err != nil {
+		slog.Error("messages failed", "error", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		for {
+			msgCtx, msg, err := iter.Next()
+			if err != nil {
+				return
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func() {
+				// runJobWithRecovery contains handler panics (it Acks — drops — the
+				// poison message) so this async goroutine, which runs outside
+				// natsrouter's recovery middleware, can't crash the worker.
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				runJobWithRecovery(msgCtx, handler, msg)
+			}()
+		}
+	}()
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -293,7 +296,6 @@ func main() {
 	hooks := []func(ctx context.Context) error{
 		func(ctx context.Context) error {
 			iter.Stop()
-			teamsIter.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -374,10 +376,14 @@ func runJobWithRecovery(msgCtx context.Context, handler jobProcessor, msg jetstr
 	handler.HandleJetStreamMsg(handlerCtx, msg)
 }
 
-// buildConsumerConfig returns the durable consumer config for
-// room-worker. Centralized so it is unit-testable without NATS.
-func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+// buildConsumerConfig returns the durable consumer config for the given mode:
+// teams mode gets its own durable so the two deploys track independent progress
+// on their separate streams. Centralized so it is unit-testable without NATS.
+func buildConsumerConfig(s stream.ConsumerSettings, mode string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "room-worker"
+	if mode == "teams" {
+		cc.Durable = "room-worker-teams"
+	}
 	return cc
 }
