@@ -101,10 +101,11 @@ func (f *fakeValkey) setCount() int { f.mu.Lock(); defer f.mu.Unlock(); return l
 // stubReader implements service.MessageReader, recording per-method call counts
 // and returning a fresh page carrying s.msg on every page read.
 type stubReader struct {
-	mu    sync.Mutex
-	calls map[string]int
-	msg   string
-	err   error
+	mu        sync.Mutex
+	calls     map[string]int
+	msg       string
+	reactions models.Reactions // optional; exercises the gob codec on the struct-keyed map
+	err       error
 }
 
 func newStubReader(msg string) *stubReader {
@@ -125,6 +126,7 @@ func (s *stubReader) page() cassrepo.Page[models.Message] {
 			MessageID: "m1",
 			Msg:       s.msg,
 			CreatedAt: time.Unix(0, 0).UTC(),
+			Reactions: s.reactions,
 		}},
 		HasNext: false,
 	}
