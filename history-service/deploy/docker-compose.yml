@@ -18,11 +18,11 @@ services:
       - MONGO_DB=chat
       - CASSANDRA_HOSTS=cassandra
       - CASSANDRA_KEYSPACE=chat
-      # Message-page cache L2 (sealed LoadHistory reads). Unset VALKEY_ADDRS to
+      # Per-bucket read cache L2 (sealed LoadHistory reads). Unset VALKEY_ADDRS to
       # disable the cache and read straight from Cassandra.
       - VALKEY_ADDRS=valkey:6379
       - VALKEY_PASSWORD=
-      - HISTORY_MSG_CACHE_TTL=30s
+      - HISTORY_BUCKET_CACHE_TTL=10m
       - ATREST_ENABLED=true
       - VAULT_ADDR=http://vault:8200
       - VAULT_TOKEN=dev-only-token

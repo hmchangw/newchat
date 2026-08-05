@@ -88,7 +88,6 @@ func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req 
 			return nil, fmt.Errorf("react: add %s shortcode %s: %w", req.MessageID, shortcode, err)
 		}
 	}
-	s.bustPageCache(c, roomID)
 
 	// Bot reactor: prefer the app's display name; degrade to composed on miss/error.
 	displayName := s.botAwareDisplayName(c, actor.EngName, actor.ChineseName, actor.Account)

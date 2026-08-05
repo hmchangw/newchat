@@ -524,7 +524,6 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		}
 		return nil, fmt.Errorf("editing message %s: %w", req.MessageID, err)
 	}
-	s.bustPageCache(c, roomID)
 
 	editedAtMs := editedAt.UnixMilli()
 
@@ -607,7 +606,6 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 			DeletedAt: actualDeletedAt.UnixMilli(),
 		}, nil
 	}
-	s.bustPageCache(c, roomID)
 
 	deletedAtMs := actualDeletedAt.UnixMilli()
 

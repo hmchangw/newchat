@@ -44,35 +44,35 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
-func TestValidate_RejectsNegativeMsgCacheTTL(t *testing.T) {
+func TestValidate_RejectsNegativeBucketCacheTTL(t *testing.T) {
 	cfg := baseValid()
-	cfg.MsgCacheTTL = -1 * time.Second
+	cfg.BucketCacheTTL = -1 * time.Second
 	err := validate(&cfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_MSG_CACHE_TTL")
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_TTL")
 }
 
-func TestValidate_RejectsNegativeMsgCacheL1Size(t *testing.T) {
+func TestValidate_RejectsNegativeBucketCacheL1Size(t *testing.T) {
 	cfg := baseValid()
-	cfg.MsgCacheL1Size = -1
+	cfg.BucketCacheL1Size = -1
 	err := validate(&cfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_MSG_CACHE_L1_SIZE")
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_L1_SIZE")
 }
 
-func TestValidate_RejectsNegativeMsgGenTTL(t *testing.T) {
+func TestValidate_RejectsNegativeBucketCacheMaxRows(t *testing.T) {
 	cfg := baseValid()
-	cfg.MsgGenTTL = -1 * time.Second
+	cfg.BucketCacheMaxRows = -1
 	err := validate(&cfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_MSG_GEN_TTL")
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_MAX_ROWS")
 }
 
-func TestValidate_AcceptsZeroMsgCacheAsDisable(t *testing.T) {
+func TestValidate_AcceptsZeroBucketCacheAsDisable(t *testing.T) {
 	cfg := baseValid()
-	cfg.MsgCacheTTL = 0
-	cfg.MsgCacheL1Size = 0
-	cfg.MsgGenTTL = 0
+	cfg.BucketCacheTTL = 0
+	cfg.BucketCacheL1Size = 0
+	cfg.BucketCacheMaxRows = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 

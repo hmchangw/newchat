@@ -6,10 +6,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/hmchangw/chat/history-service/internal/bucketcache"
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
-	"github.com/hmchangw/chat/history-service/internal/msgpagecache"
 	"github.com/hmchangw/chat/history-service/internal/publisher"
 	"github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
@@ -134,7 +134,32 @@ func main() {
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
+	// Per-bucket read cache (L1 in-process + L2 Valkey) for the sealed Cassandra
+	// LoadHistory reads. Disabled when VALKEY_ADDRS is unset. The cache lives
+	// inside cassRepo: sealed buckets are served from cache, the current bucket
+	// and mutations always hit Cassandra, and the write path busts affected
+	// buckets synchronously.
+	var (
+		msgValkey valkeyutil.Client
+		repoOpts  []cassrepo.Option
+	)
+	if len(cfg.ValkeyAddrs) > 0 && cfg.BucketCacheL1Size > 0 && cfg.BucketCacheTTL > 0 {
+		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
+		if err != nil {
+			slog.Error("valkey connect (per-bucket cache) failed", "error", err)
+			os.Exit(1)
+		}
+		bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheL1Size, cfg.BucketCacheTTL)
+		if cerr != nil {
+			slog.Error("init per-bucket cache failed", "error", cerr)
+			os.Exit(1)
+		}
+		repoOpts = append(repoOpts, cassrepo.WithBucketCache(bc, cfg.BucketCacheMaxRows))
+		slog.Info("per-bucket cache enabled", "l1Size", cfg.BucketCacheL1Size, "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
+	}
+
+	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher, repoOpts...)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
 	roomRepo := mongorepo.NewRoomRepo(db)
@@ -184,27 +209,6 @@ func main() {
 		}
 		opts = append(opts, service.WithPreviewCache(pc))
 		slog.Info("preview cache enabled", "size", cfg.PreviewCacheSize, "ttl", cfg.PreviewCacheTTL)
-	}
-
-	// Message-page cache (L1 in-process + L2 Valkey) in front of the sealed
-	// Cassandra LoadHistory reads. Disabled when VALKEY_ADDRS is unset; the
-	// caching reader is slotted in as the message reader while mutations still
-	// hit cassRepo directly, and doubles as the write-site cache invalidator.
-	var msgValkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 && cfg.MsgCacheL1Size > 0 && cfg.MsgCacheTTL > 0 {
-		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
-		if err != nil {
-			slog.Error("valkey connect (message-page cache) failed", "error", err)
-			os.Exit(1)
-		}
-		pageReader, perr := msgpagecache.NewReader(cassRepo, msgValkey, bucketSizer, cfg.MsgCacheL1Size, cfg.MsgCacheTTL, cfg.MsgGenTTL)
-		if perr != nil {
-			slog.Error("init message-page cache failed", "error", perr)
-			os.Exit(1)
-		}
-		opts = append(opts, service.WithMessageReader(pageReader), service.WithPageCacheBuster(pageReader))
-		slog.Info("message-page cache enabled", "l1Size", cfg.MsgCacheL1Size, "ttl", cfg.MsgCacheTTL, "genTTL", cfg.MsgGenTTL)
 	}
 
 	pub := publisher.New(js)
