@@ -5850,20 +5850,24 @@ The client sends `quotedParentMessageId`; the server fetches and embeds the auth
 }
 ```
 
-##### Forwarded message with a body override
+##### Forwarded message with a redacted body
+
+The source body references a restricted image the destination room's members cannot open, so the client substitutes a safe body:
 
 ```json
 {
   "id": "01970a4f8c2d7c9aQFWE",
-  "content": "just the second half is relevant",
+  "content": "sharing the decision from #design",
   "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789e",
   "forwardedMessageId": "01970a4f8c2d7c9aQRST",
   "forwardedRoomId": "01970a4f8c2d7c9aR",
-  "forwardedContent": "…ship it Thursday, not Tuesday."
+  "forwardedContent": "Going with option B. [image removed]"
 }
 ```
 
 The reply's `forwardedMessage.msg` carries `forwardedContent` verbatim; every other snapshot field still comes from the fetched source.
+
+Because the snapshot is immutable, redaction must happen **before** the send — there is no edit path for a persisted snapshot. Note the substitution is not recorded anywhere: a reader cannot tell a redacted body from the source's real text.
 
 `content` is the optional forward comment — it may be empty. The server builds the `forwardedMessage` snapshot from the source at forward time; the snapshot is immutable (later edits/deletes of the source do not touch it) and is never access-window-redacted for readers. Forwarding a message that is itself a forward captures only that message's own comment (chain depth stays 1). Not forwardable: messages with attachments, card messages, system messages, deleted messages, and forwards whose own comment is empty.
 
