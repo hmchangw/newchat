@@ -51,6 +51,10 @@ func (r *SubscriptionRepo) EnsureIndexes(ctx context.Context) error {
 		// room-service's declaration on the shared collection (mismatch → conflict).
 		{Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}}, Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "name", Value: 1}, {Key: "roomType", Value: 1}}},
+		// Serves AggregateSubscriptionsFast's {u.account} match + {lastMsgAt} sort
+		// entirely from the index (no in-memory sort) — the perf-spike path. See
+		// AggregateSubscriptionsFast's doc comment for the denormalization tradeoffs.
+		{Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "lastMsgAt", Value: -1}}},
 	}); err != nil {
 		return fmt.Errorf("create subscription indexes: %w", err)
 	}
@@ -267,6 +271,93 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// the lookup). Fine at realistic per-account sub counts; the fix for very large accounts is
 	// denormalizing room activity onto the subscription — a write-side change tracked separately.
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
+}
+
+// AggregateSubscriptionsFast is a PERF-SPIKE variant of AggregateSubscriptions. It
+// sorts+paginates on the subscription's OWN denormalized "lastMsgAt" (index-backed,
+// see EnsureIndexes) BEFORE the rooms $lookup, so the join+enrich only runs over the
+// ≤limit+1 page instead of the account's entire subscription set — the fix the
+// AggregateSubscriptions doc comment calls out. Result-equivalent to
+// AggregateSubscriptions on non-deleted data as long as sub.lastMsgAt is kept in
+// sync with room.lastMsgAt (see caveat 1). NOT wired into any handler — spike/
+// benchmark only, see subscriptions_bench_test.go.
+//
+// Two productionization caveats deliberately left unsolved here:
+//  1. Write amplification: keeping sub.lastMsgAt fresh means every message-land
+//     updates N subscriber docs (an `updateMany({roomId},{$set:{lastMsgAt}})`) — a
+//     write-side cost to weigh against the read win.
+//  2. Deleted-room filter pushdown: AggregateSubscriptions filters ^Del- rooms
+//     BEFORE paging (roomsEnrichStages(true) on the full set); this fast path
+//     filters after the page's own $lookup, so a page containing a soft-deleted
+//     room returns <limit rows unless the deleted/closed state is ALSO
+//     denormalized onto the subscription. The benchmark only seeds non-deleted
+//     rooms, so the two variants stay row-count-equivalent there.
+func (r *SubscriptionRepo) AggregateSubscriptionsFast(ctx context.Context, account, listType string, favorite bool, withinDays *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
+	match := bson.M{"u.account": account}
+	switch listType {
+	case "current":
+		match["$or"] = bson.A{
+			bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
+			bson.M{"roomType": "botDM", "isSubscribed": true},
+		}
+	case "rooms":
+		match["roomType"] = bson.M{"$in": bson.A{"dm", "channel"}}
+	case "apps":
+		match["roomType"] = "botDM"
+		match["isSubscribed"] = true
+	}
+	if favorite {
+		match["favorite"] = true
+	}
+	match["open"] = bson.M{"$ne": false}
+	// Window applied directly on the sub's own (denormalized) lastMsgAt — pre-page,
+	// index-served — instead of post-join like AggregateSubscriptions.
+	if listType == "rooms" && withinDays != nil {
+		cutoff := time.Now().UTC().AddDate(0, 0, -*withinDays)
+		match["lastMsgAt"] = bson.M{"$gte": cutoff}
+	}
+
+	pipeline := bson.A{bson.M{"$match": match}}
+	pipeline = append(pipeline, fastSortStages(account, favorite)...)
+	// Skip/limit BEFORE the rooms lookup — the whole point of the fast path — so
+	// AggregatePagedHasMore (which appends skip/limit at the END) can't be reused.
+	pipeline = append(pipeline,
+		bson.D{{Key: "$skip", Value: page.Offset}},
+		bson.D{{Key: "$limit", Value: page.Limit + 1}},
+	)
+	pipeline = append(pipeline, roomsEnrichStages(true)...)
+
+	cur, err := r.enriched.Raw().Aggregate(ctx, pipeline)
+	if err != nil {
+		return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{}, fmt.Errorf("aggregate subscriptions fast: %w", err)
+	}
+	var results []model.EnrichedSubscription
+	if err := cur.All(ctx, &results); err != nil {
+		return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{}, fmt.Errorf("decode subscriptions fast page: %w", err)
+	}
+	hasMore := int64(len(results)) > page.Limit
+	if hasMore {
+		results = results[:page.Limit]
+	}
+	if results == nil {
+		results = []model.EnrichedSubscription{}
+	}
+	return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: results, HasMore: hasMore}, nil
+}
+
+// fastSortStages mirrors sortStages but sorts on the subscription's own denormalized
+// lastMsgAt field (top-level, index-backed) instead of the room-joined __sortKey.
+func fastSortStages(account string, favorite bool) bson.A {
+	if !favorite {
+		return bson.A{bson.M{"$sort": bson.D{{Key: "lastMsgAt", Value: -1}, {Key: "name", Value: 1}}}}
+	}
+	return bson.A{
+		bson.M{"$addFields": bson.M{"__selfDM": bson.M{"$and": bson.A{
+			bson.M{"$eq": bson.A{"$roomType", "dm"}},
+			bson.M{"$eq": bson.A{"$name", account}},
+		}}}},
+		bson.M{"$sort": bson.D{{Key: "__selfDM", Value: -1}, {Key: "lastMsgAt", Value: -1}, {Key: "name", Value: 1}}},
+	}
 }
 
 // sortStages orders rows by room activity (lastMsgAt) desc then name asc. In the
