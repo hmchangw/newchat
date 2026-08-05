@@ -94,13 +94,15 @@ type SendMessageRequest struct {
 	ForwardedMessageID string `json:"forwardedMessageId,omitempty"`
 	ForwardedRoomID    string `json:"forwardedRoomId,omitempty"`
 	// ForwardedContent optionally replaces the snapshot body the gatekeeper
-	// would otherwise copy from the fetched source — for clients that forward a
-	// selected excerpt rather than the whole message. The source is still
-	// fetched and every authorization and forwardability rule still runs
-	// against it; only ForwardedMessage.Msg is substituted. Requires
-	// ForwardedMessageID. Note this is caller-supplied text stored under the
-	// source author's identity, and the stored snapshot does not distinguish it
-	// from the real body.
+	// would otherwise copy from the fetched source. Primary use is client-side
+	// redaction: the source body may reference a restricted image the
+	// destination room's members cannot access, so the client substitutes a
+	// safe body before the snapshot is persisted. The source is still fetched
+	// and every authorization and forwardability rule still runs against it;
+	// only ForwardedMessage.Msg is substituted. Requires ForwardedMessageID.
+	// Note this is caller-supplied text stored under the source author's
+	// identity, and the stored snapshot does not distinguish it from the real
+	// body.
 	ForwardedContent string `json:"forwardedContent,omitempty"`
 }
 
