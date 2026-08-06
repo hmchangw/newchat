@@ -39,14 +39,15 @@ func fileJ1(path string) j1Source {
 // newJ1Source selects the J1 source by precedence: the TRANSLATION_J1_TOKEN
 // literal wins when set (local/dev), otherwise the file at
 // TRANSLATION_J1_TOKEN_FILE (production: the ServiceAccount token). It errors
-// when neither is configured.
+// when neither is configured. The literal is trimmed first so a whitespace-only
+// value is treated as absent (matching fileJ1, which trims and rejects empty),
+// rather than sending an invalid token.
 func newJ1Source(literal, file string) (j1Source, error) {
-	switch {
-	case literal != "":
-		return staticJ1(literal), nil
-	case file != "":
-		return fileJ1(file), nil
-	default:
-		return nil, fmt.Errorf("one of TRANSLATION_J1_TOKEN or TRANSLATION_J1_TOKEN_FILE is required")
+	if lit := strings.TrimSpace(literal); lit != "" {
+		return staticJ1(lit), nil
 	}
+	if file != "" {
+		return fileJ1(file), nil
+	}
+	return nil, fmt.Errorf("one of TRANSLATION_J1_TOKEN or TRANSLATION_J1_TOKEN_FILE is required")
 }

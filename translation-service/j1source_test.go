@@ -83,3 +83,30 @@ func TestNewJ1Source_NeitherIsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TRANSLATION_J1_TOKEN")
 }
+
+// A whitespace-only literal must be treated as absent (fileJ1 already trims and
+// rejects empty), so the file source is used when configured.
+func TestNewJ1Source_WhitespaceLiteralFallsBackToFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(path, []byte("from-file"), 0o600))
+
+	src, err := newJ1Source("  \n", path)
+	require.NoError(t, err)
+	got, err := src()
+	require.NoError(t, err)
+	assert.Equal(t, "from-file", got)
+}
+
+func TestNewJ1Source_TrimsLiteral(t *testing.T) {
+	src, err := newJ1Source("  abc \n", "")
+	require.NoError(t, err)
+	got, err := src()
+	require.NoError(t, err)
+	assert.Equal(t, "abc", got)
+}
+
+func TestNewJ1Source_WhitespaceLiteralAndNoFileIsError(t *testing.T) {
+	_, err := newJ1Source("  \n", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TRANSLATION_J1_TOKEN")
+}
