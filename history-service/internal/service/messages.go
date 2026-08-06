@@ -93,6 +93,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	s.enrichForwardedRooms(c, page.Data)
 	return &models.LoadHistoryResponse{
 		Messages:          page.Data,
 		MinUserLastSeenAt: minMs,

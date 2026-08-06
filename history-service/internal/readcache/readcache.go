@@ -17,6 +17,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 )
@@ -152,6 +153,7 @@ type RoomSource interface {
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error)
 }
 
 type roomTimes struct {
@@ -213,6 +215,13 @@ func (c *RoomCache) GetMinUserLastSeenAt(ctx context.Context, roomID string) (*t
 // large-room pin check needs the live member count, not a cached one.
 func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
 	return c.inner.GetRoomUserCount(ctx, roomID)
+}
+
+// GetRoomsNameType bypasses the cache and delegates to the source. Forwarded-
+// message room enrichment is a batched, per-request lookup — caching a
+// variable-length ID set doesn't fit the single-key TTL cache shape here.
+func (c *RoomCache) GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error) {
+	return c.inner.GetRoomsNameType(ctx, roomIDs)
 }
 
 // previewEntry is the cached resolved room preview. found=false is never stored

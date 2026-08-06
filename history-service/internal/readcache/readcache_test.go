@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 )
 
@@ -169,6 +170,10 @@ func (f *fakeRoomSource) GetMinUserLastSeenAt(_ context.Context, _ string) (*tim
 
 func (f *fakeRoomSource) GetRoomUserCount(_ context.Context, _ string) (int, error) {
 	return 0, nil
+}
+
+func (f *fakeRoomSource) GetRoomsNameType(_ context.Context, _ []string) (map[string]mongorepo.RoomNameType, error) {
+	return nil, nil
 }
 
 func TestRoomCache_CachesRoomTimes(t *testing.T) {

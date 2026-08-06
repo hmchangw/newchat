@@ -65,6 +65,9 @@ type RoomRepository interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	// GetRoomsNameType returns name/type for the given room IDs; absent IDs
+	// are missing from the map. Backs forwarded-message room enrichment.
+	GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error)
 }
 
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.
