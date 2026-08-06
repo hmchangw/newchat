@@ -1,6 +1,7 @@
 package cassrepo
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func descRows(times ...time.Time) []models.Message {
 	return out
 }
 
-func itoa(i int) string { return string(rune('0' + i)) }
+func itoa(i int) string { return strconv.Itoa(i) }
 
 func ids(msgs []models.Message) []string {
 	out := make([]string, len(msgs))
