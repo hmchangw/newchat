@@ -152,8 +152,16 @@ func (stubRoomRepo) GetRoomTimes(_ context.Context, _ string) (lastMsgAt, create
 	return now, now.AddDate(-1, 0, 0), nil
 }
 
-func (stubRoomRepo) GetRoomTimesByIDs(_ context.Context, _ []string) (map[string]mongorepo.RoomTimes, error) {
-	return map[string]mongorepo.RoomTimes{}, nil
+func (stubRoomRepo) GetRoomTimesByIDs(_ context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
+	// Mirror GetRoomTimes for every requested id: a room absent from a successful
+	// batch read is treated as nonexistent and skipped, which would starve the
+	// RoomsGet integration test of its seeded room.
+	now := time.Now().UTC()
+	out := make(map[string]mongorepo.RoomTimes, len(ids))
+	for _, id := range ids {
+		out[id] = mongorepo.RoomTimes{LastMsgAt: now, CreatedAt: now.AddDate(-1, 0, 0)}
+	}
+	return out, nil
 }
 
 func (stubRoomRepo) GetRoomUserCount(_ context.Context, _ string) (int, error) {

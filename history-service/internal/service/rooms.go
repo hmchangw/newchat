@@ -49,7 +49,7 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 
 	ids := dedupRoomIDs(req.RoomIDs)
 	now := time.Now().UTC()
-	metaByRoom := s.resolveRoomMetaHints(c, ids, req.Hints, now)
+	timesByRoom := s.resolveRoomMetaHints(c, ids, req.Hints, now)
 
 	out := make(map[string]models.PreviewMessage, len(ids))
 	var mu sync.Mutex
@@ -63,12 +63,16 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 		if err := c.Err(); err != nil {
 			return nil, err
 		}
+		times := timesByRoom[roomID]
+		if times.state == roomTimesMissing {
+			continue // room doesn't exist here — degrade to no entry, no further reads
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			lm, ok := s.resolvePreview(c, roomID, metaByRoom[roomID], now)
+			lm, ok := s.resolvePreview(c, roomID, times, now)
 			if !ok {
 				return
 			}
@@ -82,19 +86,49 @@ func (s *HistoryService) RoomsGet(c *natsrouter.Context, req models.RoomsGetRequ
 	return &models.RoomsGetResponse{Rooms: out}, nil
 }
 
-// resolveRoomMetaHints maps req.Hints into a per-room *models.RoomMeta and batches ONE
-// GetRoomTimesByIDs read for the rooms whose hint doesn't resolve to a usable lastMsgAt
-// (missing entirely, or rejected by the same sanitizeLastMsgAt every per-room resolve uses).
-// A batch-read failure degrades: those rooms simply keep a nil meta, so the per-room
-// resolveRoomTimes falls back to its existing GetRoomTimes read — the batch failure never
-// fails the whole RPC.
+// roomTimesState says how a room's walk-bound times were (or weren't) resolved by
+// the up-front hint/batch step, and therefore what the per-room resolve must do.
+type roomTimesState int
+
+const (
+	// roomTimesFallback: no up-front resolution (batch read degraded, or a direct
+	// caller like previewAfterMutation) — resolve per-room via resolveRoomTimes.
+	roomTimesFallback roomTimesState = iota
+	// roomTimesHinted: a usable caller hint — validate via resolveRoomTimes
+	// (sanitize + consistency refetch), which skips Mongo in the common case.
+	roomTimesHinted
+	// roomTimesResolved: times came from our own batch read — authoritative, use
+	// verbatim (re-reading the same document past the hint sanitizer buys nothing).
+	roomTimesResolved
+	// roomTimesMissing: absent from a successful batch read — the room doesn't
+	// exist here (orphaned subscription / deleted room); a per-room retry of the
+	// same read is doomed, so drop the room without further store reads.
+	roomTimesMissing
+)
+
+// roomTimesResolution is the per-room outcome of resolveRoomMetaHints. The zero
+// value means roomTimesFallback (fresh per-room resolve).
+type roomTimesResolution struct {
+	state     roomTimesState
+	meta      *models.RoomMeta // hint payload when state == roomTimesHinted
+	lastMsgAt time.Time        // batch times when state == roomTimesResolved
+	createdAt time.Time
+}
+
+// resolveRoomMetaHints resolves each room's walk-bound times up front: a usable hint
+// (per the same sanitizeLastMsgAt every per-room resolve uses) is kept as a hint, and
+// ONE batched GetRoomTimesByIDs read covers all the rest. Batch results are
+// authoritative — present rooms carry verbatim times (even a zero lastMsgAt), absent
+// rooms are known missing. A batch-read failure degrades: those rooms keep the
+// zero-value fallback resolution, so the per-room resolveRoomTimes fires for them —
+// the batch failure never fails the whole RPC.
 func (s *HistoryService) resolveRoomMetaHints(
 	ctx context.Context,
 	ids []string,
 	hints map[string]pkgmodel.RoomTimeHint,
 	now time.Time,
-) map[string]*models.RoomMeta {
-	metaByRoom := make(map[string]*models.RoomMeta, len(ids))
+) map[string]roomTimesResolution {
+	res := make(map[string]roomTimesResolution, len(ids))
 	unhinted := make([]string, 0, len(ids))
 	for _, roomID := range ids {
 		hint, ok := hints[roomID]
@@ -102,44 +136,43 @@ func (s *HistoryService) resolveRoomMetaHints(
 			unhinted = append(unhinted, roomID)
 			continue
 		}
-		metaByRoom[roomID] = &models.RoomMeta{LastMsgAt: hint.LastMsgAt, CreatedAt: hint.CreatedAt}
+		res[roomID] = roomTimesResolution{
+			state: roomTimesHinted,
+			meta:  &models.RoomMeta{LastMsgAt: hint.LastMsgAt, CreatedAt: hint.CreatedAt},
+		}
 	}
 	if len(unhinted) == 0 {
-		return metaByRoom
+		return res
 	}
 
 	times, err := s.rooms.GetRoomTimesByIDs(ctx, unhinted)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get batch room-times read degraded, falling back per-room",
 			"room_count", len(unhinted), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-		return metaByRoom
+		return res
 	}
-	for roomID, rt := range times {
-		if rt.LastMsgAt.IsZero() {
-			// Never-messaged room: nothing usable to hint. Leave the meta nil so
-			// resolveRoomTimes takes its plain meta==nil path (one full per-room
-			// GetRoomTimes, normalized directly) instead of treating a synthetic zero
-			// lastMsgAt as a "hint" and tripping the created>last consistency refetch.
+	for _, roomID := range unhinted {
+		rt, ok := times[roomID]
+		if !ok {
+			res[roomID] = roomTimesResolution{state: roomTimesMissing}
 			continue
 		}
-		last := rt.LastMsgAt.UnixMilli()
-		created := rt.CreatedAt.UnixMilli()
-		metaByRoom[roomID] = &models.RoomMeta{LastMsgAt: &last, CreatedAt: &created}
+		res[roomID] = roomTimesResolution{state: roomTimesResolved, lastMsgAt: rt.LastMsgAt, createdAt: rt.CreatedAt}
 	}
-	return metaByRoom
+	return res
 }
 
 // resolvePreview resolves one room's preview, serving it from the preview cache
 // when installed. The cache is positives-only, so empty rooms and read failures
-// fall through to a fresh resolve. meta is the caller/batch-resolved times hint
-// (nil when none applies); previewAfterMutation (edit/delete) keeps calling
-// roomLastPreviewMessage directly with meta=nil so mutations always see fresh state.
-func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
+// fall through to a fresh resolve. times is the caller/batch resolution outcome
+// (zero value when none applies); previewAfterMutation (edit/delete) keeps calling
+// roomLastPreviewMessage directly with the zero value so mutations always see fresh state.
+func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, times roomTimesResolution, now time.Time) (models.PreviewMessage, bool) {
 	if s.previewCache == nil {
-		return s.roomLastPreviewMessage(ctx, roomID, meta, now)
+		return s.roomLastPreviewMessage(ctx, roomID, times, now)
 	}
 	preview, ok, err := s.previewCache.Get(ctx, roomID, func(ctx context.Context) (models.PreviewMessage, bool, error) {
-		p, found := s.roomLastPreviewMessage(ctx, roomID, meta, now)
+		p, found := s.roomLastPreviewMessage(ctx, roomID, times, now)
 		return p, found, nil
 	})
 	if err != nil {
@@ -150,17 +183,21 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta
 }
 
 // roomLastPreviewMessage resolves one room's latest eligible preview message at read time.
-// meta, when non-nil, is a caller/batch-resolved room-times hint that lets resolveRoomTimes
-// skip its own Mongo read (see resolveRoomMetaHints / resolveRoomTimes); pass nil to always
-// resolve fresh (previewAfterMutation's contract). ok=false means drop the room (empty,
-// all-ineligible within the walk cap, or a read failure). Walks backward from lastMsgAt in
-// pages, skipping ineligible messages.
-func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
-	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
-	if err != nil {
-		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
-			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-		return models.PreviewMessage{}, false
+// times carries the up-front resolution outcome: batch-resolved times are used verbatim,
+// a hint lets resolveRoomTimes skip its own Mongo read (see resolveRoomMetaHints), and the
+// zero value always resolves fresh (previewAfterMutation's contract). ok=false means drop
+// the room (empty, all-ineligible within the walk cap, or a read failure). Walks backward
+// from lastMsgAt in pages, skipping ineligible messages.
+func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, times roomTimesResolution, now time.Time) (models.PreviewMessage, bool) {
+	lastMsgAt, createdAt := times.lastMsgAt, times.createdAt
+	if times.state != roomTimesResolved {
+		var err error
+		lastMsgAt, createdAt, err = s.resolveRoomTimesOrError(ctx, roomID, times.meta, now)
+		if err != nil {
+			slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+			return models.PreviewMessage{}, false
+		}
 	}
 
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
