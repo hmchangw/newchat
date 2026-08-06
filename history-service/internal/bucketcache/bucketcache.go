@@ -132,6 +132,10 @@ func (c *Cache) Bust(ctx context.Context, roomID string, bucket int64) {
 	}
 }
 
+// l2Get reads a raw cache blob from the L2 (Valkey) tier. It returns
+// (nil, false) on a miss or any transport error; a genuine cache miss is
+// silent while other errors are logged at warn (fail-open — the caller then
+// loads live).
 func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, bool) {
 	val, err := c.valkey.Get(ctx, key)
 	if err != nil {
@@ -143,6 +147,9 @@ func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, bool) {
 	return []byte(val), true
 }
 
+// encode gob-encodes a bucket's messages for cache storage. gob (not JSON) is
+// used because models.Message.Reactions is a struct-keyed, marshal-only map that
+// JSON cannot round-trip.
 func encode(msgs []models.Message) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(msgs); err != nil {
@@ -151,6 +158,8 @@ func encode(msgs []models.Message) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// decode reverses encode, returning a freshly-allocated slice on every call so a
+// cached blob is never aliased into a caller that mutates it in place.
 func decode(blob []byte) ([]models.Message, error) {
 	var msgs []models.Message
 	if err := gob.NewDecoder(bytes.NewReader(blob)).Decode(&msgs); err != nil {
