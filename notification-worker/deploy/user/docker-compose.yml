@@ -17,6 +17,8 @@ services:
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - VALKEY_ADDRS=valkey:6379
       - ROOMSUBCACHE_TTL=5m
       - LARGE_ROOM_THRESHOLD=500

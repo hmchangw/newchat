@@ -11,6 +11,8 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
@@ -35,13 +37,16 @@ type encryptionConfig struct {
 }
 
 type config struct {
-	NatsURL              string          `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
-	NatsCredsFile        string          `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID               string          `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI             string          `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB              string          `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername        string          `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword        string          `env:"MONGO_PASSWORD"            envDefault:""`
+	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
+	MongoURI      string `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
+	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
+	// offloads reads (a just-joined member is recovered via history).
+	MongoReadPreference  string          `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
 	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
 	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
 	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
@@ -101,11 +106,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.MongoReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
@@ -145,7 +157,10 @@ func main() {
 				"room_key_grace_period", cfg.RoomKeyGracePeriod)
 			os.Exit(1)
 		}
-		keyStore = roomkeystore.NewMongoStore(db.Collection("rooms"), cfg.RoomKeyGracePeriod)
+		// Room keys are written by other services; pin to primary so a fresh/rotated
+		// key isn't missed on a lagging secondary.
+		roomsPrimary := db.Collection("rooms", options.Collection().SetReadPreference(readpref.Primary()))
+		keyStore = roomkeystore.NewMongoStore(roomsPrimary, cfg.RoomKeyGracePeriod)
 	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)

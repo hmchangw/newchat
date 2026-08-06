@@ -33,13 +33,16 @@ import (
 )
 
 type config struct {
-	NatsURL                string                  `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
-	NatsCredsFile          string                  `env:"NATS_CREDS_FILE"           envDefault:""`
-	SiteID                 string                  `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI               string                  `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB                string                  `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername          string                  `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword          string                  `env:"MONGO_PASSWORD"            envDefault:""`
+	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
+	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
+	MongoURI      string `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
+	// MongoReadPreference: read-only service (fan-out lookups); secondaryPreferred
+	// offloads the primary.
+	MongoReadPreference    string                  `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
 	MaxWorkers             int                     `env:"MAX_WORKERS"               envDefault:"100"`
 	LargeRoomThreshold     int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
 	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
@@ -135,11 +138,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.MongoReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")

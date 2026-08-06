@@ -17,6 +17,8 @@ services:
       - VALKEY_PASSWORD=
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - USERS_API_URL=http://users-api-mock:8080
       - USERS_API_TIMEOUT=5s
       - SEARCH_DOC_COUNTS=25
