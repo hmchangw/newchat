@@ -36,10 +36,10 @@ func (p Pipeline) ConsumerName(base string) string {
 
 // Wiring is everything a fan-out worker needs to bind to a pipeline.
 type Wiring struct {
-	CanonicalStream   Config // MESSAGES_CANONICAL or BOT_MESSAGES_CANONICAL
+	CanonicalStream   Config // MESSAGES-CANONICAL or BOT-MESSAGES-CANONICAL
 	CanonicalCreated  string // .created leaf — notification-worker filter
 	CanonicalWildcard string // .> wildcard — broadcast-worker filter
-	PushStream        Config // PUSH_NOTIFICATION or BOT_PUSH_NOTIFICATION
+	PushStream        Config // PUSH-NOTIFICATION or BOT-PUSH-NOTIFICATION
 	PushSendSubject   string // .send leaf — notification-worker publishes here
 	PushInputWildcard string // .> wildcard — push-notification-service filter, also the push-stream binding
 }

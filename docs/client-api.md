@@ -89,7 +89,7 @@ This doc covers the public client-facing API surface only.
 
 **Out of scope (backend-internal — clients never see these):**
 
-- Backend-only JetStream subjects (MESSAGES, MESSAGES_CANONICAL, INBOX, ROOMS, OUTBOX streams).
+- Backend-only JetStream subjects (MESSAGES, MESSAGES-CANONICAL, INBOX, ROOMS, OUTBOX streams).
 - Server-to-server subjects (`chat.server.request.…`).
 
 Room-encryption key events that clients consume are documented under the RPC that triggers them (Create Room, Add Members, Remove Member) and in [§5 Room Encryption](#5-room-encryption). Multi-site federation is transparent to clients: a cross-site action delivers the **same** events on the same `chat.user.{account}.…` / `chat.room.…` subjects as a same-site action, so this doc does not distinguish them.
@@ -1305,7 +1305,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 
 **3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Delivered to clients subscribed to `chat.room.>` for the room.
+**4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Routed on the room's namespace exactly like `chat.room.{roomID}.event` — pick the subject by the room's `crossSite` flag (`chat.local.room.{roomID}.event.member` when `crossSite: false`, `chat.room.{roomID}.event.member` when `crossSite: true`/unknown). Delivered to clients subscribed to the room on that namespace.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1410,7 +1410,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 **3. `chat.user.{survivor}.event.room.key`** — on a channel removal the room key is **rotated**; every surviving member receives a new `RoomKeyEvent` with an incremented `version`. The removed account stops receiving key events. See [§5 Room Encryption](#5-room-encryption).
 
-**4. `chat.room.{roomID}.event.member`** — a `MemberRemoveEvent` (`type: "member_left"` for a self-leave, `"member_removed"` for a forced removal or org removal). Delivered to clients subscribed to `chat.room.>`.
+**4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberRemoveEvent` (`type: "member_left"` for a self-leave, `"member_removed"` for a forced removal or org removal). Routed on the room's namespace by its `crossSite` flag, exactly like the add event above (`chat.local.room.{roomID}.event.member` when `crossSite: false`).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1600,7 +1600,7 @@ The event uses a **dedicated flat struct** (`type: "room_renamed"`) — mirrorin
 
 **2. `chat.user.{requesterAccount}.response.{requestID}`** — an [`AsyncJobResult`](#asyncjobresult) to the requester when the rename finishes (requires `X-Request-ID`). `operation` is `"room.rename"`. `status` is `"ok"` on success or `"error"` if the async job fails.
 
-**3. Cross-site inbox events** — one event per remote site that has federated members. Published directly to `chat.inbox.{remoteSiteID}.external.room_renamed` (the destination's `INBOX_{remoteSiteID}` stream); remote `inbox-worker` mirrors the rename.
+**3. Cross-site inbox events** — one event per remote site that has federated members. Published directly to `chat.inbox.{remoteSiteID}.external.room_renamed` (the destination's `INBOX-{remoteSiteID}` stream); remote `inbox-worker` mirrors the rename.
 
 ##### Triggered events — error path
 
@@ -2661,15 +2661,15 @@ The paginated read RPCs (Load History, Load Next, Load Surrounding, Get Thread M
 
 | Field | Type | Notes |
 |---|---|---|
-| `lastMsgAt` | number | Optional. Room's most-recent-message time, UTC ms. |
-| `createdAt` | number | Optional. Room's creation time, UTC ms. |
+| `lastMsgAt` | number | Optional. Room's most-recent-message time, UTC ms. Supplying a valid value is what lets the server skip its MongoDB lookup. |
+| `createdAt` | number | Optional. Room's creation time, UTC ms. A refinement only — narrows the scan's lower bound; its absence never forces a lookup. |
 
-**What to pass for `meta`:** the server needs the room's `lastMsgAt` and `createdAt` to pick the Cassandra time-bucket window to scan. `meta` lets the client supply the values it already holds so the server can skip a MongoDB lookup:
+**What to pass for `meta`:** the server uses the room's `lastMsgAt` to pick the Cassandra time-bucket window to scan (and, when given, `createdAt` as the scan's lower bound). `meta` lets the client supply the values it already holds so the server can skip a MongoDB lookup:
 
-- `meta.lastMsgAt` — the room's most-recent-message time, as the client knows it from the room summary (the same `lastMsgAt` carried on `RoomEvent`s / the sidebar). Use the room's last-activity timestamp; for an empty room use its `createdAt`.
-- `meta.createdAt` — the room's creation time from the room summary.
+- `meta.lastMsgAt` — the room's most-recent-message time, as the client knows it from the room summary (the same `lastMsgAt` carried on `RoomEvent`s / the sidebar). **A valid `lastMsgAt` alone is sufficient to skip the lookup.** Use the room's last-activity timestamp; for an empty room use its `createdAt`.
+- `meta.createdAt` — the room's creation time from the room summary. Optional refinement: when present it floors the scan at the room's creation time instead of the server's default history window; when omitted the server still skips the lookup and simply uses that default floor.
 
-Both are **hints, not authority**: the server sanitizes them (ignores values that are negative, in the future, or mutually inconsistent) and falls back to a MongoDB fetch when a value is missing or fails sanitization. A client that does not have these values should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
+Both are **hints, not authority**: the server sanitizes each (values that are negative or in the future are ignored) and falls back to a MongoDB fetch when `lastMsgAt` is missing or fails sanitization — or when both are supplied but mutually inconsistent (a `createdAt` later than `lastMsgAt`), which triggers a re-fetch to resolve the inconsistency. A client that does not have `lastMsgAt` should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
 
 Common error envelopes across these RPCs (see §6 for the full shape):
 
@@ -2795,6 +2795,7 @@ message projection, keyed by `id`.
 | `hideExecLog` | boolean | Optional. Suppress the execution log entry. |
 | `cardTmId` | string | Optional. Card template ID. |
 | `data` | string | Optional. Base64-encoded action payload. |
+| `botUsername` | string | Optional. Username of the bot the action targets — the client sets it on a tcard_execute event so the server can route the callback. |
 
 ##### QuotedParentMessage
 
@@ -3442,7 +3443,7 @@ Pin and unpin share the same flat `PinStateRoomEvent` payload; `type` discrimina
 
 ##### Backend side effects (internal — not client-subscribable)
 
-On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.pinned`** (JetStream, `MESSAGES-CANONICAL-{siteID}` stream). This is an internal canonical subject consumed by backend workers (broadcast-worker, search-sync-worker, etc.) and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-pinned message (idempotent short-circuit) or a soft-deleted message (the handler returns `not_found` before publishing).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -3550,7 +3551,7 @@ Same flat `PinStateRoomEvent` payload as [Pin Message](#pin-message); `type` dis
 
 ##### Backend side effects (internal — not client-subscribable)
 
-On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES_CANONICAL_{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
+On success, the service publishes a `MessageEvent` to **`chat.msg.canonical.{siteID}.unpinned`** (JetStream, `MESSAGES-CANONICAL-{siteID}` stream). This is an internal canonical subject consumed by backend workers and is **not** part of any client subscription pattern. Documented here only so backend service authors know the payload shape. Not published when the request hits an already-unpinned message.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -5767,7 +5768,7 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
 
-This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES_CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
+This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES-CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
 
 The same subject and request body cover three send variants: plain message, thread reply, and quoted message. The variant is determined by which optional fields are set.
 
@@ -7300,7 +7301,7 @@ during read via `http.MaxBytesReader`.
 
 Sends a message into an existing room the bot is a member of. Returns
 the canonical `Message` document that landed on
-`BOT_MESSAGES_CANONICAL_{sub.siteId}`.
+`BOT-MESSAGES-CANONICAL-{sub.siteId}`.
 
 #### Request body
 

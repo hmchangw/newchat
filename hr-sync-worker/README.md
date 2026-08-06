@@ -1,7 +1,7 @@
 # hr-sync-worker
 
 Reference consumer for the HR feed — one durable, strictly-sequential
-consumer per `SITE_IDS` entry on `HR_{siteID}` (`chat.hr.{siteID}.>`),
+consumer per `SITE_IDS` entry on `HR-{siteID}` (`chat.hr.{siteID}.>`),
 persisting:
 
 | Subject suffix | Write |

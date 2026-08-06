@@ -231,7 +231,7 @@ func main() {
 		}
 	}()
 
-	// Mute is the only canonical member event still on this stream; add/remove invalidation rides on MESSAGES_CANONICAL sys-messages.
+	// Mute is the only canonical member event still on this stream; add/remove invalidation rides on MESSAGES-CANONICAL sys-messages.
 	// DeliverNewPolicy: skip history on restart; roomsubcache TTL reconciles any boundary staleness.
 	roomsCfg := stream.Rooms(cfg.SiteID)
 	invalCons, err := otelJS.CreateOrUpdateConsumer(ctx, roomsCfg.Name, jetstream.ConsumerConfig{

@@ -364,7 +364,7 @@ available (no app record / disabled assistant), user/org not found.
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
 ```
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject, embedding the room object incl. the room key for channels; no separate `room.key` event), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject, embedding the room object incl. the room key for channels; no separate `room.key` event), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`, or `chat.local.room.{roomID}.event.member` for same-site rooms by `crossSite`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -395,7 +395,7 @@ Synchronous: neither/both of `account`/`orgId` set; requester not an owner; targ
 last **human** member (bots don't count, and a bot target skips the guard); org member
 cannot leave individually.
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`), `new_message` system message → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`, or `chat.local.room.{roomID}.event.member` for same-site rooms by `crossSite`), `new_message` system message → [events.md](events.md#new_message-roomevent)
 
 ---
 

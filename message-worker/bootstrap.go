@@ -31,31 +31,35 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams handles the JetStream MESSAGES_CANONICAL stream this
-// service uses. When enabled (dev/integration), it creates the stream via
-// CreateOrUpdateStream. When disabled (production), it verifies the stream
-// exists via Stream() and returns an error if it doesn't — fail-fast so a
-// misprovisioned deploy surfaces at startup rather than at first publish.
+// bootstrapStreams handles the JetStream stream this mode consumes — MESSAGES-
+// CANONICAL for default mode, MESSAGES-TEAMS for teams mode. When enabled
+// (dev/integration), it creates the stream via CreateOrUpdateStream. When disabled
+// (production), it verifies the stream exists via Stream() and returns an error if
+// it doesn't — fail-fast so a misprovisioned deploy surfaces at startup rather than
+// at first publish.
 //
-// Ownership rule: this helper sets only the stream schema (Name + Subjects)
-// from pkg/stream.MessagesCanonical. Federation config belongs to ops/IaC and
-// is layered on in production. App code never sets it.
-func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
-	canonicalCfg := stream.MessagesCanonical(siteID)
+// Ownership rule: this helper sets only the stream schema (Name + Subjects) from
+// pkg/stream. Federation config belongs to ops/IaC and is layered on in production.
+// App code never sets it.
+func bootstrapStreams(ctx context.Context, js streamManager, siteID, mode string, enabled bool) error {
+	cfg := stream.MessagesCanonical(siteID)
+	if mode == "teams" {
+		cfg = stream.MessagesTeams(siteID)
+	}
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     canonicalCfg.Name,
-			Subjects: canonicalCfg.Subjects,
+			Name:     cfg.Name,
+			Subjects: cfg.Subjects,
 		}); err != nil {
-			return fmt.Errorf("create MESSAGES_CANONICAL stream: %w", err)
+			return fmt.Errorf("create %s stream: %w", cfg.Name, err)
 		}
 		return nil
 	}
 	// Production path: verify the stream exists. Fail fast if it doesn't —
 	// ops/IaC owns provisioning, and a missing stream means the deploy is
 	// broken before the first publish or consume.
-	if _, err := js.Stream(ctx, canonicalCfg.Name); err != nil {
-		return fmt.Errorf("verify MESSAGES_CANONICAL stream: %w", err)
+	if _, err := js.Stream(ctx, cfg.Name); err != nil {
+		return fmt.Errorf("verify %s stream: %w", cfg.Name, err)
 	}
 	return nil
 }

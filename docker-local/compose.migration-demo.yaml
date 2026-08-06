@@ -4,7 +4,7 @@ name: oplog-migration-demo
 # plus the two migration services onto the SHARED `chat-local` network, wired to
 # the shared NATS / Mongo / Cassandra started by `make deps-up`.
 #
-#   source-mongo (legacy RS) ──▶ oplog-connector ──▶ MIGRATION_OPLOG_{site}
+#   source-mongo (legacy RS) ──▶ oplog-connector ──▶ MIGRATION-OPLOG-{site}
 #                                          │
 #                                          ▼
 #                                 oplog-transformer ──▶ chat.msg.canonical.{site}.* (X-Migration: live)
@@ -56,7 +56,7 @@ services:
       # Demo scope is messages only (the transformer only handles messages today).
       - WATCH_COLLECTIONS=rocketchat_message
       - READ_PREFERENCE=primaryPreferred
-      - BOOTSTRAP_STREAMS=true # owns MIGRATION_OPLOG; creates it in dev
+      - BOOTSTRAP_STREAMS=true # owns MIGRATION-OPLOG; creates it in dev
       - HEALTH_ADDR=:9090
       - LOG_LEVEL=info
     volumes:

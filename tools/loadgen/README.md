@@ -1,7 +1,7 @@
 # loadgen
 
 Capacity-baseline load generator for the single-site messaging pipeline
-(`message-gatekeeper` → `MESSAGES_CANONICAL` → `message-worker` +
+(`message-gatekeeper` → `MESSAGES-CANONICAL` → `message-worker` +
 `broadcast-worker`). It also contains focused history, membership, presence,
 and Cassandra Run A workloads.
 
@@ -829,7 +829,7 @@ Before `loadgen daily` will produce a meaningful verdict, you need:
 | Docker-local stack running | Daily talks to message-gatekeeper, room-service, broadcast-worker, etc. | `make -C tools/loadgen/deploy up` |
 | Mongo `users`/`rooms`/`subscriptions` seeded for the preset | Gatekeeper rejects every send with "user not subscribed" otherwise | `loadgen seed --workload=messages --preset=<your daily preset>` |
 | Per-room AES-256-GCM keys (in the room documents) | broadcast-worker decrypts with these when `ENCRYPTION_ENABLED=true` (default) | Written by the same `loadgen seed` step |
-| JetStream streams (`MESSAGES`, `MESSAGES_CANONICAL`, `ROOMS`, `INBOX`) | The whole pipeline | Auto-created by services at startup when `BOOTSTRAP_STREAMS=true` (docker-local default) |
+| JetStream streams (`MESSAGES`, `MESSAGES-CANONICAL`, `ROOMS`, `INBOX`) | The whole pipeline | Auto-created by services at startup when `BOOTSTRAP_STREAMS=true` (docker-local default) |
 | Cassandra tables | message-worker writes here; history-service reads here | Created by `docker-local/cassandra/init/*.cql` at first stack boot |
 | `NATS_CREDS_FILE` pointing at credentials with `pub/sub` on `chat.>` | Loadgen otherwise dials anonymously and gets permission violations | docker-local writes `backend.creds` with full perms via `docker-local/setup.sh` |
 

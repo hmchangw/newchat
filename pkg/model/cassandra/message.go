@@ -33,6 +33,10 @@ type CardAction struct {
 	HideExecLog bool   `json:"hideExecLog,omitempty" cql:"hide_exec_log"`
 	CardTmID    string `json:"cardTmId,omitempty"    cql:"card_tmid"`
 	Data        []byte `json:"data,omitempty"        cql:"data"`
+	// BotUsername names the bot the card action is dispatched to — the client
+	// (desktop/kr backend) sets it on the tcard_execute event so the receiving
+	// bot can route the callback. Optional: legacy card actions predate the field.
+	BotUsername string `json:"botUsername,omitempty" cql:"bot_username"`
 }
 
 // EncMeta maps to the Cassandra "EncMeta" UDT. Nonce is the 12-byte

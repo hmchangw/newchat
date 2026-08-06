@@ -12,12 +12,16 @@ describe('SystemMessage', () => {
     expect(screen.getByText(content)).toBeInTheDocument()
   })
 
-  it('renders a timestamp alongside the text', () => {
-    render(
+  it('renders a timestamp with both date and time alongside the text', () => {
+    const { container } = render(
       <SystemMessage
         message={{ id: 'm', content: 'whatever', createdAt: '2026-05-18T10:42:00Z' }}
       />
     )
-    expect(screen.getByText(/\d{1,2}:\d{2}/)).toBeInTheDocument()
+    // 2026-05-18T10:42:00Z stays within 2026 in any timezone, so the year
+    // proves the date renders alongside the HH:MM time.
+    const timeEl = container.querySelector('.system-message-time')
+    expect(timeEl.textContent).toMatch(/2026/)
+    expect(timeEl.textContent).toMatch(/\d{1,2}:\d{2}/)
   })
 })

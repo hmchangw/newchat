@@ -266,7 +266,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Publish rate by stream (msg/s)",
-      "description": "Per-stream publish throughput, derived from rate(jetstream_stream_last_seq). Each stream owns a subject namespace (e.g. MESSAGES_* carries chat.user.*...msg.>), so this is the closest per-subject view the exporter exposes.",
+      "description": "Per-stream publish throughput, derived from rate(jetstream_stream_last_seq). Each stream owns a subject namespace (e.g. MESSAGES-* carries chat.user.*...msg.>), so this is the closest per-subject view the exporter exposes.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
       "fieldConfig": {

@@ -18,6 +18,11 @@ type Observability interface {
 
 type connectConfig struct {
 	obs Observability
+	// maxPoolSize/minPoolSize are nil when the corresponding option was not
+	// supplied, so applyTuning leaves the client option untouched and a value
+	// from the connection URI (or the driver default) survives.
+	maxPoolSize *uint64
+	minPoolSize *uint64
 }
 
 // Option configures Connect. Options are additive; the zero config attaches no

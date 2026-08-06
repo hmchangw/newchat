@@ -96,10 +96,21 @@ func (m *Message) SenderDisplayName() string {
 	return m.UserAccount
 }
 
+// RoomTimeHint is an optional caller-supplied walk-bounds hint (UTC millis) for a
+// single room, letting history-service skip its own per-room room-times read.
+type RoomTimeHint struct {
+	LastMsgAt *int64 `json:"lastMsgAt,omitempty"`
+	CreatedAt *int64 `json:"createdAt,omitempty"`
+}
+
 // RoomsGetRequest is the request body for the rooms.get batch RPC: the rooms whose
 // last message the caller wants. The site is taken from the subject.
 type RoomsGetRequest struct {
 	RoomIDs []string `json:"roomIds"`
+	// Hints is an optional per-room (keyed by roomID) walk-bounds hint that lets
+	// history-service skip its per-room room-times read. Backward compatible:
+	// old callers omit it and send only RoomIDs.
+	Hints map[string]RoomTimeHint `json:"hints,omitempty"`
 }
 
 // PreviewMessage is a room's most-recent eligible message, resolved at read time and

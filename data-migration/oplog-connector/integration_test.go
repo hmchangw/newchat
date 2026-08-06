@@ -64,7 +64,7 @@ func createSourceCollection(t *testing.T, db *mongo.Database, coll string) *mong
 }
 
 // TestConnector_RealPublishEndToEnd runs the full connector (start → real NATS publish) and reads
-// the envelope back off MIGRATION_OPLOG — covering main.go wiring and the real o11y/nats JetStream path.
+// the envelope back off MIGRATION-OPLOG — covering main.go wiring and the real o11y/nats JetStream path.
 func TestConnector_RealPublishEndToEnd(t *testing.T) {
 	const coll = "rocketchat_message"
 	client, uri := startReplicaSet(t)
@@ -109,7 +109,7 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 
 	var gotID string
 	require.Eventually(t, func() bool {
-		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION_OPLOG_site1", jetstream.ConsumerConfig{
+		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION-OPLOG-site1", jetstream.ConsumerConfig{
 			AckPolicy:      jetstream.AckExplicitPolicy,
 			FilterSubjects: []string{"chat.migration.oplog.site1.>"},
 		})
@@ -127,7 +127,7 @@ func TestConnector_RealPublishEndToEnd(t *testing.T) {
 			}
 		}
 		return gotID != ""
-	}, 40*time.Second, 500*time.Millisecond, "insert envelope must land on MIGRATION_OPLOG")
+	}, 40*time.Second, 500*time.Millisecond, "insert envelope must land on MIGRATION-OPLOG")
 
 	assert.NotEmpty(t, gotID, "published event carries a Nats-Msg-Id dedup key")
 }
@@ -362,7 +362,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 
 	var subjects []string
 	require.Eventually(t, func() bool {
-		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION_OPLOG_sitecr", jetstream.ConsumerConfig{
+		cons, cerr := js.CreateOrUpdateConsumer(ctx, "MIGRATION-OPLOG-sitecr", jetstream.ConsumerConfig{
 			AckPolicy:      jetstream.AckExplicitPolicy,
 			FilterSubjects: []string{"chat.migration.oplog.sitecr.>"},
 		})
@@ -378,7 +378,7 @@ func TestConnector_CollectionsRole_DisjointSet(t *testing.T) {
 			subjects = append(subjects, m.Subject())
 		}
 		return slices.Contains(subjects, "chat.migration.oplog.sitecr.rocketchat_room.insert")
-	}, 40*time.Second, 500*time.Millisecond, "room insert must land on MIGRATION_OPLOG")
+	}, 40*time.Second, 500*time.Millisecond, "room insert must land on MIGRATION-OPLOG")
 
 	for _, s := range subjects {
 		assert.NotContains(t, s, "rocketchat_message",
