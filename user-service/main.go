@@ -77,7 +77,7 @@ func main() {
 	}
 
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, cfg.SortKeyCacheSize, cfg.SortKeyCacheTTL)
+	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SortKeyCacheSize, cfg.SortKeyCacheTTL)
 	userRepo := mongorepo.NewUserRepo(db)
 	appRepo := mongorepo.NewAppRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)

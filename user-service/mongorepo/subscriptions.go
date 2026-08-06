@@ -38,23 +38,21 @@ type SubscriptionRepo struct {
 	// baselines); owned by room-service, referenced only by name.
 	rooms    *mongo.Collection
 	sortKeys *sortKeyCache
-	siteID   string // this instance's site — distinguishes local vs cross-site rows in the deleted-filter
 }
 
-// NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter
-// keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
-// sortKeyCacheSize/sortKeyCacheTTL configure the list sort-key cache — a
+// NewSubscriptionRepo builds a SubscriptionRepo over db. The deleted-filter is
+// room.name-based (^Del-): rows with a missing room doc — cross-site — are
+// kept. sortKeyCacheSize/sortKeyCacheTTL configure the list sort-key cache — a
 // non-positive value disables it (every list resolves sort keys from a fresh
 // batched Mongo read). Defaults live in the service config (SUBS_SORTKEY_CACHE_*),
 // the single source.
-func NewSubscriptionRepo(db *mongo.Database, siteID string, sortKeyCacheSize int, sortKeyCacheTTL time.Duration) *SubscriptionRepo {
+func NewSubscriptionRepo(db *mongo.Database, sortKeyCacheSize int, sortKeyCacheTTL time.Duration) *SubscriptionRepo {
 	col := db.Collection(subscriptionsCollection)
 	return &SubscriptionRepo{
 		subscriptions: mongoutil.NewCollection[model.Subscription](col),
 		enriched:      mongoutil.NewCollection[model.EnrichedSubscription](col),
 		rooms:         db.Collection(roomsCollection),
 		sortKeys:      newSortKeyCache(sortKeyCacheSize, sortKeyCacheTTL),
-		siteID:        siteID,
 	}
 }
 
@@ -89,6 +87,8 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 			"let":  bson.M{"rid": "$roomId"},
 			"pipeline": bson.A{
 				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
+				// No createdAt: its only consumer was the in-pipeline sort key the
+				// phased list path replaced (the in-memory sort resolves its own).
 				bson.M{"$project": bson.M{
 					"name":              1,
 					"userCount":         1,
@@ -97,7 +97,6 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 					"lastMsgId":         1,
 					"lastMentionAllAt":  1,
 					"minUserLastSeenAt": 1,
-					"createdAt":         1,
 					"encKey.priv":       1,
 					"encKey.ver":        1,
 					"crossSite":         1,
@@ -404,10 +403,13 @@ func (r *SubscriptionRepo) fillListPage(ctx context.Context, rows []listRow, pag
 	offset := max(page.Offset, 0)
 	limit := max(page.Limit, 0)
 	candidates := rows[min(offset, int64(len(rows))):]
+	// minFillBatch keeps a degenerate limit (0 after clamping) from turning a
+	// long freshly-dead candidate prefix into one enrich round trip per row.
+	const minFillBatch = 32
 	need := limit + 1
 	collected := make([]model.EnrichedSubscription, 0, need)
 	for len(candidates) > 0 && int64(len(collected)) < need {
-		take := min(need, int64(len(candidates)))
+		take := min(max(need, minFillBatch), int64(len(candidates)))
 		batch, err := r.enrichListRows(ctx, candidates[:take])
 		if err != nil {
 			return nil, false, err

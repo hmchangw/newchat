@@ -2,6 +2,7 @@ package mongorepo
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,8 +50,10 @@ func TestSubLite_DecodesFromFullDocument(t *testing.T) {
 	assert.Equal(t, sub.Name, lite.Name)
 }
 
-// bsonTagPaths flattens a struct's bson tags into Mongo field paths (one level
-// of nesting, matching roomBaseline's encKey sub-document), excluding _id.
+// bsonTagPaths flattens a struct's persisted bson tags into Mongo field paths
+// (anonymous sub-structs recurse, matching roomBaseline's encKey sub-document),
+// excluding _id and read-time-only (bson:"-") fields. Tag options
+// (",omitempty") are stripped so drift-introduced tag forms still match.
 func bsonTagPaths(t *testing.T, typ reflect.Type, prefix string) []string {
 	t.Helper()
 	var paths []string
@@ -58,16 +61,38 @@ func bsonTagPaths(t *testing.T, typ reflect.Type, prefix string) []string {
 		f := typ.Field(i)
 		tag := f.Tag.Get("bson")
 		require.NotEmpty(t, tag, "field %s must carry a bson tag", f.Name)
-		if tag == "_id" {
+		name, _, _ := strings.Cut(tag, ",")
+		require.NotEmpty(t, name, "field %s must carry a bson field name", f.Name)
+		if name == "_id" || name == "-" {
 			continue
 		}
-		if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(time.Time{}) && f.Type.Name() == "" {
-			paths = append(paths, bsonTagPaths(t, f.Type, prefix+tag+".")...)
+		ft := f.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && ft.Name() == "" {
+			paths = append(paths, bsonTagPaths(t, ft, prefix+name+".")...)
 			continue
 		}
-		paths = append(paths, prefix+tag)
+		paths = append(paths, prefix+name)
 	}
 	return paths
+}
+
+// subscriptionFieldsProjection must cover every persisted model.Subscription
+// field (bson:"-" fields are read-time-only): a field added to the model but
+// not the projection would silently decode as its zero value on the list path
+// while every other read path returns it populated — exactly what happened to
+// origin once.
+func TestSubscriptionFieldsProjection_MatchesModelTags(t *testing.T) {
+	proj := subscriptionFieldsProjection()
+
+	assert.Contains(t, proj, "_id")
+	want := bsonTagPaths(t, reflect.TypeOf(model.Subscription{}), "")
+	assert.Len(t, proj, len(want)+1, "projection and model field counts must match (+1 for _id)")
+	for _, path := range want {
+		assert.Contains(t, proj, path, "projection must include %q", path)
+	}
 }
 
 // The enrich read's projection and the roomBaseline struct are the two halves
