@@ -229,3 +229,118 @@ none"** (safe to clear) and **"unknown"** (a degraded walk — clearing would lo
    `rooms.get` fallback runs, its own walk skips the deleted message, and `previewMessage`
    is omitted — exactly what the client docs already promise. No wire-schema change, so
    `docs/client-api.md` and its derived views need no edit.
+
+## Amendment 2 (2026-08-06, security review)
+
+**Supersedes** §1's plaintext `previewMessage` subdocument on the room doc.
+
+### Defect
+
+`Room.PreviewMessage` persists `Content` (≤500 runes of the message body) and
+`Attachments` to Mongo in cleartext. `atrest.SplitForEncryption` classifies exactly
+those two fields — plus `Card`/`CardAction` — as sensitive, and
+`StripEncryptedFields` nulls them in Cassandra so plaintext never lands there.
+The denormalization therefore writes, in the clear, the field categories the
+project's own threat model requires encrypted at rest.
+
+This is new exposure, not inherited: on `main` the room doc carries only
+`lastMsgAt` and `lastMsgId`. Previews were resolved at read time by walking
+Cassandra and decrypting, so Mongo held zero message body.
+
+What breaks is the trust split. atrest distributes trust across three stores —
+Cassandra holds ciphertext, Mongo holds Vault-wrapped DEKs, Vault holds the KEK —
+so read access to any one alone yields nothing. After this change, Mongo read
+access alone yields the latest 500 runes of every room, no key required. The
+plaintext lands in the same store as the wrapped keys that were supposed to make
+that store safe to lose. `ATREST_ENABLED=true` is the deployed posture.
+
+### Fix — encrypt the preview under a dedicated preview DEK
+
+1. **Room doc shape.** `previewMessage` (subdocument) is replaced by
+   `previewCiphertext []byte`, `previewNonce []byte`, and `previewKeyEpoch int`.
+   `previewAsOf` stays plaintext — it is a timestamp, carries no body content, and
+   the guarded-write pipeline must compare it server-side.
+   `GuardedSetFields`/`GuardedClearFields` set and `$$REMOVE` the new triple; the
+   watermark semantics of Amendment 1 are unchanged.
+
+2. **Key scope — one preview DEK per site, not per room.** The per-room DEK is the
+   wrong granularity for this data. Preview reads are driven by membership
+   enumeration (`subscription.list` touches up to `MAX_SUBSCRIPTION_LIMIT` = 1000
+   rooms, dormant ones included), which is precisely the one-shot cold-tail scan
+   `dekCache`'s 2Q algorithm is designed to *resist*, not serve. Each dormant room
+   would miss, costing a Mongo read plus a single-key Vault `Unwrap`
+   (`KeyWrapper.Unwrap` has no batch form), and would never promote to 2Q's
+   frequent segment, so the next list pays again. A single per-site key is
+   unwrapped once at process start and cached permanently.
+
+   Trade-off accepted: previews lose per-room cryptographic isolation. Compromise
+   of the preview DEK exposes every room's 500-rune preview in that site. Full
+   message history keeps its per-room DEKs and is unaffected.
+
+3. **Provisioning — no human step.** Reuse the existing atrest DEK lifecycle with
+   the sentinel id `preview:{siteID}:{epoch}` in place of a roomID.
+   `KeyWrapper.GenerateDataKey` mints the DEK inside Vault (plaintext never
+   originates outside the KEK provider); `DEKStore.Upsert` uses `$setOnInsert` so
+   the first writer wins atomically; `createDEK` re-reads and adopts the winner's
+   key on a lost race; `singleflight` collapses the per-process stampede. That
+   protocol is already correct for a globally shared key as written — no change to
+   `pkg/atrest`. The colon in the sentinel cannot collide with a room id (base62 /
+   hex / concatenations thereof); pin this with a test.
+
+4. **Storage — separate collection, shared KEK.** The wrapped preview DEK lives in
+   a dedicated `preview_deks` collection, NOT `atrest.CollectionName`. Wiring is
+   `db.Collection("preview_deks")` at the call site; `NewMongoDEKStore` is unchanged.
+   Both collections are wrapped by the existing `chat-kek` — one KEK, decided
+   knowingly (see Residual risk).
+
+   Rationale for the split collection is operational rather than cryptographic:
+   the two key classes have opposite criticality. Losing a preview DEK is a cache
+   miss (previews are derived — see 6). Losing a room DEK is permanent,
+   unrecoverable history loss. Co-locating them invites identical backup, retention,
+   and restore-test treatment for records that deserve different handling.
+
+5. **Nonce budget.** `atrest.Encrypt` uses random 96-bit GCM nonces, so NIST
+   SP 800-38D's 2^32-invocations-per-key guidance applies. A per-room DEK never
+   approaches it because usage is naturally partitioned; one site-wide key
+   encrypting every preview write does so far sooner. Collision probability is
+   `~q²/2^97` and degrades quadratically (≈1.2e-10 at 2^32, ≈7.6e-6 at 2^40), so
+   this is a margin to preserve, not a cliff. It is handled by rotation (6) rather
+   than by bucketing the key, since rotation here is free.
+
+   A GCM nonce collision is silent — both messages decrypt and authenticate
+   normally. It leaks `P₁ ⊕ P₂` (recoverable: the payload is JSON with known
+   structure, and an attacker can plant a known preview by posting in any room they
+   belong to), and permits recovery of the GHASH subkey `H = E_K(0¹²⁸)`, which
+   extends forgery to every nonce under that key. This is why the preview DEK must
+   never be reused for message bodies.
+
+6. **Rotation — lazy, no migration.** Previews are derived data, always
+   reconstructible from Cassandra, so a decryption failure is a cache miss rather
+   than data loss. Rotate by incrementing `{epoch}` in the sentinel id. Previews
+   carrying an older `previewKeyEpoch` are treated as absent: the room becomes
+   residual, the existing `rooms.get` walk resolves it, and warm-back rewrites it
+   under the new key. No re-encryption pass, no backfill.
+
+7. **Access control.** user-service receives Mongo read on `preview_deks` only and
+   MUST NOT hold `find` on `atrest.CollectionName`. Because a single KEK is shared,
+   this grant is the sole boundary preventing a compromised user-service from
+   unwrapping room DEKs, so it is asserted rather than assumed: at startup
+   user-service attempts a read against `atrest.CollectionName` and fails fast if it
+   **succeeds**, turning a silent grant misconfiguration into a boot failure.
+
+8. **Service impact.** broadcast-worker and history-service both write previews and
+   so both need the preview cipher; broadcast-worker has no atrest wiring today and
+   gains it. user-service gains atrest plus Vault unwrap capability, scoped per 7.
+   The read path still costs one aggregation — decryption happens in-process against
+   an always-cached key, with no Vault traffic and no per-room DEK access.
+
+### Residual risk (accepted)
+
+One KEK means user-service holds unwrap capability on the same `chat-kek` that
+protects room DEKs, so the Mongo collection grant in 7 is the only control
+preventing full history disclosure from a user-service compromise. Any path that
+leaks wrapped room DEKs to such an attacker — a Mongo backup, a snapshot, a
+read-replica credential, an over-broad grant added later — converts that compromise
+into history disclosure. A distinct `chat-preview-kek` would make the two boundaries
+independent; it was declined to avoid a second transit key to provision, rotate, and
+monitor across every service's Vault policy.
