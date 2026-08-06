@@ -134,6 +134,12 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			fmt.Fprintln(os.Stderr, "--request-timeout must be > 0")
 			return 2
 		}
+		// Validated here so a bad flag exits 2 like every other flag error,
+		// rather than reaching newLoginKeyPool and exiting 1 as a runtime fault.
+		if *loginKeyPool <= 0 {
+			fmt.Fprintln(os.Stderr, "--login-key-pool must be > 0")
+			return 2
+		}
 		lw, clean, err := newLoginWorkload(cfg, &p, *seed, url, *requestTimeout, *loginKeyPool)
 		if err != nil {
 			slog.Error("init login workload", "error", err)

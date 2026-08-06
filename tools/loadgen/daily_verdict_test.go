@@ -228,6 +228,22 @@ func TestScrapeErrorCounter_PresentButZeroIsNotAnError(t *testing.T) {
 	require.Equal(t, 0.0, v)
 }
 
+// A prefix match would score slog_errors_total_extra as slog_errors_total,
+// making an absent counter look present — which defeats errCounterFamilyAbsent.
+func TestSumCounterFamily_RequiresExactFamilyName(t *testing.T) {
+	body := "slog_errors_total_extra 42\nslog_errors_total_bucket 7\n"
+	sum, found := sumCounterFamily(body, "slog_errors_total")
+	assert.False(t, found, "a longer metric name is a different family")
+	assert.Equal(t, 0.0, sum)
+}
+
+func TestSumCounterFamily_AcceptsLabelsAndBareNames(t *testing.T) {
+	body := "slog_errors_total{level=\"error\"} 5\nslog_errors_total 3\n"
+	sum, found := sumCounterFamily(body, "slog_errors_total")
+	assert.True(t, found)
+	assert.Equal(t, 8.0, sum)
+}
+
 func TestSumCounterFamily_ReportsPresence(t *testing.T) {
 	body := "foo_total{a=\"x\"} 3\nfoo_total{a=\"y\"} 4\nunrelated 99\n"
 	sum, found := sumCounterFamily(body, "foo_total")

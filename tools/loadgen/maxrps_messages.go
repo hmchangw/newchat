@@ -271,15 +271,23 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 
 	holdErr := waitOrCancel(ctx, hold)
 
-	// Counters are snapshotted at hold-end, before the drain, so a gatekeeper or
-	// bad_reply error whose reply lands during the drain is not attributed to
-	// this step's error counters. The drain then lets trailing E1/E2 samples
-	// settle before percentiles and the unanswered-publish counts are taken.
-	endCounts := w.snapshotCounters()
-	endPending, perr2 := w.snapshotPending(ctx)
+	// Stop the generator and wait for it BEFORE snapshotting. Publishing must be
+	// finished first: a publish landing between the counter snapshot and the
+	// cancel is absent from the denominator yet still registered in the
+	// correlation map, so Finalize counts it as missing and the miss rate can
+	// exceed 100%.
+	//
+	// Counters are still read before the drain, so a gatekeeper or bad_reply
+	// error whose reply lands during the drain is not attributed to this step.
+	// The drain then lets trailing E1/E2 samples settle before percentiles and
+	// the unanswered-publish counts are taken.
 	cancel()
 	wg.Wait()
-	time.Sleep(w.drain) // let in-flight replies/broadcasts land
+	endCounts := w.snapshotCounters()
+	endPending, perr2 := w.snapshotPending(ctx)
+	if err := waitOrCancel(ctx, w.drain); err != nil {
+		return rpsStepInputs{}, err
+	}
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {

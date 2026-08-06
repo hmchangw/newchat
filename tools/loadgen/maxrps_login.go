@@ -171,6 +171,16 @@ func (r *loginRequester) login(ctx context.Context, account, natsPublicKey strin
 	resp, err := r.client.Do(req)
 	elapsed := time.Since(start)
 	if err != nil {
+		// The step deadline cancels the context handed to every in-flight
+		// request, so a window-edge request fails through no fault of the
+		// service. Those are excluded rather than counted: at MaxInFlight=200
+		// they would otherwise add 200 failures per step and trip the
+		// error-rate SLO on a perfectly healthy service. A timeout of the
+		// request itself (r.client.Timeout) leaves ctx.Err() nil and stays a
+		// failure — that one is the service missing its budget.
+		if ctx.Err() != nil {
+			return outcomeExcluded, elapsed
+		}
 		return classifyHTTPStatus(0, true), elapsed
 	}
 	defer func() { _ = resp.Body.Close() }()

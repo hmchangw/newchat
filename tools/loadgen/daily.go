@@ -348,6 +348,7 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	if err := waitOrCancel(ctx, env.hold); err != nil {
 		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during hold")
 	}
+	holdEndedAt := time.Now()
 
 	endPending, endPollErr := env.pollPending(ctx)
 	if endPollErr != nil {
@@ -375,9 +376,19 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	}
 
 	// Emitters keep running across steps, so there is no quiet point at which
-	// every unmatched publish is a drop. Count only those older than the
-	// delivery grace; anything more recent may still be legitimately in flight.
-	missingBroadcasts := env.collector.MissingBroadcastsOlderThan(time.Now().Add(-deliveryGrace))
+	// every unmatched publish is a drop. Wait out the delivery grace, then score
+	// everything published up to the hold boundary.
+	//
+	// The cutoff is holdEndedAt, not now-minus-grace: a moving cutoff would
+	// permanently exclude the last grace-interval of every hold, and the
+	// collector.Reset() at the next step discards those entries, so a broadcast
+	// dropped in that window would never be counted by any step. Waiting first
+	// and then cutting at the boundary gives eligible broadcasts their full
+	// grace while still scoring the whole hold.
+	if err := waitOrCancel(ctx, deliveryGrace); err != nil {
+		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during delivery grace")
+	}
+	missingBroadcasts := env.collector.MissingBroadcastsOlderThan(holdEndedAt)
 
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
