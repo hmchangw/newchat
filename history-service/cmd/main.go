@@ -143,20 +143,20 @@ func main() {
 		msgValkey valkeyutil.Client
 		repoOpts  []cassrepo.Option
 	)
-	if len(cfg.ValkeyAddrs) > 0 && cfg.BucketCacheL1Size > 0 && cfg.BucketCacheTTL > 0 {
+	if len(cfg.ValkeyAddrs) > 0 && cfg.BucketCacheL1MaxBytes > 0 && cfg.BucketCacheTTL > 0 {
 		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
 		if err != nil {
 			slog.Error("valkey connect (per-bucket cache) failed", "error", err)
 			os.Exit(1)
 		}
-		bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheL1Size, cfg.BucketCacheTTL)
+		bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheL1MaxBytes, cfg.BucketCacheTTL)
 		if cerr != nil {
 			slog.Error("init per-bucket cache failed", "error", cerr)
 			os.Exit(1)
 		}
 		repoOpts = append(repoOpts, cassrepo.WithBucketCache(bc, cfg.BucketCacheMaxRows))
-		slog.Info("per-bucket cache enabled", "l1Size", cfg.BucketCacheL1Size, "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
+		slog.Info("per-bucket cache enabled", "l1MaxBytes", cfg.BucketCacheL1MaxBytes, "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
 	}
 
 	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher, repoOpts...)

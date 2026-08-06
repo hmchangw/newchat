@@ -24,7 +24,7 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 func TestCache_ReactionsRoundTripThroughValkey(t *testing.T) {
 	t.Cleanup(func() { testutil.FlushValkey(t) })
 	vk := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
-	c, err := NewCache(vk, 100, time.Minute)
+	c, err := NewCache(vk, 1<<20, time.Minute)
 	require.NoError(t, err)
 	ctx := context.Background()
 
@@ -40,7 +40,7 @@ func TestCache_ReactionsRoundTripThroughValkey(t *testing.T) {
 	c.Put(ctx, "r1", 100, msgs)
 
 	// A fresh Cache instance has a cold L1, forcing the read to come from Valkey.
-	c2, err := NewCache(vk, 100, time.Minute)
+	c2, err := NewCache(vk, 1<<20, time.Minute)
 	require.NoError(t, err)
 	got, ok := c2.Get(ctx, "r1", 100)
 	require.True(t, ok, "served from shared L2 (Valkey)")

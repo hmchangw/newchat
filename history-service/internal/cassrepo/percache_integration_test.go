@@ -27,7 +27,7 @@ func newBucketCachedRepo(t *testing.T, session *gocql.Session, maxRows int, now 
 	t.Helper()
 	t.Cleanup(func() { testutil.FlushValkey(t) })
 	vk := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
-	bc, err := bucketcache.NewCache(vk, 1000, time.Minute)
+	bc, err := bucketcache.NewCache(vk, 1<<20, time.Minute)
 	require.NoError(t, err)
 	repo := NewRepository(session, msgbucket.New(percacheWindow), 365, nil,
 		WithBucketCache(bc, maxRows),

@@ -91,7 +91,7 @@ func bucketOf(msg string) []models.Message {
 
 func newCache(t *testing.T, fv valkeyutil.Client) *Cache {
 	t.Helper()
-	c, err := NewCache(fv, 1000, time.Minute)
+	c, err := NewCache(fv, 1<<20, time.Minute)
 	require.NoError(t, err)
 	return c
 }
@@ -210,7 +210,7 @@ func TestCache_FailOpen_DelError(t *testing.T) {
 }
 
 func TestCache_NilClient_Noops(t *testing.T) {
-	c, err := NewCache(nil, 1000, time.Minute)
+	c, err := NewCache(nil, 1<<20, time.Minute)
 	require.NoError(t, err)
 	ctx := context.Background()
 
@@ -218,6 +218,85 @@ func TestCache_NilClient_Noops(t *testing.T) {
 	assert.NotPanics(t, func() { c.Bust(ctx, "r1", 100) })
 	_, ok := c.Get(ctx, "r1", 100)
 	assert.False(t, ok, "nil client is a permanent miss")
+}
+
+// TestCache_ByteBoundedEviction verifies L1 evicts least-recently-used buckets
+// to stay under the byte budget (not an entry count). Uses a nil Valkey so Get
+// reflects L1 alone.
+func TestCache_ByteBoundedEviction(t *testing.T) {
+	ctx := context.Background()
+	blob, err := encode(bucketOf("payload"))
+	require.NoError(t, err)
+	s := int64(len(blob))
+
+	c, err := NewCache(nil, 2*s, time.Minute) // budget holds exactly two buckets
+	require.NoError(t, err)
+
+	c.Put(ctx, "r", 1, bucketOf("payload"))
+	c.Put(ctx, "r", 2, bucketOf("payload"))
+	require.Equal(t, 2*s, c.curBytes.Load(), "two buckets fill the budget exactly")
+
+	c.Put(ctx, "r", 3, bucketOf("payload")) // over budget → evict the oldest (bucket 1)
+	assert.Equal(t, 2*s, c.curBytes.Load(), "curBytes stays at the budget after eviction")
+	assert.LessOrEqual(t, c.curBytes.Load(), c.maxBytes)
+
+	_, ok := c.Get(ctx, "r", 1)
+	assert.False(t, ok, "least-recently-used bucket was evicted")
+	_, ok = c.Get(ctx, "r", 2)
+	assert.True(t, ok)
+	_, ok = c.Get(ctx, "r", 3)
+	assert.True(t, ok)
+}
+
+// TestCache_ByteAccounting verifies the counter stays exact across a re-Put of
+// the same key (no double-count) and a Bust (returns to zero).
+func TestCache_ByteAccounting(t *testing.T) {
+	ctx := context.Background()
+	small, err := encode(bucketOf("s"))
+	require.NoError(t, err)
+	big, err := encode(bucketOf("a-much-longer-payload-string"))
+	require.NoError(t, err)
+
+	c, err := NewCache(nil, 1<<20, time.Minute)
+	require.NoError(t, err)
+
+	c.Put(ctx, "r", 1, bucketOf("s"))
+	require.Equal(t, int64(len(small)), c.curBytes.Load())
+
+	// Re-Put the same key with larger content: the counter reflects the new size
+	// only (the old entry is removed first, not replaced in place).
+	c.Put(ctx, "r", 1, bucketOf("a-much-longer-payload-string"))
+	require.Equal(t, int64(len(big)), c.curBytes.Load(), "re-Put must not double-count")
+
+	c.Bust(ctx, "r", 1)
+	require.Equal(t, int64(0), c.curBytes.Load(), "bust returns the counter to zero")
+}
+
+// TestCache_ByteAccounting_ConsistentUnderConcurrency runs concurrent Puts/Gets
+// (with -race) and confirms the atomic byte counter never drifts from the actual
+// bytes held in L1.
+func TestCache_ByteAccounting_ConsistentUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewCache(nil, 1<<20, time.Minute)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			b := int64(i % 8)
+			c.Put(ctx, "r", b, bucketOf("payload"))
+			c.Get(ctx, "r", b)
+		}(i)
+	}
+	wg.Wait()
+
+	var actual int64
+	for _, v := range c.l1.Values() {
+		actual += int64(len(v))
+	}
+	assert.Equal(t, actual, c.curBytes.Load(), "byte counter must match the bytes actually held in L1")
 }
 
 // guards against an accidental key-format change.
