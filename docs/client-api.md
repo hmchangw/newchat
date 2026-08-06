@@ -2821,6 +2821,8 @@ When the reader is in a restricted access window and the quoted parent falls out
 
 Immutable snapshot of the forwarded source message, built server-side at forward time. Text-only — never carries attachments or cards. Never redacted by the reader's access window (the source room's window was enforced once, at forward time).
 
+On history reads the snapshot additionally carries a best-effort `room` object resolved from `roomId` at read time (see the field note).
+
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | The source message's ID. |
@@ -2831,6 +2833,7 @@ Immutable snapshot of the forwarded source message, built server-side at forward
 | `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
 | `threadParentId` | string | Optional. Set when the source is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
+| `room` | [MessageRoom](#messageroom) | Optional. Read-time enrichment of `roomId`, resolved server-side on the history read paths (`msg.history` / `msg.next` / `msg.surrounding` / `msg.get` / `msg.get.ids` / `msg.pinned.list` / thread reads) — NOT set on the `msg.send` echo or on broadcast events. Best-effort: omitted when the source room could not be resolved (fall back to `roomId`). Channel/discussion sources carry `id`+`name`+`type`; `dm`/`botDM` sources carry `id`+`type` only (never `name`/`hrInfo`/`appInfo`). Names resolve at read time, so a rename is reflected on the next read. |
 
 ##### ReactionUser
 
@@ -2885,6 +2888,31 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 ```json
 {
   "messages": [
+    {
+      "roomId": "dest-room",
+      "createdAt": "2026-08-06T09:00:00Z",
+      "messageId": "aB3dE5fG7hJ9kL1mN0pQ",
+      "sender": {
+        "id": "u1",
+        "account": "alice"
+      },
+      "msg": "check this out",
+      "forwardedMessage": {
+        "messageId": "zY8xW6vU4tS2rQ0pN9mL",
+        "roomId": "src-room",
+        "sender": {
+          "id": "u2",
+          "account": "bob"
+        },
+        "createdAt": "2026-08-01T12:00:00Z",
+        "msg": "original text",
+        "room": {
+          "id": "src-room",
+          "name": "prj-alpha",
+          "type": "channel"
+        }
+      }
+    },
     {
       "roomId": "01970a4f8c2d7c9aQ",
       "createdAt": "2026-05-06T07:55:00Z",
@@ -4049,6 +4077,8 @@ See [Error envelope](#6-error-envelope-reference).
 | `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
 | `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
 | `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
+
+On a `forwardedMessage.room` (history reads), `dm`/`botDM` rooms carry only `id` and `type`.
 
 ##### MessageHRInfo
 
