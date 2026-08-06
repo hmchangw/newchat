@@ -74,6 +74,85 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 	}
 }
 
+// liveMessageFetcher adapts a per-bucket queryFn into a bucketFetcher that runs
+// the paged Cassandra query and scans+decrypts up to `remaining` rows. This is
+// the behavior the walker had inline before the fetcher refactor.
+func (r *Repository) liveMessageFetcher(queryFn bucketQueryFn) bucketFetcher[models.Message] {
+	return func(ctx context.Context, bucket int64, firstBucket bool, remaining int, pageState []byte) ([]models.Message, []byte, error) {
+		q := queryFn(bucket, firstBucket).WithContext(ctx).PageSize(remaining)
+		if pageState != nil {
+			q = q.PageState(pageState)
+		}
+		iter := q.Iter()
+		rows, scanErr := r.scanMessagesUpTo(ctx)(iter, remaining)
+		nextPageState := iter.PageState()
+		if err := iter.Close(); err != nil {
+			return nil, nil, fmt.Errorf("scan bucket %d: %w", bucket, err)
+		}
+		if scanErr != nil {
+			return nil, nil, fmt.Errorf("scan bucket %d: %w", bucket, scanErr)
+		}
+		return rows, nextPageState, nil
+	}
+}
+
+// cachedDescFetcher wraps a live fetcher so sealed buckets (strictly older than
+// the current bucket) are served from the per-bucket cache — the whole bucket
+// loaded once, then bounds-filtered in memory — while the current/hot bucket,
+// oversized buckets, and (when caching is disabled) all buckets fall through to
+// live. `before` is the DESC upper bound (applied only on the first bucket);
+// `since` is the optional lower bound (applied only on the floor bucket, for
+// BetweenDesc). These in-memory bounds mirror, on the cached rows, the exact
+// predicates the live queryFns below apply in CQL (`created_at < before` on the
+// first bucket, `created_at > since` on the floor bucket) — keep the two in
+// lockstep, or a cache hit and a cache miss would return different rows.
+//
+// It returns a nil resume page-state even when it truncates a cached bucket to
+// `remaining` rows. That makes fillPage emit a boundary NextCursor that skips
+// the bucket's unconsumed rows, which is safe ONLY because no caller of the two
+// DESC methods paginates via NextCursor: LoadHistory re-anchors by `before`
+// timestamp, and the surrounding-message reads use only Page.HasNext. A real
+// intra-bucket resume cursor (a row offset) would be required before any caller
+// could resume from the returned cursor — this is why the cursor-consuming ASC
+// methods are deliberately left uncached.
+func (r *Repository) cachedDescFetcher(roomID string, before time.Time, since *time.Time, floorBucket int64, live bucketFetcher[models.Message]) bucketFetcher[models.Message] {
+	if r.bucketCache == nil {
+		return live
+	}
+	currentBucket := r.bucket.Of(r.now())
+	return func(ctx context.Context, bucket int64, firstBucket bool, remaining int, pageState []byte) ([]models.Message, []byte, error) {
+		if bucket >= currentBucket {
+			return live(ctx, bucket, firstBucket, remaining, pageState)
+		}
+		full, ok := r.bucketCache.Get(ctx, roomID, bucket)
+		if !ok {
+			loaded, oversized, err := r.loadSealedBucket(ctx, roomID, bucket, r.maxCacheRows)
+			if err != nil {
+				return nil, nil, err
+			}
+			if oversized {
+				return live(ctx, bucket, firstBucket, remaining, pageState)
+			}
+			r.bucketCache.Put(ctx, roomID, bucket, loaded)
+			full = loaded
+		}
+		var upper *time.Time
+		if firstBucket {
+			upper = &before
+		}
+		var lower *time.Time
+		if since != nil && bucket == floorBucket {
+			lower = since
+		}
+		return sliceBounded(full, upper, lower, remaining), nil, nil
+	}
+}
+
+// GetMessagesBefore returns a DESC page of messages older than `before`, down to
+// `floor`. With the per-bucket cache enabled the returned NextCursor is a
+// bucket-boundary cursor only and is NOT a valid intra-bucket resume token —
+// callers paginate by re-anchoring `before` (LoadHistory) or read only
+// Page.HasNext (surrounding-message reads), never by feeding NextCursor back.
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(floor)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
@@ -96,7 +175,8 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState,
+		r.cachedDescFetcher(roomID, before, nil, floorBucket, r.liveMessageFetcher(queryFn)),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages before: %w", err)
@@ -104,6 +184,9 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 	return res.toPage(), nil
 }
 
+// GetMessagesBetweenDesc returns a DESC page of messages in (since, before). The
+// same NextCursor caveat as GetMessagesBefore applies when caching is enabled:
+// the cursor is a bucket boundary, not an intra-bucket resume token.
 func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(since)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
@@ -143,7 +226,8 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState,
+		r.cachedDescFetcher(roomID, before, &since, floorBucket, r.liveMessageFetcher(queryFn)),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages between desc: %w", err)
@@ -171,9 +255,12 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 		)
 	}
 
+	// Intentionally uncached (unlike the DESC reads): the ASC/LoadNextMessages
+	// path round-trips a real NextCursor, so it needs an intra-bucket offset
+	// resume that cachedDescFetcher's nil-page-state shortcut can't provide.
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		pageReq.PageSize, initialPageState, r.liveMessageFetcher(queryFn),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages after: %w", err)
@@ -197,7 +284,9 @@ func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
+		// Intentionally uncached, same reason as GetMessagesAfter: the ASC path
+		// round-trips a real NextCursor that the cached fetcher can't resume.
+		pageReq.PageSize, initialPageState, r.liveMessageFetcher(queryFn),
 	)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get all messages asc: %w", err)

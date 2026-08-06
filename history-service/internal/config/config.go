@@ -89,6 +89,22 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// Per-bucket read cache (Cassandra sealed-bucket LoadHistory reads). L2 is
+	// Valkey; when ValkeyAddrs is empty the whole cache is disabled and reads go
+	// direct to Cassandra. Only sealed buckets (strictly older than the current
+	// one) are cached; the hot current bucket is always read live.
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD"              envDefault:""`
+	// BucketCacheL1MaxBytes caps the total encoded bucket data held in the
+	// per-replica L1, LRU-evicted to stay under budget. Byte-bounded (not entry-
+	// count-bounded) so the memory ceiling holds regardless of bucket size.
+	// Default 256 MiB.
+	BucketCacheL1MaxBytes int64         `env:"HISTORY_BUCKET_CACHE_L1_MAX_BYTES" envDefault:"268435456"`
+	BucketCacheTTL        time.Duration `env:"HISTORY_BUCKET_CACHE_TTL"          envDefault:"10m"`
+	// BucketCacheMaxRows caps how many rows a bucket may hold to be cacheable;
+	// larger (dense) buckets are read live instead of cached whole.
+	BucketCacheMaxRows int `env:"HISTORY_BUCKET_CACHE_MAX_ROWS" envDefault:"2000"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -130,6 +146,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if cfg.BucketCacheTTL < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_TTL must be >= 0, got %s", cfg.BucketCacheTTL)
+	}
+	if cfg.BucketCacheL1MaxBytes < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_L1_MAX_BYTES must be >= 0, got %d", cfg.BucketCacheL1MaxBytes)
+	}
+	if cfg.BucketCacheMaxRows < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_MAX_ROWS must be >= 0, got %d", cfg.BucketCacheMaxRows)
 	}
 	// 0 makes the driver treat the pool as unbounded — reject it so the cap stays explicit.
 	if cfg.Mongo.MaxPoolSize < 1 {

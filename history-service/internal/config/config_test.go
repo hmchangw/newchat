@@ -44,6 +44,38 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
+func TestValidate_RejectsNegativeBucketCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeBucketCacheL1MaxBytes(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheL1MaxBytes = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_L1_MAX_BYTES")
+}
+
+func TestValidate_RejectsNegativeBucketCacheMaxRows(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheMaxRows = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_MAX_ROWS")
+}
+
+func TestValidate_AcceptsZeroBucketCacheAsDisable(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheTTL = 0
+	cfg.BucketCacheL1MaxBytes = 0
+	cfg.BucketCacheMaxRows = 0
+	require.NoError(t, validate(&cfg), "zero is the documented disable value")
+}
+
 func TestValidate_RejectsNegativeSubCacheSize(t *testing.T) {
 	cfg := baseValid()
 	cfg.SubCacheSize = -1

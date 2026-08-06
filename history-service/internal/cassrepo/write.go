@@ -279,6 +279,7 @@ func (r *Repository) UpdateMessageContent(ctx context.Context, msg *models.Messa
 		}
 	}
 
+	r.bustBucket(ctx, msg.RoomID, msg.CreatedAt)
 	return nil
 }
 
@@ -358,6 +359,10 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 		}
 	}
 
+	// The LWT delete committed, so the message's own messages_by_room row is gone
+	// on every path below — bust its bucket once here rather than at each return.
+	r.bustBucket(ctx, msg.RoomID, msg.CreatedAt)
+
 	if msg.ThreadParentID == "" {
 		return deletedAt, true, nil, nil, nil
 	}
@@ -366,6 +371,11 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 		// The LWT delete already committed — return applied=true so callers correctly
 		// identify this as a count-set failure rather than a concurrent-winner race.
 		return deletedAt, true, nil, nil, fmt.Errorf("count and set parent tcount for message %s: %w", msg.MessageID, err)
+	}
+	// A recomputed parent tcount rewrote the parent's messages_by_room row, so
+	// its bucket (a different one) must be invalidated too.
+	if newTcount != nil && msg.ThreadParentCreatedAt != nil {
+		r.bustBucket(ctx, msg.RoomID, *msg.ThreadParentCreatedAt)
 	}
 	return deletedAt, true, newTcount, newTlm, nil
 }

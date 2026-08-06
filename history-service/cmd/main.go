@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/hmchangw/chat/history-service/internal/bucketcache"
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
@@ -24,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // checkConfig validates positive-integer config knobs and exits the process on
@@ -132,7 +134,32 @@ func main() {
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
+	// Per-bucket read cache (L1 in-process + L2 Valkey) for the sealed Cassandra
+	// LoadHistory reads. Disabled when VALKEY_ADDRS is unset. The cache lives
+	// inside cassRepo: sealed buckets are served from cache, the current bucket
+	// and mutations always hit Cassandra, and the write path busts affected
+	// buckets synchronously.
+	var (
+		msgValkey valkeyutil.Client
+		repoOpts  []cassrepo.Option
+	)
+	if len(cfg.ValkeyAddrs) > 0 && cfg.BucketCacheL1MaxBytes > 0 && cfg.BucketCacheTTL > 0 {
+		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
+		if err != nil {
+			slog.Error("valkey connect (per-bucket cache) failed", "error", err)
+			os.Exit(1)
+		}
+		bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheL1MaxBytes, cfg.BucketCacheTTL)
+		if cerr != nil {
+			slog.Error("init per-bucket cache failed", "error", cerr)
+			os.Exit(1)
+		}
+		repoOpts = append(repoOpts, cassrepo.WithBucketCache(bc, cfg.BucketCacheMaxRows))
+		slog.Info("per-bucket cache enabled", "l1MaxBytes", cfg.BucketCacheL1MaxBytes, "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
+	}
+
+	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher, repoOpts...)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
 	roomRepo := mongorepo.NewRoomRepo(db)
@@ -229,6 +256,7 @@ func main() {
 		func(ctx context.Context) error { return nc.Drain() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
+		func(ctx context.Context) error { valkeyutil.Disconnect(msgValkey); return nil },
 		func(ctx context.Context) error {
 			if vaultWrapper != nil {
 				return vaultWrapper.Close()

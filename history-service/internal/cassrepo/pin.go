@@ -78,6 +78,7 @@ func (r *Repository) PinMessage(ctx context.Context, msg *models.Message, pinned
 	if err := r.session.ExecuteBatch(batch); err != nil {
 		return fmt.Errorf("pin message %s in room %s via batch(%s): %w", msg.MessageID, msg.RoomID, pinBatchTables(withRoomRow), err)
 	}
+	r.bustBucket(ctx, msg.RoomID, msg.CreatedAt)
 	return nil
 }
 
@@ -98,6 +99,7 @@ func (r *Repository) UnpinMessage(ctx context.Context, msg *models.Message) erro
 	if err := r.session.ExecuteBatch(batch); err != nil {
 		return fmt.Errorf("unpin message %s in room %s via batch(%s): %w", msg.MessageID, msg.RoomID, pinBatchTables(withRoomRow), err)
 	}
+	r.bustBucket(ctx, msg.RoomID, msg.CreatedAt)
 	return nil
 }
 
