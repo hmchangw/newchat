@@ -187,7 +187,7 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 	cfg := &config{NatsURL: testutil.NATS(t), SiteID: siteID, MetricsAddr: ":0", MaxInFlight: 100}
 	preset, _ := BuiltinPreset("small")
 
-	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42)
+	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42, resolveDrainWindow(0))
 	require.NoError(t, err)
 	defer cleanup()
 
