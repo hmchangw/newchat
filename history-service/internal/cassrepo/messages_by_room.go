@@ -75,6 +75,9 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 }
 
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessagesBefore", roomID, "")
+	defer span.End()
+
 	floorBucket := r.bucket.Of(floor)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
 	if err != nil {
@@ -105,6 +108,9 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 }
 
 func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessagesBetweenDesc", roomID, "")
+	defer span.End()
+
 	floorBucket := r.bucket.Of(since)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
 	if err != nil {
@@ -152,6 +158,9 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 }
 
 func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after time.Time, ceiling time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetMessagesAfter", roomID, "")
+	defer span.End()
+
 	ceilingBucket := r.bucket.Of(ceiling)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkAsc, r.bucket.Of(after), ceilingBucket)
 	if err != nil {
@@ -182,6 +191,9 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 }
 
 func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor time.Time, ceiling time.Time, pageReq PageRequest) (Page[models.Message], error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetAllMessagesAsc", roomID, "")
+	defer span.End()
+
 	ceilingBucket := r.bucket.Of(ceiling)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkAsc, r.bucket.Of(floor), ceilingBucket)
 	if err != nil {

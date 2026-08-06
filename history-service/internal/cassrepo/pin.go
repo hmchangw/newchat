@@ -63,6 +63,9 @@ func pinBatchTables(withRoomRow bool) string {
 // half-apply on coordinator failure is possible (caller-side heal in
 // service/pin.go).
 func (r *Repository) PinMessage(ctx context.Context, msg *models.Message, pinnedAt time.Time, pinnedBy models.Participant) error { //nolint:gocritic // hugeParam: Participant is passed by value to match the service.MessageWriter interface
+	ctx, span := r.startSpan(ctx, "cassrepo.PinMessage", msg.RoomID, msg.MessageID)
+	defer span.End()
+
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
 	batch.Query(pinMsgByID, pinnedAt, pinnedBy, msg.MessageID)
 	batch.Query(insertPinnedMsg,
@@ -86,6 +89,9 @@ func (r *Repository) UnpinMessage(ctx context.Context, msg *models.Message) erro
 	if msg.PinnedAt == nil {
 		return fmt.Errorf("unpin message %s: PinnedAt is nil", msg.MessageID)
 	}
+	ctx, span := r.startSpan(ctx, "cassrepo.UnpinMessage", msg.RoomID, msg.MessageID)
+	defer span.End()
+
 	batch := r.session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
 	batch.Query(unpinMsgByID, msg.MessageID)
 	batch.Query(deletePinnedRow, msg.RoomID, *msg.PinnedAt, msg.MessageID)
@@ -103,6 +109,9 @@ func (r *Repository) UnpinMessage(ctx context.Context, msg *models.Message) erro
 
 // GetPinnedMessages returns one page of pins for a room (redaction is service-side).
 func (r *Repository) GetPinnedMessages(ctx context.Context, roomID string, pageReq PageRequest) (Page[models.Message], error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetPinnedMessages", roomID, "")
+	defer span.End()
+
 	builder := NewQueryBuilder(r.session.Query(pinnedByRoomQuery, roomID).WithContext(ctx)).
 		WithPageSize(pageReq.PageSize).
 		WithCursor(pageReq.Cursor)
@@ -134,6 +143,9 @@ func (r *Repository) GetPinnedMessages(ctx context.Context, roomID string, pageR
 
 // GetAllPinnedMessages returns every pin for a room (internal: cap + orphan scan need it all).
 func (r *Repository) GetAllPinnedMessages(ctx context.Context, roomID string) ([]models.Message, error) {
+	ctx, span := r.startSpan(ctx, "cassrepo.GetAllPinnedMessages", roomID, "")
+	defer span.End()
+
 	iter := r.session.Query(pinnedByRoomQuery, roomID).WithContext(ctx).Iter()
 	rows := make([]models.Message, 0)
 	for {
