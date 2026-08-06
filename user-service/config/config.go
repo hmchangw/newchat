@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
@@ -13,6 +15,9 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
+	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
+	// the client stays on primary for dedup/read-after-write.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -87,6 +92,9 @@ func Load() (Config, error) {
 		if cfg.SSORefreshWindow <= 0 {
 			return Config{}, fmt.Errorf("SSO_REFRESH_WINDOW must be > 0, got %s", cfg.SSORefreshWindow)
 		}
+	}
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
+		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
 	}
 	return cfg, nil
 }
