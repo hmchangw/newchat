@@ -71,3 +71,30 @@ func (r *RoomRepo) GetRoomUserCount(ctx context.Context, roomID string) (int, er
 	}
 	return room.UserCount, nil
 }
+
+// RoomNameType is the projected name/type row returned by GetRoomsNameType.
+type RoomNameType struct {
+	Name string
+	Type model.RoomType
+}
+
+// GetRoomsNameType returns name/type for each existing room in roomIDs;
+// absent IDs are simply missing from the map (not an error). Backs the
+// forwarded-message room enrichment on history read paths.
+func (r *RoomRepo) GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]RoomNameType, error) {
+	out := make(map[string]RoomNameType, len(roomIDs))
+	if len(roomIDs) == 0 {
+		return out, nil
+	}
+	rooms, err := r.rooms.FindMany(ctx,
+		bson.M{"_id": bson.M{"$in": roomIDs}},
+		mongoutil.WithProjection(bson.M{"name": 1, "type": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get rooms name/type: %w", err)
+	}
+	for i := range rooms {
+		out[rooms[i].ID] = RoomNameType{Name: rooms[i].Name, Type: rooms[i].Type}
+	}
+	return out, nil
+}
