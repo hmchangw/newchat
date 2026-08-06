@@ -2795,6 +2795,7 @@ message projection, keyed by `id`.
 | `hideExecLog` | boolean | Optional. Suppress the execution log entry. |
 | `cardTmId` | string | Optional. Card template ID. |
 | `data` | string | Optional. Base64-encoded action payload. |
+| `botUsername` | string | Optional. Username of the bot the action targets — the client sets it on a tcard_execute event so the server can route the callback. |
 
 ##### QuotedParentMessage
 

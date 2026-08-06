@@ -58,7 +58,7 @@ func TestRepository_FullRow_AllColumns(t *testing.T) {
 	sender := models.Participant{ID: "u1", EngName: "Alice", CompanyName: "Acme", AppID: "app1", AppName: "MyApp", IsBot: false, Account: "alice"}
 	mentionUser := models.Participant{ID: "u3", Account: "charlie"}
 	card := models.Card{Template: "approval", Data: []byte("card-data")}
-	cardAction := models.CardAction{Verb: "approve", Text: "Approve", CardID: "c1", DisplayText: "Click", HideExecLog: true, CardTmID: "tm1", Data: []byte("action-data")}
+	cardAction := models.CardAction{Verb: "approve", Text: "Approve", CardID: "c1", DisplayText: "Click", HideExecLog: true, CardTmID: "tm1", Data: []byte("action-data"), BotUsername: "expense-bot"}
 	quotedSender := models.Participant{ID: "u5", Account: "eve"}
 	quotedMsg := models.QuotedParentMessage{
 		MessageID: "m-quoted", RoomID: "r-full", Sender: quotedSender,
@@ -124,6 +124,7 @@ func TestRepository_FullRow_AllColumns(t *testing.T) {
 	assert.True(t, msg.CardAction.HideExecLog)
 	assert.Equal(t, "tm1", msg.CardAction.CardTmID)
 	assert.Equal(t, []byte("action-data"), msg.CardAction.Data)
+	assert.Equal(t, "expense-bot", msg.CardAction.BotUsername)
 
 	assert.True(t, msg.TShow)
 	assert.Equal(t, "m-parent", msg.ThreadParentID)

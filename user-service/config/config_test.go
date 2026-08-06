@@ -41,6 +41,35 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, 100, cfg.MaxAppsLimit)
 	require.Equal(t, 20, cfg.DefaultAppsLimit)
 	require.Equal(t, 15*time.Second, cfg.HandlerTimeout)
+	require.Equal(t, 256, cfg.MaxConcurrency)
+}
+
+func TestLoad_MaxConcurrency(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MAX_CONCURRENCY", "64")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, 64, cfg.MaxConcurrency)
+	})
+
+	// 0 is the documented disable value (unbounded spawn) and must validate.
+	t.Run("zero_disables", func(t *testing.T) {
+		t.Setenv("MAX_CONCURRENCY", "0")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, 0, cfg.MaxConcurrency)
+	})
+
+	t.Run("negative_rejected", func(t *testing.T) {
+		t.Setenv("MAX_CONCURRENCY", "-1")
+		_, err := Load()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "MAX_CONCURRENCY")
+	})
 }
 
 func TestLoad_MissingRequired(t *testing.T) {

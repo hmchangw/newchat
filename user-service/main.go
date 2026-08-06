@@ -112,7 +112,13 @@ func main() {
 
 	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
-	router := natsrouter.New(nc, "user-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "user-service", routerOpts...)
 	router.Use(natsrouter.Recovery())
 	// RequestID must precede any handler that reads request_id from ctx —
 	// otherwise Classify's log line records an empty value.
