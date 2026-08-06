@@ -298,16 +298,9 @@ type messageIterator interface {
 // the handler, then settle via jsretry (short first retry; malformed events Ack-drop).
 func broadcastProcessor(handler *Handler) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
-		handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-		// Migrated events carry X-Migration: live — the source already delivered them, so this
-		// live-delivery worker must not re-fan them out. Ack and drop without invoking the handler.
-		if natsutil.IsMigrationLiveHeader(msg.Headers()) {
-			slog.Info("skipping migrated event (no re-broadcast)", "subject", msg.Subject(), "request_id", reqID)
-			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
-			}
-			return
-		}
+		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+		// X-Migration: live events are NOT filtered here — during the legacy→new backend release
+		// switch we still need broadcast to fan them out so live clients see the messages.
 		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 		// flow: hop entry with stream-wait latency time-diffing can't see. Gate the block so
