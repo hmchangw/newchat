@@ -573,6 +573,15 @@ func sumCounterFamily(body, family string) (sum float64, found bool) {
 		if !strings.HasPrefix(line, family) {
 			continue
 		}
+		// Require a family boundary after the name. A bare prefix test would
+		// score slog_errors_total_extra as slog_errors_total, which would make
+		// an absent counter report as present and defeat errCounterFamilyAbsent.
+		// In Prometheus text format the name is followed by '{' (labels) or
+		// whitespace (value).
+		if rest := line[len(family):]; rest == "" ||
+			(rest[0] != '{' && rest[0] != ' ' && rest[0] != '\t') {
+			continue
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue

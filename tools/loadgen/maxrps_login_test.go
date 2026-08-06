@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -149,6 +150,44 @@ func TestLoginRequester_ClassifiesServerError(t *testing.T) {
 
 	r := newLoginRequester(srv.URL, 5*time.Second)
 	outcome, _ := r.login(t.Context(), "alice", "UABC")
+	assert.Equal(t, outcomeFailed, outcome)
+}
+
+// pacedDispatch cancels the run context at the step deadline and hands that
+// same context to every in-flight request. Those cancellations are the harness
+// closing the window, not the service failing: counting them would put up to
+// MaxInFlight failures into every step and trip the error-rate SLO on a healthy
+// service.
+func TestLoginRequester_StepDeadlineCancellationIsExcluded(t *testing.T) {
+	// The handler returns on its own rather than blocking on the request
+	// context, so srv.Close() cannot deadlock waiting for it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Cancelled well before the client's own timeout would fire, so the error
+	// can only come from the caller's context.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	r := newLoginRequester(srv.URL, 30*time.Second)
+	outcome, _ := r.login(ctx, "alice", "UABC")
+	assert.Equal(t, outcomeExcluded, outcome, "a cancelled window edge is not a service failure")
+}
+
+// A timeout of the request itself is still ours — the service did not answer
+// within the budget, which is exactly what the SLO is meant to catch.
+func TestLoginRequester_RequestTimeoutIsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := newLoginRequester(srv.URL, 20*time.Millisecond)
+	outcome, _ := r.login(context.Background(), "alice", "UABC")
 	assert.Equal(t, outcomeFailed, outcome)
 }
 

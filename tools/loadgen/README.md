@@ -1043,7 +1043,7 @@ A step's verdict is one of `PASS`, `TRIP`, or `INCONCLUSIVE`.
 - `p95_latency_ms` > 500 — publish→broadcast latency, measured by correlating `RoomEvent.LastMsgID` with `RecordPublish` timestamps
 - `p99_latency_ms` > 1000 — same source
 - `error_rate` > 0.001 (0.1%) — failed publishes, request timeouts, gatekeeper 4xx/5xx; counted by the action emitter
-- `missing broadcast rate` > 0.001 (0.1%, same threshold as `error_rate`) — sends whose broadcast never arrived within a 2 s delivery grace. These are invisible to `error_rate`: the action returned nil because the *publish* succeeded, so the send counts in `attempted_ops` but never in `failed_ops` and contributes no latency sample. Without this signal a step that drops deliveries reads as healthy — and reads *better* the more it drops, because the dropped sends are the slow ones that would have widened the tail. Emitters run continuously across steps, so the count is age-based (published more than 2 s ago and still unmatched) rather than drain-based; anything more recent may still legitimately be in flight
+- `missing broadcast rate` > 0.001 (0.1%, same threshold as `error_rate`) — sends whose broadcast never arrived within a 2 s delivery grace. These are invisible to `error_rate`: the action returned nil because the *publish* succeeded, so the send counts in `attempted_ops` but never in `failed_ops` and contributes no latency sample. Without this signal a step that drops deliveries reads as healthy — and reads *better* the more it drops, because the dropped sends are the slow ones that would have widened the tail. Emitters run continuously across steps, so there is no quiet point to drain at: the step waits out the 2 s grace after the hold ends, then counts publishes from the hold window that are still unmatched. Cutting at the hold boundary rather than at "now minus grace" matters — the latter would permanently exclude the last 2 s of every hold, and the next step's collector reset would discard those entries unscored
 - any JetStream consumer's `num_pending` grew by more than 1000 over the hold — polled via `/jsz?consumers=true` at hold start and end. The `notification-worker` durable is exempt: push-notification delivery delay is tolerated by design, so its backlog never fails the run (still shown in `worst-pending-delta` for observability)
 - any service's `slog_errors_total` counter increased over the hold — currently a no-op because no service emits that counter; see known limitations
 - any durable that existed at hold-start was *missing* at hold-end (consumer crashed or was deleted) — applies to `notification-worker` too, since a vanished consumer is an availability failure, not a tolerated delay
@@ -1088,8 +1088,12 @@ CSV columns (`--csv=results.csv`):
 
 ```
 n,effective_n,started_at,p50_ms,p95_ms,p99_ms,error_rate,attempted_ops,failed_ops,
+missing_broadcasts,missing_broadcast_rate,
 worst_durable,worst_pending_delta,tripped,inconclusive,tripped_reasons
 ```
+
+Per-action columns (`<action>_count`, `_p50_ms`, `_p95_ms`, `_p99_ms`) and the
+`presence_*` columns follow, in that order.
 
 One row per step, sorted ascending by N. Use this for post-hoc plotting
 or regression comparison across runs.

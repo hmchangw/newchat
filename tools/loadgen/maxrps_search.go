@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -147,21 +148,24 @@ func (g *searchQueryGen) build(e searchEndpoint, i int) []byte {
 	// Vary the term further by iteration so consecutive requests rarely repeat.
 	query := fmt.Sprintf("%s%d", term, i%97)
 
+	// Typed request structs from pkg/model, not map[string]any: CLAUDE.md
+	// requires NATS payloads to use them, and it makes a field rename in the
+	// contract a compile error here instead of a silently-rejected request.
 	var (
 		body []byte
 		err  error
 	)
 	switch e {
 	case searchMessages:
-		body, err = json.Marshal(map[string]any{"query": query, "size": size})
+		body, err = json.Marshal(model.SearchMessagesRequest{Query: query, Size: size})
 	case searchRooms:
-		body, err = json.Marshal(map[string]any{"query": query, "roomType": roomType, "size": size})
+		body, err = json.Marshal(model.SearchRoomsRequest{Query: query, RoomType: roomType, Size: size})
 	default:
-		// search.users pages a third-party endpoint and uses limit, not size.
-		body, err = json.Marshal(map[string]any{"query": query, "limit": size})
+		// search.users pages a third-party endpoint and uses Limit, not Size.
+		body, err = json.Marshal(model.SearchUsersRequest{Query: query, Limit: size})
 	}
 	if err != nil {
-		// Every branch marshals a map of strings and ints, so this is
+		// Every branch marshals a struct of strings and ints, so this is
 		// unreachable; an empty body would be rejected as bad_request and
 		// excluded rather than silently counted as a success.
 		return nil
@@ -334,7 +338,7 @@ func (w *searchWorkload) drive(ctx context.Context, targetRPS int, d time.Durati
 	pacedDispatch(runCtx, targetRPS, w.maxInFlt,
 		c.RecordUnderrun,
 		c.RecordSaturation,
-		func(context.Context) {
+		func(reqCtx context.Context) {
 			i := int(seq.Add(1) - 1)
 			endpoint := w.mix.pick(i)
 			sub := w.fixtures.Subscriptions[i%len(w.fixtures.Subscriptions)]
@@ -343,6 +347,14 @@ func (w *searchWorkload) drive(ctx context.Context, targetRPS int, d time.Durati
 			start := time.Now()
 			msg, err := w.nc.Request(subj, w.queries.build(endpoint, i), w.requestTimeout)
 			elapsed := time.Since(start)
+			// A request cut short because the step window closed is the harness
+			// ending the measurement, not the service failing. Excluded for the
+			// same reason as the login path; a genuine reply timeout leaves
+			// reqCtx live and stays a failure.
+			if err != nil && reqCtx.Err() != nil {
+				c.Record(endpoint, outcomeExcluded, elapsed)
+				return
+			}
 			var data []byte
 			if msg != nil {
 				data = msg.Data
