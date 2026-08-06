@@ -234,6 +234,13 @@ none"** (safe to clear) and **"unknown"** (a degraded walk — clearing would lo
 
 **Supersedes** §1's plaintext `previewMessage` subdocument on the room doc.
 
+**Status: design decision only — not yet implemented.** As of this commit the branch
+still writes the plaintext shape: `pkg/preview.GuardedSetFields` builds
+`previewMessage`, `ClearRoomPreviewMessage` `$$REMOVE`s it, and
+`model.PreviewMessage` still carries cleartext `Content` and `Attachments`. That
+divergence is expected and must be closed before merge. A green CI run on this
+branch does not mean the code matches this spec.
+
 ### Defect
 
 `Room.PreviewMessage` persists `Content` (≤500 runes of the message body) and
@@ -241,7 +248,7 @@ none"** (safe to clear) and **"unknown"** (a degraded walk — clearing would lo
 those two fields — plus `Card`/`CardAction` — as sensitive, and
 `StripEncryptedFields` nulls them in Cassandra so plaintext never lands there.
 The denormalization therefore writes, in the clear, the field categories the
-project's own threat model requires encrypted at rest.
+project's own threat model requires to be encrypted at rest.
 
 This is new exposure, not inherited: on `main` the room doc carries only
 `lastMsgAt` and `lastMsgId`. Previews were resolved at read time by walking
@@ -316,17 +323,41 @@ that store safe to lose. `ATREST_ENABLED=true` is the deployed posture.
 
 6. **Rotation — lazy, no migration.** Previews are derived data, always
    reconstructible from Cassandra, so a decryption failure is a cache miss rather
-   than data loss. Rotate by incrementing `{epoch}` in the sentinel id. Previews
-   carrying an older `previewKeyEpoch` are treated as absent: the room becomes
-   residual, the existing `rooms.get` walk resolves it, and warm-back rewrites it
-   under the new key. No re-encryption pass, no backfill.
+   than data loss. No re-encryption pass, no backfill.
+
+   *Epoch is configuration, not discovered state.* `PREVIEW_KEY_EPOCH` (int,
+   `envDefault:"1"`) is set identically across broadcast-worker, history-service and
+   user-service, and selects the sentinel id `preview:{siteID}:{epoch}`. Rotation is
+   therefore an ops action — bump the value, redeploy — and process restart is what
+   invalidates the cached DEK. This deliberately avoids inventing an invalidation
+   protocol: caching the key permanently is safe precisely because the only thing
+   that changes it also restarts the process holding it.
+
+   *Writers* encrypt under their configured epoch. *Readers* compare the doc's
+   `previewKeyEpoch` against their configured epoch; on mismatch they treat the
+   preview as absent, which makes the room residual, so the `rooms.get` walk resolves
+   it and warm-back rewrites it under the current epoch. No reader ever needs a
+   retired DEK, so an old `preview_deks` row may be deleted once no doc references
+   its epoch.
+
+   *During a rolling deploy* both epochs are live and previews churn: a pod on epoch
+   N treats an N+1 doc as absent and rewrites it as N, and vice versa. This is
+   self-correcting and bounded by the rollout window, but it costs extra walks — so
+   rotate during low traffic, and no more often than the nonce budget in 5 requires.
 
 7. **Access control.** user-service receives Mongo read on `preview_deks` only and
    MUST NOT hold `find` on `atrest.CollectionName`. Because a single KEK is shared,
    this grant is the sole boundary preventing a compromised user-service from
-   unwrapping room DEKs, so it is asserted rather than assumed: at startup
-   user-service attempts a read against `atrest.CollectionName` and fails fast if it
-   **succeeds**, turning a silent grant misconfiguration into a boot failure.
+   unwrapping room DEKs, so it is asserted at startup rather than assumed.
+
+   The assertion **fails closed**. user-service issues a projected, non-data-bearing
+   `find` against `atrest.CollectionName` (`limit 1`, projection `{_id: 0}`) and
+   startup proceeds *only* on an explicit authorization error (MongoDB code 13,
+   `Unauthorized`). Every other outcome is a startup failure: success, timeout,
+   network error, namespace-not-found, or any unrecognised error. A check that
+   passed merely because the query failed would prove nothing — "cannot tell" must
+   never be read as "not permitted". The cursor is never decoded or logged, so no
+   DEK record can reach the log even on a misconfigured deployment.
 
 8. **Service impact.** broadcast-worker and history-service both write previews and
    so both need the preview cipher; broadcast-worker has no atrest wiring today and
