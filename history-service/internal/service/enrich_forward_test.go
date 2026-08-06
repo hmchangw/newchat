@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
+	"github.com/hmchangw/chat/history-service/internal/service/mocks"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -140,4 +141,141 @@ func TestLoadHistory_NoForwards_NoLookup(t *testing.T) {
 
 	_, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
+}
+
+func expectSrcChLookup(rooms *mocks.MockRoomRepository) {
+	rooms.EXPECT().
+		GetRoomsNameType(gomock.Any(), []string{"src-ch"}).
+		Return(map[string]mongorepo.RoomNameType{"src-ch": {Name: "prj-alpha", Type: model.RoomTypeChannel}}, nil)
+}
+
+func TestLoadNextMessages_EnrichesForwardedRooms(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{fwdMsg("m1", "src-ch", joinTime.Add(time.Minute))}, false), nil)
+	expectSrcChLookup(rooms)
+
+	resp, err := svc.LoadNextMessages(c, models.LoadNextMessagesRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Messages[0].ForwardedMessage.Room)
+	assert.Equal(t, "prj-alpha", resp.Messages[0].ForwardedMessage.Room.Name)
+}
+
+func TestGetMessageByID_EnrichesForwardedRoom(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	m := fwdMsg("m1", "src-ch", joinTime.Add(time.Minute))
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m1").Return(&m, nil)
+	expectSrcChLookup(rooms)
+
+	resp, err := svc.GetMessageByID(c, models.GetMessageByIDRequest{MessageID: "m1"})
+	require.NoError(t, err)
+	require.NotNil(t, resp.ForwardedMessage.Room)
+	assert.Equal(t, "prj-alpha", resp.ForwardedMessage.Room.Name)
+}
+
+func TestGetMessagesByIDs_EnrichesForwardedRooms(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), []string{"m1"}).
+		Return([]models.Message{fwdMsg("m1", "src-ch", joinTime.Add(time.Minute))}, nil)
+	expectSrcChLookup(rooms)
+
+	resp, err := svc.GetMessagesByIDs(c, models.GetMessagesByIDsRequest{MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Messages[0].ForwardedMessage.Room)
+}
+
+func TestListPinnedMessages_EnrichesForwardedRooms(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	pinned := fwdMsg("m1", "src-ch", joinTime.Add(time.Minute))
+	pinned.PinnedAt = ptrTime(joinTime.Add(2 * time.Minute))
+	msgs.EXPECT().GetPinnedMessages(gomock.Any(), "r1", gomock.Any()).
+		Return(makePage([]models.Message{pinned}, false), nil)
+	expectSrcChLookup(rooms)
+
+	resp, err := svc.ListPinnedMessages(c, models.ListPinnedMessagesRequest{Limit: 10})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Messages[0].ForwardedMessage.Room)
+}
+
+func TestLoadSurroundingMessages_EnrichesForwardedRooms(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	central := fwdMsg("m-central", "src-ch", joinTime.Add(10*time.Minute))
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-central").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(nil, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil)
+	expectSrcChLookup(rooms)
+
+	resp, err := svc.LoadSurroundingMessages(c, models.LoadSurroundingMessagesRequest{MessageID: "m-central", Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1) // the spliced central message
+	require.NotNil(t, resp.Messages[0].ForwardedMessage.Room)
+	assert.Equal(t, "prj-alpha", resp.Messages[0].ForwardedMessage.Room.Name)
+}
+
+func TestGetThreadMessages_EnrichesForwardedParent(t *testing.T) {
+	svc, msgs, subs, rooms, _, threadRooms, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	threadRooms.EXPECT().GetMinThreadUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	parent := fwdMsg("m-parent", "src-ch", joinTime.Add(5*time.Minute))
+	parent.ThreadRoomID = "tr-1"
+	parent.TCount = intPtr(1)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-parent").Return(&parent, nil)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	replies := []models.Message{{
+		MessageID: "reply-1", RoomID: "r1", ThreadRoomID: "tr-1",
+		ThreadParentID: "m-parent", CreatedAt: parent.CreatedAt.Add(time.Minute),
+	}}
+	msgs.EXPECT().GetThreadMessages(gomock.Any(), "tr-1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(replies, false), nil)
+	expectSrcChLookup(rooms) // exactly ONE lookup shared by replies + parent
+
+	resp, err := svc.GetThreadMessages(c, models.GetThreadMessagesRequest{ThreadMessageID: "m-parent"})
+	require.NoError(t, err)
+	require.NotNil(t, resp.ParentMessage.ForwardedMessage.Room)
+	assert.Equal(t, "prj-alpha", resp.ParentMessage.ForwardedMessage.Room.Name)
+}
+
+func TestGetThreadParentMessages_EnrichesForwardedRooms(t *testing.T) {
+	svc, msgs, subs, rooms, _, threadRooms, _, _ := newServiceWithRoomMock(t)
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	threadRooms.EXPECT().GetThreadRooms(gomock.Any(), "r1", nil, gomock.Any()).Return(makeThreadPage(2), nil)
+	// makeThreadPage's rows reference parent IDs "p1"/"p2" (threads_test.go).
+	p1 := fwdMsg("p1", "src-ch", joinTime.Add(time.Minute))
+	p2 := models.Message{MessageID: "p2", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{p1, p2}, nil)
+	expectSrcChLookup(rooms)
+
+	resp, err := svc.GetThreadParentMessages(c, models.GetThreadParentMessagesRequest{Filter: models.ThreadFilterAll, Limit: 20})
+	require.NoError(t, err)
+	require.Len(t, resp.ParentMessages, 2)
+	require.NotNil(t, resp.ParentMessages[0].ForwardedMessage.Room)
+	assert.Equal(t, "prj-alpha", resp.ParentMessages[0].ForwardedMessage.Room.Name)
+	assert.Nil(t, resp.ParentMessages[1].ForwardedMessage)
 }

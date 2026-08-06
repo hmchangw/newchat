@@ -208,6 +208,7 @@ func (s *HistoryService) ListPinnedMessages(c *natsrouter.Context, req models.Li
 	redactUnavailablePins(page.Data, accessSince)
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	s.enrichForwardedRooms(c, page.Data)
 
 	return &models.ListPinnedMessagesResponse{
 		Messages:   page.Data,

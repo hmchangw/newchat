@@ -138,6 +138,7 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	s.enrichForwardedRooms(c, page.Data, []models.Message{*msg})
 	return &models.GetThreadMessagesResponse{
 		Messages:          page.Data,
 		NextCursor:        page.NextCursor,
@@ -373,5 +374,6 @@ func (s *HistoryService) GetThreadParentMessages(c *natsrouter.Context, req mode
 
 	redactUnavailableQuotes(parentMessages, accessSince)
 	setDecodedAttachments(c, parentMessages)
+	s.enrichForwardedRooms(c, parentMessages)
 	return &models.GetThreadParentMessagesResponse{ParentMessages: parentMessages, Total: threadPage.Total}, nil
 }
