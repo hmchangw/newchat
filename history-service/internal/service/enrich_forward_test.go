@@ -32,24 +32,26 @@ func TestLoadHistory_EnrichesForwardedRooms(t *testing.T) {
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 
 	messages := []models.Message{
-		fwdMsg("m1", "src-ch", joinTime.Add(3*time.Minute)),
-		fwdMsg("m2", "src-dm", joinTime.Add(2*time.Minute)),
-		{MessageID: "m3", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute)}, // no forward
+		fwdMsg("m1", "src-ch", joinTime.Add(4*time.Minute)),
+		fwdMsg("m2", "src-dm", joinTime.Add(3*time.Minute)),
+		fwdMsg("m3", "src-botdm", joinTime.Add(2*time.Minute)),
+		{MessageID: "m4", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute)}, // no forward
 	}
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
 		Return(makePage(messages, false), nil)
 
 	// One batched lookup over the DISTINCT source-room IDs.
 	rooms.EXPECT().
-		GetRoomsNameType(gomock.Any(), gomock.InAnyOrder([]string{"src-ch", "src-dm"})).
+		GetRoomsNameType(gomock.Any(), gomock.InAnyOrder([]string{"src-ch", "src-dm", "src-botdm"})).
 		Return(map[string]mongorepo.RoomNameType{
-			"src-ch": {Name: "prj-alpha", Type: model.RoomTypeChannel},
-			"src-dm": {Name: "bob", Type: model.RoomTypeDM},
+			"src-ch":    {Name: "prj-alpha", Type: model.RoomTypeChannel},
+			"src-dm":    {Name: "bob", Type: model.RoomTypeDM},
+			"src-botdm": {Name: "MyApp", Type: model.RoomTypeBotDM},
 		}, nil)
 
 	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
-	require.Len(t, resp.Messages, 3)
+	require.Len(t, resp.Messages, 4)
 
 	chRoom := resp.Messages[0].ForwardedMessage.Room
 	require.NotNil(t, chRoom)
@@ -66,7 +68,16 @@ func TestLoadHistory_EnrichesForwardedRooms(t *testing.T) {
 	assert.Nil(t, dmRoom.HRInfo)
 	assert.Nil(t, dmRoom.AppInfo)
 
-	assert.Nil(t, resp.Messages[2].ForwardedMessage)
+	// botDM source: id + type ONLY — the app name must not leak.
+	botDMRoom := resp.Messages[2].ForwardedMessage.Room
+	require.NotNil(t, botDMRoom)
+	assert.Equal(t, "src-botdm", botDMRoom.ID)
+	assert.Equal(t, model.RoomTypeBotDM, botDMRoom.Type)
+	assert.Empty(t, botDMRoom.Name)
+	assert.Nil(t, botDMRoom.HRInfo)
+	assert.Nil(t, botDMRoom.AppInfo)
+
+	assert.Nil(t, resp.Messages[3].ForwardedMessage)
 }
 
 func TestLoadHistory_ForwardEnrichment_DedupesRoomIDs(t *testing.T) {
