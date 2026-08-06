@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
@@ -154,6 +155,10 @@ func (stubRoomRepo) GetRoomTimes(_ context.Context, _ string) (lastMsgAt, create
 
 func (stubRoomRepo) GetRoomUserCount(_ context.Context, _ string) (int, error) {
 	return 0, nil
+}
+
+func (stubRoomRepo) GetRoomsNameType(_ context.Context, _ []string) (map[string]mongorepo.RoomNameType, error) {
+	return nil, nil
 }
 
 func TestEditMessage_Integration(t *testing.T) {
