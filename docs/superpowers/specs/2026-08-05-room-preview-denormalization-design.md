@@ -505,3 +505,56 @@ it should be measured against the cache's real hit rate before committing.
 Pick B only if a NATS round-trip cannot fit the latency budget; the price is Vault in
 two more services, the preview DEK in the front-line service, and two writers whose
 divergence has already produced defects.
+
+## Amendment 4 (2026-08-06, encryption shape)
+
+**Supersedes** Amendment 2 §1's single opaque `previewCiphertext` covering the
+whole preview. Option D from Amendment 3 is the chosen shape; this fixes how its
+preview is encrypted.
+
+### Why the single blob does not work
+
+`atrest.Cipher.Encrypt` accepts only `EncryptedFields` — a fixed, message-shaped
+struct (`Msg`, `Attachments`, `Card`, `CardAction`, `QuotedParentContent`). There
+is no generic seal, so sealing an arbitrary `PreviewMessage` as one blob would
+require adding a generic `Seal`/`Open` pair to `pkg/atrest`, extending a shared
+security package to serve one caller.
+
+### Fix — seal the body, leave the metadata clear
+
+Encrypt exactly the two fields `atrest.SplitForEncryption` already classifies as
+sensitive, through the existing `EncryptedFields`:
+
+- **Sealed:** `Content` → `Msg`, and `Attachments` → `Attachments` (marshalled
+  back to the `[][]byte` form Cassandra stores natively, so this is a round-trip
+  rather than a re-encoding).
+- **Plaintext `previewMeta`:** `messageId`, `sender`, `createdAt`, `mentions`,
+  `visibleTo` — precisely what Cassandra leaves in the clear. message-worker's
+  `toMentionSet` already writes sender and mentions to plaintext columns, so this
+  introduces no classification the system does not already make.
+
+Room doc: `previewMeta` + `previewCiphertext` + `previewNonce` +
+`previewKeyEpoch` + `previewForMsgId` + `previewAsOf`. `pkg/preview` gains
+`Seal`/`Open`; `pkg/atrest` is untouched.
+
+**`previewForMsgId` is not `previewMeta.messageId`.** The former is the newest
+message id the walk OBSERVED (the freshness key, compared against `lastMsgId`);
+the latter is the id of the message the preview actually shows. They differ
+whenever the newest message is ineligible and skipped — which is the ordinary
+case for a room whose last activity was a system message.
+
+Everything else in Amendment 2 stands: site-scoped preview DEK, auto-provisioning
+via the existing `GenerateDataKey`/`$setOnInsert` lifecycle, the separate
+`preview_deks` collection under the shared `chat-kek`, and lazy epoch rotation.
+Amendment 2 §7's startup assertion and its shared-KEK residual risk are retired
+by Option D, which keeps the preview key inside history-service.
+
+### Implementation status
+
+Not implemented. `pkg/model` and `pkg/preview` were built to this shape and
+passed, but the branch is not carrying them: `history-service` cannot compile
+until the preview cipher is wired (`PREVIEW_KEY_EPOCH` config, the `preview_deks`
+collection off the existing Vault wrapper, and the cipher threaded into
+`NewRoomRepo`), so the work was reverted rather than pushed broken. `Seal`/`Open`
+also still need tests — round-trip, wrong-key failure, and attachment-marshal
+error. Resume at task 23.
