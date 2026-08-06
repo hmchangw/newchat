@@ -1,8 +1,17 @@
 package main
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 //go:generate mockgen -source=translator.go -destination=mock_translator_test.go -package=main
+
+// errBackendUnavailable marks a transient upstream failure — the translation
+// backend is temporarily unavailable (e.g. it returned HTTP 503). A Translator
+// wraps it so the handler maps it to errcode.Unavailable (a retryable reply),
+// instead of the `internal` collapse other backend errors take.
+var errBackendUnavailable = errors.New("translate backend unavailable")
 
 // Translator turns source text into targetLang text. Implementations may call an
 // external service; callers pass a context with a deadline.

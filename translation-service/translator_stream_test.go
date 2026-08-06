@@ -213,4 +213,24 @@ func TestStreamTranslator_BackendErrorNonJWT(t *testing.T) {
 	_, err := tr.Translate(context.Background(), "hi", "en")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "translate backend error")
+	// A 500 is not a transient-unavailable signal — it must NOT be tagged
+	// errBackendUnavailable (it stays an internal-collapsing backend error).
+	assert.NotErrorIs(t, err, errBackendUnavailable)
+}
+
+// A 503 from the translate backend is a transient outage: it is tagged
+// errBackendUnavailable so the handler replies `unavailable` (retryable)
+// instead of collapsing to `internal`.
+func TestStreamTranslator_ServiceUnavailable(t *testing.T) {
+	tSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `<html>503 Service Unavailable</html>`) // not SSE, not JWT JSON
+	}))
+	defer tSrv.Close()
+
+	tr := streamTranslatorTo(t, tSrv.URL)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errBackendUnavailable)
+	assert.Contains(t, err.Error(), "503")
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -83,4 +84,23 @@ func TestHandler_Translate_BackendError(t *testing.T) {
 	// it collapses to `internal` at the boundary and the cause never reaches the client.
 	var ec *errcode.Error
 	assert.False(t, errors.As(err, &ec), "backend error must stay untyped so it classifies to internal")
+}
+
+// A backend that signals errBackendUnavailable (503) is mapped to a typed
+// errcode.Unavailable so the client gets a retryable `unavailable`/`backend_unavailable`
+// reply instead of the `internal` collapse a generic backend error takes.
+func TestHandler_Translate_BackendUnavailable(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	tr := NewMockTranslator(ctrl)
+	tr.EXPECT().Translate(gomock.Any(), "hi", "en").
+		Return("", fmt.Errorf("%w (status 503)", errBackendUnavailable))
+
+	res, err := NewHandler(tr).Translate(testContext(),
+		model.TranslateRequest{Text: "hi", TargetLang: "en"})
+
+	assert.Nil(t, res)
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
+	assert.Equal(t, errcode.TranslateBackendUnavailable, ec.Reason)
 }

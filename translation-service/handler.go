@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -36,6 +37,13 @@ func (h *Handler) Translate(c *natsrouter.Context, req model.TranslateRequest) (
 
 	translated, err := h.translator.Translate(c, req.Text, backendLang)
 	if err != nil {
+		// A 503 from the upstream translate backend is transient: surface it as
+		// `unavailable` so the client retries, instead of collapsing to `internal`.
+		if errors.Is(err, errBackendUnavailable) {
+			return nil, errcode.Unavailable("translation backend temporarily unavailable",
+				errcode.WithReason(errcode.TranslateBackendUnavailable),
+				errcode.WithCause(err))
+		}
 		return nil, fmt.Errorf("translate backend: %w", err)
 	}
 	return &model.TranslateResult{

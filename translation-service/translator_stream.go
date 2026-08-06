@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -139,6 +140,12 @@ readLoop:
 		// No SSE payload — the response is an error body, possibly a JWT rejection.
 		if isJWTFailure(nonSSE.String()) {
 			return "", true, nil
+		}
+		if resp.StatusCode() == http.StatusServiceUnavailable {
+			// Transient upstream outage — tag it so the handler replies `unavailable`
+			// (retryable) rather than collapsing to `internal`. Only the trusted
+			// numeric status is propagated, never the third-party error body.
+			return "", false, fmt.Errorf("%w (status %d)", errBackendUnavailable, resp.StatusCode())
 		}
 		return "", false, fmt.Errorf("translate backend error (status %d)", resp.StatusCode())
 	}
