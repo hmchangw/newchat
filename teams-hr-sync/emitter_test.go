@@ -35,9 +35,10 @@ func TestDirectEmitter_UpsertsEmployeesAndConvertedUsers(t *testing.T) {
 			return nil
 		})
 
-	n, err := e.emit(context.Background(), diff)
+	res, err := e.emit(context.Background(), diff)
 	require.NoError(t, err)
-	assert.Equal(t, 2, n)
+	assert.Equal(t, 1, res.EmployeesWritten)
+	assert.Equal(t, 1, res.UsersWritten)
 }
 
 func TestDirectEmitter_QuitsWhenPresent(t *testing.T) {
@@ -46,18 +47,18 @@ func TestDirectEmitter_QuitsWhenPresent(t *testing.T) {
 
 	store.EXPECT().QuitTeamsEmployees(gomock.Any(), []string{"eve"}).Return(nil)
 
-	n, err := e.emit(context.Background(), diffResult{Quits: map[string][]string{"site-a": {"eve"}}})
+	res, err := e.emit(context.Background(), diffResult{Quits: map[string][]string{"site-a": {"eve"}}})
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, res.QuitsWritten)
 }
 
 func TestDirectEmitter_SkipsEmptyDiff(t *testing.T) {
 	store := NewMockWriteStore(gomock.NewController(t)) // no EXPECT — any call fails the test
 	e := directEmitter{store: store, converter: transform.DefaultConverter{}}
 
-	n, err := e.emit(context.Background(), diffResult{})
+	res, err := e.emit(context.Background(), diffResult{})
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Equal(t, emitResult{}, res)
 }
 
 func TestDirectEmitter_UpsertErrorAborts(t *testing.T) {
@@ -79,10 +80,11 @@ func TestStreamEmitter_DelegatesToPublisher(t *testing.T) {
 	e := streamEmitter{pub: pub}
 
 	diff := diffResult{Upserts: []model.IEmployeeWithChange{{IEmployee: teamsEmployee("alice", "site-a"), ChangeType: model.IChangeTypeNewHire}}}
-	n, err := e.emit(context.Background(), diff)
+	res, err := e.emit(context.Background(), diff)
 	require.NoError(t, err)
-	assert.Equal(t, 2, n) // employees.upsert + users.upsert
-	assert.Len(t, got, 2)
+	assert.Equal(t, 1, res.EmployeesWritten)
+	assert.Equal(t, 1, res.UsersWritten)
+	assert.Len(t, got, 2) // employees.upsert + users.upsert
 }
 
 func TestRunDirectSync_ModePicksEmitter(t *testing.T) {
@@ -100,5 +102,6 @@ func TestRunDirectSync_ModePicksEmitter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Created)
 	assert.Zero(t, stats.Quits, "direct mode diffs against an empty baseline: no quits")
-	assert.Equal(t, 2, stats.Published)
+	assert.Equal(t, 1, stats.EmployeesPublished)
+	assert.Equal(t, 1, stats.UsersPublished)
 }
