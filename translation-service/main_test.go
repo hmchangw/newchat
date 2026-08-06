@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -67,6 +69,34 @@ func TestNewTranslator_Stream(t *testing.T) {
 	require.NoError(t, err)
 	_, ok := tr.(*streamTranslator)
 	assert.True(t, ok)
+}
+
+func TestNewTranslator_StreamJ1FromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(path, []byte("sa-token"), 0o600))
+
+	tr, err := newTranslator(&Config{
+		Backend:        "stream",
+		Endpoint:       "http://x",
+		AccessTokenURL: "http://a",
+		J1TokenFile:    path,
+		HTTPTimeout:    time.Second,
+	})
+	require.NoError(t, err)
+	_, ok := tr.(*streamTranslator)
+	assert.True(t, ok)
+}
+
+func TestNewTranslator_StreamFailsWhenJ1FileMissing(t *testing.T) {
+	_, err := newTranslator(&Config{
+		Backend:        "stream",
+		Endpoint:       "http://x",
+		AccessTokenURL: "http://a",
+		J1TokenFile:    filepath.Join(t.TempDir(), "nope"),
+		HTTPTimeout:    time.Second,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validate j1 token source")
 }
 
 func TestNewTranslator_Unknown(t *testing.T) {
