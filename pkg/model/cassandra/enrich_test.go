@@ -35,3 +35,22 @@ func TestMessageRoom_JSON_IDTypeOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id":"dm-1","type":"dm"}`, string(b))
 }
+
+func TestForwardedMessage_JSON_WithRoom(t *testing.T) {
+	fm := ForwardedMessage{
+		MessageID: "m-src",
+		RoomID:    "room-src",
+		Sender:    Participant{ID: "u1", Account: "alice"},
+		Msg:       "hello",
+		Room:      &MessageRoom{ID: "room-src", Name: "prj-alpha", Type: RoomType("channel")},
+	}
+	got := roundTrip(t, fm)
+	require.NotNil(t, got.Room)
+	assert.Equal(t, "prj-alpha", got.Room.Name)
+}
+
+func TestForwardedMessage_JSON_RoomOmittedWhenNil(t *testing.T) {
+	b, err := json.Marshal(ForwardedMessage{MessageID: "m-src", RoomID: "room-src"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), `"room"`)
+}

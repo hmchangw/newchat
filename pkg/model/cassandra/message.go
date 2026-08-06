@@ -78,6 +78,11 @@ type ForwardedMessage struct {
 	Mentions              []Participant `json:"mentions,omitempty"              cql:"mentions"`
 	ThreadParentID        string        `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
 	ThreadParentCreatedAt *time.Time    `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
+	// Room is read-time enrichment of RoomID (name/type resolved from the
+	// local rooms collection by history-service read paths); transient
+	// (cql:"-"), never persisted into the UDT. dm/botDM sources carry only
+	// ID and Type. Omitted when the room could not be resolved.
+	Room *MessageRoom `json:"room,omitempty" cql:"-"`
 }
 
 // Message represents a message row in the Cassandra message tables
