@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -28,19 +29,27 @@ type accessTokenResponse struct {
 	JwtRequestID string `json:"jwtRequestId"`
 }
 
+// tokenEntry is an immutable snapshot of a cached J2 token and its validity
+// deadline (parsed expiresAt minus skew). Published via an atomic pointer so the
+// read path needs no lock.
+type tokenEntry struct {
+	token     string
+	expiresAt time.Time
+}
+
 // tokenProvider exchanges a J1 token for a J2 token via the accessToken API,
 // caching it until shortly before expiresAt (minus skew). The J1 token comes
 // from readJ1 and is read fresh on every exchange (see j1Source). Safe for
-// concurrent use.
+// concurrent use: the cached token is read lock-free via an atomic pointer, and
+// mu serializes only the (rare) fetches.
 type tokenProvider struct {
 	client *resty.Client
 	readJ1 j1Source
 	skew   time.Duration
 	now    func() time.Time
 
-	mu        sync.Mutex
-	token     string    // cached J2 token
-	expiresAt time.Time // cache validity (parsed expiresAt minus skew)
+	cached atomic.Pointer[tokenEntry] // valid cached J2 token; read without a lock
+	mu     sync.Mutex                 // serializes fetchLocked (one exchange at a time)
 }
 
 func newTokenProvider(accessTokenURL string, j1 j1Source, timeout, skew time.Duration) *tokenProvider {
@@ -61,10 +70,15 @@ func newTokenProvider(accessTokenURL string, j1 j1Source, timeout, skew time.Dur
 // Token returns a valid J2 token, fetching a fresh one when the cache is empty or
 // past its (skew-adjusted) expiry.
 func (p *tokenProvider) Token(ctx context.Context) (string, error) {
+	if e := p.cached.Load(); e != nil && p.now().Before(e.expiresAt) {
+		return e.token, nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.token != "" && p.now().Before(p.expiresAt) {
-		return p.token, nil
+	// Re-check under the lock: another goroutine may have refreshed while we
+	// waited, so at most one fetch happens per expiry.
+	if e := p.cached.Load(); e != nil && p.now().Before(e.expiresAt) {
+		return e.token, nil
 	}
 	return p.fetchLocked(ctx)
 }
@@ -75,8 +89,8 @@ func (p *tokenProvider) Token(ctx context.Context) (string, error) {
 func (p *tokenProvider) Refresh(ctx context.Context, stale string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.token != "" && p.token != stale {
-		return p.token, nil
+	if e := p.cached.Load(); e != nil && e.token != "" && e.token != stale {
+		return e.token, nil
 	}
 	return p.fetchLocked(ctx)
 }
@@ -109,7 +123,6 @@ func (p *tokenProvider) fetchLocked(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse access token expiresAt %q: %w", out.ExpiresAt, err)
 	}
-	p.token = out.Token
-	p.expiresAt = exp.Add(-p.skew)
-	return p.token, nil
+	p.cached.Store(&tokenEntry{token: out.Token, expiresAt: exp.Add(-p.skew)})
+	return out.Token, nil
 }

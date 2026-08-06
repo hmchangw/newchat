@@ -168,6 +168,34 @@ func TestTokenProvider_RereadsJ1EachFetch(t *testing.T) {
 	assert.Equal(t, "J1-v2", keys[1])
 }
 
+// Concurrent readers of a valid cached token must not trigger extra fetches and
+// must be free of data races (run under -race). Guards the lock-free read path.
+func TestTokenProvider_ConcurrentReadsNoExtraFetch(t *testing.T) {
+	var calls int32
+	srv := accessTokenServer(t, "J2-conc", rfc3339In(time.Hour), &calls)
+	defer srv.Close()
+
+	p := newTokenProvider(srv.URL, staticJ1("J1"), 5*time.Second, time.Minute)
+	// Prime the cache with a single fetch.
+	_, err := p.Token(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls))
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			tok, err := p.Token(context.Background())
+			assert.NoError(t, err)
+			assert.Equal(t, "J2-conc", tok)
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls)) // reads served from cache, no refetch
+}
+
 func TestTokenProvider_J1SourceError(t *testing.T) {
 	srv := accessTokenServer(t, "J2", rfc3339In(time.Hour), nil)
 	defer srv.Close()
