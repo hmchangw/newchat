@@ -1,6 +1,7 @@
 package mongoutil
 
 import (
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -17,7 +18,8 @@ type Observability interface {
 }
 
 type connectConfig struct {
-	obs Observability
+	obs      Observability
+	readPref *readpref.ReadPref
 	// maxPoolSize/minPoolSize are nil when the corresponding option was not
 	// supplied, so applyTuning leaves the client option untouched and a value
 	// from the connection URI (or the driver default) survives.

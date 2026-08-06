@@ -35,6 +35,12 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 	cfg := newConnectConfig(opts...)
 	cfg.applyTuning(clientOpts)
 
+	// An explicit WithReadPreference overrides whatever clientOpts carried
+	// (e.g. ConnectRead's secondaryPreferred).
+	if cfg.readPref != nil {
+		clientOpts.SetReadPreference(cfg.readPref)
+	}
+
 	var cleanup func(context.Context) error
 	if cfg.obs != nil {
 		// Propagator comes from the OTel global (obs.Init installs sdk.Propagator
