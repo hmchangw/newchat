@@ -102,9 +102,19 @@ func (r *Repository) liveMessageFetcher(queryFn bucketQueryFn) bucketFetcher[mod
 // oversized buckets, and (when caching is disabled) all buckets fall through to
 // live. `before` is the DESC upper bound (applied only on the first bucket);
 // `since` is the optional lower bound (applied only on the floor bucket, for
-// BetweenDesc). It is used ONLY by the DESC LoadHistory reads, whose emitted
-// cursor is discarded — the client re-anchors by timestamp — so returning a nil
-// resume state for a partially-consumed cached bucket is correct.
+// BetweenDesc). These in-memory bounds mirror, on the cached rows, the exact
+// predicates the live queryFns below apply in CQL (`created_at < before` on the
+// first bucket, `created_at > since` on the floor bucket) — keep the two in
+// lockstep, or a cache hit and a cache miss would return different rows.
+//
+// It returns a nil resume page-state even when it truncates a cached bucket to
+// `remaining` rows. That makes fillPage emit a boundary NextCursor that skips
+// the bucket's unconsumed rows, which is safe ONLY because no caller of the two
+// DESC methods paginates via NextCursor: LoadHistory re-anchors by `before`
+// timestamp, and the surrounding-message reads use only Page.HasNext. A real
+// intra-bucket resume cursor (a row offset) would be required before any caller
+// could resume from the returned cursor — this is why the cursor-consuming ASC
+// methods are deliberately left uncached.
 func (r *Repository) cachedDescFetcher(roomID string, before time.Time, since *time.Time, floorBucket int64, live bucketFetcher[models.Message]) bucketFetcher[models.Message] {
 	if r.bucketCache == nil {
 		return live
@@ -138,6 +148,11 @@ func (r *Repository) cachedDescFetcher(roomID string, before time.Time, since *t
 	}
 }
 
+// GetMessagesBefore returns a DESC page of messages older than `before`, down to
+// `floor`. With the per-bucket cache enabled the returned NextCursor is a
+// bucket-boundary cursor only and is NOT a valid intra-bucket resume token —
+// callers paginate by re-anchoring `before` (LoadHistory) or read only
+// Page.HasNext (surrounding-message reads), never by feeding NextCursor back.
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(floor)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
@@ -169,6 +184,9 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 	return res.toPage(), nil
 }
 
+// GetMessagesBetweenDesc returns a DESC page of messages in (since, before). The
+// same NextCursor caveat as GetMessagesBefore applies when caching is enabled:
+// the cursor is a bucket boundary, not an intra-bucket resume token.
 func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(since)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
@@ -237,6 +255,9 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 		)
 	}
 
+	// Intentionally uncached (unlike the DESC reads): the ASC/LoadNextMessages
+	// path round-trips a real NextCursor, so it needs an intra-bucket offset
+	// resume that cachedDescFetcher's nil-page-state shortcut can't provide.
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
 		pageReq.PageSize, initialPageState, r.liveMessageFetcher(queryFn),
@@ -263,6 +284,8 @@ func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor
 
 	res, err := fillPage[models.Message](
 		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
+		// Intentionally uncached, same reason as GetMessagesAfter: the ASC path
+		// round-trips a real NextCursor that the cached fetcher can't resume.
 		pageReq.PageSize, initialPageState, r.liveMessageFetcher(queryFn),
 	)
 	if err != nil {
