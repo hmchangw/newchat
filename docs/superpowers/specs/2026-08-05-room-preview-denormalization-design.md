@@ -375,3 +375,133 @@ read-replica credential, an over-broad grant added later — converts that compr
 into history disclosure. A distinct `chat-preview-kek` would make the two boundaries
 independent; it was declined to avoid a second transit key to provision, rotate, and
 monitor across every service's Vault policy.
+
+## Amendment 3 (2026-08-06, options review)
+
+**Status: decision pending — no option below is implemented.** The branch implements
+Option B minus encryption. This amendment exists to choose between four shapes before
+the Amendment 2 rework starts, because that rework's size depends entirely on which
+one is picked.
+
+### What prompted it
+
+Two findings from review of Amendments 1–2:
+
+1. **`resolvePreview` never reads the field `warmBackPreview` writes.** In
+   `history-service/internal/service/rooms.go`, the load path is
+   `roomLastPreviewMessage` (the Cassandra walk) → on `previewFound`,
+   `warmBackPreview` persists to the room doc. Nothing reads `previewMessage` back.
+   The only consumer anywhere is user-service, for LOCAL rooms. So a cross-site
+   room walks Cassandra on every read that misses the in-process `previewCache`,
+   then redundantly rewrites the identical preview. **Cross-site rooms get no
+   benefit from this design at all**, and `enrichLastMessage`'s own comment
+   confirms it: cross-site room docs live remotely and carry no local baseline.
+
+2. **The Amendment 2 rework's cost is concentrated in Vault wiring**, not in the
+   preview logic. Encrypting a preview requires the atrest cipher, a Vault client
+   with its token-renewal goroutine and shutdown handling, the DEK store handle,
+   and config. history-service has all of it. broadcast-worker and user-service
+   have none. Which services write and read previews therefore determines most of
+   the diff.
+
+### The four options
+
+**A — Status quo (`main`).** No preview stored. Every `subscription.list` issues one
+`rooms.get` per site; history-service walks Cassandra per room, bounded by
+`previewCache`. No encryption question, because no message content reaches Mongo.
+
+**B — Eager write (the branch as built).** broadcast-worker builds the preview from
+the canonical event and folds it into its existing coalesced room `$set`;
+history-service writes on mutation and warm-back; user-service reads and decrypts
+from the doc. Local rooms are served with zero RPCs when warm.
+
+**C — Warm-back only.** broadcast-worker reverts to `main` — it writes
+`lastMsgAt`/`lastMsgId` and nothing else. history-service becomes the sole preview
+writer (warm-back + mutation). user-service still reads and decrypts from the doc.
+Staleness is implicit: a room is fresh iff `previewForMsgId == lastMsgId`, so a new
+message invalidates the preview as a side effect of a write that already happens.
+
+**D — Doc read inside history-service.** Writers as in C, but the *reader* moves:
+`resolvePreview` consults the room doc before walking. user-service reverts entirely
+to `main` and always calls `rooms.get`. The preview fields join the projection of the
+`GetRoomTimesByIDs` batch read that `resolveRoomMetaHints` already performs, so the
+doc read costs no extra round-trip.
+
+### Comparison
+
+| | A: status quo | B: eager write | C: warm-back only | D: doc read in history |
+|---|---|---|---|---|
+| Preview writers | — | broadcast-worker + history-service | history-service | history-service |
+| Decrypts preview | — | **user-service** | **user-service** | history-service |
+| New Vault/atrest wiring | none | **broadcast-worker + user-service** | **user-service** | **none** |
+| RPCs per local list | 1/site | 0 when warm | 1/site if any stale | 1/site always |
+| Walk runs | every room | residual only | stale only | doc miss only |
+| Cross-site rooms benefit | — | no | no | **yes** |
+| Freshness mechanism | n/a | eager write + watermark | `previewForMsgId == lastMsgId` | same, evaluated remotely |
+| user-service holds preview DEK | no | **yes** | **yes** | **no** |
+| Relative diff size | zero | largest | medium | smallest |
+
+### Cross-cutting facts (true under B, C and D)
+
+- **Encryption is still required.** The Amendment 2 defect is about what is *stored*
+  in Mongo, not about who reads it. Any option that persists preview content must
+  encrypt it. What changes across options is only *which services hold the key*.
+- **The preview-scoped key still earns its place.** Even under D, a doc hit on a
+  dormant room needs that preview decrypted without having walked Cassandra, so a
+  per-room DEK would re-introduce the cold-tail miss (Mongo read + Vault unwrap per
+  dormant room) inside history-service instead of user-service. The site-scoped
+  preview key in Amendment 2 §2 stands; under D its consumer set shrinks to services
+  that already have atrest, which is what removes the §7 access-control problem.
+- **Mutations need an explicit write under every option.** `lastMsgId` changes only
+  on message creation, so editing or deleting the current preview message is
+  invisible to any implicit freshness check. Amendment 1's `PreviewGone` path stays.
+- **Best-effort writes can be lost.** Warm-back and post-mutation writes are
+  warn-and-continue with the event acked regardless, so a Mongo failure leaves a
+  stale preview until the next message. Design-independent.
+- **`visibleTo` is unresolved.** One preview is stored per room but consumed per
+  member. When the `visibleTo` write path lands, a partially-visible last message
+  will be served to every member, and no freshness check can detect it — the value
+  is not stale, merely not per-user. Decide before that path ships.
+
+### Hazards specific to C and D
+
+Both resolve previews by *reading Cassandra*, which introduces a race B does not
+have. broadcast-worker and message-worker are independent consumers of
+MESSAGES-CANONICAL with no ordering between them, so the room doc can advertise
+`lastMsgId = M2` before message-worker has persisted M2. A warm-back that trusts
+Mongo's `lastMsgId` would stamp `previewForMsgId = M2` while the walk resolved M1,
+claiming freshness for a state it never saw — and it would not self-heal, because
+the ID equality holds until M3 arrives.
+
+**Required mitigation:** stamp `previewForMsgId` with the newest message id the walk
+actually observed in Cassandra, never the `lastMsgId` read from Mongo. The
+ineligible-newest-message case still works, because there the walk did observe the
+message and merely skipped it. B avoids this entirely by building the preview from
+the event payload it already holds.
+
+**Cold start under C.** With nothing warmed, every room is residual, so the first
+list per user sends the full room set to `rooms.get` — straight into the
+`maxRoomsGetBatch = 100` cap, which rejects the request outright. C therefore makes
+the batch-chunking fix a prerequisite rather than a deferrable follow-up. D shares
+the exposure only if a large fraction of a list misses simultaneously.
+
+### Recommendation
+
+**D**, unless zero-RPC is a hard latency requirement.
+
+It is the only option that helps cross-site rooms, the only one that needs no new
+Vault wiring, and the smallest diff — user-service reverts to `main`, taking the
+`SubscriptionPreviewFromDoc` flag, the aggregation projection, and the residual-set
+logic with it. It also keeps the preview DEK confined to services that already
+handle message plaintext, which retires the Amendment 2 §7 startup assertion and the
+shared-KEK residual risk rather than mitigating them.
+
+Its cost is honest: `rooms.get` fires on every list, so the original "zero RPCs for
+a local list" goal is not met — the RPC becomes cheap rather than absent. And because
+`previewCache` already absorbs hot rooms in-process, D's measurable gain concentrates
+in the cold dormant tail. That is where a large room list's cost actually lives, but
+it should be measured against the cache's real hit rate before committing.
+
+Pick B only if a NATS round-trip cannot fit the latency budget; the price is Vault in
+two more services, the preview DEK in the front-line service, and two writers whose
+divergence has already produced defects.
