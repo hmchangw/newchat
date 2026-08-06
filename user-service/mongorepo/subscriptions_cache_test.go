@@ -147,6 +147,86 @@ func TestAggregateSubscriptions_PageRefillsPastFreshSoftDeletes_Integration(t *t
 	assert.False(t, page.HasMore, "no live rows remain beyond the refilled page")
 }
 
+// The withinDays window decides list MEMBERSHIP, not just position, so it must
+// not hide a room whose activity the cache hasn't seen yet: a cache hit that
+// fails the window is re-read fresh (demoted to a miss) before the row is
+// dropped. Ordering staleness within the TTL stays acceptable — absence does not.
+func TestAggregateSubscriptions_WindowSeesFreshActivityDespiteWarmCache_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC()
+	days := 7
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-dormant", "name": "Dormant", "siteId": "site-a", "userCount": 1, "lastMsgAt": t0.AddDate(0, 0, -30)},
+		bson.M{"_id": "r-active", "name": "Active", "siteId": "site-a", "userCount": 1, "lastMsgAt": t0.Add(-time.Minute)},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "s-dormant", "u": bson.M{"_id": "u-windy", "account": "windy"}, "roomId": "r-dormant",
+			"name": "Dormant", "roomType": "channel", "siteId": "site-a"},
+		bson.M{"_id": "s-active", "u": bson.M{"_id": "u-windy", "account": "windy"}, "roomId": "r-active",
+			"name": "Active", "roomType": "channel", "siteId": "site-a"},
+	)
+
+	windowedIDs := func() []string {
+		t.Helper()
+		page, err := r.AggregateSubscriptions(ctx, "windy", "rooms", false, &days, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
+		require.NoError(t, err)
+		ids := make([]string, 0, len(page.Data))
+		for _, sub := range page.Data {
+			ids = append(ids, sub.ID)
+		}
+		return ids
+	}
+
+	// First windowed list: dormant room is out of the window; its stale sort key
+	// is now cached.
+	require.Equal(t, []string{"s-active"}, windowedIDs(), "dormant room outside the window")
+
+	// The dormant room receives its first message in weeks — exactly the moment
+	// clients re-list. The row must appear despite the warm out-of-window cache entry.
+	_, err := db.Collection("rooms").UpdateOne(ctx, bson.M{"_id": "r-dormant"}, bson.M{"$set": bson.M{"lastMsgAt": t0.Add(time.Hour)}})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"s-dormant", "s-active"}, windowedIDs(),
+		"a room entering the window must appear immediately, not after the cache TTL")
+}
+
+// Non-normalized page values must degrade the way the old Mongo-side paging
+// did (an error or a sane empty result) — never a slice-bounds panic. The
+// service layer clamps today, but the repo must not turn a future caller's
+// bad input into a process crash.
+func TestAggregateSubscriptions_NonNormalizedPageValues_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC()
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-p1", "name": "P1", "siteId": "site-a", "userCount": 1, "lastMsgAt": t0},
+		bson.M{"_id": "r-p2", "name": "P2", "siteId": "site-a", "userCount": 1, "lastMsgAt": t0.Add(-time.Minute)},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "s-p1", "u": bson.M{"_id": "u-clamp", "account": "clamp"}, "roomId": "r-p1",
+			"name": "P1", "roomType": "channel", "siteId": "site-a"},
+		bson.M{"_id": "s-p2", "u": bson.M{"_id": "u-clamp", "account": "clamp"}, "roomId": "r-p2",
+			"name": "P2", "roomType": "channel", "siteId": "site-a"},
+	)
+
+	// Negative offset clamps to 0: same page as offset 0.
+	page, err := r.AggregateSubscriptions(ctx, "clamp", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: -5, Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+	assert.Equal(t, "s-p1", page.Data[0].ID)
+	assert.True(t, page.HasMore)
+
+	// Negative limit clamps to 0: empty page, HasMore mirrors the old
+	// over-read-one contract (rows remain beyond the empty page).
+	page, err = r.AggregateSubscriptions(ctx, "clamp", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: -1})
+	require.NoError(t, err)
+	assert.Empty(t, page.Data)
+	assert.True(t, page.HasMore)
+}
+
 // Ordering contract pinned before the sort moves out of Mongo: rows with no
 // activity signal (no local room, or a room with neither lastMsgAt nor
 // createdAt) sort after every keyed row, name ascending among themselves; a

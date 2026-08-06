@@ -5,6 +5,7 @@ package mongorepo
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -21,11 +22,14 @@ var (
 	_ service.SSOTokenRepository     = (*SSOTokenRepo)(nil)
 )
 
-// newTestSubscriptionRepo builds a SubscriptionRepo with siteID "site-a"; seed cross-site rows with a different siteId to exercise the deleted-filter.
+// newTestSubscriptionRepo builds a SubscriptionRepo with siteID "site-a" and
+// the production-default sort-key cache (the cache tests depend on it being
+// enabled); seed cross-site rows with a different siteId to exercise the
+// deleted-filter.
 func newTestSubscriptionRepo(t *testing.T) (*SubscriptionRepo, *mongo.Database) {
 	t.Helper()
 	db := testutil.MongoDB(t, "user-service")
-	r := NewSubscriptionRepo(db, "site-a")
+	r := NewSubscriptionRepo(db, "site-a", 100_000, 15*time.Second)
 	require.NoError(t, r.EnsureIndexes(context.Background()))
 	return r, db
 }

@@ -1,6 +1,7 @@
 package mongorepo
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestNewSortKeyCache_DisabledOnNonPositiveSizeOrTTL(t *testing.T) {
 func TestSortKeyCache_NilIsSafeAndAlwaysMisses(t *testing.T) {
 	var c *sortKeyCache
 	c.add("r1", roomSortKey{Name: "Eng"}) // must not panic
-	_, ok := c.get("r1")
+	_, ok := c.get(context.Background(), "r1")
 	assert.False(t, ok, "disabled cache never hits")
 }
 
@@ -41,7 +42,7 @@ func TestSortKeyCache_AddGetRoundTrip(t *testing.T) {
 	created := at.Add(-time.Hour)
 	c.add("r1", roomSortKey{Name: "Eng", LastMsgAt: &at, CreatedAt: &created})
 
-	got, ok := c.get("r1")
+	got, ok := c.get(context.Background(), "r1")
 	require.True(t, ok)
 	assert.Equal(t, "Eng", got.Name)
 	require.NotNil(t, got.LastMsgAt)
@@ -54,7 +55,7 @@ func TestSortKeyCache_AddGetRoundTrip(t *testing.T) {
 func TestSortKeyCache_MissOnUnknownID(t *testing.T) {
 	c := newSortKeyCache(10, time.Minute)
 	require.NotNil(t, c)
-	_, ok := c.get("never-added")
+	_, ok := c.get(context.Background(), "never-added")
 	assert.False(t, ok)
 }
 
@@ -66,7 +67,7 @@ func TestSortKeyCache_NegativeEntryIsAHit(t *testing.T) {
 
 	c.add("r-remote", roomSortKey{Missing: true})
 
-	got, ok := c.get("r-remote")
+	got, ok := c.get(context.Background(), "r-remote")
 	require.True(t, ok, "negative entry must be a cache hit")
 	assert.True(t, got.Missing)
 }
@@ -76,11 +77,11 @@ func TestSortKeyCache_EntriesExpireAfterTTL(t *testing.T) {
 	require.NotNil(t, c)
 
 	c.add("r1", roomSortKey{Name: "Eng"})
-	_, ok := c.get("r1")
+	_, ok := c.get(context.Background(), "r1")
 	require.True(t, ok, "entry readable before TTL")
 
 	assert.Eventually(t, func() bool {
-		_, ok := c.get("r1")
+		_, ok := c.get(context.Background(), "r1")
 		return !ok
 	}, time.Second, 10*time.Millisecond, "entry must expire after the TTL")
 }
