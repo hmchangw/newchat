@@ -6,6 +6,9 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
@@ -13,7 +16,9 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -23,7 +28,9 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // checkConfig validates positive-integer config knobs and exits the process on
@@ -46,6 +53,25 @@ func checkConfig(cfg *config.Config) {
 			os.Exit(1)
 		}
 	}
+}
+
+// subL2Source is the always-present subscription base source. The access check
+// (GetHistorySharedSince) runs through the shared Valkey L2 read-through, itself
+// breaker-guarded, so a Mongo outage fails open regardless of whether the L1
+// process-local cache is enabled. The full-subscription read (GetSubscription,
+// pin/unpin) delegates to the raw Mongo repo unchanged. This keeps L2/breaker
+// outage survival active symmetrically with message-gatekeeper.
+type subL2Source struct {
+	l2    readcache.SubAuthReadThrough
+	inner service.SubscriptionRepository
+}
+
+func (s subL2Source) GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+	return s.l2(ctx, account, roomID)
+}
+
+func (s subL2Source) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
+	return s.inner.GetSubscription(ctx, account, roomID)
 }
 
 func main() {
@@ -117,6 +143,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Shared subauthcache L2 (Valkey). nil disables the L2 tier — the base
+	// source's read-through then falls straight through to the breaker-guarded
+	// Mongo loader (still fronted, regardless of the L1 cache).
+	var subValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		subValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if err != nil {
+			slog.Error("valkey connect (subauth L2) failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("subauth L2 cache enabled", "ttl", cfg.SubL2TTL)
+	}
+
 	var (
 		cipher       atrest.Cipher
 		vaultWrapper atrest.KeyWrapperCloser
@@ -150,16 +192,76 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Front the per-request Mongo reads with process-local LRU+TTL caches.
-	var subSource service.SubscriptionRepository = subRepo
+	// Front the per-request Mongo reads with process-local LRU+TTL caches. The
+	// subscription L1's loader runs through the shared Valkey L2 (subauthcache),
+	// itself breaker-guarded so a Mongo outage fails open instead of stalling.
+	subscriptionsColl := db.Collection("subscriptions")
+	mongoBreakerState, err := otel.Meter("history-service").Int64Gauge("mongo_breaker_state",
+		metric.WithDescription("Mongo circuit breaker state (0=closed, 1=open, 2=half-open)"))
+	if err != nil {
+		slog.Error("create mongo breaker state gauge failed", "error", err)
+		os.Exit(1)
+	}
+	breaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.WithOnTransition(func(from, to circuitbreaker.State) {
+			slog.Warn("mongo circuit breaker transition", "from", from.String(), "to", to.String())
+			mongoBreakerState.Record(ctx, int64(to))
+		}),
+	)
+	subRec := cachemetrics.For("subauth", "l2")
+	subL2 := func(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+		loader := func(ctx context.Context, roomID, account string) (subauthcache.SubAuth, bool, error) {
+			var (
+				auth subauthcache.SubAuth
+				sub  bool
+			)
+			err := breaker.Do(func() error {
+				var e error
+				auth, sub, e = subauthcache.FetchFromMongo(ctx, subscriptionsColl, roomID, account)
+				return e
+			})
+			return auth, sub, err
+		}
+		auth, subscribed, err := subauthcache.ReadThrough(ctx, subValkey, loader, roomID, account, cfg.SubL2TTL, subRec,
+			subauthcache.WithSlideOnDegraded(func() bool { return breaker.State() != circuitbreaker.StateClosed }))
+		if err != nil {
+			return nil, false, err
+		}
+		if !subscribed {
+			return nil, false, nil
+		}
+		var ss *time.Time
+		if auth.HistorySharedSince != nil {
+			t := time.UnixMilli(*auth.HistorySharedSince).UTC()
+			ss = &t
+		}
+		return ss, true, nil
+	}
+
+	// The breaker-guarded L2 read-through is the ALWAYS-present base source, so
+	// outage survival stays active even when the L1 cache is disabled
+	// (SubCacheSize/TTL = 0). The L1 cache, when enabled, layers on top with a
+	// nil l2 param — its loader then falls through to base.GetHistorySharedSince,
+	// which already runs the L2/breaker chain.
+	base := subL2Source{l2: subL2, inner: subRepo}
+	var subSource service.SubscriptionRepository = base
 	if cfg.SubCacheSize > 0 && cfg.SubCacheTTL > 0 {
-		sc, err := readcache.NewSubscriptionCache(subRepo, cfg.SubCacheSize, cfg.SubCacheTTL)
+		sc, err := readcache.NewSubscriptionCache(base, nil, cfg.SubCacheSize, cfg.SubCacheTTL)
 		if err != nil {
 			slog.Error("init subscription cache failed", "error", err)
 			os.Exit(1)
 		}
 		subSource = sc
-		slog.Info("subscription cache enabled", "size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL)
+		slog.Info("subscription cache enabled",
+			"size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL,
+			"sub_l2_ttl", cfg.SubL2TTL,
+			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+		)
+	} else {
+		slog.Info("subscription L1 cache disabled; L2/breaker outage survival remains active",
+			"sub_l2_ttl", cfg.SubL2TTL,
+			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+		)
 	}
 
 	var roomSource service.RoomRepository = roomRepo
@@ -236,6 +338,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return healthStop(ctx) },
+		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

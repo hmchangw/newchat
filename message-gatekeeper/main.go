@@ -11,7 +11,10 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -44,6 +47,9 @@ type config struct {
 	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"               envSeparator:","`
 	ValkeyPassword     string                  `env:"VALKEY_PASSWORD"            envDefault:""`
 	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"15m"`
+	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
+	MongoBreakerFails  int                     `env:"GATEKEEPER_MONGO_BREAKER_FAILS"    envDefault:"5"`
+	MongoBreakerCool   time.Duration           `env:"GATEKEEPER_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
 	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
@@ -114,7 +120,24 @@ func main() {
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
 
-	mongoStore := NewMongoStore(db, metaValkey, cfg.RoomMetaL2TTL)
+	mongoBreakerState, err := otel.Meter("message-gatekeeper").Int64Gauge("mongo_breaker_state",
+		metric.WithDescription("Mongo circuit breaker state (0=closed, 1=open, 2=half-open)"))
+	if err != nil {
+		slog.Error("create mongo breaker state gauge failed", "error", err)
+		os.Exit(1)
+	}
+	// The subscription breaker carries the authz-critical Mongo-health signal
+	// (warn log + mongo_breaker_state gauge). The room-meta breaker is a separate
+	// instance so a warm room-meta L2 hit can't reset the subscription breaker's
+	// failure count; it fast-fails on its own health with no second gauge.
+	subBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.WithOnTransition(func(from, to circuitbreaker.State) {
+			slog.Warn("mongo circuit breaker transition", "from", from.String(), "to", to.String())
+			mongoBreakerState.Record(ctx, int64(to))
+		}),
+	)
+	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool)
+	mongoStore := NewMongoStore(db, metaValkey, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)
@@ -135,6 +158,7 @@ func main() {
 		"sub_cache_size", cfg.SubCacheSize, "sub_cache_ttl", cfg.SubCacheTTL,
 		"room_meta_cache_size", cfg.RoomMetaCacheSize, "room_meta_cache_ttl", cfg.RoomMetaCacheTTL,
 		"user_cache_size", cfg.UserCacheSize, "user_cache_ttl", cfg.UserCacheTTL,
+		"sub_l2_ttl", cfg.SubL2TTL,
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)

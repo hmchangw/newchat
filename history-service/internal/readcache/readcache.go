@@ -108,20 +108,28 @@ type subEntry struct {
 	subscribed  bool
 }
 
-// SubscriptionCache caches positive subscription access checks.
+// SubAuthReadThrough is the shared-L2 subscription read the L1 cache fronts.
+// history-service injects a closure that runs subauthcache.ReadThrough behind
+// the circuit breaker. account/roomID order matches SubscriptionSource.
+type SubAuthReadThrough func(ctx context.Context, account, roomID string) (sharedSince *time.Time, subscribed bool, err error)
+
+// SubscriptionCache caches positive subscription access checks (L1), backed by
+// a shared L2 read-through when configured.
 type SubscriptionCache struct {
 	inner SubscriptionSource
+	l2    SubAuthReadThrough // nil => L1 fronts inner directly (no shared L2)
 	cache *ttlCache[subEntry]
 }
 
 // NewSubscriptionCache wraps inner with an LRU+TTL cache of size entries and
-// the given TTL. size and ttl must be positive.
-func NewSubscriptionCache(inner SubscriptionSource, size int, ttl time.Duration) (*SubscriptionCache, error) {
+// the given TTL. When l2 is non-nil, L1 misses resolve through the shared L2
+// read-through instead of inner. size and ttl must be positive.
+func NewSubscriptionCache(inner SubscriptionSource, l2 SubAuthReadThrough, size int, ttl time.Duration) (*SubscriptionCache, error) {
 	cache, err := newTTLCache[subEntry](size, ttl, cachemetrics.For("history_sub", "l1"))
 	if err != nil {
 		return nil, err
 	}
-	return &SubscriptionCache{inner: inner, cache: cache}, nil
+	return &SubscriptionCache{inner: inner, l2: l2, cache: cache}, nil
 }
 
 // GetHistorySharedSince serves the access check from cache, loading on miss.
@@ -129,7 +137,16 @@ func NewSubscriptionCache(inner SubscriptionSource, size int, ttl time.Duration)
 func (c *SubscriptionCache) GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
 	key := account + "\x00" + roomID
 	entry, err := c.cache.getOrLoad(ctx, key, func(ctx context.Context) (subEntry, bool, error) {
-		ss, subscribed, err := c.inner.GetHistorySharedSince(ctx, account, roomID)
+		var (
+			ss         *time.Time
+			subscribed bool
+			err        error
+		)
+		if c.l2 != nil {
+			ss, subscribed, err = c.l2(ctx, account, roomID)
+		} else {
+			ss, subscribed, err = c.inner.GetHistorySharedSince(ctx, account, roomID)
+		}
 		if err != nil {
 			return subEntry{}, false, err
 		}
