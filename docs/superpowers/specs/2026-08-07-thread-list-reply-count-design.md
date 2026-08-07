@@ -87,7 +87,7 @@ yet every client must code the `undefined` branch.
 `data-migration/oplog-collections-transformer` writes `thread_rooms` and
 `thread_subscriptions` straight into Mongo (`targetstore.go:31`, `threadsubs.go`)
 and never touches Cassandra. Those threads appear in the inbox with a parent
-whose `tcount` column was never written; `*int` + `omitempty`
+whose `tcount` column was never written to Cassandra; `*int` + `omitempty`
 (`pkg/model/cassandra/message.go:89`) then omits the key entirely.
 `data-migration/README.md:71` already books this as an accepted limitation
 ("Migrated threads/rooms may show stale/zero counts"). The client cannot
@@ -160,9 +160,30 @@ Red first, per CLAUDE.md §4.
 2. `history-service/internal/service/threadlist_test.go` — table-driven over the
    parent's `TCount`: `intPtr(4)` → `4`; `nil` → `0`; `intPtr(0)` → `0`;
    `intPtr(99)` → `99` (cap passes through unchanged).
-3. `user-service/service/threads_test.go` — a leaf response carrying `TCount`
-   survives the merge, the sort, and `enrichThreadPage` (assert on a DM row,
-   whose `HRInfo` path rewrites the item).
+3. `user-service/service/threads_test.go` — `TCount` survives the **whole**
+   aggregator pass: the cross-site merge, the `(lastMsgAt, threadRoomId) DESC`
+   sort, and `enrichThreadPage`. The aggregator copies items verbatim today, so
+   this test is what keeps it that way.
+
+   One page, rows from **two different sites** with interleaved `lastMsgAt` so
+   the sort genuinely reorders them, and one row per `enrichThreadPage` branch
+   (`user-service/service/threads.go:230-248`) — each branch mutates the item
+   differently, so each needs its own assertion that `TCount` is untouched:
+
+   | Row | `roomType` | What enrichment does to it | Assert |
+   |---|---|---|---|
+   | A | `channel` | nothing — no per-row enrichment | `TCount` intact |
+   | B | `dm` | sets `HRInfo` from the HR lookup | `TCount` intact **and** `HRInfo` set |
+   | C | `botDM` | overwrites `RoomName` with the app name | `TCount` intact **and** `RoomName` rewritten |
+
+   Assert on the final `resp.Items` — indexed by the post-sort order, not the
+   per-site input order — so a regression that drops the field during the merge,
+   the sort, or any one enrichment branch fails distinguishably.
+
+   Plus two degraded cases, since enrichment failures are swallowed by design
+   (`lookupThreadHRInfo` / `lookupThreadApps` return nil on error): the HR
+   lookup failing and the app lookup failing must each still leave `TCount`
+   intact on every row.
 4. Implement 1–2 above; `make test SERVICE=history-service`,
    `make test SERVICE=user-service`, `make lint`.
 
@@ -207,28 +228,45 @@ same database as the subscription rows. Here messages are Cassandra-only, which
 is exactly what breaks the next suggestion.
 
 **"The pipeline should `$lookup` the parent message at aggregation time, then a
-`TransformToThreadSubscription` step converts it" — half already true, half
-cannot port.**
+`TransformToThreadSubscription` step converts it" — right shape, wrong
+mechanism here. The equivalent already exists in code.**
 
-- *The transform step already exists.* `buildThreadItems`
-  (`history-service/internal/service/threads.go:203`) is our
-  `TransformToThreadSubscription`: it takes the raw `ThreadSubRow`s and the
-  hydrated parents and emits `ThreadListItem`s. The parent **is** resolved
-  during the same request, so the count is free either way — the legacy shape
-  holds, only the join mechanism differs.
-- *The `$lookup` cannot.* There is no production Mongo `messages` collection to
-  join to. The only `db.Collection("messages")` in the repo is
+In tchat2 the parent lived in the same MongoDB as the subscription rows, so
+joining it inside the aggregation was the natural move. **Here the parent's
+`tcount` lives in Cassandra (`messages_by_id`), so the join cannot happen in
+Mongo at all** — the aggregation returns row *keys* and the join happens in Go,
+one hop later:
+
+```
+mongo agg  → ThreadSubRow{parentMessageId, lastMsgId, …}   pipelines.go:56
+             ↓ threadListLookupMsgIDs — dedup parents ∪ lasts
+cassandra  → GetMessagesByIDs(ids)                         cassrepo/messages_by_id.go:44
+             ↓
+             buildThreadItems → ThreadListItem[]           threads.go:203
+```
+
+- *Both halves already exist.* `GetMessagesByIDs` is an existing Cassandra
+  batch read, and `buildThreadItems` is our `TransformToThreadSubscription` —
+  it takes the `ThreadSubRow`s plus the hydrated parents and emits
+  `ThreadListItem`s. The parent **is** already resolved in the same request, so
+  the count is free. This change adds no read; it only lifts a value the
+  transform already holds.
+- *The `$lookup` itself cannot port.* There is no production Mongo `messages`
+  collection to join to. The only `db.Collection("messages")` in the repo is
   `tools/seed-sample-data/mongo.go:122`, a dev seeder no service reads;
   history-service's Mongo repos bind `apps`, `subscriptions`, `rooms`,
-  `thread_rooms`, `thread_subscriptions` and nothing else. Messages are in
-  Cassandra, and Mongo cannot `$lookup` across engines. Secondary point:
-  CLAUDE.md bans `$lookup` without a documented justification, and
-  `userThreadSubscriptionsPipeline` already carries two justified ones.
-- *Our equivalent is better anyway.* The legacy join resolved a parent per row;
-  `buildThreadItems` issues **one** deduped batch
-  (`threadListLookupMsgIDs` → `GetMessagesByIDs`, bounded at
-  `maxConcurrentIDReads = 16`) covering parents ∪ last-messages for the whole
-  page.
+  `thread_rooms`, `thread_subscriptions` and nothing else. Mongo cannot
+  `$lookup` across engines. Secondary point: CLAUDE.md bans `$lookup` without a
+  documented justification, and `userThreadSubscriptionsPipeline` already
+  carries two justified ones.
+- *The in-code join is the more efficient one.* The legacy pipeline resolved a
+  parent **per row**; we resolve the **whole page in one deduped batch** —
+  `threadListLookupMsgIDs` unions parents ∪ last-messages and drops duplicates
+  (a message that is one row's parent and another's last message is fetched
+  once), then `GetMessagesByIDs` fans the union out as token-aware
+  single-partition point reads with at most `maxConcurrentIDReads = 16` in
+  flight — deliberately not a multi-partition `IN` scatter. So the page costs
+  one bounded fan-out, not N sequential joins.
 - The nearest true port of "get the count from the aggregation" is denormalizing
   it onto `thread_rooms` — that is Option B below, and it is not a minor fix.
 
