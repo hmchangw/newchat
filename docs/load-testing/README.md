@@ -6,6 +6,10 @@ component-specific and system-wide test plans.
 
 ## Current Plans
 
+- [`system/end-to-end-load-test-plan.md`](system/end-to-end-load-test-plan.md)
+  is the authoritative **system-level** umbrella plan (Baseline / Stress-Capacity
+  / Resilience) for the whole single-site message path. Component plans sit under
+  it.
 - [`cassandra/soak-test-plan.md`](cassandra/soak-test-plan.md) is the
   authoritative specification for the Cassandra Run A pre-production soak.
 - [`cassandra/run-a-implementation-plan.md`](cassandra/run-a-implementation-plan.md)
@@ -35,11 +39,14 @@ docs/load-testing/
     `-- resilience-test-plan.md
 ```
 
-The directories under `common/` and `system/` should be created only when
-their first real document is ready. In particular, user-facing SLI/SLO
-definitions belong under `system/`; the Cassandra plan has component-level
-acceptance criteria and must not be treated as an end-to-end SLO
-certification.
+`system/` now exists — its first real document is the end-to-end load & stress
+plan above. The remaining `system/` documents (`sli-slo.md`,
+`capacity-test-plan.md`, `resilience-test-plan.md`) and all of `common/` should
+still be created only when their first real content is ready. In particular,
+user-facing SLI/SLO definitions belong under `system/` (the end-to-end plan
+carries only *provisional* targets and defers the authoritative catalog to
+`sli-slo.md`); the Cassandra plan has component-level acceptance criteria and
+must not be treated as an end-to-end SLO certification.
 
 Run B/C pathological and direct-CQL experiments remain deferred and are not
 part of the Run A implementation plan.
