@@ -4,11 +4,24 @@
 
 **Goal:** Store `priorityContacts` on the user document and expose it via three new user-service NATS RPCs (`get`/`add`/`remove`), replicated cross-site through dedicated atomic inbox events.
 
-**Architecture:** `priorityContacts []string` is embedded in `UserSettings` (already stored in `users.settings`). `user-service` gets a new `UserRepository` surface (`AddPriorityContact`/`RemovePriorityContact`/`GetPriorityContacts`/`GetDirectoryInfoByAccounts`) backed by atomic Mongo `$addToSet`/`$pull`/projected reads, three new NATS handlers, and a new pair of cross-site `InboxEvent` types that `inbox-worker` applies with the same atomic ops (never a full-settings overwrite) on every other site.
+**Architecture:** `priorityContacts []string` is embedded in `UserSettings` (already stored in `users.settings`). `user-service` gets a new `UserRepository` surface (`AddPriorityContact`/`RemovePriorityContact`/`GetPriorityContactAccounts`/`GetDirectoryInfoByAccounts`) backed by atomic Mongo `$addToSet`/`$pull`/projected reads, three new NATS handlers, and a new pair of cross-site `InboxEvent` types that `inbox-worker` applies with the same atomic ops (never a full-settings overwrite) on every other site.
 
 **Tech Stack:** Go 1.25, NATS core request/reply, MongoDB (`go.mongodb.org/mongo-driver/v2`), `go.uber.org/mock` (mockgen), `stretchr/testify`, `testcontainers-go` (via `pkg/testutil`).
 
 **Spec:** `docs/superpowers/specs/2026-08-07-priority-contacts-storage-api-design.md`
+
+## Client contract (non-negotiable)
+
+**All three RPCs return the fully enriched `[]PriorityContactItem` — the frontend makes exactly ONE call to render the priority-contacts list.** `.get`, `.add`, and `.remove` all reply with the caller's complete, enriched list (account + names + employee ID + org for humans, account + app name for bots). The frontend must never have to follow up with a user-lookup or app-lookup RPC to display a contact; all cross-collection enrichment happens server-side inside the handler.
+
+Naming, to keep the layers unambiguous (they are NOT the same function):
+
+| Layer | Name | Returns |
+|---|---|---|
+| Client-facing handler (`service/prioritycontacts.go`) | `UserService.GetPriorityContacts` | `[]models.PriorityContactItem` — enriched, what the FE receives |
+| Repo (`mongorepo/users.go`) | `UserRepo.GetPriorityContactAccounts` | `[]string` — raw stored accounts, internal only |
+
+The repo method cannot return `PriorityContactItem`: enrichment requires reading a second collection (`apps`), and CLAUDE.md forbids `$lookup`, so the join belongs in the service layer.
 
 ## Global Constraints
 
@@ -30,7 +43,7 @@
 These are implementation-level corrections found while grounding the plan in the actual code — no product/scope decision changes, just technical accuracy fixes on top of the approved spec:
 
 1. **Model file location.** `UserSettings` lives in `pkg/model/usersettings.go`, not `pkg/model/event.go` (the spec said `event.go` for this field — it's right about `event.go` for the new `InboxEventType`/`PriorityContactChanged` additions, just wrong about where `UserSettings` itself lives).
-2. **A 4th repo method is needed for enrichment.** The spec assumed `GetPriorityContacts`'s enrichment reuses the existing `UserRepository.GetHRInfoByAccounts`. That method returns `model.SubscriptionHRInfo{Account, Name, EngName}` — it has no `EmployeeID`/`SectName`, which `PriorityContactItem` needs. Rather than widen `SubscriptionHRInfo` (a type already used by unrelated DM-sidebar responses — widening it would ripple into `docs/client-api.md`'s existing DM subscription docs), Task 5 adds a new, purpose-built `UserRepo.GetDirectoryInfoByAccounts` returning `map[string]*model.User` (narrow-projected).
+2. **A 4th repo method is needed for enrichment.** The spec assumed the get handler's enrichment reuses the existing `UserRepository.GetHRInfoByAccounts`. That method returns `model.SubscriptionHRInfo{Account, Name, EngName}` — it has no `EmployeeID`/`SectName`, which `PriorityContactItem` needs. Rather than widen `SubscriptionHRInfo` (a type already used by unrelated DM-sidebar responses — widening it would ripple into `docs/client-api.md`'s existing DM subscription docs), Task 5 adds a new, purpose-built `UserRepo.GetDirectoryInfoByAccounts` returning `map[string]*model.User` (narrow-projected).
 3. **Enrichment degrades, it doesn't error.** `user-service/service/subscriptions.go` already has this exact "split by `model.IsBot`, bulk-enrich, degrade to a nil map + log on failure" pattern (`lookupApps`/`lookupHRInfo`). Task 7 reuses `lookupApps` as-is and adds a `lookupPriorityContactDirectory` sibling with the same degrade-on-error style, instead of propagating enrichment errors as the spec's prose implied.
 
 ## File Structure
@@ -41,7 +54,7 @@ These are implementation-level corrections found while grounding the plan in the
 | `pkg/model/event.go` | Add `InboxPriorityContactAdded`/`InboxPriorityContactRemoved` + `PriorityContactChanged`. |
 | `pkg/errcode/codes_user.go` | Add 3 new `Reason` constants. |
 | `pkg/subject/subject.go` | Add 6 new subject builder functions (get/add/remove × concrete/pattern). |
-| `user-service/mongorepo/users.go` | Add `AddPriorityContact`, `RemovePriorityContact`, `GetPriorityContacts`, `GetDirectoryInfoByAccounts` to `UserRepo`. |
+| `user-service/mongorepo/users.go` | Add `AddPriorityContact`, `RemovePriorityContact`, `GetPriorityContactAccounts`, `GetDirectoryInfoByAccounts` to `UserRepo`. |
 | `user-service/service/service.go` | Extend `UserRepository` interface; register 3 new handlers. |
 | `user-service/models/prioritycontacts.go` (new) | Request/response structs. |
 | `user-service/service/prioritycontacts.go` (new) | 3 NATS handlers + enrichment + cross-site publish helper. |
@@ -399,7 +412,7 @@ git commit -m "feat(subject): add priority-contacts RPC subject builders"
 - Produces:
   - `func (r *UserRepo) AddPriorityContact(ctx context.Context, account, contactAccount string) (*model.User, error)`
   - `func (r *UserRepo) RemovePriorityContact(ctx context.Context, account, contactAccount string) (*model.User, error)`
-  - `func (r *UserRepo) GetPriorityContacts(ctx context.Context, account string) ([]string, error)` — **contract:** `nil, nil` when no active user matched; `[]string{}, nil` when the user exists but has never set the field; the stored slice otherwise. Never truncates.
+  - `func (r *UserRepo) GetPriorityContactAccounts(ctx context.Context, account string) ([]string, error)` — **contract:** `nil, nil` when no active user matched; `[]string{}, nil` when the user exists but has never set the field; the stored slice otherwise. Never truncates.
   - `func (r *UserRepo) GetDirectoryInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.User, error)` — narrow projection (`account`, `chineseName`, `engName`, `employeeId`, `sectName`); all other `model.User` fields are zero-valued. Accounts with no doc are omitted from the map.
 
 - [ ] **Step 1: Write the failing tests**
@@ -472,7 +485,7 @@ func TestRemovePriorityContact_Integration(t *testing.T) {
 	})
 }
 
-func TestGetPriorityContacts_Integration(t *testing.T) {
+func TestGetPriorityContactAccounts_Integration(t *testing.T) {
 	r, db := newTestUserRepo(t)
 	ctx := context.Background()
 	over30 := make(bson.A, 31)
@@ -488,28 +501,28 @@ func TestGetPriorityContacts_Integration(t *testing.T) {
 	)
 
 	t.Run("returns stored list", func(t *testing.T) {
-		got, err := r.GetPriorityContacts(ctx, "alice")
+		got, err := r.GetPriorityContactAccounts(ctx, "alice")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"bob"}, got)
 	})
 
 	t.Run("empty slice, not nil, when field never set", func(t *testing.T) {
-		got, err := r.GetPriorityContacts(ctx, "noset")
+		got, err := r.GetPriorityContactAccounts(ctx, "noset")
 		require.NoError(t, err)
 		assert.NotNil(t, got)
 		assert.Empty(t, got)
 	})
 
 	t.Run("nil when no active user matched", func(t *testing.T) {
-		got, err := r.GetPriorityContacts(ctx, "nobody")
+		got, err := r.GetPriorityContactAccounts(ctx, "nobody")
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
 
 	t.Run("never truncates, even over the 30 cap", func(t *testing.T) {
-		got, err := r.GetPriorityContacts(ctx, "over")
+		got, err := r.GetPriorityContactAccounts(ctx, "over")
 		require.NoError(t, err)
-		assert.Len(t, got, 31, "GetPriorityContacts must return every stored entry, uncapped")
+		assert.Len(t, got, 31, "GetPriorityContactAccounts must return every stored entry, uncapped")
 	})
 }
 
@@ -601,11 +614,11 @@ func (r *UserRepo) RemovePriorityContact(ctx context.Context, account, contactAc
 	return &u, nil
 }
 
-// GetPriorityContacts returns settings.priorityContacts for account, uncapped and untruncated:
+// GetPriorityContactAccounts returns settings.priorityContacts for account, uncapped and untruncated:
 // nil when no active user matched, []string{} (never nil) when the user exists but has never
 // set the field, the stored slice otherwise — including any entry count, even above the
 // 30-entry write-time cap (a rare add/add race can briefly exceed it; callers must not clip).
-func (r *UserRepo) GetPriorityContacts(ctx context.Context, account string) ([]string, error) {
+func (r *UserRepo) GetPriorityContactAccounts(ctx context.Context, account string) ([]string, error) {
 	u, err := r.users.FindOne(ctx, activeUserFilter(account),
 		mongoutil.WithProjection(bson.M{"_id": 0, "settings.priorityContacts": 1}),
 	)
@@ -669,7 +682,7 @@ git commit -m "feat(user-service): add priority-contacts store methods to UserRe
 **Interfaces:**
 - Consumes: Task 5's four `UserRepo` methods (satisfying the extended interface).
 - Produces:
-  - `UserRepository` interface gains `AddPriorityContact`, `RemovePriorityContact`, `GetPriorityContacts`, `GetDirectoryInfoByAccounts` (same signatures as Task 5).
+  - `UserRepository` interface gains `AddPriorityContact`, `RemovePriorityContact`, `GetPriorityContactAccounts`, `GetDirectoryInfoByAccounts` (same signatures as Task 5).
   - `models.PriorityContactAddRequest{ContactAccount string}`
   - `models.PriorityContactRemoveRequest{ContactAccount string}`
   - `models.PriorityContactItem{Account, EngName, ChineseName, EmployeeID, SectName, AppName string}`
@@ -705,10 +718,10 @@ type UserRepository interface {
 	// RemovePriorityContact atomically removes contactAccount from settings.priorityContacts
 	// via $pull. Returns (nil, nil) when no active user matched.
 	RemovePriorityContact(ctx context.Context, account, contactAccount string) (*model.User, error)
-	// GetPriorityContacts returns settings.priorityContacts for account: nil when no active
+	// GetPriorityContactAccounts returns settings.priorityContacts for account: nil when no active
 	// user matched, []string{} (never nil) when set but empty, the stored (uncapped) slice
 	// otherwise.
-	GetPriorityContacts(ctx context.Context, account string) ([]string, error)
+	GetPriorityContactAccounts(ctx context.Context, account string) ([]string, error)
 	// GetDirectoryInfoByAccounts maps account → a narrow users-doc projection
 	// (chineseName/engName/employeeId/sectName) for priority-contacts enrichment.
 	GetDirectoryInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.User, error)
@@ -721,7 +734,7 @@ No other change to `service.go` in this step — `AppRepository` and its injecti
 
 Run: `make generate SERVICE=user-service`
 
-This regenerates `user-service/service/mocks/mock_repository.go` (via the `//go:generate` directive at `service.go:16`) to add `MockUserRepository.AddPriorityContact`/`RemovePriorityContact`/`GetPriorityContacts`/`GetDirectoryInfoByAccounts`.
+This regenerates `user-service/service/mocks/mock_repository.go` (via the `//go:generate` directive at `service.go:16`) to add `MockUserRepository.AddPriorityContact`/`RemovePriorityContact`/`GetPriorityContactAccounts`/`GetDirectoryInfoByAccounts`.
 
 - [ ] **Step 3: Verify the package still builds**
 
@@ -819,7 +832,7 @@ func expectPriorityContactInbox(pub *mocks.MockEventPublisher, eventType string)
 
 func TestGetPriorityContacts_Empty(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{}, nil)
 	items, err := svc.GetPriorityContacts(ctx("alice", "site-a"))
 	require.NoError(t, err)
 	assert.Empty(t, items)
@@ -827,7 +840,7 @@ func TestGetPriorityContacts_Empty(t *testing.T) {
 
 func TestGetPriorityContacts_MixedUserAndBotEnrichment(t *testing.T) {
 	svc, _, users, apps, _, _, _ := newSvc(t)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{"bob", "helper.bot"}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{"bob", "helper.bot"}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"bob"}).
 		Return(map[string]*model.User{"bob": {Account: "bob", EngName: "Bob", ChineseName: "鮑勃", EmployeeID: "E1", SectName: "Eng"}}, nil)
 	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper.bot"}).
@@ -842,7 +855,7 @@ func TestGetPriorityContacts_MixedUserAndBotEnrichment(t *testing.T) {
 
 func TestGetPriorityContacts_MissingDirectoryEntryIsAccountOnly(t *testing.T) {
 	svc, _, users, apps, _, _, _ := newSvc(t)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{"ghost"}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{"ghost"}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"ghost"}).Return(map[string]*model.User{}, nil)
 	apps.EXPECT().GetAppsByAssistants(gomock.Any(), nil).Return(map[string]*model.App{}, nil).AnyTimes()
 
@@ -854,7 +867,7 @@ func TestGetPriorityContacts_MissingDirectoryEntryIsAccountOnly(t *testing.T) {
 
 func TestGetPriorityContacts_PreservesStoredOrder(t *testing.T) {
 	svc, _, users, apps, _, _, _ := newSvc(t)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{"carol", "bob"}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{"carol", "bob"}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"carol", "bob"}).
 		Return(map[string]*model.User{
 			"carol": {Account: "carol", EngName: "Carol"},
@@ -871,14 +884,14 @@ func TestGetPriorityContacts_PreservesStoredOrder(t *testing.T) {
 
 func TestGetPriorityContacts_NotFound(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "ghost").Return(nil, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "ghost").Return(nil, nil)
 	_, err := svc.GetPriorityContacts(ctx("ghost", "site-a"))
 	requireCode(t, err, errcode.CodeNotFound)
 }
 
 func TestGetPriorityContacts_StoreError(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return(nil, errors.New("db unavailable"))
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return(nil, errors.New("db unavailable"))
 	_, err := svc.GetPriorityContacts(ctx("alice", "site-a"))
 	require.Error(t, err)
 	var ee *errcode.Error
@@ -892,7 +905,7 @@ func TestAddPriorityContact_HappyPath_User(t *testing.T) {
 	expectPriorityContactInbox(pub, model.InboxPriorityContactAdded)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"bob"}).
 		Return(map[string]*model.User{"bob": {Account: "bob"}}, nil)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{}, nil)
 	updated := &model.UserSettings{PriorityContacts: []string{"bob"}}
 	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob").Return(&model.User{Settings: updated}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"bob"}).Return(map[string]*model.User{"bob": {Account: "bob", EngName: "Bob"}}, nil)
@@ -910,7 +923,7 @@ func TestAddPriorityContact_HappyPath_Bot(t *testing.T) {
 	expectPriorityContactInbox(pub, model.InboxPriorityContactAdded)
 	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper.bot"}).
 		Return(map[string]*model.App{"helper.bot": {Name: "Helper Bot", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}}, nil)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{}, nil)
 	updated := &model.UserSettings{PriorityContacts: []string{"helper.bot"}}
 	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "helper.bot").Return(&model.User{Settings: updated}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), nil).Return(map[string]*model.User{}, nil).AnyTimes()
@@ -974,7 +987,7 @@ func TestAddPriorityContact_At29Succeeds(t *testing.T) {
 	for i := range current {
 		current[i] = "c"
 	}
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return(current, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return(current, nil)
 	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob").Return(&model.User{Settings: &model.UserSettings{PriorityContacts: append(current, "bob")}}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), gomock.Any()).Return(map[string]*model.User{}, nil).AnyTimes()
 	apps.EXPECT().GetAppsByAssistants(gomock.Any(), nil).Return(map[string]*model.App{}, nil).AnyTimes()
@@ -988,7 +1001,7 @@ func TestAddPriorityContact_At30Rejected(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"bob"}).Return(map[string]*model.User{"bob": {Account: "bob"}}, nil)
 	current := make([]string, 30)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return(current, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return(current, nil)
 
 	_, err := svc.AddPriorityContact(ctx("alice", "site-a"), models.PriorityContactAddRequest{ContactAccount: "bob"})
 	requireCode(t, err, errcode.CodeForbidden)
@@ -1000,7 +1013,7 @@ func TestAddPriorityContact_At30Rejected(t *testing.T) {
 func TestAddPriorityContact_RepoError(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"bob"}).Return(map[string]*model.User{"bob": {Account: "bob"}}, nil)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return(nil, errors.New("db unavailable"))
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return(nil, errors.New("db unavailable"))
 	_, err := svc.AddPriorityContact(ctx("alice", "site-a"), models.PriorityContactAddRequest{ContactAccount: "bob"})
 	require.Error(t, err)
 	var ee *errcode.Error
@@ -1010,7 +1023,7 @@ func TestAddPriorityContact_RepoError(t *testing.T) {
 func TestAddPriorityContact_PublishesBothFanouts(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), []string{"bob"}).Return(map[string]*model.User{"bob": {Account: "bob"}}, nil)
-	users.EXPECT().GetPriorityContacts(gomock.Any(), "alice").Return([]string{}, nil)
+	users.EXPECT().GetPriorityContactAccounts(gomock.Any(), "alice").Return([]string{}, nil)
 	updated := &model.UserSettings{PriorityContacts: []string{"bob"}}
 	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob").Return(&model.User{Settings: updated}, nil)
 	users.EXPECT().GetDirectoryInfoByAccounts(gomock.Any(), gomock.Any()).Return(map[string]*model.User{}, nil).AnyTimes()
@@ -1150,7 +1163,7 @@ const maxPriorityContacts = 30
 func (s *UserService) GetPriorityContacts(c *natsrouter.Context) ([]models.PriorityContactItem, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
-	contacts, err := s.users.GetPriorityContacts(c, account)
+	contacts, err := s.users.GetPriorityContactAccounts(c, account)
 	if err != nil {
 		return nil, fmt.Errorf("get priority contacts: %w", err)
 	}
@@ -1175,7 +1188,7 @@ func (s *UserService) AddPriorityContact(c *natsrouter.Context, req models.Prior
 	if err := s.validatePriorityContactExists(c, contactAccount); err != nil {
 		return nil, err
 	}
-	current, err := s.users.GetPriorityContacts(c, account)
+	current, err := s.users.GetPriorityContactAccounts(c, account)
 	if err != nil {
 		return nil, fmt.Errorf("get priority contacts: %w", err)
 	}

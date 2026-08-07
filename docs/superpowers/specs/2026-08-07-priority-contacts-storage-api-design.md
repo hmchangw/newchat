@@ -92,16 +92,36 @@ One struct serves both event types; the operation is implied by which
 
 `UserRepository` gains three methods (same interface — no new one; priority
 contacts are part of the `users` document, same as the rest of
-`UserRepository`'s surface):
+`UserRepository`'s surface). Note the repo method is
+`GetPriorityContactAccounts` (raw `[]string`), deliberately named apart from
+the client-facing handler `UserService.GetPriorityContacts` (enriched
+`[]PriorityContactItem`) — see §3.1:
 
 ```go
 AddPriorityContact(ctx context.Context, account, contactAccount string) (*model.User, error)
 RemovePriorityContact(ctx context.Context, account, contactAccount string) (*model.User, error)
-GetPriorityContacts(ctx context.Context, account string) ([]string, error)
+GetPriorityContactAccounts(ctx context.Context, account string) ([]string, error)
 ```
 
 `AppRepository` (already defined for `GetAppsByAssistants`) is injected
 into `UserService` for the bot-existence check and bot enrichment.
+
+### 3.1 Client contract: one call, fully enriched
+
+**All three RPCs reply with the caller's complete, enriched
+`[]PriorityContactItem`.** The frontend makes exactly ONE call to render the
+priority-contacts list — it never follows up with a user-lookup or app-lookup
+RPC to resolve a contact's name, employee ID, org, or app name. Every
+cross-collection enrichment happens server-side inside the handler.
+
+| Layer | Name | Returns |
+|---|---|---|
+| Client-facing handler | `UserService.GetPriorityContacts` | `[]PriorityContactItem` — enriched; what the FE receives |
+| Repo | `UserRepo.GetPriorityContactAccounts` | `[]string` — raw stored accounts, internal only |
+
+The repo method cannot return `PriorityContactItem`: enrichment requires
+reading a second collection (`apps`), and CLAUDE.md forbids `$lookup`, so the
+join belongs in the service layer, not the repo.
 
 ### `user-service/mongorepo/users.go`
 
@@ -112,7 +132,7 @@ Three new `UserRepo` methods:
   `{_id: 0, settings: 1}`. `(nil, nil)` on `ErrNoDocuments`.
 - **`RemovePriorityContact`** — same shape with
   `$pull: {"settings.priorityContacts": contactAccount}`.
-- **`GetPriorityContacts`** — `FindOne` projecting only
+- **`GetPriorityContactAccounts`** — `FindOne` projecting only
   `settings.priorityContacts`; returns `[]string{}` (never nil) when the
   field is absent. **Always returns the full stored array, untruncated** —
   see §5 "Uncapped reads."
@@ -192,7 +212,7 @@ evt, op)`, which unmarshals `PriorityContactChanged` and calls new
    `apps.GetAppsByAssistants` and require an enabled assistant; otherwise
    look it up via the `users` collection and require an active user.
    Not found → `errcode.NotFound(..., WithReason(UserPriorityContactNotFound))`.
-3. Read the current list via `GetPriorityContacts`; if `len(current) >= 30`
+3. Read the current list via `GetPriorityContactAccounts`; if `len(current) >= 30`
    → `errcode.Forbidden(..., WithReason(UserPriorityContactLimitReached))`.
 4. `users.AddPriorityContact(account, contactAccount)` — atomic
    `$addToSet`; a re-add of an existing contact is a no-op, returns 200
@@ -231,7 +251,7 @@ harmless.
 
 ## 5. Design Rules Worth Calling Out
 
-- **Uncapped reads.** `GetPriorityContacts` always returns the full stored
+- **Uncapped reads.** `GetPriorityContactAccounts` always returns the full stored
   array — it never truncates to 30. The cap is enforced *only* on the
   `AddPriorityContact` write path. This matters for the rare race where two
   concurrent adds both pass the `len < 30` pre-check before either write
@@ -285,7 +305,7 @@ min / 90% target on handlers & store):
   `testutil.MongoDB`): add/idempotent-re-add/missing-user for
   `AddPriorityContact`; remove/no-op-on-missing/missing-user for
   `RemovePriorityContact`; empty-vs-absent and an untruncated >30-entry case
-  for `GetPriorityContacts`.
+  for `GetPriorityContactAccounts`.
 - **`user-service/service/prioritycontacts_test.go`** (new, unit, mocked
   `UserRepository` + `AppRepository`, table-driven): happy path (user +
   bot contact), empty/self/nonexistent contactAccount, at-cap (30)
@@ -334,4 +354,4 @@ Since this adds client-facing handlers under
 | Scope | One combined plan across user-service + notification-worker | Split into two specs/PRs; this one covers user-service storage/API only. |
 | `MuteAllMobileNotifications` | Add now as a placeholder | Dropped — YAGNI, deferred to the Mobile Phase 1 project. |
 | `contactAccount` existence | Not addressed | Validated on Add — reject accounts that don't resolve to an active user or enabled bot. |
-| Uncapped reads | Not addressed | `GetPriorityContacts` never truncates; the 30 cap applies only to Add. |
+| Uncapped reads | Not addressed | `GetPriorityContactAccounts` never truncates; the 30 cap applies only to Add. |
