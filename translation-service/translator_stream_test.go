@@ -255,3 +255,52 @@ func TestStreamTranslator_TransportErrorUnavailable(t *testing.T) {
 	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
 	assert.Equal(t, errcode.TranslateUpstreamUnavailable, ec.Reason)
 }
+
+// A 5XX carrying valid-looking SSE data must still classify as Unavailable — the
+// status is checked before the body is parsed, so no translation leaks out.
+func TestStreamTranslator_Upstream5xxWithDataUnavailable(t *testing.T) {
+	tSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "data: {\"returnCode\":0,\"returnData\":{\"translation\":\"leak\"}}\ndata: [DONE]\n")
+	}))
+	defer tSrv.Close()
+
+	tr := streamTranslatorTo(t, tSrv.URL)
+	out, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	assert.Empty(t, out) // the 5XX must not surface the "translation"
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
+	assert.Equal(t, errcode.TranslateUpstreamUnavailable, ec.Reason)
+}
+
+// A connection drop mid-stream (a non-EOF read error after headers arrive)
+// classifies as Unavailable, same as an up-front transport failure.
+func TestStreamTranslator_MidStreamDropUnavailable(t *testing.T) {
+	tSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		// 200 promising more body than we send, then abrupt close → the client's
+		// stream read fails with io.ErrUnexpectedEOF mid-stream.
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\n\r\n")
+		_, _ = io.WriteString(conn, ": keep-alive partial line without a newline")
+		_ = conn.Close()
+	}))
+	defer tSrv.Close()
+
+	tr := streamTranslatorTo(t, tSrv.URL)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
+	assert.Equal(t, errcode.TranslateUpstreamUnavailable, ec.Reason)
+}

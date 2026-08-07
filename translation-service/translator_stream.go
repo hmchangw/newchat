@@ -99,6 +99,13 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 	body := resp.RawBody()
 	defer body.Close()
 
+	// A 5XX is an outage regardless of body — classify before parsing, so a 5XX
+	// carrying data/JWT-shaped content can't read as success or trigger a refresh.
+	if s := resp.StatusCode(); s >= 500 && s < 600 {
+		return "", false, errcode.Unavailable("translation upstream unavailable",
+			errcode.WithReason(errcode.TranslateUpstreamUnavailable))
+	}
+
 	reader := bufio.NewReader(body)
 	var merged strings.Builder
 	var nonSSE strings.Builder // accumulates a non-SSE body (potential error JSON)
@@ -135,7 +142,10 @@ readLoop:
 			if readErr == io.EOF {
 				break readLoop
 			}
-			return "", false, fmt.Errorf("read stream: %w", readErr)
+			// Transport drop mid-stream (reset/timeout after headers) — same
+			// upstream-unavailable class as a failed request.
+			return "", false, errcode.Unavailable("translation upstream unavailable",
+				errcode.WithReason(errcode.TranslateUpstreamUnavailable), errcode.WithCause(readErr))
 		}
 	}
 
@@ -143,12 +153,6 @@ readLoop:
 		// No SSE payload — the response is an error body, possibly a JWT rejection.
 		if isJWTFailure(nonSSE.String()) {
 			return "", true, nil
-		}
-		if resp.StatusCode() >= 500 {
-			// Upstream 5XX — third-party backend is down, not our bug. Only the
-			// numeric status is safe to surface; never the (untrusted) body.
-			return "", false, errcode.Unavailable("translation upstream unavailable",
-				errcode.WithReason(errcode.TranslateUpstreamUnavailable))
 		}
 		return "", false, fmt.Errorf("translate backend error (status %d)", resp.StatusCode())
 	}
