@@ -121,8 +121,19 @@ freshness check in §3.
 ### 5. Read path
 
 `resolvePreview` consults the room doc before walking. The preview fields join the
-projection of the `GetRoomTimesByIDs` batch read that `resolveRoomMetaHints` already
-performs, so the doc read costs no extra round-trip.
+projection of the `GetRoomTimesByIDs` batch read, so the doc read costs no extra
+round-trip beyond the room-times read `rooms.get` already needs.
+
+**Correction to the original design:** that batch read used to cover only the rooms
+whose `RoomTimeHint` was missing or unusable. It now covers **every** requested room.
+user-service hints every room that has a `lastMsgAt` — that is, every room a preview
+matters for — so the old scoping would have skipped the doc read exactly where it pays
+off. `RoomTimeHint` also carries no `lastMsgId`, so a hinted room has nothing to run the
+§3 identity check against. Hints still win for the walk bounds, so no room pays a
+per-room `GetRoomTimes` it did not pay before; the change is one batch read per
+`rooms.get` instead of one covering a subset. Extending the hint to carry `lastMsgId`
+was rejected: it would put this feature back into user-service, which the design keeps
+untouched.
 
 ```
 fresh (previewForMsgId == lastMsgId AND previewKeyEpoch == configured) → Open, return
@@ -246,21 +257,33 @@ was never considered: O(members) writes per message. Everything here is per-room
 
 ## Implementation status
 
-**Not implemented.** The branch still carries the superseded shape: broadcast-worker
-writes previews, user-service reads them, and nothing is encrypted. A green CI run
-does not mean the code matches this document.
+**Implemented.** Steps 1–6 are done and the code now matches this document.
 
-Remaining work, in order:
-
-1. Revert `broadcast-worker/` and `user-service/` to the **merge-base** (not
-   `origin/main`, which has moved — reverting to it shows main's own changes as ours).
-2. Reshape `pkg/model`: the §1 room fields, add `PreviewMeta`, drop
-   `MessageEvent.PreviewGone`.
-3. Rebuild `pkg/preview` guards around `Sealed`; add `Seal`/`Open` **with tests** —
-   round-trip, wrong-key failure, attachment-marshal error.
-4. Wire the preview DEK in history-service: `PREVIEW_KEY_EPOCH`, the `preview_deks`
+1. ✅ `broadcast-worker/` and `user-service/` reverted to the merge-base (`9953d63`),
+   so neither carries any part of this feature.
+2. ✅ `pkg/model` reshaped: the §1 room fields, `PreviewMeta` added,
+   `MessageEvent.PreviewGone` dropped, `PreviewMessage` back to a pure wire type.
+3. ✅ `pkg/preview` rebuilt around `Sealed`, with `Key`, `Seal`/`Open`, and guards that
+   iterate one `previewDocFields` list. Tests were written first.
+4. ✅ Preview DEK wired: `PREVIEW_KEY_EPOCH` (validated `>= 1`), the `preview_deks`
    collection off the existing Vault wrapper, cipher threaded into `NewRoomRepo`.
-5. Make history-service the sole writer (§4).
-6. Add the doc read to `resolvePreview` (§5).
-7. Verify: `make generate`, `lint`, `test`, `sast`, integration for history-service and
-   `pkg/model`; confirm the 80% coverage floor.
+   `NewRoomRepo(db, nil, key)` disables preview storage rather than falling back to
+   plaintext.
+5. ✅ history-service is the sole writer: warm-back on the read path, direct
+   store/clear in the edit/delete handlers.
+6. ✅ `resolvePreview` serves a current stored preview and skips the walk. See the
+   correction in §5 about which rooms the batch read covers.
+
+Verification status: `make lint` clean, `make test` green repo-wide, `make sast-gosec`
+clean, `make generate` re-run. `pkg/preview` is at 98% statement coverage. Not yet run
+in this environment: `make test-integration` (needs Docker), `govulncheck` (its
+vulnerability database is blocked by the sandbox's egress policy), and `semgrep` (the
+container's Python `cryptography` bindings are broken). All three run in CI.
+
+### Still open
+
+`visibleTo` (see Known hazards) is unresolved and this work does not resolve it. The
+sealed preview stores the single `visibleTo` the walk found, exactly as the read path
+already returned it, so the behaviour is unchanged from `main` — but the field is now
+memoized, which means a partially-visible last message would be served to every member
+until `lastMsgId` moves. **Decide before the `visibleTo` write path ships.**
