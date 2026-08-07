@@ -255,8 +255,21 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 	if err != nil {
 		return fmt.Errorf("marshal membership event: %w", err)
 	}
+	// The internal lane carries the InboxEvent envelope like every other
+	// InboxInternal publisher — search-sync-worker decodes evt.Payload. The
+	// federated branch below stays unwrapped: outbox.Publish builds its own.
+	internalData, err := json.Marshal(model.InboxEvent{
+		Type:       eventType,
+		SiteID:     h.siteID,
+		DestSiteID: h.siteID,
+		Payload:    payload,
+		Timestamp:  acceptedAt.UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal internal inbox envelope: %w", err)
+	}
 	seed := fmt.Sprintf("%s:%s:%d", room.ID, eventType, acceptedAt.UnixMilli())
-	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), payload, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
 		return fmt.Errorf("local inbox publish: %w", err)
 	}
 

@@ -241,19 +241,25 @@ the next producer that gets this wrong fail legibly.
 
 ### F3 — fix the test that allowed it (`room-worker/teamsroomcreate_test.go:40-59`)
 
-Decode the internal-lane message through the envelope, same as the outbox branch. Then add
-a **round-trip contract test** — producer and consumer live in the same Go module, so the
-bytes one emits can be fed directly to the other:
+Decode the internal-lane message through the envelope, same as the outbox branch.
 
-```go
-// The internal-lane bytes room-worker publishes must decode through the exact
-// helper search-sync-worker uses. Guards the envelope contract end to end.
-func TestFederateTeamsMembership_InternalLaneDecodesAsInboxEvent(t *testing.T) { … }
-```
+A literal round-trip test is **not** possible: `room-worker` and `search-sync-worker` are
+both `package main` in separate directories, so a room-worker test cannot import
+search-sync-worker's unexported `parseMemberEvent`. Closing the contract without a shared
+package therefore takes a **mirrored pair**, one assertion on each side:
 
-A shape assertion in one service cannot catch a cross-service contract break; only the
-round trip can. This is the change that actually prevents recurrence — F2 makes the failure
-loud, F3 makes it impossible to merge.
+| Side | Test | Guarantees |
+|---|---|---|
+| Producer | `TestFederateTeamsMembership_InternalLaneCarriesInboxEventEnvelope` | the internal lane emits an `InboxEvent` with non-empty `Type` and `Payload` |
+| Producer | `TestFederateTeamsMembership_FederatedLaneStaysSingleWrapped` | the cross-site lane keeps passing the *inner* event — catches a double-wrap regression |
+| Consumer | `TestParseMemberEvent` (table) | anything without an envelope is rejected by name |
+
+Together these pin both ends of the contract. F2 makes the failure loud at runtime; the
+mirrored tests make it un-mergeable.
+
+The alternative — hoisting the envelope encode/decode into a shared `pkg/` so one function
+serves both sides and a true round-trip test becomes possible — is the more durable fix, but
+it touches every INBOX publisher and belongs in its own PR.
 
 ---
 
@@ -262,34 +268,51 @@ loud, F3 makes it impossible to merge.
 Per `CLAUDE.md` §4 (Red-Green-Refactor, mandatory). Verify Red before writing any
 implementation.
 
-| Step | Action | Expected |
+Per `CLAUDE.md` §4 (Red-Green-Refactor, mandatory). **Status: executed** — observed results
+recorded below.
+
+| Step | Action | Observed |
 |---|---|---|
-| 1 | Write the F3 round-trip test against current `main` | **RED** — `unexpected end of JSON input` |
-| 2 | Write `parseMemberEvent` table tests: bare inner event, missing `type`, empty `payload`, valid envelope | **RED** for the first three (they currently fail with the wrong error, or pass the guard) |
-| 3 | Apply F2 | Step-2 cases GREEN; step-1 still RED |
-| 4 | Apply F1 | Step-1 GREEN |
-| 5 | Update the existing `membershipEvents` helper | `TestProcessTeamsRoomCreate_*` GREEN |
-| 6 | `make lint && make test && make sast` | clean |
+| 1 | `parseMemberEvent` table tests against current `main` | **RED** — `missing event type` returned **nil error**: a typeless envelope decoded as valid. `unwrapped inner event` failed with the opaque `unexpected end of JSON input`. |
+| 2 | Producer envelope tests against current `main` | **RED** — `evt.Payload` empty on the internal lane. `FederatedLaneStaysSingleWrapped` **passed**, confirming the cross-site path was already correct. |
+| 3 | Apply F2 | Consumer cases GREEN |
+| 4 | Apply F1 | Producer cases GREEN |
+| 5 | Update `membershipEvents` helper | `TestProcessTeamsRoomCreate_*` GREEN |
+| 6 | `make test` (race), `make lint` | full suite PASS; lint **0 issues** |
 
-Coverage: both touched files must stay ≥80% (`CLAUDE.md` §4); `room-worker` and
-`search-sync-worker` are core business logic and should target 90%+.
+**Guard order changed during step 3.** Checking `Type` before `Payload` made an unwrapped
+publish report `missing event type`, which names a symptom rather than the fault. Payload is
+the structural break, so it is checked first and carries the `(unwrapped publish?)` hint.
 
-**Do not skip step 1's Red.** If the round-trip test passes before F1, it is not exercising
-the internal lane and needs rewriting.
+### Coverage
+
+| Unit | Before | After |
+|---|---|---|
+| `parseMemberEvent` | — | **100%** |
+| `federateTeamsMembership` | — | **80.8%** |
+| `search-sync-worker` (pkg) | 55.1% | 55.5% |
+| `room-worker` (pkg) | 63.3% | 63.3% |
+
+Both touched functions clear the 80% floor. **Both packages sit below it and did so before
+this change** — pre-existing debt, not introduced here, and out of scope for this PR.
 
 ---
 
 ## 5. Compliance checklist
 
-- [ ] No store interfaces changed → `make generate` not required
-- [ ] No client-facing handler changed (`chat.user.…` subjects untouched) → **no
+- [x] No store interfaces changed → `make generate` not required
+- [x] No client-facing handler changed (`chat.user.…` subjects untouched) → **no
       `docs/client-api.md` update required** for this PR. Note this does *not* hold for the
       §6 item on DM names, which changes a `pkg/model` event struct and therefore requires
       `docs/client-api.md` **and** both derived views in the same PR.
-- [ ] No new dependencies
-- [ ] Errors wrapped with context, no bare `err` (`CLAUDE.md` §3)
+- [x] No new dependencies
+- [x] Errors wrapped with context, no bare `err` (`CLAUDE.md` §3)
+- [x] `make test` (race detector) — full suite passes
+- [x] `make lint` — 0 issues
 - [ ] Branch → PR; never merge to `master` directly
-- [ ] `make sast` clean (blocking CI gate)
+- [~] `make sast` — **gosec PASS**; `govulncheck` and `semgrep` could **not run** in this
+      environment (`vuln.go.dev` blocked by the egress proxy; semgrep not installed). Both
+      are blocking CI gates and must pass there — this PR has not cleared them locally.
 
 ---
 
