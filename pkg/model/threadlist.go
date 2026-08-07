@@ -19,8 +19,14 @@ type ThreadListItem struct {
 	Unread     bool   `json:"unread"               bson:"unread"` // lastMsgAt > lastSeenAt
 
 	// LastMsgAt is the thread's last-activity time (UTC ms) and the global sort
-	// key for the inbox. Reply count rides on ParentMessage.TCount.
+	// key for the inbox. Reply count is surfaced as TCount below.
 	LastMsgAt int64 `json:"lastMsgAt" bson:"lastMsgAt"`
+
+	// TCount is the thread's non-deleted reply count, capped at
+	// pkg/threadcount.Cap — 99 means "99 or more". Lifted from the hydrated
+	// parent's tcount; 0 when that column was never written (migrated threads).
+	// Always present on the wire so clients never branch on undefined.
+	TCount int `json:"tcount" bson:"tcount"`
 
 	// Hydrated message bodies, subject to the thread access window. Carried opaque:
 	// history-service emits them pre-marshaled from *cassandra.Message and user-service

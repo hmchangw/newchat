@@ -26,8 +26,22 @@ func TestThreadListItemJSON(t *testing.T) {
 		HasMention:      true,
 		Unread:          true,
 		LastMsgAt:       1746518400000,
+		TCount:          7,
 	}
 	roundTrip(t, &src, &model.ThreadListItem{})
+}
+
+// tcount is always on the wire, so a reply-less thread reports 0 rather than
+// leaving the client to branch on an absent key.
+func TestThreadListItemJSON_ZeroTCountSerialized(t *testing.T) {
+	src := model.ThreadListItem{SiteID: "site-a", RoomID: "room-1", ThreadRoomID: "thr-1", TCount: 0}
+	data, err := json.Marshal(&src)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	tcount, hasTCount := raw["tcount"]
+	require.True(t, hasTCount, "zero tcount must still be serialized")
+	assert.Equal(t, float64(0), tcount)
 }
 
 // A DM thread row carries the counterpart's HR record, which survives a round trip.
