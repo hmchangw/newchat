@@ -260,6 +260,7 @@ func TestUserService_ListUserThreads_BotDM_AppLookupDegrades(t *testing.T) {
 func TestUserService_ListUserThreads_TCountSurvivesAggregation(t *testing.T) {
 	svc, history, users, apps := newThreadSvc(t)
 	rowA := item("site-a", "ta1", 50)
+	rowA.RoomType = model.RoomTypeChannel
 	rowA.TCount = 4
 	rowB := dmItem("site-b", "tb1", 40, "bob")
 	rowB.TCount = 99

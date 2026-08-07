@@ -135,7 +135,9 @@ func TestHistoryService_ListThreadSubscriptions_TCountFromParent(t *testing.T) {
 			require.NoError(t, json.Unmarshal(resp.Items[0].ParentMessage, &parent))
 			if tt.wantParentKey {
 				require.Contains(t, parent, "tcount", "parent body must keep its own tcount key")
-				assert.Equal(t, float64(tt.want), parent["tcount"])
+				// Asserted against the source column, not tt.want, so the two stay
+				// independent if the lift ever stops being an identity.
+				assert.Equal(t, float64(*tt.parentTCount), parent["tcount"])
 			} else {
 				assert.NotContains(t, parent, "tcount", "a nil column must be omitted from the parent body")
 			}

@@ -123,8 +123,8 @@ Files: `pkg/model/threadlist.go` (+field, comment updates), `history-service/int
 
 1. **`0` is overloaded**: all-replies-deleted, migrated-thread (never written), transient just-created-thread mid-write, and old-leaf-during-rollout all read `0`. Chosen over `*int` to keep the field unconditional. A backfill job (recompute per `thread_rooms` row via `pkg/threadcount`) would fix the migrated case — follow-up ticket material.
 2. **Old aggregator + new leaf** drops the key (unknown field) — self-heals when the aggregator upgrades; documented.
-3. Unpinned by tests: decoding leaf JSON that *lacks* the `tcount` key (Go zero-value makes the documented old-leaf behavior trivially true; a one-line unmarshal pin would guard it).
-4. Nitpick-level polish left as-is: `TCount` godoc lines run ~113/127 chars (file norm ~85; no lll linter); the aggregation test's "channel" row is untyped (`RoomType: ""` — provably same enrichment path; typed-channel arm covered by a neighbouring test); `search-service/integration_index_test.go` has pre-existing gofmt drift unrelated to this branch.
+3. Nitpick-level polish left as-is: `99` is spelled out in the `TCount` godoc beside the `pkg/threadcount.Cap` reference (deliberate — a reader needs the number, and the client docs must name it anyway); the combined degraded-enrichment test overlaps two existing single-degrade tests (kept — it is the only pin of `tcount` under *combined* degrade); `search-service/integration_index_test.go` has pre-existing gofmt drift unrelated to this branch.
+4. Closed by the post-review polish pass (commit after `59be77d`): the old-leaf decode is now pinned (`TestThreadListItemJSON_AbsentTCountDecodesZero`), the docs name the transient just-created-thread cause of `0` alongside migration, the `TCount` godoc wraps at the file's width, the aggregation test's channel row is explicitly typed, and the leaf table test asserts the parent body against the source column rather than the item's expectation.
 
 ## 10. Comparison checklist vs the legacy implementation
 

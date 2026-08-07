@@ -44,6 +44,15 @@ func TestThreadListItemJSON_ZeroTCountSerialized(t *testing.T) {
 	assert.Equal(t, float64(0), tcount)
 }
 
+// A leaf response predating the field decodes to 0 rather than failing — the
+// documented mixed-version rollout behavior (an old site's leaf omits tcount).
+func TestThreadListItemJSON_AbsentTCountDecodesZero(t *testing.T) {
+	var item model.ThreadListItem
+	raw := []byte(`{"siteId":"site-a","roomId":"room-1","threadRoomId":"thr-1","lastMsgAt":1746518400000}`)
+	require.NoError(t, json.Unmarshal(raw, &item))
+	assert.Equal(t, 0, item.TCount)
+}
+
 // A DM thread row carries the counterpart's HR record, which survives a round trip.
 func TestThreadListItemJSON_WithHRInfo(t *testing.T) {
 	src := model.ThreadListItem{

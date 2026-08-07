@@ -5315,7 +5315,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `hasMention` | boolean | The user was @-mentioned in the thread. |
 | `unread` | boolean | `true` when `lastMsgAt` is newer than `lastSeenAt` (or the thread was never opened). |
 | `lastMsgAt` | number | UTC ms of the thread's last activity — the global sort key. |
-| `tcount` | number | Non-deleted reply count, capped at 99 — `99` means "99 or more". Always present; `0` also covers threads whose count was never written (e.g. migrated threads). During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
+| `tcount` | number | Non-deleted reply count, capped at 99 — `99` means "99 or more". Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
 | `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message. |
 | `lastMessage` | [Message](#message-schema) | Optional. The hydrated last reply. |
 | `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | Optional. Present **only on `dm` rows** — the counterpart's HR record, resolved from `roomName`. Omitted when the directory lookup degrades. |
