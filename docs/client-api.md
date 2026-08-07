@@ -5355,6 +5355,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
       "roomType": "dm",
       "threadRoomId": "01970a4f8c2d7c9aTHR2",
       "parentMessageId": "01970a4f8c2d7c9aPQRS",
+      "lastSeenAt": 1746518200000,
       "hasMention": false,
       "unread": false,
       "lastMsgAt": 1746518100000,
