@@ -4,6 +4,7 @@ package mongorepo
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -225,6 +226,13 @@ func TestAggregateSubscriptions_NonNormalizedPageValues_Integration(t *testing.T
 	require.NoError(t, err)
 	assert.Empty(t, page.Data)
 	assert.True(t, page.HasMore)
+
+	// A pathological MaxInt64 limit must not overflow the over-read arithmetic:
+	// everything is returned, nothing remains.
+	page, err = r.AggregateSubscriptions(ctx, "clamp", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: math.MaxInt64})
+	require.NoError(t, err)
+	assert.Len(t, page.Data, 2)
+	assert.False(t, page.HasMore)
 }
 
 // Ordering contract pinned before the sort moves out of Mongo: rows with no

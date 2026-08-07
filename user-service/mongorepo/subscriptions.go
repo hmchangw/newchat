@@ -406,7 +406,10 @@ func (r *SubscriptionRepo) fillListPage(ctx context.Context, rows []listRow, pag
 	// minFillBatch keeps a degenerate limit (0 after clamping) from turning a
 	// long freshly-dead candidate prefix into one enrich round trip per row.
 	const minFillBatch = 32
-	need := limit + 1
+	// Cap the over-read at the candidate count: collected can never exceed it,
+	// and the cap keeps limit+1 from overflowing (and the slice capacity sane)
+	// for a pathological MaxInt64 limit.
+	need := min(limit, int64(len(candidates))) + 1
 	collected := make([]model.EnrichedSubscription, 0, need)
 	for len(candidates) > 0 && int64(len(collected)) < need {
 		take := min(max(need, minFillBatch), int64(len(candidates)))
