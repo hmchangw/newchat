@@ -203,11 +203,7 @@ func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs [
 		roomIDsBySite[site] = append(roomIDsBySite[site], subs[i].RoomID)
 	}
 
-	// Only copy the baseline preview onto Room when the caller actually asked for
-	// last messages — withLastMsg=false (includeLastMessage:false, GetDM,
-	// GetByRoomID) must never surface a previewMessage, matching the RPC path's
-	// contract (docs/client-api.md: "Omitted when ... includeLastMessage: false").
-	s.enrichLocal(subs, idxBySite[s.siteID], s.previewFromDoc && withLastMsg)
+	s.enrichLocal(subs, idxBySite[s.siteID])
 	dropped := s.enrichCrossSite(c, subs, idxBySite, roomIDsBySite)
 	if withLastMsg {
 		s.enrichLastMessage(c, subs, idxBySite, roomIDsBySite)
@@ -241,13 +237,10 @@ func removeIndices(subs []model.EnrichedSubscription, drop []int) []model.Enrich
 
 // enrichLocal builds sub.Room for LOCAL subs entirely from the $lookup baseline —
 // room metadata plus the E2E key projected from the room's encKey sub-document —
-// so it needs no separate key store read. includePreview gates copying the
-// baseline PreviewMessage onto Room (the caller decides based on the flag AND
-// whether last-message enrichment was requested at all); Room/HasUnread/
-// HasGroupMention are always built regardless.
-func (s *UserService) enrichLocal(subs []model.EnrichedSubscription, localIdx []int, includePreview bool) {
+// so it needs no separate key store read.
+func (s *UserService) enrichLocal(subs []model.EnrichedSubscription, localIdx []int) {
 	for _, j := range localIdx {
-		subs[j].Room = buildLocalRoom(&subs[j], includePreview)
+		subs[j].Room = buildLocalRoom(&subs[j])
 		// hasUnread / hasGroupMention are computed at read time: room activity (resp.
 		// an @all mention) newer than lastSeenAt. No room object (deleted/absent) ⇒
 		// nothing to be unread/mentioned about.
@@ -325,17 +318,12 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 	return dropped
 }
 
-// enrichLastMessage populates sub.Room.PreviewMessage via one rooms.get RPC per
-// site — for the LOCAL site with the preview-from-doc flag on, ONLY the residual
-// rooms (no baseline preview already served by enrichLocal from the denormalized
-// room doc) are requested; the local RPC is skipped entirely when nothing is
-// residual. Flag off, or any CROSS-SITE site, requests the full per-site roomID
-// list as before (cross-site room docs live remotely and carry no local baseline).
-// One call per site: a subscription page is bounded well under history-service's
-// 100-roomId batch cap, so no chunk-split is needed. Reuses the caller's per-site
-// grouping. A degraded/absent site, or a room the RPC omits, just leaves
-// PreviewMessage nil (or the baseline already applied, for a served room); it
-// never fails the list.
+// enrichLastMessage populates sub.Room.PreviewMessage (read-time resolve, no denormalized
+// write path) via one rooms.get RPC per site — LOCAL subs need it too (last-message
+// isn't part of the $lookup baseline). One call per site: a subscription page is
+// bounded well under history-service's 100-roomId batch cap, so no chunk-split is
+// needed. Reuses the caller's per-site grouping. A degraded/absent site, or a room the
+// RPC omits, just leaves PreviewMessage nil; it never fails the list.
 // Each room already carrying a resolved sub.Room.LastMsgAt (set by enrichLocal/
 // enrichCrossSite, which both run before this) is passed as a hint so
 // history-service can skip its own room-times read for that room; rooms with no
@@ -352,15 +340,6 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 		if c.Err() != nil {
 			break
 		}
-		reqIdx, reqIDs := idxBySite[site], roomIDsBySite[site]
-		if site == s.siteID && s.previewFromDoc {
-			// Rooms already carrying a baseline preview are served from the doc;
-			// only the residual (unwarmed/dormant/soft-deleted-nil) goes to the RPC.
-			reqIdx, reqIDs = residualLastMsgRooms(subs, idxBySite[site])
-			if len(reqIDs) == 0 {
-				continue
-			}
-		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -370,13 +349,13 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 				return
 			}
 			hints := map[string]model.RoomTimeHint{}
-			for _, j := range reqIdx {
+			for _, j := range idxBySite[site] {
 				if subs[j].Room == nil || subs[j].Room.LastMsgAt == nil {
 					continue
 				}
 				hints[subs[j].RoomID] = model.RoomTimeHint{LastMsgAt: timeutil.TimeToMillis(subs[j].Room.LastMsgAt)}
 			}
-			m, err := s.history.RoomsGet(c, site, reqIDs, hints)
+			m, err := s.history.RoomsGet(c, site, roomIDsBySite[site], hints)
 			if err != nil {
 				slog.WarnContext(c, "last-message enrichment degraded", "account", c.Param("account"), "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
 				return
@@ -404,24 +383,6 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 	}
 }
 
-// residualLastMsgRooms returns the local subs (and their roomIDs), among localIdx,
-// that still need a rooms.get resolve: a sub with no Room yet, or whose Room
-// carries no baseline preview, is residual; a Room whose baseline preview is
-// already set (by enrichLocal, from the denormalized room doc) is excluded — it's
-// already served from the doc.
-func residualLastMsgRooms(subs []model.EnrichedSubscription, localIdx []int) ([]int, []string) {
-	var idx []int
-	var ids []string
-	for _, j := range localIdx {
-		if subs[j].Room != nil && subs[j].Room.PreviewMessage != nil {
-			continue
-		}
-		idx = append(idx, j)
-		ids = append(ids, subs[j].RoomID)
-	}
-	return idx, ids
-}
-
 // roomKeySecretLen is the AES-256-GCM key length. A baseline encKeyPriv of any
 // other length is treated as absent (mirrors roomkeystore's secret validation).
 const roomKeySecretLen = 32
@@ -430,10 +391,8 @@ const roomKeySecretLen = 32
 // $lookup baseline — room metadata plus the E2E key projected from the room's
 // encKey sub-document — so no separate key store read is needed. The baseline and
 // the wire room object both carry *time.Time, so LastMsgAt/LastMentionAllAt pass
-// through unconverted. includePreview gates copying the baseline PreviewMessage
-// (from the room doc's denormalized previewMessage) onto the wire room; when false
-// the room ships with no preview, leaving it for enrichLastMessage's RPC to fill.
-func buildLocalRoom(sub *model.EnrichedSubscription, includePreview bool) *model.SubscriptionRoom {
+// through unconverted.
+func buildLocalRoom(sub *model.EnrichedSubscription) *model.SubscriptionRoom {
 	// A soft-deleted room (name "Del-...") is surfaced with no room object.
 	if strings.HasPrefix(sub.RoomName, deletedRoomNamePrefix) {
 		return nil
@@ -454,9 +413,6 @@ func buildLocalRoom(sub *model.EnrichedSubscription, includePreview bool) *model
 		ver := sub.RoomKeyVer
 		room.PrivateKey = &enc
 		room.KeyVersion = &ver
-	}
-	if includePreview {
-		room.PreviewMessage = sub.PreviewMessage
 	}
 	return room
 }

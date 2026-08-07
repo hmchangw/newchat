@@ -119,9 +119,6 @@ type UserService struct {
 	maxApps          int
 	defaultApps      int
 	maxAccountNames  int
-	// previewFromDoc gates serving LOCAL subscription-list previews from the
-	// denormalized room doc (rooms.get requested only for the residual).
-	previewFromDoc bool
 }
 
 // New constructs a UserService with the given dependencies and configuration.
@@ -147,7 +144,6 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		maxApps:          cfg.MaxAppsLimit,
 		defaultApps:      cfg.DefaultAppsLimit,
 		maxAccountNames:  cfg.MaxAccountNames,
-		previewFromDoc:   cfg.SubscriptionPreviewFromDoc,
 	}
 }
 

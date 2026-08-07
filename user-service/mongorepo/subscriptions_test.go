@@ -708,45 +708,6 @@ func TestCountUnread_ZeroActive_Integration(t *testing.T) {
 	assert.Empty(t, subs)
 }
 
-// TestAggregateSubscriptions_PreviewMessage_Integration exercises roomsEnrichStages'
-// previewMessage projection/addFields: a room doc carrying a previewMessage sub-doc
-// must decode onto EnrichedSubscription.PreviewMessage; a room without the field
-// must decode nil (never a zero-value struct).
-func TestAggregateSubscriptions_PreviewMessage_Integration(t *testing.T) {
-	r, db := newTestSubscriptionRepo(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	seed(t, db, "rooms",
-		bson.M{"_id": "r-preview", "name": "Preview", "siteId": "site-a", "userCount": 2, "lastMsgAt": now,
-			"previewMessage": bson.M{"messageId": "m1", "content": "hi", "createdAt": now,
-				"sender": bson.M{"account": "alice"}}},
-		bson.M{"_id": "r-noPreview", "name": "NoPreview", "siteId": "site-a", "userCount": 2, "lastMsgAt": now},
-	)
-	seed(t, db, "subscriptions",
-		bson.M{"_id": "sub-preview", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-preview",
-			"name": "Preview", "roomType": "channel", "siteId": "site-a", "_updatedAt": now, "createdAt": now},
-		bson.M{"_id": "sub-noPreview", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-noPreview",
-			"name": "NoPreview", "roomType": "channel", "siteId": "site-a", "_updatedAt": now, "createdAt": now},
-	)
-
-	page, err := r.AggregateSubscriptions(ctx, "alice", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
-	require.NoError(t, err)
-	byID := map[string]int{}
-	for i, sub := range page.Data {
-		byID[sub.ID] = i
-	}
-	require.Contains(t, byID, "sub-preview")
-	require.Contains(t, byID, "sub-noPreview")
-
-	withPreview := page.Data[byID["sub-preview"]]
-	require.NotNil(t, withPreview.PreviewMessage, "room's previewMessage sub-doc must decode onto EnrichedSubscription.PreviewMessage")
-	assert.Equal(t, "m1", withPreview.PreviewMessage.MessageID)
-
-	withoutPreview := page.Data[byID["sub-noPreview"]]
-	assert.Nil(t, withoutPreview.PreviewMessage, "room with no previewMessage field must decode nil, not a zero-value struct")
-}
-
 func TestAppSubscriptionRoundTrip_Integration(t *testing.T) {
 	r, db := newTestSubscriptionRepo(t)
 	ctx := context.Background()

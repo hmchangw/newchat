@@ -4,8 +4,8 @@ import "encoding/json"
 
 // ImageDimensions is the pixel size of an uploaded image attachment.
 type ImageDimensions struct {
-	Width  int `json:"width"  bson:"width"`
-	Height int `json:"height" bson:"height"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
 }
 
 // Attachment is the render-ready descriptor for an uploaded file. upload-service
@@ -13,31 +13,31 @@ type ImageDimensions struct {
 // Message.Attachments blob; history-service decodes those blobs back into this
 // type. ID is the Drive file id; Title is the file name (no separate name).
 type Attachment struct {
-	ID                string `json:"id"                bson:"id"`
-	Title             string `json:"title"             bson:"title"`
-	Type              string `json:"type"              bson:"type"`
-	Description       string `json:"description,omitempty" bson:"description,omitempty"`
-	TitleLink         string `json:"titleLink"         bson:"titleLink"`
-	TitleLinkDownload bool   `json:"titleLinkDownload" bson:"titleLinkDownload"`
+	ID                string `json:"id"`
+	Title             string `json:"title"`
+	Type              string `json:"type"`
+	Description       string `json:"description,omitempty"`
+	TitleLink         string `json:"titleLink"`
+	TitleLinkDownload bool   `json:"titleLinkDownload"`
 
 	// FileType is the canonical lowercased MIME type, present on every attachment
 	// family (image/audio/video/generic). The media-specific *Type fields remain
 	// for the existing frontend.
-	FileType string `json:"fileType,omitempty" bson:"fileType,omitempty"`
+	FileType string `json:"fileType,omitempty"`
 
-	ImageURL        string           `json:"imageUrl,omitempty"        bson:"imageUrl,omitempty"`
-	ImageType       string           `json:"imageType,omitempty"       bson:"imageType,omitempty"`
-	ImageSize       int64            `json:"imageSize,omitempty"       bson:"imageSize,omitempty"`
-	ImageDimensions *ImageDimensions `json:"imageDimensions,omitempty" bson:"imageDimensions,omitempty"`
-	ImagePreview    string           `json:"imagePreview,omitempty"    bson:"imagePreview,omitempty"`
+	ImageURL        string           `json:"imageUrl,omitempty"`
+	ImageType       string           `json:"imageType,omitempty"`
+	ImageSize       int64            `json:"imageSize,omitempty"`
+	ImageDimensions *ImageDimensions `json:"imageDimensions,omitempty"`
+	ImagePreview    string           `json:"imagePreview,omitempty"`
 
-	AudioURL  string `json:"audioUrl,omitempty"  bson:"audioUrl,omitempty"`
-	AudioType string `json:"audioType,omitempty" bson:"audioType,omitempty"`
-	AudioSize int64  `json:"audioSize,omitempty" bson:"audioSize,omitempty"`
+	AudioURL  string `json:"audioUrl,omitempty"`
+	AudioType string `json:"audioType,omitempty"`
+	AudioSize int64  `json:"audioSize,omitempty"`
 
-	VideoURL  string `json:"videoUrl,omitempty"  bson:"videoUrl,omitempty"`
-	VideoType string `json:"videoType,omitempty" bson:"videoType,omitempty"`
-	VideoSize int64  `json:"videoSize,omitempty" bson:"videoSize,omitempty"`
+	VideoURL  string `json:"videoUrl,omitempty"`
+	VideoType string `json:"videoType,omitempty"`
+	VideoSize int64  `json:"videoSize,omitempty"`
 }
 
 // DecodeAttachments decodes a LIST<BLOB> attachments column (each blob is one

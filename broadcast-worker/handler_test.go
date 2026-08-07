@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
-	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -174,7 +172,7 @@ func TestHandleMessage_DispatchesByEvent(t *testing.T) {
 				// Created path: expect the full created-flow mock calls.
 				key := testRoomKey(t)
 				keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
-				store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+				store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 				store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 				store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -247,7 +245,7 @@ func TestHandler_HandleMessage_ChannelRoom(t *testing.T) {
 			keyStore := NewMockRoomKeyProvider(ctrl)
 			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll, gomock.Any(), gomock.Any()).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 
@@ -353,7 +351,7 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			}
 			data, _ := json.Marshal(evt)
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 			store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
@@ -431,7 +429,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		pub := &mockPublisher{}
 
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // combined lookup runs before UpdateRoomLastMessage
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(errors.New("not found"))
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(errors.New("not found"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -447,7 +445,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		pub := &mockPublisher{}
 
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // combined lookup runs before UpdateRoomLastMessage
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(errors.New("db error"))
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(errors.New("db error"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -463,7 +461,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		pub := &mockPublisher{}
 
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender", "alice"}).Return(testUsers[:1], nil) // single combined lookup
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.Any(), gomock.Any()).Return(errors.New("db error"))
@@ -486,7 +484,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 			ID: "room-1", Name: "general", Type: "unknown",
 			SiteID: "site-a", UserCount: 5,
 		}
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(unknownRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // sender lookup
@@ -504,7 +502,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		us := NewMockUserStore(ctrl)
 		pub := &mockPublisher{}
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // sender lookup
@@ -538,7 +536,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", []string{"sender"}, msgTime).Return(nil)
@@ -567,7 +565,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, errors.New("db error")) // sender lookup
@@ -611,7 +609,7 @@ func TestHandler_HandleMessage_DMRoom_PublishError(t *testing.T) {
 	pub := &failingPublisher{failAfter: 0}
 
 	us := NewMockUserStore(ctrl)
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
@@ -646,7 +644,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -667,7 +665,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, errors.New("valkey down"))
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -690,7 +688,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return([]model.User{{ID: "u-sender", Account: "sender", EngName: "Sender Lin", ChineseName: "寄件者", SiteID: "site-a"}}, nil)
@@ -746,8 +744,7 @@ func TestBuildClientMessage(t *testing.T) {
 		users := map[string]model.User{
 			"alice": {ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲"},
 		}
-		decoded, _ := cassandra.DecodeAttachments(msg.Attachments)
-		cm := buildClientMessage(msg, users, decoded)
+		cm := buildClientMessage(msg, users)
 		assert.Equal(t, "m1", cm.ID)
 		require.NotNil(t, cm.Sender)
 		assert.Equal(t, "u1", cm.Sender.UserID)
@@ -757,8 +754,7 @@ func TestBuildClientMessage(t *testing.T) {
 	})
 
 	t.Run("user not found", func(t *testing.T) {
-		decoded, _ := cassandra.DecodeAttachments(msg.Attachments)
-		cm := buildClientMessage(msg, map[string]model.User{}, decoded)
+		cm := buildClientMessage(msg, map[string]model.User{})
 		require.NotNil(t, cm.Sender)
 		assert.Equal(t, "alice", cm.Sender.ChineseName)
 		assert.Equal(t, "alice", cm.Sender.EngName)
@@ -774,7 +770,7 @@ func TestHandler_FetchAndUpdateRoom_Missing(t *testing.T) {
 	pub := &mockPublisher{}
 
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // single combined lookup
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "ghost-room", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "ghost-room", "msg-1", msgTime, false).
 		Return(fmt.Errorf("update room last message ghost-room: %w", mongo.ErrNoDocuments))
 
 	keyStore := NewMockRoomKeyProvider(ctrl)
@@ -859,8 +855,6 @@ func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
 	}
 	data, err := json.Marshal(&evt)
 	require.NoError(t, err)
-
-	store.EXPECT().SetRoomPreviewMessage(gomock.Any(), roomID, evt.PreviewMessage, edited.UnixMilli()).Return(nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
@@ -1425,7 +1419,7 @@ func TestHandler_HandleMessage_ChannelEncryptionDisabled(t *testing.T) {
 			us := NewMockUserStore(ctrl)
 			pub := &mockPublisher{}
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll, gomock.Any(), gomock.Any()).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 			if tc.wantSetMentions != nil {
@@ -3169,8 +3163,7 @@ func TestBuildClientMessage_DecodesAttachments(t *testing.T) {
 		},
 	}
 
-	decoded, _ := cassandra.DecodeAttachments(msg.Attachments)
-	cm := buildClientMessage(&msg, map[string]model.User{}, decoded)
+	cm := buildClientMessage(&msg, map[string]model.User{})
 
 	// Main message: raw blobs decoded onto the wrapper; embedded raw nilled (Task F).
 	require.Len(t, cm.Attachments, 1)
@@ -3197,7 +3190,7 @@ func TestHandleCreated_NonRename_NoRoomRenamedEvent(t *testing.T) {
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
 	msgTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -3219,7 +3212,7 @@ func TestHandleCreated_AdvancesSenderLastSeen(t *testing.T) {
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -3237,7 +3230,7 @@ func TestHandleCreated_AdvanceSenderLastSeen_FailureSwallowed(t *testing.T) {
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false, gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(errors.New("mongo down"))
 	// Fan-out still runs after the swallowed advance error.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
@@ -3245,414 +3238,4 @@ func TestHandleCreated_AdvanceSenderLastSeen_FailureSwallowed(t *testing.T) {
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime)))
-}
-
-// TestHandler_HandleCreated_PassesEligiblePreview verifies an eligible (non-system)
-// created message builds a denormalized preview, truncated to the shared cap, and
-// watermarked with the canonical event Timestamp (not msg.CreatedAt).
-func TestHandler_HandleCreated_PassesEligiblePreview(t *testing.T) {
-	msgTime := time.Date(2026, 6, 17, 11, 0, 0, 0, time.UTC)
-	longContent := strings.Repeat("a", preview.MaxContentRunes+200)
-
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: 5000,
-		Message: model.Message{
-			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
-			Content: longContent, CreatedAt: msgTime,
-		},
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", gomock.Any(), false,
-		gomock.AssignableToTypeOf(&model.PreviewMessage{}), int64(5000)).
-		DoAndReturn(func(_ context.Context, _, _ string, _ time.Time, _ bool, pvw *model.PreviewMessage, _ int64) error {
-			require.NotNil(t, pvw)
-			assert.Equal(t, "msg-1", pvw.MessageID)
-			assert.Len(t, []rune(pvw.Content), preview.MaxContentRunes)
-			return nil
-		})
-	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
-	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-}
-
-// TestHandler_HandleCreated_SystemMessageNilPreview verifies a system-message type
-// (e.g. members_added) is never eligible for the room-list preview.
-func TestHandler_HandleCreated_SystemMessageNilPreview(t *testing.T) {
-	msgTime := time.Date(2026, 6, 17, 11, 0, 0, 0, time.UTC)
-
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: 5000,
-		Message: model.Message{
-			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
-			Content: "Alice was added to the room", CreatedAt: msgTime,
-			Type: model.MessageTypeMembersAdded,
-		},
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", gomock.Any(), false,
-		gomock.Nil(), gomock.Any()).Return(nil)
-	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
-	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-}
-
-// TestHandler_HandleCreated_BotSenderUsesAppName verifies the preview's sender
-// DisplayName is bot-aware (app name), while the published client message's
-// sender keeps its current wire shape (no displayName) — the bot-aware name is
-// preview-only, never a wire change to room events.
-func TestHandler_HandleCreated_BotSenderUsesAppName(t *testing.T) {
-	msgTime := time.Date(2026, 6, 17, 11, 0, 0, 0, time.UTC)
-	botAccount := "helper.bot"
-
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: 5000,
-		Message: model.Message{
-			ID: "msg-1", RoomID: "room-1", UserID: "user-bot", UserAccount: botAccount,
-			Content: "automated update", CreatedAt: msgTime,
-		},
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().AppNameByAccount(gomock.Any(), botAccount).Return("Helper App", nil)
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-		gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, _, _ string, _ time.Time, _ bool, pvw *model.PreviewMessage, _ int64) error {
-			require.NotNil(t, pvw)
-			assert.Equal(t, "Helper App", pvw.Sender.DisplayName)
-			return nil
-		})
-	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", botAccount, msgTime).Return(nil)
-	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{botAccount}).Return(nil, nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1)
-	roomEvt := decodeRoomEvent(t, pub.records[0].data)
-	require.NotNil(t, roomEvt.Message)
-	require.NotNil(t, roomEvt.Message.Sender)
-	assert.Empty(t, roomEvt.Message.Sender.DisplayName,
-		"the client-message sender must NOT carry the bot-aware display name")
-}
-
-// TestHandler_HandleUpdated_PersistsEventPreview verifies handleUpdated persists
-// the relayed preview to the store before publishing the mutation event.
-func TestHandler_HandleUpdated_PersistsEventPreview(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	pvw := &model.PreviewMessage{MessageID: "m-prev", Content: "updated"}
-	evt := model.MessageEvent{
-		Event:     model.EventUpdated,
-		SiteID:    "site-a",
-		Timestamp: 7000,
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			Content: "updated", CreatedAt: edited.Add(-time.Hour), EditedAt: &edited, UpdatedAt: &edited,
-		},
-		PreviewMessage: pvw,
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().SetRoomPreviewMessage(gomock.Any(), roomID, gomock.Any(), int64(7000)).
-		DoAndReturn(func(_ context.Context, _ string, got *model.PreviewMessage, _ int64) error {
-			assert.Equal(t, "m-prev", got.MessageID)
-			return nil
-		})
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1)
-}
-
-// TestHandler_HandleUpdated_NilPreviewNoPersist verifies a nil evt.PreviewMessage
-// is skipped — never calls SetRoomPreviewMessage, and never clears a stored preview.
-func TestHandler_HandleUpdated_NilPreviewNoPersist(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	evt := model.MessageEvent{
-		Event:     model.EventUpdated,
-		SiteID:    "site-a",
-		Timestamp: edited.UnixMilli(),
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			Content: "updated content", CreatedAt: edited.Add(-time.Hour), EditedAt: &edited, UpdatedAt: &edited,
-		},
-		// PreviewMessage nil -> SetRoomPreviewMessage must NOT be called.
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	// No store.EXPECT().SetRoomPreviewMessage(...) — a call would fail the strict mock.
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1)
-}
-
-// TestHandler_HandleDeleted_PersistsEventPreview_BestEffort verifies a
-// SetRoomPreviewMessage failure is best-effort: logged and swallowed, never
-// failing the delete-mutation handler (the relayed event already carries the
-// preview for clients).
-func TestHandler_HandleDeleted_PersistsEventPreview_BestEffort(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	pvw := &model.PreviewMessage{MessageID: "m-prev", Content: "prior message"}
-	evt := model.MessageEvent{
-		Event:     model.EventDeleted,
-		SiteID:    "site-a",
-		Timestamp: deleted.UnixMilli(),
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
-		},
-		PreviewMessage: pvw,
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().SetRoomPreviewMessage(gomock.Any(), roomID, gomock.Any(), deleted.UnixMilli()).
-		Return(errors.New("mongo down"))
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1, "mutation fan-out must still happen despite the persist failure")
-}
-
-// TestHandler_HandleDeleted_PreviewGoneClearsStoredPreview: history-service's walk
-// completed and found no eligible survivor, so the deleted message's stale preview
-// must be removed from the room doc — not left behind for user-service to serve.
-func TestHandler_HandleDeleted_PreviewGoneClearsStoredPreview(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	evt := model.MessageEvent{
-		Event:     model.EventDeleted,
-		SiteID:    "site-a",
-		Timestamp: deleted.UnixMilli(),
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
-		},
-		PreviewGone: true,
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().ClearRoomPreviewMessage(gomock.Any(), roomID, deleted.UnixMilli()).Return(nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1)
-}
-
-// A preview on the event wins over the gone marker (defensive: only one is ever set).
-func TestHandler_HandleDeleted_PreviewPresentNeverClears(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	evt := model.MessageEvent{
-		Event:     model.EventDeleted,
-		SiteID:    "site-a",
-		Timestamp: deleted.UnixMilli(),
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
-		},
-		PreviewMessage: &model.PreviewMessage{MessageID: "m-prev", Content: "survivor"},
-		PreviewGone:    true,
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	// Set, never Clear — a call to ClearRoomPreviewMessage fails the strict mock.
-	store.EXPECT().SetRoomPreviewMessage(gomock.Any(), roomID, gomock.Any(), deleted.UnixMilli()).Return(nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-}
-
-// Degraded upstream walk: nil preview AND no gone marker leaves the stored preview
-// completely untouched — neither Set nor Clear (a strict mock enforces both).
-func TestHandler_HandleDeleted_DegradedWalk_NeitherSetNorClear(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	evt := model.MessageEvent{
-		Event:     model.EventDeleted,
-		SiteID:    "site-a",
-		Timestamp: deleted.UnixMilli(),
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
-		},
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1)
-}
-
-// A ClearRoomPreviewMessage failure is best-effort like Set: logged, swallowed,
-// never failing the mutation fan-out.
-func TestHandler_HandleDeleted_ClearPreviewError_BestEffort(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	deleted := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	evt := model.MessageEvent{
-		Event:     model.EventDeleted,
-		SiteID:    "site-a",
-		Timestamp: deleted.UnixMilli(),
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			CreatedAt: deleted.Add(-time.Hour), UpdatedAt: &deleted,
-		},
-		PreviewGone: true,
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().ClearRoomPreviewMessage(gomock.Any(), roomID, deleted.UnixMilli()).
-		Return(errors.New("mongo down"))
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1, "mutation fan-out must still happen despite the clear failure")
-}
-
-// An edit that leaves the room with no eligible survivor clears too (same path).
-func TestHandler_HandleUpdated_PreviewGoneClearsStoredPreview(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	roomID := "room-1"
-	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}
-	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-
-	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
-	evt := model.MessageEvent{
-		Event:     model.EventUpdated,
-		SiteID:    "site-a",
-		Timestamp: 7000,
-		Message: model.Message{
-			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
-			Content: "updated", CreatedAt: edited.Add(-time.Hour), EditedAt: &edited, UpdatedAt: &edited,
-		},
-		PreviewGone: true,
-	}
-	data, err := json.Marshal(&evt)
-	require.NoError(t, err)
-
-	store.EXPECT().ClearRoomPreviewMessage(gomock.Any(), roomID, int64(7000)).Return(nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 1)
 }

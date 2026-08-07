@@ -57,35 +57,6 @@ func (mr *MockStoreMockRecorder) AdvanceSubscriptionLastSeen(ctx, roomID, accoun
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AdvanceSubscriptionLastSeen", reflect.TypeOf((*MockStore)(nil).AdvanceSubscriptionLastSeen), ctx, roomID, account, at)
 }
 
-// AppNameByAccount mocks base method.
-func (m *MockStore) AppNameByAccount(ctx context.Context, botAccount string) (string, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "AppNameByAccount", ctx, botAccount)
-	ret0, _ := ret[0].(string)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// AppNameByAccount indicates an expected call of AppNameByAccount.
-func (mr *MockStoreMockRecorder) AppNameByAccount(ctx, botAccount any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppNameByAccount", reflect.TypeOf((*MockStore)(nil).AppNameByAccount), ctx, botAccount)
-}
-
-// ClearRoomPreviewMessage mocks base method.
-func (m *MockStore) ClearRoomPreviewMessage(ctx context.Context, roomID string, asOf int64) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ClearRoomPreviewMessage", ctx, roomID, asOf)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// ClearRoomPreviewMessage indicates an expected call of ClearRoomPreviewMessage.
-func (mr *MockStoreMockRecorder) ClearRoomPreviewMessage(ctx, roomID, asOf any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearRoomPreviewMessage", reflect.TypeOf((*MockStore)(nil).ClearRoomPreviewMessage), ctx, roomID, asOf)
-}
-
 // GetHistorySharedSince mocks base method.
 func (m *MockStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
 	m.ctrl.T.Helper()
@@ -161,20 +132,6 @@ func (mr *MockStoreMockRecorder) ListSubscriptions(ctx, roomID any) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSubscriptions", reflect.TypeOf((*MockStore)(nil).ListSubscriptions), ctx, roomID)
 }
 
-// SetRoomPreviewMessage mocks base method.
-func (m *MockStore) SetRoomPreviewMessage(ctx context.Context, roomID string, pvw *model.PreviewMessage, asOf int64) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetRoomPreviewMessage", ctx, roomID, pvw, asOf)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SetRoomPreviewMessage indicates an expected call of SetRoomPreviewMessage.
-func (mr *MockStoreMockRecorder) SetRoomPreviewMessage(ctx, roomID, pvw, asOf any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRoomPreviewMessage", reflect.TypeOf((*MockStore)(nil).SetRoomPreviewMessage), ctx, roomID, pvw, asOf)
-}
-
 // SetSubscriptionMentions mocks base method.
 func (m *MockStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
 	m.ctrl.T.Helper()
@@ -190,15 +147,15 @@ func (mr *MockStoreMockRecorder) SetSubscriptionMentions(ctx, roomID, accounts, 
 }
 
 // UpdateRoomLastMessage mocks base method.
-func (m *MockStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, pvw *model.PreviewMessage, previewAsOf int64) error {
+func (m *MockStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateRoomLastMessage", ctx, roomID, msgID, msgAt, mentionAll, pvw, previewAsOf)
+	ret := m.ctrl.Call(m, "UpdateRoomLastMessage", ctx, roomID, msgID, msgAt, mentionAll)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateRoomLastMessage indicates an expected call of UpdateRoomLastMessage.
-func (mr *MockStoreMockRecorder) UpdateRoomLastMessage(ctx, roomID, msgID, msgAt, mentionAll, pvw, previewAsOf any) *gomock.Call {
+func (mr *MockStoreMockRecorder) UpdateRoomLastMessage(ctx, roomID, msgID, msgAt, mentionAll any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomLastMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomLastMessage), ctx, roomID, msgID, msgAt, mentionAll, pvw, previewAsOf)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomLastMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomLastMessage), ctx, roomID, msgID, msgAt, mentionAll)
 }

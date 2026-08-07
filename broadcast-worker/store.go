@@ -19,19 +19,7 @@ type Store interface {
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
 	ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error)
 	GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error)
-	// UpdateRoomLastMessage records the room's newest message; pvw (nil for
-	// system messages) is the denormalized preview to persist alongside,
-	// previewAsOf its canonical-event-Timestamp watermark.
-	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool, pvw *model.PreviewMessage, previewAsOf int64) error
-	// SetRoomPreviewMessage persists a post-mutation (edit/delete) preview,
-	// watermark-guarded so redeliveries and races cannot regress a newer one.
-	SetRoomPreviewMessage(ctx context.Context, roomID string, pvw *model.PreviewMessage, asOf int64) error
-	// ClearRoomPreviewMessage removes the stored preview after a mutation left
-	// the room with no eligible survivor, watermark-guarded like Set.
-	ClearRoomPreviewMessage(ctx context.Context, roomID string, asOf int64) error
-	// AppNameByAccount returns the app display name for a bot account
-	// (assistant.name), or ("", nil) when no app matches.
-	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
+	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error
 	// SetSubscriptionMentions flags accounts as mentioned, unless a given account
 	// already read past msgCreatedAt (lastSeenAt >= msgCreatedAt) — otherwise an
 	// async mention write can clobber a read-clear that happened first (#467).

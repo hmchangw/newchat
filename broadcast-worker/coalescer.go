@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/hmchangw/chat/pkg/model"
 )
 
 // roomLastMsgUpdate is the per-room state buffered between flushes.
@@ -16,16 +14,10 @@ import (
 //   - lastMentionAllAt carries the latest createdAt among messages whose
 //     mentionAll flag was true; it sticks across subsequent non-mention-all
 //     messages until a newer mention-all arrives.
-//   - preview/previewAsOf carry the latest eligible preview by previewAsOf
-//     (max by previewAsOf), independent of the msgID/at merge above — a
-//     system message (pvw == nil) advances msgID/at without touching a
-//     previously buffered preview.
 type roomLastMsgUpdate struct {
 	msgID            string
 	at               time.Time
 	lastMentionAllAt time.Time
-	preview          *model.PreviewMessage
-	previewAsOf      int64
 }
 
 // bulkRoomLastMsgWriter is the persistence boundary the coalescer flushes to.
@@ -65,11 +57,8 @@ func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStor
 }
 
 // UpdateRoomLastMessage buffers the update. Always returns nil; the buffered
-// write is performed asynchronously by Flush. The preview merges independently
-// of msgID/at by max previewAsOf: a system message (pvw==nil) advances the
-// message fields while the buffered preview sticks, and an out-of-order older
-// preview never displaces a newer one.
-func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool, pvw *model.PreviewMessage, previewAsOf int64) error {
+// write is performed asynchronously by Flush.
+func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cur := c.pending[roomID]
@@ -79,10 +68,6 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID
 	}
 	if mentionAll && at.After(cur.lastMentionAllAt) {
 		cur.lastMentionAllAt = at
-	}
-	if pvw != nil && previewAsOf >= cur.previewAsOf {
-		cur.preview = pvw
-		cur.previewAsOf = previewAsOf
 	}
 	c.pending[roomID] = cur
 	return nil

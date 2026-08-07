@@ -20,7 +20,6 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -171,12 +170,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	// Decode the raw attachment blobs once: both the preview and the client
-	// message below carry the same decoded slice (neither mutates it).
-	decoded, _ := cassandra.DecodeAttachments(msg.Attachments)
-
-	pvw := h.buildPreview(ctx, &msg, userByAccount, resolved.Participants, decoded)
-	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll, pvw, evt.Timestamp); err != nil {
+	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
 		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
 	}
 	// Sending implies the sender has read up to their own message: advance the
@@ -198,7 +192,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 
-	clientMsg := buildClientMessage(&msg, userByAccount, decoded)
+	clientMsg := buildClientMessage(&msg, userByAccount)
 
 	// debug: how this message was routed for fan-out (metadata only).
 	slog.DebugContext(ctx, "broadcast routing", "request_id", natsutil.RequestIDFromContext(ctx),
@@ -260,8 +254,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	threadDecoded, _ := cassandra.DecodeAttachments(msg.Attachments)
-	clientMsg := buildClientMessage(&msg, userByAccount, threadDecoded)
+	clientMsg := buildClientMessage(&msg, userByAccount)
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
@@ -314,34 +307,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
 		}
 	}
-	h.persistPostMutationPreview(ctx, evt)
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
-}
-
-// persistPostMutationPreview applies the post-mutation (edit/delete) preview
-// outcome computed upstream by history-service. Best-effort: the guarded writes
-// are idempotent under redelivery, and clients already receive the preview on the
-// relayed event; a store failure must not fail the mutation fan-out.
-//
-// Three-way on the upstream walk result: a preview means the room has a new last
-// eligible message (Set); evt.PreviewGone means the walk completed and found none,
-// so the stale stored preview must go (Clear); neither means the walk degraded —
-// the survivor is unknown, so the stored preview is left alone.
-func (h *Handler) persistPostMutationPreview(ctx context.Context, evt *model.MessageEvent) {
-	var err error
-	switch {
-	case evt.PreviewMessage != nil:
-		err = h.store.SetRoomPreviewMessage(ctx, evt.Message.RoomID, evt.PreviewMessage, evt.Timestamp)
-	case evt.PreviewGone:
-		err = h.store.ClearRoomPreviewMessage(ctx, evt.Message.RoomID, evt.Timestamp)
-	default:
-		return
-	}
-	if err != nil {
-		slog.WarnContext(ctx, "persist post-mutation preview failed",
-			"room_id", evt.Message.RoomID, "message_id", evt.Message.ID, "preview_gone", evt.PreviewGone,
-			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-	}
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
@@ -533,7 +499,6 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	del := buildDeleteRoomEvent(room, evt)
-	h.persistPostMutationPreview(ctx, evt)
 	if err := h.publishMutation(ctx, room, model.RoomEventMessageDeleted, msg.ID, &del); err != nil {
 		return fmt.Errorf("publish delete mutation for room %s message %s: %w", room.ID, msg.ID, err)
 	}
@@ -949,10 +914,11 @@ func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, ev
 	}
 }
 
-// buildSenderParticipant resolves the message sender to a wire Participant from
-// the prefetched user map, falling back to the raw account.
-func buildSenderParticipant(msg *model.Message, userMap map[string]model.User) model.Participant {
-	sender := model.Participant{UserID: msg.UserID, Account: msg.UserAccount}
+func buildClientMessage(msg *model.Message, userMap map[string]model.User) *model.ClientMessage {
+	sender := model.Participant{
+		UserID:  msg.UserID,
+		Account: msg.UserAccount,
+	}
 	if u, ok := userMap[msg.UserAccount]; ok {
 		sender.ChineseName = u.ChineseName
 		sender.EngName = u.EngName
@@ -960,34 +926,7 @@ func buildSenderParticipant(msg *model.Message, userMap map[string]model.User) m
 		sender.ChineseName = msg.UserAccount
 		sender.EngName = msg.UserAccount
 	}
-	return sender
-}
-
-// buildPreview assembles the denormalized preview for an eligible (non-system)
-// created message. The sender copy gets the bot-aware display name — a copy, so
-// the client-message sender keeps its current wire shape (no displayName).
-func (h *Handler) buildPreview(ctx context.Context, msg *model.Message, userMap map[string]model.User, mentions []model.Participant, decoded []cassandra.Attachment) *model.PreviewMessage {
-	if model.IsSystemMessageType(msg.Type) {
-		return nil
-	}
-	sender := buildSenderParticipant(msg, userMap)
-	sender.DisplayName = preview.BotAwareDisplayName(ctx, h.store.AppNameByAccount, sender.EngName, sender.ChineseName, sender.Account)
-	p := preview.Build(model.PreviewMessage{
-		MessageID:   msg.ID,
-		Sender:      sender,
-		Content:     msg.Content,
-		CreatedAt:   msg.CreatedAt,
-		Attachments: decoded,
-		Mentions:    mentions,
-	})
-	return &p
-}
-
-// buildClientMessage assembles the client-facing message. decoded is the
-// caller's already-decoded attachments — decoding is hoisted to the caller so a
-// handler that also builds a preview from the same message decodes only once.
-func buildClientMessage(msg *model.Message, userMap map[string]model.User, decoded []cassandra.Attachment) *model.ClientMessage {
-	sender := buildSenderParticipant(msg, userMap)
+	decoded, _ := cassandra.DecodeAttachments(msg.Attachments)
 	cm := &model.ClientMessage{
 		Message:     *msg,
 		Sender:      &sender,

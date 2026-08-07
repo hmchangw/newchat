@@ -119,7 +119,7 @@ func main() {
 		}
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("apps"), metaValkey, cfg.RoomMetaL2TTL)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
