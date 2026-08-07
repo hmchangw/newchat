@@ -70,10 +70,44 @@ type SearchConfig struct {
 	RestrictedRoomsCacheTTL time.Duration `env:"RESTRICTED_ROOMS_CACHE_TTL" envDefault:"5m"`
 	RecentWindow            time.Duration `env:"RECENT_WINDOW"              envDefault:"8760h"`
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
-	UserRoomIndex           string        `env:"USER_ROOM_INDEX,required"`
-	SpotlightIndex          string        `env:"SPOTLIGHT_INDEX,required"`
-	SpotlightOrgIndex       string        `env:"SPOTLIGHT_ORG_INDEX,required"`
 	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
+	// The three index names below are the DEPRECATED SEARCH_-prefixed spelling,
+	// kept readable for one release. The canonical unprefixed names live on
+	// Config.Indexes; resolveIndexName picks between them. Neither form is
+	// `required` — presence is validated after parse so either spelling suffices.
+	UserRoomIndex     string `env:"USER_ROOM_INDEX"`
+	SpotlightIndex    string `env:"SPOTLIGHT_INDEX"`
+	SpotlightOrgIndex string `env:"SPOTLIGHT_ORG_INDEX"`
+}
+
+// IndexConfig carries the canonical, unprefixed ES index names — the same
+// spelling search-sync-worker (`search-sync-worker/main.go`) and
+// es-index-migrator already use. search-service historically required them
+// under the SEARCH_ prefix, so one logical value had two names across the three
+// services that share these indices. A drifted pair fails silently: the read
+// pattern is a wildcard and `pkg/searchengine` searches with
+// allow_no_indices=true, so reading an index nobody writes yields empty hits
+// rather than an error.
+type IndexConfig struct {
+	UserRoomIndex     string `env:"USER_ROOM_INDEX"`
+	SpotlightIndex    string `env:"SPOTLIGHT_INDEX"`
+	SpotlightOrgIndex string `env:"SPOTLIGHT_ORG_INDEX"`
+}
+
+// resolveIndexName prefers the canonical unprefixed value over the deprecated
+// SEARCH_-prefixed one so a chart can adopt either spelling in any order
+// relative to this binary. name is the unprefixed var name, used for both the
+// deprecation warning and the error.
+func resolveIndexName(name, canonical, legacy string) (string, error) {
+	if canonical != "" {
+		return canonical, nil
+	}
+	if legacy != "" {
+		slog.Warn("deprecated env var: use the unprefixed name shared with search-sync-worker",
+			"deprecated", "SEARCH_"+name, "canonical", name)
+		return legacy, nil
+	}
+	return "", fmt.Errorf("%s is required (deprecated alias: SEARCH_%s)", name, name)
 }
 
 // Config is the root service config. Note that ES and Search share the
@@ -88,6 +122,7 @@ type Config struct {
 	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
 	NATS     NATSConfig     `envPrefix:"NATS_"`
 	Search   SearchConfig   `envPrefix:"SEARCH_"`
+	Indexes  IndexConfig    // canonical, unprefixed — see IndexConfig
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
 	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
 	DebugLog logctx.Config  `envPrefix:"DEBUG_LOG_"`
@@ -107,16 +142,32 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
-	spotlightBase, _, ok := searchindex.StripVersion(cfg.Search.SpotlightIndex)
+	userRoomIndex, err := resolveIndexName("USER_ROOM_INDEX", cfg.Indexes.UserRoomIndex, cfg.Search.UserRoomIndex)
+	if err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	spotlightIndex, err := resolveIndexName("SPOTLIGHT_INDEX", cfg.Indexes.SpotlightIndex, cfg.Search.SpotlightIndex)
+	if err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	spotlightOrgIndex, err := resolveIndexName("SPOTLIGHT_ORG_INDEX", cfg.Indexes.SpotlightOrgIndex, cfg.Search.SpotlightOrgIndex)
+	if err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+
+	spotlightBase, _, ok := searchindex.StripVersion(spotlightIndex)
 	if !ok {
-		slog.Error("invalid config", "name", "SEARCH_SPOTLIGHT_INDEX", "value", cfg.Search.SpotlightIndex, "reason", "must end with -v<N>, e.g. spotlight-site-a-v1")
+		slog.Error("invalid config", "name", "SPOTLIGHT_INDEX", "value", spotlightIndex, "reason", "must end with -v<N>, e.g. spotlight-site-a-v1")
 		os.Exit(1)
 	}
 	spotlightReadPattern := fmt.Sprintf("%s-*", spotlightBase)
 
-	spotlightOrgBase, _, ok := searchindex.StripVersion(cfg.Search.SpotlightOrgIndex)
+	spotlightOrgBase, _, ok := searchindex.StripVersion(spotlightOrgIndex)
 	if !ok {
-		slog.Error("invalid config", "name", "SEARCH_SPOTLIGHT_ORG_INDEX", "value", cfg.Search.SpotlightOrgIndex, "reason", "must end with -v<N>, e.g. spotlightorg-site-a-v1")
+		slog.Error("invalid config", "name", "SPOTLIGHT_ORG_INDEX", "value", spotlightOrgIndex, "reason", "must end with -v<N>, e.g. spotlightorg-site-a-v1")
 		os.Exit(1)
 	}
 	spotlightOrgReadPattern := fmt.Sprintf("%s-*", spotlightOrgBase)
@@ -175,7 +226,7 @@ func main() {
 	)
 	usersClient := newHTTPUsersClient(usersRC, cfg.UsersAPI.Token)
 
-	store := newESStore(engine, cfg.Search.UserRoomIndex)
+	store := newESStore(engine, userRoomIndex)
 	cache := newValkeyCache(valkey)
 	mongoStore := newMongoStore(mongoDB)
 
@@ -193,7 +244,7 @@ func main() {
 		RestrictedRoomsCacheTTL: cfg.Search.RestrictedRoomsCacheTTL,
 		RecentWindow:            cfg.Search.RecentWindow,
 		RequestTimeout:          cfg.Search.RequestTimeout,
-		UserRoomIndex:           cfg.Search.UserRoomIndex,
+		UserRoomIndex:           userRoomIndex,
 		SpotlightReadPattern:    spotlightReadPattern,
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
 	})

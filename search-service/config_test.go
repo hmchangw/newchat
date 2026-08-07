@@ -24,6 +24,77 @@ func setRequiredSearchEnv(t *testing.T) {
 	t.Setenv("USERS_API_URL", "http://localhost:8080")
 }
 
+// TestResolveIndexNames covers the dual-name window for the three ES index
+// vars. search-sync-worker and es-index-migrator read the unprefixed names;
+// search-service historically read SEARCH_-prefixed ones. Two names for one
+// value drift silently — a wildcard read pattern plus allow_no_indices turns a
+// mismatch into an empty result set rather than an error — so both are accepted
+// during the migration, with the unprefixed form canonical.
+func TestResolveIndexNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		canonical string
+		legacy    string
+		want      string
+		wantErr   bool
+	}{
+		{name: "unprefixed only", canonical: "spotlight-site-a-v1", want: "spotlight-site-a-v1"},
+		{name: "legacy prefixed only", legacy: "spotlight-site-a-v1", want: "spotlight-site-a-v1"},
+		{
+			name:      "unprefixed wins when both set",
+			canonical: "spotlight-new-v2",
+			legacy:    "spotlight-old-v1",
+			want:      "spotlight-new-v2",
+		},
+		{name: "neither set", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveIndexName("SPOTLIGHT_INDEX", tt.canonical, tt.legacy)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "SPOTLIGHT_INDEX")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestConfig_UnprefixedIndexNamesParse pins that the unprefixed vars are read
+// at all — without a struct field for them, env.ParseAs silently ignores them
+// and the service falls back to the legacy value or fails as "not set".
+func TestConfig_UnprefixedIndexNamesParse(t *testing.T) {
+	setRequiredSearchEnv(t)
+	t.Setenv("USER_ROOM_INDEX", "userroom-canonical")
+	t.Setenv("SPOTLIGHT_INDEX", "spotlight-canonical-v1")
+	t.Setenv("SPOTLIGHT_ORG_INDEX", "spotlightorg-canonical-v1")
+
+	cfg, err := env.ParseAs[Config]()
+	require.NoError(t, err)
+	assert.Equal(t, "userroom-canonical", cfg.Indexes.UserRoomIndex)
+	assert.Equal(t, "spotlight-canonical-v1", cfg.Indexes.SpotlightIndex)
+	assert.Equal(t, "spotlightorg-canonical-v1", cfg.Indexes.SpotlightOrgIndex)
+}
+
+// TestConfig_IndexNamesNoLongerRequiredAtParse guards the deploy-order property:
+// parsing must succeed with only the unprefixed names present, so a chart can
+// migrate to them without the binary refusing to start.
+func TestConfig_IndexNamesNoLongerRequiredAtParse(t *testing.T) {
+	setRequiredSearchEnv(t)
+	for _, k := range []string{"SEARCH_USER_ROOM_INDEX", "SEARCH_SPOTLIGHT_INDEX", "SEARCH_SPOTLIGHT_ORG_INDEX"} {
+		require.NoError(t, os.Unsetenv(k))
+	}
+	t.Setenv("USER_ROOM_INDEX", "userroom-canonical")
+	t.Setenv("SPOTLIGHT_INDEX", "spotlight-canonical-v1")
+	t.Setenv("SPOTLIGHT_ORG_INDEX", "spotlightorg-canonical-v1")
+
+	_, err := env.ParseAs[Config]()
+	require.NoError(t, err, "unprefixed names alone must be enough to parse")
+}
+
 func TestConfig_MaxConcurrency(t *testing.T) {
 	setRequiredSearchEnv(t)
 

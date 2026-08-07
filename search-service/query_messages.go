@@ -139,8 +139,9 @@ func scopedAccessClauses(roomIDs []string, account string, restricted map[string
 
 // termsLookupClause resolves the user's allowed rooms via ES terms-lookup
 // instead of shipping the rooms[] array on every query. The caller must
-// pass a concrete, non-empty index name (enforced upstream by the
-// SEARCH_USER_ROOM_INDEX env var being marked ,required in main.go). ES
+// pass a concrete, non-empty index name (enforced upstream by
+// resolveIndexName in main.go, which fails startup when neither
+// USER_ROOM_INDEX nor its deprecated SEARCH_-prefixed alias is set). ES
 // terms_lookup rejects wildcard patterns, which is why this index is
 // intentionally unversioned across the codebase.
 func termsLookupClause(account, userRoomIndex string) map[string]any {
