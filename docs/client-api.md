@@ -5743,7 +5743,8 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 | `bad_request` | `empty_text` | `text` is empty. |
 | `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
 | `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
-| `internal` | — | Translation backend failure. The raw cause is logged server-side, never returned. |
+| `unavailable` | `upstream_unavailable` | The third-party translation backend returned a 5XX or was unreachable (transport failure). Clients should show a "translation service temporarily unavailable" message and allow a retry. |
+| `internal` | — | Other translation backend failure (e.g. malformed stream, 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
 
 ```json
 {
