@@ -190,6 +190,43 @@ func TestRepository_GetMessagesByIDs(t *testing.T) {
 	assert.ElementsMatch(t, []string{"m-batch-1", "m-batch-2"}, ids)
 }
 
+// The thread inbox reads its reply count through this batch path, so tcount must
+// survive the scan into Message.TCount — and stay nil when the column was never
+// written, which is what the list RPC reports as 0.
+func TestRepository_GetMessagesByIDs_TCount(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg, tcount) VALUES (?, ?, ?, ?, ?, ?)`,
+		"m-tcount-set", "r1", ts, sender, "parent with replies", 7,
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, msg) VALUES (?, ?, ?, ?, ?)`,
+		"m-tcount-unset", "r1", ts, sender, "parent never counted",
+	).Exec())
+
+	msgs, err := repo.GetMessagesByIDs(ctx, []string{"m-tcount-set", "m-tcount-unset"})
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	byID := make(map[string]models.Message, len(msgs))
+	for _, m := range msgs {
+		byID[m.MessageID] = m
+	}
+
+	set, ok := byID["m-tcount-set"]
+	require.True(t, ok)
+	require.NotNil(t, set.TCount, "a written tcount must scan into Message.TCount")
+	assert.Equal(t, 7, *set.TCount)
+
+	unset, ok := byID["m-tcount-unset"]
+	require.True(t, ok)
+	assert.Nil(t, unset.TCount, "an unwritten tcount column must scan as nil, not 0")
+}
+
 func TestRepository_GetMessagesByIDs_Empty(t *testing.T) {
 	session := setupCassandra(t)
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
