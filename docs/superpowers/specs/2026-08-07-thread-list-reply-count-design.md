@@ -20,7 +20,7 @@ first-class field there.
 
 ## Current implementation
 
-```
+```text
 client
   └─ user-service  ListUserThreads                       threads.go:54
        ├─ fan-out over ALL_SITE_IDS                      threads.go:157
@@ -239,7 +239,7 @@ joining it inside the aggregation was the natural move. **Here the parent's
 Mongo at all** — the aggregation returns row *keys* and the join happens in Go,
 one hop later:
 
-```
+```text
 mongo agg  → ThreadSubRow{parentMessageId, lastMsgId, …}   pipelines.go:56
              ↓ threadListLookupMsgIDs — dedup parents ∪ lasts
 cassandra  → GetMessagesByIDs(ids)                         cassrepo/messages_by_id.go:44

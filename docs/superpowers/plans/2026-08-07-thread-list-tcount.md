@@ -96,13 +96,38 @@ New test `TestUserService_ListUserThreads_TCountSurvivesDegradedEnrichment`:
 Files: `docs/client-api.md`, `docs/design/user-thread-list.md`, `docs/superpowers/specs/2026-08-07-thread-list-reply-count-design.md`.
 
 1. `docs/client-api.md`, **ThreadListItem** table (§ List User Threads, around line 5304): add a row directly after `lastMsgAt`:
-   `| `tcount` | number | Non-deleted reply count, capped at 99 — `99` means "99 or more". Always present; `0` also covers threads whose count was never written (e.g. migrated threads). |`
-2. Same section: change the `parentMessage` row note from `Optional. The hydrated parent message; reply count rides on its `tcount`.` to `Optional. The hydrated parent message.`
+
+   ```markdown
+   | `tcount` | number | Non-deleted reply count, capped at 99 — `99` means "99 or more". Always present; `0` also covers threads whose count was never written (e.g. migrated threads). |
+   ```
+
+2. Same section: change the `parentMessage` row note from
+
+   ```markdown
+   Optional. The hydrated parent message; reply count rides on its `tcount`.
+   ```
+
+   to
+
+   ```markdown
+   Optional. The hydrated parent message.
+   ```
+
 3. Same section, JSON example: add `"tcount": 3` to the first item (it matches the embedded `parentMessage.tcount: 3` — place it after `"lastMsgAt"`), and `"tcount": 1` to the second item (after `"lastMsgAt"`).
 4. Verify the derived views need no edit: `docs/client-api/request-reply.md` links to the canonical ThreadListItem schema without restating fields (check around its line 1813) and `docs/client-api/events.md` has no thread.list entry. State the verification result in the report; edit only if a restated field table is actually found.
 5. `docs/design/user-thread-list.md` (around lines 328-329, "Reply count is **not** a separate field..."): replace that bullet with:
-   `- Reply count: originally not a separate field (clients read `parentMessage.TCount`); superseded 2026-08-07 — `tcount` is now lifted onto the item itself (see `docs/superpowers/specs/2026-08-07-thread-list-reply-count-design.md`). The parent's embedded `tcount` remains for backward compatibility.`
-   Also update the §5 enrichment bullet around line 251 (`reply count rides on `parentMessage.TCount` (no separate item field)`) with a matching parenthetical `(since 2026-08-07, also lifted to the item's `tcount`)`.
-6. Spec status: in `docs/superpowers/specs/2026-08-07-thread-list-reply-count-design.md` change `**Status:** Sketch — for review, not implemented` to `**Status:** Approved — implemented` and resolve open question 2 in place: append ` **Resolved: plain `int`.**` to that question.
+
+   ```markdown
+   - Reply count: originally not a separate field (clients read `parentMessage.TCount`); superseded 2026-08-07 — `tcount` is now lifted onto the item itself (see `docs/superpowers/specs/2026-08-07-thread-list-reply-count-design.md`). The parent's embedded `tcount` remains for backward compatibility.
+   ```
+
+   Also update the §5 enrichment bullet around line 251, which reads
+
+   ```markdown
+   reply count rides on `parentMessage.TCount` (no separate item field)
+   ```
+
+   with a matching parenthetical: `(since 2026-08-07, also lifted to the item's tcount)`.
+6. Spec status: in `docs/superpowers/specs/2026-08-07-thread-list-reply-count-design.md` change `**Status:** Sketch — for review, not implemented` to `**Status:** Approved — implemented` and resolve open question 2 in place by appending **Resolved: plain `int`.** to that question.
 
 No tests. `make lint` still runs (markdown untouched by it, but keeps the gate honest). Commit: `docs(client-api): document ThreadListItem.tcount`.
