@@ -3,6 +3,8 @@
 **Date:** 2026-08-07
 **Status:** Approved — implemented
 
+> The "Current implementation" / "What's wrong" sections are the pre-change diagnosis, kept as a dated snapshot; line references are to the pre-change tree.
+
 ## Scope
 
 Return the number of thread replies on each row of the cross-site thread inbox:
@@ -282,7 +284,8 @@ an always-present item-level `tcount` is additive, not breaking.
 ## Open questions
 
 1. **Is the 99 cap acceptable for the inbox badge?** If product wants exact
-   counts, this becomes Option B and is no longer a minor fix.
+   counts, this becomes Option B and is no longer a minor fix. **Resolved: cap
+   accepted — implemented as proposed.**
 2. **`int` or `*int` for the item-level `tcount`?** Proposed: plain `int`,
    always serialized — that is the main ergonomic win, and
    `data-migration/README.md:71` already accepts zero counts for migrated

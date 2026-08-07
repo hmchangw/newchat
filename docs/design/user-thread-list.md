@@ -248,8 +248,8 @@ Aggregation pipeline on `thread_subscriptions`:
 - **Messages** — collect the page's distinct `parentMessageId` ∪ `lastMsgId` and
   hydrate with a **single** batched `GetMessagesByIDs` against `messages_by_id`
   (already exists), local to the site. Attach `parentMessage`/`lastMessage`; the
-  reply count rides on `parentMessage.TCount` (no separate item field; since
-  2026-08-07, also lifted to the item's `tcount`). A thread is included only when
+  reply count rides on `parentMessage.TCount` (originally no separate item field;
+  since 2026-08-07, lifted to the item's `tcount`). A thread is included only when
   **both** bodies hydrate — a row missing either (hard-deleted, or not yet
   replicated) is dropped rather than surfaced half-empty.
   (Edge case: a page whose rows are *all* unhydratable returns empty while
@@ -302,12 +302,12 @@ type ThreadSubscriptionListResponse struct {
 
 ```go
 type ThreadListItem struct {
-    SiteID          string     `json:"siteId"          bson:"siteId"`
-    RoomID          string     `json:"roomId"          bson:"roomId"`
-    RoomName        string     `json:"roomName"        bson:"roomName"`
-    RoomType        RoomType   `json:"roomType"        bson:"roomType"`
-    ThreadRoomID    string     `json:"threadRoomId"    bson:"threadRoomId"`
-    ParentMessageID string     `json:"parentMessageId" bson:"parentMessageId"`
+    SiteID          string   `json:"siteId"          bson:"siteId"`
+    RoomID          string   `json:"roomId"          bson:"roomId"`
+    RoomName        string   `json:"roomName"        bson:"roomName"`
+    RoomType        RoomType `json:"roomType"        bson:"roomType"`
+    ThreadRoomID    string   `json:"threadRoomId"    bson:"threadRoomId"`
+    ParentMessageID string   `json:"parentMessageId" bson:"parentMessageId"`
 
     // subscription state (this user)
     LastSeenAt *int64 `json:"lastSeenAt,omitempty" bson:"lastSeenAt,omitempty"` // UTC ms
@@ -317,9 +317,15 @@ type ThreadListItem struct {
     // thread activity
     LastMsgAt int64 `json:"lastMsgAt" bson:"lastMsgAt"` // UTC ms — the global sort key
 
-    // enriched bodies
-    ParentMessage *Message `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
-    LastMessage   *Message `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
+    // reply count, capped at pkg/threadcount.Cap
+    TCount int `json:"tcount" bson:"tcount"`
+
+    // enriched bodies, carried opaque (pre-marshaled *cassandra.Message)
+    ParentMessage json.RawMessage `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
+    LastMessage   json.RawMessage `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
+
+    // DM counterpart's HR-directory record; DM rows only
+    HRInfo *SubscriptionHRInfo `json:"hrInfo,omitempty" bson:"hrInfo,omitempty"`
 }
 ```
 

@@ -255,20 +255,22 @@ func TestUserService_ListUserThreads_BotDM_AppLookupDegrades(t *testing.T) {
 	assert.Equal(t, "helper.bot", resp.Items[0].RoomName, "degraded app lookup keeps the bot account")
 }
 
-// The aggregator copies leaf rows verbatim: tcount rides through the cross-site
-// merge, the global re-sort, and the per-row enrichment pass untouched — including
-// on the DM/botDM rows that enrichment does rewrite.
+// tcount rides the aggregator verbatim — through the cross-site merge, the global
+// re-sort, and the enrichment pass, including the DM/botDM rows it does rewrite.
 func TestUserService_ListUserThreads_TCountSurvivesAggregation(t *testing.T) {
 	svc, history, users, apps := newThreadSvc(t)
-	rowA := model.ThreadListItem{SiteID: "site-a", ThreadRoomID: "ta1", LastMsgAt: 50, RoomType: model.RoomTypeChannel, TCount: 4}
-	rowB := model.ThreadListItem{SiteID: "site-b", ThreadRoomID: "tb1", LastMsgAt: 40, RoomType: model.RoomTypeDM, RoomName: "bob", TCount: 99}
-	rowC := model.ThreadListItem{SiteID: "site-a", ThreadRoomID: "ta2", LastMsgAt: 30, RoomType: model.RoomTypeBotDM, RoomName: "helper-bot", TCount: 1}
+	rowA := item("site-a", "ta1", 50)
+	rowA.TCount = 4
+	rowB := dmItem("site-b", "tb1", 40, "bob")
+	rowB.TCount = 99
+	rowC := botDMItem("site-a", "ta2", 30, "helper.bot")
+	rowC.TCount = 1
 	expectThreadList(history, "site-a", []model.ThreadListItem{rowA, rowC}, false)
 	expectThreadList(history, "site-b", []model.ThreadListItem{rowB}, false)
 	users.EXPECT().GetHRInfoByAccounts(gomock.Any(), []string{"bob"}).
 		Return(map[string]*model.SubscriptionHRInfo{"bob": {Account: "bob", Name: "鮑勃", EngName: "Bob Chen"}}, nil)
-	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper-bot"}).
-		Return(map[string]*model.App{"helper-bot": {Name: "Helper"}}, nil)
+	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]*model.App{"helper.bot": {Name: "Helper"}}, nil)
 
 	resp, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 10})
 	require.NoError(t, err)
@@ -292,12 +294,14 @@ func TestUserService_ListUserThreads_TCountSurvivesAggregation(t *testing.T) {
 // lookup must not blank the counts or fail the request.
 func TestUserService_ListUserThreads_TCountSurvivesDegradedEnrichment(t *testing.T) {
 	svc, history, users, apps := newThreadSvc(t)
-	dm := model.ThreadListItem{SiteID: "site-a", ThreadRoomID: "td", LastMsgAt: 50, RoomType: model.RoomTypeDM, RoomName: "bob", TCount: 3}
-	bot := model.ThreadListItem{SiteID: "site-a", ThreadRoomID: "tb", LastMsgAt: 40, RoomType: model.RoomTypeBotDM, RoomName: "helper-bot", TCount: 5}
+	dm := dmItem("site-a", "td", 50, "bob")
+	dm.TCount = 3
+	bot := botDMItem("site-a", "tb", 40, "helper.bot")
+	bot.TCount = 5
 	expectThreadList(history, "site-a", []model.ThreadListItem{dm, bot}, false)
 	expectThreadList(history, "site-b", nil, false)
 	users.EXPECT().GetHRInfoByAccounts(gomock.Any(), []string{"bob"}).Return(nil, errors.New("hr down"))
-	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper-bot"}).Return(nil, errors.New("apps down"))
+	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper.bot"}).Return(nil, errors.New("apps down"))
 
 	resp, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 10})
 	require.NoError(t, err, "degraded enrichment must not fail the request")
@@ -306,7 +310,7 @@ func TestUserService_ListUserThreads_TCountSurvivesDegradedEnrichment(t *testing
 	assert.Equal(t, 3, resp.Items[0].TCount, "dm row keeps its tcount when hr lookup fails")
 	assert.Nil(t, resp.Items[0].HRInfo)
 	assert.Equal(t, 5, resp.Items[1].TCount, "botDM row keeps its tcount when app lookup fails")
-	assert.Equal(t, "helper-bot", resp.Items[1].RoomName, "degraded app lookup keeps the bot account")
+	assert.Equal(t, "helper.bot", resp.Items[1].RoomName, "degraded app lookup keeps the bot account")
 }
 
 func ids(items []model.ThreadListItem) []string {
