@@ -11,6 +11,7 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-}
       - ROOM_CREATE_BATCH_SIZE=${ROOM_CREATE_BATCH_SIZE:-100}
+      - MONGO_PAGE_SIZE=${MONGO_PAGE_SIZE:-2000}
       - MAX_WORKERS=${MAX_WORKERS:-8}
     networks:
       - chat-local

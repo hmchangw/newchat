@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -32,7 +33,7 @@ func TestMongoStore_ListAndMark(t *testing.T) {
 
 	store := newMongoStore(db, db)
 
-	got, err := store.ListChatsNeedingRoom(ctx)
+	got, err := store.ListChatsNeedingRoom(ctx, "", 100)
 	require.NoError(t, err)
 	byID := map[string]RoomCreatedRef{}
 	for _, c := range got {
@@ -45,10 +46,54 @@ func TestMongoStore_ListAndMark(t *testing.T) {
 
 	// Clear c1 with the updatedAt we read (compare-and-set matches).
 	require.NoError(t, store.MarkRoomsCreated(ctx, []RoomCreatedRef{byID["c1"]}))
-	after, err := store.ListChatsNeedingRoom(ctx)
+	after, err := store.ListChatsNeedingRoom(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Len(t, after, 1)
 	assert.Equal(t, "c2", after[0].ID)
+}
+
+// TestMongoStore_ListChatsNeedingRoom_Pagination walks the flagged set with
+// limit 2 keyset pages: each page is _id-ascending, bounded below by afterID,
+// capped at limit, and the walk terminates on an empty page.
+func TestMongoStore_ListChatsNeedingRoom_Pagination(t *testing.T) {
+	db := testutil.MongoDB(t, "teamsroom")
+	col := db.Collection("teams_chat")
+	ctx := context.Background()
+	ua := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+
+	docs := make([]any, 0, 5)
+	for _, id := range []string{"c1", "c2", "c3", "c4", "c5"} {
+		docs = append(docs, bson.M{"_id": id, "name": "N-" + id, "siteId": "site-a",
+			"needCreateRoom": true, "updatedAt": ua, "members": []bson.M{}})
+	}
+	_, err := col.InsertMany(ctx, docs)
+	require.NoError(t, err)
+
+	store := newMongoStore(db, db)
+
+	ids := func(chats []model.TeamsChat) []string {
+		out := make([]string, 0, len(chats))
+		for _, c := range chats {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+
+	page1, err := store.ListChatsNeedingRoom(ctx, "", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c1", "c2"}, ids(page1))
+
+	page2, err := store.ListChatsNeedingRoom(ctx, "c2", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c3", "c4"}, ids(page2))
+
+	page3, err := store.ListChatsNeedingRoom(ctx, "c4", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c5"}, ids(page3))
+
+	page4, err := store.ListChatsNeedingRoom(ctx, "c5", 2)
+	require.NoError(t, err)
+	assert.Empty(t, page4)
 }
 
 func TestMongoStore_MarkRoomsCreated_EmptyIsNoop(t *testing.T) {
@@ -78,13 +123,13 @@ func TestMongoStore_MarkRoomsCreated_StaleRefIsNoop(t *testing.T) {
 
 	// Stale updatedAt: CAS misses, flag stays set.
 	require.NoError(t, store.MarkRoomsCreated(ctx, []RoomCreatedRef{{ID: "c1", UpdatedAt: stale}}))
-	got, err := store.ListChatsNeedingRoom(ctx)
+	got, err := store.ListChatsNeedingRoom(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Len(t, got, 1, "stale ref must not clear the flag")
 
 	// Current updatedAt: CAS matches, flag clears.
 	require.NoError(t, store.MarkRoomsCreated(ctx, []RoomCreatedRef{{ID: "c1", UpdatedAt: current}}))
-	after, err := store.ListChatsNeedingRoom(ctx)
+	after, err := store.ListChatsNeedingRoom(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Empty(t, after, "matching ref clears the flag")
 }

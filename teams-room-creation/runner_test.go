@@ -62,7 +62,10 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 		chat("a1", "site-a"), chat("a2", "site-a"), chat("a3", "site-a"),
 		chat("b1", "site-b"),
 	}
-	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(chats, nil)
+	gomock.InOrder(
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 50).Return(chats, nil),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "b1", 50).Return(nil, nil),
+	)
 
 	var markMu sync.Mutex
 	marked := map[string]bool{}
@@ -79,7 +82,7 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 	var mu sync.Mutex
 	var got []captured
 	r := newRunner(store, recorder(&mu, &got, nil), runConfig{
-		BatchSize: 2, MaxWorkers: 4, Now: func() time.Time { return time.UnixMilli(1700) },
+		BatchSize: 2, PageSize: 50, MaxWorkers: 4, Now: func() time.Time { return time.UnixMilli(1700) },
 	})
 	require.NoError(t, r.run(context.Background()))
 
@@ -103,18 +106,94 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 	assert.Len(t, marked, 4)
 }
 
+// TestRunner_PagesUntilEmpty drives two full pages plus the terminating empty
+// page, and asserts each page is fully published before the next page is
+// fetched (the second/third list calls observe all prior publishes).
+func TestRunner_PagesUntilEmpty(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockTeamsChatStore(ctrl)
+
+	var mu sync.Mutex
+	var got []captured
+
+	page1 := []model.TeamsChat{chat("a1", "site-a"), chat("a2", "site-a")}
+	page2 := []model.TeamsChat{chat("a3", "site-a"), chat("b1", "site-b")}
+	gomock.InOrder(
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 2).Return(page1, nil),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "a2", 2).DoAndReturn(
+			func(context.Context, string, int) ([]model.TeamsChat, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				assert.Len(t, got, 1, "page 1 (one batch) must be published before page 2 is fetched")
+				return page2, nil
+			}),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "b1", 2).DoAndReturn(
+			func(context.Context, string, int) ([]model.TeamsChat, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				assert.Len(t, got, 3, "page 2 (two batches) must be published before the final fetch")
+				return nil, nil
+			}),
+	)
+
+	var markMu sync.Mutex
+	marked := map[string]bool{}
+	store.EXPECT().MarkRoomsCreated(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, refs []RoomCreatedRef) error {
+			markMu.Lock()
+			defer markMu.Unlock()
+			for _, r := range refs {
+				marked[r.ID] = true
+			}
+			return nil
+		}).AnyTimes()
+
+	r := newRunner(store, recorder(&mu, &got, nil), runConfig{
+		BatchSize: 10, PageSize: 2, MaxWorkers: 4, Now: time.Now,
+	})
+	require.NoError(t, r.run(context.Background()))
+	assert.Len(t, got, 3, "page 1: 1 batch (site-a); page 2: 2 batches (site-a, site-b)")
+	assert.True(t, marked["a1"] && marked["a2"] && marked["a3"] && marked["b1"])
+	assert.Len(t, marked, 4)
+}
+
+// TestRunner_CursorAdvancesPastFailedBatch: a failed publish leaves its chats
+// flagged for the next CronJob run, but the page cursor still advances so the
+// current run terminates instead of refetching the same page.
+func TestRunner_CursorAdvancesPastFailedBatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockTeamsChatStore(ctrl)
+	gomock.InOrder(
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 1).Return(
+			[]model.TeamsChat{chat("a1", "site-a")}, nil),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "a1", 1).Return(nil, nil),
+	)
+	// Publish fails, so MarkRoomsCreated must never be called.
+
+	var mu sync.Mutex
+	var got []captured
+	r := newRunner(store, recorder(&mu, &got, map[string]bool{subject.RoomTeamsCanonicalCreate("site-a"): true}), runConfig{
+		BatchSize: 10, PageSize: 1, MaxWorkers: 2, Now: time.Now,
+	})
+	require.NoError(t, r.run(context.Background()))
+	assert.Empty(t, got)
+}
+
 func TestRunner_FailedBatchNotFlipped(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockTeamsChatStore(ctrl)
-	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(
-		[]model.TeamsChat{chat("a1", "site-a"), chat("b1", "site-b")}, nil)
+	gomock.InOrder(
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 50).Return(
+			[]model.TeamsChat{chat("a1", "site-a"), chat("b1", "site-b")}, nil),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "b1", 50).Return(nil, nil),
+	)
 	// Only site-a's chats may be flipped; site-b publish fails.
 	store.EXPECT().MarkRoomsCreated(gomock.Any(), []RoomCreatedRef{{ID: "a1", UpdatedAt: chatUpdatedAt}}).Return(nil)
 
 	var mu sync.Mutex
 	var got []captured
 	r := newRunner(store, recorder(&mu, &got, map[string]bool{subject.RoomTeamsCanonicalCreate("site-b"): true}), runConfig{
-		BatchSize: 10, MaxWorkers: 2, Now: time.Now,
+		BatchSize: 10, PageSize: 50, MaxWorkers: 2, Now: time.Now,
 	})
 	require.NoError(t, r.run(context.Background()))
 	assert.Len(t, got, 1)
@@ -124,13 +203,16 @@ func TestRunner_FailedBatchNotFlipped(t *testing.T) {
 func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockTeamsChatStore(ctrl)
-	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(
-		[]model.TeamsChat{chat("a1", "site-a")}, nil)
+	gomock.InOrder(
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 50).Return(
+			[]model.TeamsChat{chat("a1", "site-a")}, nil),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "a1", 50).Return(nil, nil),
+	)
 	store.EXPECT().MarkRoomsCreated(gomock.Any(), []RoomCreatedRef{{ID: "a1", UpdatedAt: chatUpdatedAt}}).Return(errors.New("mark boom"))
 
 	var mu sync.Mutex
 	var got []captured
-	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 10, MaxWorkers: 2, Now: time.Now})
+	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 10, PageSize: 50, MaxWorkers: 2, Now: time.Now})
 	require.NoError(t, r.run(context.Background())) // mark failure logged, not fatal
 	assert.Len(t, got, 1)                           // publish still happened
 	assert.Equal(t, subject.RoomTeamsCanonicalCreate("site-a"), got[0].subj)
@@ -139,11 +221,11 @@ func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
 func TestRunner_EmptyListNoPublish(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockTeamsChatStore(ctrl)
-	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(nil, nil)
+	store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 50).Return(nil, nil)
 
 	var mu sync.Mutex
 	var got []captured
-	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 5, MaxWorkers: 2, Now: time.Now})
+	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 5, PageSize: 50, MaxWorkers: 2, Now: time.Now})
 	require.NoError(t, r.run(context.Background()))
 	assert.Empty(t, got)
 }
@@ -151,10 +233,29 @@ func TestRunner_EmptyListNoPublish(t *testing.T) {
 func TestRunner_ListErrorReturned(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockTeamsChatStore(ctrl)
-	store.EXPECT().ListChatsNeedingRoom(gomock.Any()).Return(nil, errors.New("db down"))
+	store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 50).Return(nil, errors.New("db down"))
 
-	r := newRunner(store, recorder(new(sync.Mutex), &[]captured{}, nil), runConfig{BatchSize: 5, MaxWorkers: 2, Now: time.Now})
+	r := newRunner(store, recorder(new(sync.Mutex), &[]captured{}, nil), runConfig{BatchSize: 5, PageSize: 50, MaxWorkers: 2, Now: time.Now})
 	require.Error(t, r.run(context.Background()))
+}
+
+// TestRunner_ListErrorOnLaterPageReturned: a list failure mid-run aborts with
+// an error; pages already processed keep their published batches.
+func TestRunner_ListErrorOnLaterPageReturned(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockTeamsChatStore(ctrl)
+	gomock.InOrder(
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "", 1).Return(
+			[]model.TeamsChat{chat("a1", "site-a")}, nil),
+		store.EXPECT().ListChatsNeedingRoom(gomock.Any(), "a1", 1).Return(nil, errors.New("db down")),
+	)
+	store.EXPECT().MarkRoomsCreated(gomock.Any(), []RoomCreatedRef{{ID: "a1", UpdatedAt: chatUpdatedAt}}).Return(nil)
+
+	var mu sync.Mutex
+	var got []captured
+	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 5, PageSize: 1, MaxWorkers: 2, Now: time.Now})
+	require.Error(t, r.run(context.Background()))
+	assert.Len(t, got, 1, "page 1 was published before the failing fetch")
 }
 
 func TestBuildEvent_MapsMembers(t *testing.T) {

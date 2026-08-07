@@ -1,9 +1,10 @@
 // Command teams-room-creation is a run-to-completion job (k8s CronJob) that
 // turns Teams chats flagged needCreateRoom=true into room-canonical NATS
-// events. It lists every such teams_chat, groups them by siteId, publishes each
-// group in batches to chat.room.canonical.{siteId}.teams.create, and clears the
-// flag for each batch that JetStream acknowledges. One global instance serves
-// the whole federation.
+// events. It walks the flagged teams_chat set in keyset pages of
+// MONGO_PAGE_SIZE; each page is grouped by siteId, published in batches to
+// chat.room.canonical.{siteId}.teams.create, and fully drained before the next
+// page is fetched, with the flag cleared for each batch that JetStream
+// acknowledges. One global instance serves the whole federation.
 package main
 
 import (
@@ -81,6 +82,7 @@ func run() error {
 	store := newMongoStore(readClient.Database(cfg.MongoDB), writeClient.Database(cfg.MongoDB))
 	r := newRunner(store, newJetStreamPublisher(js), runConfig{
 		BatchSize:  cfg.BatchSize,
+		PageSize:   cfg.PageSize,
 		MaxWorkers: cfg.MaxWorkers,
 		Now:        time.Now,
 	})

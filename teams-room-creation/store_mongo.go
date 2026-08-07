@@ -26,16 +26,24 @@ func newMongoStore(readDB, writeDB *mongo.Database) *mongoStore {
 	}
 }
 
-// ListChatsNeedingRoom returns every teams_chat with needCreateRoom=true,
-// projected to exactly the fields the event needs. Served by the read client.
-func (s *mongoStore) ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsChat, error) {
-	// Stable _id sort so batch composition is deterministic across runs.
-	// updatedAt is carried as the compare-and-set token for MarkRoomsCreated.
-	chats, err := s.readChats.FindMany(ctx, bson.M{"needCreateRoom": true},
+// ListChatsNeedingRoom returns one _id-ascending keyset page of at most limit
+// teams_chat docs with needCreateRoom=true and _id > afterID ("" means first
+// page), projected to exactly the fields the event needs. Served by the read
+// client.
+func (s *mongoStore) ListChatsNeedingRoom(ctx context.Context, afterID string, limit int) ([]model.TeamsChat, error) {
+	filter := bson.M{"needCreateRoom": true}
+	if afterID != "" {
+		filter["_id"] = bson.M{"$gt": afterID}
+	}
+	// The _id sort is load-bearing: it is the keyset cursor order, and keeps
+	// page/batch composition deterministic across runs. updatedAt is carried as
+	// the compare-and-set token for MarkRoomsCreated.
+	chats, err := s.readChats.FindMany(ctx, filter,
 		mongoutil.WithProjection(bson.M{
 			"_id": 1, "name": 1, "members": 1, "createdDateTime": 1, "siteId": 1, "updatedAt": 1,
 		}),
-		mongoutil.WithSort(bson.D{{Key: "_id", Value: 1}}))
+		mongoutil.WithSort(bson.D{{Key: "_id", Value: 1}}),
+		mongoutil.WithLimit(int64(limit)))
 	if err != nil {
 		return nil, fmt.Errorf("list chats needing room: %w", err)
 	}

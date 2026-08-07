@@ -8,7 +8,7 @@ import (
 )
 
 func baseConfig() Config {
-	return Config{BatchSize: 100, MaxWorkers: 8}
+	return Config{BatchSize: 100, PageSize: 2000, MaxWorkers: 8}
 }
 
 func TestValidateConfig(t *testing.T) {
@@ -22,6 +22,8 @@ func TestValidateConfig(t *testing.T) {
 		{"negative batch size", func(c *Config) { c.BatchSize = -1 }, true},
 		{"zero workers", func(c *Config) { c.MaxWorkers = 0 }, true},
 		{"negative workers", func(c *Config) { c.MaxWorkers = -3 }, true},
+		{"zero page size", func(c *Config) { c.PageSize = 0 }, true},
+		{"negative page size", func(c *Config) { c.PageSize = -1 }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

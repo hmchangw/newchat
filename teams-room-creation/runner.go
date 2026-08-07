@@ -16,6 +16,7 @@ import (
 // event Timestamp.
 type runConfig struct {
 	BatchSize  int
+	PageSize   int
 	MaxWorkers int
 	Now        func() time.Time
 }
@@ -39,18 +40,36 @@ type batch struct {
 	chats  []model.TeamsChat
 }
 
-// run executes one pass. It returns an error only when the initial list fails;
-// per-batch publish failures are logged and leave those chats flagged for the
-// next CronJob run.
+// run executes one pass, walking the flagged set in keyset pages of PageSize:
+// each page is grouped/chunked and fully published (all workers joined) before
+// the next page is fetched, so memory stays bounded by one page. It returns an
+// error only when a page list fails; per-batch publish failures are logged and
+// leave those chats flagged for the next CronJob run — the cursor still
+// advances past them, so the run always terminates.
 func (r *runner) run(ctx context.Context) error {
-	chats, err := r.store.ListChatsNeedingRoom(ctx)
-	if err != nil {
-		return fmt.Errorf("list chats needing room: %w", err)
+	afterID := ""
+	total := 0
+	for {
+		chats, err := r.store.ListChatsNeedingRoom(ctx, afterID, r.cfg.PageSize)
+		if err != nil {
+			return fmt.Errorf("list chats needing room: %w", err)
+		}
+		if len(chats) == 0 {
+			break
+		}
+		r.runPage(ctx, chats)
+		afterID = chats[len(chats)-1].ID
+		total += len(chats)
 	}
-	if len(chats) == 0 {
+	if total == 0 {
 		slog.InfoContext(ctx, "no chats need room creation")
-		return nil
 	}
+	return nil
+}
+
+// runPage publishes one page's worth of chats: group by site, chunk into event
+// batches, publish under the MaxWorkers semaphore, and wait for all of them.
+func (r *runner) runPage(ctx context.Context, chats []model.TeamsChat) {
 	batches := planBatches(chats, r.cfg.BatchSize)
 	slog.InfoContext(ctx, "publishing room-creation batches",
 		"chats", len(chats), "batches", len(batches))
@@ -67,7 +86,6 @@ func (r *runner) run(ctx context.Context) error {
 		}(b)
 	}
 	wg.Wait()
-	return nil
 }
 
 // publishBatch marshals and publishes one batch, then clears the flag for its

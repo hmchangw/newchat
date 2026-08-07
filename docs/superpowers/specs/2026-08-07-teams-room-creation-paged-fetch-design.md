@@ -98,6 +98,8 @@ ListChatsNeedingRoom(ctx context.Context, afterID string, limit int) ([]model.Te
   a failed batch, existing batch/flag tests updated to the paged signature.
 - `config_test.go`: PageSize validation cases.
 - `store_mongo_test.go` (integration): pagination — seed >limit flagged chats,
-  assert page contents, `afterID` bound, and limit; existing tests updated.
-- `integration_test.go` e2e: updated to the new runConfig; add a page-size-1
-  multi-page pass asserting all chats still publish and clear.
+  assert page contents, `afterID` bound, limit, and empty-page termination;
+  existing tests updated.
+- `integration_test.go` e2e: updated to the new runConfig (single-page pass);
+  multi-page behavior is covered by the runner unit tests plus the store
+  pagination integration test.

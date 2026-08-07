@@ -24,10 +24,13 @@ type RoomCreatedRef struct {
 // *mongoStore, whose reads and writes go to separate clients (secondary-read,
 // primary-write).
 type TeamsChatStore interface {
-	// ListChatsNeedingRoom returns every teams_chat with needCreateRoom=true,
-	// projected to the fields the event and the compare-and-set clear need
-	// (_id, name, members, createdDateTime, siteId, updatedAt).
-	ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsChat, error)
+	// ListChatsNeedingRoom returns one _id-ascending page of at most limit
+	// teams_chat docs with needCreateRoom=true and _id > afterID (afterID ""
+	// means no lower bound — the first page), projected to the fields the event
+	// and the compare-and-set clear need (_id, name, members, createdDateTime,
+	// siteId, updatedAt). The caller pages by passing the last _id of the
+	// previous page.
+	ListChatsNeedingRoom(ctx context.Context, afterID string, limit int) ([]model.TeamsChat, error)
 	// MarkRoomsCreated clears needCreateRoom for each ref whose updatedAt still
 	// matches — a compare-and-set so a chat re-flagged by member-sync since it
 	// was listed is left for the next run.

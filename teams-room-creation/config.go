@@ -20,6 +20,9 @@ type Config struct {
 	// BatchSize is the maximum number of chats packed into one room-canonical
 	// event. Each site's flagged chats are chunked into batches of this size.
 	BatchSize int `env:"ROOM_CREATE_BATCH_SIZE" envDefault:"100"`
+	// PageSize is the maximum number of flagged chats fetched from Mongo per
+	// keyset page; each page is fully published before the next is fetched.
+	PageSize int `env:"MONGO_PAGE_SIZE" envDefault:"2000"`
 	// MaxWorkers bounds concurrent batch publishes across all site groups.
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
 }
@@ -32,6 +35,9 @@ type Config struct {
 func validateConfig(cfg Config) error {
 	if cfg.BatchSize <= 0 {
 		return fmt.Errorf("invalid config: ROOM_CREATE_BATCH_SIZE must be positive")
+	}
+	if cfg.PageSize <= 0 {
+		return fmt.Errorf("invalid config: MONGO_PAGE_SIZE must be positive")
 	}
 	if cfg.MaxWorkers <= 0 {
 		return fmt.Errorf("invalid config: MAX_WORKERS must be positive")

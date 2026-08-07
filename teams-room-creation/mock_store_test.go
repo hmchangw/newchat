@@ -42,18 +42,18 @@ func (m *MockTeamsChatStore) EXPECT() *MockTeamsChatStoreMockRecorder {
 }
 
 // ListChatsNeedingRoom mocks base method.
-func (m *MockTeamsChatStore) ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsChat, error) {
+func (m *MockTeamsChatStore) ListChatsNeedingRoom(ctx context.Context, afterID string, limit int) ([]model.TeamsChat, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListChatsNeedingRoom", ctx)
+	ret := m.ctrl.Call(m, "ListChatsNeedingRoom", ctx, afterID, limit)
 	ret0, _ := ret[0].([]model.TeamsChat)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ListChatsNeedingRoom indicates an expected call of ListChatsNeedingRoom.
-func (mr *MockTeamsChatStoreMockRecorder) ListChatsNeedingRoom(ctx any) *gomock.Call {
+func (mr *MockTeamsChatStoreMockRecorder) ListChatsNeedingRoom(ctx, afterID, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListChatsNeedingRoom", reflect.TypeOf((*MockTeamsChatStore)(nil).ListChatsNeedingRoom), ctx)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListChatsNeedingRoom", reflect.TypeOf((*MockTeamsChatStore)(nil).ListChatsNeedingRoom), ctx, afterID, limit)
 }
 
 // MarkRoomsCreated mocks base method.

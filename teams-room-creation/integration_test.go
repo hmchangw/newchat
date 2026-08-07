@@ -87,7 +87,7 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), rc.Name) })
 
 	store := newMongoStore(db, db)
-	r := newRunner(store, newJetStreamPublisher(js), runConfig{BatchSize: 10, MaxWorkers: 2, Now: time.Now})
+	r := newRunner(store, newJetStreamPublisher(js), runConfig{BatchSize: 10, PageSize: 10, MaxWorkers: 2, Now: time.Now})
 	require.NoError(t, r.run(ctx))
 
 	// Both seeded chats share one site, so exactly one event should carry both.
@@ -121,7 +121,7 @@ func TestEndToEnd_PublishesAndClearsFlag(t *testing.T) {
 	assert.Empty(t, byID["c2"].Members)
 
 	// Flags cleared: no chats remain flagged for room creation.
-	remaining, err := store.ListChatsNeedingRoom(ctx)
+	remaining, err := store.ListChatsNeedingRoom(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Empty(t, remaining)
 }
