@@ -3221,9 +3221,10 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 			return capturedSubs[0], capturedSubs[1], nil
 		})
 
-	// finishCreateRoom calls resolveSubUpdateRoomName per sub; the human sub has
+	// finishCreateRoom calls resolveSubUpdateCounterpart per sub; the human sub has
 	// Name="helper.bot" (RoomTypeBotDM), so GetApp is invoked once.
-	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+	// Assistant left nil to match the real store's {"name":1} projection.
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil)
 
 	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-1").Return(nil)
 
@@ -3260,6 +3261,9 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Helper Bot", humanEvt.RoomName)
+	// ...and the app it is now talking to, so the client renders the row without a refetch.
+	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-helper", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	assert.Nil(t, humanEvt.HRInfo)
 
 	// bot (helper.bot) subscription.update must carry the human's display name,
 	// delivered on the bot's ENCODED per-user subject (helper.bot → helper_bot).
@@ -3274,6 +3278,8 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Alice A 艾麗斯", botEvt.RoomName)
+	assert.Equal(t, &model.CounterpartHRInfo{Account: "alice", ChineseName: "艾麗斯", EngName: "Alice A"}, botEvt.HRInfo)
+	assert.Nil(t, botEvt.AppInfo)
 }
 
 // ---- Task 34: Channel branch tests ----
@@ -3948,6 +3954,11 @@ func TestHandleSyncCreateDM_SelfDM(t *testing.T) {
 	assert.Nil(t, evt.Subscription.Room.PrivateKey, "self-DM rooms are keyless — no key fields")
 	require.NotNil(t, evt.Subscription.Room.CrossSite)
 	assert.False(t, *evt.Subscription.Room.CrossSite)
+
+	// A self-DM's counterpart is the recipient, so the event carries their own record
+	// — a documented contract (docs/client-api.md) with no other test behind it.
+	assert.Equal(t, &model.CounterpartHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice"}, evt.HRInfo)
+	assert.Nil(t, evt.AppInfo)
 }
 
 func TestHandleSyncCreateDM_SelfDM_StoreErrors(t *testing.T) {
@@ -6876,9 +6887,10 @@ func TestHandler_bustRoomMeta_FailOpen(t *testing.T) {
 	assert.Equal(t, []string{roommetacache.MetaKey("r123")}, fake.dels)
 }
 
-func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
+func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 	alice := &model.User{Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}
 	users := map[string]*model.User{"alice": alice}
+	aliceHR := &model.CounterpartHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice"}
 
 	tests := []struct {
 		name      string
@@ -6886,9 +6898,11 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 		userMap   map[string]*model.User
 		setupMock func(s *MockSubscriptionStore)
 		want      string
+		wantHR    *model.CounterpartHRInfo
+		wantApp   *model.CounterpartAppInfo
 	}{
 		{
-			name: "channel uses sub.Name",
+			name: "channel uses sub.Name and carries no counterpart",
 			sub:  model.Subscription{RoomType: model.RoomTypeChannel, Name: "general"},
 			want: "general",
 		},
@@ -6897,31 +6911,68 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 			sub:     model.Subscription{RoomType: model.RoomTypeDM, Name: "alice"},
 			userMap: users,
 			want:    "Alice 愛麗絲",
+			wantHR:  aliceHR,
 		},
 		{
-			name:    "dm counterpart missing from map falls back to account",
+			name:    "dm counterpart missing from map falls back to account and omits hrInfo",
 			sub:     model.Subscription{RoomType: model.RoomTypeDM, Name: "carol"},
 			userMap: users,
 			want:    "carol",
 		},
 		{
-			name: "botDM resolves app name",
-			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
-			setupMock: func(s *MockSubscriptionStore) {
-				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
-			},
-			want: "Helper Bot",
+			// Self-DM: buildSelfDMSub names the sub after the owner, so the "counterpart"
+			// is the recipient. A cp == sub.User.Account guard would break the documented
+			// contract without this row.
+			name:    "self-DM carries the recipient's own hrInfo",
+			sub:     model.Subscription{RoomType: model.RoomTypeDM, Name: "alice", User: model.SubscriptionUser{Account: "alice"}},
+			userMap: users,
+			want:    "Alice 愛麗絲",
+			wantHR:  aliceHR,
 		},
 		{
-			name: "botDM GetApp error falls back to bot account",
-			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "broken.bot"},
+			// Degraded directory: user exists but has no names.
+			name:    "dm counterpart with no names still carries hrInfo",
+			sub:     model.Subscription{RoomType: model.RoomTypeDM, Name: "dave"},
+			userMap: map[string]*model.User{"dave": {Account: "dave"}},
+			want:    "dave",
+			wantHR:  &model.CounterpartHRInfo{Account: "dave"},
+		},
+		{
+			// Assistant nil as in production; assistantName comes from the queried account.
+			name: "botDM resolves app name and appInfo",
+			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
+			setupMock: func(s *MockSubscriptionStore) {
+				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
+			},
+			want:    "Helper Bot",
+			wantApp: &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"},
+		},
+		{
+			// The bot IS in userByAccount in production (FindUsersByAccounts returns it),
+			// so this pins that a failed app lookup does NOT silently fall back to the
+			// user map — a bot counterpart must never yield hrInfo.
+			name:    "botDM GetApp error omits appInfo and does not fall back to the user map",
+			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "broken.bot"},
+			userMap: map[string]*model.User{"broken.bot": {Account: "broken.bot", EngName: "Broken Bot"}},
 			setupMock: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetApp(gomock.Any(), "broken.bot").Return(nil, ErrAppNotFound)
 			},
 			want: "broken.bot",
 		},
 		{
-			name: "botDM GetApp infra error falls back to bot account",
+			// IsBot beats the map: a .bot counterpart present in userByAccount still
+			// takes the app path, never the human one.
+			name:    "botDM bot counterpart present in the map still resolves as an app",
+			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
+			userMap: map[string]*model.User{"helper.bot": {Account: "helper.bot", EngName: "Helper Bot User"}},
+			setupMock: func(s *MockSubscriptionStore) {
+				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-9", Name: "Helper Bot"}, nil)
+			},
+			want:    "Helper Bot",
+			wantApp: &model.CounterpartAppInfo{ID: "app-9", Name: "Helper Bot", AssistantName: "helper.bot"},
+		},
+		{
+			name: "botDM GetApp infra error falls back to bot account and omits appInfo",
 			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "flaky.bot"},
 			setupMock: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetApp(gomock.Any(), "flaky.bot").Return(nil, context.DeadlineExceeded)
@@ -6929,30 +6980,34 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 			want: "flaky.bot",
 		},
 		{
-			name: "botDM empty app name falls back to bot account",
+			name: "botDM empty app name falls back for roomName but still carries appInfo",
 			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "nameless.bot"},
 			setupMock: func(s *MockSubscriptionStore) {
-				s.EXPECT().GetApp(gomock.Any(), "nameless.bot").Return(&model.App{Name: ""}, nil)
+				s.EXPECT().GetApp(gomock.Any(), "nameless.bot").Return(&model.App{ID: "app-3", Name: ""}, nil)
 			},
-			want: "nameless.bot",
+			want:    "nameless.bot",
+			wantApp: &model.CounterpartAppInfo{ID: "app-3", Name: "", AssistantName: "nameless.bot"},
 		},
 		{
 			name:    "botDM bot-side sub resolves human from map",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "alice"},
 			userMap: users,
 			want:    "Alice 愛麗絲",
+			wantHR:  aliceHR,
 		},
 		{
 			name:    "botDM p_ counterpart resolves as a user from map (has a user record)",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_admin"},
 			userMap: map[string]*model.User{"p_admin": {Account: "p_admin", EngName: "Pat", ChineseName: "派特"}},
 			want:    "Pat 派特",
+			wantHR:  &model.CounterpartHRInfo{Account: "p_admin", ChineseName: "派特", EngName: "Pat"},
 		},
 		{
 			name:    "botDM platform-admin pseudo-account resolves via user map, not GetApp",
 			sub:     model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_adminsiteA"},
 			userMap: map[string]*model.User{"p_adminsiteA": {Account: "p_adminsiteA", EngName: "Admin", ChineseName: "管理"}},
 			want:    "Admin 管理",
+			wantHR:  &model.CounterpartHRInfo{Account: "p_adminsiteA", ChineseName: "管理", EngName: "Admin"},
 		},
 		{
 			name:    "botDM p_ counterpart missing from map falls back to account",
@@ -6970,8 +7025,10 @@ func TestHandler_resolveSubUpdateRoomName(t *testing.T) {
 				tt.setupMock(store)
 			}
 			h := &Handler{store: store}
-			got := h.resolveSubUpdateRoomName(context.Background(), &tt.sub, tt.userMap)
+			got, hr, app := h.resolveSubUpdateCounterpart(context.Background(), &tt.sub, tt.userMap)
 			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantHR, hr)
+			assert.Equal(t, tt.wantApp, app)
 		})
 	}
 }
@@ -7041,6 +7098,64 @@ func TestServerCreateDM_BotDM_SetsAppNameForHuman(t *testing.T) {
 
 	assert.Equal(t, "Helper Bot", decodeSubUpdate(t, capture.captured, "alice").RoomName)
 	assert.Equal(t, "Alice", decodeSubUpdate(t, capture.captured, "helper.bot").RoomName)
+}
+
+// The "added" event must identify the counterpart so the client renders the
+// sidebar row without a subscription.list refetch.
+func TestServerCreateDM_DM_SetsCounterpartHRInfo(t *testing.T) {
+	h, store, capture := newSyncDMTestHandler(t)
+
+	requester := &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛麗絲"}
+	other := &model.User{ID: "u-bob", Account: "bob", SiteID: "site-a", EngName: "Bob Chan", ChineseName: "陳大文"}
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{*requester, *other}, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().FindDMSubscriptionPair(gomock.Any(), gomock.Any(), "alice").Return(
+		&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomType: model.RoomTypeDM, Name: "bob"},
+		&model.Subscription{User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}, RoomType: model.RoomTypeDM, Name: "alice"},
+		nil)
+
+	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeDM, RequesterAccount: "alice", OtherAccount: "bob"}
+	_, err := h.serverCreateDM(dmCtx(), req)
+	require.NoError(t, err)
+
+	// Each side gets the *other* person's HR record.
+	aliceEvt := decodeSubUpdate(t, capture.captured, "alice")
+	assert.Equal(t, &model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"}, aliceEvt.HRInfo)
+	assert.Nil(t, aliceEvt.AppInfo, "human counterpart carries no appInfo")
+
+	bobEvt := decodeSubUpdate(t, capture.captured, "bob")
+	assert.Equal(t, &model.CounterpartHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice"}, bobEvt.HRInfo)
+	assert.Nil(t, bobEvt.AppInfo)
+}
+
+func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
+	h, store, capture := newSyncDMTestHandler(t)
+
+	requester := &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛麗絲"}
+	bot := &model.User{ID: "u-bot", Account: "helper.bot", SiteID: "site-a"}
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{*requester, *bot}, nil)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().FindDMSubscriptionPair(gomock.Any(), gomock.Any(), "alice").Return(
+		&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
+		&model.Subscription{User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot"}, RoomType: model.RoomTypeBotDM, Name: "alice"},
+		nil)
+	// Assistant left nil to match the real store's {"name":1} projection.
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
+
+	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeBotDM, RequesterAccount: "alice", OtherAccount: "helper.bot"}
+	_, err := h.serverCreateDM(dmCtx(), req)
+	require.NoError(t, err)
+
+	// Human side sees the app; bot side sees the human.
+	humanEvt := decodeSubUpdate(t, capture.captured, "alice")
+	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	assert.Nil(t, humanEvt.HRInfo, "bot counterpart carries no hrInfo")
+
+	botEvt := decodeSubUpdate(t, capture.captured, "helper.bot")
+	assert.Equal(t, &model.CounterpartHRInfo{Account: "alice", ChineseName: "愛麗絲", EngName: "Alice"}, botEvt.HRInfo)
+	assert.Nil(t, botEvt.AppInfo)
 }
 
 func TestSubscriptionRoomFor(t *testing.T) {

@@ -1268,6 +1268,8 @@ Shared by Add Members, Remove Member, and Update Member Role.
 | `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
 | `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
+| `hrInfo` | [CounterpartHRInfo](#counterparthrinfo) | The DM counterpart's HR record, so the client can render the new sidebar row without a `subscription.list` refetch. Sent on `added` `dm` / `botDM` events when the counterpart account does **not** end in `.bot` — i.e. to both sides of a `dm`, and to the bot's own copy of a `botDM`. On a self-DM (note-to-self) the counterpart is the recipient, so the event carries their own record. Omitted on `channel` / `discussion` rooms and when the user lookup missed. |
+| `appInfo` | [CounterpartAppInfo](#counterpartappinfo) | The counterpart's app record, sent on `added` `botDM` events when the counterpart account ends in `.bot` — i.e. to the human member. Mutually exclusive with `hrInfo`; omitted when the app lookup missed. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is `omitempty`: set on `added` / `role_updated`, omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
@@ -1303,6 +1305,40 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 }
 ```
 
+On a newly created **DM** the event additionally carries the counterpart's `hrInfo` — everything the client needs to render the sidebar row on its own:
+
+```json
+{
+  "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+  "subscription": {
+    "id": "01970a4f8c2d7c9a01970a4f8c2d7c9c",
+    "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+    "roomId": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+    "roomType": "dm",
+    "siteId": "siteA",
+    "roles": null,
+    "name": "bob",
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": { "siteId": "siteA", "crossSite": false, "userCount": 2 }
+  },
+  "action": "added",
+  "roomName": "Bob Chan 陳大文",
+  "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" },
+  "timestamp": 1778054483000
+}
+```
+
+For a **botDM**, the human member's event carries `appInfo` instead (the bot's own copy of the event carries the human's `hrInfo`):
+
+```json
+{
+  "action": "added",
+  "roomName": "Helper Bot",
+  "appInfo": { "id": "01970a4f8c2d7c9aA1", "name": "Helper Bot", "assistantName": "helper.bot" },
+  "timestamp": 1778054483000
+}
+```
+
 **3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Routed on the room's namespace exactly like `chat.room.{roomID}.event` — pick the subject by the room's `crossSite` flag (`chat.local.room.{roomID}.event.member` when `crossSite: false`, `chat.room.{roomID}.event.member` when `crossSite: true`/unknown). Delivered to clients subscribed to the room on that namespace.
@@ -1324,6 +1360,28 @@ The event carries no separate account list — member identities are in `members
 
 > [!NOTE]
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
+
+###### CounterpartHRInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | Counterpart's account. |
+| `chineseName` | string | Counterpart's native (Chinese) name. Omitted when empty. |
+| `engName` | string | Counterpart's English name. Omitted when empty. |
+
+> Both name fields are `omitempty`, so a directory record with neither yields `{"account": "..."}` alone — and `roomName` then falls back to the account.
+>
+> Same wire shape as the search hit's [MessageHRInfo](#messagehrinfo). The key is `chineseName` here, whereas [SubscriptionHRInfo](#subscriptionhrinfo) — the `hrInfo` nested on a `subscription.list` DM row — still uses the legacy `name`.
+>
+> **This divergence is deliberate.** PR #165 scoped the `chineseName` rekey to "search response only; other payloads untouched", deliberately leaving `subscription.list` on the legacy key. New and reshaped surfaces take `chineseName`; existing ones are not rekeyed. A client must therefore **not** reuse one `hrInfo` parser across the event and the list — it would silently drop the name on one of them.
+
+###### CounterpartAppInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | App ID. |
+| `name` | string | App display name. Empty string when the app document has no name — `roomName` then falls back to the bot account. |
+| `assistantName` | string | The bot account the app answers on. |
 
 ##### Triggered events — error path
 

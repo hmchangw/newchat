@@ -106,6 +106,8 @@ Two shapes exist — discriminated by `action`:
 | `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
 | `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. |
+| `hrInfo` | [CounterpartHRInfo](../client-api.md#counterparthrinfo) | `{account, chineseName, engName}` — the DM counterpart's HR record, so a newly created DM renders from this event alone. Sent on `added` `dm` / `botDM` when the counterpart account does **not** end in `.bot`; on a self-DM it carries the recipient's own record. Both name fields are `omitempty`. Omitted on `channel` / `discussion` rooms and on a lookup miss. |
+| `appInfo` | [CounterpartAppInfo](../client-api.md#counterpartappinfo) | `{id, name, assistantName}` — the counterpart's app record, sent on `added` `botDM` when the counterpart account ends in `.bot`. `name` is empty when the app document has none, and `roomName` then falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -135,6 +137,30 @@ Two shapes exist — discriminated by `action`:
   },
   "action": "added",
   "roomName": "engineering-announcements",
+  "timestamp": 1778054483000
+}
+```
+
+A newly created **DM** carries the counterpart's `hrInfo`; a **botDM** carries `appInfo`
+on the human member's copy (the bot's copy carries the human's `hrInfo`):
+
+```json
+{
+  "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+  "subscription": {
+    "id": "01970a4f8c2d7c9a01970a4f8c2d7c9c",
+    "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+    "roomId": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+    "roomType": "dm",
+    "siteId": "siteA",
+    "roles": null,
+    "name": "bob",
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": { "siteId": "siteA", "crossSite": false, "userCount": 2 }
+  },
+  "action": "added",
+  "roomName": "Bob Chan 陳大文",
+  "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" },
   "timestamp": 1778054483000
 }
 ```

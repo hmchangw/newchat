@@ -2398,6 +2398,10 @@ func TestMongoStore_GetApp_Integration(t *testing.T) {
 	app, err := store.GetApp(ctx, "helper.bot")
 	require.NoError(t, err)
 	assert.Equal(t, "Helper Bot", app.Name)
+	// Both projected fields feed appInfo; dropping _id would ship appInfo.id empty.
+	assert.Equal(t, "app1", app.ID)
+	// Not projected despite being in the document — appInfo.assistantName relies on this.
+	assert.Nil(t, app.Assistant)
 
 	_, err = store.GetApp(ctx, "missing.bot")
 	assert.ErrorIs(t, err, ErrAppNotFound)
