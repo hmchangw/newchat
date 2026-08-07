@@ -739,3 +739,26 @@ func TestAppSubscriptionRoundTrip_Integration(t *testing.T) {
 		assert.True(t, sub.Muted)
 	})
 }
+
+// Every persisted subscription field must survive the list path's inclusion
+// projection — origin (subscription provenance, e.g. Teams migration) is
+// json:"-" so nothing downstream catches its loss.
+func TestAggregateSubscriptions_OriginFieldRoundTrip_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC()
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-orig", "name": "Orig", "siteId": "site-a", "userCount": 1, "lastMsgAt": t0},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "s-orig", "u": bson.M{"_id": "u-orig", "account": "orig"}, "roomId": "r-orig",
+			"name": "Orig", "roomType": "channel", "siteId": "site-a", "origin": "teams"},
+	)
+
+	page, err := r.AggregateSubscriptions(ctx, "orig", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+	assert.Equal(t, "teams", page.Data[0].Origin,
+		"list rows must carry the persisted origin like every other read path")
+}
