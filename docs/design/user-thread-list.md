@@ -302,12 +302,12 @@ type ThreadSubscriptionListResponse struct {
 
 ```go
 type ThreadListItem struct {
-    SiteID          string   `json:"siteId"          bson:"siteId"`
-    RoomID          string   `json:"roomId"          bson:"roomId"`
-    RoomName        string   `json:"roomName"        bson:"roomName"`
-    RoomType        RoomType `json:"roomType"        bson:"roomType"`
-    ThreadRoomID    string   `json:"threadRoomId"    bson:"threadRoomId"`
-    ParentMessageID string   `json:"parentMessageId" bson:"parentMessageId"`
+    SiteID          string     `json:"siteId"          bson:"siteId"`
+    RoomID          string     `json:"roomId"          bson:"roomId"`
+    RoomName        string     `json:"roomName"        bson:"roomName"`
+    RoomType        RoomType   `json:"roomType"        bson:"roomType"`
+    ThreadRoomID    string     `json:"threadRoomId"    bson:"threadRoomId"`
+    ParentMessageID string     `json:"parentMessageId" bson:"parentMessageId"`
 
     // subscription state (this user)
     LastSeenAt *int64 `json:"lastSeenAt,omitempty" bson:"lastSeenAt,omitempty"` // UTC ms
@@ -320,12 +320,9 @@ type ThreadListItem struct {
     // reply count, capped at pkg/threadcount.Cap
     TCount int `json:"tcount" bson:"tcount"`
 
-    // enriched bodies, carried opaque (pre-marshaled *cassandra.Message)
-    ParentMessage json.RawMessage `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
-    LastMessage   json.RawMessage `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
-
-    // DM counterpart's HR-directory record; DM rows only
-    HRInfo *SubscriptionHRInfo `json:"hrInfo,omitempty" bson:"hrInfo,omitempty"`
+    // enriched bodies
+    ParentMessage *Message `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
+    LastMessage   *Message `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
 }
 ```
 
