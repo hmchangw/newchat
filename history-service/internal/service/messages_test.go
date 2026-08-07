@@ -52,6 +52,10 @@ func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageReposi
 		MinTimes(0)
 	// Permissive default: existing GetThreadMessages tests don't verify the floor field.
 	threadRooms.EXPECT().GetMinThreadUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	// history-service is the sole preview writer, so every edit/delete now stores or
+	// clears as a side effect. Tests that assert on those use newServiceWithRoomMock.
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	return svc, msgs, subs, pub, threadRooms
 }
 
@@ -2713,12 +2717,14 @@ func TestHistoryService_GetMessagesByIDs_QuoteRedaction(t *testing.T) {
 	assert.Equal(t, service.UnavailableQuoteMsg, result.Messages[0].QuotedParentMessage.Msg)
 }
 
-// Deleting the room's last eligible message must mark the walk as definitively
-// empty (PreviewGone) so broadcast-worker clears the stored room preview — a nil
-// PreviewMessage alone can't be distinguished from a degraded walk.
-func TestHistoryService_DeleteMessage_LastMessage_MarksPreviewGone(t *testing.T) {
-	svc, msgs, subs, pub, _ := newService(t)
+// Deleting the room's last eligible message leaves the walk definitively empty,
+// so history-service must CLEAR the stored preview — a stale one would otherwise
+// survive, since a mutation doesn't change lastMsgId and so can't be caught by
+// the freshness check.
+func TestHistoryService_DeleteMessage_LastMessage_ClearsStoredPreview(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	hydrated := &models.Message{
@@ -2744,18 +2750,20 @@ func TestHistoryService_DeleteMessage_LastMessage_MarksPreviewGone(t *testing.T)
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Nil(t, evt.PreviewMessage)
-			assert.True(t, evt.PreviewGone, "an empty walk must signal the stored preview should be cleared")
 			return nil
 		})
+	rooms.EXPECT().ClearPreview(gomock.Any(), "r1", gomock.Any()).Return(nil).Times(1)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
 }
 
 // A terminal all-ineligible page (HasNext=false) is also definitively empty.
-func TestHistoryService_DeleteMessage_AllIneligibleTerminalPage_MarksPreviewGone(t *testing.T) {
-	svc, msgs, subs, pub, _ := newService(t)
+func TestHistoryService_DeleteMessage_AllIneligibleTerminalPage_ClearsStoredPreview(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
@@ -2779,19 +2787,22 @@ func TestHistoryService_DeleteMessage_AllIneligibleTerminalPage_MarksPreviewGone
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Nil(t, evt.PreviewMessage)
-			assert.True(t, evt.PreviewGone, "terminal all-ineligible page means no survivor exists")
 			return nil
 		})
+	rooms.EXPECT().ClearPreview(gomock.Any(), "r1", gomock.Any()).Return(nil).Times(1)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
 }
 
-// A failed history read is DEGRADED, not empty: an eligible survivor may well exist,
-// so the event must NOT tell broadcast-worker to clear the stored preview.
-func TestHistoryService_DeleteMessage_DegradedWalk_DoesNotMarkPreviewGone(t *testing.T) {
-	svc, msgs, subs, pub, _ := newService(t)
+// A failed history read is DEGRADED, not empty: an eligible survivor may well
+// exist, so the stored preview must be left exactly as it is — neither refreshed
+// nor cleared.
+func TestHistoryService_DeleteMessage_DegradedWalk_LeavesStoredPreviewAlone(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	hydrated := &models.Message{
@@ -2814,9 +2825,10 @@ func TestHistoryService_DeleteMessage_DegradedWalk_DoesNotMarkPreviewGone(t *tes
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Nil(t, evt.PreviewMessage)
-			assert.False(t, evt.PreviewGone, "a read failure is unknown, never a clear signal")
 			return nil
 		})
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
@@ -2824,9 +2836,10 @@ func TestHistoryService_DeleteMessage_DegradedWalk_DoesNotMarkPreviewGone(t *tes
 
 // Exhausting the 250-row scan budget on an unbroken ineligible run is DEGRADED:
 // an eligible message may exist beyond the budget, so no clear signal.
-func TestHistoryService_DeleteMessage_ScanBudgetExhausted_DoesNotMarkPreviewGone(t *testing.T) {
-	svc, msgs, subs, pub, _ := newService(t)
+func TestHistoryService_DeleteMessage_ScanBudgetExhausted_LeavesStoredPreviewAlone(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
@@ -2860,19 +2873,21 @@ func TestHistoryService_DeleteMessage_ScanBudgetExhausted_DoesNotMarkPreviewGone
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Nil(t, evt.PreviewMessage)
-			assert.False(t, evt.PreviewGone, "budget exhaustion is unknown, never a clear signal")
 			return nil
 		})
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
 }
 
-// A hidden thread reply never touches the room preview, so it must not carry a
-// clear signal either (broadcast-worker's thread branches skip persistence).
-func TestHistoryService_DeleteMessage_HiddenThreadReply_NoPreviewGone(t *testing.T) {
-	svc, msgs, subs, pub, _ := newService(t)
+// A hidden thread reply never appears in the room timeline, so it must not touch
+// the stored room preview at all — no walk, no write.
+func TestHistoryService_DeleteMessage_HiddenThreadReply_LeavesStoredPreviewAlone(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	parentCreatedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
@@ -2899,9 +2914,10 @@ func TestHistoryService_DeleteMessage_HiddenThreadReply_NoPreviewGone(t *testing
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Nil(t, evt.PreviewMessage)
-			assert.False(t, evt.PreviewGone, "hidden thread replies never drive the room preview")
 			return nil
 		})
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "reply-1"})
 	require.NoError(t, err)

@@ -85,47 +85,81 @@ func TestBotAwareDisplayName(t *testing.T) {
 
 // NOTE: "helper.bot" carries model.IsBot's recognized suffix (".bot").
 
-func TestGuardedSetFields_Shape(t *testing.T) {
-	pvw := &model.PreviewMessage{MessageID: "m1", Content: "$notAFieldPath"}
-	fields := GuardedSetFields(pvw, 1754388000000)
-
-	// Both guarded fields present, keyed for a $set pipeline stage.
-	require.Contains(t, fields, "previewMessage")
-	require.Contains(t, fields, "previewAsOf")
-
-	// The preview doc must be wrapped in $literal so "$"-prefixed content
-	// strings are never evaluated as aggregation field paths.
-	cond := fields["previewMessage"].(bson.M)["$cond"].(bson.A)
-	_, hasLiteral := cond[1].(bson.M)["$literal"]
-	assert.True(t, hasLiteral, "preview doc must be $literal-wrapped")
-
-	// Guard compares incoming asOf against $ifNull(previewAsOf, 0).
+// assertGuard checks the shared watermark rule: asOf >= $ifNull(previewAsOf, 0).
+func assertGuard(t *testing.T, cond bson.A, asOf int64) {
+	t.Helper()
 	gte := cond[0].(bson.M)["$gte"].(bson.A)
-	assert.EqualValues(t, 1754388000000, gte[0])
+	assert.EqualValues(t, asOf, gte[0])
+	ifNull := gte[1].(bson.M)["$ifNull"].(bson.A)
+	assert.Equal(t, "$previewAsOf", ifNull[0])
+	assert.EqualValues(t, 0, ifNull[1])
+}
+
+func TestGuardedSetFields_Shape(t *testing.T) {
+	sealed := Sealed{
+		Meta:       model.PreviewMeta{MessageID: "m1", Sender: model.Participant{DisplayName: "$notAFieldPath"}},
+		Ciphertext: []byte{0x01},
+		Nonce:      []byte{0x02},
+		KeyEpoch:   3,
+		ForMsgID:   "m2",
+	}
+	fields := GuardedSetFields(sealed, 1754388000000)
+
+	require.Contains(t, fields, "previewAsOf")
+	for _, f := range previewDocFields {
+		require.Contains(t, fields, f)
+
+		cond := fields[f].(bson.M)["$cond"].(bson.A)
+		// Every stored value is $literal-wrapped so a "$"-prefixed string is
+		// never evaluated as an aggregation field path.
+		_, hasLiteral := cond[1].(bson.M)["$literal"]
+		assert.True(t, hasLiteral, "%s must be $literal-wrapped", f)
+		// Guard failure leaves the existing value untouched.
+		assert.Equal(t, "$"+f, cond[2], "%s must be preserved when the guard fails", f)
+		assertGuard(t, cond, 1754388000000)
+	}
+
+	asOfCond := fields["previewAsOf"].(bson.M)["$cond"].(bson.A)
+	assert.EqualValues(t, 1754388000000, asOfCond[1])
+	assert.Equal(t, "$previewAsOf", asOfCond[2])
 }
 
 func TestGuardedClearFields_Shape(t *testing.T) {
 	fields := GuardedClearFields(1754388000000)
 
-	// Both guarded fields present, keyed for a $set pipeline stage.
-	require.Contains(t, fields, "previewMessage")
 	require.Contains(t, fields, "previewAsOf")
+	for _, f := range previewDocFields {
+		require.Contains(t, fields, f)
 
-	// The true branch REMOVES the stored preview rather than writing a value.
-	cond := fields["previewMessage"].(bson.M)["$cond"].(bson.A)
-	assert.Equal(t, "$$REMOVE", cond[1], "clear must drop the field, not store an empty doc")
-	assert.Equal(t, "$previewMessage", cond[2], "guard failure must leave the stored preview untouched")
+		cond := fields[f].(bson.M)["$cond"].(bson.A)
+		assert.Equal(t, "$$REMOVE", cond[1], "%s must be dropped, not written empty", f)
+		assert.Equal(t, "$"+f, cond[2], "%s must be preserved when the guard fails", f)
+		assertGuard(t, cond, 1754388000000)
+	}
 
-	// Same watermark rule as GuardedSetFields: asOf >= $ifNull(previewAsOf, 0).
-	gte := cond[0].(bson.M)["$gte"].(bson.A)
-	assert.EqualValues(t, 1754388000000, gte[0])
-	ifNull := gte[1].(bson.M)["$ifNull"].(bson.A)
-	assert.Equal(t, "$previewAsOf", ifNull[0])
-	assert.EqualValues(t, 0, ifNull[1])
-
-	// previewAsOf still advances on clear, so a redelivered older create can't
+	// previewAsOf still advances on clear, so a redelivered older write can't
 	// resurrect the cleared preview.
 	asOfCond := fields["previewAsOf"].(bson.M)["$cond"].(bson.A)
 	assert.EqualValues(t, 1754388000000, asOfCond[1])
 	assert.Equal(t, "$previewAsOf", asOfCond[2])
+}
+
+// Set and clear must touch exactly the same keys, or a partial clear strands a
+// fragment: a nonce and epoch describing a ciphertext that no longer exists.
+func TestGuardedSetAndClear_CoverIdenticalFields(t *testing.T) {
+	set := GuardedSetFields(Sealed{}, 1)
+	clear := GuardedClearFields(1)
+
+	setKeys := make([]string, 0, len(set))
+	for k := range set {
+		setKeys = append(setKeys, k)
+	}
+	clearKeys := make([]string, 0, len(clear))
+	for k := range clear {
+		clearKeys = append(clearKeys, k)
+	}
+	assert.ElementsMatch(t, setKeys, clearKeys)
+
+	// And both cover the canonical list plus the watermark itself.
+	assert.Len(t, setKeys, len(previewDocFields)+1)
 }

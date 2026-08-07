@@ -45,7 +45,7 @@ func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageR
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms
 }
@@ -64,7 +64,7 @@ func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.Mock
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms, apps
 }
@@ -85,7 +85,7 @@ func newRoomsServiceWithPreviewCache(t *testing.T) (*service.HistoryService, *mo
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
 	pc, err := readcache.NewPreviewCache(100, time.Minute)
 	require.NoError(t, err)
-	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, service.WithPreviewCache(pc))
 	return svc, msgs, rooms
 }
@@ -548,12 +548,18 @@ func msPtr(t time.Time) *int64 {
 	return &ms
 }
 
-// (a) Every room carries a usable lastMsgAt hint: resolveRoomTimes never needs Mongo at
-// all, so neither the per-room GetRoomTimes nor the batched GetRoomTimesByIDs is called.
-func TestHistoryService_RoomsGet_AllHinted_NoStoreReads(t *testing.T) {
+// (a) Every room carries a usable lastMsgAt hint: the hint supplies the walk
+// bounds, so the per-room GetRoomTimes is never called. The ONE batched room-doc
+// read still happens — hinted or not, the stored preview and the lastMsgId its
+// freshness check compares against live only on the doc, and RoomTimeHint
+// carries neither.
+func TestHistoryService_RoomsGet_AllHinted_StillReadsRoomDocsOnce(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
-	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), gomock.InAnyOrder([]string{"r1", "r2"})).
+		Return(map[string]mongorepo.RoomTimes{}, nil).
+		Times(1)
 
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
@@ -597,13 +603,13 @@ func TestHistoryService_RoomsGet_NoHints_BatchesAllIDs(t *testing.T) {
 	assert.Equal(t, "m2", resp.Rooms["r2"].MessageID)
 }
 
-// (c) Mixed hinted/unhinted: only r2 (unhinted) is in the batch call; r1's hint means it
-// never reaches Mongo at all.
-func TestHistoryService_RoomsGet_MixedHints_BatchesOnlyUnhinted(t *testing.T) {
+// (c) Mixed hinted/unhinted: one batch call still carries EVERY id, but the hint
+// still wins for r1's walk bounds, so the per-room GetRoomTimes stays unused.
+func TestHistoryService_RoomsGet_MixedHints_BatchesAllIDs(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
 	rooms.EXPECT().
-		GetRoomTimesByIDs(gomock.Any(), []string{"r2"}).
+		GetRoomTimesByIDs(gomock.Any(), gomock.InAnyOrder([]string{"r1", "r2"})).
 		Return(map[string]mongorepo.RoomTimes{"r2": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt}}, nil).
 		Times(1)
 

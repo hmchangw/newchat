@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	readcache "github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
@@ -67,9 +69,11 @@ func TestHistoryService_RoomsGet_WarmsBackResolvedPreview(t *testing.T) {
 			{MessageID: "m1", RoomID: "room-1", Msg: "hi", CreatedAt: msgCreatedAt, Sender: models.Participant{Account: "alice"}},
 		}, false), nil)
 	rooms.EXPECT().
-		SetPreviewMessage(gomock.Any(), "room-1", gomock.Any(), msgCreatedAt.UTC().UnixMilli()).
-		DoAndReturn(func(_ interface{}, _ string, pvw models.PreviewMessage, _ int64) error {
+		SetPreviewMessage(gomock.Any(), "room-1", gomock.Any(), gomock.Any(), msgCreatedAt.UTC().UnixMilli()).
+		DoAndReturn(func(_ context.Context, _ string, pvw models.PreviewMessage, forMsgID string, _ int64) error {
 			require.Equal(t, "m1", pvw.MessageID)
+			// Newest observed == the preview itself when the newest message is eligible.
+			require.Equal(t, "m1", forMsgID)
 			return nil
 		}).
 		Times(1)
@@ -91,7 +95,7 @@ func TestHistoryService_RoomsGet_WarmBackFailureDoesNotFailRead(t *testing.T) {
 			{MessageID: "m1", RoomID: "room-1", Msg: "hi", CreatedAt: roomLastMsgAt, Sender: models.Participant{Account: "alice"}},
 		}, false), nil)
 	rooms.EXPECT().
-		SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(errors.New("mongo down")).
 		Times(1)
 
@@ -114,7 +118,7 @@ func TestHistoryService_RoomsGet_CacheHitSkipsWarmBack(t *testing.T) {
 	// Exactly one warm-back call: the priming (cache-miss) resolve. A second call
 	// here would mean the cache hit re-ran the loader — exhausting this Times(1)
 	// expectation fails the test via gomock's "unexpected call" fatal.
-	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "room-1", gomock.Any(), gomock.Any()).Return(nil).Times(1)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "room-1", gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
 
 	resp1, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"room-1"}})
 	require.NoError(t, err)
@@ -123,4 +127,58 @@ func TestHistoryService_RoomsGet_CacheHitSkipsWarmBack(t *testing.T) {
 	resp2, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"room-1"}})
 	require.NoError(t, err)
 	require.Equal(t, "m1", resp2.Rooms["room-1"].MessageID)
+}
+
+// The freshness key is the newest message the walk OBSERVED, which is NOT the
+// preview's own id whenever the newest message is ineligible and gets skipped —
+// the ordinary case for a room whose last activity was a system message. Keying
+// on the preview's id instead would leave the memo permanently "stale" and make
+// every read re-walk.
+func TestHistoryService_RoomsGet_WarmBackKeysOnNewestObservedMessage(t *testing.T) {
+	svc, msgs, rooms := newWarmBackTestService(t)
+
+	stubRoomTimes(rooms, []string{"room-1"}, roomLastMsgAt, roomCreatedAt)
+	// Newest row is a deleted message (skipped); the eligible preview is older.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "room-1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{
+			{MessageID: "newest", RoomID: "room-1", Deleted: true, CreatedAt: roomLastMsgAt},
+			{MessageID: "older", RoomID: "room-1", Msg: "hi", CreatedAt: roomLastMsgAt.Add(-time.Minute), Sender: models.Participant{Account: "alice"}},
+		}, false), nil)
+	rooms.EXPECT().
+		SetPreviewMessage(gomock.Any(), "room-1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, pvw models.PreviewMessage, forMsgID string, _ int64) error {
+			require.Equal(t, "older", pvw.MessageID, "preview is the newest ELIGIBLE message")
+			require.Equal(t, "newest", forMsgID, "freshness key is the newest OBSERVED message")
+			return nil
+		}).
+		Times(1)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"room-1"}})
+	require.NoError(t, err)
+	require.Equal(t, "older", resp.Rooms["room-1"].MessageID)
+}
+
+// A stored preview that the repo reports as current short-circuits the walk
+// entirely: no Cassandra read, no re-write. This is the whole point of the memo.
+func TestHistoryService_RoomsGet_FreshStoredPreviewSkipsWalk(t *testing.T) {
+	svc, msgs, rooms := newWarmBackTestService(t)
+
+	stored := models.PreviewMessage{
+		MessageID: "m1",
+		Content:   "from the doc",
+		CreatedAt: roomLastMsgAt,
+	}
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{
+			"room-1": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt, Preview: &stored},
+		}, nil).
+		Times(1)
+	// Strict: any Cassandra walk or preview write fails the test.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"room-1"}})
+	require.NoError(t, err)
+	require.Equal(t, "from the doc", resp.Rooms["room-1"].Content)
 }

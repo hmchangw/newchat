@@ -20,15 +20,27 @@ type Room struct {
 	AppCount  int        `json:"appCount" bson:"appCount"`
 	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
 	LastMsgID string     `json:"lastMsgId" bson:"lastMsgId"`
-	// PreviewMessage is the denormalized last eligible preview, written by
-	// broadcast-worker (coalesced create path, guarded edit/delete path) and
-	// lazily warm-backed by history-service. Serves the local subscription.list
-	// without a rooms.get RPC.
-	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"previewMessage,omitempty"`
-	// PreviewAsOf is the ordering watermark for previewMessage writes: the
-	// canonical event Timestamp (epoch ms) that produced the stored preview
-	// (warm-backs use the preview's own createdAt, always ≤ any event ts).
-	// Guard key only; never serialized to clients.
+	// PreviewMeta is the plaintext half of the memoized room-list preview:
+	// exactly the fields Cassandra also leaves unencrypted. The body lives in
+	// PreviewCiphertext. history-service is the sole writer and sole reader.
+	PreviewMeta *PreviewMeta `json:"-" bson:"previewMeta,omitempty"`
+	// PreviewCiphertext seals the preview's Content and Attachments under the
+	// site preview DEK, so Mongo access alone never yields message bodies.
+	PreviewCiphertext []byte `json:"-" bson:"previewCiphertext,omitempty"`
+	// PreviewNonce is the AES-GCM nonce for PreviewCiphertext.
+	PreviewNonce []byte `json:"-" bson:"previewNonce,omitempty"`
+	// PreviewKeyEpoch is the preview DEK epoch that produced the ciphertext. A
+	// reader on a different epoch treats the preview as absent and re-resolves,
+	// so no reader ever needs a retired DEK.
+	PreviewKeyEpoch int `json:"-" bson:"previewKeyEpoch,omitempty"`
+	// PreviewForMsgID is the freshness key: the newest message id the resolving
+	// walk OBSERVED in Cassandra. The preview is current iff it equals LastMsgID.
+	// It is NOT PreviewMeta.MessageID — the two differ whenever the newest
+	// message is ineligible and skipped.
+	PreviewForMsgID string `json:"-" bson:"previewForMsgId,omitempty"`
+	// PreviewAsOf is the write-ordering watermark (epoch ms) for the preview
+	// fields; it stays plaintext because the guarded update pipeline must
+	// compare it server-side. Guard key only; never serialized to clients.
 	PreviewAsOf       int64      `json:"-" bson:"previewAsOf,omitempty"`
 	LastMentionAllAt  *time.Time `json:"lastMentionAllAt,omitempty" bson:"lastMentionAllAt,omitempty"`
 	MinUserLastSeenAt *time.Time `json:"minUserLastSeenAt,omitempty" bson:"minUserLastSeenAt,omitempty"`

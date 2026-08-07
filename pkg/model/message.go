@@ -116,20 +116,35 @@ type RoomsGetRequest struct {
 // PreviewMessage is a room's most-recent eligible message, enriched for the
 // room-list preview. Content is a snippet capped at preview.MaxContentRunes
 // (500 runes) — no longer the full body. Sender/mentions carry render-ready
-// wire Participants (a bot sender's displayName is its app name). Shared wire
-// type: history-service's rooms.get RPC produces it, user-service's
-// subscription.list embeds it, and it persists on the room doc (Room.PreviewMessage).
+// wire Participants (a bot sender's displayName is its app name). Purely a wire
+// type: history-service's rooms.get RPC produces it and user-service's
+// subscription.list embeds it. It is never stored — the room doc holds the
+// split PreviewMeta + sealed body instead.
 type PreviewMessage struct {
-	MessageID   string                 `json:"messageId"             bson:"messageId"`
-	Sender      Participant            `json:"sender"                bson:"sender"`
-	Content     string                 `json:"content"               bson:"content"`
-	CreatedAt   time.Time              `json:"createdAt"             bson:"createdAt"`
-	Attachments []cassandra.Attachment `json:"attachments,omitempty" bson:"attachments,omitempty"`
-	Mentions    []Participant          `json:"mentions,omitempty"    bson:"mentions,omitempty"`
+	MessageID   string                 `json:"messageId"`
+	Sender      Participant            `json:"sender"`
+	Content     string                 `json:"content"`
+	CreatedAt   time.Time              `json:"createdAt"`
+	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
+	Mentions    []Participant          `json:"mentions,omitempty"`
 	// VisibleTo is surfaced now; its write-path (populating the column) is a separate
 	// follow-up, so it's empty until that lands.
-	VisibleTo string `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
+	VisibleTo string `json:"visibleTo,omitempty"`
 	// TODO(#106): forwardSource — wired after the Forwarded snapshot merges.
+}
+
+// PreviewMeta is the plaintext half of a stored room preview: precisely the
+// fields Cassandra leaves unencrypted, so persisting them introduces no
+// classification the system does not already make. The user-authored half
+// (Content, Attachments) is sealed into Room.PreviewCiphertext instead.
+//
+// Storage-only — clients receive a preview as a PreviewMessage, never this.
+type PreviewMeta struct {
+	MessageID string        `json:"messageId"           bson:"messageId"`
+	Sender    Participant   `json:"sender"              bson:"sender"`
+	CreatedAt time.Time     `json:"createdAt"           bson:"createdAt"`
+	Mentions  []Participant `json:"mentions,omitempty"  bson:"mentions,omitempty"`
+	VisibleTo string        `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 }
 
 // RoomsGetResponse maps each requested roomId that has a resolvable last message to
