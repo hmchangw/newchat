@@ -5315,7 +5315,8 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `hasMention` | boolean | The user was @-mentioned in the thread. |
 | `unread` | boolean | `true` when `lastMsgAt` is newer than `lastSeenAt` (or the thread was never opened). |
 | `lastMsgAt` | number | UTC ms of the thread's last activity — the global sort key. |
-| `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message; reply count rides on its `tcount`. |
+| `tcount` | number | Non-deleted reply count, capped at 99 — `99` means "99 or more". Always present; `0` also covers threads whose count was never written (e.g. migrated threads). |
+| `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message. |
 | `lastMessage` | [Message](#message-schema) | Optional. The hydrated last reply. |
 | `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | Optional. Present **only on `dm` rows** — the counterpart's HR record, resolved from `roomName`. Omitted when the directory lookup degrades. |
 
@@ -5332,6 +5333,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
       "hasMention": true,
       "unread": true,
       "lastMsgAt": 1746518400000,
+      "tcount": 3,
       "parentMessage": {
         "roomId": "01970a4f8c2d7c9aQ",
         "messageId": "01970a4f8c2d7c9aQRST",
@@ -5356,6 +5358,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
       "hasMention": false,
       "unread": false,
       "lastMsgAt": 1746518100000,
+      "tcount": 1,
       "hrInfo": { "account": "bob", "name": "鮑伯", "engName": "Bob" }
     }
   ],

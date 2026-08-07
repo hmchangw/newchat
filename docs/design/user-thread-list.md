@@ -248,9 +248,10 @@ Aggregation pipeline on `thread_subscriptions`:
 - **Messages** — collect the page's distinct `parentMessageId` ∪ `lastMsgId` and
   hydrate with a **single** batched `GetMessagesByIDs` against `messages_by_id`
   (already exists), local to the site. Attach `parentMessage`/`lastMessage`; the
-  reply count rides on `parentMessage.TCount` (no separate item field). A thread
-  is included only when **both** bodies hydrate — a row missing either (hard-
-  deleted, or not yet replicated) is dropped rather than surfaced half-empty.
+  reply count rides on `parentMessage.TCount` (no separate item field; since
+  2026-08-07, also lifted to the item's `tcount`). A thread is included only when
+  **both** bodies hydrate — a row missing either (hard-deleted, or not yet
+  replicated) is dropped rather than surfaced half-empty.
   (Edge case: a page whose rows are *all* unhydratable returns empty while
   `HasMore` is set; the cross-site aggregator then has no item to derive
   `NextCursor` from and reports `HasNext` without a cursor. Accepted given rarity
@@ -325,8 +326,11 @@ type ThreadListItem struct {
 Field sources (all resolved on the **owning site**, none cross-site):
 - `roomName` / `roomType` — the site's `rooms` collection, joined into the page
   via a post-`$limit` `$lookup` in the aggregation (§5).
-- Reply count is **not** a separate field — it already rides on
-  `parentMessage.TCount` (Cassandra `messages_by_id`); clients read it there.
+- Reply count: originally not a separate field (clients read
+  `parentMessage.TCount`); superseded 2026-08-07 — `tcount` is now lifted onto the
+  item itself (see
+  `docs/superpowers/specs/2026-08-07-thread-list-reply-count-design.md`). The
+  parent's embedded `tcount` remains for backward compatibility.
 
 Aggregated client response:
 

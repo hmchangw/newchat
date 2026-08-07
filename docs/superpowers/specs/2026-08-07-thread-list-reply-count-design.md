@@ -1,7 +1,7 @@
 # Thread List reply count (`thread.list` → `ThreadListItem`)
 
 **Date:** 2026-08-07
-**Status:** Sketch — for review, not implemented
+**Status:** Approved — implemented
 
 ## Scope
 
@@ -289,7 +289,7 @@ an always-present item-level `tcount` is additive, not breaking.
    threads. The honest cost is that a migrated thread with replies reports
    `0`, indistinguishable from a thread whose replies were all deleted. `*int`
    + `omitempty` keeps that distinction but reinstates the `undefined` branch
-   this change exists to remove.
+   this change exists to remove. **Resolved: plain `int`.**
 3. **Do we backfill migrated threads?** Out of scope here; it would be a
    one-off job recomputing `tcount` per `thread_rooms` row via
    `pkg/threadcount`. Worth a follow-up ticket rather than blocking this.
