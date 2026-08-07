@@ -113,14 +113,17 @@ new writes, no new source of truth.
 ### 1. `pkg/model/threadlist.go`
 
 ```go
-// ReplyCount is the thread's non-deleted reply count, capped at
-// pkg/threadcount.Cap — 99 means "99 or more". Sourced from the hydrated
-// parent's tcount; 0 when that column was never written (migrated threads).
-// Always present on the wire so clients never branch on undefined.
-ReplyCount int `json:"replyCount" bson:"replyCount"`
+// TCount is the thread's non-deleted reply count, capped at
+// pkg/threadcount.Cap — 99 means "99 or more". Same number and same name as
+// Message.tcount, lifted to the row so clients need not parse ParentMessage.
+// 0 when the parent's column was never written (migrated threads). Always
+// present on the wire so clients never branch on undefined.
+TCount int `json:"tcount" bson:"tcount"`
 ```
 
-No `omitempty` — a zero count must serialize.
+No `omitempty` — a zero count must serialize. Note this is a plain `int`, not
+the `*int` of `cassandra.Message.TCount`: at the row level the count is
+unconditional. See open question 2 for the trade-off.
 
 Update the `LastMsgAt` comment (line 21-23) to stop pointing at
 `ParentMessage.TCount` as the carrier.
@@ -132,7 +135,7 @@ hydrated:
 
 ```go
 if parent.TCount != nil {
-    item.ReplyCount = *parent.TCount
+    item.TCount = *parent.TCount
 }
 ```
 
@@ -152,23 +155,23 @@ it.
 
 Red first, per CLAUDE.md §4.
 
-1. `pkg/model/threadlist_test.go` — round-trip `ReplyCount`; assert the key is
+1. `pkg/model/threadlist_test.go` — round-trip `TCount`; assert the key is
    present in the marshaled JSON when the value is `0`.
 2. `history-service/internal/service/threadlist_test.go` — table-driven over the
    parent's `TCount`: `intPtr(4)` → `4`; `nil` → `0`; `intPtr(0)` → `0`;
    `intPtr(99)` → `99` (cap passes through unchanged).
-3. `user-service/service/threads_test.go` — a leaf response carrying
-   `ReplyCount` survives the merge, the sort, and `enrichThreadPage` (assert on a
-   DM row, whose `HRInfo` path rewrites the item).
+3. `user-service/service/threads_test.go` — a leaf response carrying `TCount`
+   survives the merge, the sort, and `enrichThreadPage` (assert on a DM row,
+   whose `HRInfo` path rewrites the item).
 4. Implement 1–2 above; `make test SERVICE=history-service`,
    `make test SERVICE=user-service`, `make lint`.
 
 ## Docs (same PR — CLAUDE.md §5)
 
-- `docs/client-api.md` — add a `replyCount` row to the **ThreadListItem** table
-  (§ List User Threads) stating the 99 cap and that `0` covers "never counted";
-  add it to the JSON example; soften the `parentMessage` note so the count is no
-  longer described as riding there.
+- `docs/client-api.md` — add a `tcount` row to the **ThreadListItem** table
+  (§ List User Threads) stating the 99 cap, that it is always present, and that
+  `0` covers "never counted"; add it to the JSON example; soften the
+  `parentMessage` note so the count is no longer described as riding there.
 - `docs/client-api/request-reply.md` — **no change needed**: the derived view
   (line 1813-1815) links to the canonical `ThreadListItem` schema rather than
   restating it.
@@ -178,7 +181,7 @@ Red first, per CLAUDE.md §4.
 
 ## Alternatives considered
 
-**B — maintain `replyCount` on the `thread_rooms` Mongo doc.**
+**B — maintain a `tcount` on the `thread_rooms` Mongo doc.**
 message-worker increments on reply-add, history-service recomputes on
 reply-delete, and `userThreadSubscriptionsPipeline` projects it out of the
 existing `tr` `$lookup` (`pipelines.go:92-102`) — no Cassandra dependency for the
@@ -192,13 +195,63 @@ One bounded `thread_messages_by_thread` partition scan per item, up to 100 per
 page per site. Rejected on cost; it is precisely what the cached `tcount` exists
 to avoid.
 
+## Legacy-repo suggestions — reviewed
+
+Three suggestions came back from the legacy monolith. Two apply; one does not
+survive the monolith → services split.
+
+**"tcount lives on the Message document (Cassandra `messages_by_id.tcount`)" —
+confirmed, no change.** Matches the trace above. Worth naming the difference:
+in the monolith the count sat on a **Mongo** message document, so it was in the
+same database as the subscription rows. Here messages are Cassandra-only, which
+is exactly what breaks the next suggestion.
+
+**"The pipeline should `$lookup` the parent message at aggregation time, then a
+`TransformToThreadSubscription` step converts it" — half already true, half
+cannot port.**
+
+- *The transform step already exists.* `buildThreadItems`
+  (`history-service/internal/service/threads.go:203`) is our
+  `TransformToThreadSubscription`: it takes the raw `ThreadSubRow`s and the
+  hydrated parents and emits `ThreadListItem`s. The parent **is** resolved
+  during the same request, so the count is free either way — the legacy shape
+  holds, only the join mechanism differs.
+- *The `$lookup` cannot.* There is no production Mongo `messages` collection to
+  join to. The only `db.Collection("messages")` in the repo is
+  `tools/seed-sample-data/mongo.go:122`, a dev seeder no service reads;
+  history-service's Mongo repos bind `apps`, `subscriptions`, `rooms`,
+  `thread_rooms`, `thread_subscriptions` and nothing else. Messages are in
+  Cassandra, and Mongo cannot `$lookup` across engines. Secondary point:
+  CLAUDE.md bans `$lookup` without a documented justification, and
+  `userThreadSubscriptionsPipeline` already carries two justified ones.
+- *Our equivalent is better anyway.* The legacy join resolved a parent per row;
+  `buildThreadItems` issues **one** deduped batch
+  (`threadListLookupMsgIDs` → `GetMessagesByIDs`, bounded at
+  `maxConcurrentIDReads = 16`) covering parents ∪ last-messages for the whole
+  page.
+- The nearest true port of "get the count from the aggregation" is denormalizing
+  it onto `thread_rooms` — that is Option B below, and it is not a minor fix.
+
+**"Stay with `tcount` instead of `replyCount`" — accepted, sketch updated.**
+The whole ecosystem is already `tcount`-shaped: `docs/client-api.md:2701`,
+`chat-frontend/src/api/types.ts:239,281` (`tcount?: number`, "surfaced as the
+'💬 N replies' badge"), the optimistic bumps in
+`chat-frontend/src/context/RoomEventsContext/reducer.js:375,802`, and the
+`newTcount` broadcast field (`pkg/model/event.go:38,380`). A second name for the
+same number buys nothing. The frontend type is already optional (`tcount?`), so
+an always-present item-level `tcount` is additive, not breaking.
+
 ## Open questions
 
 1. **Is the 99 cap acceptable for the inbox badge?** If product wants exact
    counts, this becomes Option B and is no longer a minor fix.
-2. **Field name** — `replyCount` (proposed) or `tcount` for symmetry with the
-   Message schema? `replyCount` reads better and marks the field as
-   thread-list-owned rather than a `Message` passthrough.
-3. **Migrated threads** — is `0` the right answer, or should they be
-   distinguishable (`*int`, key omitted)? `0` keeps the field unconditional,
-   which is the main win here; the migration README already accepts stale counts.
+2. **`int` or `*int` for the item-level `tcount`?** Proposed: plain `int`,
+   always serialized — that is the main ergonomic win, and
+   `data-migration/README.md:71` already accepts zero counts for migrated
+   threads. The honest cost is that a migrated thread with replies reports
+   `0`, indistinguishable from a thread whose replies were all deleted. `*int`
+   + `omitempty` keeps that distinction but reinstates the `undefined` branch
+   this change exists to remove.
+3. **Do we backfill migrated threads?** Out of scope here; it would be a
+   one-off job recomputing `tcount` per `thread_rooms` row via
+   `pkg/threadcount`. Worth a follow-up ticket rather than blocking this.
