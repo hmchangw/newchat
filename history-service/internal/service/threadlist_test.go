@@ -86,13 +86,49 @@ func TestHistoryService_ListThreadSubscriptions_Success(t *testing.T) {
 	assert.Equal(t, "p1", parent.MessageID)
 	require.NotNil(t, parent.TCount)
 	assert.Equal(t, 4, *parent.TCount) // reply count rides on the parent
+	assert.Equal(t, 4, resp.Items[0].TCount)
 	require.NotNil(t, first.LastMessage)
 	assert.Equal(t, "m1", decodeThreadMsg(t, first.LastMessage).MessageID)
 	assert.True(t, first.Unread) // lastMsgAt 5h > lastSeenAt 2h
 
 	second := resp.Items[1]
 	assert.Nil(t, second.LastSeenAt)
-	assert.True(t, second.Unread) // never-seen ⇒ unread
+	assert.True(t, second.Unread)            // never-seen ⇒ unread
+	assert.Equal(t, 0, resp.Items[1].TCount) // p2 carries no tcount column
+}
+
+// The item's tcount is lifted straight off the hydrated parent's Cassandra
+// column: a nil column reads as 0 and the cap rides through untouched.
+func TestHistoryService_ListThreadSubscriptions_TCountFromParent(t *testing.T) {
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name         string
+		parentTCount *int
+		want         int
+	}{
+		{name: "count passes through", parentTCount: intPtr(4), want: 4},
+		{name: "never written — migrated thread", parentTCount: nil, want: 0},
+		{name: "all replies deleted", parentTCount: intPtr(0), want: 0},
+		{name: "cap passes through unchanged", parentTCount: intPtr(99), want: 99},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, msgs, _, _, threadSubs := newThreadListService(t)
+			rows := []mongorepo.ThreadSubRow{
+				{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+			}
+			threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+			msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+				{MessageID: "p1", RoomID: "r1", Msg: "parent", TCount: tt.parentTCount},
+				{MessageID: "m1", RoomID: "r1", Msg: "last"},
+			}, nil)
+
+			resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, resp.Items, 1)
+			assert.Equal(t, tt.want, resp.Items[0].TCount)
+		})
+	}
 }
 
 // A parent carrying reactions still builds and its body rides through as the
