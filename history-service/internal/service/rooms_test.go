@@ -23,10 +23,17 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
 // newRoomsService builds a service with bare mocks. rooms.get is server-to-server
 // now — no access (subscription) check — so tests only set room-time + message reads.
+// A permissive default on SetPreviewMessage lets every pre-existing fixture ignore
+// the warm-back call it now triggers on a successful walk; tests that care about
+// warm-back specifically (rooms_warmback_test.go) build their own mocks instead, so
+// their precise EXPECT()s aren't shadowed by this default (gomock matches the first
+// registered expectation, so a shared AnyTimes() here must never be the only one a
+// warm-back-specific test relies on).
 func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
@@ -38,12 +45,14 @@ func newRoomsService(t *testing.T) (*service.HistoryService, *mocks.MockMessageR
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms
 }
 
 // newRoomsServiceWithApps also exposes the AppStore mock, needed by the preview
-// enrichment tests (bot sender → app name).
+// enrichment tests (bot sender → app name). See newRoomsService for the default
+// SetPreviewMessage stub rationale.
 func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository, *mocks.MockAppStore) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
@@ -55,12 +64,14 @@ func newRoomsServiceWithApps(t *testing.T) (*service.HistoryService, *mocks.Mock
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
 	return svc, msgs, rooms, apps
 }
 
 // newRoomsServiceWithPreviewCache installs a real PreviewCache so RoomsGet routes
-// through it (cache-hit behavior on the second/third read of the same room).
+// through it (cache-hit behavior on the second/third read of the same room). See
+// newRoomsService for the default SetPreviewMessage stub rationale.
 func newRoomsServiceWithPreviewCache(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
@@ -74,6 +85,7 @@ func newRoomsServiceWithPreviewCache(t *testing.T) (*service.HistoryService, *mo
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
 	pc, err := readcache.NewPreviewCache(100, time.Minute)
 	require.NoError(t, err)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, service.WithPreviewCache(pc))
 	return svc, msgs, rooms
 }
@@ -305,8 +317,9 @@ func TestHistoryService_RoomsGet_DedupsRoomIDs(t *testing.T) {
 	assert.Len(t, resp.Rooms, 1)
 }
 
-// Content is returned in full — the client truncates for display.
-func TestHistoryService_RoomsGet_FullContent(t *testing.T) {
+// Content beyond the preview cap is truncated to a rune-safe snippet — multi-byte
+// runes must not be split mid-character.
+func TestHistoryService_RoomsGet_ContentTruncatedAtCapMultibyte(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	long := strings.Repeat("世", 1000)
 
@@ -317,7 +330,23 @@ func TestHistoryService_RoomsGet_FullContent(t *testing.T) {
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
 	require.Contains(t, resp.Rooms, "r1")
-	assert.Equal(t, long, resp.Rooms["r1"].Content)
+	assert.Equal(t, strings.Repeat("世", preview.MaxContentRunes), resp.Rooms["r1"].Content)
+}
+
+// Content beyond the preview cap is truncated to exactly preview.MaxContentRunes
+// runes — the room list renders a snippet, not the full (≤20KB) body.
+func TestHistoryService_RoomsGet_PreviewContentTruncated(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	long := strings.Repeat("x", preview.MaxContentRunes+100)
+
+	stubRoomTimes(rooms, []string{"r1"}, roomLastMsgAt, roomCreatedAt)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: long, CreatedAt: roomLastMsgAt}}, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Contains(t, resp.Rooms, "r1")
+	assert.Equal(t, strings.Repeat("x", preview.MaxContentRunes), resp.Rooms["r1"].Content)
 }
 
 // Latest message is a system message → walk back to the first non-system, non-quoted survivor.
@@ -519,12 +548,18 @@ func msPtr(t time.Time) *int64 {
 	return &ms
 }
 
-// (a) Every room carries a usable lastMsgAt hint: resolveRoomTimes never needs Mongo at
-// all, so neither the per-room GetRoomTimes nor the batched GetRoomTimesByIDs is called.
-func TestHistoryService_RoomsGet_AllHinted_NoStoreReads(t *testing.T) {
+// (a) Every room carries a usable lastMsgAt hint: the hint supplies the walk
+// bounds, so the per-room GetRoomTimes is never called. The ONE batched room-doc
+// read still happens — hinted or not, the stored preview and the lastMsgId its
+// freshness check compares against live only on the doc, and RoomTimeHint
+// carries neither.
+func TestHistoryService_RoomsGet_AllHinted_StillReadsRoomDocsOnce(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
-	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().
+		GetRoomTimesByIDs(gomock.Any(), gomock.InAnyOrder([]string{"r1", "r2"})).
+		Return(map[string]mongorepo.RoomTimes{}, nil).
+		Times(1)
 
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: roomLastMsgAt}}, false), nil)
@@ -568,13 +603,13 @@ func TestHistoryService_RoomsGet_NoHints_BatchesAllIDs(t *testing.T) {
 	assert.Equal(t, "m2", resp.Rooms["r2"].MessageID)
 }
 
-// (c) Mixed hinted/unhinted: only r2 (unhinted) is in the batch call; r1's hint means it
-// never reaches Mongo at all.
-func TestHistoryService_RoomsGet_MixedHints_BatchesOnlyUnhinted(t *testing.T) {
+// (c) Mixed hinted/unhinted: one batch call still carries EVERY id, but the hint
+// still wins for r1's walk bounds, so the per-room GetRoomTimes stays unused.
+func TestHistoryService_RoomsGet_MixedHints_BatchesAllIDs(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
 	rooms.EXPECT().
-		GetRoomTimesByIDs(gomock.Any(), []string{"r2"}).
+		GetRoomTimesByIDs(gomock.Any(), gomock.InAnyOrder([]string{"r1", "r2"})).
 		Return(map[string]mongorepo.RoomTimes{"r2": {LastMsgAt: roomLastMsgAt, CreatedAt: roomCreatedAt}}, nil).
 		Times(1)
 

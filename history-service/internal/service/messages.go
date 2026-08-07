@@ -639,19 +639,50 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 }
 
 // previewAfterMutation resolves the room's current last-eligible preview (same walk as
-// subscription.list) to carry on an edit/delete fan-out. Hidden thread replies (TShow==false)
-// never appear in the room timeline, so they're skipped — clients tell those apart via the
-// event's threadParentMessageId and drive the room preview themselves. TShow==true replies do
-// appear in the room, so they still get a preview. nil for a hidden thread reply, when the room
-// has no eligible message, or on a read error.
+// subscription.list), both to carry on the edit/delete fan-out and to refresh what is
+// stored on the room doc. Hidden thread replies (TShow==false) never appear in the room
+// timeline, so they're skipped — clients tell those apart via the event's
+// threadParentMessageId and drive the room preview themselves. TShow==true replies do
+// appear in the room, so they still get a preview. Deliberately bypasses the preview
+// cache (calls the walk directly) so a mutation always sees fresh state.
+//
+// The stored write happens here rather than riding the canonical event, because a
+// mutation is invisible to the freshness check in §3 of the design: editing or deleting
+// the current preview message does not change the room's lastMsgId, so nothing else
+// would ever invalidate the memoized copy.
 func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
 	if msg.ThreadParentID != "" && !msg.TShow {
 		return nil
 	}
-	if preview, ok := s.roomLastPreviewMessage(c, roomID, nil, at); ok {
-		return &preview
+	w := s.roomLastPreviewMessage(c, roomID, nil, at)
+	switch w.State {
+	case previewFound:
+		s.storePreviewAfterMutation(c, roomID, &w, at)
+		return &w.Preview
+	case previewEmpty:
+		// The walk COMPLETED and found no eligible survivor, so the stored preview
+		// is definitively wrong — drop it. A degraded walk never reaches here.
+		if err := s.rooms.ClearPreview(c, roomID, at.UnixMilli()); err != nil {
+			slog.WarnContext(c, "preview clear after mutation failed", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(c), "error", err)
+		}
+		return nil
+	default: // previewDegraded — a survivor may still exist; clearing would lose it
+		return nil
 	}
-	return nil
+}
+
+// storePreviewAfterMutation persists the post-mutation preview, best-effort: a
+// failure leaves a stale preview until the next message changes lastMsgId, which
+// costs correctness of a room-list snippet and nothing else.
+func (s *HistoryService) storePreviewAfterMutation(c *natsrouter.Context, roomID string, w *previewWalk, at time.Time) {
+	if w.NewestObservedID == "" {
+		return // nothing observed — no freshness key to store against
+	}
+	if err := s.rooms.SetPreviewMessage(c, roomID, w.Preview, w.NewestObservedID, at.UnixMilli()); err != nil {
+		slog.WarnContext(c, "preview store after mutation failed", "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(c), "error", err)
+	}
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).
