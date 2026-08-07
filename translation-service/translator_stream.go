@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-resty/resty/v2"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/restyutil"
 )
 
@@ -90,7 +91,10 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 		SetDoNotParseResponse(true).
 		Post("")
 	if err != nil {
-		return "", false, fmt.Errorf("translate request: %w", err)
+		// Transport failure (connection refused / timeout / no response) — the
+		// third-party backend is unreachable, not our bug.
+		return "", false, errcode.Unavailable("translation upstream unavailable",
+			errcode.WithReason(errcode.TranslateUpstreamUnavailable), errcode.WithCause(err))
 	}
 	body := resp.RawBody()
 	defer body.Close()
@@ -139,6 +143,12 @@ readLoop:
 		// No SSE payload — the response is an error body, possibly a JWT rejection.
 		if isJWTFailure(nonSSE.String()) {
 			return "", true, nil
+		}
+		if resp.StatusCode() >= 500 {
+			// Upstream 5XX — third-party backend is down, not our bug. Only the
+			// numeric status is safe to surface; never the (untrusted) body.
+			return "", false, errcode.Unavailable("translation upstream unavailable",
+				errcode.WithReason(errcode.TranslateUpstreamUnavailable))
 		}
 		return "", false, fmt.Errorf("translate backend error (status %d)", resp.StatusCode())
 	}
