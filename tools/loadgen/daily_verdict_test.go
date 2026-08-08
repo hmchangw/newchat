@@ -204,6 +204,56 @@ other_total 100
 	require.Equal(t, 5.0, v)
 }
 
+// An endpoint that serves metrics but not this family is not the same as a
+// service reporting zero errors. Collapsing the two would let a wired-up but
+// wrong metric name read as permanently healthy.
+func TestScrapeErrorCounter_AbsentFamilyIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("# TYPE other_total counter\nother_total 100\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := scrapeErrorCounter(context.Background(), srv.URL)
+	require.ErrorIs(t, err, errCounterFamilyAbsent)
+}
+
+func TestScrapeErrorCounter_PresentButZeroIsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("slog_errors_total{level=\"error\"} 0\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	v, err := scrapeErrorCounter(context.Background(), srv.URL)
+	require.NoError(t, err)
+	require.Equal(t, 0.0, v)
+}
+
+// A prefix match would score slog_errors_total_extra as slog_errors_total,
+// making an absent counter look present — which defeats errCounterFamilyAbsent.
+func TestSumCounterFamily_RequiresExactFamilyName(t *testing.T) {
+	body := "slog_errors_total_extra 42\nslog_errors_total_bucket 7\n"
+	sum, found := sumCounterFamily(body, "slog_errors_total")
+	assert.False(t, found, "a longer metric name is a different family")
+	assert.Equal(t, 0.0, sum)
+}
+
+func TestSumCounterFamily_AcceptsLabelsAndBareNames(t *testing.T) {
+	body := "slog_errors_total{level=\"error\"} 5\nslog_errors_total 3\n"
+	sum, found := sumCounterFamily(body, "slog_errors_total")
+	assert.True(t, found)
+	assert.Equal(t, 8.0, sum)
+}
+
+func TestSumCounterFamily_ReportsPresence(t *testing.T) {
+	body := "foo_total{a=\"x\"} 3\nfoo_total{a=\"y\"} 4\nunrelated 99\n"
+	sum, found := sumCounterFamily(body, "foo_total")
+	require.True(t, found)
+	require.Equal(t, 7.0, sum)
+
+	_, found = sumCounterFamily(body, "missing_total")
+	require.False(t, found)
+}
+
 func TestSumCounterFamily_HandlesCommentsAndBlankLines(t *testing.T) {
 	body := `
 # HELP foo
@@ -212,8 +262,72 @@ foo_total{a="x"} 3
 foo_total{a="y"} 4
 unrelated 99
 `
-	require.Equal(t, 7.0, sumCounterFamily(body, "foo_total"))
-	require.Equal(t, 0.0, sumCounterFamily(body, "missing"))
+	sum, found := sumCounterFamily(body, "foo_total")
+	require.True(t, found)
+	require.Equal(t, 7.0, sum)
+
+	sum, found = sumCounterFamily(body, "missing")
+	require.False(t, found)
+	require.Equal(t, 0.0, sum)
+}
+
+// A send whose broadcast never arrives is invisible to daily's error_rate: the
+// action returned nil (the publish succeeded), so it counts in AttemptedOps but
+// never in FailedOps, and contributes no latency sample. The more the pipeline
+// drops, the healthier the run reads.
+func TestEvaluateStep_TripsOnMissingBroadcasts(t *testing.T) {
+	in := stepInputs{
+		N: 1000, HoldDuration: time.Minute,
+		AttemptedOps: 10000, FailedOps: 0, MissingBroadcasts: 500,
+		LatencySamples: []float64{10, 20, 30},
+	}
+	r := evaluateStep(in, defaultThresholds())
+
+	assert.True(t, r.Tripped)
+	assert.InDelta(t, 0.05, r.MissingBroadcastRate, 1e-9)
+	require.NotEmpty(t, r.TrippedReasons)
+	assert.Contains(t, strings.Join(r.TrippedReasons, "; "), "missing broadcast")
+}
+
+func TestEvaluateStep_ToleratesMissingBroadcastsUnderThreshold(t *testing.T) {
+	in := stepInputs{
+		N: 1000, HoldDuration: time.Minute,
+		AttemptedOps: 100000, FailedOps: 0, MissingBroadcasts: 50,
+		LatencySamples: []float64{10, 20, 30},
+	}
+	r := evaluateStep(in, defaultThresholds())
+
+	assert.False(t, r.Tripped)
+	assert.Empty(t, r.TrippedReasons)
+}
+
+// A misconfigured metric name must not pass as "no errors". Scrape keeps
+// tolerating the reading (a down service shouldn't fail the run) but says so,
+// so a half-done wiring is visible instead of permanently green.
+func TestServiceScraper_ReportsAbsentFamily(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("other_total 100\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newServiceScraper()
+	out, err := s.Scrape(context.Background(), map[string]string{"svc": srv.URL})
+
+	require.NoError(t, err, "an unreadable service must not abort the step")
+	require.Equal(t, int64(0), out["svc"])
+	require.Equal(t, []string{"svc"}, s.Unavailable())
+}
+
+func TestServiceScraper_HealthyServiceIsNotUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("slog_errors_total 0\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newServiceScraper()
+	_, err := s.Scrape(context.Background(), map[string]string{"svc": srv.URL})
+	require.NoError(t, err)
+	require.Empty(t, s.Unavailable())
 }
 
 func TestServiceScraper_DeltaAfterBaseline(t *testing.T) {

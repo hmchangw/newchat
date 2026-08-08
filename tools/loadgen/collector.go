@@ -147,6 +147,17 @@ func (c *Collector) RecordPublishFailed(requestID, messageID string) {
 	ms.mu.Unlock()
 }
 
+// DiscardReply consumes one pending publish keyed by requestID without
+// recording a latency sample. Use when a reply arrived but was unusable (e.g.
+// a malformed body already counted under the bad_reply error reason), so the
+// same message is not counted a second time as a missing reply by Finalize.
+func (c *Collector) DiscardReply(requestID string) {
+	rs := c.reqShards[shardIdx(requestID)]
+	rs.mu.Lock()
+	delete(rs.byReqID, requestID)
+	rs.mu.Unlock()
+}
+
 // RecordBroadcast consumes one pending publish keyed by messageID.
 func (c *Collector) RecordBroadcast(messageID string, at time.Time) {
 	ms := c.msgShards[shardIdx(messageID)]
@@ -202,6 +213,32 @@ func (c *Collector) Finalize() (missingReplies int, missingBroadcasts int) {
 		ms.mu.Unlock()
 	}
 	return
+}
+
+// MissingBroadcastsOlderThan counts publishes that are still unmatched and
+// were published at or before cutoff.
+//
+// Finalize's plain unmatched count only means "dropped" once the generator has
+// stopped and drained. Scenarios whose emitters run continuously across steps
+// (daily) have no such quiet point: at any instant some publishes are
+// legitimately in flight. Age is what separates the two, so callers pass a
+// cutoff of now minus a delivery grace and everything older is a genuine drop.
+//
+// Only the broadcast side is exposed. A caller that never calls RecordReply
+// leaves every byReqID entry unmatched forever, so a reply count here would
+// read as a 100% failure rate rather than a real signal.
+func (c *Collector) MissingBroadcastsOlderThan(cutoff time.Time) int {
+	missing := 0
+	for _, ms := range &c.msgShards {
+		ms.mu.Lock()
+		for _, e := range ms.byMsgID {
+			if !e.publishedAt.After(cutoff) {
+				missing++
+			}
+		}
+		ms.mu.Unlock()
+	}
+	return missing
 }
 
 // E1Count returns the number of matched E1 samples.

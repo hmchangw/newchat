@@ -64,6 +64,7 @@ SLO signals evaluated over the hold window:
   - p95 latency (publish→broadcast)        threshold 500ms
   - p99 latency                            threshold 1000ms
   - error rate                             threshold 0.1%
+  - missing broadcast rate                 threshold 0.1% (same as error rate)
   - any JetStream consumer pending growth  threshold +1000
     (notification-worker exempt: push-notification delay is tolerated)
   - any service slog_errors_total increase threshold +0
@@ -347,6 +348,7 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	if err := waitOrCancel(ctx, env.hold); err != nil {
 		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during hold")
 	}
+	holdEndedAt := time.Now()
 
 	endPending, endPollErr := env.pollPending(ctx)
 	if endPollErr != nil {
@@ -373,16 +375,32 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		actionSamples[actionKind(kind).String()] = ss
 	}
 
+	// Emitters keep running across steps, so there is no quiet point at which
+	// every unmatched publish is a drop. Wait out the delivery grace, then score
+	// everything published up to the hold boundary.
+	//
+	// The cutoff is holdEndedAt, not now-minus-grace: a moving cutoff would
+	// permanently exclude the last grace-interval of every hold, and the
+	// collector.Reset() at the next step discards those entries, so a broadcast
+	// dropped in that window would never be counted by any step. Waiting first
+	// and then cutting at the boundary gives eligible broadcasts their full
+	// grace while still scoring the whole hold.
+	if err := waitOrCancel(ctx, deliveryGrace); err != nil {
+		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during delivery grace")
+	}
+	missingBroadcasts := env.collector.MissingBroadcastsOlderThan(holdEndedAt)
+
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
-		EffectiveN:      int(env.activatedCount.Load()),
-		LatencySamples:  env.collector.LatencySamples(),
-		ActionSamplesMs: actionSamples,
-		AttemptedOps:    env.collector.AttemptedOps(),
-		FailedOps:       env.collector.FailedOps(),
-		ConsumerPending: pendingDeltas,
-		ServiceErrors:   svcErrors,
-		Self:            snapshotSelfMetrics(),
+		EffectiveN:        int(env.activatedCount.Load()),
+		LatencySamples:    env.collector.LatencySamples(),
+		ActionSamplesMs:   actionSamples,
+		AttemptedOps:      env.collector.AttemptedOps(),
+		FailedOps:         env.collector.FailedOps(),
+		MissingBroadcasts: int64(missingBroadcasts),
+		ConsumerPending:   pendingDeltas,
+		ServiceErrors:     svcErrors,
+		Self:              snapshotSelfMetrics(),
 	}
 	r := evaluateStep(in, env.thresholds)
 	snapshotPresenceStats(env, &r)
@@ -630,6 +648,12 @@ func presenceFlip(env *stepEnv, u *userState, wasActive bool) {
 // stream, which is what makes regression CSV comparisons meaningful.
 const dailyRunSeed int64 = 42
 
+// deliveryGrace is how long after publish a broadcast may still arrive before
+// the send is treated as dropped. Double the 1000ms p99 threshold this
+// scenario gates on, matching drainWindow's rationale on the max-rps path: a
+// tail-latency straggler has room to land, and only genuine drops are counted.
+const deliveryGrace = 2 * time.Second
+
 //nolint:gocritic // cfg passed by value to match envFactory.Build signature
 func runDailyForTest(ctx context.Context, cfg dailyConfig, factory envFactory) ([]StepResult, error) {
 	preset, _ := BuiltinPreset(cfg.Preset)
@@ -821,9 +845,20 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		jszURL = "http://nats:8222/jsz"
 	}
 
-	// Backend services don't currently expose /metrics endpoints, so the
-	// service-error scraper is a no-op until they do. Pass an empty URL map
-	// — Scrape will return an empty delta map without making any requests.
+	// The service-error verdict arm is dormant, but not for the reason this
+	// comment used to give: services DO expose /metrics now (:9090 for
+	// hand-rolled counters, :2112 for the o11y SDK). What is missing is the
+	// metric — no service in this repo emits slog_errors_total, so wiring URLs
+	// here would scrape real endpoints, find no such family, and report a
+	// permanent zero that reads as "no service errors".
+	//
+	// Unblocking it needs a uniform per-service error counter first. The
+	// natsrouter middleware in docs/specs/o11y/o11y-slo.md §8 P1
+	// (rpc_server_duration_seconds{subject_pattern, errcode_category}) is the
+	// intended source; point serviceErrorCounterName at it and fill this map
+	// once it ships. scrapeErrorCounter fails with errCounterFamilyAbsent if
+	// the family is missing, so a half-done wiring surfaces instead of
+	// silently passing.
 	scraper := newServiceScraper()
 	svcURLs := map[string]string{}
 

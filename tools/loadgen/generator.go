@@ -167,7 +167,6 @@ func (g *Generator) publishOne(ctx context.Context) {
 		}
 		data, err = json.Marshal(evt)
 		subj = subject.MsgCanonicalCreated(g.cfg.SiteID)
-		g.cfg.Collector.RecordPublishBroadcastOnly(msgID, publishTime)
 	default:
 		reqID = idgen.GenerateRequestID()
 		req := model.SendMessageRequest{ID: msgID, Content: content, RequestID: reqID}
@@ -181,11 +180,20 @@ func (g *Generator) publishOne(ctx context.Context) {
 		}
 		data, err = json.Marshal(req)
 		subj = subject.MsgSend(sub.User.Account, sub.RoomID, g.cfg.SiteID)
-		g.cfg.Collector.RecordPublish(reqID, msgID, publishTime)
 	}
 	if err != nil {
 		g.cfg.Metrics.PublishErrors.WithLabelValues(g.cfg.Preset.Name, "marshal").Inc()
 		return
+	}
+	// Correlate only once the payload is known good. Registering before the
+	// marshal check would leave an entry no reply can ever clear, which
+	// Finalize would then report as a missing delivery on top of the
+	// marshal error already counted. publishTime is captured above, so the
+	// recorded timestamp is unaffected by the ordering.
+	if reqID == "" {
+		g.cfg.Collector.RecordPublishBroadcastOnly(msgID, publishTime)
+	} else {
+		g.cfg.Collector.RecordPublish(reqID, msgID, publishTime)
 	}
 	if perr := g.cfg.Publisher.Publish(ctx, subj, data); perr != nil {
 		g.cfg.Collector.RecordPublishFailed(reqID, msgID)

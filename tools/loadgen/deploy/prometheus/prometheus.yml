@@ -1,3 +1,18 @@
+# Prometheus config for the loadgen dashboards profile.
+#
+# Beyond loadgen's own series this scrapes the three sources a load run needs to
+# tell "the service is too slow" apart from "the harness is too slow":
+#
+#   :7777  prometheus-nats-exporter — JetStream consumer backlog. Per
+#          docs/specs/o11y/o11y-slo.md §0.1/§7 backlog growth is the *primary*
+#          enforcement signal for every async SLO (1a/1b/2/6/9); the event
+#          ratios are secondary because they are approximate today.
+#   :2112  o11y SDK metrics off every microservice (Docker SD, same shape as
+#          docker-local/o11y/prometheus.yaml). Carries http.server.request.duration
+#          (SLO-3) and db.client.operation.duration, and is where the §8 P1/P2/P4
+#          counters land when they ship.
+#   :9090  hand-rolled per-service counters, incl. search_service_requests_total
+#          {type,status} (SLO-7).
 global:
   scrape_interval: 5s
   evaluation_interval: 5s
@@ -6,8 +21,67 @@ scrape_configs:
   - job_name: loadgen
     static_configs:
       - targets: ["loadgen:9099"]
+
   - job_name: cadvisor
     static_configs:
       - targets: ["cadvisor:8080"]
-  # NATS monitoring on :8222 serves JSON (/varz, /jsz) — not Prometheus.
-  # Add prometheus-nats-exporter as a sidecar if NATS metrics are needed.
+
+  # JetStream stream/consumer state (num_pending, num_ack_pending,
+  # num_redelivered) re-exposed as Prometheus metrics by the exporter sidecar,
+  # which polls the NATS monitoring endpoint on :8222.
+  - job_name: nats-jetstream
+    static_configs:
+      - targets: ["nats-exporter:7777"]
+
+  # o11y SDK endpoint on every container of the chat-local-services project.
+  # Docker SD (not static targets) so services added later are picked up without
+  # editing this file — mirrors docker-local/o11y/prometheus.yaml.
+  - job_name: chat-services
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        port: 2112
+    relabel_configs:
+      - source_labels: [__meta_docker_network_name]
+        regex: chat-local
+        action: keep
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        regex: chat-local-services
+        action: keep
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: traefik|vault|portal-seed
+        action: drop
+      # docker_sd emits the container's exposed app port when one is present;
+      # force every target onto the SDK endpoint instead.
+      - source_labels: [__meta_docker_network_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: ${1}:2112
+      - source_labels: [__meta_docker_container_name]
+        regex: /?(.*)
+        target_label: instance
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+
+  # Services exposing hand-rolled counters on :9090 (METRICS_ADDR; search-service
+  # uses SEARCH_METRICS_ADDR). Same list as tools/observability/prometheus/prometheus.yml.
+  - job_name: notification-worker
+    static_configs:
+      - targets: ["notification-worker:9090"]
+  - job_name: broadcast-worker
+    static_configs:
+      - targets: ["broadcast-worker:9090"]
+  - job_name: message-gatekeeper
+    static_configs:
+      - targets: ["message-gatekeeper:9090"]
+  - job_name: message-worker
+    static_configs:
+      - targets: ["message-worker:9090"]
+  - job_name: room-worker
+    static_configs:
+      - targets: ["room-worker:9090"]
+  - job_name: history-service
+    static_configs:
+      - targets: ["history-service:9090"]
+  - job_name: search-service
+    static_configs:
+      - targets: ["search-service:9090"]

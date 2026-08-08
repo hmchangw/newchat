@@ -72,7 +72,7 @@ func renderRPSReportWithBottleneck(w io.Writer, results []rpsStepResult, workloa
 	for _, n := range names {
 		header = append(header, n+" p95", n+" p99")
 	}
-	header = append(header, "err%", "worst_pending", "verdict")
+	header = append(header, "err%", "miss% (r/b)", "worst_pending", "verdict")
 	fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for i := range results {
@@ -86,7 +86,8 @@ func renderRPSReportWithBottleneck(w io.Writer, results []rpsStepResult, workloa
 		if r.WorstDurable != "" {
 			pending = fmt.Sprintf("%s +%d", r.WorstDurable, r.WorstDelta)
 		}
-		row = append(row, fmt.Sprintf("%.3f", r.ErrorRate*100), pending, r.Kind.String())
+		miss := fmt.Sprintf("%.3f/%.3f", r.MissingReplyRate*100, r.MissingBroadcastRate*100)
+		row = append(row, fmt.Sprintf("%.3f", r.ErrorRate*100), miss, pending, r.Kind.String())
 		fmt.Fprintln(tw, strings.Join(row, "\t"))
 	}
 	if err := tw.Flush(); err != nil {
@@ -122,6 +123,7 @@ func writeRPSCSV(w io.Writer, results []rpsStepResult, bn *bottleneckVerdict) er
 	}
 	header = append(header,
 		"error_rate", "attempted", "failed",
+		"missing_replies", "missing_broadcasts", "missing_reply_rate", "missing_broadcast_rate",
 		"saturation", "emit_underrun", "worst_durable", "worst_pending_delta", "verdict", "reasons",
 		// bottleneck attribution columns (nil when bottleneck detection is disabled)
 		"bottleneck_component", "bottleneck_resource", "bottleneck_confidence",
@@ -141,7 +143,11 @@ func writeRPSCSV(w io.Writer, results []rpsStepResult, bn *bottleneckVerdict) er
 		}
 		row = append(row,
 			strconv.FormatFloat(r.ErrorRate, 'f', 6, 64),
-			strconv.Itoa(r.AttemptedOps), strconv.Itoa(r.FailedOps), strconv.Itoa(r.Saturation),
+			strconv.Itoa(r.AttemptedOps), strconv.Itoa(r.FailedOps),
+			strconv.Itoa(r.MissingReplies), strconv.Itoa(r.MissingBroadcasts),
+			strconv.FormatFloat(r.MissingReplyRate, 'f', 6, 64),
+			strconv.FormatFloat(r.MissingBroadcastRate, 'f', 6, 64),
+			strconv.Itoa(r.Saturation),
 			strconv.Itoa(r.EmitUnderrun),
 			r.WorstDurable, strconv.FormatInt(r.WorstDelta, 10),
 			r.Kind.String(), strings.Join(r.Reasons, "; "))

@@ -78,9 +78,16 @@ type config struct {
 	// JetStream consumer pending counts. Defaults to the docker-compose
 	// service name. Override (e.g. `http://127.0.0.1:8222/jsz` on the host,
 	// or a custom monitoring port) when running against non-default infra.
-	NatsMonitoringURL string           `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
-	Bottleneck        bottleneckConfig `envPrefix:"BOTTLENECK_"`
-	Soak              soakConfig       `envPrefix:"SOAK_"`
+	NatsMonitoringURL string `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
+
+	// auth-service base URL for the `login` max-rps workload. Every other
+	// workload reaches NATS with a pre-provisioned creds file and never touches
+	// the HTTP auth leg, so this stays optional and the workload fail-fasts
+	// when it is empty.
+	AuthURL string `env:"AUTH_URL" envDefault:""`
+
+	Bottleneck bottleneckConfig `envPrefix:"BOTTLENECK_"`
+	Soak       soakConfig       `envPrefix:"SOAK_"`
 }
 
 func main() {
@@ -883,7 +890,14 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		slog.Error("generator error", "error", err)
 	}
 	time.Sleep(2 * time.Second)
-	collector.Finalize()
+	// The generator has stopped and drained, so anything still unmatched was
+	// never delivered. Report it: discarding the counts here made a run that
+	// dropped member events look identical to one that delivered them all.
+	missingReplies, missingEvents := collector.Finalize()
+	if missingReplies > 0 || missingEvents > 0 {
+		slog.Warn("undelivered after drain",
+			"missing_replies", missingReplies, "missing_events", missingEvents)
+	}
 
 	shutCtx, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = metricsSrv.Shutdown(shutCtx)

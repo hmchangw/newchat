@@ -169,6 +169,65 @@ func TestCollector_RecordPublishBroadcastOnly_FinalizeNoMissingReplies(t *testin
 	assert.Equal(t, 1, missingBroadcasts)
 }
 
+// A malformed reply is already counted under the bad_reply error reason. If it
+// also left its correlation entry behind, the same message would be counted a
+// second time as a missing reply once Finalize feeds the verdict.
+func TestCollector_DiscardReply_ConsumesWithoutSample(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	now := time.Unix(0, 0)
+	c.RecordPublish("req-1", "msg-1", now)
+
+	c.DiscardReply("req-1")
+
+	assert.Equal(t, 0, c.E1Count(), "a discarded reply is not a latency sample")
+	missingReplies, _ := c.Finalize()
+	assert.Equal(t, 0, missingReplies, "a discarded reply must not also count as missing")
+}
+
+func TestCollector_DiscardReply_UnknownRequestIDIsNoop(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	c.DiscardReply("never-published")
+	missingReplies, missingBroadcasts := c.Finalize()
+	assert.Equal(t, 0, missingReplies)
+	assert.Equal(t, 0, missingBroadcasts)
+}
+
+// Continuous-emitter scenarios (daily) can't stop publishing and drain, so
+// "unmatched" alone would count everything still legitimately in flight.
+// Age is what separates a dropped broadcast from an in-flight one.
+func TestCollector_MissingBroadcastsOlderThan(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	now := time.Unix(1000, 0)
+	cutoff := now.Add(-2 * time.Second)
+
+	c.RecordPublishBroadcastOnly("old-dropped", now.Add(-5*time.Second))
+	c.RecordPublishBroadcastOnly("old-delivered", now.Add(-4*time.Second))
+	c.RecordPublishBroadcastOnly("recent-inflight", now.Add(-500*time.Millisecond))
+	c.RecordBroadcast("old-delivered", now.Add(-3*time.Second))
+
+	assert.Equal(t, 1, c.MissingBroadcastsOlderThan(cutoff),
+		"only the aged-out unmatched publish counts")
+}
+
+func TestCollector_MissingBroadcastsOlderThan_BoundaryIsInclusive(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	cutoff := time.Unix(1000, 0)
+	c.RecordPublishBroadcastOnly("exactly-at-cutoff", cutoff)
+
+	assert.Equal(t, 1, c.MissingBroadcastsOlderThan(cutoff))
+}
+
+func TestCollector_MissingBroadcastsOlderThan_IgnoresReplyCorrelation(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	now := time.Unix(1000, 0)
+	// RecordPublish populates byReqID too. A caller that never correlates
+	// replies must not see those entries leak into the broadcast count.
+	c.RecordPublish("req-1", "msg-1", now.Add(-10*time.Second))
+	c.RecordBroadcast("msg-1", now.Add(-9*time.Second))
+
+	assert.Equal(t, 0, c.MissingBroadcastsOlderThan(now))
+}
+
 func TestCollector_Reset(t *testing.T) {
 	c := NewCollector(NewMetrics(), "test")
 	now := time.Now()

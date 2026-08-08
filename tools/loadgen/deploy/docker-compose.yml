@@ -34,6 +34,9 @@ services:
       # profiling.
       # - PPROF_ADDR=:6060
       - BOTTLENECK_PROM_URL=http://prometheus:9090
+      # auth-service base URL for `max-rps --workload=login`. Unused by every
+      # other workload, which connects to NATS with the creds file above.
+      - AUTH_URL=${AUTH_URL:-http://auth-service:8080}
       # Cassandra Run A. SOAK_RUN_ID must be supplied when bringing up the
       # overlay; all remaining values use the conservative binary defaults
       # unless overridden here.
@@ -104,14 +107,39 @@ services:
     networks:
       - chat-local
 
+  # Polls the deps NATS server's monitoring endpoint (:8222) and re-exposes
+  # JetStream state as Prometheus metrics. `-jsz=all` turns on the consumer-level
+  # detail (num_pending, num_ack_pending, num_redelivered) that shows whether a
+  # worker is falling behind during a run. No container_name and no host port
+  # binding, so this can coexist with tools/observability's exporter.
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:0.16.0
+    profiles: [dashboards]
+    command: ["-port=7777", "-jsz=all", "http://chat-local-nats:8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7777/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - chat-local
+
   prometheus:
     image: prom/prometheus:v2.55.0
     profiles: [dashboards]
+    # Local-dev only: Docker SD reads /var/run/docker.sock (root-owned) to
+    # discover the :2112 SDK endpoints. Run as root so no host chmod is needed.
+    # This stack already runs privileged (cAdvisor).
+    user: "0:0"
     depends_on:
       cadvisor:
         condition: service_healthy
+      nats-exporter:
+        condition: service_healthy
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Docker SD for :2112 targets
     ports:
       - "9090:9090"
     networks:

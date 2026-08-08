@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,12 +168,24 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 		defer cc.Stop()
 	}
 
-	// Fake gatekeeper: frontdoor send -> canonical event.
+	// Fake gatekeeper: frontdoor send -> canonical event, plus the reply and the
+	// room broadcast a real pipeline would produce. Both legs matter: the step
+	// verdict now scores publishes that are never answered, so a stub that only
+	// republished to canonical would leave every send unmatched and report a
+	// ~100% miss rate — the harness failing, not the system under test.
+	//
+	// Subject shape is chat.user.{account}.room.{roomID}.{siteID}.msg.send.
 	gkSub, err := nc.Subscribe(subject.MsgSendWildcard(siteID), func(m *nats.Msg) {
 		var req model.SendMessageRequest
 		if err := json.Unmarshal(m.Data, &req); err != nil {
 			return
 		}
+		tokens := strings.Split(m.Subject, ".")
+		if len(tokens) < 5 {
+			return
+		}
+		account, roomID := tokens[2], tokens[4]
+
 		evt := model.MessageEvent{
 			Message:   model.Message{ID: req.ID, Content: req.Content, CreatedAt: time.Now().UTC()},
 			SiteID:    siteID,
@@ -180,6 +193,13 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 		}
 		data, _ := json.Marshal(evt)
 		_, _ = js.Publish(ctx, subject.MsgCanonicalCreated(siteID), data)
+
+		// E1: reply on the per-request response subject.
+		_ = nc.Publish(subject.UserResponse(account, req.RequestID), []byte(`{}`))
+		// E2: room broadcast carrying lastMsgId, which is what newE2Handler
+		// correlates against the publish.
+		bcast, _ := json.Marshal(map[string]string{"lastMsgId": req.ID})
+		_ = nc.Publish(subject.RoomEvent(roomID, true), bcast)
 	})
 	require.NoError(t, err)
 	defer gkSub.Unsubscribe()
@@ -187,7 +207,7 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 	cfg := &config{NatsURL: testutil.NATS(t), SiteID: siteID, MetricsAddr: ":0", MaxInFlight: 100}
 	preset, _ := BuiltinPreset("small")
 
-	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42)
+	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42, resolveDrainWindow(0))
 	require.NoError(t, err)
 	defer cleanup()
 
@@ -205,6 +225,12 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 		require.NotEqual(t, verdictTrip, r.Kind, "reasons=%v", r.Reasons)
 		require.Greater(t, r.AttemptedOps, 0)
 		require.Greater(t, r.AchievedRPS, 0.0)
+		// A miss rate above 1.0 is arithmetically impossible for a real ratio:
+		// it means a publish was counted as missing without being counted as
+		// attempted, i.e. the generator was still emitting when the denominator
+		// was snapshotted.
+		require.LessOrEqual(t, r.MissingReplyRate, 1.0, "miss rate cannot exceed the denominator")
+		require.LessOrEqual(t, r.MissingBroadcastRate, 1.0, "miss rate cannot exceed the denominator")
 	}
 }
 

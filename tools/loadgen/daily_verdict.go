@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"runtime"
@@ -105,9 +107,15 @@ type stepInputs struct {
 	ActionSamplesMs map[string][]float64 // per-action wall-clock latency in ms
 	AttemptedOps    int64
 	FailedOps       int64
-	ConsumerPending map[string]ConsumerPendingDelta
-	ServiceErrors   map[string]int64
-	Self            SelfMetrics
+	// MissingBroadcasts counts sends whose broadcast never arrived within the
+	// delivery grace. They are invisible to FailedOps — the action returned nil
+	// because the publish itself succeeded — so without this a step that drops
+	// deliveries reads as healthy, and reads *better* the more it drops, since
+	// the dropped sends are the slow ones that would have widened the tail.
+	MissingBroadcasts int64
+	ConsumerPending   map[string]ConsumerPendingDelta
+	ServiceErrors     map[string]int64
+	Self              SelfMetrics
 }
 
 // ActionLatencyStats summarises one action kind's wall-clock latency
@@ -149,6 +157,8 @@ type StepResult struct {
 	ErrorRate             float64
 	AttemptedOps          int64
 	FailedOps             int64
+	MissingBroadcasts     int64
+	MissingBroadcastRate  float64
 	ConsumerPending       map[string]ConsumerPendingDelta
 	ServiceErrorIncreases map[string]int64
 	LoadgenSelfMetrics    SelfMetrics
@@ -206,6 +216,7 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 		N: in.N, EffectiveN: in.EffectiveN,
 		StartedAt: in.StartedAt, HoldDuration: in.HoldDuration,
 		AttemptedOps: in.AttemptedOps, FailedOps: in.FailedOps,
+		MissingBroadcasts:     in.MissingBroadcasts,
 		ConsumerPending:       in.ConsumerPending,
 		ServiceErrorIncreases: in.ServiceErrors,
 		LoadgenSelfMetrics:    in.Self,
@@ -216,6 +227,7 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 	}
 	if in.AttemptedOps > 0 {
 		r.ErrorRate = float64(in.FailedOps) / float64(in.AttemptedOps)
+		r.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.AttemptedOps)
 	}
 
 	// Inconclusive overrides trip. Reserved for situations where the
@@ -259,6 +271,13 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 		r.Tripped = true
 		r.TrippedReasons = append(r.TrippedReasons,
 			fmt.Sprintf("error_rate=%.4f > %.4f", r.ErrorRate, th.ErrorRate))
+	}
+	// Gated at the same rate as hard errors: a send whose broadcast never
+	// arrives is, to every recipient, indistinguishable from one that failed.
+	if r.MissingBroadcastRate > th.ErrorRate {
+		r.Tripped = true
+		r.TrippedReasons = append(r.TrippedReasons,
+			fmt.Sprintf("missing broadcast rate=%.4f > %.4f", r.MissingBroadcastRate, th.ErrorRate))
 	}
 	for durable, d := range in.ConsumerPending {
 		switch {
@@ -447,26 +466,67 @@ func pollPendingOnce(ctx context.Context, jszURL string) (map[string]int64, erro
 	return out, nil
 }
 
+// serviceErrorCounterName is the counter family the service-error verdict arm
+// scores. NOTHING IN THIS REPO EMITS IT YET — see the dormancy note on
+// prodEnvFactory.Build before wiring URLs.
+const serviceErrorCounterName = "slog_errors_total"
+
+// errCounterFamilyAbsent means the endpoint answered but never exported
+// serviceErrorCounterName, so its error count is unknown rather than zero.
+var errCounterFamilyAbsent = errors.New("counter family not exported by endpoint")
+
 // serviceScraper fetches /metrics from each service URL and returns a map of
 // service -> delta in slog_errors_total since the previous call.
 // First call returns zeros and records baselines.
 type serviceScraper struct {
 	mu       sync.Mutex
 	baseline map[string]float64
+	// unavailable holds the services whose last scrape could not produce an
+	// error count. Their entry in the delta map is 0, which is indistinguishable
+	// from "no errors" — this set is what tells the two apart.
+	unavailable map[string]struct{}
 }
 
 func newServiceScraper() *serviceScraper {
-	return &serviceScraper{baseline: make(map[string]float64)}
+	return &serviceScraper{
+		baseline:    make(map[string]float64),
+		unavailable: make(map[string]struct{}),
+	}
+}
+
+// Unavailable returns the services whose last Scrape yielded no usable error
+// count, sorted. A non-empty result means the service-error verdict arm is not
+// actually scoring those services, however green the run looks.
+func (s *serviceScraper) Unavailable() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.unavailable) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.unavailable))
+	for name := range s.unavailable {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *serviceScraper) Scrape(ctx context.Context, urls map[string]string) (map[string]int64, error) {
 	out := make(map[string]int64, len(urls))
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	clear(s.unavailable)
 	for name, url := range urls {
 		v, err := scrapeErrorCounter(ctx, url)
 		if err != nil {
-			out[name] = 0 // tolerate missing
+			// Tolerated so a restarting service can't fail the step, but
+			// recorded: 0 here means "unknown", not "no errors".
+			out[name] = 0
+			s.unavailable[name] = struct{}{}
+			if errors.Is(err, errCounterFamilyAbsent) {
+				slog.Warn("service error counter not exported — verdict arm inactive for this service",
+					"service", name, "counter", serviceErrorCounterName)
+			}
 			continue
 		}
 		prev, ok := s.baseline[name]
@@ -494,16 +554,32 @@ func scrapeErrorCounter(ctx context.Context, url string) (float64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("metrics read %s: %w", url, err)
 	}
-	return sumCounterFamily(string(body), "slog_errors_total"), nil
+	sum, found := sumCounterFamily(string(body), serviceErrorCounterName)
+	if !found {
+		return 0, fmt.Errorf("scrape %s: %w", url, errCounterFamilyAbsent)
+	}
+	return sum, nil
 }
 
-func sumCounterFamily(body, family string) float64 {
-	var sum float64
+// sumCounterFamily totals every sample of family in a Prometheus text body and
+// reports whether the family appeared at all. The presence flag matters: an
+// endpoint that never exports the family is not a service reporting zero, and
+// returning a bare 0 for both would make a wrong metric name look healthy.
+func sumCounterFamily(body, family string) (sum float64, found bool) {
 	for _, line := range strings.Split(body, "\n") {
 		if line == "" || line[0] == '#' {
 			continue
 		}
 		if !strings.HasPrefix(line, family) {
+			continue
+		}
+		// Require a family boundary after the name. A bare prefix test would
+		// score slog_errors_total_extra as slog_errors_total, which would make
+		// an absent counter report as present and defeat errCounterFamilyAbsent.
+		// In Prometheus text format the name is followed by '{' (labels) or
+		// whitespace (value).
+		if rest := line[len(family):]; rest == "" ||
+			(rest[0] != '{' && rest[0] != ' ' && rest[0] != '\t') {
 			continue
 		}
 		fields := strings.Fields(line)
@@ -515,6 +591,7 @@ func sumCounterFamily(body, family string) float64 {
 			continue // skip unparseable line
 		}
 		sum += v
+		found = true
 	}
-	return sum
+	return sum, found
 }

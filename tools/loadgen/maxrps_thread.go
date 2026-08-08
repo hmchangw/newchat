@@ -32,6 +32,9 @@ type threadWorkload struct {
 	publisher Publisher
 	canonical string
 	durables  []string
+	// drain is how long RunStep waits after stopping the generator before
+	// counting unanswered publishes. Scaled to the configured latency bound.
+	drain time.Duration
 }
 
 func (w *threadWorkload) Label() string { return "thread" }
@@ -40,7 +43,7 @@ func (w *threadWorkload) Label() string { return "thread" }
 // the publisher. The returned cleanup unsubscribes, shuts the metrics server,
 // and drains NATS. fixtures must already be seeded (rooms/subs/keys in Mongo,
 // parents in Cassandra).
-func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixtures *ThreadFixtures, seed int64) (*threadWorkload, func(), error) {
+func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixtures *ThreadFixtures, seed int64, drain time.Duration) (*threadWorkload, func(), error) {
 	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
@@ -72,6 +75,9 @@ func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixture
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			metrics.PublishErrors.WithLabelValues(preset.Name, "bad_reply").Inc()
+			// Consume the correlation entry: this send is already counted under
+			// bad_reply, so leaving it pending would count it again as missing.
+			collector.DiscardReply(reqID)
 			return
 		}
 		if payload.Error != "" {
@@ -107,6 +113,7 @@ func newThreadWorkload(ctx context.Context, cfg *config, preset *Preset, fixture
 		publisher: newNatsCorePublisher(nc.NatsConn(), InjectFrontdoor, js),
 		canonical: stream.MessagesCanonical(cfg.SiteID).Name,
 		durables:  []string{"message-worker", "broadcast-worker"},
+		drain:     drain,
 	}
 	cleanup := func() {
 		_ = e1Sub.Unsubscribe()
@@ -185,20 +192,24 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 
 	holdErr := waitOrCancel(ctx, hold)
 
-	// Counters are snapshotted at hold-end, before the drain: gatekeeper/bad_reply
-	// errors whose reply lands during the drain are deliberately excluded (see the
-	// straggler-exclusion rationale on buildMessagesInputs). The drain only lets
-	// trailing E1/E2 latency samples settle for the percentile signals.
-	endCounts := w.snapshotCounters()
-	endPending, perr2 := w.snapshotPending(ctx)
+	// Stop the generator and wait for it BEFORE snapshotting — see the ordering
+	// note in messagesWorkload.RunStep: a publish landing between the counter
+	// snapshot and the cancel is missing from the denominator but present in the
+	// correlation map, which can push the miss rate over 100%.
 	cancel()
 	wg.Wait()
-	time.Sleep(2 * time.Second) // drain trailing replies/broadcasts
+	endCounts := w.snapshotCounters()
+	endPending, perr2 := w.snapshotPending(ctx)
+	if err := waitOrCancel(ctx, w.drain); err != nil {
+		return rpsStepInputs{}, err
+	}
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {
 		return rpsStepInputs{}, holdErr
 	}
+
+	missingReplies, missingBroadcasts := w.collector.Finalize()
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil
@@ -207,5 +218,6 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	}
 	return buildMessagesInputs(targetRPS, hold, delta,
 		w.collector.E1Samples(), w.collector.E2Samples(),
-		startPending, endPending, w.durables, pendingOK), nil
+		startPending, endPending, w.durables, pendingOK,
+		missCounts{Replies: missingReplies, Broadcasts: missingBroadcasts}), nil
 }

@@ -15,7 +15,7 @@ import (
 // the discrepancy is annotated so an operator doesn't read "N=20000 PASS"
 // when only half the users were actually active.
 func renderConsole(w io.Writer, results []StepResult) {
-	fmt.Fprintln(w, "N        p50    p95    p99    err%    worst-pending-delta             verdict")
+	fmt.Fprintln(w, "N        p50    p95    p99    err%    miss%   worst-pending-delta             verdict")
 	var lastPass int
 	for i := range results {
 		r := &results[i]
@@ -34,9 +34,9 @@ func renderConsole(w io.Writer, results []StepResult) {
 		if r.EffectiveN > 0 && r.EffectiveN != r.N {
 			nLabel = fmt.Sprintf("%d(%d)", r.N, r.EffectiveN)
 		}
-		fmt.Fprintf(w, "%-8s %-6.0f %-6.0f %-6.0f %-7.2f%% %-30s %s\n",
+		fmt.Fprintf(w, "%-8s %-6.0f %-6.0f %-6.0f %-7.2f%% %-7.2f%% %-30s %s\n",
 			nLabel, r.P50LatencyMs, r.P95LatencyMs, r.P99LatencyMs,
-			r.ErrorRate*100, worst, verdict)
+			r.ErrorRate*100, r.MissingBroadcastRate*100, worst, verdict)
 		if (r.Tripped || r.Inconclusive) && len(r.TrippedReasons) > 0 {
 			fmt.Fprintf(w, "    reasons: %s\n", joinReasons(r.TrippedReasons))
 		}
@@ -114,6 +114,7 @@ func writeDailyCSV(path string, results []StepResult) error {
 	header := []string{
 		"n", "effective_n", "started_at", "p50_ms", "p95_ms", "p99_ms",
 		"error_rate", "attempted_ops", "failed_ops",
+		"missing_broadcasts", "missing_broadcast_rate",
 		"worst_durable", "worst_pending_delta",
 		"tripped", "inconclusive", "tripped_reasons",
 	}
@@ -153,6 +154,8 @@ func writeDailyCSV(path string, results []StepResult) error {
 			fmt.Sprintf("%.6f", r.ErrorRate),
 			strconv.FormatInt(r.AttemptedOps, 10),
 			strconv.FormatInt(r.FailedOps, 10),
+			strconv.FormatInt(r.MissingBroadcasts, 10),
+			fmt.Sprintf("%.6f", r.MissingBroadcastRate),
 			worstName,
 			strconv.FormatInt(worstDelta, 10),
 			strconv.FormatBool(r.Tripped),
