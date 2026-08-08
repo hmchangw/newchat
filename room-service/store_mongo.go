@@ -185,6 +185,13 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (u.account,name) index: %w", err)
 	}
+	// Backs ComputeSectionOrder + section rebalance (filter u.account+sectionId,
+	// sort sectionOrder); without it, section moves fall back to an in-memory sort.
+	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "sectionId", Value: 1}, {Key: "sectionOrder", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure subscriptions (u.account,sectionId,sectionOrder) index: %w", err)
+	}
 	// Backs getRoomSubscriptions: filter roomId, sort {joinedAt, _id} with
 	// skip/limit pagination. Including the sort keys lets Mongo return ordered
 	// pages from the index instead of an in-memory sort that risks the 32MB
@@ -1176,7 +1183,8 @@ func (s *MongoStore) MoveSubscriptionSection(ctx context.Context, roomID, accoun
 
 // ComputeSectionOrder midpoints a new position within (account, sectionID). Two
 // small indexed reads in the placed case (the afterRoomID sub, then the next
-// higher order); one in the append case (the section max).
+// higher order); one in the append case (the section max). Both afterRoomID and
+// beforeRoomID empty ⇒ append at the section end (max order + 1).
 func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (float64, bool, error) {
 	secFilter := bson.M{"u.account": account, "sectionId": sectionID}
 	if beforeRoomID != "" {
@@ -1292,7 +1300,8 @@ func (s *MongoStore) RebalanceSection(ctx context.Context, account, sectionID st
 	}
 	models := make([]mongo.WriteModel, 0, len(subs))
 	for i := range subs {
-		subs[i].SectionOrder = float64(i + 1)
+		// Space by 10, not 1, so later midpoint inserts rarely exhaust the gap and re-rebalance.
+		subs[i].SectionOrder = float64((i + 1) * 10)
 		subs[i].SectionUpdatedAt = &now
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"roomId": subs[i].RoomID, "u.account": account}).
