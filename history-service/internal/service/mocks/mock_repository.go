@@ -650,6 +650,21 @@ func (mr *MockRoomRepositoryMockRecorder) GetRoomTimes(ctx, roomID any) *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomTimes", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomTimes), ctx, roomID)
 }
 
+// GetRoomTimesByIDs mocks base method.
+func (m *MockRoomRepository) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRoomTimesByIDs", ctx, ids)
+	ret0, _ := ret[0].(map[string]mongorepo.RoomTimes)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetRoomTimesByIDs indicates an expected call of GetRoomTimesByIDs.
+func (mr *MockRoomRepositoryMockRecorder) GetRoomTimesByIDs(ctx, ids any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomTimesByIDs", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomTimesByIDs), ctx, ids)
+}
+
 // GetRoomUserCount mocks base method.
 func (m *MockRoomRepository) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
 	m.ctrl.T.Helper()

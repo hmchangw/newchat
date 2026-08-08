@@ -32,19 +32,22 @@ type config struct {
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
 	// LEGACY_ROOM_ORIGINS is a JSON array of {siteID, origin} objects mapping
 	// each room-origin site to the legacy URL substituted into ${roomOrigin}.
-	LegacyRoomOrigins        legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
-	MongoURI                 string            `env:"MONGO_URI,required"`
-	MongoDB                  string            `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername            string            `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword            string            `env:"MONGO_PASSWORD"            envDefault:""`
-	MaxRoomSize              int               `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int               `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration     `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration     `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	HealthAddr               string            `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled             bool              `env:"PPROF_ENABLED" envDefault:"false"`
-	Bootstrap                bootstrapConfig   `envPrefix:"BOOTSTRAP_"`
-	RestrictedRoomMinMembers int               `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	LegacyRoomOrigins legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
+	MongoURI          string            `env:"MONGO_URI,required"`
+	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
+	// MongoReadPreference routes the store's display/list reads to secondaries; the
+	// client stays on primary for authz/dedup/read-after-write.
+	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
+	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
 	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
 	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
@@ -78,6 +81,10 @@ type config struct {
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
+	// disables the cap (unbounded spawn).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -175,7 +182,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := NewMongoStore(db)
+	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.MongoReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
+
+	store := NewMongoStore(db, WithReadPreference(readPref))
 	// Bounded timeout so a hung createIndexes surfaces at startup.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := store.EnsureIndexes(ensureCtx); err != nil {
@@ -267,7 +281,13 @@ func main() {
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
-	router := natsrouter.New(nc, "room-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "room-service", routerOpts...)
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	handler.Register(router)
 

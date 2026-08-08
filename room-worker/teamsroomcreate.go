@@ -49,8 +49,10 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 
 	// A Teams chat id (…@thread.v2 / …@unq.gbl.spaces) can't be a room id — its
 	// dots/@ break NATS subject tokenisation — so derive a base62 id from it
-	// deterministically (same id on every redelivery). Name falls back to the
-	// members when the chat has no topic (a DM or an unnamed group).
+	// deterministically (same id on every redelivery). teams-room-inspector
+	// repeats this exact derivation to look the room back up, so the two must be
+	// changed together. Name falls back to the members when the chat has no topic
+	// (a DM or an unnamed group).
 	name := chat.Name
 	if name == "" {
 		name = composeMigratedRoomName(chat.Members)
@@ -95,7 +97,8 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	wantAccounts := make(map[string]struct{}, len(chat.Members))
 	memberSite := make(map[string]string, len(chat.Members)) // account -> home site, for federation
 	var newSubs []*model.Subscription
-	var addedUsers []model.User // for the room-key fan-out
+	var addedUsers []model.User        // for the room-key fan-out
+	teamsSection := model.SectionTeams // addressable built-in section id for every migrated sub
 
 	for _, member := range chat.Members {
 		if member.Account == "" {
@@ -124,6 +127,9 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		}
 		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Name, false, acceptedAt)
 		sub.Origin = model.OriginTeams
+		// Land every migrated chat in the built-in "Teams" section by default; the
+		// user re-organizes from there. No section import, no extra write.
+		sub.SectionId = &teamsSection
 		if !member.VisibleHistoryStartDateTime.IsZero() {
 			t := member.VisibleHistoryStartDateTime.UTC()
 			sub.HistorySharedSince = &t

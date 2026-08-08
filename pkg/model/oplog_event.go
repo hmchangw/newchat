@@ -2,7 +2,7 @@ package model
 
 import "encoding/json"
 
-// OplogEvent is the envelope the oplog-connector publishes to MIGRATION_OPLOG_{siteID} per change. Documents stay opaque (json.RawMessage); the transformer decodes them per collection.
+// OplogEvent is the envelope the oplog-connector publishes to MIGRATION-OPLOG-{siteID} per change. Documents stay opaque (json.RawMessage); the transformer decodes them per collection.
 type OplogEvent struct {
 	// EventID is the change-stream event id (_id._data), also set as Nats-Msg-Id so
 	// JetStream dedup collapses replays and the migration-handoff overlap.

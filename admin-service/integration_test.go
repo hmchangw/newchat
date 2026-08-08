@@ -27,7 +27,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	testutil.RunTestsWithPrewarm(m, testutil.EnsureMongoReplicaSet)
+	testutil.RunTestsWithPrewarm(m, testutil.EnsureMongoReplicaSet, testutil.EnsureNATS)
 }
 
 // seedSession inserts a session row directly into the shared sessions
@@ -602,7 +602,7 @@ func TestLoginAndChangePasswordEndToEnd(t *testing.T) {
 	require.NoError(t, store.EnsureIndexes(context.Background()))
 
 	cfg := Config{SiteID: "site-a", BcryptCost: 4, SessionsMaxPerAccount: 100}
-	h := newHandler(store, sessions, cfg)
+	h := newHandler(store, sessions, cfg, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

@@ -59,11 +59,13 @@ type SubscriptionRepository interface {
 }
 
 // RoomRepository reads room metadata required by history handlers:
-// MinUserLastSeenAt as a per-user read-receipt floor surfaced to clients, and
-// GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds.
+// MinUserLastSeenAt as a per-user read-receipt floor surfaced to clients,
+// GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds, and
+// GetRoomTimesByIDs, the batched ($in) form for resolving many rooms at once.
 type RoomRepository interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
+	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
 	// GetRoomsNameType returns name/type for the given room IDs; absent IDs
 	// are missing from the map. Backs forwarded-message room enrichment.

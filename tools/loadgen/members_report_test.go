@@ -21,7 +21,7 @@ func TestPrintMembersSummary_IncludesAllSections(t *testing.T) {
 		E1:      Percentiles{P50: 4 * time.Millisecond, P95: 12 * time.Millisecond, P99: 28 * time.Millisecond, Max: 50 * time.Millisecond},
 		E2:      Percentiles{P50: 10 * time.Millisecond, P95: 31 * time.Millisecond, P99: 78 * time.Millisecond, Max: 90 * time.Millisecond},
 		E1Count: 5000, E2Count: 4999,
-		Consumers: []ConsumerStat{{Stream: "ROOMS_site-A", Durable: "room-worker", FinalPending: 0}},
+		Consumers: []ConsumerStat{{Stream: "ROOMS-site-A", Durable: "room-worker", FinalPending: 0}},
 	}
 	var buf bytes.Buffer
 	require.NoError(t, PrintMembersSummary(&buf, &s))
@@ -33,7 +33,7 @@ func TestPrintMembersSummary_IncludesAllSections(t *testing.T) {
 		"publish errors:    0",
 		"room-service errors:", "2",
 		"E1 reply", "E2 member-event",
-		"ROOMS_site-A", "room-worker",
+		"ROOMS-site-A", "room-worker",
 	} {
 		assert.True(t, strings.Contains(out, want), "summary missing %q\n--- output ---\n%s", want, out)
 	}

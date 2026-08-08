@@ -50,6 +50,8 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
+	// ReadPreference: read-only service; secondaryPreferred offloads the primary.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
 // UsersAPIConfig carries the third-party HR endpoint settings.
@@ -91,6 +93,10 @@ type Config struct {
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
 	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
 	DebugLog logctx.Config  `envPrefix:"DEBUG_LOG_"`
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
+	// MongoDB. 0 disables the cap (unbounded spawn).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 func main() {
@@ -158,11 +164,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	mongoDB := mongoClient.Database(cfg.Mongo.DB)
 
 	usersRC := restyutil.New(
@@ -195,7 +208,14 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto Elasticsearch/MongoDB.
+	// MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "search-service", routerOpts...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

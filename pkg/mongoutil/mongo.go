@@ -33,6 +33,13 @@ func ConnectRead(ctx context.Context, uri, username, password string, opts ...Op
 
 func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string, opts ...Option) (*mongo.Client, error) {
 	cfg := newConnectConfig(opts...)
+	cfg.applyTuning(clientOpts)
+
+	// An explicit WithReadPreference overrides whatever clientOpts carried
+	// (e.g. ConnectRead's secondaryPreferred).
+	if cfg.readPref != nil {
+		clientOpts.SetReadPreference(cfg.readPref)
+	}
 
 	var cleanup func(context.Context) error
 	if cfg.obs != nil {

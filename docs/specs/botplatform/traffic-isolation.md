@@ -124,9 +124,9 @@ Where does the bot vs human separation actually happen on the wire? Three option
 |---|---|---|
 | `message-worker` | Cassandra writes are the dominant bot cost; isolate so a bot floor-flooding incident can't back up human writes. | Phase 3 onwards |
 | `broadcast-worker` (JetStream consumer) | Fan-out is the loudest bot impact (10k-member rooms × bot send rate). Isolate or human delivery WILL be hurt. | Phase 3 onwards |
-| `message-gatekeeper` | Hot validate path. **Stays shared through Phase 4** — its consumer reads from `MESSAGES_{siteID}` whose subjects (`chat.user.*.room.*.{siteID}.msg.>`) don't yet carry a class token. Split at this layer requires extending the `pkg/subject` mirror to RPC subjects too. Defer until per-class metrics show shared-gatekeeper saturation. | Deferred — re-evaluated in Phase 5+ |
+| `message-gatekeeper` | Hot validate path. **Stays shared through Phase 4** — its consumer reads from `MESSAGES-{siteID}` whose subjects (`chat.user.*.room.*.{siteID}.msg.>`) don't yet carry a class token. Split at this layer requires extending the `pkg/subject` mirror to RPC subjects too. Defer until per-class metrics show shared-gatekeeper saturation. | Deferred — re-evaluated in Phase 5+ |
 
-The two services that actually split first (`message-worker`, `broadcast-worker`) are the ones reading from `MESSAGES_CANONICAL_{siteID}` — the natural class-isolation boundary. `message-gatekeeper` derives the sender's class from `model.IsBotAccount` at publish time and routes to the correct downstream canonical stream (Part II §5.1).
+The two services that actually split first (`message-worker`, `broadcast-worker`) are the ones reading from `MESSAGES-CANONICAL-{siteID}` — the natural class-isolation boundary. `message-gatekeeper` derives the sender's class from `model.IsBotAccount` at publish time and routes to the correct downstream canonical stream (Part II §5.1).
 
 **Do NOT split (shared single Deployment):**
 
@@ -267,8 +267,8 @@ Verified against the repo on `claude/bot-platform-nextgen-migration-hb6ok2` (202
 
 ### 2.2 `pkg/stream` (per-site, single canonical stream — confirmed, with a naming gotcha)
 
-- `MessagesCanonical(siteID)` (`pkg/stream/stream.go:22`) → `{Name: "MESSAGES_CANONICAL_{siteID}", Subjects: ["chat.msg.canonical.{siteID}.>"]}`.
-- `Messages(siteID)` (`pkg/stream/stream.go:15`) → `{Name: "MESSAGES_{siteID}", Subjects: ["chat.user.*.room.*.{siteID}.msg.>"]}` — this is the **upstream stream message-gatekeeper consumes from**, distinct from `MESSAGES_CANONICAL`.
+- `MessagesCanonical(siteID)` (`pkg/stream/stream.go:22`) → `{Name: "MESSAGES-CANONICAL-{siteID}", Subjects: ["chat.msg.canonical.{siteID}.>"]}`.
+- `Messages(siteID)` (`pkg/stream/stream.go:15`) → `{Name: "MESSAGES-{siteID}", Subjects: ["chat.user.*.room.*.{siteID}.msg.>"]}` — this is the **upstream stream message-gatekeeper consumes from**, distinct from `MESSAGES-CANONICAL`.
 - `Outbox(siteID)` still exists (`pkg/stream/stream.go:36-41`) despite the supercluster migration noted in earlier discussion — the user has confirmed OUTBOX removal is deferred; treat it as still live for now.
 - `Inbox(siteID)` (`pkg/stream/stream.go:80-88`) — INBOX has two non-overlapping subject patterns (local + federated aggregate), well-documented in the file. `inbox-worker` owns it; no change needed for class isolation.
 
@@ -289,14 +289,14 @@ Rename mechanic for the stream itself uses JetStream `Mirror` to avoid downtime 
 
 | Service | Stream consumed | Durable name | Filter / queue | File:line |
 |---|---|---|---|---|
-| `message-gatekeeper` | `MESSAGES_{siteID}` (the upstream stream, **not** canonical) | `message-gatekeeper` | none (pulls all `chat.user.*.room.*.{siteID}.msg.>`) | `message-gatekeeper/main.go:138, 199-202` |
-| `message-worker` | `MESSAGES_CANONICAL_{siteID}` | `message-worker` | `chat.msg.canonical.{siteID}.created` (`.created` only — `.updated`/`.deleted` are written synchronously by history-service) | `message-worker/main.go:152, 222-226` |
-| `broadcast-worker` (JS) | `MESSAGES_CANONICAL_{siteID}` | `broadcast-worker` | none (all canonical events) | `broadcast-worker/main.go:136, 283-285` |
+| `message-gatekeeper` | `MESSAGES-{siteID}` (the upstream stream, **not** canonical) | `message-gatekeeper` | none (pulls all `chat.user.*.room.*.{siteID}.msg.>`) | `message-gatekeeper/main.go:138, 199-202` |
+| `message-worker` | `MESSAGES-CANONICAL-{siteID}` | `message-worker` | `chat.msg.canonical.{siteID}.created` (`.created` only — `.updated`/`.deleted` are written synchronously by history-service) | `message-worker/main.go:152, 222-226` |
+| `broadcast-worker` (JS) | `MESSAGES-CANONICAL-{siteID}` | `broadcast-worker` | none (all canonical events) | `broadcast-worker/main.go:136, 283-285` |
 | `broadcast-worker` (core NATS) | n/a | n/a | queue group `broadcast-worker`, subject `chat.server.broadcast.{siteID}.>` — for fire-and-forget badge events like thread tcount | `broadcast-worker/main.go:181-185` |
 
 **Implications for the split plan (§5):**
 
-- `message-gatekeeper` cannot be split cleanly on the canonical-subject axis because it consumes from `MESSAGES_{siteID}` with subjects `chat.user.*.room.*.{siteID}.msg.>`. Splitting it requires either: (a) introducing a class token in the `chat.user.*.room.…` subject space too (subject mirror at the publisher level — bigger blast radius), or (b) leaving message-gatekeeper shared and only splitting downstream (message-worker + broadcast-worker), accepting that message-gatekeeper itself is not isolated. **Recommended: (b) for Phase 1**; revisit (a) only if message-gatekeeper saturation becomes a real incident.
+- `message-gatekeeper` cannot be split cleanly on the canonical-subject axis because it consumes from `MESSAGES-{siteID}` with subjects `chat.user.*.room.*.{siteID}.msg.>`. Splitting it requires either: (a) introducing a class token in the `chat.user.*.room.…` subject space too (subject mirror at the publisher level — bigger blast radius), or (b) leaving message-gatekeeper shared and only splitting downstream (message-worker + broadcast-worker), accepting that message-gatekeeper itself is not isolated. **Recommended: (b) for Phase 1**; revisit (a) only if message-gatekeeper saturation becomes a real incident.
 - `broadcast-worker`'s **core-NATS queue subscription** (for `chat.server.broadcast.{siteID}.>` thread-tcount events) is class-agnostic by nature — those are server-side fire-and-forget badge events, not client-class-tagged. Leave it shared; only the JetStream consumer (canonical-stream side) splits.
 
 ### 2.5 `pkg/model` event struct (Timestamp pattern confirmed)
@@ -315,8 +315,8 @@ Confirmed via discussion (2026-06-16) — cross-site federation runs via NATS su
 
 - §3 (principal classification): correct as drafted, no changes needed.
 - §4 (subject mirror table): provisionally symmetric; revisit alongside the deferred bot-account-namespace fix (§2.3).
-- §5 (per-service split tables): **needs update** — `message-gatekeeper`'s consumer reads from `MESSAGES_{siteID}` not `MESSAGES_CANONICAL_{siteID}`; the current spec table is misleading on this point. Apply (b) from §2.4 — message-gatekeeper stays shared in Phase 1, downstream pair splits.
-- §6 (separate streams): solid — `MESSAGES_CANONICAL_USER_{siteID}` + `MESSAGES_CANONICAL_BOT_{siteID}` with rename-via-mirror, applied to the actual `chat.msg.canonical.…` subject space.
+- §5 (per-service split tables): **needs update** — `message-gatekeeper`'s consumer reads from `MESSAGES-{siteID}` not `MESSAGES-CANONICAL-{siteID}`; the current spec table is misleading on this point. Apply (b) from §2.4 — message-gatekeeper stays shared in Phase 1, downstream pair splits.
+- §6 (separate streams): solid — `MESSAGES-CANONICAL-USER-{siteID}` + `MESSAGES-CANONICAL-BOT-{siteID}` with rename-via-mirror, applied to the actual `chat.msg.canonical.…` subject space.
 - §7 (supercluster permissions): solid — pending OUTBOX deprecation timeline.
 
 ---
@@ -432,9 +432,9 @@ Phase 1 ships row 1 (publisher namespace split) + row 4 (rooms class-agnostic); 
 
 ### 4.4a Shared vs split canonical streams — DECIDED 2026-06-24 (Phase 1 = SHARED; split deferred)
 
-The publisher namespace is split per class (`chat.user.{account}.>` / `chat.bot.{account}.>` / admin `chat.>`) — that's enforced by JWT grants and resolves the ACL-escape problem. The orthogonal question this subsection answers: **does the downstream CANONICAL stream (and the `ROOMS_{siteID}` stream) get split per class too?**
+The publisher namespace is split per class (`chat.user.{account}.>` / `chat.bot.{account}.>` / admin `chat.>`) — that's enforced by JWT grants and resolves the ACL-escape problem. The orthogonal question this subsection answers: **does the downstream CANONICAL stream (and the `ROOMS-{siteID}` stream) get split per class too?**
 
-**Phase 1 decision: keep the canonical streams SHARED across classes.** One `MESSAGES_CANONICAL_{siteID}` stream carries both bot- and user-canonical events; one `ROOMS_{siteID}` stream carries both bot- and user-originated room operations. The publisher's class is preserved in the event payload (via `principal.class` already on the canonical envelope), so consumers can label metrics and demux behavior by class without needing separate streams.
+**Phase 1 decision: keep the canonical streams SHARED across classes.** One `MESSAGES-CANONICAL-{siteID}` stream carries both bot- and user-canonical events; one `ROOMS-{siteID}` stream carries both bot- and user-originated room operations. The publisher's class is preserved in the event payload (via `principal.class` already on the canonical envelope), so consumers can label metrics and demux behavior by class without needing separate streams.
 
 **Future split is a non-breaking change** (escape hatch detailed below) — defer it until measured noisy-neighbor pressure justifies the operational overhead. Document the trade-off here so the team can revisit with data.
 
@@ -479,7 +479,7 @@ Triggers (any one suffices):
 - Bot traffic exceeds the worker pool's ability to scale linearly with human traffic (e.g., 100× volume asymmetry).
 
 Mechanic when triggered:
-1. Add new streams `MESSAGES_CANONICAL_BOT_{siteID}` and (if needed) `ROOMS_BOT_{siteID}` with subjects `chat.bot.canonical.{siteID}.>` and `chat.room.bot.canonical.{siteID}.>`.
+1. Add new streams `MESSAGES-CANONICAL-BOT-{siteID}` and (if needed) `ROOMS-BOT-{siteID}` with subjects `chat.bot.canonical.{siteID}.>` and `chat.room.bot.canonical.{siteID}.>`.
 2. Rename the existing streams' subject scope (the §2.3 canonical-subject rename pays off here): `chat.msg.canonical.…` → `chat.user.canonical.…`. Use JetStream `Mirror` to maintain both subject patterns during transition.
 3. Update gatekeeper to publish per class: bot-originated canonical events go to `chat.bot.canonical.…`; user-originated to `chat.user.canonical.…`. Workers re-subscribe accordingly.
 4. Split the worker Deployments per class (`message-worker-user` / `message-worker-bot`, etc.) once the streams are split. Independent HPA from this point.
@@ -506,7 +506,7 @@ The publisher namespace already being class-split (chat.user vs chat.bot) is wha
 
 Bots use REST end-to-end from the bot SDK's POV (preserving legacy v2 REST semantics). The translation layer inside `bp-api` uses **core NATS request/reply** to talk to `message-gatekeeper` — **not** JetStream `js.Publish` — so bot publish errors return synchronously and fail-fast, matching legacy REST behavior bots already know.
 
-**Key consequence: there is NO `MESSAGES_BOT_{siteID}` JetStream submit stream.** The user-side `MESSAGES_{siteID}` stream (`pkg/stream/stream.go:15`) carries only `chat.user.*.room.*.{siteID}.msg.>` subjects — a parallel bot-side submit stream is not created, because bots never publish into JetStream at all.
+**Key consequence: there is NO `MESSAGES-BOT-{siteID}` JetStream submit stream.** The user-side `MESSAGES-{siteID}` stream (`pkg/stream/stream.go:15`) carries only `chat.user.*.room.*.{siteID}.msg.>` subjects — a parallel bot-side submit stream is not created, because bots never publish into JetStream at all.
 
 **Per-RPC transport for bot operations:**
 
@@ -514,7 +514,7 @@ Bots use REST end-to-end from the bot SDK's POV (preserving legacy v2 REST seman
 |---|---|---|
 | **Query / lookup** (read-only) | **Core NATS R/R** (already today's pattern in services) | `msg.history`, `msg.thread`, `msg.get`, `member.list`, `member.statuses`, `search.messages`, `search.rooms`, `user.profile.getByName`, `presence.query.batch`, `room.app.tabs` |
 | **Mutation with single sync response** (no fan-out) | **Core NATS R/R** | `member.add`, `member.remove`, `member.role-update`, `mute.toggle`, `favorite.toggle`, `room.rename`, `room.create`, `message.read`, `message.read-receipt` |
-| **Message publish** (fan-out required) | **Core NATS R/R to gatekeeper; gatekeeper synchronously publishes to JetStream `MESSAGES_CANONICAL_{siteID}` and waits for PubAck before replying to bot** | `msg.send`, `msg.edit`, `msg.delete`, `msg.react`, `msg.pin`, `msg.unpin` |
+| **Message publish** (fan-out required) | **Core NATS R/R to gatekeeper; gatekeeper synchronously publishes to JetStream `MESSAGES-CANONICAL-{siteID}` and waits for PubAck before replying to bot** | `msg.send`, `msg.edit`, `msg.delete`, `msg.react`, `msg.pin`, `msg.unpin` |
 
 **Flow for the message-publish case:**
 
@@ -549,7 +549,7 @@ bot ──REST──▶ bp-api ──nc.Request("chat.bot.{account}.room.R.{site
 
 **Why this shape vs the user-side JetStream submit path:**
 
-| Property | User publish (JetStream `MESSAGES_{siteID}` submit) | Bot publish (core NATS R/R) |
+| Property | User publish (JetStream `MESSAGES-{siteID}` submit) | Bot publish (core NATS R/R) |
 |---|---|---|
 | **Failure mode** | Durable submit — message buffers in stream until gatekeeper consumes | Fail-fast — bp-api returns error immediately if gatekeeper unreachable |
 | **Optimistic UI support** | Browser shows "sending…", message persists across transient gatekeeper hiccups | N/A — bot has no UI, just needs sync yes/no |
@@ -557,16 +557,16 @@ bot ──REST──▶ bp-api ──nc.Request("chat.bot.{account}.room.R.{site
 | **Latency profile** | Submit-PubAck + async validate | One-shot validate + canonical-PubAck inline (~5–15ms typical) |
 | **Matches legacy contract** | N/A (no legacy for chat-frontend) | YES — bot SDK already expects sync REST success/failure |
 
-**The fan-out side is unchanged.** Once a message lands in `MESSAGES_CANONICAL_{siteID}` (regardless of whether the publisher was a user via the submit stream or a bot via core-NATS R/R), all downstream workers (`message-worker`, `broadcast-worker`, `notification-worker`, `search-sync-worker`, `outbox-worker`) consume durably with at-least-once + replay semantics. The shared canonical stream (Phase 1, §4.4a) carries both classes; consumers tag metrics by the `class` field on the canonical payload.
+**The fan-out side is unchanged.** Once a message lands in `MESSAGES-CANONICAL-{siteID}` (regardless of whether the publisher was a user via the submit stream or a bot via core-NATS R/R), all downstream workers (`message-worker`, `broadcast-worker`, `notification-worker`, `search-sync-worker`, `outbox-worker`) consume durably with at-least-once + replay semantics. The shared canonical stream (Phase 1, §4.4a) carries both classes; consumers tag metrics by the `class` field on the canonical payload.
 
 **Implementation impact on `message-gatekeeper` (Phase 1):**
-- Existing JetStream pull-consumer on `MESSAGES_{siteID}` stream → **unchanged** (user submit path).
-- NEW core-NATS queue-subscribe on `chat.bot.*.room.*.{siteID}.msg.send` (and `.edit`/`.delete`/`.react`/`.pin`/`.unpin`) → **added** for bot R/R path; handler validates synchronously and publishes to `MESSAGES_CANONICAL_{siteID}` inline before replying.
+- Existing JetStream pull-consumer on `MESSAGES-{siteID}` stream → **unchanged** (user submit path).
+- NEW core-NATS queue-subscribe on `chat.bot.*.room.*.{siteID}.msg.send` (and `.edit`/`.delete`/`.react`/`.pin`/`.unpin`) → **added** for bot R/R path; handler validates synchronously and publishes to `MESSAGES-CANONICAL-{siteID}` inline before replying.
 - Both paths produce the same canonical-stream event shape (with `class` set from sender lookup).
 
 ### 5.1 `message-gatekeeper` — STAYS SHARED through Phase 4, re-evaluated in Phase 5+
 
-`message-gatekeeper` consumes from the **upstream `MESSAGES_{siteID}` stream** with subjects `chat.user.*.room.*.{siteID}.msg.>` (`pkg/stream/stream.go:15`, `message-gatekeeper/main.go:138`) for **user** submissions, AND core-NATS queue-subscribes on `chat.bot.*.room.*.{siteID}.msg.>` for **bot** submissions (§5.0). The `chat.user.…` segment here is the user-scoped RPC namespace — it's not (yet) a class token. Splitting message-gatekeeper at this layer requires either expanding the `pkg/subject` mirror to cover the `MsgSend`/`MsgSendWildcard` builders too, or rewriting publishers (the WS gateway) to route on class.
+`message-gatekeeper` consumes from the **upstream `MESSAGES-{siteID}` stream** with subjects `chat.user.*.room.*.{siteID}.msg.>` (`pkg/stream/stream.go:15`, `message-gatekeeper/main.go:138`) for **user** submissions, AND core-NATS queue-subscribes on `chat.bot.*.room.*.{siteID}.msg.>` for **bot** submissions (§5.0). The `chat.user.…` segment here is the user-scoped RPC namespace — it's not (yet) a class token. Splitting message-gatekeeper at this layer requires either expanding the `pkg/subject` mirror to cover the `MsgSend`/`MsgSendWildcard` builders too, or rewriting publishers (the WS gateway) to route on class.
 
 **Phase 1 decision:** message-gatekeeper **stays as a single Deployment** through Phase 4 of the rollout (Part I §9). It validates both human and bot messages, derives the sender's class from `model.IsBotAccount(account)` (`pkg/model/account.go:11`), and publishes to the **class-appropriate canonical stream** (§5.2 below). This is the cleanest seam:
 
@@ -583,17 +583,17 @@ if model.IsBotAccount(senderAccount) {
 canonicalSubj := subject.MsgCanonicalCreated(class, siteID)  // class-aware variant added in §4
 ```
 
-**Phase 1 update (DECIDED 2026-06-24, §4.4a):** the canonical stream is **shared** across classes in Phase 1, not split per class. Gatekeeper publishes to the single `MESSAGES_CANONICAL_{siteID}` stream with the existing `chat.msg.canonical.{siteID}.{event}` subject for BOTH user-originated and bot-originated messages; the `principal.class` field on the canonical payload preserves class information for downstream consumers' metric labels. The per-class subject variant (`chat.user.canonical.…` / `chat.bot.canonical.…`) is **deferred** until the §4.4a escape-hatch triggers a split.
+**Phase 1 update (DECIDED 2026-06-24, §4.4a):** the canonical stream is **shared** across classes in Phase 1, not split per class. Gatekeeper publishes to the single `MESSAGES-CANONICAL-{siteID}` stream with the existing `chat.msg.canonical.{siteID}.{event}` subject for BOTH user-originated and bot-originated messages; the `principal.class` field on the canonical payload preserves class information for downstream consumers' metric labels. The per-class subject variant (`chat.user.canonical.…` / `chat.bot.canonical.…`) is **deferred** until the §4.4a escape-hatch triggers a split.
 
 Phase 5+ (post-cutover) can re-evaluate: if shared message-gatekeeper saturation becomes a real production incident, then introduce a class-aware mirror in the `chat.user.*.room.…` namespace and split at that point. **Don't do it preemptively** — the per-class metrics dashboard (US6) tells you when it's needed.
 
 ### 5.2 `message-worker`
 
-**Phase 1 (DECIDED 2026-06-24, §4.4a): single shared Deployment.** `message-worker` runs as ONE Deployment consuming from the shared `MESSAGES_CANONICAL_{siteID}` stream — no `-user`/`-bot` split. Metrics tag class via the `principal.class` payload field. The per-class deployment table below is the **future design** that activates when the §4.4a escape hatch triggers a canonical-stream split.
+**Phase 1 (DECIDED 2026-06-24, §4.4a): single shared Deployment.** `message-worker` runs as ONE Deployment consuming from the shared `MESSAGES-CANONICAL-{siteID}` stream — no `-user`/`-bot` split. Metrics tag class via the `principal.class` payload field. The per-class deployment table below is the **future design** that activates when the §4.4a escape hatch triggers a canonical-stream split.
 
 | Aspect | Phase 1 (shared, current) | Phase N+ when split (per §4.4a escape hatch) — `-user` Deployment | Phase N+ when split — `-bot` Deployment |
 |---|---|---|---|
-| JetStream stream | `MESSAGES_CANONICAL_{siteID}` (shared) | `MESSAGES_CANONICAL_USER_{siteID}` | `MESSAGES_CANONICAL_BOT_{siteID}` |
+| JetStream stream | `MESSAGES-CANONICAL-{siteID}` (shared) | `MESSAGES-CANONICAL-USER-{siteID}` | `MESSAGES-CANONICAL-BOT-{siteID}` |
 | JetStream consumer | durable `message-worker` on the shared stream | durable `message-worker-user` on the USER stream | durable `message-worker-bot` on the BOT stream |
 | Concurrency | `MaxWorkers=100` (combined load) | `MaxWorkers=50` per pool | `MaxWorkers=200` per pool |
 | Cassandra connection pool | cap 200 per pod | cap 100 per pod | cap 200 per pod |
@@ -603,11 +603,11 @@ Phase 1 trade-off documented in §4.4a (no independent per-class scaling / failu
 
 ### 5.3 `broadcast-worker`
 
-**Phase 1 (DECIDED 2026-06-24, §4.4a): single shared Deployment.** Same reasoning as §5.2 — `broadcast-worker` is ONE Deployment consuming from the shared `MESSAGES_CANONICAL_{siteID}` stream. Per-class split is the future-design column, deferred per the §4.4a escape hatch.
+**Phase 1 (DECIDED 2026-06-24, §4.4a): single shared Deployment.** Same reasoning as §5.2 — `broadcast-worker` is ONE Deployment consuming from the shared `MESSAGES-CANONICAL-{siteID}` stream. Per-class split is the future-design column, deferred per the §4.4a escape hatch.
 
 | Aspect | Phase 1 (shared, current) | Phase N+ when split — `-user` Deployment | Phase N+ when split — `-bot` Deployment |
 |---|---|---|---|
-| JetStream stream | `MESSAGES_CANONICAL_{siteID}` (shared) | `MESSAGES_CANONICAL_USER_{siteID}` | `MESSAGES_CANONICAL_BOT_{siteID}` |
+| JetStream stream | `MESSAGES-CANONICAL-{siteID}` (shared) | `MESSAGES-CANONICAL-USER-{siteID}` | `MESSAGES-CANONICAL-BOT-{siteID}` |
 | JetStream consumer | durable `broadcast-worker` on the shared stream | durable `broadcast-worker-user` on the USER stream | durable `broadcast-worker-bot` on the BOT stream |
 | Concurrency | `MaxWorkers=300` (combined fan-out load) | `MaxWorkers=100` | `MaxWorkers=400` (fan-out is the dominant bot cost) |
 | Env var | `WORKER_CLASS` unset/`all` | `WORKER_CLASS=user` | `WORKER_CLASS=bot` |
@@ -634,7 +634,7 @@ When the split activates, `WORKER_CLASS` becomes a required env on split service
 
 ## 6. JetStream stream design — Phase 1 SHARED (per §4.4a); per-class split deferred
 
-**Phase 1 decision (DECIDED 2026-06-24, supersedes the earlier "separate streams per class" recommendation):** the existing `MESSAGES_CANONICAL_{siteID}` stream (subjects `chat.msg.canonical.{siteID}.>`) is **kept as-is, shared across classes**. No `MESSAGES_CANONICAL_USER_{siteID}` / `MESSAGES_CANONICAL_BOT_{siteID}` split in Phase 1; no canonical-subject rename. Gatekeeper publishes both user- and bot-originated canonical events to the same stream; consumers tag metrics by the `principal.class` payload field.
+**Phase 1 decision (DECIDED 2026-06-24, supersedes the earlier "separate streams per class" recommendation):** the existing `MESSAGES-CANONICAL-{siteID}` stream (subjects `chat.msg.canonical.{siteID}.>`) is **kept as-is, shared across classes**. No `MESSAGES-CANONICAL-USER-{siteID}` / `MESSAGES-CANONICAL-BOT-{siteID}` split in Phase 1; no canonical-subject rename. Gatekeeper publishes both user- and bot-originated canonical events to the same stream; consumers tag metrics by the `principal.class` payload field.
 
 The per-class split below is preserved as the **escape-hatch design** — what to ship when the §4.4a triggers fire (measured noisy-neighbor incident, per-tenant SLO escalation, etc.).
 
@@ -648,7 +648,7 @@ The full trade-off is in §4.4a (pros/cons of shared vs split + escape-hatch tri
 
 #### 6.1.1 Future-design reference: separate streams (escape-hatch target)
 
-When the §4.4a escape hatch triggers, the canonical streams split to `MESSAGES_CANONICAL_USER_{siteID}` / `MESSAGES_CANONICAL_BOT_{siteID}` with the per-class subject naming. The original split rationale (preserved here for the escape-hatch implementation):
+When the §4.4a escape hatch triggers, the canonical streams split to `MESSAGES-CANONICAL-USER-{siteID}` / `MESSAGES-CANONICAL-BOT-{siteID}` with the per-class subject naming. The original split rationale (preserved here for the escape-hatch implementation):
 
 A shared stream with class-filtered consumers still couples the two classes on the **write path** and at the **stream level**, undoing the isolation thesis. Separate streams give:
 
@@ -670,7 +670,7 @@ Per-class **durables** (not just filters) remain mandatory after split — they 
 // pkg/stream/stream.go — class-aware constructors
 func MessagesCanonicalUser(siteID string) jetstream.StreamConfig {
     return jetstream.StreamConfig{
-        Name:     fmt.Sprintf("MESSAGES_CANONICAL_USER_%s", siteID),
+        Name:     fmt.Sprintf("MESSAGES-CANONICAL-USER-%s", siteID),
         Subjects: []string{ fmt.Sprintf("chat.user.canonical.%s.>", siteID) },
         // ... retention/storage tuned for human load profile ...
     }
@@ -678,7 +678,7 @@ func MessagesCanonicalUser(siteID string) jetstream.StreamConfig {
 
 func MessagesCanonicalBot(siteID string) jetstream.StreamConfig {
     return jetstream.StreamConfig{
-        Name:     fmt.Sprintf("MESSAGES_CANONICAL_BOT_%s", siteID),
+        Name:     fmt.Sprintf("MESSAGES-CANONICAL-BOT-%s", siteID),
         Subjects: []string{ fmt.Sprintf("chat.bot.canonical.%s.>", siteID) },
         // ... retention/storage tuned for bot burst profile (e.g. larger MaxBytes) ...
     }
@@ -694,17 +694,17 @@ func consumerConfig(svc, class, siteID string) jetstream.ConsumerConfig {
 }
 ```
 
-Stream bootstrap (CLAUDE.md §6, gated by `BOOTSTRAP_STREAMS`) creates both per-site streams. The legacy `MESSAGES_CANONICAL_{siteID}` constructor is removed.
+Stream bootstrap (CLAUDE.md §6, gated by `BOOTSTRAP_STREAMS`) creates both per-site streams. The legacy `MESSAGES-CANONICAL-{siteID}` constructor is removed.
 
 ### 6.3 Rename migration (legacy → `_USER_` + new subject namespace)
 
-Two coupled renames land together: the stream name (`MESSAGES_CANONICAL_{siteID}` → `MESSAGES_CANONICAL_USER_{siteID}`) and the subject prefix (`chat.msg.canonical.…` → `chat.user.canonical.…`, per §2.3). JetStream handles the stream rename via Mirror; the subject rename is coordinated through dual-publish in the broader rollout (Part I §9 Phase 1).
+Two coupled renames land together: the stream name (`MESSAGES-CANONICAL-{siteID}` → `MESSAGES-CANONICAL-USER-{siteID}`) and the subject prefix (`chat.msg.canonical.…` → `chat.user.canonical.…`, per §2.3). JetStream handles the stream rename via Mirror; the subject rename is coordinated through dual-publish in the broader rollout (Part I §9 Phase 1).
 
 **Sequencing the Mirror with Part I §9 phases — these MUST NOT overlap with publisher dual-publish, or the same canonical event will land in the new USER stream twice (once via Mirror's `chat.msg.canonical.…` → `chat.user.canonical.…` transform, once via the publisher's direct `chat.user.canonical.…` write):**
 
-1. **Phase 0 (Part I §9) — Add the new streams.** Create `MESSAGES_CANONICAL_USER_{siteID}` with `Subjects: ["chat.user.canonical.{siteID}.>"]`. Add `MESSAGES_CANONICAL_BOT_{siteID}` with `Subjects: ["chat.bot.canonical.{siteID}.>"]` at the same time. Publishers still write only to `chat.msg.canonical.…` (old) → land in old stream as before. Both new streams are empty.
+1. **Phase 0 (Part I §9) — Add the new streams.** Create `MESSAGES-CANONICAL-USER-{siteID}` with `Subjects: ["chat.user.canonical.{siteID}.>"]`. Add `MESSAGES-CANONICAL-BOT-{siteID}` with `Subjects: ["chat.bot.canonical.{siteID}.>"]` at the same time. Publishers still write only to `chat.msg.canonical.…` (old) → land in old stream as before. Both new streams are empty.
 
-2. **Phase 0/1 boundary — Backfill the new USER stream via Mirror, ONE-SHOT.** Briefly enable `Mirror` + `SubjectTransform` on `MESSAGES_CANONICAL_USER_{siteID}` to map `chat.msg.canonical.{siteID}.>` → `chat.user.canonical.{siteID}.>`. Let it catch up the historical lag (within retention). **Then disable the Mirror before Phase 1 starts.** Mirror's purpose was only to seed the new stream with the existing backlog so consumers can replay from it post-cutover — it does NOT stay live during Phase 1's dual-publish.
+2. **Phase 0/1 boundary — Backfill the new USER stream via Mirror, ONE-SHOT.** Briefly enable `Mirror` + `SubjectTransform` on `MESSAGES-CANONICAL-USER-{siteID}` to map `chat.msg.canonical.{siteID}.>` → `chat.user.canonical.{siteID}.>`. Let it catch up the historical lag (within retention). **Then disable the Mirror before Phase 1 starts.** Mirror's purpose was only to seed the new stream with the existing backlog so consumers can replay from it post-cutover — it does NOT stay live during Phase 1's dual-publish.
 
 3. **Phase 1 (dual-publish) — Publishers emit on BOTH old AND new subjects.** With Mirror disabled, dual-publish is the ONLY ingestion path for the new stream. Idempotency: every canonical event carries a stable `messageId` (existing field on the canonical struct) used as the JetStream message ID (`Nats-Msg-Id` header); JetStream's duplicate-detection window (`Duplicates` config, set to ≥ 2 × dual-publish window) drops re-publishes of the same `messageId`. Consumers MUST also be idempotent on `messageId` — they already are for replay/redelivery reasons.
 
@@ -714,7 +714,7 @@ Two coupled renames land together: the stream name (`MESSAGES_CANONICAL_{siteID}
 
 6. **Phase 5 (sunset) — Delete the old stream and its consumers.**
 
-Bot stream `MESSAGES_CANONICAL_BOT_{siteID}` is created fresh in step 1 — no Mirror, no historical backfill (bot canonical events never existed under any previous subject).
+Bot stream `MESSAGES-CANONICAL-BOT-{siteID}` is created fresh in step 1 — no Mirror, no historical backfill (bot canonical events never existed under any previous subject).
 
 **Rollback at any step before Phase 4:** publisher rollback to old-subject-only is safe because the old stream is still ingesting and old consumers are still bound to it. The new USER stream's data is replayable from `messageId` idempotency on the next forward attempt.
 
@@ -741,7 +741,7 @@ gateway {
 
 **Verification before each rollout phase:** publish a message on `chat.bot.canonical.siteA.test` from siteA, assert it arrives on siteB and is consumed by `broadcast-worker-bot` at siteB (not by the human pool).
 
-`inbox-worker` continues to consume from `INBOX_{siteID}` regardless of class — it's the stream-wide ingress and shouldn't be split.
+`inbox-worker` continues to consume from `INBOX-{siteID}` regardless of class — it's the stream-wide ingress and shouldn't be split.
 
 ---
 
@@ -846,7 +846,7 @@ Source the `is_bot` value from `ctxutil.PrincipalClass(ctx)` (§3.2) **once the 
 All questions previously open are decided. Tracked here as a permanent reference so anyone touching this design can see *why* each shape is what it is.
 
 ### Q1 — Stream design ✅ separate streams (§6)
-`MESSAGES_CANONICAL_USER_{siteID}` and `MESSAGES_CANONICAL_BOT_{siteID}` — physically separate, not shared-with-filter. Decision drives §6 (Stream design), §5 (per-service tables now reference the class-specific stream by name), and §7 (federation enablement covers both stream names). **Rationale:** shared back-pressure on the write path and storage-budget coupling undermine the isolation thesis; per-class durables alone aren't enough. Trade marginal ops cost (one extra stream per site) for clean isolation top-to-bottom forever.
+`MESSAGES-CANONICAL-USER-{siteID}` and `MESSAGES-CANONICAL-BOT-{siteID}` — physically separate, not shared-with-filter. Decision drives §6 (Stream design), §5 (per-service tables now reference the class-specific stream by name), and §7 (federation enablement covers both stream names). **Rationale:** shared back-pressure on the write path and storage-budget coupling undermine the isolation thesis; per-class durables alone aren't enough. Trade marginal ops cost (one extra stream per site) for clean isolation top-to-bottom forever.
 
 ### Q2 — `class` field on the message envelope ✅ yes (§3.2)
 `Class string \`json:"class" bson:"class"\`` on the canonical event struct in `pkg/model`. Mirrors the existing `Timestamp` pattern (CLAUDE.md §6). Authoritative — subjects can be re-published (federation, oplog-transformer); envelope `class` cannot drift.

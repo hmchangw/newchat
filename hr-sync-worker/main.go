@@ -24,7 +24,7 @@ import (
 )
 
 // durableName is shared across sites — each site's consumer lives on its own
-// HR_{siteID} stream, so the same durable name never collides.
+// HR-{siteID} stream, so the same durable name never collides.
 const durableName = "hr-sync-worker"
 
 func main() {

@@ -76,10 +76,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Client stays on primary; each repo opts into secondary reads via
+	// WithReadPreference (already validated in config).
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
+	readFromSecondary := mongorepo.WithReadPreference(readPref)
+
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID)
-	userRepo := mongorepo.NewUserRepo(db)
-	appRepo := mongorepo.NewAppRepo(db)
+	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, readFromSecondary)
+	userRepo := mongorepo.NewUserRepo(db, readFromSecondary)
+	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
 	if err := subRepo.EnsureIndexes(ctx); err != nil {
@@ -111,7 +121,13 @@ func main() {
 
 	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
-	router := natsrouter.New(nc, "user-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "user-service", routerOpts...)
 	router.Use(natsrouter.Recovery())
 	// RequestID must precede any handler that reads request_id from ctx —
 	// otherwise Classify's log line records an empty value.

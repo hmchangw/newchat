@@ -79,10 +79,10 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{
-		Name: "HR_SYNC_E2E", Subjects: []string{"chat.hr.>"},
+		Name: "HR-SYNC-E2E", Subjects: []string{"chat.hr.>"},
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), "HR_SYNC_E2E") })
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), "HR-SYNC-E2E") })
 
 	fg := &fakeGraph{}
 	tokenURL, baseURL := newFakeGraphServer(t, fg)
@@ -103,7 +103,9 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, stats.Created)
 	assert.Zero(t, stats.Quits)
-	assert.Equal(t, 2, stats.Published) // employees.upsert + users.upsert, no quits
+	assert.Equal(t, 2, stats.EmployeesPublished) // 2 employee records
+	assert.Equal(t, 2, stats.UsersPublished)     // 2 user records
+	assert.Zero(t, stats.QuitsPublished)
 
 	msgs := drainStream(t, stream)
 	require.Len(t, msgs, 2)
@@ -140,7 +142,9 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	assert.Equal(t, 1, stats.Created)
 	assert.Equal(t, 1, stats.Updated)
 	assert.Equal(t, 1, stats.Quits)
-	assert.Equal(t, 3, stats.Published)
+	assert.Equal(t, 2, stats.EmployeesPublished) // 1 created + 1 updated
+	assert.Equal(t, 2, stats.UsersPublished)
+	assert.Equal(t, 1, stats.QuitsPublished)
 
 	msgs = drainStream(t, stream)
 	require.Len(t, msgs, 3)

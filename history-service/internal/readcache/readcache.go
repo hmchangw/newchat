@@ -151,6 +151,7 @@ func (c *SubscriptionCache) GetSubscription(ctx context.Context, account, roomID
 // RoomSource is the room metadata reads the cache fronts.
 type RoomSource interface {
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
+	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
 	GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error)
@@ -222,6 +223,14 @@ func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, e
 // variable-length ID set doesn't fit the single-key TTL cache shape here.
 func (c *RoomCache) GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error) {
 	return c.inner.GetRoomsNameType(ctx, roomIDs)
+}
+
+// GetRoomTimesByIDs bypasses the per-key cache and delegates to the source.
+// It is a batch read for rooms without a usable caller-supplied hint, called
+// at most once per RoomsGet request — not a hot single-room path — so there is
+// no per-room caching benefit to justify the bookkeeping.
+func (c *RoomCache) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
+	return c.inner.GetRoomTimesByIDs(ctx, ids)
 }
 
 // previewEntry is the cached resolved room preview. found=false is never stored

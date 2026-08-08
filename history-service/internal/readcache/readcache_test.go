@@ -149,13 +149,17 @@ func TestNewSubscriptionCache_InvalidConfig(t *testing.T) {
 }
 
 type fakeRoomSource struct {
-	timesCalls   atomic.Int32
-	minSeenCalls atomic.Int32
-	lastMsgAt    time.Time
-	createdAt    time.Time
-	timesErr     error
-	minSeen      *time.Time
-	minSeenErr   error
+	timesCalls      atomic.Int32
+	minSeenCalls    atomic.Int32
+	lastMsgAt       time.Time
+	createdAt       time.Time
+	timesErr        error
+	minSeen         *time.Time
+	minSeenErr      error
+	timesByIDsCalls atomic.Int32
+	timesByIDsIDs   []string
+	timesByIDs      map[string]mongorepo.RoomTimes
+	timesByIDsErr   error
 }
 
 func (f *fakeRoomSource) GetRoomTimes(_ context.Context, _ string) (time.Time, time.Time, error) {
@@ -174,6 +178,15 @@ func (f *fakeRoomSource) GetRoomUserCount(_ context.Context, _ string) (int, err
 
 func (f *fakeRoomSource) GetRoomsNameType(_ context.Context, _ []string) (map[string]mongorepo.RoomNameType, error) {
 	return nil, nil
+}
+
+func (f *fakeRoomSource) GetRoomTimesByIDs(_ context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
+	f.timesByIDsCalls.Add(1)
+	f.timesByIDsIDs = ids
+	if f.timesByIDsErr != nil {
+		return nil, f.timesByIDsErr
+	}
+	return f.timesByIDs, nil
 }
 
 func TestRoomCache_CachesRoomTimes(t *testing.T) {
@@ -234,6 +247,34 @@ func TestRoomCache_MinUserLastSeenAtValue(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, ts, *got)
+}
+
+func TestRoomCache_GetRoomTimesByIDs_BypassesCache(t *testing.T) {
+	want := map[string]mongorepo.RoomTimes{
+		"r1": {LastMsgAt: time.Now().UTC(), CreatedAt: time.Now().UTC().Add(-time.Hour)},
+	}
+	src := &fakeRoomSource{timesByIDs: want}
+	c, err := NewRoomCache(src, 100, time.Minute)
+	require.NoError(t, err)
+
+	got, err := c.GetRoomTimesByIDs(context.Background(), []string{"r1", "r2"})
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	_, err = c.GetRoomTimesByIDs(context.Background(), []string{"r1", "r2"})
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), src.timesByIDsCalls.Load(), "batch read is never cached")
+	assert.Equal(t, []string{"r1", "r2"}, src.timesByIDsIDs)
+}
+
+func TestRoomCache_GetRoomTimesByIDs_PropagatesError(t *testing.T) {
+	wantErr := errors.New("mongo down")
+	src := &fakeRoomSource{timesByIDsErr: wantErr}
+	c, err := NewRoomCache(src, 100, time.Minute)
+	require.NoError(t, err)
+
+	_, err = c.GetRoomTimesByIDs(context.Background(), []string{"r1"})
+	require.ErrorIs(t, err, wantErr)
 }
 
 func TestSubscriptionCache_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {

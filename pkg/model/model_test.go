@@ -575,6 +575,36 @@ func TestSendMessageRequestJSON(t *testing.T) {
 
 }
 
+func TestRoomsGetRequestJSON(t *testing.T) {
+	t.Run("with hints round-trip", func(t *testing.T) {
+		lastMsgAt := int64(1735689600000)
+		createdAt := int64(1735600000000)
+		src := model.RoomsGetRequest{
+			RoomIDs: []string{"r1", "r2"},
+			Hints: map[string]model.RoomTimeHint{
+				"r1": {LastMsgAt: &lastMsgAt, CreatedAt: &createdAt},
+				"r2": {LastMsgAt: &lastMsgAt},
+			},
+		}
+		roundTrip(t, &src, &model.RoomsGetRequest{})
+	})
+
+	t.Run("nil hints omitted", func(t *testing.T) {
+		src := model.RoomsGetRequest{RoomIDs: []string{"r1"}}
+		data, err := json.Marshal(&src)
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["hints"]
+		assert.False(t, present, "hints should be omitted when nil")
+
+		var dst model.RoomsGetRequest
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Nil(t, dst.Hints, "absent JSON field must unmarshal to nil map")
+	})
+}
+
 func TestMessageEventJSON(t *testing.T) {
 	e := model.MessageEvent{
 		Message: model.Message{
@@ -4055,13 +4085,6 @@ func TestRoomRestrictedRoomEventJSON(t *testing.T) {
 	roundTrip(t, &e, &model.RoomRestrictedRoomEvent{})
 }
 
-func TestRoomRestrictedSysDataJSON(t *testing.T) {
-	d := model.RoomRestrictedSysData{
-		Restricted: true, ExternalAccess: false, ByAccount: "admin1", OwnerAccount: "alice",
-	}
-	roundTrip(t, &d, &model.RoomRestrictedSysData{})
-}
-
 func TestRoomRenamedInboxPayloadJSON(t *testing.T) {
 	p := model.RoomRenamedInboxPayload{RoomID: "r1", NewName: "x", Timestamp: 1700000000000}
 	roundTrip(t, &p, &model.RoomRenamedInboxPayload{})
@@ -5099,6 +5122,112 @@ func TestSearchMessageEnrichmentJSON(t *testing.T) {
 	assert.NotContains(t, string(b), "\"room\"")
 	assert.NotContains(t, string(b), "\"sender\"")
 	assert.NotContains(t, string(b), "\"tshow\"")
+}
+
+func TestTeamsChatJSON_NeedVerify(t *testing.T) {
+	c := model.TeamsChat{ID: "19:abc@thread.v2", SiteID: "site-a", NeedVerify: true}
+	roundTrip(t, &c, &model.TeamsChat{})
+
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"needVerify":true`) {
+		t.Errorf("needVerify missing from JSON: %s", data)
+	}
+}
+
+func TestTeamsRoomVerifyRequestJSON(t *testing.T) {
+	r := model.TeamsRoomVerifyRequest{ChatIDs: []string{"19:abc@thread.v2", "19:def@unq.gbl.spaces"}}
+	roundTrip(t, &r, &model.TeamsRoomVerifyRequest{})
+}
+
+func TestTeamsRoomVerifyResponseJSON(t *testing.T) {
+	r := model.TeamsRoomVerifyResponse{
+		SiteID:         "site-a",
+		RequestedCount: 2,
+		FoundCount:     1,
+		Chats: []model.TeamsRoomVerifyResult{
+			{ChatID: "19:abc@thread.v2", RoomID: "7bQ1kR2mN8xY4pL0v", RoomExists: true, SubscriptionCount: 5, RoomUserCount: 5},
+			{ChatID: "19:def@unq.gbl.spaces", RoomID: "9xV4jP7sD2fG6bT1m"},
+		},
+	}
+	roundTrip(t, &r, &model.TeamsRoomVerifyResponse{})
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"siteId"`, `"requestedCount"`, `"foundCount"`, `"chatId"`, `"roomExists"`, `"subscriptionCount"`, `"roomUserCount"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("key %s missing from JSON: %s", key, data)
+		}
+	}
+}
+
+// TestTeamsChatBSON_NeedVerify checks the raw BSON key for NeedVerify — a
+// typo'd tag here would silently break teams-room-verify's flag-clear filter
+// (ListChatsNeedingVerify / MarkVerified both filter on this exact key), and a
+// JSON-only round-trip cannot catch that.
+func TestTeamsChatBSON_NeedVerify(t *testing.T) {
+	c := model.TeamsChat{ID: "19:abc@thread.v2", SiteID: "site-a", NeedVerify: true}
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	require.Contains(t, rawDoc, "needVerify", "BSON doc must have needVerify key")
+	assert.Equal(t, true, rawDoc["needVerify"])
+}
+
+// TestTeamsRoomVerifyRequestBSON checks the raw BSON key for
+// TeamsRoomVerifyRequest.ChatIDs. This type isn't persisted, but
+// teams-room-verify's client and pkg/model share this struct, so a tag typo
+// here is worth catching the same way as the persisted types.
+func TestTeamsRoomVerifyRequestBSON(t *testing.T) {
+	r := model.TeamsRoomVerifyRequest{ChatIDs: []string{"19:abc@thread.v2"}}
+	data, err := bson.Marshal(&r)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "chatIds", "BSON doc must have chatIds key")
+}
+
+// TestTeamsRoomVerifyResultBSON checks the raw BSON keys for
+// TeamsRoomVerifyResult, one element of TeamsRoomVerifyResponse.Chats.
+func TestTeamsRoomVerifyResultBSON(t *testing.T) {
+	res := model.TeamsRoomVerifyResult{
+		ChatID: "19:abc@thread.v2", RoomID: "7bQ1kR2mN8xY4pL0v",
+		RoomExists: true, SubscriptionCount: 5, RoomUserCount: 5,
+	}
+	data, err := bson.Marshal(&res)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	for _, key := range []string{"chatId", "roomId", "roomExists", "subscriptionCount", "roomUserCount"} {
+		assert.Contains(t, rawDoc, key, "BSON doc must have %q key", key)
+	}
+	assert.Equal(t, true, rawDoc["roomExists"])
+}
+
+// TestTeamsRoomVerifyResponseBSON checks the raw BSON keys for
+// TeamsRoomVerifyResponse, including the misroute-guard field SiteID.
+func TestTeamsRoomVerifyResponseBSON(t *testing.T) {
+	resp := model.TeamsRoomVerifyResponse{
+		SiteID: "site-a", RequestedCount: 2, FoundCount: 1,
+		Chats: []model.TeamsRoomVerifyResult{{ChatID: "19:abc@thread.v2"}},
+	}
+	data, err := bson.Marshal(&resp)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	for _, key := range []string{"siteId", "requestedCount", "foundCount", "chats"} {
+		assert.Contains(t, rawDoc, key, "BSON doc must have %q key", key)
+	}
+	assert.Equal(t, "site-a", rawDoc["siteId"])
 }
 
 func TestMessageAppInfoJSON(t *testing.T) {

@@ -33,8 +33,10 @@ func TestRunSync_DiffAndPublish(t *testing.T) {
 	assert.Equal(t, 1, stats.Created)
 	assert.Zero(t, stats.Updated)
 	assert.Equal(t, 1, stats.Quits)
-	assert.Equal(t, 3, stats.Published) // employees.upsert + users.upsert + one quit
-	assert.Len(t, got, 3)
+	assert.Equal(t, 1, stats.EmployeesPublished)
+	assert.Equal(t, 1, stats.UsersPublished)
+	assert.Equal(t, 1, stats.QuitsPublished) // one per-site quit batch
+	assert.Len(t, got, 3)                    // employees.upsert + users.upsert + one quit
 }
 
 func TestRunSync_StoreErrorAborts(t *testing.T) {

@@ -41,7 +41,7 @@ type BotSendMessageRequest struct {
 	TShow                        bool       `json:"tshow,omitempty"                        bson:"tshow,omitempty"`
 }
 
-// BotSendResponse is the reply: the canonical Message that landed on BOT_MESSAGES_CANONICAL.
+// BotSendResponse is the reply: the canonical Message that landed on BOT-MESSAGES-CANONICAL.
 type BotSendResponse struct {
 	Message Message `json:"message" bson:"message"`
 }

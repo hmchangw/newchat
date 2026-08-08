@@ -33,8 +33,10 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.user.alice.request.room.r1.site-a.member.role-update"},
 		{"RoomCanonical", subject.RoomCanonical("site-a", "invited"),
 			"chat.room.canonical.site-a.invited"},
-		{"RoomCanonicalTeamsCreate", subject.RoomCanonicalTeamsCreate("site-a"),
-			"chat.room.canonical.site-a.teams.create"},
+		{"RoomTeamsCanonicalCreate", subject.RoomTeamsCanonicalCreate("site-a"),
+			"chat.teams.room.canonical.site-a.create"},
+		{"RoomTeamsCanonicalWildcard", subject.RoomTeamsCanonicalWildcard("site-a"),
+			"chat.teams.room.canonical.site-a.>"},
 		{"SubscriptionUpdate", subject.SubscriptionUpdate("alice"),
 			"chat.user.alice.event.subscription.update"},
 		{"SubscriptionUpdate_dotted_bot_encoded", subject.SubscriptionUpdate("weather.bot"),
@@ -55,8 +57,10 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.inbox.site-a.internal.member_removed"},
 		{"MsgCanonicalCreated", subject.MsgCanonicalCreated("site-a"),
 			"chat.msg.canonical.site-a.created"},
-		{"MsgCanonicalTeamsBatch", subject.MsgCanonicalTeamsBatch("site-a"),
-			"chat.msg.canonical.site-a.teams.batch"},
+		{"MsgTeamsCanonicalBatch", subject.MsgTeamsCanonicalBatch("site-a"),
+			"chat.teams.msg.canonical.site-a.batch"},
+		{"MsgTeamsCanonicalWildcard", subject.MsgTeamsCanonicalWildcard("site-a"),
+			"chat.teams.msg.canonical.site-a.>"},
 		// single-token: matches the .created/.updated/... events but NOT the
 		// two-token .teams.batch envelope.
 		{"MsgCanonicalMessageWildcard", subject.MsgCanonicalMessageWildcard("site-a"),
@@ -77,10 +81,14 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.user.alice.request.room.r1.site-a.member.remove"},
 		{"MemberAdd", subject.MemberAdd("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.member.add"},
-		{"MemberEvent", subject.MemberEvent("r1"),
+		{"RoomMemberEvent global", subject.RoomMemberEvent("r1", true),
 			"chat.room.r1.event.member"},
-		{"RoomMemberEventWildcard", subject.RoomMemberEventWildcard(),
+		{"RoomMemberEvent local", subject.RoomMemberEvent("r1", false),
+			"chat.local.room.r1.event.member"},
+		{"RoomMemberEventWildcard global", subject.RoomMemberEventWildcard(true),
 			"chat.room.*.event.member"},
+		{"RoomMemberEventWildcard local", subject.RoomMemberEventWildcard(false),
+			"chat.local.room.*.event.member"},
 		{"MemberList", subject.MemberList("alice", "r1", "site-a"),
 			"chat.user.alice.request.room.r1.site-a.member.list"},
 		{"MemberListWildcard", subject.MemberListWildcard("site-a"),
@@ -1176,6 +1184,30 @@ func TestRoomEventTargets(t *testing.T) {
 	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", nil, nil, subject.RouteGlobal, now))
 	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", nil, nil, subject.RouteDual, now))
 	assert.Equal(t, []string{g}, subject.RoomEventTargets("r1", nil, nil, subject.RouteLocal, now))
+}
+
+// TestRoomMemberEventTargets verifies member events route on the same namespaces
+// as RoomEventTargets (they share roomRouteGlobals), so a client on the local
+// prefix for a same-site room receives roster events; and that a flipped room
+// dual-publishes them during the grace window.
+func TestRoomMemberEventTargets(t *testing.T) {
+	g := "chat.room.r1.event.member"
+	l := "chat.local.room.r1.event.member"
+	trueP, falseP := true, false
+	now := time.Unix(1_700_000_000, 0).UTC()
+	// same-site: local-only in local mode, both in dual, global in global.
+	assert.Equal(t, []string{l}, subject.RoomMemberEventTargets("r1", &falseP, nil, subject.RouteLocal, now))
+	assert.Equal(t, []string{l, g}, subject.RoomMemberEventTargets("r1", &falseP, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{g}, subject.RoomMemberEventTargets("r1", &falseP, nil, subject.RouteGlobal, now))
+	// cross-site / nil → global fail-safe.
+	assert.Equal(t, []string{g}, subject.RoomMemberEventTargets("r1", &trueP, nil, subject.RouteLocal, now))
+	assert.Equal(t, []string{g}, subject.RoomMemberEventTargets("r1", nil, nil, subject.RouteLocal, now))
+	// flipped within grace → dual in local/dual mode so both lanes get the roster event.
+	flip := now.Add(-time.Minute)
+	assert.Equal(t, []string{l, g}, subject.RoomMemberEventTargets("r1", &trueP, &flip, subject.RouteLocal, now))
+	// past grace → global only.
+	oldFlip := now.Add(-2 * subject.DefaultRoomLocalityGrace)
+	assert.Equal(t, []string{g}, subject.RoomMemberEventTargets("r1", &trueP, &oldFlip, subject.RouteLocal, now))
 }
 
 // TestRoomEventTargets_TransitionGrace covers the post-flip grace window: a room

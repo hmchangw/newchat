@@ -76,7 +76,13 @@ func run() error {
 
 	h := newHandler(store, store, blobs, &cfg)
 
-	router := natsrouter.New(nc, "media-service")
+	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
+	// instead of piling unbounded work onto MongoDB/MinIO. MAX_CONCURRENCY=0 disables.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "media-service", routerOpts...)
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	registerEmojiNATS(router, h, cfg.SiteID)
 

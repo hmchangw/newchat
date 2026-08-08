@@ -1,0 +1,43 @@
+name: teams-message-worker
+
+services:
+  teams-message-worker:
+    build:
+      context: ../../..
+      dockerfile: message-worker/deploy/teams/Dockerfile
+    pull_policy: build
+    environment:
+      - OTEL_SERVICE_NAME=teams-message-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - NATS_URL=nats://nats:4222
+      - NATS_CREDS_FILE=/etc/nats/backend.creds
+      - SITE_ID=site-local
+      - MODE=teams
+      # Dev-only pprof profiling on the health port (off by default). Flip on
+      # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
+      - PPROF_ENABLED=${PPROF_ENABLED:-false}
+      - CASSANDRA_HOSTS=cassandra
+      - CASSANDRA_KEYSPACE=chat
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB=chat
+      # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
+      # and broadcast-worker). Defaults: 10000 entries, 5m TTL.
+      - USER_CACHE_SIZE=10000
+      - USER_CACHE_TTL=5m
+      - BOOTSTRAP_STREAMS=true
+      - ATREST_ENABLED=true
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=dev-only-token
+      - ATREST_VAULT_TRANSIT_KEY=chat-kek
+      # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
+      # request/reply/consumed body capture (pair with the X-Debug-Payload header).
+      - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
+      - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
+    volumes:
+      - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

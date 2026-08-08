@@ -136,6 +136,23 @@ type RoomStore interface {
 	// federated event publishes (inbox-worker guards remote applies against it).
 	// Returns the post-flip subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
 	ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error)
+	// MoveSubscriptionSection sets sectionId+sectionOrder (or clears both when
+	// sectionID==nil, a remove) on (roomID, account), stamping sectionUpdatedAt as
+	// the high-water mark the federated event carries. Returns the post-write
+	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
+	MoveSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, sectionUpdatedAt time.Time) (*model.Subscription, error)
+	// ComputeSectionOrder returns the fractional sectionOrder for placing (account's)
+	// chat within sectionID: just after afterRoomID, just before beforeRoomID (for
+	// top-insertion), or appended (max+1) when both are empty. after/before are
+	// mutually exclusive (the caller rejects both set).
+	// needRebalance flags float-precision exhaustion so the caller re-spaces first.
+	ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (order float64, needRebalance bool, err error)
+	// RebalanceSection re-spaces every (account) sub in sectionID to 1,2,3,… by
+	// current sectionOrder, restoring gap room. Bounded to one section; rare.
+	// Returns every rewritten subscription (full post-rebalance doc, sectionUpdatedAt
+	// stamped to now) so the caller can fan out one event per row — a rebalance
+	// silently renumbers siblings the client and remote sites must also learn about.
+	RebalanceSection(ctx context.Context, account, sectionID string, now time.Time) ([]model.Subscription, error)
 	// OpenSubscription atomically sets open=true for (roomID, account) via a single
 	// FindOneAndUpdate and returns the post-update subscription, or
 	// model.ErrSubscriptionNotFound (wrapped) when no match.
@@ -237,9 +254,10 @@ type RoomStore interface {
 	// ApplySubscriptionRestriction writes the {restricted, externalAccess} denorm
 	// flags to every subscription of the room. When restricted=true and
 	// ownerAccount is non-empty, an aggregation-pipeline $cond also rewrites
-	// roles so only ownerAccount holds RoleOwner. Returns ErrOwnerNotSubscribed
-	// when ownerAccount has no active subscription in the room (the rewrite
-	// would leave zero owners). Stamps restrictUpdatedAt so the origin doc
+	// roles so only ownerAccount holds RoleOwner. An empty ownerAccount writes
+	// the flags alone and leaves every member's roles as they were. Returns
+	// ErrOwnerNotSubscribed when ownerAccount has no active subscription in the
+	// room (the rewrite would leave zero owners). Stamps restrictUpdatedAt so the origin doc
 	// carries the same high-water mark the federated event publishes (inbox-worker
 	// guards remote applies against it).
 	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error

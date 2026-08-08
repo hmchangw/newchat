@@ -26,7 +26,7 @@ On connect, every client subscribes to `chat.user.{account}.>`. This single wild
 | Subject | Direction | Publisher | Purpose |
 |---------|-----------|-----------|---------|
 | `chat.user.{account}.stream.msg` | Server → Client | broadcast-worker | DM message delivery |
-| `chat.user.{account}.notification` | Server → Client | _(removed — see PUSH_NOTIFICATION stream below)_ | _(deprecated)_ |
+| `chat.user.{account}.notification` | Server → Client | _(removed — see PUSH-NOTIFICATION stream below)_ | _(deprecated)_ |
 | `chat.user.{account}.event.subscription.update` | Server → Client | room-worker, inbox-worker | Room added/removed from user's list |
 | `chat.user.{account}.event.room.metadata.update` | Server → Client | room-worker | Room metadata changed (for rooms in sidebar) |
 | `chat.user.{account}.response.{requestID}` | Server → Client | various services | Response to a client request |
@@ -91,7 +91,7 @@ When offline, clients miss messages on non-active sidebar rooms. To restore ment
 
 #### Desktop Banner Notifications (Mobile Push)
 
-notification-worker publishes a `PushNotificationEvent` to `chat.server.notification.push.{siteID}.send` (captured by the `PUSH_NOTIFICATION_{siteID}` JetStream stream) for each eligible recipient. The push service consumes this stream and delivers the notification to the recipient's mobile device. The old per-user NATS core subject `chat.user.{account}.notification` is no longer used.
+notification-worker publishes a `PushNotificationEvent` to `chat.server.notification.push.{siteID}.send` (captured by the `PUSH-NOTIFICATION-{siteID}` JetStream stream) for each eligible recipient. The push service consumes this stream and delivers the notification to the recipient's mobile device. The old per-user NATS core subject `chat.user.{account}.notification` is no longer used.
 
 #### Reconnect Badge Restoration
 
@@ -147,7 +147,7 @@ All request subjects fall under the user's publish namespace. Responses are deli
 
 These subjects are used exclusively by backend services via JetStream. Clients never interact with them.
 
-### MESSAGES Stream (`MESSAGES_{siteID}`)
+### MESSAGES Stream (`MESSAGES-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -155,7 +155,7 @@ These subjects are used exclusively by backend services via JetStream. Clients n
 
 Stream wildcard: `chat.user.*.room.*.{siteID}.msg.>`
 
-### MESSAGES_CANONICAL Stream (`MESSAGES_CANONICAL_{siteID}`)
+### MESSAGES-CANONICAL Stream (`MESSAGES-CANONICAL-{siteID}`)
 
 The single source of truth for downstream consumers (broadcast-worker, notification-worker, search-sync-worker). One subject per mutation kind keeps consumers filterable.
 
@@ -168,7 +168,19 @@ The single source of truth for downstream consumers (broadcast-worker, notificat
 
 Stream wildcard: `chat.msg.canonical.{siteID}.>`
 
-### FANOUT Stream (`FANOUT_{siteID}`)
+### MESSAGES-TEAMS Stream (`MESSAGES-TEAMS-{siteID}`)
+
+Server-only backend stream for the Teams-migration message-batch feed. Separate from
+MESSAGES-CANONICAL so message-worker's teams mode (`MODE=teams`) and default mode each
+bind their own stream/durable.
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.teams.msg.canonical.{siteID}.batch` | External Teams migration process | message-worker (teams mode), search-sync-worker | Teams-migration message batch |
+
+Stream wildcard: `chat.teams.msg.canonical.{siteID}.>`
+
+### FANOUT Stream (`FANOUT-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -178,7 +190,7 @@ Stream wildcard: `fanout.{siteID}.>`
 
 Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on each publish. JetStream uses this for server-side dedup, keeping `msgID` out of the subject and bounding subject cardinality to the number of rooms rather than the number of messages.
 
-### ROOMS Stream (`ROOMS_{siteID}`)
+### ROOMS Stream (`ROOMS-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -186,7 +198,17 @@ Deduplication: message-worker sets the `Nats-Msg-Id` header to the message ID on
 
 Stream wildcard: `chat.user.*.request.room.*.{siteID}.member.>`
 
-### PUSH_NOTIFICATION Stream (`PUSH_NOTIFICATION_{siteID}`)
+### ROOMS-TEAMS Stream (`ROOMS-TEAMS-{siteID}`)
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.teams.room.canonical.{siteID}.create` | teams-room-creation | room-worker | Teams-migration room-create batch |
+
+Stream wildcard: `chat.teams.room.canonical.{siteID}.>`
+
+Server-only backend stream, isolated from `ROOMS` so the one-shot migration path can't interfere with live member ops. Clients never interact with it.
+
+### PUSH-NOTIFICATION Stream (`PUSH-NOTIFICATION-{siteID}`)
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
@@ -196,7 +218,7 @@ Stream wildcard: `chat.server.notification.push.{siteID}.>` (wildcard accommodat
 
 This is a server-only, backend stream. Clients never interact with it.
 
-### INBOX Stream (`INBOX_{siteID}`)
+### INBOX Stream (`INBOX-{siteID}`)
 
 Cross-site federation events are published **directly** into a site's INBOX —
 there is no OUTBOX stream and no sourcing/SubjectTransform. A service at the
@@ -306,7 +328,7 @@ Client A (sender)                    NATS                         Client B (rece
     |                                  |--- pub: chat.server.          |
     |                                  |    notification.push.         |
     |                                  |    {siteID}.send              |
-    |                                  |   (PUSH_NOTIFICATION stream)  |
+    |                                  |   (PUSH-NOTIFICATION stream)  |
     |                                  |                               |
     |--- pub: chat.user.A             |                               |
     |        .room.R1.typing -------->|                               |

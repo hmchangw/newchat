@@ -84,8 +84,8 @@ func TestRunner_GroupsBatchesAndFlipsOnAck(t *testing.T) {
 	require.NoError(t, r.run(context.Background()))
 
 	// site-a (3 chats, batch 2) -> 2 batches; site-b -> 1 batch. Total 3.
-	subjA := subject.RoomCanonicalTeamsCreate("site-a")
-	subjB := subject.RoomCanonicalTeamsCreate("site-b")
+	subjA := subject.RoomTeamsCanonicalCreate("site-a")
+	subjB := subject.RoomTeamsCanonicalCreate("site-b")
 	assert.Len(t, got, 3)
 	bySubj := map[string]int{}
 	for _, c := range got {
@@ -113,12 +113,12 @@ func TestRunner_FailedBatchNotFlipped(t *testing.T) {
 
 	var mu sync.Mutex
 	var got []captured
-	r := newRunner(store, recorder(&mu, &got, map[string]bool{subject.RoomCanonicalTeamsCreate("site-b"): true}), runConfig{
+	r := newRunner(store, recorder(&mu, &got, map[string]bool{subject.RoomTeamsCanonicalCreate("site-b"): true}), runConfig{
 		BatchSize: 10, MaxWorkers: 2, Now: time.Now,
 	})
 	require.NoError(t, r.run(context.Background()))
 	assert.Len(t, got, 1)
-	assert.Equal(t, subject.RoomCanonicalTeamsCreate("site-a"), got[0].subj)
+	assert.Equal(t, subject.RoomTeamsCanonicalCreate("site-a"), got[0].subj)
 }
 
 func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
@@ -133,7 +133,7 @@ func TestRunner_MarkErrorLoggedNotFatal(t *testing.T) {
 	r := newRunner(store, recorder(&mu, &got, nil), runConfig{BatchSize: 10, MaxWorkers: 2, Now: time.Now})
 	require.NoError(t, r.run(context.Background())) // mark failure logged, not fatal
 	assert.Len(t, got, 1)                           // publish still happened
-	assert.Equal(t, subject.RoomCanonicalTeamsCreate("site-a"), got[0].subj)
+	assert.Equal(t, subject.RoomTeamsCanonicalCreate("site-a"), got[0].subj)
 }
 
 func TestRunner_EmptyListNoPublish(t *testing.T) {

@@ -1,7 +1,7 @@
 package main
 
 // config is hr-sync-worker's environment configuration. One durable consumer
-// per entry in SITE_IDS (each site's HR_{siteID} stream).
+// per entry in SITE_IDS (each site's HR-{siteID} stream).
 type config struct {
 	SiteIDs []string `env:"SITE_IDS,required,notEmpty" envSeparator:","`
 

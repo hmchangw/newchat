@@ -5,12 +5,12 @@ Consumes user message submissions from the `MESSAGES` JetStream stream, validate
 ## Event Flow
 
 ```
-User → MESSAGES_{siteID} stream
+User → MESSAGES-{siteID} stream
          └── message-worker
                ├── validate subscription (MongoDB)
                ├── save message (Cassandra)
                ├── update room lastMessage (MongoDB)
-               ├── publish → FANOUT_{siteID} (broadcast-worker)
+               ├── publish → FANOUT-{siteID} (broadcast-worker)
                └── reply → chat.user.{account}.response.{requestID}
 ```
 

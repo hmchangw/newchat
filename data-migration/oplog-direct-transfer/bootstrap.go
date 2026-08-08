@@ -17,7 +17,7 @@ type streamManager interface {
 }
 
 // bootstrapStreams is a no-op in production (this service owns no streams). When Enabled
-// (dev/integration) it creates only the MIGRATION_OPLOG_{siteID} schema; inbox-worker owns INBOX.
+// (dev/integration) it creates only the MIGRATION-OPLOG-{siteID} schema; inbox-worker owns INBOX.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	if !enabled {
 		return nil
@@ -27,7 +27,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 		Name:     cfg.Name,
 		Subjects: cfg.Subjects,
 	}); err != nil {
-		return fmt.Errorf("create MIGRATION_OPLOG stream: %w", err)
+		return fmt.Errorf("create MIGRATION-OPLOG stream: %w", err)
 	}
 	return nil
 }

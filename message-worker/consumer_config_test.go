@@ -18,7 +18,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 			MaxDeliver:    5,
 			MaxWaiting:    512,
 			MaxAckPending: 1000,
-		}, "site-a")
+		}, "default", "site-a")
 
 		assert.Equal(t, "message-worker", cc.Durable)
 		assert.Equal(t, 1000, cc.MaxAckPending)
@@ -35,7 +35,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 			MaxDeliver:    3,
 			MaxWaiting:    256,
 			MaxAckPending: 500,
-		}, "site-a")
+		}, "default", "site-a")
 
 		assert.Equal(t, "message-worker", cc.Durable)
 		assert.Equal(t, 500, cc.MaxAckPending)
@@ -44,12 +44,15 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 256, cc.MaxWaiting)
 	})
 
-	t.Run("filters to .created + .teams.batch, excludes edits/deletes", func(t *testing.T) {
-		cc := buildConsumerConfig(stream.ConsumerSettings{}, "site-a")
+	t.Run("default mode filters to .created only, excludes edits/deletes/teams", func(t *testing.T) {
+		cc := buildConsumerConfig(stream.ConsumerSettings{}, "default", "site-a")
 		assert.Empty(t, cc.FilterSubject, "single FilterSubject unset when using FilterSubjects")
-		assert.ElementsMatch(t,
-			[]string{subject.MsgCanonicalCreated("site-a"), subject.MsgCanonicalTeamsBatch("site-a")},
-			cc.FilterSubjects,
-			"one durable serves the live .created feed + the one-time .teams.batch migration; .updated/.deleted stay excluded")
+		assert.Equal(t, []string{subject.MsgCanonicalCreated("site-a")}, cc.FilterSubjects)
+	})
+
+	t.Run("teams mode filters to the teams batch subject on its own durable", func(t *testing.T) {
+		cc := buildConsumerConfig(stream.ConsumerSettings{}, "teams", "site-a")
+		assert.Equal(t, "message-worker-teams", cc.Durable)
+		assert.Equal(t, []string{subject.MsgTeamsCanonicalBatch("site-a")}, cc.FilterSubjects)
 	})
 }

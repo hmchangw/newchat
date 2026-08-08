@@ -59,7 +59,7 @@ func (stubHistory) Edit(context.Context, model.MigrationEditRequest) error { ret
 func (stubHistory) Delete(context.Context, model.MigrationDeleteRequest) error { return nil }
 
 // TestTransformer_InsertToCanonical drives an insert oplog event through a handler wired to a real
-// JetStream publisher and reads the canonical .created envelope back off MESSAGES_CANONICAL.
+// JetStream publisher and reads the canonical .created envelope back off MESSAGES-CANONICAL.
 func TestTransformer_InsertToCanonical(t *testing.T) {
 	const (
 		site = "site1"
@@ -133,7 +133,7 @@ func TestTransformer_InsertToCanonical(t *testing.T) {
 			return true
 		}
 		return false
-	}, 30*time.Second, 250*time.Millisecond, "canonical .created envelope must land on MESSAGES_CANONICAL")
+	}, 30*time.Second, 250*time.Millisecond, "canonical .created envelope must land on MESSAGES-CANONICAL")
 
 	require.NotNil(t, got)
 	assert.Equal(t, subject.MsgCanonicalCreated(site), got.Subject())

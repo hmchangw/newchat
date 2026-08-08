@@ -30,6 +30,10 @@ import (
 )
 
 type config struct {
+	// Mode selects which stream/consumer this pod binds: "default" runs the ROOMS
+	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
+	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
+	Mode              string                  `env:"MODE"            envDefault:"default"`
 	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
 	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
@@ -88,6 +92,11 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
+	if cfg.Mode != "default" && cfg.Mode != "teams" {
+		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
+		os.Exit(1)
+	}
+
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -130,7 +139,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
@@ -168,7 +177,13 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
+	// Mode picks the stream: "default" consumes ROOMS (member/create/rename ops),
+	// "teams" consumes ROOMS-TEAMS (the Teams-migration room-create batch). Two
+	// deploys of the same binary, gated by env only.
 	streamCfg := stream.Rooms(cfg.SiteID)
+	if cfg.Mode == "teams" {
+		streamCfg = stream.RoomsTeams(cfg.SiteID)
+	}
 
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
 	// User cache is on by default; a non-positive size disables it cleanly rather
@@ -202,7 +217,7 @@ func main() {
 			}
 			return nil
 		}
-		// JetStream-backed (MESSAGES_CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
+		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
 		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}
@@ -229,7 +244,10 @@ func main() {
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer))
+	sem := make(chan struct{}, cfg.MaxWorkers)
+	var wg sync.WaitGroup
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -241,9 +259,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	var wg sync.WaitGroup
-
 	go func() {
 		for {
 			msgCtx, msg, err := iter.Next()
@@ -253,10 +268,9 @@ func main() {
 			sem <- struct{}{}
 			wg.Add(1)
 			go func() {
-				// recover() must run BEFORE the slot release so a panicking handler
-				// (e.g. a WithCause/WithMetadata misuse) Naks and is redelivered
-				// instead of crashing the worker — the async path runs outside
-				// natsrouter's recovery middleware.
+				// runJobWithRecovery contains handler panics (it Acks — drops — the
+				// poison message) so this async goroutine, which runs outside
+				// natsrouter's recovery middleware, can't crash the worker.
 				defer func() {
 					<-sem
 					wg.Done()
@@ -362,10 +376,14 @@ func runJobWithRecovery(msgCtx context.Context, handler jobProcessor, msg jetstr
 	handler.HandleJetStreamMsg(handlerCtx, msg)
 }
 
-// buildConsumerConfig returns the durable consumer config for
-// room-worker. Centralized so it is unit-testable without NATS.
-func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+// buildConsumerConfig returns the durable consumer config for the given mode:
+// teams mode gets its own durable so the two deploys track independent progress
+// on their separate streams. Centralized so it is unit-testable without NATS.
+func buildConsumerConfig(s stream.ConsumerSettings, mode string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "room-worker"
+	if mode == "teams" {
+		cc.Durable = "room-worker-teams"
+	}
 	return cc
 }

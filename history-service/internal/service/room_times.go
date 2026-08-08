@@ -59,6 +59,14 @@ func (s *HistoryService) walkBounds(lastMsgAt, createdAt, now time.Time) (ceilin
 
 // resolveRoomTimes returns lastMsgAt/createdAt for roomID: sanitized client hints are trusted,
 // missing or invalid ones fall back to Mongo. now is injected for deterministic testing.
+//
+// A usable lastMsgAt hint is sufficient on its own to skip Mongo entirely — createdAt only
+// feeds walkBounds' floor, which is clamped to now-historyFloor, so a zero createdAt (the
+// case when no hint supplied one) simply collapses the floor to that clamp. A missing or
+// invalid lastMsgAt forces the per-room Mongo read (which then also fills createdAt when
+// the hint didn't supply a usable one). One further case forces a read: if the hint supplies
+// BOTH times but they are mutually inconsistent (createdAt later than lastMsgAt), the pair is
+// re-fetched from Mongo to resolve the inconsistency (see the consistency block below).
 func (s *HistoryService) resolveRoomTimes(
 	ctx context.Context,
 	roomID string,
@@ -78,17 +86,18 @@ func (s *HistoryService) resolveRoomTimes(
 		}
 	}
 
-	if last == nil || created == nil {
+	if last == nil {
 		l, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
 		if gerr != nil {
 			return time.Time{}, time.Time{}, fmt.Errorf("resolve room times for %s: %w", roomID, gerr)
 		}
-		if last == nil {
-			last = &l
-		}
+		last = &l
 		if created == nil {
 			created = &c
 		}
+	}
+	if created == nil {
+		created = &time.Time{}
 	}
 
 	// A merged hint+Mongo pair can be internally inconsistent (created > last): refetch from

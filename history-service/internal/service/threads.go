@@ -236,6 +236,11 @@ func (s *HistoryService) buildThreadItems(c *natsrouter.Context, rows []mongorep
 			Unread:          threadUnread(row.LastMsgAt, row.LastSeenAt),
 			LastMsgAt:       row.LastMsgAt.UTC().UnixMilli(),
 		}
+		// Lift the reply count off the already-hydrated parent; a nil column (never
+		// written, e.g. migrated threads) leaves the item at 0.
+		if parent.TCount != nil {
+			item.TCount = *parent.TCount
+		}
 		if row.LastSeenAt != nil {
 			ms := row.LastSeenAt.UTC().UnixMilli()
 			item.LastSeenAt = &ms

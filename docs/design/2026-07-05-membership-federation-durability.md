@@ -88,7 +88,7 @@ The per-destination serial ceiling is ~`1/(inter-site RTT + persist)` per peer (
 1. **Reconciliation** (§3.4): does a suitable authoritative membership-list RPC already exist (`member.list`, `RoomsInfoBatch`), or is a new server-to-server endpoint needed? Cadence + on-recovery trigger.
 2. **Dead-letter + alert** for permanent (malformed) membership events, replacing the current Ack-drop-with-log.
 3. **Monitoring**: per-lane consumer lag (doubles as the per-peer health signal), OUTBOX oldest-message age (catches both a long outage and a peer missing from `ALL_SITE_IDS`).
-4. **Retention sizing**: pick `MaxAge` for OUTBOX and confirm `R3 + file` in IaC (also for ROOMS/INBOX/MESSAGES_CANONICAL).
+4. **Retention sizing**: pick `MaxAge` for OUTBOX and confirm `R3 + file` in IaC (also for ROOMS/INBOX/MESSAGES-CANONICAL).
 5. **Peer-list lifecycle**: adding a federated site requires updating `ALL_SITE_IDS` on outbox-worker and restarting it; consider deriving producer and consumer peer sets from the same source to prevent drift.
 
 ## 8. Non-goals

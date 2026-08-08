@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	"github.com/caarlos0/env/v11"
@@ -61,6 +62,31 @@ func TestConfig_EmojiAndNATSDefaults(t *testing.T) {
 	assert.Equal(t, int64(262144), cfg.EmojiMaxUploadBytes)
 	assert.Equal(t, 512, cfg.EmojiMaxDimension)
 	assert.False(t, cfg.EmojiDeleteEnabled)
+}
+
+func TestConfig_MaxConcurrency(t *testing.T) {
+	t.Setenv("SITE_ID", "s1")
+	t.Setenv("CLUSTER_DOMAINS", `[{"siteID":"s1","domain":"http://localhost:8080"}]`)
+	t.Setenv("EMPLOYEE_PHOTO_BASE_URL", "https://photos.example.com")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
+	t.Setenv("MINIO_ACCESS_KEY", "k")
+	t.Setenv("MINIO_SECRET_KEY", "s")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+
+	t.Run("default", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 256, cfg.MaxConcurrency)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MAX_CONCURRENCY", "64")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 64, cfg.MaxConcurrency)
+	})
 }
 
 func TestConfig_NATSURLRequired(t *testing.T) {
