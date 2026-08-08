@@ -76,7 +76,7 @@ new field automatically. No new event type.
 
 | Method | Op | Notes |
 |---|---|---|
-| `GetPriorityContacts(ctx, account) ([]string, error)` | `FindOne`, project `{_id:0, settings.priorityContacts:1}` | Returns `[]string{}`, never nil. Narrow projection is safe here — it never feeds a fanout |
+| `GetUserPriorityContacts(ctx, account) (*model.User, error)` | `FindOne`, project `{_id:0, settings.priorityContacts:1}` | Returns the user (not a bare `[]string`) so the service can distinguish a missing user (`(nil, nil)` → `not_found`) from a user with an empty list (`{"contacts": []}`). Narrow projection is safe here — it never feeds a fanout |
 | `AddPriorityContact(ctx, account, contact string, limit int, at time.Time) (*model.User, error)` | `FindOneAndUpdate` + `$addToSet` | Cap enforced in the filter. `(nil, nil)` on no match |
 | `RemovePriorityContact(ctx, account, contact string, at time.Time) (*model.User, error)` | `FindOneAndUpdate` + `$pull` | Idempotent — removing an absent entry is a no-op. `(nil, nil)` on no match |
 | `GetPriorityContactUsers(ctx, accounts) (map[string]*models.PriorityContactUser, error)` | `FindMany`, project `{_id:0, account:1, engName:1, chineseName:1, employeeId:1, sectName:1}` | New. **No** active filter. Returns the `user-service/models` type directly, as `GetAppCategories` already does with `models.AppCategory` (`mongorepo/apps.go`) |
@@ -126,9 +126,9 @@ existing settings helpers.
 
 | Handler | Subject | Body | Returns |
 |---|---|---|---|
-| `GetPriorityContacts` | `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get` | none (`RegisterNoBody`) | `PriorityContactItem[]` |
-| `AddPriorityContact` | `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add` | `{"contactAccount": "..."}` | `PriorityContactItem[]` |
-| `RemovePriorityContact` | `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove` | `{"contactAccount": "..."}` | `PriorityContactItem[]` |
+| `GetPriorityContacts` | `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get` | none (`RegisterNoBody`) | `PriorityContactsResponse` (`{"contacts": PriorityContactItem[]}`) |
+| `AddPriorityContact` | `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add` | `{"contactAccount": "..."}` | `PriorityContactsResponse` |
+| `RemovePriorityContact` | `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove` | `{"contactAccount": "..."}` | `PriorityContactsResponse` |
 
 Nested under `settings.` exactly as `section` nests under `chatlist` — and honest about where the
 data lives. All three return the full enriched list so the acting device re-renders without a
@@ -174,9 +174,12 @@ copied. That exists because its base is a persisted struct shared across variant
 no persisted base, so one struct with two nil-able pointers marshals to the same JSON with far
 less code.
 
-Both nested pointers are nil when the account no longer resolves — deactivated user, deleted app.
-The row degrades to `account` + `type` and the frontend renders a placeholder. This is reachable
-even with the add-time existence check, because accounts can be removed after being added.
+Both nested pointers are nil when the account no longer resolves — no surviving user document, or
+a deleted app. `GetPriorityContactUsers` deliberately carries no active-user filter (strict at add
+time via `UserExists`, lenient at render time), so a deactivated user whose document survives
+still renders full enrichment; only an account with no user document at all degrades to
+`account` + `type`, with the frontend rendering a placeholder. This is reachable even with the
+add-time existence check, because accounts can be removed after being added.
 
 ### Handler logic
 
@@ -190,7 +193,12 @@ even with the add-time existence check, because accounts can be removed after be
 4. On no match, one re-read disambiguates:
    - contact already present → success with the current list (duplicate at cap is a no-op)
    - `len >= 30` → `Forbidden` + reason `priority_contact_limit`
-   - otherwise → `NotFound("user not found")`, no reason — matches `GetSettings`
+   - re-read finds no user at all → `NotFound("user not found")`, no reason — matches `GetSettings`
+   - otherwise (a user was found, under cap, contact still absent) → `Conflict("priority
+     contacts changed concurrently, retry")`, no reason — the write missed because the list was
+     at cap, then a concurrent `RemovePriorityContact` dropped some other contact before this
+     re-read; the add itself is stale, not invalid, so the client should retry rather than being
+     falsely told the caller doesn't exist
 5. Publish both fanouts off the shared `now`
 6. Enrich and return
 

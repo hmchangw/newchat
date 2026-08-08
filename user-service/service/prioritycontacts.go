@@ -215,8 +215,11 @@ func (s *UserService) RemovePriorityContact(c *natsrouter.Context, req models.Pr
 func (s *UserService) respondPriorityContacts(c *natsrouter.Context, account string, u *model.User, now int64) *models.PriorityContactsResponse {
 	settings := u.Settings
 	if settings == nil {
-		// Unreachable after a matched update; keep the reply shape total.
-		settings = &model.UserSettings{}
+		// Reachable: $pull is a no-op on a missing path, so a matched user whose
+		// document has no settings sub-document lands here. Publishing an empty
+		// UserSettings would make inbox-worker's whole-object $set clear settings
+		// at every remote site — there is nothing to replicate, so do not fan out.
+		return &models.PriorityContactsResponse{Contacts: []models.PriorityContactItem{}}
 	}
 	s.publishSettingsFanouts(c, account, settings, now)
 	return &models.PriorityContactsResponse{

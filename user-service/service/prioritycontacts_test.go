@@ -389,11 +389,12 @@ func TestRemovePriorityContact_RepoError(t *testing.T) {
 // always come back with a settings sub-document), but is reachable given a store that
 // returns one anyway, and must not panic.
 func TestRemovePriorityContact_NilSettingsRespondsEmpty(t *testing.T) {
-	svc, _, users, _, _, _, pub := newSvc(t)
+	svc, _, users, _, _, _, _ := newSvc(t)
 
 	users.EXPECT().RemovePriorityContact(gomock.Any(), "alice", "bob", gomock.Any()).
 		Return(&model.User{Settings: nil}, nil)
-	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	// No pub.EXPECT(): gomock's strict mode fails the test if respondPriorityContacts
+	// fans out for a nil-settings match — there is nothing to replicate.
 
 	resp, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
 		models.PriorityContactMutateRequest{ContactAccount: "bob"})

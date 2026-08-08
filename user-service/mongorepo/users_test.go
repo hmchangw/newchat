@@ -337,14 +337,22 @@ func TestAddPriorityContact_ConcurrentAddsRespectCap_Integration(t *testing.T) {
 	)
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 8)
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			_, _ = r.AddPriorityContact(ctx, "alice", fmt.Sprintf("race%02d", n), 30, at)
+			// A rejected add (at cap) returns (nil, nil) — no error. Any error here
+			// is a genuine failure and must fail the test, not be discarded.
+			_, err := r.AddPriorityContact(ctx, "alice", fmt.Sprintf("race%02d", n), 30, at)
+			errs <- err
 		}(i)
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	u, err := r.GetUserPriorityContacts(ctx, "alice")
 	require.NoError(t, err)

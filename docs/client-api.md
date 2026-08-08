@@ -1078,16 +1078,17 @@ and Rename Room.
 
 One row of a [priorityContacts.get](#settingsprioritycontactsget) /
 [priorityContacts.add](#settingsprioritycontactsadd) /
-[priorityContacts.remove](#settingsprioritycontactsremove) response. `user` and
-`app` are mutually exclusive with `type`, and both are omitted when the
-account no longer resolves (deactivated user, deleted app) — the row still
-carries `account` and `type`.
+[priorityContacts.remove](#settingsprioritycontactsremove) response. `type`
+selects which nested field is present — `user` for `"user"`, `app` for
+`"bot"` — so `user` and `app` are mutually exclusive with each other. Both are
+omitted when the account no longer resolves (no surviving user document, or a
+deleted app) — the row still carries `account` and `type`.
 
 | Field | Type | Notes |
 |---|---|---|
 | `account` | string | The contact's account. |
 | `type` | string | `"user"` or `"bot"`. |
-| `user` | [PriorityContactUser](#prioritycontactuser) | Optional. Present only when `type == "user"` and the account still resolves to an active or known user. |
+| `user` | [PriorityContactUser](#prioritycontactuser) | Optional. Present only when `type == "user"` and a user document still exists for the account — a deactivated user whose document survives still renders full enrichment; only an account with no document at all degrades to `account` + `type`. |
 | `app` | [PriorityContactApp](#prioritycontactapp) | Optional. Present only when `type == "bot"` and the account still resolves to an app. |
 
 #### PriorityContactUser
