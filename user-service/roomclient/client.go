@@ -27,7 +27,16 @@ func New(nc *o11ynats.Conn, siteID string) *Client { return &Client{nc: nc, site
 
 // GetRoomsInfo issues a batch room-info RPC; non-OK reply envelopes are relayed via errcode.Parse to preserve the remote classification.
 func (c *Client) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
-	req, err := json.Marshal(model.RoomsInfoBatchRequest{RoomIDs: roomIDs})
+	return c.roomsInfo(ctx, siteID, roomIDs, false)
+}
+
+// GetRoomsMeta is the keyless (skipKeys) variant of GetRoomsInfo.
+func (c *Client) GetRoomsMeta(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
+	return c.roomsInfo(ctx, siteID, roomIDs, true)
+}
+
+func (c *Client) roomsInfo(ctx context.Context, siteID string, roomIDs []string, skipKeys bool) ([]model.RoomInfo, error) {
+	req, err := json.Marshal(model.RoomsInfoBatchRequest{RoomIDs: roomIDs, SkipKeys: skipKeys})
 	if err != nil {
 		return nil, fmt.Errorf("marshal rooms-info request: %w", err)
 	}

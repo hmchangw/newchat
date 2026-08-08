@@ -22,6 +22,10 @@ type SubscriptionRepository interface {
 	GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error)
 	GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error)
 	CountActiveSubscriptions(ctx context.Context, account string) (int, error)
+	// GetActiveSubscriptions returns up to limit active subscriptions. The cap
+	// is applied before the deleted-room filter, so a page whose capped slice
+	// contains soft-deleted rooms comes back slightly short of limit — fine for
+	// the unread count (its only consumer), not a general pagination surface.
 	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error
@@ -47,6 +51,9 @@ type AppRepository interface {
 // RoomClient is the consumer-defined interface for room-service / room-worker RPC calls.
 type RoomClient interface {
 	GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
+	// GetRoomsMeta is the keyless (skipKeys) variant of GetRoomsInfo, for
+	// metadata-only callers.
+	GetRoomsMeta(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
 	CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error)
 	GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error)
 	ClearAllThreadUnread(ctx context.Context, siteID, account string) error
@@ -72,10 +79,13 @@ type PresenceClient interface {
 
 // badgeCache is the consumer-defined interface for the thread-unread badge's
 // Valkey accelerator (pkg/badgecache.Cache satisfies it; a disabled/no-op
-// implementation is wired when Valkey is not configured). Only Bump/Seed/Reseed
-// are consumed here — ClearRoom/ClearAll belong to other event handlers.
+// implementation is wired when Valkey is not configured). Only
+// BumpBatch/Seed/Reseed are consumed here — ClearRoom/ClearAll belong to
+// other event handlers.
 type badgeCache interface {
-	Bump(ctx context.Context, account, roomID string) (int, bool)
+	// BumpBatch pipelines the per-account bump; accounts absent from the result
+	// missed (or errored) and must be seeded from the source of truth.
+	BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int
 	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
 	Reseed(ctx context.Context, account string, roomIDs []string)
 }

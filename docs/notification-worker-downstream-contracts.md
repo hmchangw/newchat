@@ -130,7 +130,8 @@ Request / reply (`pkg/model/subscription.go`):
 - **`counts`** maps account → unread-room count, capped at 10. An account
   absent from `counts` means its count could not be computed (see the
   degrade path below); the caller logs and drops it rather than failing.
-- Per-account degrade path, in order: cache hit (`Bump`, Valkey `SADD`+`SCARD`)
+- Per-account degrade path, in order: cache hit (`BumpBatch`, one pipelined
+  Valkey `SADD`+`SCARD` round per cluster node for the whole batch)
   → cache miss (`Seed` from Mongo + cross-site room RPCs, unioned with the
   trigger room) → cache down entirely (`cappedUnion`, computed without Valkey).
   Only a hard per-account error (e.g. Mongo failure while reseeding) drops the

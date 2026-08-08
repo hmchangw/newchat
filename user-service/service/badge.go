@@ -15,17 +15,19 @@ import (
 const badgeCountCap = 10
 
 // BadgeCountBatch returns each account's badge unread-room count (capped at
-// 10) for a notification in req.RoomID. Cache hit: SADD+SCARD only. Miss:
-// seed from unreadRooms (Mongo + cross-site room RPCs) ∪ the trigger room.
-// Per-account failures degrade to absence — the push must never block.
+// 10) for a notification in req.RoomID. Cache hit: one pipelined SADD+SCARD
+// batch for all accounts. Miss: seed from unreadRooms (Mongo + cross-site
+// room RPCs) ∪ the trigger room. Per-account failures degrade to absence —
+// the push must never block.
 // NATS: chat.server.request.user.{siteID}.badge.count.batch
 func (s *UserService) BadgeCountBatch(c *natsrouter.Context, req model.BadgeCountBatchRequest) (*model.BadgeCountBatchResponse, error) {
 	if len(req.Accounts) == 0 || req.RoomID == "" {
 		return nil, errcode.BadRequest("roomId and accounts are required")
 	}
 	resp := &model.BadgeCountBatchResponse{Counts: make(map[string]int, len(req.Accounts))}
+	hits := s.badge.BumpBatch(c, req.Accounts, req.RoomID)
 	for _, account := range req.Accounts {
-		if n, ok := s.badge.Bump(c, account, req.RoomID); ok {
+		if n, ok := hits[account]; ok {
 			resp.Counts[account] = n
 			continue
 		}

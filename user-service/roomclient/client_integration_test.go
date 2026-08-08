@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,6 +123,39 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
 		assert.Equal(t, "upstream boom", e.Message)
+	})
+
+	t.Run("GetRoomsMeta — skipKeys set on the wire, GetRoomsInfo leaves it unset", func(t *testing.T) {
+		nc := dial(t)
+
+		var mu sync.Mutex
+		var got []model.RoomsInfoBatchRequest
+		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
+			var req model.RoomsInfoBatchRequest
+			_ = json.Unmarshal(m.Data, &req)
+			mu.Lock()
+			got = append(got, req)
+			mu.Unlock()
+			out, _ := json.Marshal(model.RoomsInfoBatchResponse{
+				Rooms: []model.RoomInfo{{RoomID: "r1", Found: true, Name: "Eng"}},
+			})
+			_ = m.Respond(out)
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+		c := New(nc, "site-a")
+		rooms, err := c.GetRoomsMeta(context.Background(), "site-a", []string{"r1"})
+		require.NoError(t, err)
+		require.Len(t, rooms, 1)
+		_, err = c.GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
+		require.NoError(t, err)
+
+		mu.Lock()
+		defer mu.Unlock()
+		require.Len(t, got, 2)
+		assert.True(t, got[0].SkipKeys, "GetRoomsMeta must request skipKeys")
+		assert.False(t, got[1].SkipKeys, "GetRoomsInfo must not request skipKeys")
 	})
 }
 

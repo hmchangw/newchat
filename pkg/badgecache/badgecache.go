@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// maxCount is the cap applied in Go to every count Bump/Seed return — the
+// maxCount is the cap applied in Go to every count BumpBatch/Seed return — the
 // badge UI never needs to distinguish "10 unread rooms" from "50 unread
 // rooms", and capping keeps SCARD's cost bounded from the caller's view.
 const maxCount = 10
@@ -62,7 +62,7 @@ type Cache struct {
 }
 
 // New builds a Cache. ttl bounds how long an account's unread-room set
-// survives without a Bump/Seed/Reseed refresh, so a crashed/missed clear
+// survives without a BumpBatch/Seed/Reseed refresh, so a crashed/missed clear
 // self-heals rather than sticking forever.
 func New(rdb redis.UniversalClient, ttl time.Duration) *Cache {
 	return &Cache{rdb: rdb, ttl: ttl}
@@ -75,21 +75,65 @@ func Key(account string) string {
 	return "badge:{" + account + "}"
 }
 
-// Bump adds roomID to account's unread set and refreshes its TTL, returning
-// the post-add set size capped at 10. ok=false means either a cache miss (the
-// key does not exist — the caller should Seed/Reseed from Mongo) or a Valkey
-// error; Bump never partially writes and never returns an error, so callers
-// can treat ok=false as "the cache doesn't know, fall back."
-func (c *Cache) Bump(ctx context.Context, account, roomID string) (count int, ok bool) {
-	n, err := bumpScript.Run(ctx, c.rdb, []string{Key(account)}, roomID, ttlSeconds(c.ttl)).Int64()
-	if err != nil {
-		slog.WarnContext(ctx, "badgecache bump failed", "account", account, "room_id", roomID, "error", err)
-		return 0, false
+// BumpBatch adds one triggering roomID to many accounts' unread sets (TTL
+// refreshed) in a single pipeline — grouped ~1 round trip per cluster node
+// instead of one per account. The result maps each account that HIT (key
+// existed; SADD+EXPIRE applied) to its post-add set size capped at 10;
+// accounts that missed (no key yet) or errored are simply absent — fail-open,
+// so callers seed those from the source of truth. NOSCRIPT failures (empty
+// script cache on a fresh node) are re-run as one pipelined EVAL pass, which
+// also re-caches the script's SHA for subsequent batches.
+func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int {
+	counts := make(map[string]int, len(accounts))
+	if len(accounts) == 0 {
+		return counts
 	}
-	if n < 0 {
-		return 0, false
+	ttl := ttlSeconds(c.ttl)
+	cmds := make([]*redis.Cmd, len(accounts))
+	if _, err := c.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for i, account := range accounts {
+			cmds[i] = bumpScript.EvalSha(ctx, pipe, []string{Key(account)}, roomID, ttl)
+		}
+		return nil
+	}); err != nil {
+		// Logged once for visibility; the per-command errors below decide each
+		// account's outcome individually.
+		slog.WarnContext(ctx, "badgecache bump batch failed", "room_id", roomID, "accounts", len(accounts), "error", err)
 	}
-	return capCount(n), true
+	var retry []int // indexes whose EVALSHA hit NOSCRIPT
+	for i, account := range accounts {
+		n, err := cmds[i].Int64()
+		if err != nil {
+			if redis.HasErrorPrefix(err, "NOSCRIPT") {
+				retry = append(retry, i)
+			}
+			continue
+		}
+		if n < 0 {
+			continue // miss — the key does not exist yet
+		}
+		counts[account] = capCount(n)
+	}
+	if len(retry) == 0 {
+		return counts
+	}
+	// Second pipelined pass with the full script source — bounded extra rounds
+	// per node instead of one round trip per affected account.
+	retryCmds := make([]*redis.Cmd, len(retry))
+	if _, err := c.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for j, i := range retry {
+			retryCmds[j] = bumpScript.Eval(ctx, pipe, []string{Key(accounts[i])}, roomID, ttl)
+		}
+		return nil
+	}); err != nil {
+		slog.WarnContext(ctx, "badgecache bump batch retry failed", "room_id", roomID, "accounts", len(retry), "error", err)
+	}
+	for j, i := range retry {
+		if n, err := retryCmds[j].Int64(); err == nil && n >= 0 {
+			counts[accounts[i]] = capCount(n)
+		}
+	}
+	return counts
 }
 
 // Seed creates (or extends) account's unread set from roomIDs plus

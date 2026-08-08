@@ -15,15 +15,18 @@ import (
 )
 
 // fakeBadgeCache is a handwritten test double for the badgeCache interface —
-// small enough that mockgen would add noise without value. bump/seed/reseed
-// are optional overrides (nil ⇒ default miss/no-op); the call slices record
+// small enough that mockgen would add noise without value. bumpBatch/seed/reseed
+// are optional overrides (nil ⇒ default all-miss/no-op); the call slices record
 // which accounts each method was invoked for, in order.
 type fakeBadgeCache struct {
-	bump   func(account, roomID string) (int, bool)
-	seed   func(account string, roomIDs []string, trigger string) (int, bool)
-	reseed func(account string, roomIDs []string)
+	bumpBatch func(accounts []string, roomID string) map[string]int
+	seed      func(account string, roomIDs []string, trigger string) (int, bool)
+	reseed    func(account string, roomIDs []string)
 
-	bumpCalls   []string
+	// bumpCalls records one entry per BumpBatch call, holding that call's
+	// accounts — so both the call count and the batching shape are asserted
+	// from a single record.
+	bumpCalls   [][]string
 	seedCalls   []string
 	reseedCalls []string
 	// reseedRoomIDs holds the roomIDs argument passed to each Reseed call, in
@@ -31,12 +34,12 @@ type fakeBadgeCache struct {
 	reseedRoomIDs [][]string
 }
 
-func (f *fakeBadgeCache) Bump(_ context.Context, account, roomID string) (int, bool) {
-	f.bumpCalls = append(f.bumpCalls, account)
-	if f.bump != nil {
-		return f.bump(account, roomID)
+func (f *fakeBadgeCache) BumpBatch(_ context.Context, accounts []string, roomID string) map[string]int {
+	f.bumpCalls = append(f.bumpCalls, accounts)
+	if f.bumpBatch != nil {
+		return f.bumpBatch(accounts, roomID)
 	}
-	return 0, false
+	return nil
 }
 
 func (f *fakeBadgeCache) Seed(_ context.Context, account string, roomIDs []string, trigger string) (int, bool) {
@@ -82,24 +85,49 @@ func TestBadgeCountBatch_EmptyRoomID_BadRequest(t *testing.T) {
 	assert.Empty(t, badge.bumpCalls)
 }
 
-// A cache hit returns Bump's count directly, with no unreadRooms/repo call at all.
+// A cache hit returns BumpBatch's count directly, with no unreadRooms/repo call at all.
 func TestBadgeCountBatch_Hit_NoRepoCall(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	// No GetActiveSubscriptions expectation — a call would fail the mock.
 	badge := &fakeBadgeCache{
-		bump: func(account, roomID string) (int, bool) {
-			assert.Equal(t, "alice", account)
+		bumpBatch: func(accounts []string, roomID string) map[string]int {
+			assert.Equal(t, []string{"alice"}, accounts)
 			assert.Equal(t, "r1", roomID)
-			return 3, true
+			return map[string]int{"alice": 3}
 		},
 	}
 	svc := newBadgeService(t, subs, badge)
 	resp, err := svc.BadgeCountBatch(ctx("alice", "site-a"), model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"alice"}})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"alice": 3}, resp.Counts)
-	assert.Equal(t, []string{"alice"}, badge.bumpCalls)
+	assert.Equal(t, [][]string{{"alice"}}, badge.bumpCalls)
 	assert.Empty(t, badge.seedCalls)
+}
+
+// The whole batch goes to the cache as ONE BumpBatch call; only the accounts
+// it missed fall through to the per-account seed path.
+func TestBadgeCountBatch_MixedHitMiss_SingleBatchedBump(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	// Only the missed account (bob) reaches the repo.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "bob", gomock.Any()).
+		Return([]model.EnrichedSubscription{}, nil)
+	badge := &fakeBadgeCache{
+		bumpBatch: func(accounts []string, roomID string) map[string]int {
+			return map[string]int{"alice": 3} // bob misses
+		},
+		seed: func(account string, roomIDs []string, trigger string) (int, bool) {
+			assert.Equal(t, "bob", account)
+			return 1, true
+		},
+	}
+	svc := newBadgeService(t, subs, badge)
+	resp, err := svc.BadgeCountBatch(ctx("alice", "site-a"), model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"alice", "bob"}})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"alice": 3, "bob": 1}, resp.Counts)
+	assert.Equal(t, [][]string{{"alice", "bob"}}, badge.bumpCalls, "the batch must hit the cache in one pipelined call")
+	assert.Equal(t, []string{"bob"}, badge.seedCalls)
 }
 
 // A cache miss falls through to unreadRooms (called exactly once) and Seeds

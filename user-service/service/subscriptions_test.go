@@ -636,11 +636,11 @@ func TestCountUnread_Happy(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	newer := time.UnixMilli(200).UTC()
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(2, nil)
+	// No CountActiveSubscriptions expectation — the unread path must not fetch the total.
 	// LOCAL sub: lastMsgAt is on the $lookup baseline — counted with NO RPC.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
 		Return([]model.EnrichedSubscription{{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -655,18 +655,17 @@ func TestCountUnread_FailedSiteSkipped(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	newer := time.UnixMilli(200).UTC()
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(5, nil)
 	// One LOCAL unread (counted from the baseline) + one CROSS-SITE sub whose site's RPC fails.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
 		Return([]model.EnrichedSubscription{
 			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}, // local unread
 			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen}},                    // cross-site, site fails
 		}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).Return(nil, errors.New("down"))
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).Return(nil, errors.New("down"))
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
-	// The unreachable site is SKIPPED; the local unread still counts — NOT a fallback to total(5).
+	// The unreachable site is SKIPPED; the local unread still counts.
 	assert.Equal(t, 1, resp.Count)
 }
 
@@ -674,24 +673,22 @@ func TestCountUnread_PartialFailureCountsHealthySites(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	newer := int64(200)
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(9, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen}}, // healthy site, unread
 		{Subscription: model.Subscription{RoomID: "rc1", SiteID: "site-c", LastSeenAt: &seen}}, // failing site, skipped
 	}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
 		Return([]model.RoomInfo{{RoomID: "rb1", Found: true, LastMsgAt: &newer}}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-c", gomock.Any()).Return(nil, errors.New("down"))
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-c", gomock.Any()).Return(nil, errors.New("down"))
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
-	// site-b's unread counts; the unreachable site-c is skipped — NOT a fallback to total(9).
+	// site-b's unread counts; the unreachable site-c is skipped.
 	assert.Equal(t, 1, resp.Count)
 }
 
 func TestCountUnread_GetActiveStoreError(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(3, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return(nil, errors.New("db down"))
 	yes := true
 	_, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -703,7 +700,6 @@ func TestCountUnread_MultiSite(t *testing.T) {
 	seen := time.UnixMilli(100).UTC()
 	newerT := time.UnixMilli(200).UTC()
 	newer := int64(200)
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(4, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "ra1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newerT}, // local unread (baseline)
 		{Subscription: model.Subscription{RoomID: "ra2", SiteID: "site-a", LastSeenAt: &seen}},                     // local read (no lastMsgAt)
@@ -711,7 +707,7 @@ func TestCountUnread_MultiSite(t *testing.T) {
 		{Subscription: model.Subscription{RoomID: "rb2", SiteID: "site-b", LastSeenAt: &seen}},
 	}, nil)
 	// Only the CROSS-SITE site is RPC'd; local rows are counted from the baseline.
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"rb1", "rb2"})).
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"rb1", "rb2"})).
 		Return([]model.RoomInfo{
 			{RoomID: "rb1", Found: true, LastMsgAt: &newer}, // unread
 			{RoomID: "rb2", Found: true, LastMsgAt: nil},    // read
@@ -726,12 +722,11 @@ func TestCountUnread_AllRead(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(300).UTC()
 	older := time.UnixMilli(100).UTC() // older than seen → not unread
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(2, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
 		{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-a", LastSeenAt: &seen}}, // no lastMsgAt → read
 	}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -746,8 +741,8 @@ func TestCountUnread_AllRead(t *testing.T) {
 
 func TestCountUnread_EmptyActive(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(0, nil)
-	// Zero active subs must short-circuit before GetActiveSubscriptions.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]model.EnrichedSubscription{}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -765,7 +760,7 @@ func TestUnreadRooms_ContextCancelled_SkipsRPC(t *testing.T) {
 			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}, // local unread
 			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen}},                    // cross-site, must be skipped
 		}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	c := ctx("alice", "site-a")
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -787,7 +782,7 @@ func TestUnreadRooms_CrossSiteDeletedRoomNotCounted(t *testing.T) {
 		Return([]model.EnrichedSubscription{
 			{Subscription: model.Subscription{RoomID: "rd", SiteID: "site-b", LastSeenAt: &seen}},
 		}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
 		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
 
 	ids, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
@@ -805,7 +800,7 @@ func TestUnreadRooms_CrossSiteDeletedRoomThreadNotCounted(t *testing.T) {
 		Return([]model.EnrichedSubscription{
 			{Subscription: model.Subscription{RoomID: "rd", SiteID: "site-b", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}},
 		}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
 		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
 
 	ids, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
@@ -820,7 +815,6 @@ func TestCountUnread_ReadRoomBumpedByUnreadThread(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := time.UnixMilli(50).UTC()
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}, LastMsgAt: &older},
 	}, nil)
@@ -836,7 +830,6 @@ func TestCountUnread_AlreadyUnreadRoomNotDoubleCounted(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	newer := time.UnixMilli(300).UTC()
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}, LastMsgAt: &newer},
 	}, nil)
@@ -852,7 +845,6 @@ func TestCountUnread_MultipleUnreadThreadsCountOnce(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := time.UnixMilli(50).UTC()
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1", "p2", "p3"}}, LastMsgAt: &older},
 	}, nil)
@@ -869,11 +861,10 @@ func TestCountUnread_CrossSiteReadRoomBumpedByThread(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := int64(50)
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-b", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}},
 	}, nil)
-	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r1"}).
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", []string{"r1"}).
 		Return([]model.RoomInfo{{RoomID: "r1", Found: true, LastMsgAt: &older}}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -888,7 +879,6 @@ func TestCountUnread_MutedRoomThreadExcluded(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := time.UnixMilli(50).UTC()
-	subs.EXPECT().CountActiveSubscriptions(gomock.Any(), "alice").Return(1, nil)
 	// Only the unmuted, read r1 (no threads) is returned.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},

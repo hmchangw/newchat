@@ -547,17 +547,14 @@ func (s *UserService) GetByRoomID(c *natsrouter.Context, req models.GetByRoomIDR
 func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.CountRequest) (*models.CountResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
-	total, err := s.subs.CountActiveSubscriptions(c, account)
-	if err != nil {
-		return nil, fmt.Errorf("count subscriptions: %w", err)
-	}
 	if req.Unread == nil || !*req.Unread {
+		total, err := s.subs.CountActiveSubscriptions(c, account)
+		if err != nil {
+			return nil, fmt.Errorf("count subscriptions: %w", err)
+		}
 		return &models.CountResponse{Count: total}, nil
 	}
-	// Short-circuit zero: nothing to fetch or fan out for an empty active set.
-	if total == 0 {
-		return &models.CountResponse{Count: 0}, nil
-	}
+	// Unread path: the total is not needed — go straight to the unread set.
 	ids, err := s.unreadRooms(c, account)
 	if err != nil {
 		return nil, err
@@ -639,7 +636,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 				if c.Err() != nil {
 					return
 				}
-				infos, err := s.rooms.GetRoomsInfo(c, site, roomIDsBySite[site])
+				infos, err := s.rooms.GetRoomsMeta(c, site, roomIDsBySite[site])
 				if err != nil {
 					// Skip this site rather than nuking the whole result.
 					slog.WarnContext(c, "unread count degraded for site", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)

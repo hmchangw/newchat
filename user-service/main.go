@@ -51,18 +51,18 @@ var (
 // local copy lets main hold either a *badgecache.Cache or a noopBadgeCache
 // before passing it into service.New.
 type badgeCache interface {
-	Bump(ctx context.Context, account, roomID string) (int, bool)
+	BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int
 	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
 	Reseed(ctx context.Context, account string, roomIDs []string)
 }
 
-// noopBadgeCache is the badge cache used when VALKEY_ADDRS is empty: Bump/Seed
-// always miss (ok=false), Reseed is a no-op. BadgeCountBatch's cappedUnion
+// noopBadgeCache is the badge cache used when VALKEY_ADDRS is empty:
+// BumpBatch/Seed always miss, Reseed is a no-op. BadgeCountBatch's cappedUnion
 // fallback still returns a correct (just uncached) count, and CountSubscriptions'
 // Reseed call becomes a harmless no-op — so Phase A deploys need no Valkey.
 type noopBadgeCache struct{}
 
-func (noopBadgeCache) Bump(context.Context, string, string) (int, bool) { return 0, false }
+func (noopBadgeCache) BumpBatch(context.Context, []string, string) map[string]int { return nil }
 func (noopBadgeCache) Seed(context.Context, string, []string, string) (int, bool) {
 	return 0, false
 }

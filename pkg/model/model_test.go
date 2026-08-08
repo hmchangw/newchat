@@ -2086,7 +2086,8 @@ func TestSubscriptionJSON_NestedRoom(t *testing.T) {
 
 func TestRoomsInfoBatchRequestJSON(t *testing.T) {
 	src := model.RoomsInfoBatchRequest{
-		RoomIDs: []string{"r1", "r2", "r3"},
+		RoomIDs:  []string{"r1", "r2", "r3"},
+		SkipKeys: true,
 	}
 	data, err := json.Marshal(&src)
 	require.NoError(t, err)

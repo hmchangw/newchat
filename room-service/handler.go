@@ -1178,14 +1178,16 @@ func (h *Handler) roomsInfoBatch(c *natsrouter.Context, req model.RoomsInfoBatch
 		rooms = r
 		return nil
 	})
-	g.Go(func() error {
-		k, err := chunkedGetKeys(gctx, h.keyStore, req.RoomIDs)
-		if err != nil {
-			return fmt.Errorf("get room keys: %w", err)
-		}
-		keys = k
-		return nil
-	})
+	if !req.SkipKeys {
+		g.Go(func() error {
+			k, err := chunkedGetKeys(gctx, h.keyStore, req.RoomIDs)
+			if err != nil {
+				return fmt.Errorf("get room keys: %w", err)
+			}
+			keys = k
+			return nil
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}

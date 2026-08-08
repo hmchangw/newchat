@@ -2379,6 +2379,23 @@ func TestHandler_handleRoomsInfoBatch(t *testing.T) {
 			wantErr: "get room keys",
 		},
 		{
+			name: "skipKeys → keystore untouched, key fields unset",
+			req:  model.RoomsInfoBatchRequest{RoomIDs: []string{"r1"}, SkipKeys: true},
+			setupStore: func(s *MockRoomStore) {
+				s.EXPECT().ListRoomsByIDs(gomock.Any(), []string{"r1"}).Return([]model.Room{
+					{ID: "r1", Name: "general", SiteID: "site-a", LastMsgAt: &now},
+				}, nil)
+			},
+			// No setupKeys: any keystore call fails the strict mock.
+			assertResp: func(t *testing.T, resp model.RoomsInfoBatchResponse) {
+				require.Len(t, resp.Rooms, 1)
+				assert.True(t, resp.Rooms[0].Found)
+				require.NotNil(t, resp.Rooms[0].LastMsgAt)
+				assert.Nil(t, resp.Rooms[0].PrivateKey)
+				assert.Nil(t, resp.Rooms[0].KeyVersion)
+			},
+		},
+		{
 			name: "duplicate IDs → 2 entries",
 			req:  model.RoomsInfoBatchRequest{RoomIDs: []string{"r1", "r1"}},
 			setupStore: func(s *MockRoomStore) {
