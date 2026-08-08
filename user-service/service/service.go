@@ -33,7 +33,7 @@ type UserRepository interface {
 	SetUserStatus(ctx context.Context, account, text string, isShow *bool) (*model.User, error)
 	GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error)
 	GetUserSettings(ctx context.Context, account string) (*model.User, error)
-	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
+	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings, at time.Time) (*model.User, error)
 	GetUserChatlist(ctx context.Context, account string) (*model.User, error)
 	UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error)
 	GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error)

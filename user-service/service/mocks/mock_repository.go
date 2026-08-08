@@ -339,18 +339,18 @@ func (mr *MockUserRepositoryMockRecorder) UpdateUserChatlist(ctx, account, state
 }
 
 // UpdateUserSettings mocks base method.
-func (m *MockUserRepository) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+func (m *MockUserRepository) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings, at time.Time) (*model.User, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, set)
+	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, set, at)
 	ret0, _ := ret[0].(*model.User)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // UpdateUserSettings indicates an expected call of UpdateUserSettings.
-func (mr *MockUserRepositoryMockRecorder) UpdateUserSettings(ctx, account, set any) *gomock.Call {
+func (mr *MockUserRepositoryMockRecorder) UpdateUserSettings(ctx, account, set, at any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserSettings), ctx, account, set)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserSettings), ctx, account, set, at)
 }
 
 // UserExists mocks base method.

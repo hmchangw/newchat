@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 func TestGetUserStatus_Integration(t *testing.T) {
@@ -382,4 +384,25 @@ func TestRemovePriorityContact_Integration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, u)
 	})
+}
+
+func TestUpdateUserSettings_StampsSettingsUpdatedAt_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_700_000_000_000).UTC()
+	seed(t, db, "users", bson.M{"_id": "u1", "account": "alice"})
+
+	dark := "dark"
+	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{ThemePreference: &dark}, at)
+	require.NoError(t, err)
+	require.NotNil(t, u)
+
+	// Without this stamp the origin doc has no settingsUpdatedAt, so inbox-worker's
+	// $exists:false branch always matches and a stale remote event overwrites a
+	// newer local edit.
+	var doc struct {
+		SettingsUpdatedAt time.Time `bson:"settingsUpdatedAt"`
+	}
+	require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"account": "alice"}).Decode(&doc))
+	assert.Equal(t, at, doc.SettingsUpdatedAt.UTC())
 }

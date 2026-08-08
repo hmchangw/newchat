@@ -108,7 +108,7 @@ func (r *UserRepo) GetUserSettings(ctx context.Context, account string) (*model.
 // updated user (Settings projected) in one round-trip via
 // FindOneAndUpdate(After); returns (nil, nil) when no active user matched.
 // The caller guarantees at least one field is non-nil (an empty $set errors).
-func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings, at time.Time) (*model.User, error) {
 	fields := bson.M{}
 	if set.FullWidth != nil {
 		fields["settings.fullWidth"] = *set.FullWidth
@@ -137,6 +137,12 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	if set.InitialChatScrollPosition != nil {
 		fields["settings.initialChatScrollPosition"] = *set.InitialChatScrollPosition
 	}
+	// Stamp the top-level settingsUpdatedAt (the same timestamp the service shares
+	// with both fanouts) so the cross-site high-water guard sees a local edit;
+	// without it an older inbound event could regress local state. Mirrors
+	// UpdateUserChatlist. PriorityContacts is deliberately never referenced here —
+	// the dedicated add/remove RPCs own it.
+	fields["settingsUpdatedAt"] = at
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After).
 		SetProjection(bson.M{"_id": 0, "settings": 1})

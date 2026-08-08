@@ -53,7 +53,10 @@ func (s *UserService) SetSettings(c *natsrouter.Context, req models.SettingsSetR
 	if err := validateSettings(&req.UserSettings); err != nil {
 		return nil, err
 	}
-	u, err := s.users.UpdateUserSettings(c, account, &req.UserSettings)
+	// One timestamp for the write and both fanouts, so the stored high-water mark,
+	// the client event, and the cross-site replica all agree on ordering.
+	now := time.Now().UTC().UnixMilli()
+	u, err := s.users.UpdateUserSettings(c, account, &req.UserSettings, time.UnixMilli(now).UTC())
 	if err != nil {
 		return nil, fmt.Errorf("set settings: %w", err)
 	}
@@ -65,11 +68,7 @@ func (s *UserService) SetSettings(c *natsrouter.Context, req models.SettingsSetR
 		// Unreachable after a non-empty $set; keep the reply shape total.
 		settings = &model.UserSettings{}
 	}
-	// One timestamp for both fanouts so the client event and the cross-site
-	// replica agree on ordering.
-	now := time.Now().UTC().UnixMilli()
-	s.publishSettingsUpdate(c, account, settings, now)
-	s.publishSettingsInbox(c, account, settings, now)
+	s.publishSettingsFanouts(c, account, settings, now)
 	return settings, nil
 }
 
@@ -96,6 +95,17 @@ func validateSettings(set *model.UserSettings) error {
 		return errcode.BadRequest("invalid initialChatScrollPosition")
 	}
 	return nil
+}
+
+// publishSettingsFanouts emits both settings fanouts off one timestamp: the client
+// event for the caller's other devices, and the cross-site inbox replica that every
+// site's notification-worker reads locally. Both carry the FULL settings
+// sub-document — the cross-site apply is a whole-object $set, so a partial payload
+// wipes unrelated settings at remote sites. Every settings mutation must call this,
+// not just publishSettingsUpdate: a client-only fanout leaves remote sites stale.
+func (s *UserService) publishSettingsFanouts(c *natsrouter.Context, account string, settings *model.UserSettings, now int64) {
+	s.publishSettingsUpdate(c, account, settings, now)
+	s.publishSettingsInbox(c, account, settings, now)
 }
 
 // publishSettingsUpdate fans out the per-user settings.update event over core
