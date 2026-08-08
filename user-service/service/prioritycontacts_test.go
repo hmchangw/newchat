@@ -283,3 +283,143 @@ func TestAddPriorityContact_RepoError(t *testing.T) {
 		models.PriorityContactMutateRequest{ContactAccount: "bob"})
 	require.Error(t, err)
 }
+
+func TestRemovePriorityContact_EmptyContactIsBadRequest(t *testing.T) {
+	svc, _, _, _, _, _, _ := newSvc(t)
+
+	_, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: ""})
+	requireCode(t, err, errcode.CodeBadRequest)
+}
+
+func TestRemovePriorityContact_PublishesBothFanoutsWithOneTimestamp(t *testing.T) {
+	svc, _, users, apps, _, _, pub := newSvc(t)
+
+	users.EXPECT().RemovePriorityContact(gomock.Any(), "alice", "bob", gomock.Any()).
+		Return(&model.User{Settings: &model.UserSettings{PriorityContacts: []string{"helper.bot"}}}, nil)
+	// Enrichment runs on the post-removal list — only the bot remains, so
+	// GetPriorityContactUsers is never called (no user accounts left to look up).
+	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]*model.App{"helper.bot": {Name: "Helper"}}, nil)
+
+	var clientTS, inboxTS int64
+	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			var evt model.SettingsUpdateEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			clientTS = evt.Timestamp
+			return nil
+		})
+	pub.EXPECT().Publish(gomock.Any(), subject.InboxExternal("site-b", model.InboxUserSettingsUpdated), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			var evt model.InboxEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			var payload model.UserSettingsUpdated
+			require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+			inboxTS = payload.Timestamp
+			return nil
+		})
+
+	resp, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.NoError(t, err)
+	require.Len(t, resp.Contacts, 1)
+	assert.Equal(t, "helper.bot", resp.Contacts[0].Account)
+
+	assert.NotZero(t, clientTS)
+	assert.Equal(t, clientTS, inboxTS)
+}
+
+// Removing an entry that isn't in the list is a no-op that still succeeds.
+func TestRemovePriorityContact_AbsentContactSucceeds(t *testing.T) {
+	svc, _, users, _, _, _, pub := newSvc(t)
+
+	users.EXPECT().RemovePriorityContact(gomock.Any(), "alice", "ghost", gomock.Any()).
+		Return(&model.User{Settings: &model.UserSettings{PriorityContacts: []string{}}}, nil)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	resp, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "ghost"})
+	require.NoError(t, err)
+	assert.Empty(t, resp.Contacts)
+}
+
+func TestRemovePriorityContact_CallerNotFound(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().RemovePriorityContact(gomock.Any(), "alice", "bob", gomock.Any()).Return(nil, nil)
+
+	_, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	requireCode(t, err, errcode.CodeNotFound)
+}
+
+func TestRemovePriorityContact_RepoError(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().RemovePriorityContact(gomock.Any(), "alice", "bob", gomock.Any()).
+		Return(nil, errors.New("db down"))
+
+	_, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.Error(t, err)
+}
+
+// respondPriorityContacts' nil-settings branch is defensive (a matched write should
+// always come back with a settings sub-document), but is reachable given a store that
+// returns one anyway, and must not panic.
+func TestRemovePriorityContact_NilSettingsRespondsEmpty(t *testing.T) {
+	svc, _, users, _, _, _, pub := newSvc(t)
+
+	users.EXPECT().RemovePriorityContact(gomock.Any(), "alice", "bob", gomock.Any()).
+		Return(&model.User{Settings: nil}, nil)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	resp, err := svc.RemovePriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.NoError(t, err)
+	assert.Empty(t, resp.Contacts)
+}
+
+// priorityContactExists' bot-lookup error propagates out of AddPriorityContact raw
+// (infra failure, not an errcode).
+func TestAddPriorityContact_ExistsCheckBotLookupError(t *testing.T) {
+	svc, _, _, apps, _, _, _ := newSvc(t)
+
+	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"ghost.bot"}).
+		Return(nil, errors.New("db down"))
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "ghost.bot"})
+	require.Error(t, err)
+	var ee *errcode.Error
+	assert.False(t, errors.As(err, &ee))
+}
+
+// priorityContactExists' user-lookup error propagates out of AddPriorityContact raw.
+func TestAddPriorityContact_ExistsCheckUserLookupError(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(false, errors.New("db down"))
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.Error(t, err)
+	var ee *errcode.Error
+	assert.False(t, errors.As(err, &ee))
+}
+
+// The re-read inside resolveAddPriorityContactMiss can itself fail against the store.
+func TestAddPriorityContact_ResolveMissRepoError(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).Return(nil, nil)
+	users.EXPECT().GetUserPriorityContacts(gomock.Any(), "alice").Return(nil, errors.New("db down"))
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.Error(t, err)
+	var ee *errcode.Error
+	assert.False(t, errors.As(err, &ee))
+}

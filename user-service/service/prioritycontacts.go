@@ -182,6 +182,28 @@ func (s *UserService) priorityContactExists(c *natsrouter.Context, contact strin
 	return exists, nil
 }
 
+// RemovePriorityContact removes one contact from the caller's list and fans the full
+// post-update settings out. No existence check: removing an account that no longer
+// exists is exactly the cleanup case to permit.
+func (s *UserService) RemovePriorityContact(c *natsrouter.Context, req models.PriorityContactMutateRequest) (*models.PriorityContactsResponse, error) {
+	account := c.Param("account")
+	c.WithLogValues("account", account)
+	contact := req.ContactAccount
+	if contact == "" {
+		return nil, errcode.BadRequest("contactAccount is required")
+	}
+
+	now := time.Now().UTC().UnixMilli()
+	u, err := s.users.RemovePriorityContact(c, account, contact, time.UnixMilli(now).UTC())
+	if err != nil {
+		return nil, fmt.Errorf("remove priority contact: %w", err)
+	}
+	if u == nil {
+		return nil, errcode.NotFound("user not found")
+	}
+	return s.respondPriorityContacts(c, account, u, now), nil
+}
+
 // respondPriorityContacts publishes both settings fanouts off the shared timestamp
 // and builds the enriched reply. Shared by add and remove so neither can drift into
 // publishing only the client event.
