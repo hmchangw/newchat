@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -13,8 +14,6 @@ import (
 
 // maxPriorityContacts caps the stored list. The service owns the value; the repo
 // takes it as a parameter and enforces it inside the update filter.
-//
-//nolint:unused // wired into AddPriorityContact by the add handler (Task 8)
 const maxPriorityContacts = 30
 
 // GetPriorityContacts returns the caller's priority-contact list, enriched for display.
@@ -102,4 +101,98 @@ func (s *UserService) lookupPriorityContactApps(c *natsrouter.Context, bots []st
 		return nil
 	}
 	return got
+}
+
+// AddPriorityContact adds one contact to the caller's list, enforcing the cap inside
+// the write, then fans the full post-update settings to the caller's other devices
+// and to every other site.
+func (s *UserService) AddPriorityContact(c *natsrouter.Context, req models.PriorityContactMutateRequest) (*models.PriorityContactsResponse, error) {
+	account := c.Param("account")
+	c.WithLogValues("account", account)
+	contact := req.ContactAccount
+	if contact == "" {
+		return nil, errcode.BadRequest("contactAccount is required")
+	}
+	if contact == account {
+		return nil, errcode.BadRequest("cannot add yourself as a priority contact")
+	}
+
+	exists, err := s.priorityContactExists(c, contact)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errcode.NotFound("priority contact not found",
+			errcode.WithReason(errcode.UserPriorityContactNotFound))
+	}
+
+	// One timestamp for the write and both fanouts.
+	now := time.Now().UTC().UnixMilli()
+	u, err := s.users.AddPriorityContact(c, account, contact, maxPriorityContacts, time.UnixMilli(now).UTC())
+	if err != nil {
+		return nil, fmt.Errorf("add priority contact: %w", err)
+	}
+	if u == nil {
+		// The filter rejects "no such user" and "already at cap" alike.
+		return s.resolveAddPriorityContactMiss(c, account, contact)
+	}
+	return s.respondPriorityContacts(c, account, u, now), nil
+}
+
+// resolveAddPriorityContactMiss disambiguates a no-match add with one re-read, on
+// the failure path only. A duplicate add at exactly the cap is a no-op, not a
+// violation, so it succeeds with the unchanged list.
+func (s *UserService) resolveAddPriorityContactMiss(c *natsrouter.Context, account, contact string) (*models.PriorityContactsResponse, error) {
+	u, err := s.users.GetUserPriorityContacts(c, account)
+	if err != nil {
+		return nil, fmt.Errorf("resolve priority contact add: %w", err)
+	}
+	if u == nil {
+		return nil, errcode.NotFound("user not found")
+	}
+	current := storedPriorityContacts(u)
+	for _, a := range current {
+		if a == contact {
+			return &models.PriorityContactsResponse{Contacts: s.enrichPriorityContacts(c, current)}, nil
+		}
+	}
+	if len(current) >= maxPriorityContacts {
+		return nil, errcode.Forbidden("priority contact limit reached",
+			errcode.WithReason(errcode.UserPriorityContactLimit))
+	}
+	return nil, errcode.NotFound("user not found")
+}
+
+// priorityContactExists reports whether contact names something that can send
+// messages: an app for a ".bot" account, an active user otherwise. The app need only
+// exist, not be Enabled — a disabled assistant makes the entry inert, not wrong, and
+// requiring Enabled would break re-adding whenever an admin disables an app.
+func (s *UserService) priorityContactExists(c *natsrouter.Context, contact string) (bool, error) {
+	if model.IsBot(contact) {
+		apps, err := s.apps.GetAppsByAssistants(c, []string{contact})
+		if err != nil {
+			return false, fmt.Errorf("look up priority contact app: %w", err)
+		}
+		return apps[contact] != nil, nil
+	}
+	exists, err := s.users.UserExists(c, contact)
+	if err != nil {
+		return false, fmt.Errorf("look up priority contact user: %w", err)
+	}
+	return exists, nil
+}
+
+// respondPriorityContacts publishes both settings fanouts off the shared timestamp
+// and builds the enriched reply. Shared by add and remove so neither can drift into
+// publishing only the client event.
+func (s *UserService) respondPriorityContacts(c *natsrouter.Context, account string, u *model.User, now int64) *models.PriorityContactsResponse {
+	settings := u.Settings
+	if settings == nil {
+		// Unreachable after a matched update; keep the reply shape total.
+		settings = &model.UserSettings{}
+	}
+	s.publishSettingsFanouts(c, account, settings, now)
+	return &models.PriorityContactsResponse{
+		Contacts: s.enrichPriorityContacts(c, settings.PriorityContacts),
+	}
 }

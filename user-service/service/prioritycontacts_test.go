@@ -1,7 +1,9 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,13 +12,12 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/models"
 )
 
 // requireReason asserts the error carries a specific domain reason, which requireCode
 // (code only) cannot express. Consumed by the add/remove handler tests (Task 8/9).
-//
-//nolint:unused // consumed by Task 8/9
 func requireReason(t *testing.T, err error, want errcode.Reason) {
 	t.Helper()
 	require.Error(t, err)
@@ -133,4 +134,152 @@ func TestGetPriorityContacts_RepoError(t *testing.T) {
 	require.Error(t, err)
 	var ee *errcode.Error
 	assert.False(t, errors.As(err, &ee))
+}
+
+func TestAddPriorityContact_Validation(t *testing.T) {
+	cases := []struct {
+		name    string
+		contact string
+	}{
+		{"empty contact", ""},
+		{"self add", "alice"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, _, _, _, _ := newSvc(t)
+			_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+				models.PriorityContactMutateRequest{ContactAccount: tc.contact})
+			requireCode(t, err, errcode.CodeBadRequest)
+		})
+	}
+}
+
+func TestAddPriorityContact_UnknownUserIs404(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "ghost").Return(false, nil)
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "ghost"})
+	requireCode(t, err, errcode.CodeNotFound)
+	requireReason(t, err, errcode.UserPriorityContactNotFound)
+}
+
+func TestAddPriorityContact_UnknownBotIs404(t *testing.T) {
+	svc, _, _, apps, _, _, _ := newSvc(t)
+
+	apps.EXPECT().GetAppsByAssistants(gomock.Any(), []string{"gone.bot"}).
+		Return(map[string]*model.App{}, nil)
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "gone.bot"})
+	requireReason(t, err, errcode.UserPriorityContactNotFound)
+}
+
+// A client-only fanout would leave every remote site with a stale list, so both
+// fanouts must fire off one timestamp. One mock backs both publishers — they are
+// told apart by subject.
+func TestAddPriorityContact_PublishesBothFanoutsWithOneTimestamp(t *testing.T) {
+	svc, _, users, _, _, _, pub := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).
+		Return(&model.User{Settings: &model.UserSettings{PriorityContacts: []string{"bob"}}}, nil)
+	users.EXPECT().GetPriorityContactUsers(gomock.Any(), []string{"bob"}).
+		Return(map[string]*models.PriorityContactUser{"bob": {EngName: "Bob"}}, nil)
+
+	var clientTS, inboxTS int64
+	var clientContacts []string
+	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			var evt model.SettingsUpdateEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			clientTS = evt.Timestamp
+			clientContacts = evt.Settings.PriorityContacts
+			return nil
+		})
+	pub.EXPECT().Publish(gomock.Any(), subject.InboxExternal("site-b", model.InboxUserSettingsUpdated), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			var evt model.InboxEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			var payload model.UserSettingsUpdated
+			require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+			inboxTS = payload.Timestamp
+			return nil
+		})
+
+	resp, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.NoError(t, err)
+	require.Len(t, resp.Contacts, 1)
+	assert.Equal(t, "bob", resp.Contacts[0].Account)
+
+	assert.NotZero(t, clientTS)
+	assert.Equal(t, clientTS, inboxTS)
+	// The event carries raw accounts; devices refetch to render names.
+	assert.Equal(t, []string{"bob"}, clientContacts)
+}
+
+func TestAddPriorityContact_AtCapIsForbidden(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	full := make([]string, 30)
+	for i := range full {
+		full[i] = fmt.Sprintf("seed%02d", i)
+	}
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).Return(nil, nil)
+	users.EXPECT().GetUserPriorityContacts(gomock.Any(), "alice").
+		Return(&model.User{Settings: &model.UserSettings{PriorityContacts: full}}, nil)
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	requireCode(t, err, errcode.CodeForbidden)
+	requireReason(t, err, errcode.UserPriorityContactLimit)
+}
+
+// A duplicate add at exactly the cap is a no-op, not a violation: the cap filter
+// rejects the write, but the contact is already present, so it must succeed.
+func TestAddPriorityContact_DuplicateAtCapSucceeds(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	full := []string{"bob"}
+	for i := 1; i < 30; i++ {
+		full = append(full, fmt.Sprintf("seed%02d", i))
+	}
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).Return(nil, nil)
+	users.EXPECT().GetUserPriorityContacts(gomock.Any(), "alice").
+		Return(&model.User{Settings: &model.UserSettings{PriorityContacts: full}}, nil)
+	users.EXPECT().GetPriorityContactUsers(gomock.Any(), gomock.Any()).
+		Return(map[string]*models.PriorityContactUser{}, nil)
+
+	resp, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.NoError(t, err)
+	assert.Len(t, resp.Contacts, 30)
+}
+
+func TestAddPriorityContact_CallerNotFound(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).Return(nil, nil)
+	users.EXPECT().GetUserPriorityContacts(gomock.Any(), "alice").Return(nil, nil)
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	requireCode(t, err, errcode.CodeNotFound)
+}
+
+func TestAddPriorityContact_RepoError(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).
+		Return(nil, errors.New("db down"))
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	require.Error(t, err)
 }

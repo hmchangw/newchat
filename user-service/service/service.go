@@ -164,6 +164,7 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), s.GetSettings)
 	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), s.SetSettings)
 	natsrouter.RegisterNoBody(r, subject.UserPriorityContactsGetPattern(s.siteID), s.GetPriorityContacts)
+	natsrouter.Register(r, subject.UserPriorityContactsAddPattern(s.siteID), s.AddPriorityContact)
 	natsrouter.RegisterNoBody(r, subject.UserChatlistGetPattern(s.siteID), s.GetChatlist)
 	natsrouter.Register(r, subject.UserChatlistSectionCreatePattern(s.siteID), s.CreateChatlistSection)
 	natsrouter.Register(r, subject.UserChatlistSectionDeletePattern(s.siteID), s.DeleteChatlistSection)
