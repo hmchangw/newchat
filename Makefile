@@ -6,6 +6,10 @@ DEPS_COMPOSE     := docker-local/compose.deps.yaml
 SERVICES_COMPOSE := docker-local/compose.services.yaml
 NATS_CREDS       := docker-local/backend.creds
 NATS_CONF        := docker-local/nats.conf
+ENV_FILE         := docker-local/.env
+# Compose auto-loads .env only from the project directory, so `up SERVICE=<name>`
+# would otherwise take ${VAR} defaults instead of the env file.
+COMPOSE_ENV      := $(if $(wildcard $(ENV_FILE)),--env-file $(ENV_FILE),)
 NATS_CONTAINER   := chat-local-nats
 UI_COMPOSE       := docker-local/compose.ui.yaml
 O11Y_COMPOSE     := docker-local/compose.o11y.yaml
@@ -143,8 +147,8 @@ endif
 # healthcheck passes, then runs the init one-shots (cassandra schema, vault
 # transit key).
 deps-up:
-	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(NATS_CONF) ]; then \
-	  echo "First-time setup: generating nats.conf + backend.creds..."; \
+	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(NATS_CONF) ] || [ ! -f $(ENV_FILE) ]; then \
+	  echo "First-time setup: generating nats.conf + backend.creds + .env..."; \
 	  ./docker-local/setup.sh; \
 	fi
 	docker compose -f $(DEPS_COMPOSE) up -d --wait
@@ -162,8 +166,8 @@ require-deps:
 	@docker container inspect -f '{{.State.Running}}' $(NATS_CONTAINER) 2>/dev/null | grep -q true || { \
 	  echo "Deps are not running. Run 'make deps-up' first."; exit 1; \
 	}
-	@test -f $(NATS_CREDS) && test -f $(NATS_CONF) || { \
-	  echo "Missing $(NATS_CREDS) or $(NATS_CONF). Run './docker-local/setup.sh'."; exit 1; \
+	@test -f $(NATS_CREDS) && test -f $(NATS_CONF) && test -f $(ENV_FILE) || { \
+	  echo "Missing $(NATS_CREDS), $(NATS_CONF) or $(ENV_FILE). Run './docker-local/setup.sh'."; exit 1; \
 	}
 
 # Start microservices. With SERVICE=<name>, starts just that service's compose;
@@ -175,9 +179,9 @@ require-deps:
 #                  compose command can't drift between the two.
 up up-detached: require-deps
 ifdef SERVICE
-	docker compose -f $(SERVICE)/deploy/docker-compose.yml up $(UP_DETACH) --build
+	docker compose $(COMPOSE_ENV) -f $(SERVICE)/deploy/docker-compose.yml up $(UP_DETACH) --build
 else
-	docker compose -f $(SERVICES_COMPOSE) up $(UP_DETACH) --build
+	docker compose $(COMPOSE_ENV) -f $(SERVICES_COMPOSE) up $(UP_DETACH) --build
 endif
 up-detached: UP_DETACH := -d
 
@@ -193,18 +197,18 @@ endif
 # Stop microservices. SERVICE=<name> stops one; otherwise stops every service.
 down:
 ifdef SERVICE
-	docker compose -f $(SERVICE)/deploy/docker-compose.yml down
+	docker compose $(COMPOSE_ENV) -f $(SERVICE)/deploy/docker-compose.yml down
 else
-	docker compose -f $(SERVICES_COMPOSE) down
+	docker compose $(COMPOSE_ENV) -f $(SERVICES_COMPOSE) down
 endif
 
 # Browser UIs (chat-frontend :3000, admin-frontend :3001). Kept out of `make up`
 # because chat-frontend's port is the one `npm run dev` wants.
 ui-up: require-deps
-	docker compose -f $(UI_COMPOSE) up -d --build
+	docker compose $(COMPOSE_ENV) -f $(UI_COMPOSE) up -d --build
 
 ui-down:
-	docker compose -f $(UI_COMPOSE) down
+	docker compose $(COMPOSE_ENV) -f $(UI_COMPOSE) down
 
 # --- Local observability targets ----------------------------------------------
 # Two opt-in stacks, safe to run together: o11y-up receives what services export

@@ -8,9 +8,9 @@ services:
     environment:
       - OTEL_SERVICE_NAME=user-presence-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
       - USER_CACHE_SIZE=10000
       - USER_CACHE_TTL=5m
       - VALKEY_ADDRS=valkey:6379
@@ -23,7 +23,7 @@ services:
       - PRESENCE_CONNS_TTL=5m
       - PRESENCE_PEER_TIMEOUT=3s
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

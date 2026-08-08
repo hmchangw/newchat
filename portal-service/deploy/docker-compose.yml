@@ -19,7 +19,7 @@ services:
       - PORT=8085
       # Dev fallback: accounts absent from the directory resolve to the local site.
       - DEV_MODE=${DEV_MODE:-true}
-      - PORTAL_DEV_FALLBACK_SITE_ID=site-local
+      - PORTAL_DEV_FALLBACK_SITE_ID=${SITE_ID:-site-local}
       - PORTAL_DEV_FALLBACK_NATS_URL=ws://localhost:9222
       # Per-site URL registry (JSON): siteId -> {baseUrl, natsUrl} (see siteURL
       # in handler.go — both required, nothing else read). baseUrl is the unified
@@ -27,7 +27,7 @@ services:
       # natsUrl is the site's NATS WS URL.
       # site-remote maps to the same local endpoints: `make seed` homes ivan and
       # judy there, and an unregistered site is a 500 on /api/userInfo.
-      - 'PORTAL_SITE_URLS={"site-local":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"},"site-remote":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
+      - 'PORTAL_SITE_URLS={"${SITE_ID:-site-local}":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"},"site-remote":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
       # 1m, not the 2h prod default, so `make seed` lands without a restart.
       - PORTAL_CACHE_REFRESH_INTERVAL=1m
       # Single cluster-internal botplatform endpoint /api/v1/login forwards to.

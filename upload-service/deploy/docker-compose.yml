@@ -28,7 +28,7 @@ services:
       - FILE_UPLOAD_MAX_FILE_SIZE=104857600
       - FILE_UPLOAD_MEDIA_TYPE_BLACKLIST=image/svg+xml
       - FILE_DOWNLOAD_CACHE_MAX_AGE_SECONDS=31536000
-      - OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=nats-chat
       - TLS_SKIP_VERIFY=false
       # The frontends call these cross-origin via the gateway. An empty
@@ -45,7 +45,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
       - MINIO_USE_SSL=false
-      - MINIO_BUCKET=${MINIO_BUCKET:-chat-site-local}
+      - MINIO_BUCKET=${MINIO_BUCKET:-chat-${SITE_ID:-site-local}}
     networks:
       - chat-local
 

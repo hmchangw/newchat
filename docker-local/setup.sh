@@ -131,8 +131,21 @@ AUTH_ACCOUNT_PUB_KEY=${ACCOUNT_PUB_KEY}
 NATS_URL=nats://nats:4222
 NATS_CREDS_FILE=/etc/nats/backend.creds
 
-# Bypass OIDC in auth-service; flip to false to test the OIDC flow.
+# Bypass OIDC; flip to false stack-wide (auth, portal, upload, botplatform,
+# chat-frontend all read this) to test the OIDC flow.
 DEV_MODE=true
+
+# Every var below is read by all services that use it — set it once here and
+# `make up`, `make up SERVICE=<name>` and `make ui-up` all agree.
+#SITE_ID=site-local            # also drives ES index names, buckets, site URLs
+#ALL_SITE_IDS=site-local
+#OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
+#OIDC_CLIENT_ID=nats-chat
+#MINIO_ENDPOINT=minio:9000
+#MINIO_ACCESS_KEY=minioadmin
+#MINIO_SECRET_KEY=minioadmin
+#O11Y_ENABLED=true
+#PPROF_ENABLED=false
 EOF
 chmod 600 "$ENV_FILE"
 

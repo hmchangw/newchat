@@ -8,9 +8,9 @@ services:
     environment:
       - OTEL_SERVICE_NAME=broadcast-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
       - MODE=user
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
@@ -36,7 +36,7 @@ services:
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
       - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
     volumes:
-      - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

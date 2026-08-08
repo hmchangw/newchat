@@ -8,9 +8,9 @@ services:
     environment:
       - OTEL_SERVICE_NAME=search-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
       - SEARCH_URL=http://elasticsearch:9200
       - SEARCH_BACKEND=elasticsearch
       - VALKEY_ADDRS=valkey:6379
@@ -30,9 +30,9 @@ services:
       # (OTEL_EXPORTER_PROMETHEUS_PORT, default :2112), not here.
       - SEARCH_HEALTH_ADDR=:9090
       # Local dev pins to site-suffixed indices; prod uses aliases owned by ops/IaC.
-      - SEARCH_USER_ROOM_INDEX=user-room-mv-site-local
-      - SEARCH_SPOTLIGHT_INDEX=spotlight-site-local-v1
-      - SEARCH_SPOTLIGHT_ORG_INDEX=spotlightorg-site-local-v1
+      - SEARCH_USER_ROOM_INDEX=user-room-mv-${SITE_ID:-site-local}
+      - SEARCH_SPOTLIGHT_INDEX=spotlight-${SITE_ID:-site-local}-v1
+      - SEARCH_SPOTLIGHT_ORG_INDEX=spotlightorg-${SITE_ID:-site-local}-v1
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
@@ -42,7 +42,7 @@ services:
       # dev. The listener is bound on 0.0.0.0:9090 inside the container.
       - "19090:9090"
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 
