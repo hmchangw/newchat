@@ -160,7 +160,12 @@ func (s *UserService) resolveAddPriorityContactMiss(c *natsrouter.Context, accou
 		return nil, errcode.Forbidden("priority contact limit reached",
 			errcode.WithReason(errcode.UserPriorityContactLimit))
 	}
-	return nil, errcode.NotFound("user not found")
+	// Reachable: the write missed because the list was at cap, then a concurrent
+	// RemovePriorityContact for the same account dropped some other contact before
+	// this re-read, so we now see the caller's doc, no match, and a list under cap.
+	// The add itself is stale, not invalid, so tell the client to retry rather than
+	// falsely reporting the caller as not found.
+	return nil, errcode.Conflict("priority contacts changed concurrently, retry")
 }
 
 // priorityContactExists reports whether contact names something that can send

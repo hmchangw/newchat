@@ -4909,6 +4909,7 @@ Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
 | `contactAccount` equals the caller's own account | `bad_request` | — | `{ "code": "bad_request", "error": "cannot add yourself as a priority contact" }` |
 | `contactAccount` does not resolve | `not_found` | `priority_contact_not_found` | `{ "code": "not_found", "reason": "priority_contact_not_found", "error": "priority contact not found" }` — a user account must be ACTIVE; a `.bot` account only needs its app to exist (it need not be enabled). |
 | List already at the 30-entry cap and `contactAccount` is not already on it | `forbidden` | `priority_contact_limit` | `{ "code": "forbidden", "reason": "priority_contact_limit", "error": "priority contact limit reached" }` |
+| Write missed (cap or missing caller) but a concurrent `settings.priorityContacts.remove` changed the list before the disambiguating re-read | `conflict` | — | `{ "code": "conflict", "error": "priority contacts changed concurrently, retry" }` — retry the request. |
 | No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
 | Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
 

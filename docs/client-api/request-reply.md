@@ -1702,8 +1702,11 @@ priority contact"` (`bad_request`), `"priority contact not found"`
 resolve: a user must be ACTIVE, a `.bot` account only needs its app to
 exist), `"priority contact limit reached"` (`forbidden`, reason
 `priority_contact_limit` — list already at 30 and the contact isn't already
-on it), `"user not found"` (`not_found`, no reason — the caller's own user
-doc is missing).
+on it), `"priority contacts changed concurrently, retry"` (`conflict`, no
+reason — a write miss couldn't be disambiguated because a concurrent
+`settings.priorityContacts.remove` changed the list before the re-read;
+retry the request), `"user not found"` (`not_found`, no reason — the
+caller's own user doc is missing).
 
 **Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to
 the caller's other devices, carrying the full post-update settings —

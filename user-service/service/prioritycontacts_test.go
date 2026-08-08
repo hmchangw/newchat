@@ -238,6 +238,26 @@ func TestAddPriorityContact_AtCapIsForbidden(t *testing.T) {
 	requireReason(t, err, errcode.UserPriorityContactLimit)
 }
 
+// The write misses because the list was at cap, then a concurrent RemovePriorityContact
+// for the same account drops some other contact before the re-read. The re-read then
+// sees: caller's doc exists, the added contact is absent, and the list is under cap —
+// none of the three disambiguation branches fit, so the handler must report a conflict
+// (retry-able) rather than a false 404 for a user that plainly exists.
+func TestAddPriorityContact_ConcurrentRemoveDuringMissReturnsConflict(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+
+	users.EXPECT().UserExists(gomock.Any(), "bob").Return(true, nil)
+	users.EXPECT().AddPriorityContact(gomock.Any(), "alice", "bob", 30, gomock.Any()).Return(nil, nil)
+	users.EXPECT().GetUserPriorityContacts(gomock.Any(), "alice").
+		Return(&model.User{Settings: &model.UserSettings{
+			PriorityContacts: []string{"carol"},
+		}}, nil)
+
+	_, err := svc.AddPriorityContact(ctx("alice", "site-a"),
+		models.PriorityContactMutateRequest{ContactAccount: "bob"})
+	requireCode(t, err, errcode.CodeConflict)
+}
+
 // A duplicate add at exactly the cap is a no-op, not a violation: the cap filter
 // rejects the write, but the contact is already present, so it must succeed.
 func TestAddPriorityContact_DuplicateAtCapSucceeds(t *testing.T) {
