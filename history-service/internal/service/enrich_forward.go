@@ -19,7 +19,7 @@ import (
 // outside the source room).
 func (s *HistoryService) enrichForwardedRooms(ctx context.Context, slices ...[]models.Message) {
 	var snaps []*models.ForwardedMessage
-	idSet := map[string]struct{}{}
+	var rawIDs []string
 	for _, msgs := range slices {
 		for i := range msgs {
 			fm := msgs[i].ForwardedMessage
@@ -27,16 +27,13 @@ func (s *HistoryService) enrichForwardedRooms(ctx context.Context, slices ...[]m
 				continue
 			}
 			snaps = append(snaps, fm)
-			idSet[fm.RoomID] = struct{}{}
+			rawIDs = append(rawIDs, fm.RoomID)
 		}
 	}
 	if len(snaps) == 0 {
 		return
 	}
-	ids := make([]string, 0, len(idSet))
-	for id := range idSet {
-		ids = append(ids, id)
-	}
+	ids := dedupRoomIDs(rawIDs)
 
 	rooms, err := s.rooms.GetRoomsNameType(ctx, ids)
 	if err != nil {
@@ -59,4 +56,14 @@ func (s *HistoryService) enrichForwardedRooms(ctx context.Context, slices ...[]m
 		}
 		fm.Room = room
 	}
+}
+
+// enrichForwardedRoom is the single-message form of enrichForwardedRooms,
+// mirroring decodeMessageAttachments; the nil fast-path spares the slice
+// wrap on the common not-a-forward case.
+func (s *HistoryService) enrichForwardedRoom(ctx context.Context, m *models.Message) {
+	if m.ForwardedMessage == nil {
+		return
+	}
+	s.enrichForwardedRooms(ctx, []models.Message{*m})
 }

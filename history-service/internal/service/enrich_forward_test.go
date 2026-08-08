@@ -93,11 +93,9 @@ func TestLoadHistory_ForwardEnrichment_DedupesRoomIDs(t *testing.T) {
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
 		Return(makePage(messages, false), nil)
 
-	// Exactly ONE lookup with the single distinct ID.
-	rooms.EXPECT().
-		GetRoomsNameType(gomock.Any(), []string{"src-ch"}).
-		Return(map[string]mongorepo.RoomNameType{"src-ch": {Name: "prj-alpha", Type: model.RoomTypeChannel}}, nil).
-		Times(1)
+	// Exactly ONE lookup with the single distinct ID (gomock's default
+	// cardinality makes a second call fail).
+	expectSrcChLookup(rooms)
 
 	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
