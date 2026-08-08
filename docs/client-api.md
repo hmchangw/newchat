@@ -4912,7 +4912,7 @@ Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
 | No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
 | Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
 
-**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings (only on an actual change — a no-op duplicate add does not publish).
+**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings — including a duplicate add under the cap (the stored list is unchanged, but `settingsUpdatedAt` still bumps and both fanouts still fire). Only a duplicate add already at the 30-entry cap skips the publish. A server-side cross-site federation update also fires whenever this event does, not delivered to clients.
 
 ---
 
@@ -4976,7 +4976,7 @@ Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
 | No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
 | Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
 
-**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings.
+**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings. A server-side cross-site federation update also fires, not delivered to clients.
 
 ---
 

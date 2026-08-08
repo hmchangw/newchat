@@ -1706,9 +1706,12 @@ on it), `"user not found"` (`not_found`, no reason — the caller's own user
 doc is missing).
 
 **Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to
-the caller's other devices, carrying the full post-update settings. Not
-published when the add is a no-op duplicate. A server-side cross-site
-federation update also fires on an actual change, same as `settings.set`.
+the caller's other devices, carrying the full post-update settings —
+including a duplicate add under the cap (list unchanged, but
+`settingsUpdatedAt` still bumps and both fanouts still fire). Only a
+duplicate add already at the cap skips the publish. A server-side cross-site
+federation update also fires whenever this event does, same as
+`settings.set`.
 
 ---
 
