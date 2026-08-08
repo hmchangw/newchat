@@ -189,7 +189,12 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			if m.Deleted || pkgmodel.IsSystemMessageType(m.Type) {
 				continue
 			}
-			return s.toPreviewMessage(ctx, &m), true
+			pm := s.toPreviewMessage(ctx, &m)
+			// An empty-content forward has no body to preview; show a fixed label.
+			if pm.Content == "" && m.Forwarded != nil {
+				pm.Content = "Forwarded a message"
+			}
+			return pm, true
 		}
 		// Whole page ineligible. HasNext=false means the walk reached a terminal
 		// state (floor/empty) — stop. Otherwise grow the page and continue strictly
