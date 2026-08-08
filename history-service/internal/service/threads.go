@@ -69,6 +69,9 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 			"messageCreatedAt", msg.CreatedAt,
 			"account", account,
 		)
+		// Enrich here — this short-circuit returns msg as ParentMessage without
+		// ever reaching the combined enrichForwardedRooms call further down.
+		s.enrichForwardedRoom(c, msg)
 		return emptyThreadResponse(msg), nil
 	}
 
@@ -87,6 +90,7 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 	// tcount==0 means all replies were deleted — skip Cassandra. nil means never written
 	// (new parent, or mid-write before the tcount LWT) and must fall through or replies could be hidden.
 	if msg.TCount != nil && *msg.TCount == 0 {
+		s.enrichForwardedRoom(c, msg)
 		return emptyThreadResponse(msg), nil
 	}
 

@@ -184,8 +184,7 @@ ALTER TABLE chat.pinned_messages_by_room ADD forwarded_message FROZEN<"Forwarded
 ### Mirrors updated in the same PR
 
 - `docker-local/cassandra/init/` — new `NN-udt-forwarded_message.cql` + the three table files.
-- `history-service/internal/cassrepo/integration_test.go` inline UDT/DDL.
-- `history-service/docker-local/docker-compose.yml` DDL.
+- Inline UDT/DDL mirrors in `history-service/internal/cassrepo/integration_test.go`, `history-service/internal/service/integration_test.go`, `message-worker/integration_test.go`, `tools/loadgen/history_integration_test.go`.
 
 ### Production migration
 

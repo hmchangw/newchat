@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2655,6 +2656,62 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 			setupStore:    func(s *MockStore) {},
 			wantErr:       true,
 			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, strconv.Itoa(maxContentBytes), ee.Metadata["maxContentBytes"])
+				assert.Equal(t, strconv.Itoa(maxContentBytes+1), ee.Metadata["attempted"])
+			},
+		},
+		{
+			name: "forwardedContent at exactly maxContentBytes succeeds",
+			buildData: func() []byte {
+				return fwdReqOverride("check this", strings.Repeat("a", maxContentBytes))
+			},
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Len(t, msg.ForwardedMessage.Msg, maxContentBytes)
+			},
+		},
+		{
+			name: "oversized content (forward comment) → bad_request",
+			buildData: func() []byte {
+				return fwdReq(strings.Repeat("a", maxContentBytes+1))
+			},
+			setupStore:    func(s *MockStore) {},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, strconv.Itoa(maxContentBytes), ee.Metadata["maxContentBytes"])
+				assert.Equal(t, strconv.Itoa(maxContentBytes+1), ee.Metadata["attempted"])
+			},
+		},
+		{
+			name: "content (forward comment) at exactly maxContentBytes succeeds",
+			buildData: func() []byte {
+				return fwdReq(strings.Repeat("a", maxContentBytes))
+			},
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				assert.Len(t, msg.Content, maxContentBytes)
+			},
 		},
 		{
 			name:       "forwardedContent does not skip the fetch — source not found still rejects",
